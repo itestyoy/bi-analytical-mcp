@@ -72,22 +72,23 @@ export function renderBigQuery(catalog, spec) {
   const { m, partCol, timeCol, mode, steps } = resolve(catalog, spec, 'bigquery');
   const relation = spec.relation || `\`${m.dbt_model}\``;
   const sym = steps.map((_, i) => `S${i + 1}`);
-  const laterPreds = (i) => steps.slice(i + 1).map((s) => `(${s.pred})`).join(' OR ');
+  const withGap = mode !== 'strict';
+  const gap = withGap ? 'GAP* ' : '';
 
-  // PATTERN: ordered allows non-step rows between steps via a defined GAP symbol
-  // (GAP = not any later step), so greedy * is safe without reluctant quantifiers.
-  let pattern;
+  // NESTED optional pattern enforces ORDER: a later step is only reachable inside
+  // the match of the previous one, so skipping a step caps the furthest reached
+  // (e.g. S1 then S3 without S2 => furthest = S1, not S3). 'ordered' allows
+  // non-step rows between steps via a GAP filler; 'strict' requires adjacency.
+  const nestFrom = (i) => (i === sym.length - 1
+    ? `${gap}${sym[i]}`
+    : `${gap}${sym[i]} (${nestFrom(i + 1)})?`);
+  const pattern = sym.length > 1 ? `(${sym[0]} (${nestFrom(1)})?)` : `(${sym[0]})`;
+
   const defines = steps.map((s, i) => `    ${sym[i]} AS ${s.pred}`);
-  if (mode === 'strict') {
-    pattern = `(${sym[0]} ${sym.slice(1).map((s) => `${s}?`).join(' ')})`.replace(/\s+/g, ' ');
-  } else {
-    // (S1 (GAP* S2)? (GAP* S3)? ...)
-    const tail = sym.slice(1).map((s) => `(GAP* ${s})?`).join(' ');
-    pattern = `(${sym[0]} ${tail})`;
-    // GAP must not consume any subsequent step row; "later steps" relative to
-    // the deepest step is empty, so exclude ALL steps except S1 occurrences.
-    const allButFirst = steps.slice(1).map((s) => `(${s.pred})`).join(' OR ');
-    defines.push(`    GAP AS NOT (${allButFirst})`);
+  if (withGap) {
+    // GAP = a non-step row (filler), so greedy GAP* never swallows a step symbol.
+    const anyStep = steps.map((s) => `(${s.pred})`).join(' OR ');
+    defines.push(`    GAP AS NOT (${anyStep})`);
   }
 
   const caseFurthest = steps.map((s, i) => `WHEN '${sym[i]}' THEN ${i + 1}`).join(' ');

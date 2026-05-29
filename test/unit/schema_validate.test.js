@@ -76,6 +76,6 @@ test('query: requires context_id and metrics', () => {
 });
 
 test('update: semantic_model must be a known model key', () => {
-  assert.equal(v('update_semantic_model', { context_id: 'c', semantic_model: 'ghost' }).ok, false);
-  assert.ok(v('update_semantic_model', { context_id: 'c', semantic_model: 'events', add_measures: [{ name: 'x', agg: 'count', field: '*' }] }).ok);
+  assert.equal(v('update_semantic_model', { context_id: 'ctx123', semantic_model: 'ghost' }).ok, false);
+  assert.ok(v('update_semantic_model', { context_id: 'ctx123', semantic_model: 'events', add_measures: [{ name: 'x', agg: 'count', field: '*' }] }).ok);
 });

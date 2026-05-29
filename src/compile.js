@@ -200,6 +200,20 @@ export function compileDeclaration(catalog, decl) {
       if (md.period_agg) ctp.period_agg = md.period_agg;
       addMetric({ name, type: 'cumulative', type_params: { measure: { name: resolveMeasure(md.measure.name) }, cumulative_type_params: ctp } });
     } else if (md.type === 'derived') {
+      // derived expr is a formula over the input metric aliases only. Enforce a
+      // safe grammar: allowed charset (no quotes/semicolons), and every
+      // identifier must be a declared input metric alias or a safe math fn.
+      const expr = md.expr || '';
+      if (!/^[A-Za-z0-9_+\-*/().,\s]+$/.test(expr)) {
+        throw new Error(`derived metric '${md.name}': expr contains illegal characters (only metric names, numbers, + - * / ( ) . , allowed)`);
+      }
+      const aliases = new Set((md.metrics || []).map((x) => x.alias || x.name));
+      const SAFE_FNS = new Set(['nullif', 'coalesce', 'abs', 'round', 'least', 'greatest', 'floor', 'ceil', 'ceiling', 'power', 'sqrt', 'ln', 'log', 'exp', 'mod']);
+      for (const tok of expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []) {
+        if (!aliases.has(tok) && !SAFE_FNS.has(tok)) {
+          throw new Error(`derived metric '${md.name}': expr references unknown identifier '${tok}' (only input metric names + safe math functions allowed)`);
+        }
+      }
       // input metrics are namespaced; alias each to the raw name so the user's
       // `expr` (written with raw metric names) resolves correctly in MetricFlow.
       const inputs = md.metrics.map((x) => ({ name: NS(task, x.name), alias: x.alias || x.name }));

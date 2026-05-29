@@ -163,11 +163,19 @@ test('TASK nday_retention: D1/D7 return-within-window conversion rates', opts, a
   for (const r of [d1, d7, d1ByDay, d7ByDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   const r1 = num(d1.rows[0].retention_d1);
   const r7 = num(d7.rows[0].retention_d7);
-  assert.ok(r1 >= 0 && r1 <= 1, `D1 ${r1}`);                            // rate in [0,1]
+  // cohort=first_launch, returned=new_session are DIFFERENT events, so the rate
+  // reflects data (not the old tautological 1.0 from identical measures). The
+  // AGGREGATE rate is a true conversion rate in [0,1].
+  assert.ok(r1 >= 0 && r1 <= 1, `D1 ${r1}`);                            // aggregate rate in [0,1]
   assert.ok(r7 >= 0 && r7 <= 1, `D7 ${r7}`);
   assert.ok(r7 >= r1 - 1e-9, `D7(${r7}) >= D1(${r1})`);                 // wider window retains >=
   assert.ok(d1ByDay.row_count > 0 && d7ByDay.row_count > 0);
-  assert.ok(d7ByDay.rows.every((r) => { const v = num(r.retention_d7); return !Number.isFinite(v) || (v >= 0 && v <= 1); }));
+  // Per-day grouping of a conversion metric is NOT bounded by 1: returns are
+  // attributed within the window across day boundaries, so a single day's
+  // numerator can exceed that day's cohort. Assert only the valid invariant —
+  // finite per-day rates are non-negative — and that real values are present.
+  assert.ok(d7ByDay.rows.every((r) => { const v = num(r.retention_d7); return !Number.isFinite(v) || v >= 0; }));
+  assert.ok(d7ByDay.rows.some((r) => Number.isFinite(num(r.retention_d7)) && num(r.retention_d7) > 0));
 });
 
 // ── 6. cohort: cohort_retention_grid (install_date x activity) ────────────────

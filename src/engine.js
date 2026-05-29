@@ -66,20 +66,31 @@ export class Engine {
     return this._taskDimMap(ctx).get(path) || path;
   }
 
-  describe_catalog() {
+  async describe_catalog() {
     const c = this.catalog;
+    const base = this.ctxs.baseProjectDir;
+    const models = [];
+    for (const k of c.modelKeys()) {
+      const m = c.getModel(k);
+      const entry = {
+        key: k,
+        dbt_model: m.dbt_model,
+        role: m.role,
+        dimensions: k === c.anchor ? undefined : Object.keys(m.dimensions || {}),
+        measures: Object.keys(m.measures || {}),
+      };
+      // REAL physical columns from the warehouse relation (adapter.get_columns_in_relation),
+      // not just declared metadata. Applies to every model (events / users / ...).
+      if (this.runner && base) {
+        const cols = await this.runner.relationColumns(base, m.dbt_model);
+        entry.physical_columns = cols.ok ? cols.columns : null;
+        if (!cols.ok) entry.physical_columns_error = 'relation not built or introspection failed (run dbt seed + dbt run on the base project)';
+      }
+      models.push(entry);
+    }
     return {
       dialect: c.dialect,
-      models: c.modelKeys().map((k) => {
-        const m = c.getModel(k);
-        return {
-          key: k,
-          dbt_model: m.dbt_model,
-          role: m.role,
-          dimensions: k === c.anchor ? undefined : Object.keys(m.dimensions || {}),
-          measures: Object.keys(m.measures || {}),
-        };
-      }),
+      models,
       event_names: c.eventNames(),
       event_properties: c.eventProps(),
       event_numeric_properties: c.eventNumericProps(),
@@ -131,8 +142,9 @@ export class Engine {
     const modelName = `seq_${input.name}`;
     const dialect = this.catalog.dialect;
     const eventsModel = this.catalog.getModel(this.catalog.anchor).dbt_model;
-    const usersModel = this.catalog.models.users?.dbt_model;
-    const seqSpec = { ...input.sequence, relation: `{{ ref('${eventsModel}') }}`, ...(usersModel ? { usersRelation: `{{ ref('${usersModel}') }}` } : {}) };
+    // The view references only the events fact; the users join is declared in the
+    // semantic model (sequenceSemanticModel) and executed by MetricFlow.
+    const seqSpec = { ...input.sequence, relation: `{{ ref('${eventsModel}') }}` };
     const modelSql = dialect === 'bigquery' ? renderPerUserModelBigQuery(this.catalog, seqSpec) : renderPerUserModelPostgres(this.catalog, seqSpec);
     const bqSql = dialect === 'bigquery' ? modelSql : renderPerUserModelBigQuery(this.catalog, seqSpec);
     const sem = sequenceSemanticModel(this.catalog, seqSpec, modelName);
@@ -146,6 +158,14 @@ export class Engine {
     ctx.state.model = art.modelName;
     ctx.state.seqMetrics = art.sem.metricNames;
     ctx.state.seqGroupable = art.sem.dimensionNames;
+    // full introspection of the registered model (behaves like a normal dbt model)
+    ctx.state.native = {
+      model: art.modelName,
+      materialized: input.materialized || 'view',
+      dimensions: art.sem.dimensionNames,
+      measures: art.sem.semantic_models[0].measures.map((mm) => mm.name),
+      metrics: art.sem.metricNames,
+    };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.writeModel(ctx.id, art.modelName, `{{ config(materialized='${materialized}') }}\n${art.modelSql}\n`);
     this.ctxs.writeYaml(ctx.id, dumpSequenceYaml(art.sem));
@@ -311,15 +331,40 @@ export class Engine {
     return { contexts: this.ctxs.list() };
   }
 
-  describe_context(input) {
+  async describe_context(input) {
     this._validate('describe_context', input);
     const ctx = this.ctxs.get(input.context_id);
+    // a registered native (MATCH_RECOGNIZE) model behaves like a normal dbt
+    // model: report its model name, dimensions (properties), measures, metrics,
+    // and the REAL physical columns of its view (adapter introspection).
+    if (ctx.state.engine === 'match_recognize') {
+      const n = ctx.state.native || {};
+      let physical = null;
+      if (this.runner && n.model) {
+        const cols = await this.runner.relationColumns(this.ctxs.dir(ctx.id), n.model);
+        physical = cols.ok ? cols.columns : null;
+      }
+      return {
+        context_id: ctx.id,
+        engine: 'match_recognize',
+        tasks: ctx.state.tasks || [],
+        models: [{ model: n.model, materialized: n.materialized, dimensions: n.dimensions || [], measures: n.measures || [], metrics: n.metrics || [], physical_columns: physical }],
+        semantic_models: [n.model],
+        dimensions: n.dimensions || [],
+        measures: n.measures || [],
+        metrics: n.metrics || [],
+        groupable: [...(ctx.state.seqGroupable || [])],
+        files: this.ctxs.generatedFiles(ctx.id),
+      };
+    }
+    const additions = ctx.state.additions || {};
     return {
       context_id: ctx.id,
-      tasks: ctx.state.tasks,
-      semantic_models: Object.keys(ctx.state.additions),
-      measures: Object.values(ctx.state.additions).flatMap((a) => a.measures.map((m) => m.name)),
-      metrics: ctx.state.metrics.map((m) => m.name),
+      engine: 'core',
+      tasks: ctx.state.tasks || [],
+      semantic_models: Object.keys(additions),
+      measures: Object.values(additions).flatMap((a) => a.measures.map((m) => m.name)),
+      metrics: (ctx.state.metrics || []).map((m) => m.name),
       groupable: [...this._allowedPaths(ctx)],
       files: this.ctxs.generatedFiles(ctx.id),
     };
@@ -380,6 +425,11 @@ export class Engine {
       });
       where = renderWhereClauses(translated);
     }
+    // order_by keys must be a requested metric or group-by token (defense in depth)
+    const orderable = new Set([...input.metrics, ...groupBy]);
+    for (const o of input.order_by || []) {
+      if (!orderable.has(o.key)) throw new ToolError(`order_by key not in metrics/group_by: ${o.key}`, { stage: 'validate', field: o.key });
+    }
     const orderBy = (input.order_by || []).map((o) => `${o.direction === 'desc' ? '-' : ''}${o.key}`);
 
     if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
@@ -424,11 +474,22 @@ export class Engine {
     this.jobs.setTable(id, table);
     this.ctxs.writeModel(ctx.id, table, `{{ config(materialized='table') }}\n${explain.sql}\n`);
 
+    // Hold a lease on the context for the lifetime of the (possibly detached)
+    // build so drop_context can't tear down the overlay mid-run (Reliability C1).
+    this.ctxs.acquire(ctx.id);
+    // Detached build: any thrown error (not just non-ok results) must be
+    // captured to the job, never surface as an unhandled rejection (M2).
     const build = (async () => {
-      const r = await this.runner.run(dir, table);
-      if (!r.ok) this.jobs.fail(id, formatDbtError(r.stdout, r.stderr));
-      else this.jobs.ready(id);
-    })();
+      try {
+        const r = await this.runner.run(dir, table);
+        if (!r.ok) this.jobs.fail(id, formatDbtError(r.stdout, r.stderr));
+        else this.jobs.ready(id);
+      } catch (e) {
+        this.jobs.fail(id, e?.message || String(e));
+      } finally {
+        this.ctxs.release(ctx.id);
+      }
+    })().catch(() => {});
     const timed = new Promise((res) => setTimeout(() => res('timeout'), this.queryTimeoutMs));
     const winner = await Promise.race([build.then(() => 'done'), timed]);
     if (winner === 'timeout') {
@@ -436,20 +497,21 @@ export class Engine {
     }
     const job = this.jobs.get(id);
     if (job.status === 'error') return { ok: false, status: 'error', query_id: id, table, error: { stage: 'materialize', message: job.error } };
-    return this._fetchResult(id, input.limit ?? 1000);
+    return this._fetchResult(id, input.limit ?? 1000, undefined, input.offset ?? 0);
   }
 
   /** Read rows back from a materialized result table (resilient: no recompute). */
-  async _fetchResult(id, limit, transform) {
+  async _fetchResult(id, limit, transform, offset = 0) {
     const job = this.jobs.get(id);
-    return this._readTable(this.ctxs.dir(job.contextId), job.table, limit, transform, { query_id: id });
+    return this._readTable(this.ctxs.dir(job.contextId), job.table, limit, transform, { query_id: id }, offset);
   }
 
   /** Run a (optionally projected) read over a materialized result table. */
-  async _readTable(dir, table, limit, transform, extra = {}) {
-    const sql = transform
+  async _readTable(dir, table, limit, transform, extra = {}, offset = 0) {
+    let sql = transform
       ? buildProjection(`{{ ref('${table}') }}`, transform)
       : `select * from {{ ref('${table}') }}`;
+    if (offset > 0) sql = `select * from (${sql}) _paged offset ${Number(offset)}`;
     const res = await this.runner.show(dir, sql, limit);
     if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
     return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
@@ -465,15 +527,18 @@ export class Engine {
     this._validate('get_query_result', input);
     if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
     const limit = input.limit ?? 1000;
+    const offset = input.offset ?? 0;
     // direct fetch by table (crash-resilient: works even if the job is gone)
     if (input.table) {
-      return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, input.transform);
+      this.ctxs.get(input.context_id); // validate the context exists (throws otherwise)
+      if (!/^qr_[a-f0-9]{8,16}$/.test(input.table)) throw new ToolError(`invalid result table name: ${input.table}`, { stage: 'validate', field: 'table' });
+      return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, input.transform, {}, offset);
     }
     const job = this.jobs.get(input.query_id);
     if (!job) throw new ToolError(`unknown query_id: ${input.query_id} (pass {context_id, table} to fetch a known table directly)`, { stage: 'validate', field: 'query_id' });
     if (job.status === 'running') return { ok: true, status: 'running', query_id: job.id, table: job.table };
     if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, table: job.table, error: { stage: 'materialize', message: job.error } };
-    return this._fetchResult(job.id, limit, input.transform);
+    return this._fetchResult(job.id, limit, input.transform, offset);
   }
 
   list_query_jobs() {

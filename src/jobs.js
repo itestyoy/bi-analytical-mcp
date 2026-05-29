@@ -21,6 +21,9 @@ export class JobManager {
       this.db = new DatabaseSync(dbPath);
       this.db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
       this._upsert = this.db.prepare('INSERT INTO jobs (id, context_id, table_name, status, error, started_at, ready_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET context_id=excluded.context_id, table_name=excluded.table_name, status=excluded.status, error=excluded.error, ready_at=excluded.ready_at');
+      // a job left 'running' across a restart can never complete (its build
+      // promise is gone) -> reconcile to a terminal error so clients stop polling.
+      this.db.prepare("UPDATE jobs SET status='error', error='interrupted by server restart; re-issue the query' WHERE status='running'").run();
       for (const row of this.db.prepare('SELECT * FROM jobs').all()) {
         this.jobs.set(row.id, { id: row.id, contextId: row.context_id, table: row.table_name, status: row.status, error: row.error, startedAt: row.started_at, readyAt: row.ready_at });
       }

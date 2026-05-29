@@ -130,8 +130,8 @@
       "id": "nday_retention",
       "task_type": "retention",
       "title": "N-day retention (D1/D7) via conversion window",
-      "when_to_use": "Share of users who return within N days of their first activity.",
-      "required_events": ["new_session"],
+      "when_to_use": "Share of newly-acquired users who return (start a session) within N days of first launch.",
+      "required_events": ["first_launch", "new_session"],
       "required_properties": [],
       "required_user_attrs": [],
       "metric_types": ["conversion"],
@@ -139,7 +139,7 @@
         "name": "retention",
         "semantic_models": [
           { "from": "events", "measures": [
-            { "name": "cohort", "agg": "count_distinct", "field": "appsflyer_id", "event_name": ["new_session"] },
+            { "name": "cohort", "agg": "count_distinct", "field": "appsflyer_id", "event_name": ["first_launch"] },
             { "name": "returned", "agg": "count_distinct", "field": "appsflyer_id", "event_name": ["new_session"] }
           ] }
         ],
@@ -153,7 +153,7 @@
         { "metrics": ["retention_d7"] },
         { "metrics": ["retention_d1"], "group_by": [{ "time": "metric_time", "grain": "day" }] }
       ],
-      "notes": "Approximates N-day retention via conversion window. Exact point-in-time D-N retention is not native to MetricFlow."
+      "notes": "Cohort = users with a first_launch (acquisition); returned = users who start a new_session within the window. base_measure and conversion_measure are DIFFERENT events so the rate is meaningful (not identically 1.0). Approximates N-day retention via conversion window; exact point-in-time D-N retention is not native to MetricFlow."
     },
     {
       "id": "cohort_retention_grid",

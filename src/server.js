@@ -31,7 +31,7 @@ const TOOL_DESCRIPTIONS = {
   get_recipe: 'Get a recipe by id: a ready create_semantic_model payload + example queries + notes for a task type.',
 };
 
-const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model']);
+const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'describe_catalog', 'describe_context']);
 
 export function buildToolDefs(engine) {
   return Object.entries(engine.schemas).map(([name, inputSchema]) => ({
@@ -94,6 +94,18 @@ export function makeEngine(opts = {}) {
 export function createApp(engine) {
   const app = express();
   app.use(express.json({ limit: '4mb' }));
+  // Optional shared-secret auth. If MCP_AUTH_TOKEN is set, require it on /mcp.
+  // (There is otherwise NO auth — bind to localhost or front with an auth proxy.)
+  const authToken = process.env.MCP_AUTH_TOKEN;
+  if (authToken) {
+    app.use('/mcp', (req, res, next) => {
+      if (req.headers.authorization !== `Bearer ${authToken}`) {
+        res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'unauthorized' }, id: null });
+        return;
+      }
+      next();
+    });
+  }
   const transports = {}; // sessionId -> transport
 
   app.post('/mcp', async (req, res) => {
@@ -133,5 +145,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const engine = makeEngine();
   const app = createApp(engine);
   const port = Number(process.env.PORT || 3000);
-  app.listen(port, () => console.log(`dbt-semantic-mcp streamable-HTTP on :${port}/mcp`));
+  const host = process.env.HOST || '127.0.0.1'; // localhost by default (no built-in auth)
+  app.listen(port, host, () => console.log(`dbt-semantic-mcp streamable-HTTP on ${host}:${port}/mcp`));
 }

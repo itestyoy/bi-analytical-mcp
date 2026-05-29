@@ -17,6 +17,7 @@
 
 import yaml from 'js-yaml';
 import { jsonExtract, sqlLiteral } from './dialect.js';
+import { renderBaseModel } from './yaml-render.js';
 
 /** Dump a sequence semantic model (+metrics) to dbt YAML, ref('...') unquoted. */
 export function dumpSequenceYaml(sem) {
@@ -213,21 +214,17 @@ export function renderSequence(catalog, spec) {
 // JOINs to user attributes). This is the recommended pattern.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** User-attribute columns to carry into the view (so the SL needs no join). */
-function userAttrs(catalog) {
-  const u = catalog.models.users;
-  if (!u) return { key: null, attrs: [] };
-  const key = typeof u.primary_entity === 'object' ? u.primary_entity.column : 'appsflyer_id';
-  const attrs = Object.entries(u.dimensions || {}).map(([name, d]) => ({ name, time: d.type === 'time' }));
-  return { key, attrs };
-}
-
 /** Per-user sequence model SELECT (Postgres) — runnable on PGlite for data tests. */
 export function renderPerUserModelPostgres(catalog, spec) {
   const r = resolve(catalog, spec, 'postgres');
+  // The Postgres CTE chain matches the next step at any later row (gaps always
+  // allowed); it cannot enforce step adjacency. `strict` mode (contiguous match)
+  // is only honored by the BigQuery MATCH_RECOGNIZE path. Reject it here rather
+  // than silently returning ordered-with-gaps numbers under a strict label.
+  if (r.mode === 'strict') {
+    throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the Postgres equivalent");
+  }
   const relation = spec.relation || `"public"."${r.m.dbt_model}"`;
-  const ua = userAttrs(catalog);
-  const usersRel = spec.usersRelation || '"public"."dim_users"';
   const preds = r.stepPreds('postgres', null);
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
@@ -245,6 +242,9 @@ export function renderPerUserModelPostgres(catalog, spec) {
   for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (pk)`;
   // per-user output columns (already qualified with j.; aliases left untouched)
   const furthestCase = r.steps.slice().reverse().map((s) => `WHEN j.t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
+  // The view exposes ONLY sequence-derived columns. User attributes are NOT
+  // joined here; the semantic model declares a shared `user` entity so MetricFlow
+  // joins dim_users at SQL-generation time when a query groups by a user attr.
   const out = [
     '  j.pk AS appsflyer_id',
     '  , j.t1 AS first_seen_at',
@@ -253,10 +253,8 @@ export function renderPerUserModelPostgres(catalog, spec) {
     ...r.steps.map((s) => `  , (j.t${s.idx} IS NOT NULL) AS reached_${s.name}`),
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `  , EXTRACT(EPOCH FROM (j.t${m.to} - j.t${m.from})) AS secs_${m.name}`),
     ...r.propCaptures.map((c) => `  , j.${c.id}`),
-    ...ua.attrs.map((a) => `  , u.${a.name}`),
   ];
-  const userJoin = ua.key ? ` LEFT JOIN ${usersRel} u ON u.${ua.key} = j.pk` : '';
-  return `${sql},\n${ctes},\njoined AS (SELECT ${sel.join(', ')} ${joins})\nSELECT\n${out.join('\n')}\nFROM joined j${userJoin}`;
+  return `${sql},\n${ctes},\njoined AS (SELECT ${sel.join(', ')} ${joins})\nSELECT\n${out.join('\n')}\nFROM joined j`;
 }
 
 /** Per-user sequence model SELECT (BigQuery MATCH_RECOGNIZE) — production target. */
@@ -265,22 +263,26 @@ export function renderPerUserModelBigQuery(catalog, spec) {
   const relation = spec.relation || `\`${r.m.dbt_model}\``;
   const preds = r.stepPreds('bigquery', null);
   const sym = r.steps.map((s) => `S${s.idx}`);
+  // MEASURES must be aggregates (one row per match). CLASSIFIER() is NOT allowed
+  // bare here; we derive furthest_step_name in the outer SELECT from the
+  // per-step reached flags (t{idx} IS NOT NULL), exactly like the Postgres path.
   const measures = [
-    '    CLASSIFIER() AS furthest_symbol',
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
     ...r.propCaptures.map((c) => `    MAX(${jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
   if (r.mode !== 'strict') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
-  const nameCase = r.steps.map((s) => `WHEN 'S${s.idx}' THEN '${s.name}'`).join(' ');
+  // furthest = highest-index step whose time is present (steps are strictly ordered).
+  const furthestCase = r.steps.slice().reverse().map((s) => `WHEN t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
   const reached = r.steps.map((s) => `    t${s.idx} IS NOT NULL AS reached_${s.name}`);
   const secs = r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `    TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`);
-  const ua = userAttrs(catalog);
-  const usersRel = spec.usersRelation || '`dim_users`';
-  const mr = `  SELECT
+  // The view exposes ONLY sequence-derived columns. User attributes are NOT
+  // joined here; the semantic model declares a shared `user` entity so MetricFlow
+  // joins dim_users at SQL-generation time when a query groups by a user attr.
+  return `  SELECT
     ${r.partCol} AS appsflyer_id,
     t1 AS first_seen_at,
-    CASE furthest_symbol ${nameCase} END AS furthest_step_name,
+    CASE ${furthestCase} END AS furthest_step_name,
     t${r.steps.length} IS NOT NULL AS completed,
 ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')}
   FROM ${relation} MATCH_RECOGNIZE (
@@ -288,13 +290,12 @@ ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')
     ORDER BY ${r.timeCol}
     MEASURES
 ${measures}
+    ONE ROW PER MATCH
+    AFTER MATCH SKIP PAST LAST ROW
     PATTERN ${nestedPattern(r.steps, r.mode !== 'strict')}
     DEFINE
 ${defines.join(',\n')}
   )`;
-  if (!ua.key) return mr;
-  const attrCols = ua.attrs.map((a) => `  u.${a.name}`).join(',\n');
-  return `SELECT\n  mr.*,\n${attrCols}\nFROM (\n${mr}\n) mr\nLEFT JOIN ${usersRel} u ON u.${ua.key} = mr.appsflyer_id`;
 }
 
 /**
@@ -312,16 +313,12 @@ export function sequenceSemanticModel(catalog, spec, modelName) {
     ...r.metrics.filter((m) => m.type === 'agg_at_step').map((m) => ({ name: m.name, agg: m.agg.toLowerCase(), expr: m.capId })),
   ];
   const dedupMeasures = [...new Map(measures.map((mm) => [mm.name, mm])).values()];
-  // user attributes are carried as columns in the view -> exposed as base
-  // dimensions (no external join needed; SL sees exactly the view's columns).
-  const ua = userAttrs(catalog);
-  const userDims = ua.attrs.map((a) => (a.time
-    ? { name: a.name, type: 'time', type_params: { time_granularity: 'day' } }
-    : { name: a.name, type: 'categorical' }));
+  // The view exposes ONLY its own (sequence-derived) columns as dimensions.
+  // User attributes live on dim_users and are reached by JOIN at the semantic
+  // layer (see below) — they are NOT baked into the view.
   const dims = [
     { name: 'first_seen', type: 'time', type_params: { time_granularity: 'day' }, expr: 'first_seen_at' },
     { name: 'furthest_step_name', type: 'categorical' },
-    ...userDims,
   ];
   const sm = {
     name: modelName,
@@ -331,7 +328,20 @@ export function sequenceSemanticModel(catalog, spec, modelName) {
     dimensions: dims,
     measures: dedupMeasures.map((mm) => ({ name: mm.name, agg: mm.agg, expr: mm.expr, agg_time_dimension: 'first_seen' })),
   };
-  const dimensionNames = dims.filter((d) => d.name !== 'first_seen').map((d) => d.name);
+  const localDimensionNames = ['furthest_step_name'];
+
+  // Joinable users semantic model: the view's `user` entity is shared with
+  // dim_users (primary `user`), so MetricFlow performs the user-attribute join
+  // during SQL generation. The join is declared, not materialized in the view.
+  const semantic_models = [sm];
+  const userAttrNames = [];
+  const usersModel = catalog.models.users;
+  if (usersModel) {
+    semantic_models.push(renderBaseModel(catalog, 'users'));
+    for (const name of Object.keys(usersModel.dimensions || {})) userAttrNames.push(name);
+  }
+  const dimensionNames = [...localDimensionNames, ...userAttrNames];
+
   // metrics: simple per measure + ratios for declared conversions
   const metricNames = [];
   const metrics = [];
@@ -343,5 +353,5 @@ export function sequenceSemanticModel(catalog, spec, modelName) {
       metricNames.push(m.name);
     }
   }
-  return { semantic_models: [sm], metrics, metricNames, dimensionNames, groupable: ['metric_time', ...dimensionNames] };
+  return { semantic_models, metrics, metricNames, dimensionNames, localDimensionNames, userAttrNames, groupable: ['metric_time', ...dimensionNames] };
 }

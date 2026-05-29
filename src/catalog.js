@@ -72,10 +72,10 @@ export class Catalog {
   modelDimensionColumns(key) {
     const m = this.getModel(key);
     if (key === this.anchor) {
-      // events: event_name + session_id are useful categorical columns
+      // events: event_name + the real session key column are useful categorical columns
       const cols = [];
-      if (m.event_name?.column) cols.push('event_name');
-      if (m.entities?.session) cols.push('session_id');
+      if (m.event_name?.column) cols.push(m.event_name.column);
+      if (m.entities?.session?.column) cols.push(m.entities.session.column);
       return cols;
     }
     return Object.keys(m.dimensions || {});

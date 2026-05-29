@@ -43,6 +43,16 @@ export class DbtRunner {
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
   }
 
+  /** Real physical columns of a model's relation, via adapter.get_columns_in_relation. */
+  async relationColumns(projectDir, modelName) {
+    const args = ['run-operation', 'mcp_relation_columns', '--args', JSON.stringify({ model_name: modelName })];
+    const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
+    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr };
+    const m = (r.stdout || '').replace(/\x1b\[[0-9;]*m/g, '').match(/MCP_COLS:(\[[^\n]*\])/);
+    if (!m) return { ok: false, stdout: r.stdout };
+    try { return { ok: true, columns: JSON.parse(m[1]) }; } catch { return { ok: false, stdout: r.stdout }; }
+  }
+
   /** Run a simple SQL against the warehouse and return rows (dbt show --output json). */
   async show(projectDir, sql, limit = 1000) {
     const args = ['show', '--inline', sql, '--output', 'json', '--limit', String(limit)];

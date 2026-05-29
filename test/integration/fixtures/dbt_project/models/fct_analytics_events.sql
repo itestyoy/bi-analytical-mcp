@@ -6,4 +6,4 @@ select
     event_name,
     event_timestamp,
     event_properties
-from raw_events
+from {{ ref('seed_events') }}

@@ -9,12 +9,27 @@ import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner }) {
+  constructor({ catalog, contextManager, runner, recipes }) {
     this.catalog = catalog;
+    this.recipes = recipes; // optional Recipes instance
     this.schemas = buildSchemas(catalog);
+    if (recipes) {
+      this.schemas.list_recipes = { type: 'object', additionalProperties: false, properties: {} };
+      this.schemas.get_recipe = { type: 'object', additionalProperties: false, required: ['id'], properties: { id: { type: 'string', enum: recipes.ids() } } };
+    }
     this.validators = makeValidators(this.schemas);
     this.ctxs = contextManager || new ContextManager({});
     this.runner = runner; // optional; required for non-dry_run parse/query
+  }
+
+  list_recipes() {
+    if (!this.recipes) return { recipes: [] };
+    return { recipes: this.recipes.summary() };
+  }
+
+  get_recipe(input) {
+    this._validate('get_recipe', input);
+    return this.recipes.get(input.id);
   }
 
   _validate(tool, input) {

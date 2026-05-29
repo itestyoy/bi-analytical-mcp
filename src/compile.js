@@ -8,13 +8,17 @@ import { jsonExtract, sqlLiteral, isNumericType } from './dialect.js';
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
 const NS = (task, name) => `${task}_${name}`;
 
-/** Build the SQL scope predicate (e.g. event_name in ('purchase')) or null. */
-export function scopeExpr(catalog, modelKey, eventScope) {
-  if (modelKey !== catalog.anchor || !eventScope?.event_name?.length) return null;
+/** SQL predicate for a list of event names on the events model, or null. */
+export function namesToScope(catalog, modelKey, names) {
+  if (modelKey !== catalog.anchor || !names?.length) return null;
   const col = catalog.getModel(modelKey).event_name.column;
-  const names = eventScope.event_name;
   if (names.length === 1) return `${col} = ${sqlLiteral(names[0])}`;
   return `${col} in (${names.map(sqlLiteral).join(', ')})`;
+}
+
+/** Build the SQL scope predicate from a semantic_models event_scope or null. */
+export function scopeExpr(catalog, modelKey, eventScope) {
+  return namesToScope(catalog, modelKey, eventScope?.event_name);
 }
 
 /** Wrap a base value expression with the scope (M3: scope baked into every measure). */
@@ -25,10 +29,19 @@ function applyScope(valueExpr, scope, { numeric }) {
 }
 
 /** Resolve a measure declaration to a dbt measure object (name, agg, expr, ...). */
-function compileMeasure(catalog, task, modelKey, decl, scope) {
+function compileMeasure(catalog, task, modelKey, decl, smScope) {
   const name = NS(task, decl.name);
   const dialect = catalog.dialect;
+  // a per-measure event_name overrides the SM-level scope (needed for funnels/
+  // conversion where base and conversion measures target different events).
+  const scope = decl.event_name?.length ? namesToScope(catalog, modelKey, decl.event_name) : smScope;
   const props = catalog.getModel(catalog.anchor).properties || {};
+
+  // sum_boolean: sum a boolean per row (e.g. "did event X") — the scope IS the boolean.
+  if (decl.agg === 'sum_boolean') {
+    return { name, agg: 'sum_boolean', expr: scope || 'true' };
+  }
+
   let agg = decl.agg;
   let valueExpr;
 

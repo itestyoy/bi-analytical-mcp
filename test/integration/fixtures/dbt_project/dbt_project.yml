@@ -8,3 +8,12 @@ clean-targets: ["target", "dbt_packages"]
 models:
   test_project:
     +materialized: table
+seeds:
+  test_project:
+    seed_events:
+      +column_types:
+        event_timestamp: timestamp
+        event_properties: jsonb
+    seed_users:
+      +column_types:
+        install_date: date

@@ -12,4 +12,4 @@ select
     acquisition_type,
     app_version,
     campaign_id
-from raw_users
+from {{ ref('seed_users') }}

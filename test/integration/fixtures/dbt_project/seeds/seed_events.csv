@@ -1,0 +1,75 @@
+event_id,user_id,session_id,event_name,event_timestamp,event_properties
+e1,u1,s1,purchase,2026-01-03 10:00:00,"{""revenue"": 100, ""product_id"": ""p1"", ""level"": 5}"
+e2,u1,s1,purchase,2026-01-03 11:00:00,"{""revenue"": 50, ""product_id"": ""p2"", ""level"": 6}"
+e3,u3,s2,purchase,2026-01-04 09:00:00,"{""revenue"": 200, ""product_id"": ""p1"", ""level"": 9}"
+e4,u2,s3,purchase,2026-01-03 12:00:00,"{""revenue"": 999, ""product_id"": ""p1"", ""level"": 3}"
+e5,u1,s1,level_complete,2026-01-03 09:00:00,"{""level"": 5, ""score"": 1200}"
+e6,u3,s2,session_start,2026-01-04 08:00:00,{}
+e7,u1,s1,session_start,2026-01-01 08:00:00,{}
+e8,u1,s1,tutorial_step,2026-01-01 08:05:00,"{""step_id"": ""ts1""}"
+e9,u1,s1,tutorial_step,2026-01-01 08:06:00,"{""step_id"": ""ts2""}"
+e10,u1,s1,level_start,2026-01-01 08:10:00,"{""level"": 1, ""attempt"": 1}"
+e11,u1,s1,level_complete,2026-01-01 08:15:00,"{""level"": 1, ""result"": ""win"", ""attempt"": 1, ""moves"": 20, ""score"": 500}"
+e12,u1,s4,session_start,2026-01-02 08:00:00,{}
+e13,u1,s4,session_start,2026-01-08 08:00:00,{}
+e14,u2,s3,session_start,2026-01-01 09:00:00,{}
+e15,u2,s3,level_start,2026-01-01 09:05:00,"{""level"": 1, ""attempt"": 1}"
+e16,u2,s3,level_fail,2026-01-01 09:10:00,"{""level"": 1, ""result"": ""lose"", ""attempt"": 1, ""moves"": 8, ""score"": 100}"
+e17,u2,s3,level_start,2026-01-01 09:11:00,"{""level"": 1, ""attempt"": 2}"
+e18,u2,s3,level_complete,2026-01-01 09:20:00,"{""level"": 1, ""result"": ""win"", ""attempt"": 2, ""moves"": 18, ""score"": 600}"
+e19,u2,s5,session_start,2026-01-02 09:00:00,{}
+e20,u3,s2,tutorial_step,2026-01-02 08:30:00,"{""step_id"": ""ts1""}"
+e21,u3,s2,session_start,2026-01-02 08:25:00,{}
+e22,u3,s2,level_start,2026-01-04 08:30:00,"{""level"": 9, ""attempt"": 1}"
+e23,u3,s2,level_complete,2026-01-04 08:40:00,"{""level"": 9, ""result"": ""win"", ""attempt"": 1, ""moves"": 30, ""score"": 1500}"
+e24,u3,s6,session_start,2026-01-09 08:00:00,{}
+e25,u4,s7,session_start,2026-01-02 10:00:00,{}
+e26,u4,s7,tutorial_step,2026-01-02 10:02:00,"{""step_id"": ""ts1""}"
+e27,u4,s7,tutorial_step,2026-01-02 10:03:00,"{""step_id"": ""ts2""}"
+e28,u4,s7,level_start,2026-01-02 10:05:00,"{""level"": 2, ""attempt"": 1}"
+e29,u4,s7,level_fail,2026-01-02 10:08:00,"{""level"": 2, ""result"": ""lose"", ""attempt"": 1, ""moves"": 10, ""score"": 200}"
+e30,u4,s7,level_start,2026-01-02 10:09:00,"{""level"": 2, ""attempt"": 2}"
+e31,u4,s7,level_complete,2026-01-02 10:15:00,"{""level"": 2, ""result"": ""win"", ""attempt"": 2, ""moves"": 22, ""score"": 700}"
+e32,u4,s8,session_start,2026-01-05 10:00:00,{}
+e33,u4,s8,purchase,2026-01-05 10:30:00,"{""revenue"": 50, ""product_id"": ""p2"", ""level"": 2}"
+e34,u5,s9,session_start,2026-01-03 11:00:00,{}
+e35,u5,s9,level_start,2026-01-03 11:05:00,"{""level"": 1, ""attempt"": 1}"
+e36,u5,s9,level_fail,2026-01-03 11:08:00,"{""level"": 1, ""result"": ""lose"", ""attempt"": 1, ""moves"": 5, ""score"": 50}"
+e37,u6,s10,session_start,2026-01-04 12:00:00,{}
+e38,u6,s10,ad_impression,2026-01-04 12:05:00,"{""ad_network"": ""admob""}"
+e39,u6,s10,ad_click,2026-01-04 12:06:00,"{""ad_network"": ""admob""}"
+e40,u6,s10,level_start,2026-01-04 12:10:00,"{""level"": 3, ""attempt"": 1}"
+e41,u6,s10,level_complete,2026-01-04 12:20:00,"{""level"": 3, ""result"": ""win"", ""attempt"": 1, ""moves"": 25, ""score"": 800}"
+e42,u6,s10,purchase,2026-01-04 12:30:00,"{""revenue"": 20, ""product_id"": ""p3"", ""level"": 3}"
+e43,u6,s11,session_start,2026-01-11 12:00:00,{}
+e44,u6,s11,purchase,2026-01-11 12:30:00,"{""revenue"": 100, ""product_id"": ""p1"", ""level"": 4}"
+e45,u7,s12,session_start,2026-01-04 13:00:00,{}
+e46,u7,s12,ad_impression,2026-01-04 13:05:00,"{""ad_network"": ""unity""}"
+e47,u7,s12,level_start,2026-01-04 13:10:00,"{""level"": 1, ""attempt"": 1}"
+e48,u7,s12,level_complete,2026-01-04 13:18:00,"{""level"": 1, ""result"": ""win"", ""attempt"": 1, ""moves"": 19, ""score"": 550}"
+e49,u8,s13,session_start,2026-01-04 14:00:00,{}
+e50,u8,s13,tutorial_step,2026-01-04 14:02:00,"{""step_id"": ""ts1""}"
+e51,u8,s13,level_start,2026-01-04 14:05:00,"{""level"": 1, ""attempt"": 1}"
+e52,u8,s13,level_fail,2026-01-04 14:08:00,"{""level"": 1, ""result"": ""lose"", ""attempt"": 1, ""moves"": 6, ""score"": 80}"
+e53,u9,s14,session_start,2026-01-04 15:00:00,{}
+e54,u9,s14,ad_impression,2026-01-04 15:05:00,"{""ad_network"": ""applovin""}"
+e55,u9,s14,ad_click,2026-01-04 15:06:00,"{""ad_network"": ""applovin""}"
+e56,u9,s14,level_start,2026-01-04 15:10:00,"{""level"": 4, ""attempt"": 1}"
+e57,u9,s14,level_complete,2026-01-04 15:20:00,"{""level"": 4, ""result"": ""win"", ""attempt"": 1, ""moves"": 28, ""score"": 900}"
+e58,u9,s14,purchase,2026-01-05 15:30:00,"{""revenue"": 30, ""product_id"": ""p3"", ""level"": 4}"
+e59,u9,s15,session_start,2026-01-06 15:00:00,{}
+e60,u9,s15,purchase,2026-01-06 15:30:00,"{""revenue"": 50, ""product_id"": ""p2"", ""level"": 5}"
+e61,u10,s16,session_start,2026-01-05 16:00:00,{}
+e62,u10,s16,level_start,2026-01-05 16:05:00,"{""level"": 1, ""attempt"": 1}"
+e63,u10,s16,level_complete,2026-01-05 16:12:00,"{""level"": 1, ""result"": ""win"", ""attempt"": 1, ""moves"": 21, ""score"": 620}"
+e64,u10,s17,session_start,2026-01-06 16:00:00,{}
+e65,u10,s17,purchase,2026-01-06 16:30:00,"{""revenue"": 100, ""product_id"": ""p1"", ""level"": 2}"
+e66,u11,s18,session_start,2026-01-05 17:00:00,{}
+e67,u11,s18,tutorial_step,2026-01-05 17:02:00,"{""step_id"": ""ts1""}"
+e68,u11,s18,level_start,2026-01-05 17:05:00,"{""level"": 10, ""attempt"": 1}"
+e69,u11,s18,level_fail,2026-01-05 17:10:00,"{""level"": 10, ""result"": ""lose"", ""attempt"": 1, ""moves"": 12, ""score"": 300}"
+e70,u12,s19,session_start,2026-01-05 18:00:00,{}
+e71,u12,s19,ad_impression,2026-01-05 18:05:00,"{""ad_network"": ""ironsource""}"
+e72,u12,s19,level_start,2026-01-05 18:10:00,"{""level"": 7, ""attempt"": 1}"
+e73,u12,s19,level_fail,2026-01-05 18:15:00,"{""level"": 7, ""result"": ""lose"", ""attempt"": 1, ""moves"": 9, ""score"": 250}"
+e74,u12,s20,session_start,2026-01-12 18:00:00,{}

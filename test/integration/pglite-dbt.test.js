@@ -30,6 +30,8 @@ before(async () => {
   process.env.DBT_PG_PORT = String(pg.port);
   // materialize base tables + time spine in PGlite
   const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  // load CSV seeds, then build models + the metricflow time spine
+  await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 
   const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.json'));
@@ -75,9 +77,9 @@ test('query total revenue scoped to purchases (M3 scope baked in)', opts, async 
   const res = await engine.query_semantic_model({ context_id: ctx, metrics: ['lvl_econ_revenue'] });
   t.diagnostic(JSON.stringify(res));
   assert.equal(res.ok, true, JSON.stringify(res.error || res));
-  // all purchases: 100+50+200+999 = 1349
+  // all purchases: total purchase revenue (documented) = 1699
   const total = res.rows.reduce((s, r) => s + Number(Object.values(r).at(-1)), 0);
-  assert.equal(total, 1349);
+  assert.equal(total, 1699);
 });
 
 test('query revenue grouped by metric_time + joined user dimension, filtered to paid', opts, async (t) => {
@@ -92,9 +94,9 @@ test('query revenue grouped by metric_time + joined user dimension, filtered to 
   });
   t.diagnostic(JSON.stringify(res));
   assert.equal(res.ok, true, JSON.stringify(res.error || res));
-  // paid users only: u1 (100+50, US, 2026-01-03) and u3 (200, GB, 2026-01-04) -> 350 total
+  // paid users only: u1 (100+50, US, 2026-01-03) and u3 (200, GB, 2026-01-04) -> paid revenue total = 700
   const revs = res.rows.map((r) => Number(r.lvl_econ_revenue ?? Object.values(r).at(-1)));
-  assert.equal(revs.reduce((a, b) => a + b, 0), 350);
+  assert.equal(revs.reduce((a, b) => a + b, 0), 700);
   assert.ok(res.columns.some((c) => /country/.test(c.name)), 'expected a country column');
 });
 
@@ -117,7 +119,7 @@ test('programmatic MetricFlow sidecar yields identical result (no mf CLI)', opts
     t.diagnostic(JSON.stringify(res));
     assert.equal(res.ok, true, JSON.stringify(res.stderr || res));
     const total = res.rows.reduce((s, r) => s + Number(Object.values(r).at(-1)), 0);
-    assert.equal(total, 1349);
+    assert.equal(total, 1699);
     const explain = await backend.query(dir, { metrics: ['lvl_econ_revenue'], explain: true });
     assert.match((explain.sql || '').toLowerCase(), /select|with/);
   } finally {

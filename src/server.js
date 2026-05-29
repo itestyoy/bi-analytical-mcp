@@ -6,7 +6,9 @@ import express from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { existsSync } from 'node:fs';
 import { loadCatalog } from './catalog.js';
+import { loadRecipes } from './recipes.js';
 import { ContextManager } from './context-manager.js';
 import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
@@ -20,6 +22,8 @@ const TOOL_DESCRIPTIONS = {
   drop_context: 'Tear down an entire isolated context (files + artifacts).',
   list_contexts: 'List active contexts.',
   describe_context: 'Describe a context: tasks, SMs, measures, metrics, reachable group-by paths.',
+  list_recipes: 'List ready-made recipes (templates) for common analytics task types (trends, segmentation, funnel, retention, cohort, behavioral, conversion, progression, monetization, stickiness).',
+  get_recipe: 'Get a recipe by id: a ready create_semantic_model payload + example queries + notes for a task type.',
 };
 
 const ASYNC_TOOLS = new Set(['create_semantic_model', 'query_semantic_model', 'update_semantic_model', 'delete_semantic_model']);
@@ -64,6 +68,8 @@ function errorResult(message, stage, field) {
 export function makeEngine(opts = {}) {
   const catalogPath = opts.catalogPath || process.env.CATALOG_PATH || join(process.cwd(), 'config', 'catalog.json');
   const catalog = loadCatalog(catalogPath);
+  const recipesPath = opts.recipesPath || process.env.RECIPES_PATH || join(process.cwd(), 'config', 'recipes.json');
+  const recipes = existsSync(recipesPath) ? loadRecipes(recipesPath) : undefined;
   const baseProjectDir = opts.baseProjectDir || process.env.DBT_BASE_PROJECT;
   const ctxs = new ContextManager({
     baseProjectDir,
@@ -74,7 +80,7 @@ export function makeEngine(opts = {}) {
     : baseProjectDir
       ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir })
       : null;
-  return new Engine({ catalog, contextManager: ctxs, runner });
+  return new Engine({ catalog, contextManager: ctxs, runner, recipes });
 }
 
 export function createApp(engine) {

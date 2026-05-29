@@ -4,4 +4,4 @@ select
     channel,
     network,
     cost_model
-from raw_campaigns
+from {{ ref('seed_campaigns') }}

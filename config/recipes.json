@@ -1,0 +1,301 @@
+{
+  "recipes": [
+    {
+      "id": "active_users_trend",
+      "task_type": "trends",
+      "title": "Active users & event volume over time (DAU/WAU/MAU)",
+      "when_to_use": "How many unique users / events over time, at day/week/month grain.",
+      "required_events": ["session_start"],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": ["simple"],
+      "create_payload": {
+        "name": "active_users",
+        "semantic_models": [
+          { "from": "events", "measures": [
+            { "name": "active_users", "agg": "count_distinct", "field": "user_id", "event_name": ["session_start"] },
+            { "name": "event_volume", "agg": "count", "field": "*" }
+          ] }
+        ],
+        "metrics": [
+          { "name": "dau", "type": "simple", "measure": { "name": "active_users" } },
+          { "name": "events", "type": "simple", "measure": { "name": "event_volume" } }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["active_users_dau"], "group_by": [{ "time": "metric_time", "grain": "day" }] },
+        { "metrics": ["active_users_dau"], "group_by": [{ "time": "metric_time", "grain": "week" }] },
+        { "metrics": ["active_users_dau"], "group_by": [{ "time": "metric_time", "grain": "month" }] }
+      ],
+      "notes": "DAU/MAU ratio (stickiness) = query active_users at day vs month grain and divide; or define a derived metric."
+    },
+    {
+      "id": "metric_by_user_segment",
+      "task_type": "segmentation",
+      "title": "Metric sliced by a user attribute",
+      "when_to_use": "Revenue / payers / ARPPU broken down by country, platform, media_source, acquisition_type or campaign channel.",
+      "required_events": ["purchase"],
+      "required_properties": ["revenue"],
+      "required_user_attrs": ["country", "platform", "media_source", "acquisition_type"],
+      "metric_types": ["simple", "ratio"],
+      "create_payload": {
+        "name": "rev_segment",
+        "use_base_models": ["users", "campaigns"],
+        "semantic_models": [
+          { "from": "events", "event_scope": { "event_name": ["purchase"] }, "measures": [
+            { "name": "revenue", "agg": "sum", "field": "revenue" },
+            { "name": "payers", "agg": "count_distinct", "field": "user_id" }
+          ] }
+        ],
+        "metrics": [
+          { "name": "revenue", "type": "simple", "measure": { "name": "revenue" } },
+          { "name": "payers", "type": "simple", "measure": { "name": "payers" } },
+          { "name": "arppu", "type": "ratio", "numerator": { "name": "revenue" }, "denominator": { "name": "payers" } }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["rev_segment_revenue"], "group_by": ["user__country"] },
+        { "metrics": ["rev_segment_revenue"], "group_by": ["user__platform"] },
+        { "metrics": ["rev_segment_revenue"], "group_by": ["user__media_source"] },
+        { "metrics": ["rev_segment_arppu"], "group_by": ["user__acquisition_type"] },
+        { "metrics": ["rev_segment_revenue"], "group_by": ["user__campaign__channel"] }
+      ],
+      "notes": "User attributes are reachable via the implicit events.user -> users.user join; campaign channel is a 2-hop path."
+    },
+    {
+      "id": "step_conversion_funnel",
+      "task_type": "funnel",
+      "title": "2-step conversion funnel (e.g. level_start -> level_complete)",
+      "when_to_use": "Step conversion / completion rate between two events within a window.",
+      "required_events": ["level_start", "level_complete"],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": ["simple", "conversion"],
+      "create_payload": {
+        "name": "lvl_funnel",
+        "semantic_models": [
+          { "from": "events", "measures": [
+            { "name": "starts", "agg": "count", "field": "*", "event_name": ["level_start"] },
+            { "name": "completes", "agg": "count", "field": "*", "event_name": ["level_complete"] }
+          ] }
+        ],
+        "metrics": [
+          { "name": "starts", "type": "simple", "measure": { "name": "starts" } },
+          { "name": "completes", "type": "simple", "measure": { "name": "completes" } },
+          { "name": "completion_rate", "type": "conversion", "base_measure": { "name": "starts" }, "conversion_measure": { "name": "completes" }, "entity": "user", "window": "1 day" }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["lvl_funnel_starts", "lvl_funnel_completes"] },
+        { "metrics": ["lvl_funnel_completion_rate"] },
+        { "metrics": ["lvl_funnel_completion_rate"], "group_by": [{ "time": "metric_time", "grain": "day" }] }
+      ],
+      "notes": "MetricFlow has no native N-step funnel; chain 2-step conversion metrics or use a derived metric over step counts for N steps."
+    },
+    {
+      "id": "nday_retention",
+      "task_type": "retention",
+      "title": "N-day retention (D1/D7) via conversion window",
+      "when_to_use": "Share of users who return within N days of their first activity.",
+      "required_events": ["session_start"],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": ["conversion"],
+      "create_payload": {
+        "name": "retention",
+        "semantic_models": [
+          { "from": "events", "measures": [
+            { "name": "cohort", "agg": "count_distinct", "field": "user_id", "event_name": ["session_start"] },
+            { "name": "returned", "agg": "count_distinct", "field": "user_id", "event_name": ["session_start"] }
+          ] }
+        ],
+        "metrics": [
+          { "name": "d1", "type": "conversion", "base_measure": { "name": "cohort" }, "conversion_measure": { "name": "returned" }, "entity": "user", "window": "1 day" },
+          { "name": "d7", "type": "conversion", "base_measure": { "name": "cohort" }, "conversion_measure": { "name": "returned" }, "entity": "user", "window": "7 day" }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["retention_d1"] },
+        { "metrics": ["retention_d7"] },
+        { "metrics": ["retention_d1"], "group_by": [{ "time": "metric_time", "grain": "day" }] }
+      ],
+      "notes": "Approximates N-day retention via a conversion window (returned within N days). Exact point-in-time D-N retention is not native to MetricFlow."
+    },
+    {
+      "id": "cohort_retention_grid",
+      "task_type": "cohort",
+      "title": "Acquisition-cohort grid (install date x activity)",
+      "when_to_use": "Cohort table: metric by install_date cohort and activity day.",
+      "required_events": ["purchase"],
+      "required_properties": ["revenue"],
+      "required_user_attrs": ["install_date"],
+      "metric_types": ["simple"],
+      "create_payload": {
+        "name": "cohort_grid",
+        "use_base_models": ["users"],
+        "semantic_models": [
+          { "from": "events", "event_scope": { "event_name": ["purchase"] }, "measures": [
+            { "name": "revenue", "agg": "sum", "field": "revenue" },
+            { "name": "buyers", "agg": "count_distinct", "field": "user_id" }
+          ] }
+        ],
+        "metrics": [
+          { "name": "revenue", "type": "simple", "measure": { "name": "revenue" } },
+          { "name": "buyers", "type": "simple", "measure": { "name": "buyers" } }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["cohort_grid_revenue"], "group_by": ["user__install_date", { "time": "metric_time", "grain": "day" }] },
+        { "metrics": ["cohort_grid_buyers"], "group_by": ["user__install_date"] }
+      ],
+      "notes": "Group by the install_date dimension (cohort) and metric_time (age). Cumulative LTV per cohort can be layered with a cumulative metric."
+    },
+    {
+      "id": "behavioral_cohort",
+      "task_type": "behavioral",
+      "title": "Behavioral cohort: users who did / didn't do event X",
+      "when_to_use": "Segment users by whether they performed a behavior (e.g. made a purchase), then compare metrics.",
+      "required_events": ["purchase", "session_start"],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": ["simple"],
+      "create_payload": {
+        "name": "behavior",
+        "semantic_models": [
+          { "from": "events", "measures": [
+            { "name": "purchases", "agg": "sum_boolean", "event_name": ["purchase"] },
+            { "name": "sessions", "agg": "count", "field": "*", "event_name": ["session_start"] }
+          ] }
+        ],
+        "metrics": [
+          { "name": "purchases", "type": "simple", "measure": { "name": "purchases" } },
+          { "name": "sessions", "type": "simple", "measure": { "name": "sessions" } }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["behavior_purchases"] },
+        { "metrics": ["behavior_sessions"], "group_by": [{ "time": "metric_time", "grain": "day" }] }
+      ],
+      "notes": "To split did/didn't, filter with a Metric() in --where, e.g. `{{ Metric('behavior_purchases', group_by=['user']) }} > 0`. The structured `where` supports Dimension/metric_time; the Metric() filter is added at the mf-query level."
+    },
+    {
+      "id": "visit_to_purchase_conversion",
+      "task_type": "conversion",
+      "title": "Visit-to-purchase conversion (native conversion metric)",
+      "when_to_use": "Share of visitors who purchase within a window.",
+      "required_events": ["session_start", "purchase"],
+      "required_properties": [],
+      "required_user_attrs": ["country"],
+      "metric_types": ["conversion"],
+      "create_payload": {
+        "name": "visit_purchase",
+        "use_base_models": ["users"],
+        "semantic_models": [
+          { "from": "events", "measures": [
+            { "name": "visits", "agg": "count_distinct", "field": "user_id", "event_name": ["session_start"] },
+            { "name": "buyers", "agg": "count_distinct", "field": "user_id", "event_name": ["purchase"] }
+          ] }
+        ],
+        "metrics": [
+          { "name": "conversion", "type": "conversion", "base_measure": { "name": "visits" }, "conversion_measure": { "name": "buyers" }, "entity": "user", "window": "7 day" }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["visit_purchase_conversion"] },
+        { "metrics": ["visit_purchase_conversion"], "group_by": ["user__country"] }
+      ],
+      "notes": "Use constant_properties to require the same product across base/conversion events when relevant."
+    },
+    {
+      "id": "level_progression",
+      "task_type": "progression",
+      "title": "Level progression: win-rate, attempts per level",
+      "when_to_use": "Per-level difficulty: starts, wins, win-rate, avg attempts/moves.",
+      "required_events": ["level_start", "level_complete"],
+      "required_properties": ["level", "attempt", "moves"],
+      "required_user_attrs": [],
+      "metric_types": ["simple", "ratio"],
+      "create_payload": {
+        "name": "progression",
+        "semantic_models": [
+          { "from": "events", "dimensions": [{ "source": "event_property", "property": "level" }], "measures": [
+            { "name": "starts", "agg": "count", "field": "*", "event_name": ["level_start"] },
+            { "name": "wins", "agg": "count", "field": "*", "event_name": ["level_complete"] },
+            { "name": "avg_attempts", "agg": "average", "field": "attempt" }
+          ] }
+        ],
+        "metrics": [
+          { "name": "starts", "type": "simple", "measure": { "name": "starts" } },
+          { "name": "wins", "type": "simple", "measure": { "name": "wins" } },
+          { "name": "win_rate", "type": "ratio", "numerator": { "name": "wins" }, "denominator": { "name": "starts" } },
+          { "name": "avg_attempts", "type": "simple", "measure": { "name": "avg_attempts" } }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["progression_starts", "progression_wins"], "group_by": ["progression_level"] },
+        { "metrics": ["progression_win_rate"], "group_by": ["progression_level"] }
+      ],
+      "notes": "Group by the task dimension `progression_level` (JSON-extracted). Churn-at-level is derived from starts of level N vs N+1 in post-processing."
+    },
+    {
+      "id": "monetization_metrics",
+      "task_type": "monetization",
+      "title": "Monetization: revenue, ARPPU, AOV, by product/channel/day",
+      "when_to_use": "Revenue, payers, ARPPU, average order value over time and by segment/product.",
+      "required_events": ["purchase"],
+      "required_properties": ["revenue", "product_id"],
+      "required_user_attrs": ["country"],
+      "metric_types": ["simple", "ratio"],
+      "create_payload": {
+        "name": "monetization",
+        "use_base_models": ["users"],
+        "semantic_models": [
+          { "from": "events", "event_scope": { "event_name": ["purchase"] }, "dimensions": [{ "source": "event_property", "property": "product_id" }], "measures": [
+            { "name": "revenue", "agg": "sum", "field": "revenue" },
+            { "name": "payers", "agg": "count_distinct", "field": "user_id" },
+            { "name": "purchases", "agg": "count", "field": "*" }
+          ] }
+        ],
+        "metrics": [
+          { "name": "revenue", "type": "simple", "measure": { "name": "revenue" } },
+          { "name": "payers", "type": "simple", "measure": { "name": "payers" } },
+          { "name": "arppu", "type": "ratio", "numerator": { "name": "revenue" }, "denominator": { "name": "payers" } },
+          { "name": "aov", "type": "ratio", "numerator": { "name": "revenue" }, "denominator": { "name": "purchases" } }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["monetization_revenue"], "group_by": [{ "time": "metric_time", "grain": "day" }] },
+        { "metrics": ["monetization_revenue"], "group_by": ["monetization_product_id"] },
+        { "metrics": ["monetization_arppu"], "group_by": ["user__country"] },
+        { "metrics": ["monetization_aov"] }
+      ],
+      "notes": "LTV curve = cumulative revenue metric over metric_time by acquisition cohort (needs time spine)."
+    },
+    {
+      "id": "stickiness_lifecycle",
+      "task_type": "stickiness",
+      "title": "Stickiness (DAU/MAU) & active base over time",
+      "when_to_use": "How sticky the product is and how the active base evolves.",
+      "required_events": ["session_start"],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": ["simple"],
+      "create_payload": {
+        "name": "stickiness",
+        "semantic_models": [
+          { "from": "events", "measures": [
+            { "name": "active_users", "agg": "count_distinct", "field": "user_id", "event_name": ["session_start"] }
+          ] }
+        ],
+        "metrics": [
+          { "name": "active_users", "type": "simple", "measure": { "name": "active_users" } }
+        ]
+      },
+      "example_queries": [
+        { "metrics": ["stickiness_active_users"], "group_by": [{ "time": "metric_time", "grain": "day" }] },
+        { "metrics": ["stickiness_active_users"], "group_by": [{ "time": "metric_time", "grain": "month" }] }
+      ],
+      "notes": "DAU/MAU ratio = active_users at day grain / active_users at month grain (combine client-side or via a derived metric)."
+    }
+  ]
+}

@@ -78,6 +78,7 @@ function genericMeasureItem(catalog) {
       field: genericMeasureField(catalog),
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1 },
       label: { type: 'string' },
+      event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() } },
     },
     allOf: [{ if: { properties: { agg: { const: 'percentile' } } }, then: { required: ['percentile'] } }],
   };
@@ -105,6 +106,9 @@ function measureItemSchema(catalog, modelKey) {
       field: measureFieldSchema(catalog, modelKey),
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1 },
       label: { type: 'string' },
+      ...(modelKey === catalog.anchor
+        ? { event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Per-measure event scope (overrides semantic_models.event_scope) — needed for funnel/conversion measures.' } }
+        : {}),
     },
     allOf: [
       { if: { properties: { agg: { const: 'percentile' } } }, then: { required: ['percentile'] } },

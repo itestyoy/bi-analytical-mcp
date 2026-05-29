@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ContextManager, mergeCompiled, newContextId } from '../../src/context-manager.js';
@@ -19,7 +19,7 @@ test('create / writeYaml / list / drop lifecycle', () => {
   const ctx = cm.create();
   assert.ok(existsSync(cm.dir(ctx.id)));
   cm.writeYaml(ctx.id, 'semantic_models: []\n');
-  assert.ok(cm.generatedFiles(ctx.id).length === 1);
+  assert.ok(cm.generatedFiles(ctx.id).some((f) => /context\.yml$/.test(f)), 'context.yml written');
   assert.equal(cm.list().length, 1);
   const res = cm.drop(ctx.id);
   assert.equal(res.removed, true);
@@ -45,6 +45,33 @@ test('lease prevents drop while in-flight', () => {
   assert.throws(() => cm.drop(ctx.id), /in-flight/);
   cm.release(ctx.id);
   assert.equal(cm.drop(ctx.id).removed, true);
+});
+
+test('time spine is always present in a context overlay (predefined model)', () => {
+  const root = tmpRoot();
+  const cm = new ContextManager({ workspaceRoot: root, timeSpineDialect: 'postgres' });
+  const ctx = cm.create();
+  assert.ok(cm.hasTimeSpine(ctx.id), 'overlay must always have a time spine');
+  const files = cm.generatedFiles(ctx.id);
+  assert.ok(files.some((f) => /metricflow_time_spine\.sql$/.test(f)), 'generated spine sql present');
+});
+
+test('time spine is dialect-aware', () => {
+  const bq = new ContextManager({ workspaceRoot: tmpRoot(), timeSpineDialect: 'bigquery' });
+  const ctx = bq.create();
+  const sql = readFileSync(join(bq.generatedDir(ctx.id), 'metricflow_time_spine.sql'), 'utf8');
+  assert.match(sql, /generate_date_array/);
+});
+
+test('time spine is NOT duplicated when the base project already defines one', () => {
+  const base = mkdtempSync(join(tmpdir(), 'base-'));
+  mkdirSync(join(base, 'models'), { recursive: true });
+  writeFileSync(join(base, 'models', 'metricflow_time_spine.sql'), 'select 1 as date_day');
+  writeFileSync(join(base, 'dbt_project.yml'), 'name: x\n');
+  const cm = new ContextManager({ workspaceRoot: tmpRoot(), baseProjectDir: base });
+  const ctx = cm.create();
+  assert.ok(cm.hasTimeSpine(ctx.id));
+  assert.ok(!cm.generatedFiles(ctx.id).some((f) => /metricflow_time_spine\.sql$/.test(f)), 'no duplicate spine generated');
 });
 
 test('mergeCompiled accumulates additions and dedups metrics', () => {

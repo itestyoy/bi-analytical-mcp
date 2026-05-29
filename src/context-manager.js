@@ -3,8 +3,33 @@
 // tasks never share a semantic_manifest or collide on names.
 
 import { randomBytes } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+
+// A daily time spine is REQUIRED by MetricFlow for metric_time, grains,
+// cumulative and conversion metrics. We guarantee the model file is always
+// present in every context overlay (predefined model). NOTE: it must also be
+// materialized in the warehouse (dbt run --select metricflow_time_spine) — that
+// is the base project's responsibility; the server only guarantees the file.
+function timeSpineSql(dialect, start, end) {
+  if (dialect === 'bigquery') {
+    return `{{ config(materialized='table') }}\nselect d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d\n`;
+  }
+  if (dialect === 'snowflake') {
+    return `{{ config(materialized='table') }}\nselect dateadd(day, seq4(), '${start}'::date) as date_day\nfrom table(generator(rowcount => datediff(day, '${start}'::date, '${end}'::date) + 1))\n`;
+  }
+  // postgres / default
+  return `{{ config(materialized='table') }}\nselect d::date as date_day\nfrom generate_series('${start}'::date, '${end}'::date, interval '1 day') as d\n`;
+}
+
+const TIME_SPINE_YML = `models:
+  - name: metricflow_time_spine
+    time_spine:
+      standard_granularity_column: date_day
+    columns:
+      - name: date_day
+        granularity: day
+`;
 
 export function newContextId() {
   return randomBytes(6).toString('hex'); // 12 hex chars
@@ -35,10 +60,13 @@ export function mergeCompiled(state, compiled) {
 }
 
 export class ContextManager {
-  constructor({ baseProjectDir, workspaceRoot, registryPath } = {}) {
+  constructor({ baseProjectDir, workspaceRoot, registryPath, timeSpineDialect = 'postgres', timeSpineStart = '2020-01-01', timeSpineEnd = '2035-12-31' } = {}) {
     this.baseProjectDir = baseProjectDir;
     this.workspaceRoot = workspaceRoot || join(process.cwd(), '.mcp', 'ctx');
     this.registryPath = registryPath || join(this.workspaceRoot, 'registry.json');
+    this.timeSpineDialect = timeSpineDialect;
+    this.timeSpineStart = timeSpineStart;
+    this.timeSpineEnd = timeSpineEnd;
     this.contexts = new Map(); // id -> { id, createdAt, lastUsedAt, state }
     this.leases = new Map(); // id -> count of in-flight ops
     mkdirSync(this.workspaceRoot, { recursive: true });
@@ -108,10 +136,38 @@ export class ContextManager {
       });
     }
     mkdirSync(this.generatedDir(id), { recursive: true });
+    this.ensureTimeSpine(id);
     const ctx = { id, createdAt: Date.now(), lastUsedAt: Date.now(), state: { tasks: [], additions: {}, metrics: [], usedModels: [] } };
     this.contexts.set(id, ctx);
     this._persist();
     return ctx;
+  }
+
+  /** Guarantee a metricflow_time_spine model exists in the overlay (predefined). */
+  ensureTimeSpine(id) {
+    if (this.hasTimeSpine(id)) return false;
+    const dir = this.generatedDir(id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'metricflow_time_spine.sql'), timeSpineSql(this.timeSpineDialect, this.timeSpineStart, this.timeSpineEnd));
+    writeFileSync(join(dir, '_mcp_time_spine.yml'), TIME_SPINE_YML);
+    return true;
+  }
+
+  /** Does the overlay already define a time spine (base project or generated)? */
+  hasTimeSpine(id) {
+    const modelsDir = join(this.dir(id), 'models');
+    if (!existsSync(modelsDir)) return false;
+    const walk = (d) => {
+      for (const name of readdirSync(d)) {
+        const p = join(d, name);
+        const st = statSync(p);
+        if (st.isDirectory()) { if (walk(p)) return true; continue; }
+        if (name === 'metricflow_time_spine.sql') return true;
+        if (/\.ya?ml$/.test(name) && readFileSync(p, 'utf8').includes('time_spine:')) return true;
+      }
+      return false;
+    };
+    return walk(modelsDir);
   }
 
   /** Write the generated YAML for a context into its overlay. */

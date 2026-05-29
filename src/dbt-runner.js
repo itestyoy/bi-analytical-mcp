@@ -69,6 +69,26 @@ export class DbtRunner {
   }
 }
 
+/**
+ * Turn raw dbt/mf stdout+stderr into a clean, complete error message:
+ * strips ANSI colors and dbt log timestamps, and surfaces the meaningful part
+ * (from the first Error/Database Error/Parsing Error marker onward).
+ */
+export function formatDbtError(stdout = '', stderr = '') {
+  const raw = `${stderr || ''}\n${stdout || ''}`;
+  const cleaned = raw
+    .replace(/\[[0-9;]*m/g, '') // ANSI color codes
+    .split('\n')
+    .map((l) => l.replace(/^\s*\d{2}:\d{2}:\d{2}(\.\d+)?\s+/, '').replace(/\s+$/, '')) // dbt log timestamps
+    .filter((l) => l.trim() !== '')
+    .join('\n')
+    .trim();
+  const markers = /(Database Error|Parsing Error|Compilation Error|Runtime Error|Validation Error|Encountered an error|ERROR:)/;
+  const m = cleaned.search(markers);
+  const msg = m >= 0 ? cleaned.slice(m) : cleaned;
+  return msg.slice(0, 8000) || 'unknown dbt error';
+}
+
 function extractSql(stdout) {
   // mf --explain prints prose then the SQL; return everything from the first SELECT/WITH.
   const idx = stdout.search(/\b(with|select)\b/i);

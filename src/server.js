@@ -74,6 +74,7 @@ export function makeEngine(opts = {}) {
   const ctxs = new ContextManager({
     baseProjectDir,
     workspaceRoot: opts.workspaceRoot || process.env.MCP_WORKSPACE,
+    timeSpineDialect: catalog.dialect,
   });
   const runner = opts.runner !== undefined
     ? opts.runner

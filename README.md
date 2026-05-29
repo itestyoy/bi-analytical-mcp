@@ -48,7 +48,26 @@ AI ──► query_semantic_model (enum-constrained)
   persistent, disk-reconciled registry, leases, teardown.
 - **Runner** (`src/dbt-runner.js`): shells `dbt parse` and `mf query` (NOT
   `dbt sl query`, which is dbt-platform/remote and incompatible with local
-  per-context isolation).
+  per-context isolation). A warm-process programmatic backend
+  (`src/backends/mf-engine.js` + `python/mf_sidecar.py`) is a drop-in alternative.
+- **Time spine** is a predefined model **always present** in every context:
+  `ContextManager.ensureTimeSpine` writes a dialect-aware `metricflow_time_spine`
+  if the base project doesn't already define one (required for `metric_time`,
+  cumulative and conversion metrics). It must be materialized once in the
+  warehouse (`dbt run --select metricflow_time_spine`).
+- **Errors** are surfaced clearly: tool results carry
+  `error: { stage: 'validate'|'compile'|'parse'|'query', message, field }`,
+  with dbt/MetricFlow output cleaned (ANSI + log timestamps stripped, the
+  meaningful Error/Database Error/Parsing Error portion surfaced). Path/metric
+  validation errors are actionable (e.g. "add use_base_models including 'users'").
+
+## Recipes
+
+`list_recipes` / `get_recipe` return ready-to-run templates for common analytics
+task types (trends, segmentation, funnel, retention, cohort, behavioral,
+conversion, level progression, monetization, stickiness) — each a valid
+`create_semantic_model` payload + example queries. See `config/recipes.json` and
+`docs/analytics-task-taxonomy.md`.
 
 ## Run
 

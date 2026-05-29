@@ -7,6 +7,7 @@ import { compileDeclaration } from './compile.js';
 import { renderContext } from './yaml-render.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
+import { formatDbtError } from './dbt-runner.js';
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes }) {
@@ -72,9 +73,37 @@ export class Engine {
     };
   }
 
+  /** Compile, converting bad-reference errors into a clearly-staged ToolError. */
+  _compile(input) {
+    try {
+      return compileDeclaration(this.catalog, input);
+    } catch (e) {
+      if (e instanceof ToolError) throw e;
+      throw new ToolError(e.message, { stage: 'compile' });
+    }
+  }
+
+  /** Check that a group-by/where path's entity hops map to models loaded in the context. */
+  _checkPathLoaded(ctx, path) {
+    if (typeof path !== 'string' || !path.includes('__')) return; // local task dim or metric_time
+    const segs = path.split('__');
+    for (const entity of segs.slice(0, -1)) {
+      const model = this.catalog.primaryByEntity[entity];
+      if (!model) continue; // already pruned/validated elsewhere
+      if (model === this.catalog.anchor) continue;
+      if (!ctx.state.usedModels.includes(model)) {
+        throw new ToolError(
+          `path '${path}' needs model '${model}', which is not loaded in this context. ` +
+            `Recreate/update the task with use_base_models including '${model}'.`,
+          { stage: 'validate', field: path },
+        );
+      }
+    }
+  }
+
   async create_semantic_model(input) {
     this._validate('create_semantic_model', input);
-    const compiled = compileDeclaration(this.catalog, input); // throws ToolError-ish on bad refs
+    const compiled = this._compile(input);
 
     if (input.dry_run) {
       const draft = { tasks: [], additions: {}, metrics: [], usedModels: [] };
@@ -118,7 +147,7 @@ export class Engine {
     // synthesize a declaration fragment for the add_* parts and compile it
     const task = input.task || ctx.state.tasks[0] || 'task';
     const frag = { name: task, semantic_models: [{ from: modelKey, dimensions: input.add_dimensions || [], measures: input.add_measures || [] }], metrics: input.add_metrics || [] };
-    const compiled = compileDeclaration(this.catalog, frag);
+    const compiled = this._compile(frag);
 
     // removals (with dependency checks for measures)
     if (input.remove_metrics) ctx.state.metrics = ctx.state.metrics.filter((m) => !input.remove_metrics.includes(m.name));
@@ -196,7 +225,8 @@ export class Engine {
     for (const g of input.group_by || []) {
       if (typeof g === 'object' && g.time === 'metric_time') groupBy.push(`metric_time__${g.grain || 'day'}`);
       else if (typeof g === 'string') {
-        if (g !== 'metric_time' && !allowed.has(g)) throw new ToolError(`group_by path not reachable in context: ${g}`, { stage: 'validate', field: g });
+        if (g !== 'metric_time' && !allowed.has(g)) throw new ToolError(`group_by path not reachable in context: ${g}. Known paths: ${[...allowed].slice(0, 30).join(', ')}`, { stage: 'validate', field: g });
+        this._checkPathLoaded(ctx, g);
         groupBy.push(g);
       }
     }
@@ -204,8 +234,9 @@ export class Engine {
     if (input.where) {
       // validate dimension paths in the predicate tree
       walkPredicates(input.where, (p) => {
-        if (p.field?.kind === 'dimension' && !allowed.has(p.field.path)) {
-          throw new ToolError(`where path not reachable in context: ${p.field.path}`, { stage: 'validate', field: p.field.path });
+        if (p.field?.kind === 'dimension') {
+          if (!allowed.has(p.field.path)) throw new ToolError(`where path not reachable in context: ${p.field.path}`, { stage: 'validate', field: p.field.path });
+          this._checkPathLoaded(ctx, p.field.path);
         }
       });
       where = renderWhereClauses(input.where);
@@ -223,7 +254,7 @@ export class Engine {
     });
     this.ctxs.touch(ctx.id);
 
-    if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: (res.stderr || res.stdout || '').trim().slice(0, 4000) } };
+    if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
     if (input.dry_run) return { ok: true, dry_run: true, command: res.command, sql: res.sql };
 
     const pageRows = res.rows.slice(offset, offset + limit);
@@ -241,7 +272,7 @@ export class Engine {
   async _parse(ctxId) {
     if (!this.runner) return { ok: true, skipped: 'no runner (unit mode)' };
     const r = await this.runner.parse(this.ctxs.dir(ctxId));
-    if (!r.ok) return { ok: false, error: { stage: 'parse', message: (r.stderr || r.stdout || '').trim().slice(0, 4000) } };
+    if (!r.ok) return { ok: false, error: { stage: 'parse', message: formatDbtError(r.stdout, r.stderr) } };
     return { ok: true, manifest: r.manifest };
   }
 

@@ -6,10 +6,11 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, cpSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { DbtRunner } from '../../src/dbt-runner.js';
+import { DbtRunner, formatDbtError } from '../../src/dbt-runner.js';
 import { startPglite } from './pglite-harness.js';
 
 const execFileP = promisify(execFile);
@@ -112,6 +113,25 @@ test('docs example: group by a boolean dimension splits true/false', opts, async
   assert.equal(res.ok, true, res.stderr);
   assert.equal(res.rows.length, 2);
   assert.equal(res.rows.reduce((s, r) => s + Number(r.order_total), 0), 100);
+});
+
+// error surfacing: a real dbt parse error comes back clean (no ANSI / log
+// timestamps) with the meaningful dbt message.
+test('errors: a real dbt parse error is surfaced clearly', opts, async (t) => {
+  if (!HAS_DBT) return t.skip('dbt/mf not installed');
+  const tmp = mkdtempSync(join(tmpdir(), 'jaffle-bad-'));
+  cpSync(BASE, tmp, { recursive: true, filter: (s) => !/(\/target(\/|$)|\/logs(\/|$))/.test(s) });
+  // a metric referencing a measure that does not exist -> dbt parsing/validation error
+  writeFileSync(join(tmp, 'models', '_broken.yml'),
+    'metrics:\n  - name: broken_metric\n    label: Broken\n    type: simple\n    type_params:\n      measure:\n        name: does_not_exist_measure\n');
+  const r = await runner.parse(tmp);
+  assert.equal(r.ok, false, 'parse should fail');
+  const msg = formatDbtError(r.stdout, r.stderr);
+  t.diagnostic(msg);
+  assert.ok(!msg.includes(String.fromCharCode(27)) && !msg.includes('[0m'), 'no ANSI escapes');
+  assert.ok(!/^\d{2}:\d{2}:\d{2}/m.test(msg), 'no leading log timestamps');
+  assert.match(msg, /Error/);
+  assert.match(msg, /does_not_exist_measure/);
 });
 
 // docs example: `--start-time ... --end-time ... --order ... --limit ...`

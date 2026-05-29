@@ -5,7 +5,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { buildSchemas } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 
-const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.json'));
+const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.yml'));
 const validators = makeValidators(buildSchemas(catalog));
 
 function v(tool, input) {

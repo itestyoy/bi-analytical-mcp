@@ -3,11 +3,69 @@
 // reference is projected from here into JSON-Schema enums.
 
 import { readFileSync } from 'node:fs';
+import yaml from 'js-yaml';
 import { isNumericType } from './dialect.js';
 
 export function loadCatalog(path) {
-  const raw = JSON.parse(readFileSync(path, 'utf8'));
+  const text = readFileSync(path, 'utf8');
+  let raw;
+  if (/\.ya?ml$/i.test(path)) {
+    const doc = yaml.load(text);
+    // dbt model-schema notation (models: [ {name, columns, meta} ]) -> registry.
+    // A plain registry object (models: {events:{..}}) is also accepted as-is.
+    raw = Array.isArray(doc?.models) ? dbtSchemaToCatalog(doc) : doc;
+  } else {
+    raw = JSON.parse(text);
+  }
   return new Catalog(raw);
+}
+
+/**
+ * Transform a dbt model-schema document into the internal catalog registry.
+ * MCP semantics are read from `meta.mcp` at the model level (key/role/anchor/
+ * primary_entity/known_events/measures) and the column level (entity/is_time/
+ * is_event_name/is_event_data+properties/dimension).
+ */
+export function dbtSchemaToCatalog(doc) {
+  const out = { warehouse_dialect: doc.warehouse_dialect || 'postgres', models: {} };
+  for (const model of doc.models || []) {
+    const mcp = model.meta?.mcp || {};
+    const key = mcp.key;
+    if (!key) throw new Error(`catalog model '${model.name}' is missing meta.mcp.key (logical name)`);
+    const m = { dbt_model: model.name };
+    if (mcp.role) m.role = mcp.role;
+    if (mcp.primary_entity !== undefined) m.primary_entity = mcp.primary_entity;
+    if (mcp.known_events) m.known_events = mcp.known_events;
+    if (mcp.measures) m.measures = mcp.measures;
+    if (mcp.anchor) out.anchor_model = key;
+
+    const entities = {};
+    const dimensions = {};
+    for (const col of model.columns || []) {
+      const cm = col.meta?.mcp || {};
+      if (cm.entity) {
+        if (cm.entity.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name };
+        else entities[cm.entity.name] = { column: col.name, type: cm.entity.type };
+      }
+      if (cm.is_time) m.time = { column: col.name, granularity: cm.granularity || 'day' };
+      if (cm.is_event_name) m.event_name = { column: col.name };
+      if (cm.is_event_data) {
+        m.event_data_column = col.name;
+        if (cm.properties) m.properties = cm.properties;
+      }
+      if (cm.dimension) {
+        const d = { type: cm.dimension.type };
+        if (cm.dimension.granularity) d.granularity = cm.dimension.granularity;
+        if (cm.dimension.values) d.values = cm.dimension.values;
+        dimensions[col.name] = d;
+      }
+    }
+    if (Object.keys(entities).length) m.entities = entities;
+    if (Object.keys(dimensions).length) m.dimensions = dimensions;
+    out.models[key] = m;
+  }
+  if (!out.anchor_model) out.anchor_model = doc.anchor_model;
+  return out;
 }
 
 /** Logical name of a model's primary entity. */

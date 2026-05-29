@@ -6,7 +6,7 @@ import { buildSchemas } from '../../src/schema.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { compileDeclaration } from '../../src/compile.js';
 
-const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.json'));
+const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.yml'));
 const validators = makeValidators(buildSchemas(catalog));
 const v = (tool, input) => validateInput(validators[tool], input);
 

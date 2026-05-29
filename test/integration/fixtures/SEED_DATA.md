@@ -9,7 +9,7 @@ Seed files (EXACTLY TWO data sources, per the project rules):
 - `dbt_project/seeds/seed_users.csv` -> `dim_users`
 - `dbt_project/seeds/seed_events.csv` -> `fct_analytics_events`
 
-Vocabulary is restricted to `config/catalog.json` (events, event_data property
+Vocabulary is restricted to `config/catalog.yml` (events, event_data property
 keys, and user attributes). All monetary values are integers. `campaign_id` is a
 plain string attribute on `dim_users` (like country/platform) — there is NO
 separate campaigns table.

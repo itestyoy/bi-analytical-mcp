@@ -38,7 +38,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mr-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog: loadCatalog(join(process.cwd(), 'config', 'catalog.json')), contextManager: ctxs, runner: backend });
+  engine = new Engine({ catalog: loadCatalog(join(process.cwd(), 'config', 'catalog.yml')), contextManager: ctxs, runner: backend });
 
   const out = await engine.register_native_model({
     name: 'activation',

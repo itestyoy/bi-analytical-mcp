@@ -71,7 +71,7 @@ function errorResult(message, stage, field) {
 }
 
 export function makeEngine(opts = {}) {
-  const catalogPath = opts.catalogPath || process.env.CATALOG_PATH || join(process.cwd(), 'config', 'catalog.json');
+  const catalogPath = opts.catalogPath || process.env.CATALOG_PATH || join(process.cwd(), 'config', 'catalog.yml');
   const catalog = loadCatalog(catalogPath);
   const recipesPath = opts.recipesPath || process.env.RECIPES_PATH || join(process.cwd(), 'config', 'recipes.json');
   const recipes = existsSync(recipesPath) ? loadRecipes(recipesPath) : undefined;

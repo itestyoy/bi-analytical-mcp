@@ -1,0 +1,176 @@
+version: 2
+
+# MCP catalog expressed as dbt model-schema YAML. The two data sources are
+# described as ordinary dbt models with `columns`; everything MCP-specific lives
+# under `meta.mcp` (model-level and column-level). The loader (src/catalog.js)
+# transforms this into the internal registry. There are EXACTLY TWO data sources.
+#
+# Conventions (column meta.mcp):
+#   entity:        { name, type: primary|foreign }  -> entity / join key
+#   is_time:       true (+ granularity)             -> the event time axis
+#   is_event_name: true                             -> the event_name column
+#   is_event_data: true (+ properties: {..})        -> the JSON payload column
+#   dimension:     { type, granularity?, values? }  -> a groupable attribute
+
+warehouse_dialect: postgres
+
+models:
+  - name: fct_analytics_events
+    description: "Analytical events fact — one row per tracked event."
+    meta:
+      mcp:
+        key: events            # logical name used by the tools
+        role: fact
+        anchor: true           # the anchor model (funnels/metrics are built from it)
+        primary_entity: event  # the grain of the fact (no physical key column)
+        known_events:
+          - first_launch
+          - new_session
+          - end_session
+          - level_started
+          - level_completed
+          - currency_income
+          - currency_outcome
+          - shop_opened
+          - iap_purchase_completed
+          - iap_purchase_failed
+          - ad_started
+          - ad_finished
+          - tutorial
+          - screen_changed
+    columns:
+      - name: appsflyer_id
+        data_type: string
+        description: "User identifier; joins events to dim_users."
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }
+      - name: session_number
+        data_type: integer
+        description: "Per-user session counter."
+        meta:
+          mcp:
+            entity: { name: session, type: foreign }
+      - name: device_time
+        data_type: timestamp
+        description: "Event timestamp (the metric time axis)."
+        meta:
+          mcp:
+            is_time: true
+            granularity: day
+      - name: event_name
+        data_type: string
+        description: "Event type (one of known_events)."
+        meta:
+          mcp:
+            is_event_name: true
+      - name: event_data
+        data_type: json
+        description: "Per-event JSON payload; typed keys below."
+        meta:
+          mcp:
+            is_event_data: true
+            properties:
+              level_id: { type: int }
+              chain: { type: string }
+              result: { type: string, values: [win, lose] }
+              method: { type: string }
+              complete_time: { type: int }
+              attempt: { type: int }
+              amount: { type: int }
+              currency: { type: string }
+              value_in_coins: { type: int }
+              source_type: { type: string }
+              source_name: { type: string }
+              monetization_type: { type: string }
+              price_in_usd: { type: numeric }
+              product_id: { type: string }
+              order_id: { type: string }
+              status: { type: string, values: [success, failed, closed] }
+              ad_type: { type: string, values: [rewarded, interstitial, banner] }
+              ad_network: { type: string, values: [admob, unity, applovin, ironsource] }
+              placement: { type: string }
+              revenue: { type: numeric }
+              is_reward_received: { type: string }
+              is_clicked: { type: string }
+              screen_from: { type: string }
+              screen_to: { type: string }
+              step_id: { type: string }
+
+  - name: dim_users
+    description: "User attributes dimension — one row per user."
+    meta:
+      mcp:
+        key: users
+        role: dimension
+        measures:
+          users_count: { agg: count, expr: "1" }
+    columns:
+      - name: appsflyer_id
+        data_type: string
+        description: "User identifier (primary key; join target for events.user)."
+        meta:
+          mcp:
+            entity: { name: user, type: primary }
+      - name: install_date
+        data_type: date
+        description: "Acquisition (install) date — cohort time dimension."
+        meta:
+          mcp:
+            dimension: { type: time, granularity: day }
+      - name: platform
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string, values: [android, ios] }
+      - name: os_version
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string }
+      - name: device_model
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string }
+      - name: country
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string }
+      - name: region
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string }
+      - name: language
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string }
+      - name: media_source
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string }
+      - name: acquisition_type
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string, values: [organic, paid] }
+      - name: campaign_id
+        data_type: string
+        description: "Plain string attribute (no separate campaigns table)."
+        meta:
+          mcp:
+            dimension: { type: string }
+      - name: app_id
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string }
+      - name: app_version
+        data_type: string
+        meta:
+          mcp:
+            dimension: { type: string }

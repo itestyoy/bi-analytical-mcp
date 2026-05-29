@@ -1,0 +1,83 @@
+# Canonical dbt Semantic Layer example (Jaffle Shop), as documented at
+# https://docs.getdbt.com/best-practices/how-we-build-our-metrics/semantic-layer-3-build-semantic-models
+# and https://docs.getdbt.com/docs/build/metrics-overview — used as a reference
+# correctness test for our harness.
+semantic_models:
+  - name: orders
+    description: "Order grain semantic model."
+    model: ref('orders')
+    defaults:
+      agg_time_dimension: ordered_at
+    entities:
+      - name: order_id
+        type: primary
+      - name: customer
+        type: foreign
+        expr: customer_id
+    dimensions:
+      - name: ordered_at
+        type: time
+        type_params:
+          time_granularity: day
+      - name: is_food_order
+        type: categorical
+      - name: is_drink_order
+        type: categorical
+    measures:
+      - name: order_total
+        description: "The total amount for each order."
+        agg: sum
+      - name: order_count
+        description: "The count of individual orders."
+        expr: "1"
+        agg: sum
+
+  - name: customers
+    description: "Customer grain semantic model."
+    model: ref('customers')
+    defaults:
+      agg_time_dimension: first_ordered_at
+    entities:
+      - name: customer
+        type: primary
+        expr: customer_id
+    dimensions:
+      - name: customer_type
+        type: categorical
+      - name: first_ordered_at
+        type: time
+        type_params:
+          time_granularity: day
+
+metrics:
+  - name: order_total
+    description: "Sum of order totals."
+    label: "Order total"
+    type: simple
+    type_params:
+      measure:
+        name: order_total
+  - name: order_count
+    description: "Count of orders."
+    label: "Order count"
+    type: simple
+    type_params:
+      measure:
+        name: order_count
+  - name: average_order_value
+    description: "Average value of each order (AOV)."
+    label: "Average order value"
+    type: ratio
+    type_params:
+      numerator:
+        name: order_total
+      denominator:
+        name: order_count
+  - name: food_orders
+    description: "Count of orders that included food."
+    label: "Food orders"
+    type: simple
+    type_params:
+      measure:
+        name: order_count
+    filter: "{{ Dimension('order_id__is_food_order') }} = true"

@@ -1,0 +1,15 @@
+jaffle_sl:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: 127.0.0.1
+      port: "{{ env_var('DBT_PG_PORT') | as_number }}"
+      user: postgres
+      password: postgres
+      dbname: postgres
+      schema: public
+      threads: 1
+      sslmode: disable
+      connect_timeout: 30
+      retries: 1

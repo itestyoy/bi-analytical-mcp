@@ -43,6 +43,15 @@ export class DbtRunner {
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
   }
 
+  /** Run a simple SQL against the warehouse and return rows (dbt show --output json). */
+  async show(projectDir, sql, limit = 1000) {
+    const args = ['show', '--inline', sql, '--output', 'json', '--limit', String(limit)];
+    const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
+    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, rows: [], columns: [] };
+    const rows = parseShowJson(r.stdout);
+    return { ok: true, rows, columns: rows[0] ? Object.keys(rows[0]).map((name) => ({ name })) : [] };
+  }
+
   async validate(projectDir) {
     const r = await run(this.mfBin, ['validate-configs'], { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
@@ -101,6 +110,19 @@ function extractSql(stdout) {
   // mf --explain prints prose then the SQL; return everything from the first SELECT/WITH.
   const idx = stdout.search(/\b(with|select)\b/i);
   return idx >= 0 ? stdout.slice(idx).trim() : stdout.trim();
+}
+
+/** Parse `dbt show --output json` stdout: logs then { "show": [ {col:val}, ... ] }. */
+export function parseShowJson(stdout) {
+  const cleaned = (stdout || '').replace(/\x1b\[[0-9;]*m/g, '');
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start < 0 || end < 0) return [];
+  try {
+    return JSON.parse(cleaned.slice(start, end + 1)).show || [];
+  } catch {
+    return [];
+  }
 }
 
 /** Minimal CSV parser (handles quoted fields with commas/quotes/newlines). */

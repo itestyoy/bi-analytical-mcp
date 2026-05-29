@@ -311,6 +311,7 @@ export function buildSchemas(catalog) {
       time_range: { type: 'object', additionalProperties: false, properties: { start: { type: 'string' }, end: { type: 'string' } } },
       limit: { type: 'integer', minimum: 1, maximum: 100000 },
       offset: { type: 'integer', minimum: 0 },
+      materialize: { type: 'boolean', description: 'Materialize the query as a dbt table and read rows back from it (resilient, re-fetchable). Slow queries (> timeout) return a query_id; poll get_query_result.' },
       dry_run: { type: 'boolean' },
     },
   };
@@ -343,6 +344,25 @@ export function buildSchemas(catalog) {
     update_native_model: { ...registerModel, required: ['context_id', 'name', 'sequence'] },
     delete_native_model: ctxRef,
     query_semantic_model: query,
+    get_query_result: {
+      type: 'object', additionalProperties: false, required: ['context_id'],
+      properties: {
+        context_id: { type: 'string' }, query_id: { type: 'string' }, table: { type: 'string' }, limit: { type: 'integer', minimum: 1, maximum: 100000 },
+        transform: {
+          type: 'object', additionalProperties: false,
+          description: 'Optional read-only projection over the materialized result table (compress/re-slice). Identifiers are validated; values are literal-escaped.',
+          properties: {
+            where: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'is_null', 'is_not_null'] }, value: {} } } },
+            group_by: { type: 'array', items: { type: 'string' } },
+            aggregations: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'] }, column: { type: 'string' }, as: { type: 'string' } } } },
+            having: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'] }, column: { type: 'string' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'] }, value: {} } } },
+            order_by: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } },
+            limit: { type: 'integer', minimum: 1, maximum: 100000 },
+          },
+        },
+      },
+    },
+    list_query_jobs: empty,
     update_semantic_model: update,
     delete_semantic_model: del,
     drop_context: ctxRef,

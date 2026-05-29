@@ -19,7 +19,9 @@ const TOOL_DESCRIPTIONS = {
   register_native_model: 'Build a derived dbt model from a sequence spec (MATCH_RECOGNIZE funnel/path, target BigQuery) materialized as a view, and a semantic model on top. Kept separate from the semantic query; after registering, query its metrics/dimensions via query_semantic_model.',
   update_native_model: 'Update a registered native (MATCH_RECOGNIZE) model in place: regenerate the view + semantic model from a new sequence spec and rebuild (dbt run + parse).',
   delete_native_model: 'Delete a registered native model: remove its generated view + semantic model from the context and re-parse.',
-  query_semantic_model: 'Run a query (mf query, dbt Core) against a context. metrics + group_by + where are validated against the context.',
+  query_semantic_model: 'Run a query (mf query, dbt Core) against a context. metrics + group_by + where are validated against the context. Pass materialize:true to persist the result as a dbt table and read it back (resilient); slow queries return a query_id to poll.',
+  get_query_result: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}. Returns status (running/ready/error) and rows read from the materialized table.',
+  list_query_jobs: 'List background query jobs and their status.',
   update_semantic_model: 'Add/remove task measures, dimensions or metrics for a table SM within a context; re-parses.',
   delete_semantic_model: 'Remove a table SM task additions (and dependent metrics with cascade) from a context.',
   drop_context: 'Tear down an entire isolated context (files + artifacts).',
@@ -29,7 +31,7 @@ const TOOL_DESCRIPTIONS = {
   get_recipe: 'Get a recipe by id: a ready create_semantic_model payload + example queries + notes for a task type.',
 };
 
-const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'update_semantic_model', 'delete_semantic_model']);
+const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model']);
 
 export function buildToolDefs(engine) {
   return Object.entries(engine.schemas).map(([name, inputSchema]) => ({
@@ -84,7 +86,9 @@ export function makeEngine(opts = {}) {
     : baseProjectDir
       ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir })
       : null;
-  return new Engine({ catalog, contextManager: ctxs, runner, recipes });
+  const queryTimeoutMs = (Number(process.env.QUERY_TIMEOUT_SECONDS) || 60) * 1000;
+  const jobsDbPath = opts.jobsDbPath || join(ctxs.workspaceRoot, 'jobs.sqlite');
+  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, jobsDbPath });
 }
 
 export function createApp(engine) {

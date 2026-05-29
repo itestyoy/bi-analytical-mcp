@@ -9,12 +9,16 @@ import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
 import { renderPerUserModelPostgres, renderPerUserModelBigQuery, sequenceSemanticModel, dumpSequenceYaml } from './match-recognize.js';
+import { JobManager } from './jobs.js';
+import { buildProjection } from './projection.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, jobsDbPath }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
+    this.jobs = new JobManager({ dbPath: jobsDbPath }); // persisted (SQLite) if path given
+    this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
     if (recipes) {
       this.schemas.list_recipes = { type: 'object', additionalProperties: false, properties: {} };
@@ -341,11 +345,9 @@ export class Engine {
         }
       }
       if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
-      const res = await this.runner.query(this.ctxs.dir(ctx.id), {
-        metrics: input.metrics, groupBy,
-        startTime: input.time_range?.start, endTime: input.time_range?.end,
-        limit: (input.limit ?? 1000), explain: !!input.dry_run,
-      });
+      const qopts = { metrics: input.metrics, groupBy, startTime: input.time_range?.start, endTime: input.time_range?.end, limit: (input.limit ?? 1000) };
+      if (input.materialize) return this._materialize(ctx, qopts, input);
+      const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain: !!input.dry_run });
       if (!res.ok) return { ok: false, engine: 'match_recognize', command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
       if (input.dry_run) return { ok: true, engine: 'match_recognize', dry_run: true, sql: res.sql };
       return { ok: true, engine: 'match_recognize', command: res.command, columns: res.columns, rows: res.rows, row_count: res.rows.length };
@@ -384,11 +386,9 @@ export class Engine {
 
     const limit = input.limit ?? 1000;
     const offset = input.offset ?? 0;
-    const res = await this.runner.query(this.ctxs.dir(ctx.id), {
-      metrics: input.metrics, groupBy, where, orderBy,
-      startTime: input.time_range?.start, endTime: input.time_range?.end,
-      limit: limit + offset, explain: !!input.dry_run,
-    });
+    const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: input.time_range?.start, endTime: input.time_range?.end, limit: limit + offset };
+    if (input.materialize) return this._materialize(ctx, qopts, input);
+    const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain: !!input.dry_run });
     this.ctxs.touch(ctx.id);
 
     if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
@@ -404,6 +404,80 @@ export class Engine {
       page: { limit, offset, has_more: res.rows.length > offset + limit },
       warnings: [],
     };
+  }
+
+  /**
+   * Materialization mode: compile the query to SQL, write it as a
+   * materialized='table' dbt model, build it (dbt run), and read rows back from
+   * that table (dbt show). Results live in the warehouse — re-fetchable and
+   * crash-resilient. If the build exceeds queryTimeoutMs, it continues in the
+   * BACKGROUND and a query_id is returned; poll get_query_result.
+   */
+  async _materialize(ctx, qopts, input) {
+    if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
+    const dir = this.ctxs.dir(ctx.id);
+    const explain = await this.runner.query(dir, { ...qopts, explain: true });
+    if (!explain.ok) return { ok: false, error: { stage: 'query', message: formatDbtError(explain.stdout, explain.stderr) } };
+
+    const id = this.jobs.create({ contextId: ctx.id });
+    const table = `qr_${id}`;
+    this.jobs.setTable(id, table);
+    this.ctxs.writeModel(ctx.id, table, `{{ config(materialized='table') }}\n${explain.sql}\n`);
+
+    const build = (async () => {
+      const r = await this.runner.run(dir, table);
+      if (!r.ok) this.jobs.fail(id, formatDbtError(r.stdout, r.stderr));
+      else this.jobs.ready(id);
+    })();
+    const timed = new Promise((res) => setTimeout(() => res('timeout'), this.queryTimeoutMs));
+    const winner = await Promise.race([build.then(() => 'done'), timed]);
+    if (winner === 'timeout') {
+      return { ok: true, status: 'running', query_id: id, table, message: `materializing in background (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id` };
+    }
+    const job = this.jobs.get(id);
+    if (job.status === 'error') return { ok: false, status: 'error', query_id: id, table, error: { stage: 'materialize', message: job.error } };
+    return this._fetchResult(id, input.limit ?? 1000);
+  }
+
+  /** Read rows back from a materialized result table (resilient: no recompute). */
+  async _fetchResult(id, limit, transform) {
+    const job = this.jobs.get(id);
+    return this._readTable(this.ctxs.dir(job.contextId), job.table, limit, transform, { query_id: id });
+  }
+
+  /** Run a (optionally projected) read over a materialized result table. */
+  async _readTable(dir, table, limit, transform, extra = {}) {
+    const sql = transform
+      ? buildProjection(`{{ ref('${table}') }}`, transform)
+      : `select * from {{ ref('${table}') }}`;
+    const res = await this.runner.show(dir, sql, limit);
+    if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
+    return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
+  }
+
+  /**
+   * Poll a background (materialized) query: status + results from the table.
+   * Optional `transform` (where/group_by/aggregations/having/order_by/limit)
+   * runs a safe read-only projection over the materialized table — compress or
+   * re-slice the stored results without recomputing the analytics query.
+   */
+  async get_query_result(input) {
+    this._validate('get_query_result', input);
+    if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
+    const limit = input.limit ?? 1000;
+    // direct fetch by table (crash-resilient: works even if the job is gone)
+    if (input.table) {
+      return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, input.transform);
+    }
+    const job = this.jobs.get(input.query_id);
+    if (!job) throw new ToolError(`unknown query_id: ${input.query_id} (pass {context_id, table} to fetch a known table directly)`, { stage: 'validate', field: 'query_id' });
+    if (job.status === 'running') return { ok: true, status: 'running', query_id: job.id, table: job.table };
+    if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, table: job.table, error: { stage: 'materialize', message: job.error } };
+    return this._fetchResult(job.id, limit, input.transform);
+  }
+
+  list_query_jobs() {
+    return { jobs: this.jobs.list() };
   }
 
   async _parse(ctxId) {

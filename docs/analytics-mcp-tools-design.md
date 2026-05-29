@@ -178,6 +178,42 @@ avg_playtime_d3, нормировка к baseline. → §5.2 `event_count`/`metr
 Кейсы (New Balance V1 post-hoc, A/A-тест с CUPED). GrowthBook даёт значимость —
 мы даём **поведенческое «почему»**. → §5.17 `post_hoc_segment_compare`.
 
+### 3.11 Внешний референс полноты: маппинг на чарты Amplitude
+Amplitude — эталон гибкой event-аналитики. Его сила не в количестве чартов, а в
+**малом наборе переиспользуемых блоков**, из которых собирается любой анализ. Мы
+повторяем именно эту идею (§4), а список их чартов используем как чек-лист, что
+ничего из класса задач не упущено.
+
+**Гибкие блоки Amplitude → наши блоки:**
+| Amplitude | У нас |
+|---|---|
+| Любое событие + property-фильтры | `EventSelector` + `FilterGroup` (§4.4–4.5) |
+| **«Measured as»** (uniques / totals / sum / avg / % active / formula) | `Measure` (§4.6), вкл. `rate` и `named` |
+| **Group by** любым свойством события/пользователя | `Breakdown` (§4.8) |
+| **Behavioral Cohort** (did/didn't, частота, окно, последовательность) — переиспользуется в любом чарте | `cohort_define` → `CohortRef` (§4.9), питает любой тул |
+| **Formulas** (арифметика над метриками) | формульная мера / `compose_pipeline` (§5.21) |
+| **Microscope** (drill-down до пользователей и их стримов) | `user_timeline` (§5.20) |
+| Order of operations (per-user счёт → пороги → группировка) | **multi-stage пайплайн** E→U→S→A (§4.12) |
+
+**Чарты Amplitude → наши тулы (чек-лист покрытия):**
+| Amplitude chart | Вопрос | Наш тул |
+|---|---|---|
+| Event Segmentation | сколько/кто делает событие, тренд и разрез | `event_count`, `metrics_timeseries`, `segmentation` |
+| Funnel Analysis | где отваливаются в последовательности | `funnel_analysis` |
+| Retention Analysis | возвращаются ли | `retention_analysis`, `cohort_retention_grid` |
+| Stickiness | DAU/MAU, дни активности | `stickiness_analysis` |
+| Lifecycle | new/active/resurrected/dormant | `lifecycle_analysis` |
+| Pathfinder / Journeys | реальные пути до/после события | `path_analysis`, `adjacent_event_count` |
+| Behavioral Cohorts | группа по поведению, переиспользуемая | `cohort_define`, `derived_segment` |
+| Compass / корреляции с retention | какое действие коррелирует с удержанием | `correlation_explore` |
+| User Sessions | поведение по сессиям | `session_progression` |
+| Microscope | разбор конкретных пользователей | `user_timeline` |
+
+> Вывод из Amplitude: **не плодить чарты, а дать мало гибких блоков + один
+> композиционный механизм** (у них — формулы и behavioral cohorts поверх единого
+> движка; у нас — `compose_pipeline` поверх multi-stage скелета). Специализированные
+> тулы — это удобные пресеты, а не отдельные «движки».
+
 ---
 
 ## 4. Доменная модель и переиспользуемые блоки
@@ -250,10 +286,20 @@ avg_playtime_d3, нормировка к baseline. → §5.2 `event_count`/`metr
   "source_event": EventSelector,          // напр. level_complete
   "agg": "count | count_distinct | sum | avg | min | max | first | last",
   "field": "event_properties.level",      // для sum/avg/min/max
-  "window": { "relative_to":"install", "from_day":0, "to_day":2 }  // окно жизни игрока
+  "window": {
+    "relative_to": "install | activation | first_event | test_start",  // точка отсчёта окна
+    "from_day": 0, "to_day": 2,           // окно жизни игрока в днях
+    "methodology": "calendar | 24h"       // календарные сутки vs 24-часовые от точки отсчёта
+  }
 }
 ```
 Используется для: порогов (`> x`), квантильных сегментов (ntile), осей профиля.
+
+> **Точка отсчёта и методология (из практики BI).** `relative_to:"activation"` /
+> `"test_start"` нужны для анализа экспериментов: GrowthBook считает метрики от
+> **момента активации** игрока, а не от установки. `methodology:"24h"` повторяет
+> 24-часовую (Appsflyer) методологию когортных метрик Metabase; `"calendar"` —
+> календарные сутки. Дефолт берётся из конфига и попадает в `assumptions`.
 
 ### 4.8 `Breakdown` и когортные vs активностные измерения
 Список измерений для разреза: `["app_name","user.country","user.media_source",
@@ -283,6 +329,74 @@ avg_playtime_d3, нормировка к baseline. → §5.2 `event_count`/`metr
 > **Принцип консистентности:** `TimeRange`, `FilterGroup`, `Measure`,
 > `PerUserAggregate`, `Breakdown`, `CohortRef`, `AppScope` одинаковы во всех тулах.
 
+### 4.11 Грануляция (entity grain)
+Любая ad-hoc задача считается на какой-то «единице». Сервер поддерживает несколько
+грануляций промежуточного агрегата, и это явный параметр там, где он важен:
+`event` (ряд = событие), `user` (ряд = игрок), `user_day`, `user_session`,
+`user_level`, `level`, `cohort_day`. Грань определяет, на каком уровне выполняется
+per-user/per-entity свёртка перед финальной агрегацией (см. §4.12).
+
+### 4.12 Multi-stage пайплайн — ядро движка вычислений
+Это центральная концепция. **Любой тул внутри компилируется в конвейер (DAG)
+типизированных стадий**, где каждая стадия — это CTE, считающая «что-то своё» и
+агрегирующая до нужной грани, а следующие стадии **соединяют** результаты. Так
+устроены и Amplitude (его «order of operations»: сначала per-user счёт, потом
+пороги/группировки), и классический SQL-паттерн «aggregate-then-join».
+
+Канонические стадии:
+
+| Стадия | Что делает | Грань на выходе |
+|---|---|---|
+| **E — Event scan** | фильтр сырых `events` (event_name, property-фильтры, time, app), выбор нужных полей | event |
+| **U — Per-entity aggregate** | свёртка событий в один ряд на сущность: `count/sum/avg/first/last/min_ts/max_ts`, формирование per-user метрик (`PerUserAggregate`) | user / user_day / user_level / user_session |
+| **S — Segment/bucket** | присвоение сегмента: пороги или `ntile`-квантили над U; присоединение атрибутов из `users` (когортные измерения) | user (+ segment, cohort dims) |
+| **J — Join/combine** | соединение нескольких U/S-веток между собой (напр. «ветка did X» ⋈ «ветка revenue» ⋈ «ветка retention») и/или с `users` | user (обогащённый) |
+| **A — Final aggregate** | агрегация по `breakdown`-измерениям → итоговая таблица | breakdown grain |
+
+**Зачем это в дизайне:**
+
+1. **Единая модель.** Все ad-hoc-тулы (§5) — это **пресеты** одного и того же
+   скелета E→U→S→J→A. `event_count` = E→A; `behavioral_segment_metrics` = E→U→S(having)→A;
+   `derived_segment` = E→U→S(ntile); `churn_last_action` = E→U(last per user)→A;
+   `adjacent_event_count` = E→U(LAG/LEAD)→A. Это и делает набор «консистентным».
+2. **Корректность.** Per-user свёртка (U) выполняется **до** межпользовательской
+   агрегации (A) и до join'ов — это устраняет fan-out и двойной счёт при соединении
+   событийных таблиц (главная причина неверных чисел в «ручном» SQL).
+3. **Композиция = переиспользование.** Выход стадии S (сегмент/когорта) — это
+   `CohortRef`/`segment_ref`, который **подставляется на вход другому тулу**. Именно
+   так поведенческая когорта из одного исследования питает retention/монетизацию в
+   следующем (как behavioral cohorts в Amplitude).
+4. **Производительность/стоимость.** Скелет позволяет автоматически: агрегировать
+   до join (aggregate-then-join), пушить фильтры в стадию E, использовать
+   партиционирование BigQuery по дате (pruning) и оценивать сканируемый объём.
+
+**`compose_pipeline` — композиционный тул (§5.21)** даёт прямой доступ к этому
+скелету, когда ни один специализированный тул не подходит: AI описывает стадии
+структурно (а не пишет SQL), переиспользуя те же блоки (`EventSelector`,
+`PerUserAggregate`, `FilterGroup`, `Breakdown`). Это «escape hatch», который
+**остаётся структурным**.
+
+```jsonc
+// Пример: «среди тех, кто за d0_2 прошёл >20 уровней (квантиль high),
+//          какой D7 retention в разрезе media_source»
+{
+  "stages": [
+    { "id":"lvl", "type":"per_user_aggregate",
+      "source": { "event":"level_complete" },
+      "agg":"count", "as":"games_completed",
+      "window": { "relative_to":"install", "from_day":0, "to_day":2 } },
+    { "id":"seg", "type":"segment", "from":"lvl",
+      "method":"ntile", "by":"games_completed", "buckets":5,
+      "keep":["high"] },
+    { "id":"ret", "type":"retention", "cohort":"seg",
+      "return_event": { "event":"session_start" }, "period":7 },
+    { "id":"out", "type":"aggregate", "from":"ret",
+      "breakdown":["user.media_source"], "measure":"rate" }
+  ]
+}
+```
+
+
 ---
 
 ## 5. Каталог тулов
@@ -301,6 +415,7 @@ Progression/Retention/IAP/Ad/Economy/Cross-block).
 | Зависимости | `correlation_explore` |
 | Игровая специфика | `progression_analysis`, `economy_analysis`, `monetization_analysis` |
 | Эксперименты | `post_hoc_segment_compare`, `experiment_lookup` |
+| Композиция (ядро) | `compose_pipeline` (multi-stage скелет, §4.12) |
 | Отладка / исполнение | `user_timeline`, `preview_sql`/`run_query` |
 
 ---
@@ -530,6 +645,18 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
   `row_limit`, таймаутом и оценкой сканируемого объёма (BigQuery-биллинг).
 - Опциональный `run_validated_sql` (read-only) — выключен по умолчанию.
 
+### 5.21 `compose_pipeline` — структурный multi-stage конструктор (ядро)
+**Класс:** любой нестандартный. **Блок:** Cross-block.
+**Что:** прямой доступ к скелету E→U→S→J→A (§4.12). AI задаёт список **типизированных
+стадий** (`event_scan`, `per_user_aggregate`, `segment`, `join`, `retention`,
+`aggregate`), ссылаясь по `id`/`from`, и переиспользует те же блоки
+(`EventSelector`, `PerUserAggregate`, `FilterGroup`, `Breakdown`, `Measure`). Сервер
+валидирует граф (грани совместимы, нет fan-out), компилирует в один SQL с CTE,
+делает `dry_run`/выполняет. Это «escape hatch», который **остаётся структурным** —
+покрывает редкие комбинации, под которые нет специализированного тула, без падения в
+свободный SQL. Любую промежуточную стадию-сегмент можно сохранить как `CohortRef`.
+Пример графа — в §4.12.
+
 ---
 
 ## 6. Консистентность, валидация, безопасность
@@ -549,8 +676,16 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
   даём «тихо неверных» чисел.
 - **Мультипроектность:** без `AppScope` — предупреждение/требование.
 - **Read-only**, параметризованные запросы, allowlist таблиц/колонок → нет инъекций.
-- **Защита от тяжёлых запросов:** обязательный `time_range`, лимиты кардинальности
-  `breakdown`, дефолтные `row_limit`/таймаут, оценка байт (BigQuery).
+- **Защита от тяжёлых запросов / стоимость BigQuery:** обязательный `time_range`,
+  лимиты кардинальности `breakdown`, дефолтные `row_limit`/таймаут, **прунинг по
+  партициям** (таблицы партиционированы по дате — фильтр по `event_timestamp`
+  обязан попадать в партиции), оценка сканируемых байт (dry-run биллинга) до
+  выполнения.
+- **Aggregate-then-join (§4.12):** per-user свёртка до соединений — корректность
+  (нет fan-out) и дешевле по сканированию.
+- **Методология в `assumptions`:** применённые `relative_to`/`methodology`
+  (install vs activation, 24h vs calendar) всегда отражаются в ответе, чтобы число
+  можно было сверить с Metabase/GrowthBook.
 - **Детерминизм:** одинаковые параметры → одинаковый SQL (кэш, снапшот-тесты).
 
 ---
@@ -577,8 +712,10 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
 ## 8. Минимальный план внедрения (приоритеты)
 
 1. **Фундамент:** конфиг схемы + общие блоки (§4, особенно `PerUserAggregate`) +
+   **multi-stage движок E→U→S→J→A (§4.12)**, на котором собираются все тулы +
    `describe_schema`/`list_events`/`list_properties`/`list_metrics` + единый
-   конверт, `dry_run`, `AppScope`.
+   конверт, `dry_run`, `AppScope`, грануляция (§4.11). Сразу заложить движок как
+   общий слой — иначе тулы разъедутся в несовместимый SQL.
 2. **Ядро ad-hoc (по GD Tasks):** `event_count` (Блок 1), `adjacent_event_count`
    (Блок 2), `behavioral_segment_metrics` (Блок 3), `derived_segment`,
    `cohort_define`.
@@ -590,6 +727,8 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
    `monetization_analysis`.
 5. **A/B и отладка:** `post_hoc_segment_compare`, `experiment_lookup`,
    `user_timeline`, опц. `run_validated_sql`.
+6. **Композиция:** `compose_pipeline` (§5.21) — как только движок §4.12 стабилен,
+   открыть структурный escape hatch для нестандартных комбинаций.
 
 ---
 
@@ -647,14 +786,22 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
 - [Metabase] Semantic Layer: Metrics Calculation Guide — BI/4144398337; Metrics Documentation Overview — BI/3612573764
 - Data Warehouse Layered Architecture — BI/3396534300
 - Пайплайн A/B тестов (пирамида метрик) — PA/4881940484; A/B Statistic Engine — BI/3859152921; Power Calculation — BI/3804758049
-- Player Segmentation API — BI/4340121602
+- Player Segmentation API — BI/4340121602; Сегментация игроков (BI API) — FLWRD-5668
 - [Dimension] Retention X Day — BI/3508502782; Game Funnel Stage — BI/3916857510; Segment → Online Players — BI/4056481835
+- Методологии расчёта (24h Appsflyer vs calendar, авто-смена в экспериментах) — BI/4144398337
+- GrowthBook: метрики от момента активации — Publishing/4561764368
+- ELT (Extract-Load-Transform) и партиционирование BigQuery — BI/3481665728
+- Ingame Events Service (приём событий) — BI/3820290053; Кастомные аналитические события — PA/2602991642
 
-### Внешние (таксономия и бенчмарки)
+### Внешние (таксономия гибкой event-аналитики и бенчмарки)
+- [Amplitude — Charts: find the right one (taxonomy)](https://help.amplitude.com/hc/en-us/articles/115001816407)
+- [Amplitude — Historical Count / order of operations (multi-stage)](https://amplitude.com/docs/analytics/historical-count-2)
+- [Amplitude — Guide to Behavioral Cohorting](https://amplitude.com/blog/guide-to-behavioral-cohorting)
 - [Amplitude — Product Analytics Guide](https://amplitude.com/explore/analytics/product-analytics-guide)
 - [Amplitude — Funnel Analysis](https://amplitude.com/guides/funnel-analysis)
-- [Amplitude — Cohort Retention Analysis](https://amplitude.com/explore/analytics/cohort-retention-analysis)
 - [Amplitude — Pathfinder & Behavioral Cohorts](https://e-cens.com/blog/amplitude-101-advanced-analysis-with-pathfinder-cohorts/)
+- [Optimizely — Funnel analysis SQL (warehouse-native)](https://www.optimizely.com/insights/blog/funnel-analysis-sql/)
+- [Metabase Learn — CTEs for multi-stage SQL](https://www.metabase.com/learn/sql/working-with-sql/sql-cte)
 - [PostHog — Cohorts](https://posthog.com/docs/data/cohorts)
 - [Adjust — Cohort KPIs: event conversion & funnels](https://www.adjust.com/blog/demystifying-cohorts-3-tracking-custom-user-journeys-with-event-kpis/)
 - [GameAnalytics — 22 metrics all game developers should know](https://www.gameanalytics.com/blog/metrics-all-game-developers-should-know)

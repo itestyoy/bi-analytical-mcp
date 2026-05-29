@@ -5,7 +5,7 @@
 > **полностью схематизированный** объект: каждое поле, где ожидается колонка или
 > свойство, — это `enum` из реального каталога двух базовых dbt-моделей. Тул
 > материализует это в корректный YAML semantic model + metrics, выполняет
-> `dbt parse` и затем `dbt sl query`.
+> `dbt parse` и затем `mf query` (dbt Core).
 >
 > Спецификация semantic model, на которую опирается дизайн:
 > [`dbt-semantic-layer-spec.md`](./dbt-semantic-layer-spec.md).
@@ -22,9 +22,16 @@
         │  .mcp/ctx/<context_id>/…/<task>.yml  ──►  dbt parse  ──►  manifest   │
         │                                                                     │
  AI ──► │  query_semantic_model(metrics, group_by, where — всё enum)          │
-        │      │  рендер `dbt sl query ...`  ──►  выполнение  ──►  rows        │
+        │      │  рендер `mf query ...` (dbt Core)  ──►  выполнение  ──►  rows  │
         └──────┴──────────────────────────────────────────────────────────────┘
 ```
+
+> **Движок исполнения — dbt Core + `mf query`** (`pip install dbt-metricflow`),
+> НЕ `dbt sl query`. Причина: `dbt sl query` исполняется удалённо в dbt platform
+> и **несовместим** с локальной пер-контекстной изоляцией (`--project-dir`/
+> `--target-path`), на которой построен дизайн. Сервер несёт `dbt-metricflow` +
+> адаптер склада и владеет профилем/кредами. Вариант на dbt platform — отдельный,
+> без файловой изоляции (см. §10), вне основного hot-path.
 
 1. **Декларативность вместо генерации.** Тул принимает *описание* модели, а не
    SQL/YAML-текст. AI выбирает из перечислений; «свободного текста» в местах
@@ -189,77 +196,124 @@ JSON-Schema тулов. Множества имён колонок **квали�
 > кардинальность из `describe_catalog`), чтобы у AI был «grounding» прямо в схеме.
 > `GROUPABLE_PATH` сервер вычисляет обходом графа entity на ≤2 перехода — в него
 > попадают и `metric_time`, и `user__country`, и `user__campaign__channel`.
+> **Прунинг (m3):** при построении enum пути с «висящим» `foreign` (нет
+> соответствующего `primary`/`unique` в реестре) **исключаются** — чтобы AI не
+> получил путь, который пройдёт схему, но упадёт на запросе.
 
 ---
 
 ## 3. Архитектура нескольких semantic models под задачу
 
 Из спецификации §3.3: **один semantic model = одна dbt-модель**, а join'ы между
-ними MetricFlow строит сам по `entities`. Поэтому тул работает на двух уровнях:
+ними MetricFlow строит сам по `entities`.
 
-| Уровень | Что это | Жизненный цикл |
-|---|---|---|
-| **Базовые SM** | по одному стабильному SM на каждую dbt-модель реестра (`events`, `users`, `campaigns`…), деплоятся один раз в `models/semantic/_base/`. Дают цель join (`primary`/`unique`), общий словарь измерений и базовые measures. | постоянные |
-| **Task SM** | один или несколько SM, объявленных под конкретную задачу (поле `semantic_models[]`), с task-специфичными measures/dimensions; неймспейсятся префиксом `<task>`. | эфемерные |
+> **Важный инвариант (по итогам аудита, C3):** в пределах одного контекста для
+> каждой dbt-модели существует **ровно один** semantic model. Мы **не** создаём
+> второй («task») SM поверх той же таблицы — это давало бы дублирующие join-узлы
+> одного грейна и неоднозначные пути в графе entity. Вместо этого task-специфичные
+> measures/dimensions **домешиваются в единственный SM этой таблицы** внутри
+> контекста.
+
+**Модель работы (две роли, но одна SM на таблицу в контексте):**
+
+| Роль | Что это |
+|---|---|
+| **Шаблон SM (base template)** | по одному на dbt-модель реестра (`events`, `users`, `campaigns`…): entities, словарь измерений, базовые measures. Хранится в каталоге как шаблон. |
+| **SM контекста** | материализованная в overlay-проекте контекста копия шаблона **+** домешанные task-measures/dimensions. На каждую вовлечённую таблицу — одна такая SM. |
 
 **Как тул задействует несколько dbt-моделей:**
-1. **Ссылка** на базовые SM — `use_base_models: ["users","campaigns"]`. Их
-   измерения сразу доступны для `group_by`/`where`/фильтров метрик через join по
-   entity (`user__country`, `user__campaign__channel`) — ничего переобъявлять не
-   нужно.
-2. **Объявление** новых SM на лету — `semantic_models[]`, каждый со своим `from`
-   (dbt-модель из реестра) и собственными measures/dimensions. Так можно поднять
-   и несколько fct-моделей (MetricFlow соединит их full-outer по общим entity).
-3. **Метрики** (`metrics[]`) ссылаются на measures из любых вовлечённых SM (task
-   или base); join разруливается автоматически.
+1. **Подключить** модели реестра — `use_base_models: ["users","campaigns"]`:
+   их SM-шаблоны материализуются в контексте, измерения сразу доступны для
+   `group_by`/`where` через join по entity (`user__country`,
+   `user__campaign__channel`). Переобъявлять ничего не нужно.
+2. **Дополнить** SM нужной таблицы task-объектами — `semantic_models[]` с `from`
+   (таблица из реестра): сервер **домешивает** measures/dimensions в единственную
+   SM этой таблицы (merge), а не создаёт дубль. Если у таблицы ещё нет шаблона —
+   создаётся новая SM (единственная для неё).
+3. **Метрики** (`metrics[]`) ссылаются на measures любых вовлечённых SM; join
+   разруливается автоматически. Несколько fct-таблиц → full-outer по общим entity.
 
-> Итог: «виртуальная модель под задачу» = (опц.) ссылки на базовые SM + (опц.)
-> новые task-SM + метрики. Это и есть «несколько semantic models под задачу».
+> Итог: «виртуальная модель под задачу» = набор SM (по одной на таблицу) в
+> изолированном контексте, где SM нужной таблицы расширена task-measures/metrics.
+> Это и есть «несколько semantic models под задачу» — но без дублей над одной
+> таблицей.
+
+**Time spine (по итогам аудита, C2).** `metric_time`, грейны, `cumulative` и
+`conversion` требуют **материализованного** time spine (спецификация §1.4). Он —
+часть **базового** dbt-проекта и строится один раз `dbt run --select
+metricflow_time_spine` (не `dbt parse`, не на лету). Контекст наследует его из
+базового проекта/склада. Если запрошен `metric_time`/cumulative/conversion, а
+spine не сконфигурирован — тул возвращает понятную ошибку, а не падение dbt.
 
 ### Контексты выполнения и изоляция (`context_id`)
 
 Всё создание/обновление/запрос виртуальных моделей идёт **внутри контекста** —
-изолированного рабочего пространства. Это исключает три класса проблем:
-коллизии глобально-уникальных имён dbt (measures/metrics), смешивание
-`semantic_manifest.json` между параллельными задачами и гонки при `dbt parse`/
-`dbt sl query`.
+изолированного рабочего пространства. Это исключает: коллизии глобально-уникальных
+имён dbt (measures/metrics), смешивание `semantic_manifest.json` между
+параллельными задачами и гонки при `dbt parse`/`mf query`.
 
 **Что изолирует контекст:**
 | Ресурс | Изоляция |
 |---|---|
-| Файлы YAML | свой каталог `<<project>>/.mcp/ctx/<context_id>/models/` |
+| Overlay-проект | свой `--project-dir .mcp/ctx/<context_id>/` |
+| Файлы YAML | сгенерированные SM/metrics в overlay |
 | Артефакты dbt | свой `--target-path target/ctx/<context_id>` (свой `semantic_manifest.json`) |
-| Имена объектов | префикс `ctx_<context_id>__<task>__…` поверх неймспейса задачи |
-| Видимость | контекст видит только свои task-SM + общие base-SM (read-only) |
+| Имена объектов | неймспейс `<task>__…` (в изолированном режиме префикс `ctx_<id>__` **не нужен** — см. ниже, m1) |
+| Видимость | контекст видит только свои SM (по одной на таблицу) + общий time spine |
 
 **Поток `context_id` (правило для AI):**
 ```
 create_semantic_model({ ... })                  // БЕЗ context_id
    → сервер аллоцирует НОВЫЙ context_id, поднимает workspace, возвращает его
 create_semantic_model({ context_id, ... })      // С context_id из прошлого ответа
-   → добавляет SM/метрики в ТОТ ЖЕ контекст (наращиваем модель задачи)
+   → добавляет/домешивает SM/метрики в ТОТ ЖЕ контекст
 query/update/delete_*({ context_id, ... })       // всегда в рамках контекста
 ```
 - **Та же задача / продолжение** → AI передаёт `context_id` из предыдущего ответа.
-- **Новая задача** → `context_id` не передаётся, создаётся свежий изолированный
-  контекст.
+- **Новая задача** → `context_id` не передаётся, создаётся свежий контекст.
 
-**Реализация изоляции (рекомендация).** Базовый dbt-проект (base-модели +
-base-SM) — общий и read-only. Для контекста сервер делает лёгкий **оверлей-проект**
-(`--project-dir` = workspace контекста: симлинк на base `models/` + собственный
-подкаталог сгенерированных semantic YAML), запускает dbt с персональным
-`--target-path`. Параллельные контексты → независимые манифесты и параллельный
-безопасный parse/query. Альтернатива (общий проект): файлы в
-`models/semantic/ctx/<id>/` + неймспейс `ctx_<id>__` + персональный `--target-path`.
+**Реализация overlay-проекта (точно, по итогам аудита M2).** Лёгкий, но
+**самодостаточный** dbt-проект на контекст. В него нужно положить (симлинк/копия):
+- `dbt_project.yml` (с корректными `model-paths`, относительными к нему);
+- **SQL базовых моделей** (`fct_analytics_events`, `dim_users`, … — не только
+  semantic YAML, иначе `ref()` не разрешится) **и** модель/seed **time spine**;
+- `dbt_packages/` (или прогон `dbt deps`), если база использует пакеты
+  (`dbt_utils`, календарь и т.п.);
+- собственный подкаталог сгенерированных semantic/metrics YAML контекста.
+Запуск dbt всегда с `--project-dir`, персональным `--target-path` и
+`--profiles-dir` (креды склада). Базовые таблицы и time spine **уже
+материализованы** в складе — overlay только парсит семантику и шлёт запросы.
+Перед объявлением «parallel-safe» — сквозной smoke-тест (`dbt parse` +
+`mf validate-configs` + пробный `mf query --explain`).
 
-**Жизненный цикл.** Контексты эфемерны: TTL/GC по неактивности + явный
-`drop_context`. `list_contexts`/`describe_context` показывают активные контексты.
+**Режимы и неймспейс (m1).**
+- *Изолированный режим (рекомендуемый):* у каждого контекста свой манифест →
+  имена должны быть уникальны лишь **внутри** контекста; префикс `ctx_<id>__`
+  избыточен — оставляем только человекочитаемый `<task>__`.
+- *Общий проект (запасной):* один `models/` на всех; тогда нужны и `ctx_<id>__`
+  префикс, и **файловые локи** на `dbt parse`/`target` (иначе параллельные
+  парсы гонятся по общему состоянию).
+
+**Жизненный цикл, состояние, конкурентность (M4).**
+- **Персистентный реестр** контекстов (sqlite/JSON под проектом), а не только
+  in-memory: при рестарте (в т.ч. в эфемерном контейнере) — **реконсиляция** с
+  тем, что реально лежит на диске (`target/ctx/*`, `.mcp/ctx/*`); «осиротевшие»
+  id чистятся, валидные восстанавливаются. Enum `ACTIVE_CONTEXTS` строится из
+  реестра после реконсиляции.
+- **Лизы/рефкаунт:** TTL/GC и `drop_context` **не сносят** workspace, пока есть
+  in-flight `mf query` по этому контексту — берётся лиза на время запроса, GC
+  ждёт/отменяет subprocess, и только потом `rm -rf`.
+- **Эфемерный контейнер:** контексты переживают рестарт по диску; долговременное
+  хранение — только то, что закоммичено (генерируемые YAML по запросу можно
+  отдать пользователю/закоммитить, но по умолчанию они эфемерны).
+- `list_contexts`/`describe_context` показывают активные контексты и их возраст/TTL.
 
 ## 3a. Тул `create_semantic_model`
 
-**Назначение.** Декларативно описать одну/несколько semantic models под задачу и
-метрики к ним. Тул материализует YAML, проставляет `primary_entity`,
-`foreign`-ключи и `metric_time` из реестра, неймспейсит имена, делает `dbt parse`.
+**Назначение.** Декларативно описать SM нужных таблиц (по одной на таблицу) и
+метрики к ним. Тул материализует/домешивает YAML в overlay контекста, проставляет
+`primary_entity`, `foreign`-ключи и `metric_time` из реестра, неймспейсит имена и
+делает `dbt parse` в workspace контекста (time spine — уже в базовом проекте).
 
 ### 3.1 JSON Schema — конверт (вход)
 > `enum`-списки `« {NAME} »` сервер подставляет из реестра (§2.4). Так
@@ -277,7 +331,7 @@ base-SM) — общий и read-only. Для контекста сервер д�
     },
     "name": {
       "type": "string", "pattern": "^[a-z][a-z0-9_]{2,40}$",
-      "description": "Имя задачи. Namespace-префикс для генерируемых SM/measures/metrics внутри контекста (глобальная уникальность dbt обеспечивается префиксом ctx_<context_id>__<name>)."
+      "description": "Имя задачи. Namespace-префикс <name>__ для generируемых measures/metrics внутри контекста. В изолированном режиме этого достаточно для уникальности (отдельный манифест на контекст)."
     },
     "description": { "type": "string" },
 
@@ -289,7 +343,7 @@ base-SM) — общий и read-only. Для контекста сервер д�
 
     "semantic_models": {
       "type": "array",
-      "description": "Новые semantic models, объявляемые под задачу (по одному на dbt-модель). Обычно достаточно одного — по событиям.",
+      "description": "Task-объекты (measures/dimensions), домешиваемые в SM соответствующих таблиц (по одному элементу на таблицу — НЕ создаёт дубль SM над одной таблицей, C3). Обычно один элемент — по событиям.",
       "items": { "$ref": "#/$defs/semanticModel" }
     },
 
@@ -345,11 +399,11 @@ base-SM) — общий и read-only. Для контекста сервер д�
                   "label":  { "type": "string" } },
                 "required": ["source","column"] },
               { "title": "event_property",
-                "description": "Только для from=events: измерение из JSON event_properties (expr рендерит сервер под диалект).",
+                "description": "Только для from=events: КАТЕГОРИАЛЬНОЕ измерение из JSON event_properties (expr рендерит сервер под диалект). as_type=time запрещён (m2): ось времени берётся из физической event_timestamp/metric_time, JSON-извлечённое время ломает partition pruning и не годится как agg_time_dimension.",
                 "properties": {
                   "source":   { "const": "event_property" },
                   "property": { "type": "string", "enum": ["« EVENT_PROP »"] },
-                  "as_type":  { "enum": ["categorical","time"], "default": "categorical" },
+                  "as_type":  { "const": "categorical", "default": "categorical" },
                   "label":    { "type": "string" } },
                 "required": ["source","property"] }
             ]
@@ -548,27 +602,26 @@ base-SM) — общий и read-only. Для контекста сервер д�
 > `group_by`/`where` через автоджойн. Чтобы поднять под задачу совсем новую
 > dbt-модель — добавляется ещё один элемент в `semantic_models[]` с её `from`.
 
-**Сгенерированный `.mcp/ctx/a1b2c3d4e5/models/lvl_econ.yml`:**
+**Сгенерированный `.mcp/ctx/a1b2c3d4e5/models/events.yml`** — это **единственная**
+SM таблицы событий в контексте (шаблон `events` + домешанные task-объекты), а не
+параллельный дубль (C3):
 ```yaml
 semantic_models:
-  - name: sm_lvl_econ_events                      # sm_<task>_<from>
-    description: "Virtual semantic model for task: lvl_econ"
+  - name: events                                  # одна SM на таблицу в контексте
+    description: "events SM (base template + task lvl_econ)"
     model: ref('fct_analytics_events')
     defaults:
       agg_time_dimension: event_time
     primary_entity: event
     entities:
-      - name: user
-        type: foreign
-        expr: user_id
-      - name: session
-        type: foreign
-        expr: session_id
+      - { name: user,    type: foreign, expr: user_id }
+      - { name: session, type: foreign, expr: session_id }
     dimensions:
-      - name: event_time
+      - name: event_time                          # из шаблона; грейн day (см. spine)
         type: time
-        type_params: { time_granularity: second }
+        type_params: { time_granularity: day }
         expr: event_timestamp
+      # ── домешано задачей lvl_econ ──
       - name: lvl_econ__product_id
         type: categorical
         expr: "JSON_VALUE(event_properties, '$.product_id')"
@@ -576,80 +629,92 @@ semantic_models:
         type: categorical
         expr: "CAST(JSON_VALUE(event_properties, '$.level') AS INT64)"
     measures:
+      # ── домешано задачей lvl_econ; event_scope ВПЕЧАТАН в expr каждого measure (M3) ──
       - name: lvl_econ__revenue
         agg: sum
-        expr: "CAST(JSON_VALUE(event_properties, '$.revenue') AS NUMERIC)"
+        expr: "CASE WHEN event_name = 'purchase' THEN CAST(JSON_VALUE(event_properties, '$.revenue') AS NUMERIC) END"
         agg_time_dimension: event_time
       - name: lvl_econ__payers
         agg: count_distinct
-        expr: user_id
+        expr: "CASE WHEN event_name = 'purchase' THEN user_id END"
         agg_time_dimension: event_time
       - name: lvl_econ__purchases
-        agg: count
-        expr: "1"
+        agg: sum
+        expr: "CASE WHEN event_name = 'purchase' THEN 1 ELSE 0 END"
         agg_time_dimension: event_time
 
 metrics:
-  - name: lvl_econ__revenue
+  - name: lvl_econ__revenue                        # simple над scoped measure
     type: simple
-    type_params:
-      measure:
-        name: lvl_econ__revenue
-        filter: "{{ Dimension('event__event_name') }} = 'purchase'"
-  - name: lvl_econ__arppu
+    type_params: { measure: { name: lvl_econ__revenue } }
+  - name: lvl_econ__payers                         # авто-обёртка для ratio
+    type: simple
+    type_params: { measure: { name: lvl_econ__payers } }
+  - name: lvl_econ__arppu                          # ratio ссылается на МЕТРИКИ, не measures
     type: ratio
     type_params:
       numerator:   { name: lvl_econ__revenue }
       denominator: { name: lvl_econ__payers }
-    filter: "{{ Dimension('event__event_name') }} = 'purchase'"
 ```
+> Почему так: (1) **C3** — одна SM на таблицу; (2) **M3** — `event_scope` впечатан
+> в `expr` каждого measure (`CASE WHEN …`), поэтому мера не «протекает» на другие
+> классы событий независимо от метрики; (3) **ratio** в dbt ссылается на
+> **метрики**, поэтому сервер авто-создаёт `simple`-обёртки для measures,
+> используемых в numerator/denominator.
 
 Маппинг по полям:
 
 | Поле декларации | Куда идёт в YAML |
 |---|---|
-| `name` | префикс `sm_<name>` для каждого SM, `<name>__` для measures/metrics |
-| `use_base_models` | не пишет YAML — обеспечивает доступность базовых SM (граф join) |
-| `semantic_models[].from` | `model: ref(<dbt_model>)` + `primary_entity` и `foreign`-entities из реестра |
-| `semantic_models[].event_scope` | `filter` на measure/metric: `Dimension('event__event_name') IN (...)` |
+| `name` | префикс `<name>__` для measures/metrics (одна SM на таблицу не префиксуется) |
+| `use_base_models` | не пишет YAML — материализует SM-шаблоны нужных таблиц (граф join) |
+| `semantic_models[].from` | выбирает/создаёт **единственную** SM этой таблицы (merge, не дубль) |
+| `semantic_models[].event_scope` | впечатывается в `expr` **каждого** measure через `CASE WHEN` (M3) |
 | `semantic_models[].dimensions[].event_property` | `dimensions[]` c `expr` = распаковка JSON под диалект |
-| `semantic_models[].measures[].agg/field` | `measures[].agg` + `expr` (`*`→`"1"`, свойство→распаковка) |
+| `semantic_models[].measures[].agg/field` | `measures[].agg` + `expr`; `field=*`→`CASE WHEN <scope> THEN 1 ELSE 0 END` (agg sum), числовое свойство→`CASE WHEN <scope> THEN CAST(JSON…) END` |
+| `semantic_models[].measures[].filter` | сворачивается в `expr` (`CASE WHEN …`), т.к. dbt measures не имеют `filter` |
 | `…measures[].percentile` | `agg_params.percentile` |
-| `metrics[].*` | `metrics[]` c соответствующими `type_params` (§6 спецификации) |
-| фильтры (`predicateGroup` / `fieldRef`) | jinja-предикаты `filter` (`Dimension/TimeDimension`) |
+| `metrics[] simple/cumulative/conversion` | `metrics[]` c `type_params` (§6 спецификации) |
+| `metrics[] ratio` | numerator/denominator → **метрики**; сервер авто-создаёт `simple`-обёртки для упомянутых measures |
+| фильтры запроса (`predicateGroup`/`fieldRef`) | jinja-предикаты в `--where` (§4a.1 — таблица операторов) |
 
 ### 3.3 Выход тула
 ```jsonc
 {
   "context_id": "a1b2c3d4e5",                          // ВЕРНУТЬ и переиспользовать для той же задачи
   "task": "lvl_econ",
-  "file": ".mcp/ctx/a1b2c3d4e5/models/lvl_econ.yml",
+  "files": [".mcp/ctx/a1b2c3d4e5/models/events.yml"],  // по одной SM на таблицу
   "yaml": "…сгенерированный YAML…",
-  "semantic_models": ["sm_lvl_econ_events"],          // объявленные task-SM
-  "joined_base_models": ["users", "campaigns"],        // доступны через автоджойн
-  "metrics":    ["lvl_econ__revenue", "lvl_econ__arppu"],
+  "semantic_models": ["events"],                       // единственная SM таблицы (augmented)
+  "joined_models": ["users", "campaigns"],             // доступны через автоджойн
+  "metrics":    ["lvl_econ__revenue", "lvl_econ__payers", "lvl_econ__arppu"],
   "groupable":  ["metric_time", "lvl_econ__product_id", "lvl_econ__level",
                  "user__country", "user__platform", "user__media_source",
                  "user__campaign__channel"],           // 2-hop через campaigns
-  "parse": { "ok": true, "duration_ms": 1840 },        // отсутствует при dry_run
+  "parse": { "ok": true, "duration_ms": 1840 },        // или { ok:false, error:{stage,message,field} }
   "assumptions": [
     "primary_entity=event (синтетический PK события)",
-    "agg_time_dimension=event_time (event_timestamp, грейн second)",
-    "user.* доступны через join events.user→users.user; user__campaign__* — 2-hop через campaigns"
+    "agg_time_dimension=event_time (event_timestamp, грейн day; sub-daily нужен sub-daily time spine)",
+    "event_scope=purchase впечатан в expr всех measures (M3)",
+    "ratio arppu: авто-созданы simple-метрики lvl_econ__revenue/__payers",
+    "user.* через join events.user→users.user; user__campaign__* — 2-hop через campaigns"
   ],
   "warnings": []
 }
 ```
 
-После успешного вызова сервер выполняет `dbt parse` (если не `dry_run`) и модель
-готова к запросу.
+После успешного вызова сервер выполняет `dbt parse` (если не `dry_run`) **в
+workspace контекста** (time spine уже материализован в базовом проекте) — модель
+готова к запросу. При ошибке парса возвращается структурный
+`error: { stage:"parse", message, offending_field }`, а не «молчаливый» сбой.
 
 ---
 
 ## 4. Тул `query_semantic_model`
 
 **Назначение.** Выполнить запрос к метрикам ранее созданной задачи (или к
-стабильным базовым моделям). Транслируется в `dbt sl query`. Все имена — `enum`.
+стабильным базовым моделям). Транслируется в **`mf query`** (dbt Core) в
+workspace контекста. Все имена — `enum`.
 
 > Динамический enum: после `create_semantic_model` сервер знает метрики и
 > достижимые измерения (включая multi-hop пути присоединённых моделей) и
@@ -713,14 +778,34 @@ metrics:
     },
 
     "limit":   { "type": "integer", "minimum": 1, "maximum": 100000, "default": 1000 },
+    "offset":  { "type": "integer", "minimum": 0, "default": 0,
+                 "description": "Постраничность: сервер режет результат на страницы и возвращает cursor (большой результат не должен раздувать MCP-ответ)." },
+    "max_bytes_scanned": { "type": "integer",
+                 "description": "Опц. кост-гард: предел сканируемых байт склада (BigQuery dry-run estimate перед выполнением)." },
     "dry_run": { "type": "boolean", "default": false,
-                 "description": "true → вернуть только сгенерированный SQL (--compile), без выполнения." }
+                 "description": "true → вернуть только сгенерированный SQL (mf --explain) + оценку стоимости, без выполнения." }
   },
 
   "$defs": { "predicate":      { "...": "как в create_semantic_model; fieldRef.path сужен до TASK_GROUPABLE_PATH" },
              "predicateGroup": { "...": "как в create_semantic_model" } }
 }
 ```
+
+**Рендеринг операторов `predicate.op` → `--where` (m4).** Сервер детерминированно
+разворачивает структурный предикат в jinja+SQL (нет «голого» SQL от AI):
+
+| `op` | Рендер (для `Dimension('user__country')`) |
+|---|---|
+| `eq`/`neq` | `{{ Dimension('user__country') }} = 'US'` / `!=` |
+| `gt`/`gte`/`lt`/`lte` | `… > 5` и т.п. |
+| `in`/`not_in` | `… IN ('US','GB')` / `NOT IN (...)` |
+| `between` | `… BETWEEN 1 AND 10` |
+| `is_null`/`is_not_null` | `… IS NULL` / `IS NOT NULL` |
+| time-поле | `{{ TimeDimension('metric_time','day') }} >= '2026-01-01'` |
+
+> На каждый оператор — снапшот-тест рендера. `order_by.key` сервер
+> **канонизирует** из элементов `group_by`/`metrics` (для времени —
+> `metric_time__<grain>`), чтобы AI не собирал строку грейна вручную (m5).
 
 ### 4.2 Пример вызова и трансляции
 **Вход:**
@@ -739,11 +824,12 @@ metrics:
 }
 ```
 
-**Сгенерированная команда** (в изолированном workspace контекста):
+**Сгенерированная команда** (`mf query` в изолированном workspace контекста):
 ```bash
-dbt sl query \
+mf query \
   --project-dir .mcp/ctx/a1b2c3d4e5 \
   --target-path target/ctx/a1b2c3d4e5 \
+  --profiles-dir <profiles_dir> \
   --metrics lvl_econ__revenue,lvl_econ__arppu \
   --group-by metric_time__day,user__country,user__campaign__channel \
   --where "{{ Dimension('user__acquisition_type') }} = 'paid'" \
@@ -751,23 +837,33 @@ dbt sl query \
   --start-time '2026-01-01' --end-time '2026-03-31' \
   --limit 100
 ```
-При `dry_run: true` добавляется `--compile` и возвращается только SQL.
+При `dry_run: true` добавляется `--explain` и возвращается только SQL (без
+выполнения в складе).
 
 ### 4.3 Выход (единый конверт)
 ```jsonc
 {
+  "ok": true,                                  // false → см. error
   "sql": "…сгенерированный MetricFlow SQL…",
-  "command": "dbt sl query --metrics …",
+  "command": "mf query --metrics …",
   "columns": [ { "name": "metric_time__day", "type": "date" },
                { "name": "user__country", "type": "string" },
                { "name": "lvl_econ__revenue", "type": "numeric" },
                { "name": "lvl_econ__arppu", "type": "numeric" } ],
   "rows": [ … ],
   "row_count": 87,
+  "page": { "limit": 100, "offset": 0, "has_more": false, "cursor": null },  // пагинация (M5)
+  "cost": { "estimated_bytes_scanned": 1240000000 },                         // кост-гард (M5)
   "assumptions": [],
-  "warnings": []
+  "warnings": [],
+  "error": null   // при ok:false: { stage:"parse"|"validate"|"query", message, offending_field }
 }
 ```
+> **M5 (надёжность):** перед выполнением сервер (1) валидирует сгенерированный
+> YAML JSON-схемой и `mf validate-configs`; (2) на `dry_run`/BigQuery делает
+> dry-run оценку стоимости; (3) ошибки `dbt parse`/`mf` парсит в структурный
+> `error{stage,message,offending_field}`; (4) пагинирует результат (`limit`+
+> `offset`+`cursor`) и/или режет по размеру ответа с флагом усечения.
 
 ---
 
@@ -777,23 +873,24 @@ dbt sl query \
 изолированного workspace: перечитывают декларацию контекста, применяют
 изменение, ре-рендерят YAML и делают `dbt parse` с персональным `--target-path`.
 
-### `update_semantic_model` — изменить существующий task-SM/метрики
+### `update_semantic_model` — изменить SM таблицы / метрики в контексте
 Декларативные правки без переписывания всей задачи. `add_*` добавляет/заменяет
-(по имени), `remove_*` удаляет; при удалении measure сервер проверяет, что от него
-не зависят метрики (иначе — ошибка со списком зависимых).
+(по имени) **task-объекты** в SM соответствующей таблицы, `remove_*` удаляет; при
+удалении measure сервер проверяет, что от него не зависят метрики (иначе — ошибка
+со списком зависимых). Базовые (шаблонные) measures/dimensions не трогаются.
 ```jsonc
 {
   "type": "object", "additionalProperties": false,
   "required": ["context_id", "semantic_model"],
   "properties": {
     "context_id":     { "type": "string", "enum": ["« ACTIVE_CONTEXTS »"] },
-    "semantic_model": { "type": "string", "enum": ["« CONTEXT_TASK_SMS »"],
-                        "description": "Какой task-SM правим (sm_<task>_<from>)." },
+    "semantic_model": { "type": "string", "enum": ["« CONTEXT_SMS »"],
+                        "description": "SM таблицы в контексте (одна на таблицу: events/users/…)." },
     "set_event_scope":   { "$ref": "create#/$defs/semanticModel/properties/event_scope" },
     "add_dimensions":    { "type": "array", "items": { "$ref": "create#/$defs/semanticModel/properties/dimensions/items" } },
-    "remove_dimensions": { "type": "array", "items": { "type": "string", "enum": ["« SM_DIMENSIONS »"] } },
+    "remove_dimensions": { "type": "array", "items": { "type": "string", "enum": ["« TASK_DIMENSIONS »"] } },
     "add_measures":      { "type": "array", "items": { "$ref": "create#/$defs/semanticModel/properties/measures/items" } },
-    "remove_measures":   { "type": "array", "items": { "type": "string", "enum": ["« SM_MEASURES »"] } },
+    "remove_measures":   { "type": "array", "items": { "type": "string", "enum": ["« TASK_MEASURES »"] } },
     "add_metrics":       { "type": "array", "items": { "$ref": "create#/$defs/metric" } },
     "remove_metrics":    { "type": "array", "items": { "type": "string", "enum": ["« CONTEXT_METRICS »"] } },
     "dry_run":           { "type": "boolean", "default": false }
@@ -802,16 +899,17 @@ dbt sl query \
 ```
 **Выход:** обновлённые `{ context_id, semantic_model, dimensions, measures, metrics, groupable, parse, warnings }`.
 
-### `delete_semantic_model` — удалить один task-SM из контекста
-Удаляет указанный task-SM и зависящие от него метрики (с подтверждением через
-`cascade`), оставляя остальной контекст нетронутым; ре-parse.
+### `delete_semantic_model` — убрать task-объекты SM таблицы (или метрику)
+Удаляет task-добавленные measures/dimensions/metrics для SM указанной таблицы (с
+`cascade` для зависимых метрик), оставляя шаблон таблицы и остальной контекст
+нетронутыми; ре-parse. Полный снос контекста — `drop_context`.
 ```jsonc
 {
   "type": "object", "additionalProperties": false,
   "required": ["context_id", "semantic_model"],
   "properties": {
     "context_id":     { "type": "string", "enum": ["« ACTIVE_CONTEXTS »"] },
-    "semantic_model": { "type": "string", "enum": ["« CONTEXT_TASK_SMS »"] },
+    "semantic_model": { "type": "string", "enum": ["« CONTEXT_SMS »"] },
     "cascade":        { "type": "boolean", "default": false,
                         "description": "true — удалить и зависящие метрики. Без него при наличии зависимостей вернётся ошибка со списком." }
   }
@@ -871,12 +969,12 @@ dbt sl query \
        metrics:["lvl_econ__revenue","lvl_econ__arppu"],
        group_by:[metric_time/day, user__country, user__campaign__channel],
        where: acquisition_type = paid, time_range: Q1-2026 })
-     → dbt sl query в workspace контекста → rows.
+     → mf query в workspace контекста → rows.
 
-4. update_semantic_model({ context_id:"a1b2c3d4e5", semantic_model:"sm_lvl_econ_events",
+4. update_semantic_model({ context_id:"a1b2c3d4e5", semantic_model:"events",
        add_measures:[{ name:"avg_revenue", agg:"average", field:"revenue" }],
-       add_metrics:[{ name:"arppu_paid", type:"simple", measure:{name:"avg_revenue"} }] })
-     → re-parse в том же контексте.
+       add_metrics:[{ name:"avg_rev_metric", type:"simple", measure:{name:"avg_revenue"} }] })
+     → домешивает в SM таблицы events, re-parse в том же контексте.
 
 5. drop_context("a1b2c3d4e5")             // снести весь изолированный контекст
 ```
@@ -895,31 +993,42 @@ dbt sl query \
 2. **Генератор enum** — на старте сервер строит производные множества (§2.4),
    включая `GROUPABLE_PATH` обходом графа entity (≤2 hop), и **инъектирует** их в
    JSON-Schema тулов. Контекстно-зависимые наборы (`CONTEXT_METRICS`,
-   `CONTEXT_TASK_SMS`, `TASK_GROUPABLE_PATH`, `ACTIVE_CONTEXTS`) пересобираются
+   `CONTEXT_SMS`, `TASK_GROUPABLE_PATH`, `ACTIVE_CONTEXTS`) пересобираются
    после каждого create/update/delete.
-3. **Базовые SM (фикстуры)** — по одному стабильному SM на dbt-модель реестра в
-   `models/semantic/_base/` (§2.2): `events`, `users`, `campaigns`, … Деплоятся
-   один раз; задают `primary`/`foreign` entities и общий словарь измерений.
+3. **Базовый dbt-проект** — общий, материализуется один раз: SQL базовых моделей
+   (`fct_analytics_events`, `dim_users`, `dim_campaigns`), **time spine**
+   (`dbt run --select metricflow_time_spine`, C2) и SM-шаблоны (по одному на
+   таблицу). Это фундамент, который наследуют контексты.
 4. **Менеджер контекстов** — на `create` без `context_id` генерирует новый id и
-   поднимает изолированный workspace:
-   - оверлей-проект `.mcp/ctx/<id>/` (симлинк base `models/` + подкаталог
-     генерируемых semantic YAML), запуск dbt с `--project-dir` и персональным
-     `--target-path target/ctx/<id>`;
-   - реестр контекстов в памяти/на диске (`{id, tasks, sms, metrics, ttl}`);
-   - TTL/GC и `drop_context` для очистки; неймспейс `ctx_<id>__<task>__…`.
-5. **Рендер YAML** — детерминированный шаблонизатор: декларация → semantic models
-   + metrics. Распаковка свойств — таблица выражений по `warehouse_dialect`:
+   поднимает **самодостаточный** overlay-проект (M2):
+   - `.mcp/ctx/<id>/` с `dbt_project.yml`, симлинком/копией SQL базовых моделей и
+     time spine, `dbt_packages/` (или `dbt deps`), подкаталогом генерируемых
+     semantic/metrics YAML; запуск dbt с `--project-dir`, `--target-path
+     target/ctx/<id>`, `--profiles-dir`;
+   - **персистентный** реестр контекстов (sqlite/JSON), реконсилируемый с диском
+     на старте (M4); лизы на in-flight запросы; TTL/GC и `drop_context`;
+   - одна SM на таблицу в контексте (C3), неймспейс `<task>__` (в изолированном
+     режиме без `ctx_` — m1).
+5. **Рендер YAML** — детерминированный шаблонизатор: декларация → одна SM на
+   таблицу (+ авто-`simple`-обёртки для ratio) + metrics. `event_scope` и
+   measure-фильтры **впечатываются в `expr`** через `CASE WHEN` (M3). Распаковка
+   свойств — по `warehouse_dialect`:
    ```
    bigquery:  JSON_VALUE(event_properties, '$.<k>')  [+ CAST под тип]
    postgres:  (event_properties->>'<k>')              [+ ::<type>]
    snowflake: event_properties:<k>::<type>
    ```
-6. **Исполнение dbt (per-context)** — обёртки над `dbt parse` и
-   `dbt sl query`/`mf query` всегда с `--project-dir`/`--target-path` контекста;
-   парсинг вывода в единый конверт; таймауты и `--limit`. Параллельные контексты
-   не делят манифест → нет гонок и коллизий имён.
+6. **Исполнение dbt (per-context)** — обёртки над `dbt parse` + `mf validate-configs`
+   + `mf query` (НЕ `dbt sl query`, C1) всегда с `--project-dir`/`--target-path`/
+   `--profiles-dir` контекста; структурный разбор ошибок и вывода в единый
+   конверт; таймауты, `--limit`/`offset`, кост-гард. Параллельные контексты не
+   делят манифест → нет гонок.
 7. **update/delete/drop** — мутируют декларацию контекста, ре-рендерят и делают
    `dbt parse` в его workspace; проверяют зависимости метрик от measures.
+8. **Версии (M1)** — зафиксировать матрицу `dbt-core` + adapter +
+   `dbt-metricflow`, на которой проверена генерация legacy-YAML; CI-снапшот:
+   round-trip генерируемого YAML через `dbt parse` + `mf validate-configs` +
+   пробный `mf query --explain` на пиннутой версии.
 
 ---
 
@@ -932,19 +1041,34 @@ dbt sl query \
 - **Структурные фильтры, не строки.** `predicateGroup` рендерится сервером в
   безопасные jinja-обёртки — нет инъекций и «голого» SQL от AI.
 - **Read-only.** Семантический слой только читает; DDL/запись отсутствуют.
-- **Изоляция по контексту.** Каждый `context_id` — свой workspace
-  (`--project-dir`/`--target-path`), свой манифест и неймспейс `ctx_<id>__`.
-  Параллельные задачи не конфликтуют по глобально-уникальным именам dbt и не
-  делят `semantic_manifest.json`; `drop_context` гарантированно вычищает всё.
-- **Неймспейсинг** (`ctx_<id>__<task>__…`) гарантирует глобальную уникальность
-  имён dbt и изоляцию задач даже в общем проекте.
+- **Изоляция по контексту.** Каждый `context_id` — свой overlay-проект и
+  `--target-path`, свой манифест. Параллельные задачи не делят
+  `semantic_manifest.json` и не конфликтуют по именам; `drop_context` (с лизами,
+  M4) гарантированно вычищает всё. В изолированном режиме `ctx_`-префикс не нужен
+  (m1); он требуется только в запасном общем-проектном режиме (+ локи на parse).
+- **Одна SM на таблицу в контексте (C3).** Нет дублирующих SM над одной таблицей
+  → нет неоднозначных join-путей.
+- **Корректность скоупа (M3).** `event_scope`/measure-фильтры впечатаны в `expr`
+  каждого measure — мера не «протекает» на другие классы событий.
+- **Time spine — предусловие (C2).** `metric_time`/cumulative/conversion требуют
+  материализованного spine из базового проекта; при его отсутствии — понятная
+  ошибка, не падение dbt.
+- **Движок — `mf` (dbt Core), не `dbt sl query` (C1)** — единственный совместимый
+  с файловой изоляцией.
 - **Безопасные мутации.** `update/delete` проверяют зависимости (нельзя удалить
-  measure, на который ссылается метрика, без `cascade`); каждая мутация
-  сопровождается `dbt parse` контекста, ошибки парса возвращаются, а не «молча».
-- **Детерминизм.** Одна и та же декларация → один и тот же YAML и SQL
-  (удобно кэшировать, тестировать снапшотами).
-- **Прозрачность.** `dry_run`/`--compile` показывают YAML и SQL до выполнения;
-  все неявные решения попадают в `assumptions`.
+  measure, на который ссылается метрика, без `cascade`); каждая мутация — с
+  `dbt parse` контекста; ошибки возвращаются структурно, а не «молча».
+- **Надёжность (M5).** Pre-parse JSON-Schema + `mf validate-configs`; структурный
+  `error{stage,message,field}`; пагинация и кост-гард на запросах.
+- **Версии (M1).** Пиннутая матрица dbt + adapter + metricflow; CI-снапшот
+  round-trip генерируемого legacy-YAML.
+- **Детерминизм.** Одна и та же декларация → один и тот же YAML и SQL.
+- **Прозрачность.** `dry_run`/`--explain` показывают YAML и SQL до выполнения;
+  все неявные решения — в `assumptions`.
+- **Граница доверия — каталог.** Единственное место free-text→SQL — это
+  `expr`-шаблоны каталога (контролируются разработчиком) и `derived.expr`
+  (формула над **именованными** метриками) — последний валидируется грамматикой
+  числовых выражений.
 
 ---
 
@@ -957,3 +1081,23 @@ dbt sl query \
 - Если в окружении уже есть **Cube** MCP — выбрать единый источник истины для
   базовых метрик, чтобы цифры не расходились. dbt Semantic Layer уместен, когда
   метрики уже живут в dbt-проекте и важна консистентность с трансформациями.
+
+---
+
+## 10. Альтернатива на dbt platform (без файловой изоляции)
+
+Основной дизайн — **dbt Core + `mf`** с пер-контекстными overlay-проектами. Если
+требуется именно **dbt platform** (`dbt sl query`, GraphQL/JDBC API), модель
+изоляции меняется принципиально (C1):
+
+- `dbt sl query` исполняется **удалённо** против одного развёрнутого окружения и
+  **не видит** локальные overlay/`--target-path`. Файловая изоляция невозможна.
+- Изоляция «на лету» тогда требует либо отдельного **развёрнутого окружения/ветки
+  на контекст** (тяжело, медленно), либо отказа от пер-контекстных виртуальных
+  моделей в пользу заранее задеплоенных метрик + только запросов.
+- Реалистичный гибрид: **создание/итерация** виртуальных моделей — локально на
+  dbt Core (`mf`), а **продакшн-запросы** консистентных, «устоявшихся» метрик —
+  через dbt platform API после деплоя. Это держит «черновую» генерацию изолированной,
+  а стабильные метрики — в общем семантическом слое.
+
+Выбор фиксируется в конфиге сервера; hot-path по умолчанию — dbt Core.

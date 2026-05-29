@@ -52,12 +52,15 @@ dbt-проекта (обычно в каталоге `models/…`, в `*.yml`-ф
 
 ### 1.2 Жизненный цикл (важно для «на лету»)
 ```
+0. (однократно) dbt run --select metricflow_time_spine   # материализовать time spine
 1. Записать/обновить YAML semantic model + metrics
 2. dbt parse                       # пересобирает target/semantic_manifest.json
-3. dbt sl query --metrics ...       # MetricFlow читает манифест и генерит SQL
+3. mf query --metrics ...           # MetricFlow читает манифест и генерит SQL
 ```
-- **`dbt parse` достаточно** — пересобирать все модели (`dbt run`) не нужно,
-  если базовые таблицы уже существуют в складе.
+- **`dbt parse` достаточно** для семантических правок — пересобирать все модели
+  (`dbt run`) не нужно, **если** (а) базовые fct/dim-таблицы уже существуют в
+  складе и (б) time spine уже материализован (см. §1.4). Time spine —
+  исключение: его надо **построить `dbt run`** один раз заранее.
 - `target/semantic_manifest.json` — артефакт, который читает MetricFlow.
 
 **Изоляция параллельных «виртуальных» моделей.** Поскольку имена measures/metrics
@@ -79,7 +82,22 @@ dbt-проекта (обычно в каталоге `models/…`, в `*.yml`-ф
 | Исполнение | удалённо в dbt platform | локально |
 | Показать SQL | `--compile` | `--explain` |
 | Экспорт CSV | — | `--csv file.csv` |
-| Прочее | `--metrics/--group-by/--where/--order-by/--limit/--start-time/--end-time` идентичны |
+| Прочее | `--metrics/--group-by/--where/--order-by/--limit` идентичны; `--start-time/--end-time` — только `mf`/Core |
+
+> Кроме CLI есть **GraphQL** и **JDBC** API dbt Semantic Layer (см. §7.3). Для
+> MCP-сервера с локальной изоляцией по контексту основной движок — **`mf` (dbt
+> Core)**: только он совместим с пер-контекстными `--project-dir`/`--target-path`.
+
+### 1.4 Time spine — обязательная инфраструктура времени
+MetricFlow требует **материализованную модель time spine** для: `metric_time`,
+любых грейнов (`metric_time__day/week/...`), метрик `cumulative` и `conversion`.
+- Объявляется в YAML (`time_spine` + модель `metricflow_time_spine`) и
+  **строится `dbt run --select metricflow_time_spine`** (или seed) — `dbt parse`
+  для неё **недостаточно**, нужна реальная таблица в складе.
+- Для внутридневной детализации нужен дополнительный **sub-daily** time spine.
+- Практический вывод для нашего домена: держать time spine как часть **базового**
+  dbt-проекта, материализовать один раз; «на лету» создаются только семантические
+  модели/метрики, а spine уже есть.
 
 ---
 
@@ -89,10 +107,14 @@ dbt-проекта (обычно в каталоге `models/…`, в `*.yml`-ф
 semantic_models:
   - name: <string>            # уникально в проекте; основа для имён join'ов
     description: <string>     # опц.
+    label: <string>           # опц.: человекочитаемое имя для BI
     model: ref('<dbt_model>') # ОБЯЗАТЕЛЬНО: ровно одна dbt-модель (одна таблица)
     defaults:
       agg_time_dimension: <dimension_name>  # дефолтная ось времени для measures
     primary_entity: <string>  # опц.: если в таблице нет натурального PK
+    config:                   # опц.
+      meta: { <free-form> }   # произвольные метаданные
+      enabled: <bool>         # опц.: включить/выключить SM
     entities:   [ ... ]       # join-ключи (см. §3)
     dimensions: [ ... ]       # оси группировки/фильтрации (см. §4)
     measures:   [ ... ]       # агрегаты (см. §5)
@@ -103,8 +125,11 @@ semantic_models:
 | `name` | да | Уникальное имя semantic model в проекте. |
 | `model` | да | `ref('...')` на **одну** dbt-модель. SM = семантика над одной таблицей. |
 | `description` | нет | Документация. |
+| `label` | нет | Человекочитаемое имя для отображения в BI. |
 | `defaults.agg_time_dimension` | усл. | Какую time-dimension использовать как ось времени по умолчанию для measures, если у самого measure не указана `agg_time_dimension`. |
 | `primary_entity` | усл. | Синтетический первичный ключ модели, если среди `entities` нет `type: primary`. Нужен, когда у таблицы нет естественного PK (типично для таблицы событий). |
+| `config.meta` | нет | Произвольные метаданные (пробрасываются в манифест/BI). |
+| `config.enabled` | нет | Булев флаг включения semantic model. |
 | `entities` | да* | Список join-ключей. |
 | `dimensions` | нет | Список измерений. |
 | `measures` | нет | Список мер. |
@@ -123,7 +148,14 @@ entities:
   - name: <string>     # уникально в пределах SM; имя, по которому идёт join
     type: primary | unique | foreign | natural
     expr: <string>     # опц.: колонка или SQL-выражение, если name ≠ имя колонки
+    label: <string>    # опц.: человекочитаемое имя для BI
+    role: <string>     # опц.: role-playing — переименование одной сущности под
+                       #       разные роли (напр. ordered_at_entity vs delivered_at_entity)
 ```
+
+> `role` нужен, когда одна и та же физическая сущность участвует в нескольких
+> ролях/путях join (role-playing dimensions/entities) — позволяет различать их в
+> группировках (`ordered_at_entity__…` vs `delivered_at_entity__…`).
 
 ### 3.1 Типы entity (enum)
 | `type` | Семантика | Null | Уникальность |
@@ -214,11 +246,12 @@ join-пути через entities. Когда в запросе встречаю
 dimensions:
   - name: <string>           # уникально в пределах SM
     type: categorical | time
+    description: <string>    # опц.: документация
     label: <string>          # опц.: человекочитаемое имя для BI
     expr: <string>           # опц.: SQL-выражение, если ≠ прямой колонке
     is_partition: <bool>     # опц.: пометка партиционирующей колонки (time)
-    type_params:             # для type: time
-      time_granularity: day | week | month | quarter | year   # (+ sub-daily, см. §4.2)
+    type_params:             # для type: time (time_granularity фактически обязателен)
+      time_granularity: day | week | month | quarter | year   # (+ hour/sub-daily, см. §4.2)
       validity_params:       # только для SCD type II
         is_start: <bool>     # колонка valid_from
         is_end:   <bool>     # колонка valid_to
@@ -243,18 +276,23 @@ dimensions:
   ```
 
 ### 4.2 `time_granularity` (enum)
-Стандартные календарные гранулярности:
-`day`, `week`, `month`, `quarter`, `year`.
+**Стандартные** (всегда доступны): `day`, `week`, `month`, `quarter`, `year`.
 
-Дополнительно MetricFlow поддерживает:
-- **sub-daily**: `hour`, `minute`, `second` (и более мелкие на поддерживаемых
-  складах) — полезно для событийной аналитики внутри дня;
+Дополнительно:
+- **sub-daily** (`hour` и мельче) — поддерживается **только при наличии
+  специального sub-daily time spine** и при поддержке складом; это не «обычные»
+  значения enum. `minute`/`second` документированы слабо и требуют такого
+  time spine — для событийной аналитики внутри дня сначала готовится sub-daily
+  time spine. Значения `nanosecond/microsecond/millisecond` **не входят** в
+  модель гранулярностей dbt — не использовать.
 - **custom granularities** (напр. `fiscal_year`, `fiscal_week`) — задаются в
   конфиге time spine через `custom_granularities` и затем доступны как грейн.
 
-> `time_granularity` на dimension задаёт **минимальный** грейн хранения. В
-> запросе можно агрегировать только до более крупного грейна
-> (`metric_time__week`, `metric_time__month` и т.д.).
+> Для нашего домена событий безопасный дефолт — хранить time-dimension с грейном
+> `day` (а где нужна внутридневная детализация — поднять sub-daily time spine).
+> `time_granularity` задаёт **минимальный** грейн; в запросе агрегируем только до
+> **более крупного** (`metric_time__week`, `metric_time__month`, …).
+> Для `time`-dimension `time_granularity` фактически **обязателен**.
 
 ### 4.3 `validity_params` (SCD Type II)
 Для медленно меняющихся измерений: ровно одна колонка `is_start: true`
@@ -368,14 +406,26 @@ metrics:
       join_to_timespine: true                                      # опц.
 ```
 
-### 6.2 `ratio` — отношение двух метрик/мер
+### 6.2 `ratio` — отношение двух **метрик**
+> Важно: `numerator`/`denominator` ссылаются на **метрики**, а не на measures
+> напрямую. В классическом подходе сначала оборачиваем нужный measure в
+> `simple`-метрику, затем ссылаемся на неё. Доступны `name`, `filter`, `alias`
+> (alias нужен, если одна метрика используется дважды с разными фильтрами).
 ```yaml
+# сперва simple-метрики поверх measures:
+- name: revenue_metric
+  type: simple
+  type_params: { measure: { name: revenue_usd } }
+- name: payers_metric
+  type: simple
+  type_params: { measure: { name: payers } }   # count_distinct(user_id), filter=purchase
+# затем отношение метрик:
 - name: arppu
   type: ratio
   type_params:
-    numerator:   { name: revenue_usd }
-    denominator: { name: payers }      # уникальные платящие
-  # numerator/denominator могут иметь свои filter
+    numerator:   { name: revenue_metric }
+    denominator: { name: payers_metric }
+  # у numerator/denominator допустимы свои filter и alias
 ```
 
 ### 6.3 `cumulative` — накопление по времени
@@ -391,6 +441,9 @@ metrics:
 ```
 - `window` — формат `"<n> <granularity>"`: `"7 days"`, `"1 month"`.
 - При заданном `window` в запросе **обязательно** должна быть `metric_time`.
+- **Предусловие:** для cumulative (как и для любых `metric_time`/грейнов и для
+  conversion) в проекте **должен существовать материализованный time spine**
+  (см. §1.4). Без него запрос упадёт.
 
 ### 6.4 `derived` — формула над другими метриками
 ```yaml
@@ -433,13 +486,25 @@ metrics:
 
 > Имя измерения в фильтре квалифицируется именем entity, через который оно
 > доступно: `user__country`, `event__event_name`, `metric_time`.
+>
+> **Ограничения `Metric(...)` в фильтре:** в `group_by` допускается **ровно одна
+> сущность** (несколько не поддерживается), и она должна агрегироваться до
+> грейна, который join'ится к внешнему запросу **без размножения строк**
+> (иначе fan-out). Напр. для запроса по аккаунтам `group_by=['account']`
+> валидно, а `group_by=['model']` — нет.
 
 ---
 
 ## 7. Запрос к семантическому слою
 
+> **Движок.** `dbt sl query` — команда **dbt platform** (исполняется удалённо в
+> dbt Cloud/Fusion). Локально (dbt Core, `pip install dbt-metricflow`)
+> используется **`mf query`**. Поскольку наш MCP-дизайн опирается на локальную
+> файловую изоляцию по контексту, **основной движок — `mf query` (dbt Core)**.
+> Ниже — пример на `mf query`.
+
 ```bash
-dbt sl query \
+mf query \
   --metrics total_revenue,dau \
   --group-by metric_time__day,user__country \
   --where "{{ Dimension('user__acquisition_type') }} = 'paid'" \
@@ -447,7 +512,7 @@ dbt sl query \
   --order-by -metric_time__day \
   --limit 100 \
   --start-time '2026-01-01' --end-time '2026-03-31' \
-  --compile     # показать сгенерированный SQL (mf query: --explain)
+  --explain     # показать сгенерированный SQL (dbt platform: dbt sl query --compile)
 ```
 
 | Параметр | Назначение |
@@ -457,9 +522,43 @@ dbt sl query \
 | `--where` | предикат(ы) на jinja-обёртках (§6.6); можно несколько |
 | `--order-by` | сортировка; префикс `-` = DESC |
 | `--limit` | лимит строк (дефолт 100) |
-| `--start-time` / `--end-time` | ISO8601, включительно — диапазон по `metric_time` |
-| `--compile` / `--explain` | показать SQL без/с выполнением |
+| `--start-time` / `--end-time` | ISO8601, включительно — диапазон по `metric_time`. **Доступно только в `mf`/dbt Core**, в dbt platform пока нет |
+| `--explain` / `--compile` | показать SQL: `mf --explain` / platform `--compile` |
+| `--csv FILE` | экспорт в CSV (только `mf`) |
 | `--saved-query` | выполнить предопределённый saved query |
+| `--decimals`, `--show-sql-descriptions`, `--display-plans` | округление / описания / визуализация плана |
+
+### 7.1 Сопутствующие команды (интроспекция и валидация)
+Полезны для MCP-тула (grounding и проверка перед запросом):
+- `mf list metrics`, `mf list dimensions --metrics <m>`, `mf list dimension-values`,
+  `mf list entities`, `mf list saved-queries` — что доступно для запроса;
+- `mf validate-configs` (Core) / `dbt sl validate` (platform) — семантическая
+  валидация моделей/метрик **до** запроса;
+- `mf health-checks` — проверка соединения со складом.
+
+### 7.2 Saved queries (опц.)
+Запрос можно зафиксировать как объект `saved_queries:` в YAML и выполнять по
+имени (`--saved-query`) или материализовать как экспорт:
+```yaml
+saved_queries:
+  - name: paid_revenue_daily
+    query_params:
+      metrics: [total_revenue]
+      group_by: ["TimeDimension('metric_time','day')", "Dimension('user__country')"]
+      where: ["{{ Dimension('user__acquisition_type') }} = 'paid'"]
+      order_by: ["-metric_time__day"]
+      limit: 1000
+    exports:
+      - name: paid_revenue_daily
+        config: { export_as: table, schema: analytics, alias: paid_revenue_daily }
+```
+Материализация: `dbt build --resource-type saved_query` / `dbt sl export`.
+
+### 7.3 Программные API
+Кроме CLI, dbt Semantic Layer отдаёт **GraphQL** и **JDBC** API (а также Python
+SL-клиент) для запуска запросов программно. Для MCP-сервера, чья задача —
+«выполнить запрос», это часто более удобная интеграционная поверхность, чем CLI
+(особенно в dbt platform-варианте). Выбор интеграции — см. дизайн тула.
 
 ---
 
@@ -469,7 +568,7 @@ dbt sl query \
 |---|---|
 | `entity.type` | `primary`, `unique`, `foreign`, `natural` |
 | `dimension.type` | `categorical`, `time` |
-| `time_granularity` | `second`, `minute`, `hour`, `day`, `week`, `month`, `quarter`, `year` (+ custom) |
+| `time_granularity` | **стандартные:** `day`, `week`, `month`, `quarter`, `year`; `hour`/sub-daily — только с sub-daily time spine; custom (`fiscal_*`) — через time spine. `nanosecond/microsecond/millisecond` — НЕ поддерживаются |
 | `measure.agg` | `sum`, `min`, `max`, `average`, `median`, `percentile`, `count_distinct`, `sum_boolean`, `count` |
 | `metric.type` | `simple`, `ratio`, `cumulative`, `derived`, `conversion` |
 | `cumulative.period_agg` | `first`, `last`, `average` |
@@ -491,8 +590,26 @@ dbt sl query \
    (`event_properties`). Маппинг логическое-имя → выражение должен жить в
    конфиге, а не угадываться AI.
 5. **`dbt parse` обязателен** после записи/изменения YAML, иначе запрос увидит
-   старый манифест.
-6. **Read-only.** Семантический слой только читает; запись/DDL отсутствуют.
+   старый манифест. **Но** этого достаточно только для семантики над уже
+   существующими таблицами — **time spine нужно материализовать `dbt run`** (§1.4).
+6. **Time spine — жёсткое предусловие** для `metric_time`, любых грейнов,
+   `cumulative` и `conversion`. Без материализованного time spine эти запросы
+   падают.
+7. **`dbt sl query` ≠ локальная команда.** Это dbt platform (удалённо); локально
+   — `mf query` (dbt Core). Локальная файловая изоляция совместима только с `mf`.
+8. **Версии.** «Последняя» YAML-спецификация — dbt Core v1.12 (май 2026)/Fusion;
+   мы генерируем **legacy**-форму (`semantic_models:`/`measures:`/`metrics:`).
+   Зафиксировать матрицу версий dbt + adapter + `dbt-metricflow`, на которой это
+   проверено, и держать снапшот-тест `dbt parse` + `mf validate-configs`.
+9. **Read-only.** Семантический слой только читает; запись/DDL отсутствуют.
+
+> **Legacy ↔ Latest.** В новой (v1.12+) спецификации measures сворачиваются в
+> `simple`-метрики, SM встраиваются в YAML модели (`models: → semantic_model:`),
+> `time_granularity` → `granularity`, перцентиль — `percentile`+`percentile_type`,
+> а cumulative/ratio/derived/conversion ссылаются на метрики через
+> `input_metric(s)`/`base_metric`/`conversion_metric` (а не `measure`). Мы
+> сознательно используем legacy-форму ради стабильности — при апгрейде dbt
+> сверять, что выбранная версия её ещё принимает.
 
 ---
 

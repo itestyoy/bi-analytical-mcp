@@ -38,13 +38,26 @@ export class Engine {
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
   }
 
-  /** All group-by/where dimension paths allowed for a context. */
+  /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
+  _taskDimMap(ctx) {
+    const map = new Map();
+    for (const [modelKey, add] of Object.entries(ctx.state.additions || {})) {
+      const pe = this.catalog.primaryEntityName(modelKey);
+      for (const d of add.dimensions || []) map.set(d.name, pe ? `${pe}__${d.name}` : d.name);
+    }
+    return map;
+  }
+
+  /** All group-by/where dimension paths allowed for a context (bare + qualified). */
   _allowedPaths(ctx) {
     const set = new Set(this.catalog.reachableGroupByPaths());
-    for (const add of Object.values(ctx.state.additions || {})) {
-      for (const d of add.dimensions || []) set.add(d.name);
-    }
+    for (const [bare, qualified] of this._taskDimMap(ctx)) { set.add(bare); set.add(qualified); }
     return set;
+  }
+
+  /** Resolve a bare task-dim name to its entity-qualified MetricFlow path. */
+  _resolvePath(ctx, path) {
+    return this._taskDimMap(ctx).get(path) || path;
   }
 
   describe_catalog() {
@@ -226,20 +239,22 @@ export class Engine {
       if (typeof g === 'object' && g.time === 'metric_time') groupBy.push(`metric_time__${g.grain || 'day'}`);
       else if (typeof g === 'string') {
         if (g !== 'metric_time' && !allowed.has(g)) throw new ToolError(`group_by path not reachable in context: ${g}. Known paths: ${[...allowed].slice(0, 30).join(', ')}`, { stage: 'validate', field: g });
-        this._checkPathLoaded(ctx, g);
-        groupBy.push(g);
+        const resolved = this._resolvePath(ctx, g);
+        this._checkPathLoaded(ctx, resolved);
+        groupBy.push(resolved);
       }
     }
     let where = [];
     if (input.where) {
-      // validate dimension paths in the predicate tree
-      walkPredicates(input.where, (p) => {
+      const translated = clone(input.where);
+      walkPredicates(translated, (p) => {
         if (p.field?.kind === 'dimension') {
           if (!allowed.has(p.field.path)) throw new ToolError(`where path not reachable in context: ${p.field.path}`, { stage: 'validate', field: p.field.path });
+          p.field.path = this._resolvePath(ctx, p.field.path); // bare task dim -> entity-qualified
           this._checkPathLoaded(ctx, p.field.path);
         }
       });
-      where = renderWhereClauses(input.where);
+      where = renderWhereClauses(translated);
     }
     const orderBy = (input.order_by || []).map((o) => `${o.direction === 'desc' ? '-' : ''}${o.key}`);
 

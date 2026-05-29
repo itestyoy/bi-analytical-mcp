@@ -362,6 +362,7 @@ export function buildSchemas(catalog) {
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
       materialize: { type: 'boolean', description: 'Materialize the query as a dbt table and read rows back from it (resilient, re-fetchable). Slow queries (> timeout) return a query_id; poll get_query_result.' },
       dry_run: { type: 'boolean', description: 'If true, return the generated SQL (explain) WITHOUT executing the query.' },
+      explain: { type: 'boolean', description: 'If true, return the query PLAN (MetricFlow dataflow plan + execution plan) AND the rendered SQL WITHOUT executing — like `mf query --explain --show-dataflow-plan`. A superset of dry_run; useful for inspecting/optimizing how the metrics compile.' },
     },
   };
 

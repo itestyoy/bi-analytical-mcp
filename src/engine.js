@@ -394,10 +394,16 @@ export class Engine {
       }
       if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
       const qopts = { metrics: input.metrics, groupBy, startTime: input.time_range?.start, endTime: input.time_range?.end, limit: (input.limit ?? 1000) };
-      if (input.materialize) return this._materialize(ctx, qopts, input);
-      const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain: !!input.dry_run });
+      const explain = !!(input.dry_run || input.explain);
+      if (input.materialize && !explain) return this._materialize(ctx, qopts, input);
+      const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
       if (!res.ok) return { ok: false, engine: 'match_recognize', command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
-      if (input.dry_run) return { ok: true, engine: 'match_recognize', dry_run: true, sql: res.sql };
+      if (explain) {
+        const out = { ok: true, engine: 'match_recognize', command: res.command, sql: res.sql };
+        if (input.dry_run) out.dry_run = true;
+        if (input.explain) { out.explain = true; out.plan = res.plan; }
+        return out;
+      }
       return { ok: true, engine: 'match_recognize', command: res.command, columns: res.columns, rows: res.rows, row_count: res.rows.length };
     }
 
@@ -440,12 +446,18 @@ export class Engine {
     const limit = input.limit ?? 1000;
     const offset = input.offset ?? 0;
     const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: input.time_range?.start, endTime: input.time_range?.end, limit: limit + offset };
-    if (input.materialize) return this._materialize(ctx, qopts, input);
-    const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain: !!input.dry_run });
+    const explain = !!(input.dry_run || input.explain);
+    if (input.materialize && !explain) return this._materialize(ctx, qopts, input);
+    const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
     this.ctxs.touch(ctx.id);
 
     if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
-    if (input.dry_run) return { ok: true, dry_run: true, command: res.command, sql: res.sql };
+    if (explain) {
+      const out = { ok: true, command: res.command, sql: res.sql };
+      if (input.dry_run) out.dry_run = true;
+      if (input.explain) { out.explain = true; out.plan = res.plan; }
+      return out;
+    }
 
     const pageRows = res.rows.slice(offset, offset + limit);
     return {

@@ -83,6 +83,16 @@ test('TASK active_users_trend: DAU/WAU/MAU & event volume', opts, async (t) => {
   assert.equal(mau, 12);                                                 // MAU = 12
   assert.ok(byDay.rows.every((r) => num(r.active_users_dau) <= mau));    // DAU <= MAU
   assert.equal(num(events.rows[0].active_users_events), 184);           // 184 seeded events
+
+  // explain: return the query PLAN + rendered SQL WITHOUT executing (feature/
+  // lifecycle check — we assert the plan/SQL are PRESENT, not their content).
+  const ex = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], explain: true });
+  assert.equal(ex.ok, true, JSON.stringify(ex.error || ex));
+  assert.equal(ex.explain, true);
+  assert.ok(typeof ex.sql === 'string' && ex.sql.length > 0);            // rendered SQL returned
+  assert.ok(ex.plan && typeof ex.plan === 'object');                     // plan object returned
+  assert.ok(typeof ex.plan.dataflow_plan === 'string' && ex.plan.dataflow_plan.length > 0); // dataflow plan present
+  assert.ok(typeof ex.plan.execution_plan === 'string' && ex.plan.execution_plan.length > 0); // execution plan present
 });
 
 // ── 2. segmentation: metric_by_user_segment ──────────────────────────────────

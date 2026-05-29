@@ -85,8 +85,8 @@ export class MfEngineBackend {
       end: opts.endTime,
     };
     if (opts.explain) {
-      const r = await this._send({ op: 'explain', ...base });
-      return { ok: !!r.ok, command: 'mf_sidecar.explain', sql: r.sql, stderr: r.error };
+      const r = await this._send({ op: 'explain', ...base, plan: !!opts.plan });
+      return { ok: !!r.ok, command: 'mf_sidecar.explain', sql: r.sql, plan: r.plan, stderr: r.error };
     }
     const r = await this._send({ op: 'query', ...base });
     if (!r.ok) return { ok: false, command: 'mf_sidecar.query', stderr: r.error, columns: [], rows: [] };

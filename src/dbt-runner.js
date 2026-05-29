@@ -67,7 +67,7 @@ export class DbtRunner {
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
   }
 
-  buildQueryArgs({ metrics, groupBy = [], where = [], orderBy = [], startTime, endTime, limit, csvFile, explain }) {
+  buildQueryArgs({ metrics, groupBy = [], where = [], orderBy = [], startTime, endTime, limit, csvFile, explain, plan }) {
     const args = ['query', '--metrics', metrics.join(',')];
     if (groupBy.length) args.push('--group-by', groupBy.join(','));
     for (const w of where) args.push('--where', w);
@@ -75,16 +75,18 @@ export class DbtRunner {
     if (startTime) args.push('--start-time', startTime);
     if (endTime) args.push('--end-time', endTime);
     if (typeof limit === 'number') args.push('--limit', String(limit));
-    if (explain) args.push('--explain');
-    else if (csvFile) args.push('--csv', csvFile);
+    if (explain) {
+      args.push('--explain');
+      if (plan) args.push('--show-dataflow-plan'); // also print the dataflow plan
+    } else if (csvFile) args.push('--csv', csvFile);
     return args;
   }
 
   async query(projectDir, opts) {
     if (opts.explain) {
-      const args = this.buildQueryArgs({ ...opts, explain: true });
+      const args = this.buildQueryArgs({ ...opts, explain: true, plan: opts.plan });
       const r = await run(this.mfBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
-      return { ok: r.ok, command: `mf ${args.join(' ')}`, sql: extractSql(r.stdout), stdout: r.stdout, stderr: r.stderr };
+      return { ok: r.ok, command: `mf ${args.join(' ')}`, sql: extractSql(r.stdout), ...(opts.plan ? { plan: extractPlan(r.stdout) } : {}), stdout: r.stdout, stderr: r.stderr };
     }
     const csvFile = join(mkdtempSync(join(tmpdir(), 'mfq-')), 'out.csv');
     const args = this.buildQueryArgs({ ...opts, csvFile });
@@ -120,6 +122,15 @@ function extractSql(stdout) {
   // mf --explain prints prose then the SQL; return everything from the first SELECT/WITH.
   const idx = stdout.search(/\b(with|select)\b/i);
   return idx >= 0 ? stdout.slice(idx).trim() : stdout.trim();
+}
+
+function extractPlan(stdout) {
+  // With --show-dataflow-plan the plan is printed BEFORE the SQL; return the
+  // cleaned text preceding the first SELECT/WITH (ANSI/timestamps stripped).
+  const cleaned = (stdout || '').replace(/\x1b\[[0-9;]*m/g, '');
+  const idx = cleaned.search(/\b(with|select)\b/i);
+  const planText = (idx >= 0 ? cleaned.slice(0, idx) : cleaned).trim();
+  return planText ? { dataflow_plan: planText.slice(0, 20000) } : undefined;
 }
 
 /** Parse `dbt show --output json` stdout: logs then { "show": [ {col:val}, ... ] }. */

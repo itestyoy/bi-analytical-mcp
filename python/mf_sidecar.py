@@ -12,9 +12,9 @@ CLI uses: CLIConfiguration -> MetricFlowEngine -> query()/explain().
 Protocol (newline-delimited JSON):
   request : {"id","op":"query"|"explain","project_dir","profiles_dir",
              "metrics":[...],"group_by":[...],"where":[...],"order":[...],
-             "limit":int,"start":"YYYY-MM-DD","end":"YYYY-MM-DD"}
+             "limit":int,"start":"YYYY-MM-DD","end":"YYYY-MM-DD","plan":bool}
   response: {"id","ok":true,"columns":[...],"rows":[[...]]}        # query
-            {"id","ok":true,"sql":"..."}                          # explain
+            {"id","ok":true,"sql":"...","plan":{...}?}            # explain (plan if requested)
             {"id","ok":false,"error":"..."}
 """
 import json
@@ -60,7 +60,22 @@ def _handle(req):
     )
     if req.get("op") == "explain":
         res = cfg.mf.explain(mf_request=mf_request)
-        return {"ok": True, "sql": res.sql_statement.sql}
+        out = {"ok": True, "sql": res.sql_statement.sql}
+        if req.get("plan"):
+            # MetricFlow query plan: the logical dataflow plan and the physical
+            # execution plan, each rendered as a text DAG (like `mf query
+            # --explain --show-dataflow-plan`).
+            plan = {}
+            try:
+                plan["dataflow_plan"] = res.dataflow_plan.structure_text()
+            except Exception as e:  # noqa: BLE001
+                plan["dataflow_plan_error"] = str(e)[:1000]
+            try:
+                plan["execution_plan"] = res.execution_plan.structure_text()
+            except Exception as e:  # noqa: BLE001
+                plan["execution_plan_error"] = str(e)[:1000]
+            out["plan"] = plan
+        return out
     res = cfg.mf.query(mf_request=mf_request)
     df = res.result_df
     return {

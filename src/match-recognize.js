@@ -83,7 +83,7 @@ export function buildPrefilter(catalog, spec, dialect, col) {
   if (f.user_segment?.length) {
     const u = catalog.models.users;
     if (!u) throw new Error('filter.user_segment requires a users model in the catalog');
-    const usersRel = spec.usersRelation || (dialect === 'bigquery' ? '`dim_users`' : '"public"."dim_users"');
+    const usersRel = spec.usersRelation || `{{ ref('${u.dbt_model}') }}`;
     const usersKey = typeof u.primary_entity === 'object' ? u.primary_entity.column : 'appsflyer_id';
     const conds = f.user_segment.map((c) => {
       if (!(u.dimensions || {})[c.property]) throw new Error(`unknown user attribute in filter.user_segment: ${c.property}`);
@@ -149,7 +149,7 @@ function nestedPattern(steps, withGap) {
 
 export function renderBigQuery(catalog, spec) {
   const r = resolve(catalog, spec, 'bigquery');
-  const relation = spec.relation || `\`${r.m.dbt_model}\``;
+  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
   const preds = r.stepPreds('bigquery', null); // for DEFINE we reference unqualified cols
   const sym = r.steps.map((s) => `S${s.idx}`);
 
@@ -192,7 +192,7 @@ function bqMetricExpr(mt) {
 
 export function renderPostgres(catalog, spec) {
   const r = resolve(catalog, spec, 'postgres');
-  const relation = spec.relation || `"public"."${r.m.dbt_model}"`;
+  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
   const preds = r.stepPreds('postgres', null);
   // captured property extractions live as columns in ev, carried by r{idx}
   const capByIdx = new Map();
@@ -267,7 +267,7 @@ export function renderPerUserModelPostgres(catalog, spec) {
   if (r.mode === 'strict') {
     throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the Postgres equivalent");
   }
-  const relation = spec.relation || `"public"."${r.m.dbt_model}"`;
+  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
   const preds = r.stepPreds('postgres', null);
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
@@ -304,7 +304,7 @@ export function renderPerUserModelPostgres(catalog, spec) {
 /** Per-user sequence model SELECT (BigQuery MATCH_RECOGNIZE) — production target. */
 export function renderPerUserModelBigQuery(catalog, spec) {
   const r = resolve(catalog, spec, 'bigquery');
-  const relation = spec.relation || `\`${r.m.dbt_model}\``;
+  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
   const preds = r.stepPreds('bigquery', null);
   const sym = r.steps.map((s) => `S${s.idx}`);
   // MEASURES must be aggregates (one row per match). CLASSIFIER() is NOT allowed

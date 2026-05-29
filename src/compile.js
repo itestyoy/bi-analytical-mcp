@@ -200,7 +200,9 @@ export function compileDeclaration(catalog, decl) {
       if (md.period_agg) ctp.period_agg = md.period_agg;
       addMetric({ name, type: 'cumulative', type_params: { measure: { name: resolveMeasure(md.measure.name) }, cumulative_type_params: ctp } });
     } else if (md.type === 'derived') {
-      const inputs = md.metrics.map((x) => ({ name: NS(task, x.name), ...(x.alias ? { alias: x.alias } : {}) }));
+      // input metrics are namespaced; alias each to the raw name so the user's
+      // `expr` (written with raw metric names) resolves correctly in MetricFlow.
+      const inputs = md.metrics.map((x) => ({ name: NS(task, x.name), alias: x.alias || x.name }));
       addMetric({ name, type: 'derived', type_params: { expr: md.expr, metrics: inputs } });
     } else if (md.type === 'conversion') {
       const ctp = {

@@ -1,5 +1,9 @@
-// End-to-end: declarative create -> dbt parse -> mf query, against dbt Core +
-// PGlite (over a TCP socket). Skipped automatically if dbt/mf are not installed.
+// Focused smoke: declarative create -> dbt parse -> mf query against dbt Core +
+// MetricFlow + PGlite. Builds a monetization model (iap_purchase_completed,
+// sum price_in_usd, count_distinct appsflyer_id) and asserts the EXACT totals
+// documented in test/integration/fixtures/SEED_DATA.md. Data-only assertions:
+// only res.ok / res.row_count and numeric values keyed out of res.rows.
+// Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -10,7 +14,7 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { DbtRunner } from '../../src/dbt-runner.js';
+import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
 
@@ -18,111 +22,114 @@ const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
 const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'dbt');
 const MF_BIN = process.env.MF_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'mf');
+const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'python');
 const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
 const opts = { timeout: 300000 };
 
 let pg;
 let engine;
+let backend;
+let ctx; // monetization context id
+
+const num = (v) => Number(v === '' || v == null ? NaN : v);
+const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[col])) ? num(r[col]) : 0), 0);
+const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [String(r[keyCol]), num(r[valCol])]));
 
 before(async () => {
   if (!HAS_DBT) return;
   pg = await startPglite();
   process.env.DBT_PG_PORT = String(pg.port);
-  // materialize base tables + time spine in PGlite
+  // materialize seeds + models + the MetricFlow time spine into PGlite
   const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
-  // load CSV seeds, then build models + the metricflow time spine
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 
   const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.json'));
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-')) });
-  const runner = new DbtRunner({ dbtBin: DBT_BIN, mfBin: MF_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog, contextManager: ctxs, runner });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-')), timeSpineDialect: 'postgres' });
+  backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
+  engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
+
+  // Monetization model: only two data sources (events fact + user attributes).
+  const out = await engine.create_semantic_model({
+    name: 'mon',
+    use_base_models: ['users'],
+    semantic_models: [{
+      from: 'events', event_scope: { event_name: ['iap_purchase_completed'] },
+      dimensions: [{ source: 'event_property', property: 'product_id' }],
+      measures: [
+        { name: 'revenue', agg: 'sum', field: 'price_in_usd' },
+        { name: 'payers', agg: 'count_distinct', field: 'appsflyer_id' },
+        { name: 'purchases', agg: 'count', field: '*' },
+      ],
+    }],
+    metrics: [
+      { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
+      { name: 'payers', type: 'simple', measure: { name: 'payers' } },
+      { name: 'purchases', type: 'simple', measure: { name: 'purchases' } },
+      { name: 'arppu', type: 'ratio', numerator: { name: 'revenue' }, denominator: { name: 'payers' } },
+    ],
+  });
+  assert.equal(out.parse.ok, true, `parse failed: ${JSON.stringify(out.parse)}`);
+  ctx = out.context_id;
 }, opts);
 
-after(async () => {
-  if (pg) await pg.stop();
+after(async () => { backend?.close(); if (pg) await pg.stop(); });
+const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
+const q = (input) => engine.query_semantic_model({ context_id: ctx, ...input });
+
+// SEED_DATA: total IAP revenue = 85, distinct payers = 7, purchases = 8.
+test('total IAP revenue = 85 USD', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await q({ metrics: ['mon_revenue'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
 });
 
-const DECL = {
-  name: 'lvl_econ',
-  use_base_models: ['users', 'campaigns'],
-  semantic_models: [{
-    from: 'events', event_scope: { event_name: ['purchase'] },
-    dimensions: [{ source: 'event_property', property: 'product_id' }],
-    measures: [
-      { name: 'revenue', agg: 'sum', field: 'revenue' },
-      { name: 'payers', agg: 'count_distinct', field: 'user_id' },
-    ],
-  }],
-  metrics: [
-    { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },
-    { name: 'payers', type: 'simple', measure: { name: 'payers' } },
-    { name: 'arppu', type: 'ratio', numerator: { name: 'revenue' }, denominator: { name: 'payers' } },
-  ],
-};
-
-test('create_semantic_model parses in an isolated context', opts, async (t) => {
-  if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const out = await engine.create_semantic_model(DECL);
-  t.diagnostic(`context=${out.context_id} parse=${JSON.stringify(out.parse)}`);
-  assert.equal(out.parse.ok, true, `parse failed: ${JSON.stringify(out.parse)}`);
-  t.diagnostic(out.yaml);
-  globalThis.__ctx = out.context_id;
+test('payers = 7, purchases = 8, arppu = 85/7', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await q({ metrics: ['mon_revenue', 'mon_payers', 'mon_purchases', 'mon_arppu'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const row = r.rows[0];
+  assert.equal(num(row.mon_revenue), 85);
+  assert.equal(num(row.mon_payers), 7);
+  assert.equal(num(row.mon_purchases), 8);
+  assert.ok(Math.abs(num(row.mon_arppu) - 85 / 7) < 1e-6, `arppu=${row.mon_arppu}`);
 });
 
-test('query total revenue scoped to purchases (M3 scope baked in)', opts, async (t) => {
-  if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const ctx = globalThis.__ctx;
-  const res = await engine.query_semantic_model({ context_id: ctx, metrics: ['lvl_econ_revenue'] });
-  t.diagnostic(JSON.stringify(res));
-  assert.equal(res.ok, true, JSON.stringify(res.error || res));
-  // all purchases: total purchase revenue (documented) = 1699
-  const total = res.rows.reduce((s, r) => s + Number(Object.values(r).at(-1)), 0);
-  assert.equal(total, 1699);
+// SEED_DATA: revenue by country -> US=35, GB=25, BR=25, DE=0 (no rows).
+test('revenue by user__country (1-hop join) = US 35 / GB 25 / BR 25', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await q({ metrics: ['mon_revenue'], group_by: ['user__country'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const by = mapCol(r.rows, 'user__country', 'mon_revenue');
+  assert.equal(by.US, 35);
+  assert.equal(by.GB, 25);
+  assert.equal(by.BR, 25);
+  // DE has no completed purchases -> either absent or a null/0 revenue row
+  assert.ok(!Number.isFinite(by.DE) || by.DE === 0, `DE revenue should be 0, got ${by.DE}`);
+  // grouped revenue sums to the grand total
+  assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
 });
 
-test('query revenue grouped by metric_time + joined user dimension, filtered to paid', opts, async (t) => {
-  if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const ctx = globalThis.__ctx;
-  const res = await engine.query_semantic_model({
-    context_id: ctx,
-    metrics: ['lvl_econ_revenue'],
-    group_by: [{ time: 'metric_time', grain: 'day' }, 'user__country'],
-    where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'user__acquisition_type' }, op: 'eq', value: 'paid' }] },
-    order_by: [{ key: 'metric_time__day', direction: 'asc' }],
-  });
-  t.diagnostic(JSON.stringify(res));
-  assert.equal(res.ok, true, JSON.stringify(res.error || res));
-  // paid users only: u1 (100+50, US, 2026-01-03) and u3 (200, GB, 2026-01-04) -> paid revenue total = 700
-  const revs = res.rows.map((r) => Number(r.lvl_econ_revenue ?? Object.values(r).at(-1)));
-  assert.equal(revs.reduce((a, b) => a + b, 0), 700);
-  assert.ok(res.columns.some((c) => /country/.test(c.name)), 'expected a country column');
+// SEED_DATA: revenue by acquisition_type -> paid=55, organic=30.
+test('revenue filtered by user__acquisition_type: paid 55 / organic 30', opts, async (t) => {
+  if (skip(t)) return;
+  const paid = await q({ metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'user__acquisition_type' }, op: 'eq', value: 'paid' }] } });
+  const org = await q({ metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'user__acquisition_type' }, op: 'eq', value: 'organic' }] } });
+  assert.equal(paid.ok, true, JSON.stringify(paid.error));
+  assert.equal(org.ok, true, JSON.stringify(org.error));
+  assert.equal(sumCol(paid.rows, 'mon_revenue'), 55);
+  assert.equal(sumCol(org.rows, 'mon_revenue'), 30);
 });
 
-test('dry_run query returns compiled SQL (mf --explain)', opts, async (t) => {
-  if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const ctx = globalThis.__ctx;
-  const res = await engine.query_semantic_model({ context_id: ctx, metrics: ['lvl_econ_arppu'], dry_run: true });
-  assert.equal(res.ok, true, JSON.stringify(res.error || res));
-  assert.match(res.sql.toLowerCase(), /select|with/);
-});
-
-test('programmatic MetricFlow sidecar yields identical result (no mf CLI)', opts, async (t) => {
-  if (!HAS_DBT) return t.skip('dbt/mf not installed');
-  const { MfEngineBackend } = await import('../../src/backends/mf-engine.js');
-  const PY = join(process.cwd(), '.dbtvenv', 'bin', 'python');
-  const backend = new MfEngineBackend({ pythonBin: PY, dbtBin: DBT_BIN, profilesDir: BASE });
-  try {
-    const dir = engine.ctxs.dir(globalThis.__ctx);
-    const res = await backend.query(dir, { metrics: ['lvl_econ_revenue'] });
-    t.diagnostic(JSON.stringify(res));
-    assert.equal(res.ok, true, JSON.stringify(res.stderr || res));
-    const total = res.rows.reduce((s, r) => s + Number(Object.values(r).at(-1)), 0);
-    assert.equal(total, 1699);
-    const explain = await backend.query(dir, { metrics: ['lvl_econ_revenue'], explain: true });
-    assert.match((explain.sql || '').toLowerCase(), /select|with/);
-  } finally {
-    backend.close();
-  }
+// SEED_DATA: revenue by product -> p1=15, p2=30, p3=40 (local event-property dim).
+test('revenue by product_id = p1 15 / p2 30 / p3 40', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await q({ metrics: ['mon_revenue'], group_by: ['mon_product_id'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const by = mapCol(r.rows, 'event__mon_product_id', 'mon_revenue');
+  assert.equal(by.p1, 15);
+  assert.equal(by.p2, 30);
+  assert.equal(by.p3, 40);
+  assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
 });

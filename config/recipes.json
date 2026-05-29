@@ -363,9 +363,9 @@
         ]
       },
       "example_queries": [
+        { "metrics": ["economy_net_coins"], "group_by": [{ "time": "metric_time", "grain": "day" }] },
         { "metrics": ["economy_coins_in", "economy_coins_out"] },
-        { "metrics": ["economy_coins_in"], "group_by": ["economy_source_type"] },
-        { "metrics": ["economy_net_coins"], "group_by": [{ "time": "metric_time", "grain": "day" }] }
+        { "metrics": ["economy_coins_in"], "group_by": ["economy_source_type"] }
       ],
       "notes": "net_coins is a derived metric (income - outcome). Source/sink breakdown via source_type."
     },

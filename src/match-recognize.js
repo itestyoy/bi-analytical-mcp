@@ -1,33 +1,39 @@
 // Sequenced-funnel / path engine: we generate the query OURSELVES from the
-// declared ordered steps (MetricFlow can't express row-pattern sequences).
+// declared ordered steps + metrics (MetricFlow can't express row-pattern
+// sequences). Target = BigQuery MATCH_RECOGNIZE (per docs); a Postgres
+// equivalent is also emitted purely so funnel NUMBERS can be asserted on data.
 //
-// Target = BigQuery MATCH_RECOGNIZE (per the docs). BigQuery specifics honored:
-//   - one row per match (NO `ONE ROW PER MATCH` / `AFTER MATCH SKIP` keywords);
-//   - MEASURES must be aliased; CLASSIFIER()/MATCH_NUMBER()/MATCH_ROW_NUMBER()
-//     are the special functions; final (one-row-per-match) semantics;
-//   - JSON access is JSON_VALUE(event_data, '$.key') (handled via dialect);
-//   - quantifiers + * ? ; every PATTERN symbol is DEFINEd (we don't rely on
-//     undefined-symbol or reluctant-quantifier behavior — a "gap" symbol is
-//     defined as "not a later step", so greedy * is safe).
+// Output is a SINGLE ROW of the declared metrics (same shape for both dialects).
+// Supported metric types (computed over each user's matched sequence):
+//   reached            { step }                  distinct users reaching a step
+//   completed          {}                          users reaching the last step
+//   conversion         { from, to }                reached(to) / reached(from)
+//   avg_seconds_between{ from, to }                avg seconds between two steps
+//   agg_at_step        { agg, property, step }     sum/avg/min/max of a property at a step
 //
-// We also emit a Postgres-equivalent (same params) ONLY so the funnel numbers
-// can be asserted on data in the PGlite test harness (BigQuery isn't available
-// there). Production target is BigQuery.
+// BigQuery specifics honored: JSON_VALUE, one-row-per-match (no ONE ROW PER
+// MATCH / AFTER MATCH SKIP keywords), nested PATTERN enforces step order, GAP =
+// any non-step row, CLASSIFIER/aggregates in MEASURES.
 
+import yaml from 'js-yaml';
 import { jsonExtract, sqlLiteral } from './dialect.js';
 
-/** SQL boolean for one step under a given dialect: event_name (+ property conds). */
-export function stepPredicate(catalog, step, dialect) {
+/** Dump a sequence semantic model (+metrics) to dbt YAML, ref('...') unquoted. */
+export function dumpSequenceYaml(sem) {
+  const body = yaml.dump({ semantic_models: sem.semantic_models, metrics: sem.metrics }, { lineWidth: 120, noRefs: true, quotingType: '"' });
+  return body.replace(/model: "(ref\('[^']+'\))"/g, 'model: $1');
+}
+
+export function stepPredicate(catalog, step, dialect, col) {
   const m = catalog.getModel(catalog.anchor);
-  const evCol = m.event_name.column;
+  const evCol = col ? `${col}.${m.event_name.column}` : m.event_name.column;
+  const dataCol = col ? `${col}.${catalog.eventDataColumn()}` : catalog.eventDataColumn();
   const names = step.event_name;
-  const ev = names.length === 1
-    ? `${evCol} = ${sqlLiteral(names[0])}`
-    : `${evCol} IN (${names.map(sqlLiteral).join(', ')})`;
+  const ev = names.length === 1 ? `${evCol} = ${sqlLiteral(names[0])}` : `${evCol} IN (${names.map(sqlLiteral).join(', ')})`;
   const props = (step.where || []).map((c) => {
     const p = (m.properties || {})[c.property];
     if (!p) throw new Error(`unknown event property in step: ${c.property}`);
-    const lhs = jsonExtract(dialect, catalog.eventDataColumn(), c.property, p.type);
+    const lhs = jsonExtract(dialect, dataCol, c.property, p.type);
     const arr = Array.isArray(c.value) ? c.value : [c.value];
     switch (c.op) {
       case 'eq': return `${lhs} = ${sqlLiteral(c.value)}`;
@@ -55,91 +61,138 @@ function resolve(catalog, spec, dialect) {
     ? (sessionCol || (() => { throw new Error('no session entity in catalog'); })())
     : userCol;
   const timeCol = m.time.column;
-  const mode = spec.mode || 'ordered'; // 'ordered' (gaps allowed) | 'strict' (adjacent)
-  const steps = spec.steps.map((s, i) => ({
-    name: s.name || `s${i + 1}`,
-    pred: stepPredicate(catalog, s, dialect),
-  }));
-  return { m, partCol, timeCol, mode, steps };
+  const mode = spec.mode || 'ordered';
+  const steps = spec.steps.map((s, i) => ({ idx: i + 1, name: s.name || `s${i + 1}` }));
+  const byName = new Map(steps.map((s) => [s.name, s]));
+  const stepIdx = (name) => {
+    const s = byName.get(name);
+    if (!s) throw new Error(`metric references unknown step '${name}'`);
+    return s.idx;
+  };
+
+  const metrics = (spec.metrics && spec.metrics.length)
+    ? spec.metrics
+    : steps.map((s) => ({ name: `reached_${s.name}`, type: 'reached', step: s.name }));
+
+  // resolve metrics + collect which property values must be captured per step
+  const propCaptures = []; // { id, idx, property, type }
+  const resolved = metrics.map((mt) => {
+    const out = { name: mt.name, type: mt.type };
+    if (mt.type === 'reached') out.idx = stepIdx(mt.step);
+    else if (mt.type === 'completed') out.idx = steps.length;
+    else if (mt.type === 'conversion') { out.from = stepIdx(mt.from); out.to = stepIdx(mt.to); }
+    else if (mt.type === 'avg_seconds_between') { out.from = stepIdx(mt.from); out.to = stepIdx(mt.to); }
+    else if (mt.type === 'agg_at_step') {
+      out.idx = stepIdx(mt.step); out.agg = (mt.agg || 'sum').toUpperCase();
+      const p = (m.properties || {})[mt.property];
+      if (!p) throw new Error(`agg_at_step: unknown property '${mt.property}'`);
+      out.capId = `pv_${mt.name}`;
+      propCaptures.push({ id: out.capId, idx: out.idx, property: mt.property, type: p.type });
+    } else throw new Error(`unknown sequence metric type: ${mt.type}`);
+    return out;
+  });
+
+  const stepPreds = (dialect, col) => spec.steps.map((s) => stepPredicate(catalog, s, dialect, col));
+  return { m, partCol, timeCol, mode, steps, metrics: resolved, propCaptures, stepPreds };
 }
 
-/**
- * BigQuery MATCH_RECOGNIZE: one row per matching user, CLASSIFIER() = furthest
- * step reached; grouped to users-per-furthest-step. reached_k = sum of users at
- * steps >= k (cumulative downstream).
- */
-export function renderBigQuery(catalog, spec) {
-  const { m, partCol, timeCol, mode, steps } = resolve(catalog, spec, 'bigquery');
-  const relation = spec.relation || `\`${m.dbt_model}\``;
-  const sym = steps.map((_, i) => `S${i + 1}`);
-  const withGap = mode !== 'strict';
+function nestedPattern(steps, withGap) {
+  const sym = steps.map((s) => `S${s.idx}`);
   const gap = withGap ? 'GAP* ' : '';
+  const nestFrom = (i) => (i === sym.length - 1 ? `${gap}${sym[i]}` : `${gap}${sym[i]} (${nestFrom(i + 1)})?`);
+  return sym.length > 1 ? `(${sym[0]} (${nestFrom(1)})?)` : `(${sym[0]})`;
+}
 
-  // NESTED optional pattern enforces ORDER: a later step is only reachable inside
-  // the match of the previous one, so skipping a step caps the furthest reached
-  // (e.g. S1 then S3 without S2 => furthest = S1, not S3). 'ordered' allows
-  // non-step rows between steps via a GAP filler; 'strict' requires adjacency.
-  const nestFrom = (i) => (i === sym.length - 1
-    ? `${gap}${sym[i]}`
-    : `${gap}${sym[i]} (${nestFrom(i + 1)})?`);
-  const pattern = sym.length > 1 ? `(${sym[0]} (${nestFrom(1)})?)` : `(${sym[0]})`;
+export function renderBigQuery(catalog, spec) {
+  const r = resolve(catalog, spec, 'bigquery');
+  const relation = spec.relation || `\`${r.m.dbt_model}\``;
+  const preds = r.stepPreds('bigquery', null); // for DEFINE we reference unqualified cols
+  const sym = r.steps.map((s) => `S${s.idx}`);
 
-  const defines = steps.map((s, i) => `    ${sym[i]} AS ${s.pred}`);
-  if (withGap) {
-    // GAP = a non-step row (filler), so greedy GAP* never swallows a step symbol.
-    const anyStep = steps.map((s) => `(${s.pred})`).join(' OR ');
-    defines.push(`    GAP AS NOT (${anyStep})`);
-  }
+  // MEASURES: step times t{idx} + captured property values pv_*
+  const measures = [
+    ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
+    ...r.propCaptures.map((c) => `    MAX(${jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
+  ].join(',\n');
 
-  const caseFurthest = steps.map((s, i) => `WHEN '${sym[i]}' THEN ${i + 1}`).join(' ');
-  return `-- BigQuery MATCH_RECOGNIZE: users by furthest funnel step reached
+  const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
+  if (r.mode !== 'strict') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
+
+  const outCols = r.metrics.map((mt) => `  ${bqMetricExpr(mt)} AS ${mt.name}`);
+  return `-- BigQuery MATCH_RECOGNIZE sequenced-funnel metrics
 SELECT
-  furthest_step_idx,
-  furthest_step_name,
-  COUNT(*) AS users
+${outCols.join(',\n')}
 FROM (
-  SELECT
-    *,
-    CASE classifier ${caseFurthest} END AS furthest_step_idx,
-    CASE classifier ${steps.map((s, i) => `WHEN '${sym[i]}' THEN '${s.name}'`).join(' ')} END AS furthest_step_name
-  FROM ${relation} MATCH_RECOGNIZE (
-    PARTITION BY ${partCol}
-    ORDER BY ${timeCol}
-    MEASURES CLASSIFIER() AS classifier
-    PATTERN ${pattern}
+  SELECT * FROM ${relation} MATCH_RECOGNIZE (
+    PARTITION BY ${r.partCol}
+    ORDER BY ${r.timeCol}
+    MEASURES
+${measures}
+    PATTERN ${nestedPattern(r.steps, r.mode !== 'strict')}
     DEFINE
 ${defines.join(',\n')}
   )
-)
-GROUP BY furthest_step_idx, furthest_step_name
-ORDER BY furthest_step_idx`;
+)`;
 }
 
-/**
- * Postgres equivalent (for data tests only). Single row with reached_<step>
- * counts. mode 'ordered' = sequential min-time chain; 'strict' = LEAD adjacency.
- */
+function bqMetricExpr(mt) {
+  switch (mt.type) {
+    case 'reached':
+    case 'completed': return `COUNTIF(t${mt.idx} IS NOT NULL)`;
+    case 'conversion': return `SAFE_DIVIDE(COUNTIF(t${mt.to} IS NOT NULL), COUNTIF(t${mt.from} IS NOT NULL))`;
+    case 'avg_seconds_between': return `AVG(TIMESTAMP_DIFF(t${mt.to}, t${mt.from}, SECOND))`;
+    case 'agg_at_step': return `${mt.agg}(${mt.capId})`;
+    default: throw new Error(`bq metric ${mt.type}`);
+  }
+}
+
 export function renderPostgres(catalog, spec) {
-  const { m, partCol, timeCol, mode, steps } = resolve(catalog, spec, 'postgres');
-  const relation = spec.relation || `"public"."${m.dbt_model}"`;
-  const evCols = steps.map((s, i) => `    (${s.pred}) AS is${i + 1}`).join(',\n');
-  let sql = `WITH ev AS (\n  SELECT ${partCol} AS pk, ${timeCol} AS ts,\n${evCols}\n  FROM ${relation}\n)`;
-
-  if (mode === 'strict') {
-    const idxExpr = steps.map((s, i) => `WHEN is${i + 1} THEN ${i + 1}`).join(' ');
-    sql += `,\nseq AS (\n  SELECT pk, ts, CASE ${idxExpr} ELSE 0 END AS step_idx\n  FROM ev WHERE ${steps.map((s, i) => `is${i + 1}`).join(' OR ')}\n),\nadj AS (\n  SELECT pk, step_idx, LEAD(step_idx) OVER (PARTITION BY pk ORDER BY ts) AS next_idx FROM seq\n)`;
-    const cols = steps.map((s, i) => i === 0
-      ? `  (SELECT count(DISTINCT pk) FROM adj WHERE step_idx = 1) AS reached_${s.name}`
-      : `  (SELECT count(DISTINCT pk) FROM adj WHERE step_idx = ${i} AND next_idx = ${i + 1}) AS reached_${s.name}`);
-    return `${sql}\nSELECT\n${cols.join(',\n')}`;
+  const r = resolve(catalog, spec, 'postgres');
+  const relation = spec.relation || `"public"."${r.m.dbt_model}"`;
+  const preds = r.stepPreds('postgres', null);
+  // captured property extractions live as columns in ev, carried by r{idx}
+  const capByIdx = new Map();
+  for (const c of r.propCaptures) {
+    (capByIdx.get(c.idx) || capByIdx.set(c.idx, []).get(c.idx)).push(c);
   }
+  const evExtra = r.propCaptures.map((c) => `    (${jsonExtract('postgres', catalog.eventDataColumn(), c.property, c.type)}) AS ${c.id}`);
+  const evCols = [
+    ...preds.map((p, i) => `    (${p}) AS is${i + 1}`),
+    ...evExtra,
+  ].join(',\n');
 
-  let ctes = `r1 AS (SELECT pk, min(ts) AS t1 FROM ev WHERE is1 GROUP BY pk)`;
-  for (let i = 2; i <= steps.length; i++) {
-    ctes += `,\nr${i} AS (SELECT e.pk, min(e.ts) AS t${i} FROM ev e JOIN r${i - 1} ON e.pk = r${i - 1}.pk WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} GROUP BY e.pk)`;
+  let sql = `WITH ev AS (\n  SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${relation}\n)`;
+
+  const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
+  const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
+  // r1: first matching row per partition; rk: first step-k row after r{k-1}
+  let ctes = `r1 AS (SELECT DISTINCT ON (pk) pk, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY pk, ts)`;
+  for (let i = 2; i <= r.steps.length; i++) {
+    ctes += `,\nr${i} AS (SELECT DISTINCT ON (e.pk) e.pk, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON e.pk = r${i - 1}.pk WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY e.pk, e.ts)`;
   }
-  const cols = steps.map((s, i) => `  (SELECT count(*) FROM r${i + 1}) AS reached_${s.name}`);
-  return `${sql},\n${ctes}\nSELECT\n${cols.join(',\n')}`;
+  // one row per user with t1..tn + captured pv
+  const joinSel = [
+    'r1.pk',
+    ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)),
+    ...r.propCaptures.map((c) => `r${c.idx}.${c.id}`),
+  ];
+  let joins = 'FROM r1';
+  for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (pk)`;
+  const perUser = `joined AS (SELECT ${joinSel.join(', ')} ${joins})`;
+
+  const outCols = r.metrics.map((mt) => `  ${pgMetricExpr(mt)} AS ${mt.name}`);
+  return `${sql},\n${ctes},\n${perUser}\nSELECT\n${outCols.join(',\n')}\nFROM joined`;
+}
+
+function pgMetricExpr(mt) {
+  switch (mt.type) {
+    case 'reached':
+    case 'completed': return `count(t${mt.idx})`;
+    case 'conversion': return `count(t${mt.to})::float / NULLIF(count(t${mt.from}), 0)`;
+    case 'avg_seconds_between': return `avg(EXTRACT(EPOCH FROM (t${mt.to} - t${mt.from})))`;
+    case 'agg_at_step': return `${mt.agg.toLowerCase()}(${mt.capId})`;
+    default: throw new Error(`pg metric ${mt.type}`);
+  }
 }
 
 export function renderSequence(catalog, spec) {
@@ -147,7 +200,148 @@ export function renderSequence(catalog, spec) {
   return {
     mode: r.mode,
     steps: r.steps.map((s) => s.name),
+    metrics: r.metrics.map((m) => m.name),
     sql_bigquery: renderBigQuery(catalog, spec),
     sql_postgres: renderPostgres(catalog, spec),
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MATERIALIZED model: one ROW PER USER (furthest step, step times, completion,
+// value-at-step), so a core MetricFlow semantic model can be built ON TOP of it
+// (count_distinct users by furthest step, conversion ratios, avg time-between,
+// JOINs to user attributes). This is the recommended pattern.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** User-attribute columns to carry into the view (so the SL needs no join). */
+function userAttrs(catalog) {
+  const u = catalog.models.users;
+  if (!u) return { key: null, attrs: [] };
+  const key = typeof u.primary_entity === 'object' ? u.primary_entity.column : 'appsflyer_id';
+  const attrs = Object.entries(u.dimensions || {}).map(([name, d]) => ({ name, time: d.type === 'time' }));
+  return { key, attrs };
+}
+
+/** Per-user sequence model SELECT (Postgres) — runnable on PGlite for data tests. */
+export function renderPerUserModelPostgres(catalog, spec) {
+  const r = resolve(catalog, spec, 'postgres');
+  const relation = spec.relation || `"public"."${r.m.dbt_model}"`;
+  const ua = userAttrs(catalog);
+  const usersRel = spec.usersRelation || '"public"."dim_users"';
+  const preds = r.stepPreds('postgres', null);
+  const capByIdx = new Map();
+  for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
+  const evExtra = r.propCaptures.map((c) => `    (${jsonExtract('postgres', catalog.eventDataColumn(), c.property, c.type)}) AS ${c.id}`);
+  const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
+  let sql = `WITH ev AS (\n  SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${relation}\n)`;
+  const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
+  const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
+  let ctes = `r1 AS (SELECT DISTINCT ON (pk) pk, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY pk, ts)`;
+  for (let i = 2; i <= r.steps.length; i++) {
+    ctes += `,\nr${i} AS (SELECT DISTINCT ON (e.pk) e.pk, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON e.pk = r${i - 1}.pk WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY e.pk, e.ts)`;
+  }
+  const sel = ['r1.pk', ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)), ...r.propCaptures.map((c) => `r${c.idx}.${c.id}`)];
+  let joins = 'FROM r1';
+  for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (pk)`;
+  // per-user output columns (already qualified with j.; aliases left untouched)
+  const furthestCase = r.steps.slice().reverse().map((s) => `WHEN j.t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
+  const out = [
+    '  j.pk AS appsflyer_id',
+    '  , j.t1 AS first_seen_at',
+    `  , CASE ${furthestCase} END AS furthest_step_name`,
+    `  , (j.t${r.steps.length} IS NOT NULL) AS completed`,
+    ...r.steps.map((s) => `  , (j.t${s.idx} IS NOT NULL) AS reached_${s.name}`),
+    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `  , EXTRACT(EPOCH FROM (j.t${m.to} - j.t${m.from})) AS secs_${m.name}`),
+    ...r.propCaptures.map((c) => `  , j.${c.id}`),
+    ...ua.attrs.map((a) => `  , u.${a.name}`),
+  ];
+  const userJoin = ua.key ? ` LEFT JOIN ${usersRel} u ON u.${ua.key} = j.pk` : '';
+  return `${sql},\n${ctes},\njoined AS (SELECT ${sel.join(', ')} ${joins})\nSELECT\n${out.join('\n')}\nFROM joined j${userJoin}`;
+}
+
+/** Per-user sequence model SELECT (BigQuery MATCH_RECOGNIZE) — production target. */
+export function renderPerUserModelBigQuery(catalog, spec) {
+  const r = resolve(catalog, spec, 'bigquery');
+  const relation = spec.relation || `\`${r.m.dbt_model}\``;
+  const preds = r.stepPreds('bigquery', null);
+  const sym = r.steps.map((s) => `S${s.idx}`);
+  const measures = [
+    '    CLASSIFIER() AS furthest_symbol',
+    ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
+    ...r.propCaptures.map((c) => `    MAX(${jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
+  ].join(',\n');
+  const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
+  if (r.mode !== 'strict') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
+  const nameCase = r.steps.map((s) => `WHEN 'S${s.idx}' THEN '${s.name}'`).join(' ');
+  const reached = r.steps.map((s) => `    t${s.idx} IS NOT NULL AS reached_${s.name}`);
+  const secs = r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `    TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`);
+  const ua = userAttrs(catalog);
+  const usersRel = spec.usersRelation || '`dim_users`';
+  const mr = `  SELECT
+    ${r.partCol} AS appsflyer_id,
+    t1 AS first_seen_at,
+    CASE furthest_symbol ${nameCase} END AS furthest_step_name,
+    t${r.steps.length} IS NOT NULL AS completed,
+${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')}
+  FROM ${relation} MATCH_RECOGNIZE (
+    PARTITION BY ${r.partCol}
+    ORDER BY ${r.timeCol}
+    MEASURES
+${measures}
+    PATTERN ${nestedPattern(r.steps, r.mode !== 'strict')}
+    DEFINE
+${defines.join(',\n')}
+  )`;
+  if (!ua.key) return mr;
+  const attrCols = ua.attrs.map((a) => `  u.${a.name}`).join(',\n');
+  return `SELECT\n  mr.*,\n${attrCols}\nFROM (\n${mr}\n) mr\nLEFT JOIN ${usersRel} u ON u.${ua.key} = mr.appsflyer_id`;
+}
+
+/**
+ * Core semantic-model declaration (measures/dimensions/metrics) OVER the
+ * materialized per-user model `modelName`. user is the primary entity (one row
+ * per user) → joins to dim_users; furthest_step_name is a dimension.
+ */
+export function sequenceSemanticModel(catalog, spec, modelName) {
+  const r = resolve(catalog, spec, 'postgres');
+  const measures = [
+    { name: 'users', agg: 'count', expr: '1' },
+    ...r.steps.map((s) => ({ name: `reached_${s.name}`, agg: 'sum_boolean', expr: `reached_${s.name}` })),
+    { name: 'completed', agg: 'sum_boolean', expr: 'completed' },
+    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => ({ name: m.name, agg: 'average', expr: `secs_${m.name}` })),
+    ...r.metrics.filter((m) => m.type === 'agg_at_step').map((m) => ({ name: m.name, agg: m.agg.toLowerCase(), expr: m.capId })),
+  ];
+  const dedupMeasures = [...new Map(measures.map((mm) => [mm.name, mm])).values()];
+  // user attributes are carried as columns in the view -> exposed as base
+  // dimensions (no external join needed; SL sees exactly the view's columns).
+  const ua = userAttrs(catalog);
+  const userDims = ua.attrs.map((a) => (a.time
+    ? { name: a.name, type: 'time', type_params: { time_granularity: 'day' } }
+    : { name: a.name, type: 'categorical' }));
+  const dims = [
+    { name: 'first_seen', type: 'time', type_params: { time_granularity: 'day' }, expr: 'first_seen_at' },
+    { name: 'furthest_step_name', type: 'categorical' },
+    ...userDims,
+  ];
+  const sm = {
+    name: modelName,
+    model: `ref('${modelName}')`,
+    defaults: { agg_time_dimension: 'first_seen' },
+    entities: [{ name: 'user', type: 'primary', expr: 'appsflyer_id' }],
+    dimensions: dims,
+    measures: dedupMeasures.map((mm) => ({ name: mm.name, agg: mm.agg, expr: mm.expr, agg_time_dimension: 'first_seen' })),
+  };
+  const dimensionNames = dims.filter((d) => d.name !== 'first_seen').map((d) => d.name);
+  // metrics: simple per measure + ratios for declared conversions
+  const metricNames = [];
+  const metrics = [];
+  const addSimple = (name) => { if (!metricNames.includes(name)) { metrics.push({ name, label: name, type: 'simple', type_params: { measure: { name } } }); metricNames.push(name); } };
+  for (const mm of dedupMeasures) addSimple(mm.name);
+  for (const m of r.metrics) {
+    if (m.type === 'conversion') {
+      metrics.push({ name: m.name, label: m.name, type: 'ratio', type_params: { numerator: { name: `reached_${spec.steps[m.to - 1].name}` }, denominator: { name: `reached_${spec.steps[m.from - 1].name}` } } });
+      metricNames.push(m.name);
+    }
+  }
+  return { semantic_models: [sm], metrics, metricNames, dimensionNames, groupable: ['metric_time', ...dimensionNames] };
 }

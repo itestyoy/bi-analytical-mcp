@@ -35,6 +35,14 @@ export class DbtRunner {
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, 'target', 'semantic_manifest.json')) };
   }
 
+  /** Build a model (e.g. a generated MATCH_RECOGNIZE view) via `dbt run --select`. */
+  async run(projectDir, select) {
+    const args = ['run'];
+    if (select) args.push('--select', select);
+    const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
+    return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
+  }
+
   async validate(projectDir) {
     const r = await run(this.mfBin, ['validate-configs'], { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };

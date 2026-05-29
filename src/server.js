@@ -16,6 +16,9 @@ import { Engine } from './engine.js';
 const TOOL_DESCRIPTIONS = {
   describe_catalog: 'Return the registry: models, events, event properties (with types), join-reachable group-by paths, and allowed enums. Call BEFORE creating a model.',
   create_semantic_model: 'Declaratively create/augment semantic models for a task (one SM per table) and metrics, in an isolated context. Omit context_id for a new task; pass it to extend the same context. Renders YAML + dbt parse.',
+  register_native_model: 'Build a derived dbt model from a sequence spec (MATCH_RECOGNIZE funnel/path, target BigQuery) materialized as a view, and a semantic model on top. Kept separate from the semantic query; after registering, query its metrics/dimensions via query_semantic_model.',
+  update_native_model: 'Update a registered native (MATCH_RECOGNIZE) model in place: regenerate the view + semantic model from a new sequence spec and rebuild (dbt run + parse).',
+  delete_native_model: 'Delete a registered native model: remove its generated view + semantic model from the context and re-parse.',
   query_semantic_model: 'Run a query (mf query, dbt Core) against a context. metrics + group_by + where are validated against the context.',
   update_semantic_model: 'Add/remove task measures, dimensions or metrics for a table SM within a context; re-parses.',
   delete_semantic_model: 'Remove a table SM task additions (and dependent metrics with cascade) from a context.',
@@ -26,7 +29,7 @@ const TOOL_DESCRIPTIONS = {
   get_recipe: 'Get a recipe by id: a ready create_semantic_model payload + example queries + notes for a task type.',
 };
 
-const ASYNC_TOOLS = new Set(['create_semantic_model', 'query_semantic_model', 'update_semantic_model', 'delete_semantic_model']);
+const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'update_semantic_model', 'delete_semantic_model']);
 
 export function buildToolDefs(engine) {
   return Object.entries(engine.schemas).map(([name, inputSchema]) => ({

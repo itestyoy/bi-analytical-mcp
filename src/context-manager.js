@@ -178,6 +178,21 @@ export class ContextManager {
     return file;
   }
 
+  /** Write a generated dbt model (.sql) into the context overlay. */
+  writeModel(id, name, sql) {
+    mkdirSync(this.generatedDir(id), { recursive: true });
+    const file = join(this.generatedDir(id), `${name}.sql`);
+    writeFileSync(file, sql);
+    return file;
+  }
+
+  /** Remove a generated file (model or yaml) from the context overlay. */
+  removeGeneratedFile(id, filename) {
+    const file = join(this.generatedDir(id), filename);
+    if (existsSync(file)) rmSync(file, { force: true });
+    return file;
+  }
+
   touch(id) {
     const c = this.get(id);
     c.lastUsedAt = Date.now();

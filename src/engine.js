@@ -8,7 +8,7 @@ import { renderContext } from './yaml-render.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
-import { renderSequence } from './match-recognize.js';
+import { renderPerUserModelPostgres, renderPerUserModelBigQuery, sequenceSemanticModel, dumpSequenceYaml } from './match-recognize.js';
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner }) {
@@ -116,33 +116,101 @@ export class Engine {
     }
   }
 
+  /**
+   * Register a derived dbt model (e.g. a MATCH_RECOGNIZE sequence VIEW) and a
+   * semantic model on top of it. Kept SEPARATE from create_semantic_model so the
+   * row-pattern SQL and MetricFlow are not mixed. After registration the model's
+   * metrics/dimensions are queryable via query_semantic_model like any other.
+   */
+  /** Generate the view SQL + semantic model for a sequence spec. */
+  _nativeArtifacts(input) {
+    const modelName = `seq_${input.name}`;
+    const dialect = this.catalog.dialect;
+    const eventsModel = this.catalog.getModel(this.catalog.anchor).dbt_model;
+    const usersModel = this.catalog.models.users?.dbt_model;
+    const seqSpec = { ...input.sequence, relation: `{{ ref('${eventsModel}') }}`, ...(usersModel ? { usersRelation: `{{ ref('${usersModel}') }}` } : {}) };
+    const modelSql = dialect === 'bigquery' ? renderPerUserModelBigQuery(this.catalog, seqSpec) : renderPerUserModelPostgres(this.catalog, seqSpec);
+    const bqSql = dialect === 'bigquery' ? modelSql : renderPerUserModelBigQuery(this.catalog, seqSpec);
+    const sem = sequenceSemanticModel(this.catalog, seqSpec, modelName);
+    return { modelName, dialect, modelSql, bqSql, sem };
+  }
+
+  /** Write the view + semantic model into the context overlay, build + parse. */
+  async _materializeNative(input, ctx, art) {
+    const materialized = input.materialized || 'view';
+    ctx.state.engine = 'match_recognize';
+    ctx.state.model = art.modelName;
+    ctx.state.seqMetrics = art.sem.metricNames;
+    ctx.state.seqGroupable = art.sem.dimensionNames;
+    if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
+    this.ctxs.writeModel(ctx.id, art.modelName, `{{ config(materialized='${materialized}') }}\n${art.modelSql}\n`);
+    this.ctxs.writeYaml(ctx.id, dumpSequenceYaml(art.sem));
+    this.ctxs.touch(ctx.id);
+    let build = { ok: true, skipped: 'no runner' };
+    if (this.runner) {
+      const r = await this.runner.run(this.ctxs.dir(ctx.id), art.modelName);
+      if (!r.ok) return { ok: false, build: { ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) } } };
+      const p = await this.runner.parse(this.ctxs.dir(ctx.id));
+      build = p.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(p.stdout, p.stderr) } };
+    }
+    return { ok: build.ok !== false, build, materialized };
+  }
+
+  async register_native_model(input) {
+    this._validate('register_native_model', input);
+    const art = this._nativeArtifacts(input);
+    if (input.dry_run) {
+      return { kind: 'match_recognize', dry_run: true, model: art.modelName, materialized: input.materialized || 'view', dialect: art.dialect, model_sql: art.modelSql, model_sql_bigquery: art.bqSql, semantic_yaml: dumpSequenceYaml(art.sem), metrics: art.sem.metricNames, dimensions: art.sem.dimensionNames };
+    }
+    const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
+    const m = await this._materializeNative(input, ctx, art);
+    if (!m.ok) return { context_id: ctx.id, kind: 'match_recognize', ok: false, error: m.build.error };
+    return {
+      context_id: ctx.id,
+      kind: 'match_recognize',
+      model: art.modelName,
+      materialized: m.materialized,
+      dialect: art.dialect,
+      registered: { model: art.modelName, metrics: art.sem.metricNames, dimensions: art.sem.dimensionNames },
+      metrics: art.sem.metricNames,
+      groupable: art.sem.dimensionNames,
+      model_sql_bigquery: art.bqSql,
+      build: m.build,
+      assumptions: [
+        `MATCH_RECOGNIZE registered as a ${m.materialized} model (${art.modelName}); a semantic model is built on it.`,
+        'It now behaves like a base model: query its metrics/dimensions via query_semantic_model.',
+      ],
+      warnings: [],
+    };
+  }
+
+  /** Update a registered native model in place (re-generate + rebuild the view). */
+  async update_native_model(input) {
+    this._validate('update_native_model', input);
+    const ctx = this.ctxs.get(input.context_id);
+    const art = this._nativeArtifacts(input);
+    const m = await this._materializeNative(input, ctx, art);
+    if (!m.ok) return { context_id: ctx.id, kind: 'match_recognize', ok: false, error: m.build.error };
+    return { context_id: ctx.id, kind: 'match_recognize', model: art.modelName, materialized: m.materialized, metrics: art.sem.metricNames, groupable: art.sem.dimensionNames, build: m.build, warnings: [] };
+  }
+
+  /** Delete a registered native model: remove its files + state and re-parse. */
+  async delete_native_model(input) {
+    this._validate('delete_native_model', input);
+    const ctx = this.ctxs.get(input.context_id);
+    if (ctx.state.engine !== 'match_recognize') return { context_id: ctx.id, removed: false, reason: 'no native model registered in this context' };
+    const model = ctx.state.model;
+    this.ctxs.removeGeneratedFile(ctx.id, `${model}.sql`);
+    this.ctxs.removeGeneratedFile(ctx.id, 'context.yml');
+    delete ctx.state.engine; delete ctx.state.model; delete ctx.state.seqMetrics; delete ctx.state.seqGroupable;
+    ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
+    this.ctxs.touch(ctx.id);
+    const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, skipped: 'no runner' };
+    return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: 'model definition removed; the warehouse view may persist until the context is dropped (drop_context) or the warehouse cleans ephemeral objects' };
+  }
+
   async create_semantic_model(input) {
     this._validate('create_semantic_model', input);
-
-    if (input.engine === 'match_recognize') {
-      const seq = renderSequence(this.catalog, input.sequence); // throws on bad spec
-      const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
-      ctx.state.engine = 'match_recognize';
-      ctx.state.sequence = seq;
-      (ctx.state.tasks ||= []).push(input.name);
-      this.ctxs.touch(ctx.id);
-      return {
-        context_id: ctx.id,
-        task: input.name,
-        engine: 'match_recognize',
-        mode: seq.mode,
-        steps: seq.steps,
-        dialect: this.catalog.dialect,
-        sql: this.catalog.dialect === 'bigquery' ? seq.sql_bigquery : seq.sql_postgres,
-        sql_bigquery: seq.sql_bigquery,
-        assumptions: [
-          'engine=match_recognize: server-generated row-pattern SQL (NOT MetricFlow); target BigQuery.',
-          'output is users per furthest_step; reached(step k) = sum of users at furthest_step_idx >= k.',
-        ],
-        warnings: [],
-      };
-    }
-
     const compiled = this._compile(input);
 
     if (input.dry_run) {
@@ -257,15 +325,30 @@ export class Engine {
     this._validate('query_semantic_model', input);
     const ctx = this.ctxs.get(input.context_id);
 
-    // match_recognize contexts run server-generated row-pattern SQL (not MetricFlow)
+    // match_recognize contexts are a core semantic model OVER a generated VIEW;
+    // query them through MetricFlow (full metric/join power).
     if (ctx.state.engine === 'match_recognize') {
-      const seq = ctx.state.sequence;
-      const sql = this.catalog.dialect === 'bigquery' ? seq.sql_bigquery : seq.sql_postgres;
-      if (input.dry_run || !this.sqlRunner) {
-        return { ok: true, engine: 'match_recognize', dry_run: true, sql, sql_bigquery: seq.sql_bigquery };
+      const known = new Set(ctx.state.seqMetrics);
+      for (const m of input.metrics || []) if (!known.has(m)) throw new ToolError(`unknown metric in context: ${m}`, { stage: 'validate', field: m });
+      const reachable = new Set(ctx.state.seqGroupable);
+      const groupBy = [];
+      for (const g of input.group_by || []) {
+        if (typeof g === 'object' && g.time === 'metric_time') groupBy.push(`metric_time__${g.grain || 'day'}`);
+        else if (typeof g === 'string') {
+          if (!reachable.has(g)) throw new ToolError(`group_by not available on this view: ${g}. Available: ${[...reachable].join(', ')}`, { stage: 'validate', field: g });
+          // all are local dims on the seq SM (primary entity 'user') -> user__<dim>
+          groupBy.push(`user__${g}`);
+        }
       }
-      const res = await this.sqlRunner(sql);
-      return { ok: true, engine: 'match_recognize', command: 'sqlRunner', sql, columns: res.columns || [], rows: res.rows || [], row_count: (res.rows || []).length };
+      if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
+      const res = await this.runner.query(this.ctxs.dir(ctx.id), {
+        metrics: input.metrics, groupBy,
+        startTime: input.time_range?.start, endTime: input.time_range?.end,
+        limit: (input.limit ?? 1000), explain: !!input.dry_run,
+      });
+      if (!res.ok) return { ok: false, engine: 'match_recognize', command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
+      if (input.dry_run) return { ok: true, engine: 'match_recognize', dry_run: true, sql: res.sql };
+      return { ok: true, engine: 'match_recognize', command: res.command, columns: res.columns, rows: res.rows, row_count: res.rows.length };
     }
 
     if (!input.metrics?.length) throw new ToolError('metrics is required for core (MetricFlow) queries', { stage: 'validate' });

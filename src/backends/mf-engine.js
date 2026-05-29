@@ -60,6 +60,10 @@ export class MfEngineBackend {
     return this._dbt.parse(projectDir);
   }
 
+  async run(projectDir, select) {
+    return this._dbt.run(projectDir, select);
+  }
+
   async query(projectDir, opts) {
     const base = {
       project_dir: projectDir,

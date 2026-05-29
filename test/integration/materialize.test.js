@@ -124,3 +124,24 @@ test('transform: compress/re-slice the materialized result table (where/group_by
   assert.ok(big.rows.every((r) => num(r.rev) >= 25)); // HAVING applied
   assert.ok(big.rows.reduce((s, r) => s + num(r.rev), 0) <= 85);
 });
+
+test('materialized paging: limit/offset + has_more reconstruct the full stored result', opts, async (t) => {
+  if (skip(t)) return;
+  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: ['user__country'], materialize: true });
+  assert.equal(m.status, 'ready', JSON.stringify(m));
+  const full = await engine.get_query_result({ context_id: ctxId, table: m.table, limit: 1000 });
+  const total = full.row_count;
+  assert.ok(total >= 2, `expected multiple country rows, got ${total}`);
+  // page through in chunks of 2; has_more drives the loop and must terminate.
+  const collected = [];
+  let offset = 0; let last; let guard = 0;
+  do {
+    last = await engine.get_query_result({ context_id: ctxId, table: m.table, limit: 2, offset });
+    assert.equal(last.ok, true, JSON.stringify(last.error));
+    collected.push(...last.rows);
+    offset += 2;
+  } while (last.page.has_more && guard++ < 20);
+  assert.equal(last.page.has_more, false);                 // terminates on the last page
+  assert.equal(collected.length, total);                   // pages cover every row exactly
+  assert.equal(collected.reduce((s, x) => s + num(x.mon_revenue), 0), 85);
+});

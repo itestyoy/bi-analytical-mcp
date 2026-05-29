@@ -1,6 +1,6 @@
 // Streamable-HTTP MCP server exposing the declarative dbt Semantic Layer tools.
 
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { join } from 'node:path';
 import express from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -93,6 +93,14 @@ export function makeMcpServer(engine) {
   return server;
 }
 
+/** Constant-time string compare (avoids timing leaks on the auth token). */
+function safeEqual(a, b) {
+  const ab = Buffer.from(String(a));
+  const bb = Buffer.from(String(b));
+  if (ab.length !== bb.length) return false;
+  return timingSafeEqual(ab, bb);
+}
+
 function errorResult(message, stage, field) {
   const payload = { ok: false, error: { stage: stage || 'error', message, ...(field ? { field } : {}) } };
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
@@ -127,8 +135,9 @@ export function createApp(engine) {
   // (There is otherwise NO auth — bind to localhost or front with an auth proxy.)
   const authToken = process.env.MCP_AUTH_TOKEN;
   if (authToken) {
+    const expected = `Bearer ${authToken}`;
     app.use('/mcp', (req, res, next) => {
-      if (req.headers.authorization !== `Bearer ${authToken}`) {
+      if (!safeEqual(req.headers.authorization || '', expected)) {
         res.status(401).json({ jsonrpc: '2.0', error: { code: -32001, message: 'unauthorized' }, id: null });
         return;
       }
@@ -175,5 +184,27 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const app = createApp(engine);
   const port = Number(process.env.PORT || 3000);
   const host = process.env.HOST || '127.0.0.1'; // localhost by default (no built-in auth)
-  app.listen(port, host, () => console.log(`dbt-semantic-mcp streamable-HTTP on ${host}:${port}/mcp`));
+  const httpServer = app.listen(port, host, () => console.log(`dbt-semantic-mcp streamable-HTTP on ${host}:${port}/mcp`));
+
+  // Optional periodic reclamation of idle contexts (bounds workspace growth).
+  const ttlMs = Number(process.env.CONTEXT_TTL_MS) || 0;
+  let gcTimer;
+  if (ttlMs > 0) {
+    gcTimer = setInterval(() => { try { engine.gc(ttlMs); } catch { /* noop */ } }, Math.min(ttlMs, 300000));
+    gcTimer.unref?.();
+  }
+
+  // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.
+  let shuttingDown = false;
+  const shutdown = (sig) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`received ${sig}, shutting down`);
+    if (gcTimer) clearInterval(gcTimer);
+    httpServer.close(() => {});
+    try { engine.close(); } catch { /* noop */ }
+    setTimeout(() => process.exit(0), 200).unref?.();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }

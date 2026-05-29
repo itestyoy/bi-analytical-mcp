@@ -66,4 +66,10 @@ export class JobManager {
   list() {
     return [...this.jobs.values()].map((j) => ({ query_id: j.id, status: j.status, table: j.table, context_id: j.contextId, age_ms: Date.now() - j.startedAt }));
   }
+
+  close() {
+    try { this.db?.close(); } catch { /* already closed */ }
+    this.db = null;
+    this._upsert = null;
+  }
 }

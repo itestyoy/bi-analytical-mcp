@@ -85,19 +85,22 @@ and the integration tests.
 
 Consolidated from the code-quality and production-readiness audits. Severity is the auditors'.
 
-### Production-readiness risks
-- **[CRITICAL] The production query runner is untested.** Production wires the `mf`/`dbt` **CLI runner** (`src/server.js` `makeEngine` → `DbtRunner`), but every integration test injects the **Python sidecar** (`MfEngineBackend`). The two have divergent error/result contracts (e.g. CLI extracts SQL by scanning stdout for the first `select`/`with`; the sidecar returns structured SQL). The materialize flow writes that scraped SQL verbatim into a dbt model — fragile and unexercised. → Run the suite against `DbtRunner` too, or default production to the tested sidecar.
-- **[CRITICAL — verify] BigQuery `MATCH_RECOGNIZE` path has zero test coverage.** The native funnel's BigQuery SQL is only exercised via the Postgres equivalent in tests. One audit flagged that **GoogleSQL may not support `MATCH_RECOGNIZE` at all** — this must be validated on a live BigQuery instance before relying on native funnels in production; if unsupported, provide a window-function / ordered self-join fallback (the same logical shape the Postgres path already produces).
-- **[unverified on BigQuery/Snowflake]** `jsonExtract` (`JSON_VALUE`/`CAST … AS INT64`; Snowflake `col:key::type`) and the time-spine SQL (`generate_date_array` / `seq4()`) are code-complete but only the Postgres branches are executed by tests.
-- **[HIGH] No process lifecycle management.** No `SIGTERM`/`SIGINT` handlers: the warm sidecar and SQLite are not closed, in-flight detached builds are abandoned. (Startup reconciliation flips orphaned `running` jobs → `error`, which is correct.)
-- **[HIGH] No context GC / orphan reclamation.** Contexts have `createdAt`/`lastUsedAt` but no TTL/idle eviction; each `create()` deep-copies the base project, so workspace and `qr_*` result tables grow unbounded under sustained use. → Add lease-aware, age-based GC + a `qr_*` sweeper.
+### ✅ Fixed in the post-audit pass (proven by tests)
+- **Funnel `where`/`order_by` now applied** (was silently dropped) — `match_recognize` queries translate `where` to the shared-entity paths and pass `order_by` to MetricFlow. Proven: `match-recognize.test.js` "where on a view dim is applied" (furthest=tut3 → 3 users) and "order_by is applied".
+- **Deterministic paging + meaningful `has_more`** — core path over-fetches one row so `has_more` is real; materialized reads page in JS over a single read (no non-deterministic SQL `OFFSET`) and return `page.has_more`. Proven: `materialize.test.js` "materialized paging … reconstruct the full stored result".
+- **Process lifecycle** — `SIGTERM`/`SIGINT` handlers close the warm sidecar + SQLite (`Engine.close`/`JobManager.close`); per-query `mf` temp dirs are removed in a `finally`.
+- **Context GC** — `ContextManager.gc(maxIdleMs)` reclaims idle, **lease-free** contexts; optional periodic sweep via `CONTEXT_TTL_MS`.
+- **Smaller fixes** — constant-time auth-token compare (`crypto.timingSafeEqual`); `update_semantic_model` no longer mutates state/files on `dry_run`; `get_query_result` requires `context_id` only with `table` (poll-by-`query_id` needs no context).
 
-### Code-quality bugs
-- **[HIGH] The funnel (`match_recognize`) query path silently drops `where` and `order_by`.** Unlike the core path, the native-model branch builds query options without translating `input.where`/`input.order_by` — a caller filtering a funnel query gets unfiltered results with no error. → Translate/validate `where` and build `orderBy` in that branch.
-- **[HIGH] `offset` paging and `has_more` are unreliable.** Offset queries lack a deterministic `ORDER BY` (materialized reads, and the over-fetch on the core path), and `has_more` is computed after truncation. → Thread a stable order and compute `has_more` before truncation; surface truncation on materialized reads.
-- **[MEDIUM]** `describe_context` for a native model over-states filtering/ordering and lists bare attribute names while the query path qualifies them as `entity__attr` — reconcile once `where`/`order_by` are wired.
-- **[MEDIUM]** `get_query_result` requires `context_id` even for `query_id`-only polling (it's then ignored). → Make `context_id` required only with `table`.
-- **[LOW]** Non-constant-time auth-token compare; no response-size cap; per-query `mf` temp dirs are never deleted; unknown logical types fall through `jsonExtract` uncast; some dead/unused code (`MfEngineBackend` not wired in production, single-row `renderBigQuery`/`renderPostgres`, `DbtRunner.validate`); `update_semantic_model` writes files even on `dry_run`.
+### Still open — production-readiness
+- **[CRITICAL] The production query runner is untested.** Production wires the `mf`/`dbt` **CLI runner** (`src/server.js` `makeEngine` → `DbtRunner`), but every integration test injects the **Python sidecar** (`MfEngineBackend`). The two have divergent error/result contracts (the CLI extracts SQL by scanning stdout; the sidecar returns structured SQL, which the materialize flow writes verbatim into a dbt model). → Run the suite against `DbtRunner` too, or default production to the tested sidecar.
+- **[CRITICAL — verify] BigQuery `MATCH_RECOGNIZE` path has zero test coverage.** The native funnel's BigQuery SQL is only exercised via the Postgres equivalent in tests. One audit flagged that **GoogleSQL may not support `MATCH_RECOGNIZE`** — validate on a live BigQuery instance before relying on native funnels in production; if unsupported, add a window-function / ordered self-join fallback (the same logical shape the Postgres path already produces).
+- **[unverified on BigQuery/Snowflake]** `jsonExtract` (`JSON_VALUE`/`CAST … AS INT64`; Snowflake `col:key::type`) and the time-spine SQL (`generate_date_array` / `seq4()`) are code-complete but only the Postgres branches are executed by tests.
+- **[MEDIUM] No warehouse `qr_*` result-table sweeper.** Context overlay GC now bounds the workspace, but materialized result tables in the warehouse are still only reclaimed when their context is dropped. → Add a sweeper for completed/aged jobs.
+
+### Still open — smaller
+- **[MEDIUM]** `describe_context` for a native model still lists bare attribute names while the query path qualifies them as `entity__attr` — cosmetic reconcile.
+- **[LOW]** No response-size cap (rows are bounded by `limit ≤ 100000` only); unknown logical types fall through `jsonExtract` uncast (validate types at catalog load); some dead/unused code (`MfEngineBackend` is wired in tests but not in `makeEngine`; single-row `renderBigQuery`/`renderPostgres`/`renderSequence`; `DbtRunner.validate`).
 
 ### What is solid (all three audits agreed)
 - **Injection defense is consistent and layered** — typed predicate trees, strict identifier/path/JSON-key regexes, `sqlLiteral` everywhere, catalog-enum-bounded schemas, and a safe-arithmetic allowlist for `derived` metrics. No injection or path-traversal holes found (injection/escaping is even proven on data in the materialize suite).
@@ -113,9 +116,8 @@ Consolidated from the code-quality and production-readiness audits. Severity is 
 
 The semantic-layer/MetricFlow integration, context isolation, materialization/job machinery, and injection safety are well-built and **proven on data** for the full set of two-source mobile-game analytics. The dominant gap is the distance between *what is tested* (Postgres via the sidecar runner) and *what ships* (BigQuery via the CLI runner): both the production runner and the BigQuery funnel SQL are currently unexercised.
 
-**Top recommendations before production:**
+**Top recommendations before production** (the funnel `where`/`order_by`, deterministic paging, lifecycle handlers, and context GC from the original list are now done — see §4):
 1. Validate the whole stack against a real BigQuery instance — especially `register_native_model` (the `MATCH_RECOGNIZE` SQL), `jsonExtract`, the time spine, and metric_time/cumulative/conversion metrics.
 2. Test the production CLI runner (or default production to the already-tested sidecar).
 3. Provide a BigQuery funnel that does not depend on `MATCH_RECOGNIZE` if it proves unsupported.
-4. Wire `where`/`order_by` into the funnel query path; make paging deterministic.
-5. Add process lifecycle handlers (SIGTERM/SIGINT) and lease-aware context/result-table GC.
+4. Add a warehouse `qr_*` result-table sweeper to complement the new context GC.

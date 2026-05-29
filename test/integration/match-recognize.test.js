@@ -84,6 +84,31 @@ test('MR view: users by furthest_step_name partition to 12 (local dim on the vie
   assert.equal(by.tut3, 3); // only u1,u2,u3 reach the last step
 });
 
+test('MR query: where on a view dim is applied (not dropped) — furthest=tut3 -> 3 users', opts, async (t) => {
+  if (skip(t)) return;
+  // Regression for the funnel path silently dropping `where`: with the filter
+  // applied we get only the tut3 partition (3 users); without it we'd get all 12.
+  const r = await engine.query_semantic_model({
+    context_id: globalThis.__mrctx, metrics: ['users'], group_by: ['furthest_step_name'],
+    where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'furthest_step_name' }, op: 'eq', value: 'tut3' }] },
+  });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(r.rows.length, 1);
+  assert.equal(String(r.rows[0].user__furthest_step_name), 'tut3');
+  assert.equal(num(r.rows[0].users), 3);
+});
+
+test('MR query: order_by is applied (users desc is sorted)', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await engine.query_semantic_model({
+    context_id: globalThis.__mrctx, metrics: ['users'], group_by: ['furthest_step_name'],
+    order_by: [{ key: 'users', direction: 'desc' }],
+  });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const vals = r.rows.map((x) => num(x.users));
+  for (let i = 1; i < vals.length; i++) assert.ok(vals[i - 1] >= vals[i], `not descending: ${vals}`);
+});
+
 test('MR view: reached_tut1 broken down by country (user attr JOINED at the semantic layer)', opts, async (t) => {
   if (skip(t)) return;
   // country lives on dim_users, NOT in the view. MetricFlow joins it via the

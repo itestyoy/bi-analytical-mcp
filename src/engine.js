@@ -278,18 +278,20 @@ export class Engine {
     this._validate('update_semantic_model', input);
     const ctx = this.ctxs.get(input.context_id);
     const modelKey = input.semantic_model;
-    const add = (ctx.state.additions[modelKey] ||= { measures: [], dimensions: [] });
+    // dry_run must NOT mutate the context (state or files): work on a clone.
+    const state = input.dry_run ? clone(ctx.state) : ctx.state;
+    const add = (state.additions[modelKey] ||= { measures: [], dimensions: [] });
 
     // synthesize a declaration fragment for the add_* parts and compile it
-    const task = input.task || ctx.state.tasks[0] || 'task';
+    const task = input.task || state.tasks[0] || 'task';
     const frag = { name: task, semantic_models: [{ from: modelKey, dimensions: input.add_dimensions || [], measures: input.add_measures || [] }], metrics: input.add_metrics || [] };
     const compiled = this._compile(frag);
 
     // removals (with dependency checks for measures)
-    if (input.remove_metrics) ctx.state.metrics = ctx.state.metrics.filter((m) => !input.remove_metrics.includes(m.name));
+    if (input.remove_metrics) state.metrics = state.metrics.filter((m) => !input.remove_metrics.includes(m.name));
     if (input.remove_measures) {
       for (const rm of input.remove_measures) {
-        const dependents = ctx.state.metrics.filter((m) => metricUsesMeasure(m, rm));
+        const dependents = state.metrics.filter((m) => metricUsesMeasure(m, rm));
         if (dependents.length && !input.cascade) {
           throw new ToolError(`cannot remove measure '${rm}'; metrics depend on it: ${dependents.map((d) => d.name).join(', ')}`, { stage: 'validate', field: rm });
         }
@@ -298,11 +300,14 @@ export class Engine {
     }
     if (input.remove_dimensions) add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(d.name));
 
-    mergeCompiled(ctx.state, compiled);
-    const render = renderContext(this.catalog, ctx.state);
+    mergeCompiled(state, compiled);
+    const render = renderContext(this.catalog, state);
+    if (input.dry_run) {
+      return { context_id: ctx.id, semantic_model: modelKey, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: [] };
+    }
     const file = this.ctxs.writeYaml(ctx.id, render.yaml);
     this.ctxs.touch(ctx.id);
-    const parse = input.dry_run ? undefined : await this._parse(ctx.id);
+    const parse = await this._parse(ctx.id);
     return { context_id: ctx.id, semantic_model: modelKey, files: [file], yaml: render.yaml, metrics: render.metricNames, groupable: [...this._allowedPaths(ctx)], parse, warnings: [] };
   }
 
@@ -394,8 +399,27 @@ export class Engine {
           groupBy.push(`${entity}__${g}`);
         }
       }
+      // where: dimension paths resolve to <entity>__<path> (same as group_by);
+      // metric_time is handled by renderWhereClauses. (Previously dropped — H1.)
+      let where = [];
+      if (input.where) {
+        const translated = clone(input.where);
+        walkPredicates(translated, (p) => {
+          if (p.field?.kind === 'dimension') {
+            if (!reachable.has(p.field.path)) throw new ToolError(`where not available on this view: ${p.field.path}`, { stage: 'validate', field: p.field.path });
+            p.field.path = `${entity}__${p.field.path}`;
+          }
+        });
+        where = renderWhereClauses(translated);
+      }
+      // order_by keys must be a requested metric or a resolved group-by token.
+      const seqOrderable = new Set([...(input.metrics || []), ...groupBy]);
+      for (const o of input.order_by || []) {
+        if (!seqOrderable.has(o.key)) throw new ToolError(`order_by key not in metrics/group_by: ${o.key}`, { stage: 'validate', field: o.key });
+      }
+      const seqOrderBy = (input.order_by || []).map((o) => `${o.direction === 'desc' ? '-' : ''}${o.key}`);
       if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
-      const qopts = { metrics: input.metrics, groupBy, startTime: input.time_range?.start, endTime: input.time_range?.end, limit: (input.limit ?? 1000) };
+      const qopts = { metrics: input.metrics, groupBy, where, orderBy: seqOrderBy, startTime: input.time_range?.start, endTime: input.time_range?.end, limit: (input.limit ?? 1000) };
       const explain = !!(input.dry_run || input.explain);
       if (input.materialize && !explain) return this._materialize(ctx, qopts, input);
       const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
@@ -447,7 +471,9 @@ export class Engine {
 
     const limit = input.limit ?? 1000;
     const offset = input.offset ?? 0;
-    const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: input.time_range?.start, endTime: input.time_range?.end, limit: limit + offset };
+    // Over-fetch one extra row so `has_more` is meaningful (H2): without the +1,
+    // res.rows is capped at limit+offset and has_more can never be true.
+    const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: input.time_range?.start, endTime: input.time_range?.end, limit: limit + offset + 1 };
     const explain = !!(input.dry_run || input.explain);
     if (input.materialize && !explain) return this._materialize(ctx, qopts, input);
     const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
@@ -525,13 +551,15 @@ export class Engine {
 
   /** Run a (optionally projected) read over a materialized result table. */
   async _readTable(dir, table, limit, transform, extra = {}, offset = 0) {
-    let sql = transform
+    const sql = transform
       ? buildProjection(`{{ ref('${table}') }}`, transform)
       : `select * from {{ ref('${table}') }}`;
-    if (offset > 0) sql = `select * from (${sql}) _paged offset ${Number(offset)}`;
-    const res = await this.runner.show(dir, sql, limit);
+    // Page in JS over a single read (over-fetch by 1 for has_more) rather than a
+    // SQL OFFSET with no ORDER BY (which was non-deterministic across calls — H2).
+    const res = await this.runner.show(dir, sql, limit + offset + 1);
     if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
-    return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
+    const pageRows = res.rows.slice(offset, offset + limit);
+    return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: { limit, offset, has_more: res.rows.length > offset + limit }, ...(transform ? { projected: true } : {}) };
   }
 
   /**
@@ -560,6 +588,17 @@ export class Engine {
 
   list_query_jobs() {
     return { jobs: this.jobs.list() };
+  }
+
+  /** Reclaim idle, lease-free contexts (bounds workspace growth). */
+  gc(maxIdleMs) {
+    return this.ctxs.gc(maxIdleMs);
+  }
+
+  /** Release process resources (SQLite handle, warm runner/sidecar). */
+  close() {
+    try { this.jobs.close?.(); } catch { /* noop */ }
+    try { this.runner?.close?.(); } catch { /* noop */ }
   }
 
   async _parse(ctxId) {

@@ -4,7 +4,7 @@
 // and incompatible with local per-context isolation).
 
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, mkdtempSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -88,13 +88,18 @@ export class DbtRunner {
       const r = await run(this.mfBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
       return { ok: r.ok, command: `mf ${args.join(' ')}`, sql: extractSql(r.stdout), ...(opts.plan ? { plan: extractPlan(r.stdout) } : {}), stdout: r.stdout, stderr: r.stderr };
     }
-    const csvFile = join(mkdtempSync(join(tmpdir(), 'mfq-')), 'out.csv');
+    const tmpDir = mkdtempSync(join(tmpdir(), 'mfq-'));
+    const csvFile = join(tmpDir, 'out.csv');
     const args = this.buildQueryArgs({ ...opts, csvFile });
-    const r = await run(this.mfBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
-    let columns = [];
-    let rows = [];
-    if (r.ok && existsSync(csvFile)) ({ columns, rows } = parseCsv(readFileSync(csvFile, 'utf8')));
-    return { ok: r.ok, command: `mf ${args.join(' ')}`, columns, rows, stdout: r.stdout, stderr: r.stderr };
+    try {
+      const r = await run(this.mfBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
+      let columns = [];
+      let rows = [];
+      if (r.ok && existsSync(csvFile)) ({ columns, rows } = parseCsv(readFileSync(csvFile, 'utf8')));
+      return { ok: r.ok, command: `mf ${args.join(' ')}`, columns, rows, stdout: r.stdout, stderr: r.stderr };
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true }); // don't leak per-query temp dirs
+    }
   }
 }
 

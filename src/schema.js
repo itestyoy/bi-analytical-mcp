@@ -399,7 +399,10 @@ export function buildSchemas(catalog) {
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     query_semantic_model: query,
     get_query_result: {
-      type: 'object', additionalProperties: false, required: ['context_id'],
+      type: 'object', additionalProperties: false,
+      // Either poll by query_id (context_id not needed — taken from the job), or
+      // fetch a known table directly (which requires its context_id).
+      anyOf: [{ required: ['query_id'] }, { required: ['table', 'context_id'] }],
       description: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}; optionally re-slice it with a read-only transform.',
       properties: {
         context_id: { type: 'string', pattern: CTX, description: D.context_id },

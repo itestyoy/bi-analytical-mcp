@@ -209,6 +209,23 @@ export class ContextManager {
     else this.leases.set(id, n);
   }
 
+  /**
+   * Reclaim contexts idle longer than maxIdleMs that have NO in-flight leases.
+   * Bounds workspace growth under sustained use. Returns the dropped ids.
+   */
+  gc(maxIdleMs) {
+    if (!(maxIdleMs > 0)) return [];
+    const now = Date.now();
+    const dropped = [];
+    for (const c of [...this.contexts.values()]) {
+      if (this.leases.get(c.id)) continue; // never reclaim a context with a live build
+      if (now - (c.lastUsedAt || c.createdAt) > maxIdleMs) {
+        try { this.drop(c.id); dropped.push(c.id); } catch { /* in-flight; skip */ }
+      }
+    }
+    return dropped;
+  }
+
   /** Tear down a whole context (waits on no in-flight leases). */
   drop(id) {
     if (!this.contexts.has(id)) return { removed: false };

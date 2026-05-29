@@ -1,4 +1,0 @@
-order_id,customer_id,ordered_at,order_total,is_food_order,is_drink_order
-101,1,2030-01-05 10:00:00,20,true,false
-102,1,2030-01-20 12:00:00,30,false,true
-103,2,2030-02-03 09:00:00,50,true,true

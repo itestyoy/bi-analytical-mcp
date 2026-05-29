@@ -61,9 +61,6 @@
       "dbt_model": "dim_users",
       "role": "dimension",
       "primary_entity": { "name": "user", "column": "appsflyer_id" },
-      "entities": {
-        "campaign": { "column": "campaign_id", "type": "foreign" }
-      },
       "dimensions": {
         "install_date": { "type": "time", "granularity": "day" },
         "platform": { "type": "string", "values": ["android", "ios"] },
@@ -74,21 +71,12 @@
         "language": { "type": "string" },
         "media_source": { "type": "string" },
         "acquisition_type": { "type": "string", "values": ["organic", "paid"] },
+        "campaign_id": { "type": "string" },
         "app_id": { "type": "string" },
         "app_version": { "type": "string" }
       },
       "measures": {
         "users_count": { "agg": "count", "expr": "1" }
-      }
-    },
-    "campaigns": {
-      "dbt_model": "dim_campaigns",
-      "role": "dimension",
-      "primary_entity": { "name": "campaign", "column": "campaign_id" },
-      "dimensions": {
-        "channel": { "type": "string" },
-        "network": { "type": "string" },
-        "cost_model": { "type": "string" }
       }
     }
   }

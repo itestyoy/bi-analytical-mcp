@@ -1,321 +1,304 @@
-# SEED_DATA — dbt seed dataset for the Postgres test warehouse
+# Seed Data — Exact Totals for Test Assertions
 
-This documents the **exact** contents of the dbt seeds so integration tests can assert
-precise numbers. The dataset is intentionally small but exercises every task type in
-[`docs/analytics-task-taxonomy.md`](../../../docs/analytics-task-taxonomy.md).
+This document records the EXACT counts and totals contained in the dbt seed CSVs
+under `dbt_project/seeds/`. The numbers below are derived directly from the CSV
+files and are intended to be asserted verbatim by integration tests. If you edit
+any seed CSV, regenerate this document.
 
-Seeds live in `dbt_project/seeds/`:
+Seed files:
+- `dbt_project/seeds/seed_campaigns.csv` -> `dim_campaigns`
+- `dbt_project/seeds/seed_users.csv` -> `dim_users`
+- `dbt_project/seeds/seed_events.csv` -> `fct_analytics_events`
 
-- `seed_campaigns.csv` -> model `dim_campaigns`
-- `seed_users.csv` -> model `dim_users`
-- `seed_events.csv` -> model `fct_analytics_events`
-
-Load with `dbt seed` then `dbt run`. Column types are pinned in `dbt_project.yml`
-(`seed_events.event_timestamp` = `timestamp`, `seed_events.event_properties` = `jsonb`,
-`seed_users.install_date` = `date`).
-
-All values use only columns / `event_name`s / `event_properties` keys defined in
-`config/catalog.json`. Revenue values are integers (no float noise).
+Vocabulary is restricted to `config/catalog.json` (events, event_data property
+keys, and user/campaign attributes). All monetary values are integers.
 
 ---
 
-## Row counts
+## 1. Campaigns (`seed_campaigns.csv`)
 
-| Table / model | Rows |
-|---|---|
-| `seed_campaigns` / `dim_campaigns` | 3 |
-| `seed_users` / `dim_users` | 12 |
-| `seed_events` / `fct_analytics_events` | 74 |
+3 campaigns.
 
-### Event rows by `event_name`
-
-| event_name | count |
-|---|---|
-| session_start | 22 |
-| purchase | 10 |
-| level_start | 14 |
-| level_complete | 9 |
-| level_fail | 6 |
-| tutorial_step | 7 |
-| ad_impression | 4 |
-| ad_click | 2 |
-| **total** | **74** |
-
-(`session_end` and `item_acquired` are valid catalog events but are not present.)
+| campaign_id | channel | network  | cost_model |
+|-------------|---------|----------|------------|
+| c1          | social  | meta     | cpi        |
+| c2          | search  | google   | cpc        |
+| c3          | video   | applovin | cpm        |
 
 ---
 
-## Campaigns (`dim_campaigns`)
+## 2. Users (`seed_users.csv`)
 
-| campaign_id | channel | network | cost_model |
-|---|---|---|---|
-| c1 | social | meta | cpi |
-| c2 | search | google | cpc |
-| c3 | video | applovin | cpm |
+12 users (`u1`..`u12`). `app_id` = `com.omg.wordsearch` for all. `app_version` = `1.0` for all.
 
-Distinct channels: social, search, video.
-
----
-
-## Users (`dim_users`)
-
-| user_id | install_date | platform | os_version | device_model | country | region | language | media_source | acquisition_type | app_version | campaign_id |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| u1 | 2026-01-01 | ios | 17 | iphone | US | NA | en | meta | paid | 1.0 | c1 |
-| u2 | 2026-01-01 | android | 14 | pixel | US | NA | en | organic | organic | 1.0 | c2 |
-| u3 | 2026-01-02 | ios | 17 | iphone | GB | EU | en | meta | paid | 1.0 | c1 |
-| u4 | 2026-01-02 | android | 13 | galaxy | DE | EU | de | google | paid | 1.0 | c2 |
-| u5 | 2026-01-03 | ios | 16 | iphone | BR | LATAM | pt | organic | organic | 1.0 | c1 |
-| u6 | 2026-01-03 | android | 14 | pixel | US | NA | en | applovin | paid | 1.0 | c3 |
-| u7 | 2026-01-04 | ios | 17 | iphone | GB | EU | en | applovin | paid | 1.0 | c3 |
-| u8 | 2026-01-04 | android | 13 | galaxy | DE | EU | de | organic | organic | 1.0 | c2 |
-| u9 | 2026-01-04 | ios | 16 | iphone | BR | LATAM | pt | meta | paid | 1.0 | c1 |
-| u10 | 2026-01-05 | android | 14 | pixel | US | NA | en | google | paid | 1.0 | c2 |
-| u11 | 2026-01-05 | ios | 17 | iphone | GB | EU | en | organic | organic | 1.0 | c1 |
-| u12 | 2026-01-05 | android | 13 | galaxy | DE | EU | de | applovin | paid | 1.0 | c3 |
-
-### Install cohorts (users per `install_date`)
-
-| install_date | users | user_ids |
-|---|---|---|
-| 2026-01-01 | 2 | u1, u2 |
-| 2026-01-02 | 2 | u3, u4 |
-| 2026-01-03 | 2 | u5, u6 |
-| 2026-01-04 | 3 | u7, u8, u9 |
-| 2026-01-05 | 3 | u10, u11, u12 |
+| user | install_date | platform | os | device | country | region | language | media_source | acquisition_type | campaign |
+|------|--------------|----------|----|--------|---------|--------|----------|--------------|------------------|----------|
+| u1  | 2026-01-01 | ios     | 17 | iphone | US | NA    | en | meta     | paid    | c1 |
+| u2  | 2026-01-01 | android | 14 | pixel  | US | NA    | en | organic  | organic | c2 |
+| u3  | 2026-01-02 | ios     | 17 | iphone | GB | EU    | en | meta     | paid    | c1 |
+| u4  | 2026-01-02 | android | 13 | galaxy | DE | EU    | de | google   | paid    | c2 |
+| u5  | 2026-01-03 | ios     | 16 | iphone | BR | LATAM | pt | organic  | organic | c1 |
+| u6  | 2026-01-03 | android | 14 | pixel  | US | NA    | en | applovin | paid    | c3 |
+| u7  | 2026-01-04 | ios     | 17 | iphone | GB | EU    | en | applovin | paid    | c3 |
+| u8  | 2026-01-04 | android | 13 | galaxy | DE | EU    | de | organic  | organic | c2 |
+| u9  | 2026-01-04 | ios     | 16 | iphone | BR | LATAM | pt | meta     | paid    | c1 |
+| u10 | 2026-01-05 | android | 14 | pixel  | US | NA    | en | google   | paid    | c2 |
+| u11 | 2026-01-05 | ios     | 17 | iphone | GB | EU    | en | organic  | organic | c1 |
+| u12 | 2026-01-05 | android | 13 | galaxy | DE | EU    | de | applovin | paid    | c3 |
 
 ### User attribute distributions
 
-- **acquisition_type:** paid = 8 (u1,u3,u4,u6,u7,u9,u10,u12), organic = 4 (u2,u5,u8,u11)
-- **platform:** ios = 6 (u1,u3,u5,u7,u9,u11), android = 6 (u2,u4,u6,u8,u10,u12)
-- **country:** US = 4 (u1,u2,u6,u10), GB = 3 (u3,u7,u11), DE = 3 (u4,u8,u12), BR = 2 (u5,u9)
-- **media_source:** meta = 3 (u1,u3,u9), organic = 4 (u2,u5,u8,u11), google = 2 (u4,u10), applovin = 3 (u6,u7,u12)
-- **campaign_id:** c1 = 5 (u1,u3,u5,u9,u11), c2 = 4 (u2,u4,u8,u10), c3 = 3 (u6,u7,u12)
+- platform: ios = 6, android = 6
+- country: US = 4, GB = 3, DE = 3, BR = 2
+- media_source: meta = 3, organic = 4, google = 2, applovin = 3
+- acquisition_type: paid = 8, organic = 4
+- campaign_id: c1 = 5, c2 = 4, c3 = 3
+- install_date: 2026-01-01 = 2 (u1,u2), 2026-01-02 = 2 (u3,u4),
+  2026-01-03 = 2 (u5,u6), 2026-01-04 = 3 (u7,u8,u9), 2026-01-05 = 3 (u10,u11,u12)
+
+### Campaign -> channel mapping (via user.campaign_id join to dim_campaigns)
+
+- c1 (social/meta/cpi): u1, u3, u5, u9, u11
+- c2 (search/google/cpc): u2, u4, u8, u10
+- c3 (video/applovin/cpm): u6, u7, u12
 
 ---
 
-## Monetization (purchases)
+## 3. Events (`seed_events.csv`)
 
-10 `purchase` events. All revenue is integer USD.
+Total event rows: **184**
 
-| event_id | user_id | timestamp | revenue | product_id | level |
-|---|---|---|---|---|---|
-| e1 | u1 | 2026-01-03 10:00:00 | 100 | p1 | 5 |
-| e2 | u1 | 2026-01-03 11:00:00 | 50 | p2 | 6 |
-| e3 | u3 | 2026-01-04 09:00:00 | 200 | p1 | 9 |
-| e4 | u2 | 2026-01-03 12:00:00 | 999 | p1 | 3 |
-| e33 | u4 | 2026-01-05 10:30:00 | 50 | p2 | 2 |
-| e42 | u6 | 2026-01-04 12:30:00 | 20 | p3 | 3 |
-| e44 | u6 | 2026-01-11 12:30:00 | 100 | p1 | 4 |
-| e58 | u9 | 2026-01-05 15:30:00 | 30 | p3 | 4 |
-| e60 | u9 | 2026-01-06 15:30:00 | 50 | p2 | 5 |
-| e65 | u10 | 2026-01-06 16:30:00 | 100 | p1 | 2 |
+### Row counts per `event_name`
 
-### Total purchase revenue = **1699**
-
-### Revenue by `acquisition_type`
-
-| acquisition_type | revenue |
-|---|---|
-| paid | 700 |
-| organic | 999 |
-| **total** | **1699** |
-
-(organic revenue is entirely u2's single 999 purchase.)
-
-### Revenue by `country`
-
-| country | revenue |
-|---|---|
-| US | 1369 |
-| GB | 200 |
-| DE | 50 |
-| BR | 80 |
-| **total** | **1699** |
-
-### Revenue by `product_id`
-
-| product_id | revenue | purchase count |
-|---|---|---|
-| p1 | 1499 | 5 |
-| p2 | 150 | 3 |
-| p3 | 50 | 2 |
-| **total** | **1699** | **10** |
-
-Products present: **p1, p2, p3**.
-
-### Payers vs non-payers
-
-- **Distinct payers = 7:** u1, u2, u3, u4, u6, u9, u10
-- **Non-payers = 5:** u5, u7, u8, u11, u12
-- **Payer share** = 7 / 12.
-
-Revenue per payer:
-
-| user_id | revenue | acquisition_type | country |
-|---|---|---|---|
-| u1 | 150 | paid | US |
-| u2 | 999 | organic | US |
-| u3 | 200 | paid | GB |
-| u4 | 50 | paid | DE |
-| u6 | 120 | paid | US |
-| u9 | 80 | paid | BR |
-| u10 | 100 | paid | US |
-
-Derived monetization figures:
-- ARPU = 1699 / 12 distinct users.
-- ARPPU = 1699 / 7 payers.
-- Avg transaction value = 1699 / 10 purchases = 169.9.
+| event_name             | count |
+|------------------------|-------|
+| first_launch           | 12    |
+| new_session            | 21    |
+| end_session            | 21    |
+| level_started          | 28    |
+| level_completed        | 25    |
+| currency_income        | 8     |
+| currency_outcome       | 5     |
+| shop_opened            | 10    |
+| iap_purchase_completed | 8     |
+| iap_purchase_failed    | 3     |
+| ad_started             | 12    |
+| ad_finished            | 12    |
+| tutorial               | 16    |
+| screen_changed         | 3     |
+| **TOTAL**              | **184** |
 
 ---
 
-## Behavioral cohorts (did / didn't do event X)
+## 4. IAP / Monetization
 
-Distinct users who performed each event (for `behavioral_cohort` and `visit_to_purchase`):
+`iap_purchase_completed`: 8 rows. `iap_purchase_failed`: 3 rows. `shop_opened`: 10 rows.
+Product prices (integer USD): p1 = 5, p2 = 10, p3 = 20. currency = `USD`, status = `success`.
 
-| event | users who did it | count | users who did NOT (of 12) | count |
-|---|---|---|---|---|
-| purchase | u1,u2,u3,u4,u6,u9,u10 | 7 | u5,u7,u8,u11,u12 | 5 |
-| level_complete | u1,u2,u3,u4,u6,u7,u9,u10 | 8 | u5,u8,u11,u12 | 4 |
-| ad_click | u6,u9 | 2 | the other 10 | 10 |
-| tutorial_step | u1,u3,u4,u8,u11 | 5 | the other 7 | 7 |
-| session_start | all except none with sessions: u1..u12 minus none | 12 | 0 | 0 |
+### Completed purchases
 
-Note: every user has at least one `session_start` (all 12 are "visitors").
+| order_id | user | product | price_usd |
+|----------|------|---------|-----------|
+| o1 | u1  | p1 | 5  |
+| o2 | u1  | p2 | 10 |
+| o3 | u3  | p1 | 5  |
+| o4 | u5  | p3 | 20 |
+| o5 | u7  | p2 | 10 |
+| o6 | u9  | p1 | 5  |
+| o7 | u10 | p3 | 20 |
+| o8 | u11 | p2 | 10 |
 
----
+- **Total IAP revenue = 85 USD**
+- Revenue by acquisition_type: paid = 55, organic = 30
+- Revenue by country: US = 35, GB = 25, BR = 25  (DE = 0)
+- Revenue by product: p1 = 15, p2 = 30, p3 = 40
+- **Distinct payers = 7**: u1, u3, u5, u7, u9, u10, u11  (u1 purchased twice)
+- Purchase count (completed) = 8
 
-## Level progression (`level_start` / `level_complete` / `level_fail`)
+### Failed purchases (`iap_purchase_failed`, status = `failed`)
 
-Per-level event counts:
-
-| level | level_start | level_complete | level_fail |
-|---|---|---|---|
-| 1 | 7 | 4 | 3 |
-| 2 | 2 | 1 | 1 |
-| 3 | 1 | 1 | 0 |
-| 4 | 1 | 1 | 0 |
-| 5 | 0 | 1 | 0 |
-| 6 | 0 | 0 | 0 |
-| 7 | 1 | 0 | 1 |
-| 9 | 1 | 1 | 0 |
-| 10 | 1 | 0 | 1 |
-| **total** | **14** | **9** | **6** |
-
-Notes:
-- Level 5 has a `level_complete` with **no** matching `level_start` (this is the
-  preserved event `e5`, u1, score 1200). This is intentional — useful for testing
-  joins/measures that don't assume a 1:1 start/complete pairing.
-- Levels 6 and 8 never appear in level_* events (level 6 only appears as a purchase
-  property on e2). No level_* rows exist for them.
-- `result` values present: `win` (on level_complete rows) and `lose` (on level_fail rows).
-- `attempt` ranges 1..2; multi-attempt levels: level 1 (u2: fail attempt 1 then
-  complete attempt 2) and level 2 (u4: fail attempt 1 then complete attempt 2).
-- `moves` and `score` are populated on level_start/complete/fail and on e5.
-
-Win rate per started level (level_complete / level_start), ignoring level 5's orphan
-complete:
-- L1 = 4/7, L2 = 1/2, L3 = 1/1, L4 = 1/1, L7 = 0/1, L9 = 1/1, L10 = 0/1.
+| order_id | user | product | price_usd |
+|----------|------|---------|-----------|
+| of1 | u2 | p1 | 5  |
+| of2 | u4 | p2 | 10 |
+| of3 | u1 | p3 | 20 |
 
 ---
 
-## Tutorial funnel (`tutorial_step`)
+## 5. Levels Funnel
 
-`step_id` values present: **ts1, ts2**.
+level_id range 1..10. `level_completed` carries `result` (win/lose),
+`complete_time` (int sec), `attempt` (int).
+
+- Total `level_started` = 28
+- Total `level_completed` = 25
+- Total wins = 20  (losses = 5)
+
+### Per-level counts
+
+| level_id | started | completed | wins |
+|----------|---------|-----------|------|
+| 1  | 12 | 12 | 12 |
+| 2  | 6  | 4  | 2  |
+| 3  | 3  | 3  | 2  |
+| 4  | 1  | 1  | 1  |
+| 5  | 1  | 1  | 0  |
+| 6  | 1  | 0  | 0  |
+| 7  | 1  | 1  | 1  |
+| 8  | 1  | 1  | 1  |
+| 9  | 1  | 1  | 0  |
+| 10 | 1  | 1  | 1  |
+| **TOTAL** | **28** | **25** | **20** |
+
+Funnel note: started (28) > completed (25). Level 1 is fully completed by all 12
+users (12/12 win). Level 6 has 1 start and 0 completions (drop-off).
+
+---
+
+## 6. Ads
+
+`ad_started`: 12 rows. `ad_finished`: 12 rows (one finish per start).
+ad_type in {rewarded, interstitial, banner}; placement in {store, level_fail, main_menu};
+ad_network in {admob, unity, applovin, ironsource}. `ad_finished.revenue` is integer cents,
+plus `is_reward_received` and `is_clicked`.
+
+### ad_finished rows
+
+| user | ad_type      | placement  | network    | revenue_cents | reward | clicked |
+|------|--------------|------------|------------|---------------|--------|---------|
+| u1  | rewarded     | level_fail | admob      | 3 | true  | false |
+| u1  | interstitial | main_menu  | unity      | 2 | false | true  |
+| u2  | banner       | main_menu  | applovin   | 1 | false | false |
+| u3  | rewarded     | store      | ironsource | 4 | true  | true  |
+| u4  | interstitial | level_fail | admob      | 2 | false | false |
+| u5  | rewarded     | level_fail | unity      | 3 | true  | false |
+| u6  | banner       | main_menu  | applovin   | 1 | false | false |
+| u7  | rewarded     | store      | admob      | 5 | true  | true  |
+| u8  | interstitial | main_menu  | ironsource | 2 | false | false |
+| u9  | rewarded     | level_fail | unity      | 3 | true  | false |
+| u10 | banner       | main_menu  | applovin   | 1 | false | false |
+| u11 | interstitial | store      | admob      | 2 | false | true  |
+
+- **Total ad revenue = 29 cents**
+- By network: admob = 12, unity = 8, ironsource = 6, applovin = 3
+
+---
+
+## 7. Currency
+
+currency = `coins`. `amount` and `value_in_coins` are equal integers per row.
+
+### currency_income (8 rows)
+
+| user | source_type  | source_name    | amount |
+|------|--------------|----------------|--------|
+| u1 | level_reward | level_complete | 100 |
+| u1 | level_reward | level_complete | 100 |
+| u2 | level_reward | level_complete | 50  |
+| u3 | level_reward | level_complete | 100 |
+| u3 | daily_bonus  | login          | 25  |
+| u5 | level_reward | level_complete | 75  |
+| u7 | ad_reward    | rewarded_ad    | 30  |
+| u9 | ad_reward    | rewarded_ad    | 30  |
+
+- **Total coins in = 510**
+
+### currency_outcome (5 rows)
+
+| user | source_type   | source_name | amount |
+|------|---------------|-------------|--------|
+| u1 | hint_spend    | gameplay | 20 |
+| u1 | hint_spend    | gameplay | 20 |
+| u3 | hint_spend    | gameplay | 40 |
+| u5 | powerup_spend | gameplay | 50 |
+| u7 | hint_spend    | gameplay | 10 |
+
+- **Total coins out = 140**
+- Net coins = 510 - 140 = 370
+
+---
+
+## 8. Tutorial Drop-off
+
+`tutorial` carries `step_id` in {step_1, step_2, step_3}. Total tutorial rows = 16.
 
 | step_id | distinct users | users |
-|---|---|---|
-| ts1 | 5 | u1, u3, u4, u8, u11 |
-| ts2 | 2 | u1, u4 |
+|---------|----------------|-------|
+| step_1 | 8 | u1, u2, u3, u4, u5, u6, u7, u8 |
+| step_2 | 5 | u1, u2, u3, u4, u5 |
+| step_3 | 3 | u1, u2, u3 |
 
-Drop-off ts1 -> ts2: 5 reach ts1, 2 reach ts2.
-
----
-
-## Ad events (`ad_impression` / `ad_click`)
-
-`ad_network` values present: **admob, unity, applovin, ironsource**.
-
-| ad_network | ad_impression | ad_click |
-|---|---|---|
-| admob | 1 (u6) | 1 (u6) |
-| unity | 1 (u7) | 0 |
-| applovin | 1 (u9) | 1 (u9) |
-| ironsource | 1 (u12) | 0 |
-| **total** | **4** | **2** |
+Each user appears once per step they reached, so row count = 8 + 5 + 3 = 16.
 
 ---
 
-## Activity, sessions, retention & stickiness
+## 9. Screen Changes
 
-"Active" = a `session_start` event. There are 22 `session_start` rows across 20
-distinct session ids (s1..s20). Each (user, day) below has exactly one session_start
-(one session per user per day), so sessions-per-user-per-day = 1 on every active day.
+`screen_changed`: 3 rows, with `screen_from` / `screen_to`.
 
-### Distinct active users per day (DAU via session_start)
-
-| day | active users | count |
-|---|---|---|
-| 2026-01-01 | u1, u2 | 2 |
-| 2026-01-02 | u1, u2, u3, u4 | 4 |
-| 2026-01-03 | u5 | 1 |
-| 2026-01-04 | u3, u6, u7, u8, u9 | 5 |
-| 2026-01-05 | u4, u10, u11, u12 | 4 |
-| 2026-01-06 | u9, u10 | 2 |
-| 2026-01-08 | u1 | 1 |
-| 2026-01-09 | u3 | 1 |
-| 2026-01-11 | u6 | 1 |
-| 2026-01-12 | u12 | 1 |
-
-(Note: u6 installs 2026-01-03 but first `session_start` is 2026-01-04 — first activity
-is on day +1, not install day.)
-
-### Per-user activity offsets from install (for N-day retention)
-
-Offset = (active day − install_date) in days, based on `session_start`.
-
-| user | install | active-day offsets |
-|---|---|---|
-| u1 | 2026-01-01 | 0, 1, 7 |
-| u2 | 2026-01-01 | 0, 1 |
-| u3 | 2026-01-02 | 0, 2, 7 |
-| u4 | 2026-01-02 | 0, 3 |
-| u5 | 2026-01-03 | 0 |
-| u6 | 2026-01-03 | 1, 8 |
-| u7 | 2026-01-04 | 0 |
-| u8 | 2026-01-04 | 0 |
-| u9 | 2026-01-04 | 0, 2 |
-| u10 | 2026-01-05 | 0, 1 |
-| u11 | 2026-01-05 | 0 |
-| u12 | 2026-01-05 | 0, 7 |
-
-Retention summary (cohort = install_date, "returned within / on offset"):
-- **Returned on day +1 exactly:** u1, u2, u10 -> 3 users.
-- **Active again on offset +7 exactly:** u1 (1/1), u3 (2/9), u12 (5/12). u6 returns at
-  offset +8 (not +7). -> 3 users at exactly +7.
-- **Returned within 7 days (offset 1..7):** u1, u2, u3, u4, u9, u10, u12 -> 7 users.
-  (u6's only return is +8, just outside the 7-day window — useful for window-cutoff tests.)
-- **Never returned after install day (single active day):** u5, u7, u8, u11 -> 4 users.
-
-### Stickiness (DAU/MAU)
-
-All activity falls in the single month 2026-01, so MAU (distinct users with a
-`session_start` in 2026-01) = **12** (every user has at least one session_start).
-DAU/MAU per day = (active-users-that-day) / 12 using the per-day table above.
+| user | screen_from | screen_to |
+|------|-------------|-----------|
+| u1 | main_menu | shop     |
+| u3 | main_menu | levels   |
+| u5 | levels    | gameplay |
 
 ---
 
-## Coverage map: which rows exercise which task type
+## 10. Sessions / Retention / DAU / MAU
 
-| Taxonomy task | Exercised by |
-|---|---|
-| 1 active_users_trend | multi-day session_start (10 active days), purchases with revenue for ARPDAU |
-| 2 metric_by_user_segment | users across US/GB/DE/BR, ios/android, paid/organic, 3 media_sources, 3 campaigns/channels |
-| 3 step_conversion_funnel | level_start->level_complete pairs; tutorial ts1->ts2 drop-off; session_start->purchase |
-| 4 nday_retention | 5 install cohorts, offsets incl. exact +1/+7 and +8 (window cutoff), never-returners |
-| 5 cohort_retention_grid | cohorts x activity days x revenue, organic/paid + multi-campaign |
-| 6 behavioral_cohort | did/didn't purchase (7 vs 5), level_complete (8 vs 4), ad_click (2 vs 10) |
-| 7 visit_to_purchase_conversion | all 12 visit; 7 convert; multiple product_ids; same-day & later-day purchases |
-| 8 level_progression | levels 1..10, win/lose results, multi-attempt, moves/score populated |
-| 9 monetization_metrics | revenue by product/network/channel/country/acq; payers vs non-payers; multi-day LTV |
-| 10 stickiness_lifecycle | DAU per day + MAU=12; new installs each day; dormant/resurrected (gaps then return) |
+`new_session` events drive activity. Each new_session is paired with an
+`end_session` on the same day, so end_session counts equal new_session counts (21 each).
+
+### new_session days per user (offset = days since install)
+
+| user | install    | session day offsets |
+|------|------------|---------------------|
+| u1  | 2026-01-01 | 0, 1, 4, 7 |
+| u2  | 2026-01-01 | 0, 7       |
+| u3  | 2026-01-02 | 0, 1, 7    |
+| u4  | 2026-01-02 | 0, 3       |
+| u5  | 2026-01-03 | 0, 1       |
+| u6  | 2026-01-03 | 0          |
+| u7  | 2026-01-04 | 0, 1       |
+| u8  | 2026-01-04 | 0          |
+| u9  | 2026-01-04 | 0          |
+| u10 | 2026-01-05 | 0          |
+| u11 | 2026-01-05 | 0          |
+| u12 | 2026-01-05 | 0          |
+
+### Retention return sets
+
+- **D1 returners (offset 1) = {u1, u3, u5, u7}** -> 4 users
+- **D7 returners (offset 7) = {u1, u2, u3}** -> 3 users
+- Never-returners (only install-day session, offset {0}) = {u6, u8, u9, u10, u11, u12} -> 6 users
+
+### DAU per day
+
+DAU computed as distinct users with a `new_session` on that day (identical to
+distinct users with any event on that day in this dataset).
+
+| date       | DAU | users |
+|------------|-----|-------|
+| 2026-01-01 | 2 | u1, u2 |
+| 2026-01-02 | 3 | u1, u3, u4 |
+| 2026-01-03 | 3 | u3, u5, u6 |
+| 2026-01-04 | 4 | u5, u7, u8, u9 |
+| 2026-01-05 | 6 | u1, u4, u7, u10, u11, u12 |
+| 2026-01-08 | 2 | u1, u2 |
+| 2026-01-09 | 1 | u3 |
+
+- **MAU (Jan 2026) = 12** (all users have at least one event in January 2026)
+- Stickiness reference: mean DAU over the 7 active days = (2+3+3+4+6+2+1)/7 = 21/7 = 3;
+  DAU/MAU on peak day (2026-01-05) = 6/12 = 0.50.
+
+---
+
+## Notes for test authors
+
+- All `event_data` values are valid JSON objects; inner double quotes are
+  CSV-escaped by doubling. Empty payloads (`first_launch`) are `{}`.
+- `appsflyer_id` joins events to users; `campaign_id` joins users to campaigns.
+- All monetary fields are integers: `price_in_usd` (whole USD),
+  `ad_finished.revenue` (cents), `amount` / `value_in_coins` (coins).
+- `session_number` is a per-user integer (1..n) and is reused across event types
+  within the same session.

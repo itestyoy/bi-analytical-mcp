@@ -1,4 +1,0 @@
-campaign_id,channel,network,cost_model
-c1,social,meta,cpi
-c2,search,google,cpc
-c3,video,applovin,cpm

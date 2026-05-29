@@ -79,6 +79,7 @@ function genericMeasureItem(catalog) {
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1 },
       label: { type: 'string' },
       event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() } },
+      where: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['property', 'op'], properties: { property: { type: 'string', enum: catalog.eventProps() }, op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'] }, value: {} } } },
     },
     allOf: [{ if: { properties: { agg: { const: 'percentile' } } }, then: { required: ['percentile'] } }],
   };
@@ -107,7 +108,21 @@ function measureItemSchema(catalog, modelKey) {
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1 },
       label: { type: 'string' },
       ...(modelKey === catalog.anchor
-        ? { event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Per-measure event scope (overrides semantic_models.event_scope) — needed for funnel/conversion measures.' } }
+        ? {
+            event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Per-measure event scope (overrides semantic_models.event_scope) — needed for funnel/conversion measures.' },
+            where: {
+              type: 'array',
+              description: 'Per-measure event_data property conditions, ANDed with the event scope. Used to define funnel steps as event + property value (e.g. event_name=tutorial AND step_id=step_1).',
+              items: {
+                type: 'object', additionalProperties: false, required: ['property', 'op'],
+                properties: {
+                  property: { type: 'string', enum: catalog.eventProps() },
+                  op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'] },
+                  value: {},
+                },
+              },
+            },
+          }
         : {}),
     },
     allOf: [

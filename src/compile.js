@@ -21,6 +21,35 @@ export function scopeExpr(catalog, modelKey, eventScope) {
   return namesToScope(catalog, modelKey, eventScope?.event_name);
 }
 
+/** SQL for a single event_data property condition (used for funnel-step scoping). */
+function propCond(catalog, modelKey, cond) {
+  const props = catalog.getModel(catalog.anchor).properties || {};
+  const p = props[cond.property];
+  if (!p) throw new Error(`unknown event property in where: ${cond.property}`);
+  const lhs = jsonExtract(catalog.dialect, catalog.eventDataColumn(), cond.property, p.type);
+  switch (cond.op) {
+    case 'eq': return `${lhs} = ${sqlLiteral(cond.value)}`;
+    case 'neq': return `${lhs} != ${sqlLiteral(cond.value)}`;
+    case 'gt': return `${lhs} > ${sqlLiteral(cond.value)}`;
+    case 'gte': return `${lhs} >= ${sqlLiteral(cond.value)}`;
+    case 'lt': return `${lhs} < ${sqlLiteral(cond.value)}`;
+    case 'lte': return `${lhs} <= ${sqlLiteral(cond.value)}`;
+    case 'in':
+    case 'not_in': {
+      const arr = Array.isArray(cond.value) ? cond.value : [cond.value];
+      return `${lhs} ${cond.op === 'in' ? 'in' : 'not in'} (${arr.map(sqlLiteral).join(', ')})`;
+    }
+    default: throw new Error(`unsupported where op: ${cond.op}`);
+  }
+}
+
+/** Combine event_name scope + property conditions into one boolean (or null). */
+function measureScope(catalog, modelKey, decl, smScope) {
+  const evScope = decl.event_name?.length ? namesToScope(catalog, modelKey, decl.event_name) : smScope;
+  const propParts = (decl.where || []).map((c) => propCond(catalog, modelKey, c));
+  return [evScope, ...propParts].filter(Boolean).join(' AND ') || null;
+}
+
 /** Wrap a base value expression with the scope (M3: scope baked into every measure). */
 function applyScope(valueExpr, scope, { numeric }) {
   if (!scope) return valueExpr;
@@ -32,9 +61,9 @@ function applyScope(valueExpr, scope, { numeric }) {
 function compileMeasure(catalog, task, modelKey, decl, smScope) {
   const name = NS(task, decl.name);
   const dialect = catalog.dialect;
-  // a per-measure event_name overrides the SM-level scope (needed for funnels/
-  // conversion where base and conversion measures target different events).
-  const scope = decl.event_name?.length ? namesToScope(catalog, modelKey, decl.event_name) : smScope;
+  // a per-measure event_name (+ optional property `where`) overrides the SM-level
+  // scope — this is how a funnel step is defined as "event + property value".
+  const scope = measureScope(catalog, modelKey, decl, smScope);
   const props = catalog.getModel(catalog.anchor).properties || {};
 
   // sum_boolean: sum a boolean per row (e.g. "did event X") — the scope IS the boolean.

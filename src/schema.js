@@ -256,7 +256,10 @@ function predicateDefs(catalog) {
 
 export function buildSchemas(catalog) {
   const modelKeys = catalog.modelKeys();
-  const userAttrCols = modelKeys.includes('users') ? catalog.modelDimensionColumns('users') : [];
+  // Attribute columns available for filter.user_segment = dimensions of the
+  // joinable (non-anchor) dimension models — derived from the catalog, not a
+  // hardcoded model key.
+  const userAttrCols = [...new Set(catalog.joinableModelKeys().flatMap((k) => catalog.modelDimensionColumns(k)))];
   const sequenceStep = {
     type: 'object', additionalProperties: false, required: ['name', 'event_name'],
     description: 'One ordered step of the sequence/funnel: an event (optionally narrowed by event_data property values).',

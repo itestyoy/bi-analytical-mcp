@@ -70,7 +70,6 @@ export function buildPrefilter(catalog, spec, dialect, col) {
   const evNameCol = q(m.event_name.column);
   const timeCol = q(m.time.column);
   const dataCol = q(catalog.eventDataColumn());
-  const userCol = q(m.entities.user.column);
   const clauses = [];
   if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
   if (f.time_range?.end) clauses.push(`${timeCol} <= ${sqlLiteral(f.time_range.end)}`);
@@ -81,15 +80,20 @@ export function buildPrefilter(catalog, spec, dialect, col) {
     clauses.push(comparePred(jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value));
   }
   if (f.user_segment?.length) {
-    const u = catalog.models.users;
-    if (!u) throw new Error('filter.user_segment requires a users model in the catalog');
+    // Resolve the dimension model + keys from the catalog (by the partition
+    // entity), not hardcoded names. Semi-join filter; no columns are carried.
+    const partEntity = spec.partition_by === 'session' ? 'session' : 'user';
+    const dimKey = catalog.dimensionModelForEntity(partEntity);
+    if (!dimKey) throw new Error(`filter.user_segment requires a dimension model for entity '${partEntity}'`);
+    const u = catalog.getModel(dimKey);
+    const entCol = q(catalog.anchorEntityColumn(partEntity));
     const usersRel = spec.usersRelation || `{{ ref('${u.dbt_model}') }}`;
-    const usersKey = typeof u.primary_entity === 'object' ? u.primary_entity.column : 'appsflyer_id';
+    const usersKey = u.primary_entity.column;
     const conds = f.user_segment.map((c) => {
-      if (!(u.dimensions || {})[c.property]) throw new Error(`unknown user attribute in filter.user_segment: ${c.property}`);
+      if (!(u.dimensions || {})[c.property]) throw new Error(`unknown attribute in filter.user_segment: ${c.property}`);
       return comparePred(c.property, c.op, c.value);
     });
-    clauses.push(`${userCol} IN (SELECT ${usersKey} FROM ${usersRel}${conds.length ? ` WHERE ${conds.join(' AND ')}` : ''})`);
+    clauses.push(`${entCol} IN (SELECT ${usersKey} FROM ${usersRel}${conds.length ? ` WHERE ${conds.join(' AND ')}` : ''})`);
   }
   return clauses.join(' AND ');
 }
@@ -99,11 +103,11 @@ function resolve(catalog, spec, dialect) {
     throw new Error('sequence requires at least 2 ordered steps');
   }
   const m = catalog.getModel(catalog.anchor);
-  const userCol = m.entities?.user?.column || 'user_id';
-  const sessionCol = m.entities?.session?.column;
-  const partCol = spec.partition_by === 'session'
-    ? (sessionCol || (() => { throw new Error('no session entity in catalog'); })())
-    : userCol;
+  // Partition entity (and its key column) are taken from the catalog by the
+  // declared partition_by name — no hardcoded entity/column.
+  const partEntity = spec.partition_by === 'session' ? 'session' : 'user';
+  const partCol = m.entities?.[partEntity]?.column;
+  if (!partCol) throw new Error(`anchor model has no '${partEntity}' entity to partition by`);
   const timeCol = m.time.column;
   const mode = spec.mode || 'ordered';
   const steps = spec.steps.map((s, i) => ({ idx: i + 1, name: s.name || `s${i + 1}` }));
@@ -137,7 +141,7 @@ function resolve(catalog, spec, dialect) {
   });
 
   const stepPreds = (dialect, col) => spec.steps.map((s) => stepPredicate(catalog, s, dialect, col));
-  return { m, partCol, timeCol, mode, steps, metrics: resolved, propCaptures, stepPreds };
+  return { m, partEntity, partCol, timeCol, mode, steps, metrics: resolved, propCaptures, stepPreds };
 }
 
 function nestedPattern(steps, withGap) {
@@ -290,7 +294,7 @@ export function renderPerUserModelPostgres(catalog, spec) {
   // joined here; the semantic model declares a shared `user` entity so MetricFlow
   // joins dim_users at SQL-generation time when a query groups by a user attr.
   const out = [
-    '  j.pk AS appsflyer_id',
+    `  j.pk AS ${r.partCol}`,
     '  , j.t1 AS first_seen_at',
     `  , CASE ${furthestCase} END AS furthest_step_name`,
     `  , (j.t${r.steps.length} IS NOT NULL) AS completed`,
@@ -326,7 +330,7 @@ export function renderPerUserModelBigQuery(catalog, spec) {
   const pre = buildPrefilter(catalog, spec, 'bigquery', null);
   const src = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
   return `  SELECT
-    ${r.partCol} AS appsflyer_id,
+    ${r.partCol},
     t1 AS first_seen_at,
     CASE ${furthestCase} END AS furthest_step_name,
     t${r.steps.length} IS NOT NULL AS completed,
@@ -366,25 +370,29 @@ export function sequenceSemanticModel(catalog, spec, modelName) {
     { name: 'first_seen', type: 'time', type_params: { time_granularity: 'day' }, expr: 'first_seen_at' },
     { name: 'furthest_step_name', type: 'categorical' },
   ];
+  // The view's primary entity and its key column are the partition entity and
+  // its anchor key column — both resolved from the catalog (no hardcoded
+  // 'user'/'appsflyer_id'). The key column carried into the view is r.partCol.
   const sm = {
     name: modelName,
     model: `ref('${modelName}')`,
     defaults: { agg_time_dimension: 'first_seen' },
-    entities: [{ name: 'user', type: 'primary', expr: 'appsflyer_id' }],
+    entities: [{ name: r.partEntity, type: 'primary', expr: r.partCol }],
     dimensions: dims,
     measures: dedupMeasures.map((mm) => ({ name: mm.name, agg: mm.agg, expr: mm.expr, agg_time_dimension: 'first_seen' })),
   };
   const localDimensionNames = ['furthest_step_name'];
 
-  // Joinable users semantic model: the view's `user` entity is shared with
-  // dim_users (primary `user`), so MetricFlow performs the user-attribute join
-  // during SQL generation. The join is declared, not materialized in the view.
+  // Joinable dimension semantic model: the model whose PRIMARY entity is the
+  // partition entity (resolved from the catalog) shares that entity with the
+  // view, so MetricFlow performs the attribute join during SQL generation. The
+  // join is declared, not materialized in the view.
   const semantic_models = [sm];
   const userAttrNames = [];
-  const usersModel = catalog.models.users;
-  if (usersModel) {
-    semantic_models.push(renderBaseModel(catalog, 'users'));
-    for (const name of Object.keys(usersModel.dimensions || {})) userAttrNames.push(name);
+  const dimKey = catalog.dimensionModelForEntity(r.partEntity);
+  if (dimKey) {
+    semantic_models.push(renderBaseModel(catalog, dimKey));
+    for (const name of Object.keys(catalog.getModel(dimKey).dimensions || {})) userAttrNames.push(name);
   }
   const dimensionNames = [...localDimensionNames, ...userAttrNames];
 
@@ -399,5 +407,5 @@ export function sequenceSemanticModel(catalog, spec, modelName) {
       metricNames.push(m.name);
     }
   }
-  return { semantic_models, metrics, metricNames, dimensionNames, localDimensionNames, userAttrNames, groupable: ['metric_time', ...dimensionNames] };
+  return { semantic_models, metrics, metricNames, dimensionNames, localDimensionNames, userAttrNames, entity: r.partEntity, groupable: ['metric_time', ...dimensionNames] };
 }

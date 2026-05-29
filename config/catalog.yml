@@ -11,8 +11,9 @@ version: 2
 #   is_event_name: true                             -> the event_name column
 #   is_event_data: true (+ properties: {..})        -> the JSON payload column
 #   dimension:     { type, granularity?, values? }  -> a groupable attribute
-
-warehouse_dialect: postgres
+#
+# The warehouse dialect is NOT stored here — it is runtime config, resolved from
+# the WAREHOUSE_DIALECT env var or the dbt profile's output `type`.
 
 models:
   - name: fct_analytics_events

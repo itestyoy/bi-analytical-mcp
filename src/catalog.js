@@ -2,11 +2,15 @@
 // graph. This is the single source of physical names; everything the AI can
 // reference is projected from here into JSON-Schema enums.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { homedir } from 'node:os';
 import yaml from 'js-yaml';
 import { isNumericType } from './dialect.js';
 
-export function loadCatalog(path) {
+export const SUPPORTED_DIALECTS = new Set(['postgres', 'bigquery', 'snowflake']);
+
+export function loadCatalog(path, opts = {}) {
   const text = readFileSync(path, 'utf8');
   let raw;
   if (/\.ya?ml$/i.test(path)) {
@@ -17,7 +21,47 @@ export function loadCatalog(path) {
   } else {
     raw = JSON.parse(text);
   }
+  // The warehouse dialect is runtime config, NOT catalog data: resolve it from
+  // the environment / the dbt profile dbt actually runs with — never the YAML.
+  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, fallback: raw.warehouse_dialect });
   return new Catalog(raw);
+}
+
+/**
+ * Resolve the warehouse dialect (runtime config). Precedence:
+ *   1. explicit `dialect` argument
+ *   2. WAREHOUSE_DIALECT env var
+ *   3. the active dbt profile's output `type` (what dbt actually connects with)
+ *   4. `fallback` (legacy catalogs) / 'postgres'
+ */
+export function resolveDialect({ dialect, profilesDir, projectDir, fallback } = {}) {
+  const d = dialect || process.env.WAREHOUSE_DIALECT || dialectFromProfile(profilesDir, projectDir) || fallback || 'postgres';
+  if (!SUPPORTED_DIALECTS.has(d)) {
+    throw new Error(`unsupported warehouse dialect '${d}' (supported: ${[...SUPPORTED_DIALECTS].join(', ')}). Set WAREHOUSE_DIALECT or fix the dbt profile output type.`);
+  }
+  return d;
+}
+
+/** Read the adapter `type` from the dbt profile (the dialect dbt runs with). */
+function dialectFromProfile(profilesDir, projectDir) {
+  try {
+    let profileName;
+    if (projectDir) {
+      const pj = join(projectDir, 'dbt_project.yml');
+      if (existsSync(pj)) profileName = yaml.load(readFileSync(pj, 'utf8'))?.profile;
+    }
+    const dir = profilesDir || process.env.DBT_PROFILES_DIR || join(homedir(), '.dbt');
+    const pp = join(dir, 'profiles.yml');
+    if (!existsSync(pp)) return undefined;
+    const profiles = yaml.load(readFileSync(pp, 'utf8')) || {};
+    const prof = (profileName && profiles[profileName]) || profiles[Object.keys(profiles).filter((k) => k !== 'config')[0]];
+    if (!prof) return undefined;
+    const target = process.env.DBT_TARGET || prof.target || Object.keys(prof.outputs || {})[0];
+    const type = prof.outputs?.[target]?.type;
+    return type && SUPPORTED_DIALECTS.has(type) ? type : undefined;
+  } catch {
+    return undefined; // best-effort: fall back to env/default
+  }
 }
 
 /**
@@ -27,7 +71,9 @@ export function loadCatalog(path) {
  * is_event_name/is_event_data+properties/dimension).
  */
 export function dbtSchemaToCatalog(doc) {
-  const out = { warehouse_dialect: doc.warehouse_dialect || 'postgres', models: {} };
+  // warehouse_dialect is intentionally NOT read from the catalog here; loadCatalog
+  // resolves it from env/profile. `fallback` carries any legacy value if present.
+  const out = { warehouse_dialect: doc.warehouse_dialect, models: {} };
   for (const model of doc.models || []) {
     const mcp = model.meta?.mcp || {};
     const key = mcp.key;
@@ -103,6 +149,17 @@ export class Catalog {
 
   primaryEntityName(key) {
     return primaryEntityName(this.getModel(key));
+  }
+
+  /** Model key whose PRIMARY entity is `entity` (the join target), excluding the anchor. */
+  dimensionModelForEntity(entity) {
+    const key = this.primaryByEntity[entity];
+    return key && key !== this.anchor ? key : undefined;
+  }
+
+  /** Physical column on the anchor for an entity (e.g. the user/session key). */
+  anchorEntityColumn(entity) {
+    return this.models[this.anchor]?.entities?.[entity]?.column;
   }
 
   /** Physical JSON column holding event-specific properties on the events model. */

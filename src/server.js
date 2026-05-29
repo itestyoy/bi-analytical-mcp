@@ -31,6 +31,34 @@ const TOOL_DESCRIPTIONS = {
   get_recipe: 'Get a recipe by id: a ready create_semantic_model payload + example queries + notes for a task type.',
 };
 
+// Server-level documentation surfaced to the AI client (serverInfo.description):
+// what this MCP is for and how to use it end-to-end.
+const SERVER_DESCRIPTION = `Declarative semantic layer for product analytics.
+
+WHAT IT DOES
+You define "virtual" semantic models — measures, dimensions, and metrics — on the fly over a FIXED set of two data sources, and query them by name. You never write SQL. Everything you can reference (events, properties, user attributes, join paths) is enumerated by the catalog and enforced by schema, so you cannot name a field that does not exist.
+
+DATA MODEL (exactly two sources)
+- events fact: one row per analytical event — a user id, a session id, an event timestamp (the time axis), an event_name, and a JSON payload of typed event-data properties.
+- users dimension: one row per user — categorical attributes (country, platform, media_source, acquisition_type, campaign_id, install_date, ...).
+Funnels/sequences are built ONLY from events (a step = an event + an event_data property value). Segmentation joins user attributes to events by the user entity automatically at query time.
+
+WORKFLOW
+1. describe_catalog — discover the models, events, event properties, joinable group-by paths, and the columns of each table. Call this first.
+2. create_semantic_model — declare measures/dimensions/metrics for a task in an ISOLATED context (returns a context_id). Pass that context_id back to extend the same context.
+   - For ordered multi-step funnels/paths use register_native_model: it builds a per-user funnel model you can query like any other model, and accepts a pre-filter (time window / event subset / user segment) to narrow the data.
+3. query_semantic_model — run metrics with group_by / where / order_by / time_range. Options: dry_run (preview, no run), explain (query plan, no run), materialize (persist the result and read it back; long queries return a query_id to poll), limit/offset.
+4. get_query_result — poll a backgrounded query by query_id, or re-read/re-slice a stored result (where/group_by/aggregations/having) WITHOUT recomputing.
+
+KEY CONCEPTS
+- context_id: an isolated workspace; parallel tasks never collide. Manage via list_contexts / describe_context / drop_context.
+- metric types: simple, ratio, cumulative, derived, conversion.
+- group_by: { time: "metric_time", grain } for a time series, or an entity-qualified attribute path (e.g. user__country).
+- recipes: list_recipes / get_recipe — ready-made templates for common task families (trends, segmentation, funnels, retention, cohorts, behavioral, conversion, progression, monetization, ads, economy, stickiness).`;
+
+// Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
+const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over two fixed, catalog-enumerated data sources (an events fact + a user-attributes dimension) and query them by name; you never write SQL. Start with describe_catalog, then create_semantic_model / register_native_model, then query_semantic_model.';
+
 const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'describe_catalog', 'describe_context']);
 
 export function buildToolDefs(engine) {
@@ -43,8 +71,8 @@ export function buildToolDefs(engine) {
 
 export function makeMcpServer(engine) {
   const server = new Server(
-    { name: 'dbt-semantic-mcp', version: '0.1.0' },
-    { capabilities: { tools: {} } },
+    { name: 'dbt-semantic-mcp', version: '0.1.0', description: SERVER_SUMMARY },
+    { capabilities: { tools: {} }, instructions: SERVER_DESCRIPTION },
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: buildToolDefs(engine) }));
@@ -72,10 +100,11 @@ function errorResult(message, stage, field) {
 
 export function makeEngine(opts = {}) {
   const catalogPath = opts.catalogPath || process.env.CATALOG_PATH || join(process.cwd(), 'config', 'catalog.yml');
-  const catalog = loadCatalog(catalogPath);
+  const baseProjectDir = opts.baseProjectDir || process.env.DBT_BASE_PROJECT;
+  // Dialect is resolved from WAREHOUSE_DIALECT or the dbt profile dbt runs with.
+  const catalog = loadCatalog(catalogPath, { profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, projectDir: baseProjectDir });
   const recipesPath = opts.recipesPath || process.env.RECIPES_PATH || join(process.cwd(), 'config', 'recipes.json');
   const recipes = existsSync(recipesPath) ? loadRecipes(recipesPath) : undefined;
-  const baseProjectDir = opts.baseProjectDir || process.env.DBT_BASE_PROJECT;
   const ctxs = new ContextManager({
     baseProjectDir,
     workspaceRoot: opts.workspaceRoot || process.env.MCP_WORKSPACE,

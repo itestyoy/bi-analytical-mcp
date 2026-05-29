@@ -142,12 +142,11 @@ export class Engine {
     const modelName = `seq_${input.name}`;
     const dialect = this.catalog.dialect;
     const eventsModel = this.catalog.getModel(this.catalog.anchor).dbt_model;
-    const usersModel = this.catalog.models.users?.dbt_model;
-    // The view references the events fact. The dimensional users JOIN is declared
-    // in the semantic model (executed by MetricFlow). usersRelation is passed only
-    // for an optional filter.user_segment SEMI-JOIN (data slicing — no columns
-    // carried into the view).
-    const seqSpec = { ...input.sequence, relation: `{{ ref('${eventsModel}') }}`, ...(usersModel ? { usersRelation: `{{ ref('${usersModel}') }}` } : {}) };
+    // The view references only the events fact (via ref). The dimensional join is
+    // declared in the semantic model (executed by MetricFlow); the optional
+    // filter.user_segment semi-join resolves its own ref() relation from the
+    // catalog. No hardcoded model names here.
+    const seqSpec = { ...input.sequence, relation: `{{ ref('${eventsModel}') }}` };
     const modelSql = dialect === 'bigquery' ? renderPerUserModelBigQuery(this.catalog, seqSpec) : renderPerUserModelPostgres(this.catalog, seqSpec);
     const bqSql = dialect === 'bigquery' ? modelSql : renderPerUserModelBigQuery(this.catalog, seqSpec);
     const sem = sequenceSemanticModel(this.catalog, seqSpec, modelName);
@@ -161,10 +160,12 @@ export class Engine {
     ctx.state.model = art.modelName;
     ctx.state.seqMetrics = art.sem.metricNames;
     ctx.state.seqGroupable = art.sem.dimensionNames;
+    ctx.state.seqEntity = art.sem.entity; // primary entity of the view (e.g. user)
     // full introspection of the registered model (behaves like a normal dbt model)
     ctx.state.native = {
       model: art.modelName,
       materialized: input.materialized || 'view',
+      entity: art.sem.entity,
       dimensions: art.sem.dimensionNames,
       measures: art.sem.semantic_models[0].measures.map((mm) => mm.name),
       metrics: art.sem.metricNames,
@@ -383,13 +384,14 @@ export class Engine {
       const known = new Set(ctx.state.seqMetrics);
       for (const m of input.metrics || []) if (!known.has(m)) throw new ToolError(`unknown metric in context: ${m}`, { stage: 'validate', field: m });
       const reachable = new Set(ctx.state.seqGroupable);
+      const entity = ctx.state.seqEntity || 'user'; // the view's primary entity
       const groupBy = [];
       for (const g of input.group_by || []) {
         if (typeof g === 'object' && g.time === 'metric_time') groupBy.push(`metric_time__${g.grain || 'day'}`);
         else if (typeof g === 'string') {
           if (!reachable.has(g)) throw new ToolError(`group_by not available on this view: ${g}. Available: ${[...reachable].join(', ')}`, { stage: 'validate', field: g });
-          // all are local dims on the seq SM (primary entity 'user') -> user__<dim>
-          groupBy.push(`user__${g}`);
+          // local dims + joined dimension-model attrs resolve via the shared entity
+          groupBy.push(`${entity}__${g}`);
         }
       }
       if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });

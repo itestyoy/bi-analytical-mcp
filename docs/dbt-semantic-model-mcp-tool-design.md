@@ -1101,3 +1101,31 @@ mf query \
   а стабильные метрики — в общем семантическом слое.
 
 Выбор фиксируется в конфиге сервера; hot-path по умолчанию — dbt Core.
+
+---
+
+## 11. Программный доступ к запросам (execution backends)
+
+Запрос можно исполнять не только через CLI. Все бэкенды реализуют один контракт
+`{ parse(projectDir), query(projectDir, opts) }`, поэтому взаимозаменяемы
+(`Engine` принимает любой `runner`).
+
+| Backend | Как работает | Когда |
+|---|---|---|
+| **`mf` CLI** (`src/dbt-runner.js`, по умолчанию) | shell `mf query`/`--explain`, парсинг CSV/SQL | просто, надёжно; минус — холодный старт Python (~2с) на запрос |
+| **MetricFlow sidecar** (`python/mf_sidecar.py` + `src/backends/mf-engine.js`) | **тёплый** Python-процесс с `MetricFlowEngine` (та же связка, что у `mf` CLI: `CLIConfiguration → MetricFlowEngine.query()/explain()`), общение по stdio JSON | **программный** локальный доступ для dbt Core: без холодного старта, структурированные результаты (`column_names`/`rows`) и `explain` SQL |
+| **dbt platform SL** (dbtsl / GraphQL / JDBC) | как в dbt-mcp `client.py`: `SyncSemanticLayerClient` к **хостинговому** SL (host + token + environment_id), Arrow Flight | только dbt Cloud/platform (§10), без файловой изоляции; для JS — напрямую через GraphQL/JDBC (официального JS SDK нет) |
+
+**Вывод по вопросу «можно ли программно».**
+- Для **локального dbt Core** программный доступ — это **`MetricFlowEngine`**
+  (Python). У него те же методы, что в `mf` CLI: `query`, `explain`,
+  `list_metrics`, `simple_dimensions_for_metrics`. Из JS он недоступен напрямую
+  (это Python), поэтому используем **тёплый sidecar** — он сохраняет нашу
+  пер-контекстную файловую изоляцию (работает в `--project-dir` контекста) и
+  убирает накладные расходы CLI. Реализовано и покрыто интеграционным тестом
+  (даёт идентичный результат запросу через `mf`).
+- `dbtsl`-подход из dbt-mcp `client.py` — это **хостинговый** SL платформы
+  (Cloud), не локальный dbt Core; он уместен только в platform-режиме (§10).
+
+`parse` во всех локальных бэкендах остаётся через `dbt parse` (пишет
+`semantic_manifest.json`, который читает движок).

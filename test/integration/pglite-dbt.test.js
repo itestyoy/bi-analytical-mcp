@@ -105,3 +105,22 @@ test('dry_run query returns compiled SQL (mf --explain)', opts, async (t) => {
   assert.equal(res.ok, true, JSON.stringify(res.error || res));
   assert.match(res.sql.toLowerCase(), /select|with/);
 });
+
+test('programmatic MetricFlow sidecar yields identical result (no mf CLI)', opts, async (t) => {
+  if (!HAS_DBT) return t.skip('dbt/mf not installed');
+  const { MfEngineBackend } = await import('../../src/backends/mf-engine.js');
+  const PY = join(process.cwd(), '.dbtvenv', 'bin', 'python');
+  const backend = new MfEngineBackend({ pythonBin: PY, dbtBin: DBT_BIN, profilesDir: BASE });
+  try {
+    const dir = engine.ctxs.dir(globalThis.__ctx);
+    const res = await backend.query(dir, { metrics: ['lvl_econ_revenue'] });
+    t.diagnostic(JSON.stringify(res));
+    assert.equal(res.ok, true, JSON.stringify(res.stderr || res));
+    const total = res.rows.reduce((s, r) => s + Number(Object.values(r).at(-1)), 0);
+    assert.equal(total, 1349);
+    const explain = await backend.query(dir, { metrics: ['lvl_econ_revenue'], explain: true });
+    assert.match((explain.sql || '').toLowerCase(), /select|with/);
+  } finally {
+    backend.close();
+  }
+});

@@ -1,592 +1,663 @@
-# Аналитический MCP-сервер для игровой event-аналитики
+# Аналитический MCP-сервер для **ad-hoc** игровой event-аналитики
 
-> Дизайн-документ: какие тулы нужны, какие параметры в них заложить, как сделать
-> их **гибкими, универсальными и консистентными**, чтобы AI вызывал **структурные
-> инструменты**, а не генерировал SQL «из головы».
+> Дизайн-документ: какие тулы нужны и какие в них параметры, чтобы AI вызывал
+> **структурные инструменты** под **исследовательские (ad-hoc) задачи**, а не
+> генерировал SQL «из головы».
 
-Документ описывает семантическую обёртку над двумя таблицами (события + атрибуты
-пользователей), которая закрывает широкий класс продуктовых/игровых аналитических
-задач: тренды, воронки, retention, когорты, сегментация, поведенческие когорты,
-path-анализ, lifecycle, stickiness, прогрессия по уровням и монетизация.
+## 0. Главный тезис: это НЕ ещё один семантический слой
 
----
+В компании **уже есть** семантический слой (Metabase Semantic Layer на витринах
+`bi_data_metrics`, плюс пирамида метрик, Atomic/Semi-Atomic, словарь метрик и
+измерений). Он отлично решает **классические BI-задачи**: стандартные метрики на
+заранее смоделированных витринах, дашборды, регулярная отчётность, готовые разрезы.
 
-## 1. Цели и принципы дизайна
+**Этот MCP-сервер решает другой класс задач — ad-hoc исследования**, которые
+семантический слой структурно **не может** выразить, потому что они требуют:
 
-1. **Структурность вместо свободного SQL.** AI выбирает тул и заполняет
-   типизированные параметры. Сам SQL генерируется детерминированно внутри
-   сервера. Это даёт корректность, безопасность (нет SQL-инъекций и «галлюцинаций
-   названий колонок») и воспроизводимость.
-2. **Композиционность.** Небольшой набор **переиспользуемых строительных блоков**
-   (фильтры, временной диапазон, разбивки, ссылка на когорту) используется во
-   **всех** тулах одинаково. Один раз понял фильтр — понял его везде.
-3. **Ортогональность.** Каждый тул отвечает на один класс вопросов. Сложные
-   задачи собираются комбинацией тулов (например, поведенческая когорта →
-   retention этой когорты).
-4. **Grounding через метаданные.** Прежде чем что-то считать, AI может (и должен)
-   спросить у сервера, какие события и свойства существуют. Это убирает угадывание
-   имён.
-5. **Dry-run по умолчанию.** Любой тул умеет вернуть сгенерированный SQL без
-   выполнения (`dry_run: true`) — для проверки и обучения доверию.
-6. **Консистентный контракт ответа.** Все тулы возвращают единый конверт:
-   `sql`, `columns`, `rows`, `row_count`, `warnings`, `assumptions`.
+- **вычислений на уровне игрока «на лету»** (агрегаты по событиям → пороги/квантили
+  → сегмент), которых нет среди готовых дименьшенов;
+- **условий на соседние события** в хронологии пользователя (event X, рядом с
+  которым было event Y);
+- **произвольных гипотез** «сделал X → как ведёт себя дальше», last-action,
+  поиска зависимостей и корреляций;
+- **доступа к сырым параметрам событий**, не вынесенным в витрину.
 
----
+> Семантический слой = «известные вопросы, считаем быстро и одинаково».
+> Этот сервер = «новые вопросы, которые задают раз и под конкретное исследование».
 
-## 2. Доменная модель данных
+### 0.1 Единственный источник данных для SQL — две детальные таблицы
 
-Сервер опирается на конфигурируемую схему (semantic schema), описывающую две
-таблицы. Это единственное место, где «зашиты» физические имена колонок — тулы
-оперируют только логическими именами.
+**Сервер генерирует SQL ровно по двум таблицам:**
 
-### 2.1 Таблица событий (`events`)
-Канонические поля (маппятся на реальные колонки в конфиге):
+1. **`events`** — детальные событийные данные (по одному ряду на событие игрока, с
+   сырыми параметрами в `event_properties`);
+2. **`users`** — атрибуты пользователя (UA / acquisition данные, по ряду на игрока).
 
-| Логическое поле | Назначение |
-|---|---|
-| `user_id` | идентификатор игрока (ключ join с users) |
-| `event_name` | тип события (`level_start`, `level_complete`, `purchase`, `session_start`, ...) |
-| `event_timestamp` | время события (UTC) |
-| `session_id` | (опц.) сессия |
-| `event_properties` | полуструктурированные свойства (JSON/MAP): `level`, `score`, `attempt`, `moves`, `revenue`, `currency`, `item_id`, `result` (`win`/`lose`), ... |
+Никакие витрины `bi_data_metrics`, готовые метрики семантического слоя, Cube или
+другие агрегаты **не** являются источником запроса. Вся аналитика — от DAU до
+last-action — собирается **из сырых событий и атрибутов** через `JOIN events × users`.
+Семантический слой здесь — только **референс определений** (как считать метрику,
+как её называют), чтобы наши числа совпадали с BI; но сам расчёт всегда выполняется
+по `events` + `users`. Именно поэтому возможен весь ad-hoc класс задач: у нас есть
+доступ к деталям, которых в витринах нет.
 
-### 2.2 Таблица атрибутов пользователей (`users` / UA-данные)
-Атрибуты на уровне игрока (обычно «срез на момент установки»):
-
-| Логическое поле | Назначение |
-|---|---|
-| `user_id` | ключ |
-| `install_date` / `first_seen` | дата привлечения (опора для acquisition-когорт) |
-| `platform`, `os_version`, `device_model` | техническое |
-| `country`, `region`, `language` | гео |
-| `media_source`, `campaign`, `ad_group`, `creative` | UA / атрибуция |
-| `acquisition_type` (`organic`/`paid`) | канал |
-| `app_version` | версия на установке |
-| произвольные `user_properties` | расширяемый набор |
-
-> **Конфиг схемы** задаёт: имена таблиц, маппинг логических полей, тип хранения
-> `event_properties` (JSON vs колонки), список «известных» событий и свойств с
-> типами. Метаданные-тулы (§4.1) читают именно отсюда.
+Дизайн заземлён на **реальные ad-hoc задачи компании** (openmygame / malpa games):
+ТЗ BI-команды «GD Tasks» и реальные исследования по retention, экономике, балансу
+уровней, post-hoc разбору A/B (Confluence: BI, Product Analytics, WO/Word Search
+Sea, Sudoku, MW, WP и др.). См. §3 и §10.
 
 ---
 
-## 3. Переиспользуемые строительные блоки (общие типы параметров)
+## 1. Принципы дизайна
 
-Эти объекты — фундамент консистентности. Они используются во всех тулах с
-одинаковой семантикой.
+1. **Ad-hoc прежде всего.** Покрываем исследовательские задачи. Классические
+   витринные вопросы отдаём семантическому слою; если такая метрика нужна внутри
+   исследования — повторяем её **формулу в SQL по `events`+`users`** (§0.1), а не
+   читаем витрину.
+2. **Структурность вместо свободного SQL.** AI выбирает тул и заполняет
+   типизированные параметры; SQL генерируется детерминированно внутри сервера
+   (корректность, безопасность, воспроизводимость).
+3. **Композиционность.** Маленький набор **переиспользуемых блоков** (фильтры,
+   диапазон, разбивки, мера, per-user агрегаты, ссылка на когорту) одинаков во всех
+   тулах. Сложные исследования = комбинация тулов.
+4. **Вычисления на уровне игрока — первый класс.** Per-user агрегаты, квантильные
+   сегменты, last-action, частоты, последовательности — встроенные примитивы, а не
+   «хак».
+5. **Grounding через метаданные.** Перед расчётом AI спрашивает у сервера события,
+   свойства, именованные метрики и измерения (убирает угадывание имён).
+6. **Dry-run по умолчанию.** Любой тул умеет вернуть SQL без выполнения
+   (`dry_run: true`).
+7. **Единый конверт ответа:** `sql`, `columns`, `rows`, `row_count`, `warnings`,
+   `assumptions`, `metric_source`.
 
-### 3.1 `TimeRange`
+---
+
+## 2. Граница: что делает семантический слой и чего он НЕ может
+
+| Класс задачи | Семантический слой (Metabase/Cube) | Этот MCP (ad-hoc) |
+|---|---|---|
+| DAU/WAU/MAU, ARPU/ARPPU, ROAS, LTV, Retention Rate Day X по готовым дименьшенам | ✅ канон, быстро | реплицирует формулу в SQL по `events`+`users` (`named`-рецепт) |
+| Стандартные дашборды и регулярная отчётность | ✅ | — |
+| Разрез метрики по **сырым параметрам события**, которых нет в витрине | ⚠️/❌ | ✅ |
+| Сегмент = **агрегат по игроку** (>X подсказок, <Y avg время уровня) | ❌ (нет такого дименьшена) | ✅ `behavioral_segment_metrics` |
+| **Квантильная** сегментация на лету (5×20% по games_completed) | ❌ | ✅ `derived_segment` |
+| Условие на **соседнее событие** (X, рядом с которым был Y) | ❌ | ✅ `adjacent_event_count` |
+| **Last-action** перед оттоком, на гранулярности уровня | ❌ | ✅ `churn_last_action` |
+| Воронки с окнами, path, произвольные последовательности | ⚠️ ограниченно | ✅ |
+| Поведенческие когорты «сделал X → что дальше» | ❌ | ✅ `cohort_define` + любой тул |
+| Поиск зависимостей/корреляций между параметрами уровня и исходом | ❌ | ✅ `correlation_explore` |
+| Post-hoc разбор A/B по сегментам (глубже стат-движка) | ⚠️ | ✅ `post_hoc_segment_compare` |
+
+> Эта таблица — карта «зачем мы вообще нужны». Если ответ полностью лежит в правой
+> колонке семантического слоя — корректно отослать туда (или вызвать Cube), а не
+> пересчитывать.
+
+---
+
+## 3. Таксономия ad-hoc исследовательских задач (что реально спрашивают)
+
+Собрано из ТЗ BI-команды (Confluence **GD Tasks**, BI/4971790388) и реальных
+исследований. Это «класс задач», под которые проектируется каталог тулов (§5).
+
+### 3.1 Фильтрованный подсчёт по событию + связь с когортой (GD Tasks, Блок 1)
+> *Посчитать число событий/уникальных пользователей по ивенту с условиями на его
+> параметры, с разбивкой/фильтрацией по когортам (app/country/install_date/
+> media_source), и со сплитом по комбинациям параметров события.*
+
+Пример: по `ad_finished` где `ad_type='rewarded'` и `placement='RewardedGameScreen'`
+посчитать пользователей и события, разделив на сегменты по
+`(is_reward_received, is_user_returned)`. → §5.2 `event_count` (+ event-property
+splits), §5.4 `conversion_rate`.
+
+### 3.2 Условие на соседнее событие в хронологии (GD Tasks, Блок 2)
+> *Посчитать событие X, до/после которого произошло событие Y с заданными
+> параметрами. Условие — не на само событие, а на соседнее во времени у игрока.*
+
+Пример: число `coins_outcome`, **после** которого было `ad_finished` с
+`placement='RewardedGameScreen'`. → §5.5 `adjacent_event_count`.
+
+### 3.3 Метрики по поведенческим сегментам (GD Tasks, Блок 3)
+> *Смотреть метрики только по пользователям, удовлетворяющим условию на его
+> поведение, где сегмент формируется из агрегатов самого игрока (сумма/среднее/кол-во).*
+
+Пример: ключевые метрики только по тем, у кого `hints_used > x` ИЛИ
+`avg_level_time < y`. → §5.6 `behavioral_segment_metrics` (+ `cohort_define` с
+per-user порогами).
+
+### 3.4 Динамическая (квантильная) сегментация и профили сегментов
+> *Разбить игроков на N равных групп по per-user метрике и сравнить богатый профиль.*
+
+Реальный кейс (Retention D1, WO): 5 сегментов по 20% от `games_completed` за
+`d0_2` (low / middle_low / middle / middle_high / high); по каждому — avg/median
+completed levels, p25/p75, max_level, started_levels, total_complete_time и т.д.
+Также skill-сегменты (fast/middle/slow) и ad-watch tiers (low/mid/high/extreme).
+→ §5.7 `derived_segment` + §5.13 `distribution_profile`.
+
+### 3.5 Last-action перед оттоком
+> *Найти последнее событие/уровень игрока, после которого N дней не было активности
+> (отток), и распределить отток по последнему действию.*
+
+Кейс (WO): `last_action` за `d0_d2` с колонками `segment, event, last_lvl, lvl,
+level_id, ad_type, ad_place, med_coins, players, share_pct`. → §5.8
+`churn_last_action`.
+
+### 3.6 Прогрессия по сессиям и по уровням
+> *Где осыпается аудитория по номеру сессии и по номеру/ID уровня.*
+
+Кейс (WO): по `session_number` — `players, share_from_start_pct,
+avg/median_session_duration, completed_levels`; по уровням — Started/Win rate,
+attempts, churn_at_level, «стена сложности». → §5.9 `session_progression`,
+§5.14 `progression_analysis`.
+
+### 3.7 Root-cause просадки метрики
+> *Почему упал Retention/ARPU: разложить на состав трафика (media_source, organic),
+> прокси-метрики (avg_playtime_d3), привести к baseline, сопоставить динамику.*
+
+Кейс (WO, «падение Retention RU Android»): доли media_source vs installs vs
+avg_playtime_d3, нормировка к baseline. → §5.2 `event_count`/`metrics_timeseries`
++ §5.10 `behavioral_segment` сравнение + §5.15 `correlation_explore`.
+
+### 3.8 Поиск зависимостей / корреляций
+> *Связан ли параметр уровня/поведения с исходом: ad usage vs completion rate,
+> число ходов/техник vs прохождение, трата монет vs досмотр RV.*
+
+Кейсы (Sudoku «поиск зависимостей», RewardedGameScreen). → §5.15
+`correlation_explore` + §5.5 `adjacent_event_count`.
+
+### 3.9 Экономика: структура источников и баланс
+> *Откуда игроки берут и куда тратят валюту, по сегментам, на поздних уровнях;
+> баланс ресурса на конец дня/уровня/сессии.*
+
+Кейс (WO, free/reward `currency_income` по ad-watch сегментам). → §5.16
+`economy_analysis`.
+
+### 3.10 Post-hoc разбор A/B (глубже стат-движка)
+> *Почему вариант выиграл/проиграл: разрез по сегментам новизны (новички/1-99/100+),
+> last-action в base vs test, поведенческие различия.*
+
+Кейсы (New Balance V1 post-hoc, A/A-тест с CUPED). GrowthBook даёт значимость —
+мы даём **поведенческое «почему»**. → §5.17 `post_hoc_segment_compare`.
+
+---
+
+## 4. Доменная модель и переиспользуемые блоки
+
+Сервер опирается на конфигурируемую **semantic schema** — маппинг логических полей
+на физические колонки **двух таблиц: `events` и `users`** (см. §0.1). Это
+единственные источники для SQL; тулы оперируют только логическими именами поверх них.
+
+### 4.1 Таблица событий (`events`)
+`user_id`, `app_name`, `platform`, `event_name`, `event_timestamp`, `session_id`,
+`session_number`, `event_properties` (JSON/MAP: `level`, `level_id`, `score`,
+`attempt`, `moves`, `revenue`, `ad_type` (banner/interstitial/rewarded),
+`placement`, `is_reward_received`, `is_user_returned`, `hints_used`, `currency`,
+`resource_type`, `amount`, `result`, `funnel_stage`, …).
+
+### 4.2 Таблица атрибутов пользователей (`users` / UA)
+`user_id`, `install_date`/`first_seen` (Cohort Date), `platform`, `os_version`,
+`device_model`, `country`/`country_group`, `language`, `media_source`, `campaign`,
+`ad_group`, `creative`, `acquisition_type` (organic/paid, incent/non-incent),
+`app_version`, `att_status`, `gdpr_consent`, произвольные `user_properties`.
+
+### 4.3 `TimeRange` / `Granularity`
 ```jsonc
-{
-  "type": "relative" | "absolute",
-  "last": "30d",                 // для relative: 7d / 12w / 6mo / 90d
-  "from": "2026-01-01",          // для absolute
-  "to":   "2026-03-31",
-  "timezone": "UTC"
-}
+{ "type":"relative|absolute", "last":"30d", "from":"2026-01-01", "to":"2026-03-31", "timezone":"UTC" }
 ```
+`Granularity`: `hour|day|week|month|quarter`.
 
-### 3.2 `Granularity`
-`hour | day | week | month | quarter` — шаг временной оси / окна.
-
-### 3.3 `EventSelector` — как опознать событие
+### 4.4 `FilterGroup` — рекурсивные И/ИЛИ, единый язык для свойств событий и атрибутов
 ```jsonc
 {
-  "event": "level_complete",     // имя события; "*" = любое
-  "filters": FilterGroup,        // условия на свойства этого события (см. 3.4)
-  "alias": "win"                 // имя для отображения/ссылок (опц.)
-}
-```
-
-### 3.4 `FilterGroup` — рекурсивные условия (И/ИЛИ)
-Единый язык фильтрации для **свойств событий** и **атрибутов пользователей**.
-```jsonc
-{
-  "op": "and" | "or",
+  "op": "and|or",
   "conditions": [
-    {
-      "field": "event_properties.level",   // или "user.country"
-      "operator": "eq|neq|gt|gte|lt|lte|in|not_in|between|contains|is_null|is_not_null",
-      "value": 50
-    },
-    { "op": "or", "conditions": [ ... ] }   // вложенность допускается
+    { "field":"event_properties.placement", "operator":"eq", "value":"RewardedGameScreen" },
+    { "field":"user.media_source", "operator":"in", "value":["unityads","applovin_int"] },
+    { "op":"or", "conditions":[ ... ] }
   ]
 }
 ```
-- Префикс `event_properties.*` → условие на свойство события.
-- Префикс `user.*` → условие на атрибут пользователя (join к `users`).
+Операторы: `eq|neq|gt|gte|lt|lte|in|not_in|between|contains|is_null|is_not_null`.
+Префиксы: `event_properties.*` (свойство события), `user.*` (атрибут игрока).
 
-### 3.5 `Measure` — что считаем
+### 4.5 `EventSelector`
+```jsonc
+{ "event":"ad_finished", "filters": FilterGroup, "alias":"rv" }
+```
+
+### 4.6 `Measure` — что считаем
 ```jsonc
 {
-  "type": "count_events"        // число событий
-        | "count_unique_users"  // DAU/уник. пользователи
-        | "count_sessions"
-        | "sum" | "avg" | "min" | "max" | "median" | "p90" | "p95",
-  "field": "event_properties.revenue",   // для агрегатов по полю
+  "type": "count_events | count_unique_users | count_sessions
+         | sum | avg | min | max | median | p25 | p75 | p90 | p95
+         | rate | named",
+  "field": "event_properties.revenue",
+  "name": "ARPDAU",                     // type=named: метрика семантического слоя
+  "numerator": EventSelector,           // type=rate
+  "denominator": "cohort" | EventSelector,
   "alias": "revenue"
 }
 ```
+- `named` → **встроенный SQL-рецепт**, повторяющий определение метрики из
+  семантического слоя (ARPDAU, LTV, Retention Rate Day X…), но считаемый **по
+  `events`+`users`**, а не читаемый из витрины. Цель — совпадение чисел с BI.
+- `rate` → конверсия по принципу Atomic/Semi-Atomic (`num/denom×100`), тоже из сырых.
 
-### 3.6 `Breakdown` (разбивка/сегментация)
-Список измерений, по которым «разрезать» результат: например
-`["user.country", "user.platform", "event_properties.level"]`. Используется
-во всех тулах единообразно.
-
-### 3.7 `CohortRef` — ссылка на популяцию пользователей
-Любой тул может ограничить расчёт некоторой когортой. Когорту можно задать
-**инлайн** или **по ссылке** на ранее построенную (§4.4).
+### 4.7 `PerUserAggregate` — вычисление на уровне игрока (ядро ad-hoc)
+Базовый примитив для GD Tasks Блок 3 и квантильных сегментов.
 ```jsonc
 {
-  "ref": "cohort_abc123"                 // ссылка на сохранённую когорту
-  // ИЛИ инлайн-определение:
+  "name": "games_completed_d0_2",
+  "source_event": EventSelector,          // напр. level_complete
+  "agg": "count | count_distinct | sum | avg | min | max | first | last",
+  "field": "event_properties.level",      // для sum/avg/min/max
+  "window": { "relative_to":"install", "from_day":0, "to_day":2 }  // окно жизни игрока
+}
+```
+Используется для: порогов (`> x`), квантильных сегментов (ntile), осей профиля.
+
+### 4.8 `Breakdown` и когортные vs активностные измерения
+Список измерений для разреза: `["app_name","user.country","user.media_source",
+"event_properties.level","session_number"]`. Сервер знает (из конфига), какие
+измерения **когортные** (App Name, Country, Media Source, Campaign…). Для
+`rate`/semi-atomic мер разбивка только по когортным → иначе понятный `warning`.
+
+### 4.9 `CohortRef` — популяция игроков
+```jsonc
+{
+  "ref": "cohort_abc123",                 // сохранённая когорта (§5.6)
+  "segment_api_id": "high_ad_watchers",   // сегмент Player Segmentation API
   "inline": {
-    "user_filter": FilterGroup,          // по атрибутам (UA)
-    "did_events": [ EventSelector ],     // совершил эти события...
-    "did_not_events": [ EventSelector ], // ...и НЕ совершал эти
+    "user_filter": FilterGroup,
+    "did_events": [ EventSelector ],
+    "did_not_events": [ EventSelector ],
+    "having": [ { "aggregate": PerUserAggregate, "operator":"gte", "value":3 } ],
     "within": TimeRange
   }
 }
 ```
 
-> **Принцип:** `TimeRange`, `FilterGroup`, `Breakdown`, `Measure`, `CohortRef`
-> выглядят одинаково в каждом туле. Это и есть «гибко, универсально и
-> консистентно».
+### 4.10 `AppScope`
+Общий фильтр области: `app_name?`, `platform?`. Без него — требование явного выбора
+или `warning` (портфель мультипроектный — легко получить «среднюю по больнице»).
+
+> **Принцип консистентности:** `TimeRange`, `FilterGroup`, `Measure`,
+> `PerUserAggregate`, `Breakdown`, `CohortRef`, `AppScope` одинаковы во всех тулах.
 
 ---
 
-## 4. Каталог тулов
+## 5. Каталог тулов
 
-Для каждого тула: назначение, ключевые параметры (поверх общих блоков), форма
-вывода и эскиз генерируемого SQL.
+Помечены: класс задачи из §3 и блок пирамиды метрик (Onboarding/Engagement/
+Progression/Retention/IAP/Ad/Economy/Cross-block).
 
-### 4.0 Категории
+### 5.0 Категории
 | Категория | Тулы |
 |---|---|
-| Метаданные / grounding | `list_events`, `list_properties`, `describe_schema` |
-| Базовая аналитика | `metrics_timeseries`, `segmentation` |
-| Поведение во времени | `funnel_analysis`, `retention_analysis`, `lifecycle_analysis`, `stickiness_analysis` |
-| Когорты | `cohort_retention_grid`, `cohort_define`, `behavioral_segment` |
-| Глубокое поведение | `path_analysis`, `distribution_analysis`, `user_timeline` |
-| Игровая специфика | `progression_analysis`, `monetization_analysis` |
-| Исполнение | `preview_sql` / `run_query` (режимы) |
+| Метаданные / grounding | `list_events`, `list_properties`, `list_metrics`, `describe_schema` |
+| Подсчёты и доли | `event_count`, `metrics_timeseries`, `segmentation`, `conversion_rate` |
+| Последовательности | `adjacent_event_count`, `funnel_analysis`, `path_analysis`, `session_progression` |
+| Поведенческие сегменты | `cohort_define`, `behavioral_segment_metrics`, `derived_segment`, `behavioral_segment` |
+| Отток и профили | `churn_last_action`, `retention_analysis`, `lifecycle_analysis`, `stickiness_analysis`, `distribution_profile` |
+| Зависимости | `correlation_explore` |
+| Игровая специфика | `progression_analysis`, `economy_analysis`, `monetization_analysis` |
+| Эксперименты | `post_hoc_segment_compare`, `experiment_lookup` |
+| Отладка / исполнение | `user_timeline`, `preview_sql`/`run_query` |
 
 ---
 
-### 4.1 Метаданные (grounding) — `list_events`, `list_properties`, `describe_schema`
-
-**Зачем:** дать AI «карту территории», чтобы он не угадывал имена.
+### 5.1 Метаданные — `list_events`, `list_properties`, `list_metrics`, `describe_schema`
+**Зачем:** карта территории, чтобы AI не угадывал имена и совпадал с BI.
 
 | Тул | Параметры | Выход |
 |---|---|---|
-| `list_events` | `search?`, `with_volume?` (объём за период) | список событий + частота |
-| `list_properties` | `event?` (свойства конкретного события или общие user-атрибуты), `with_sample_values?` | свойства, типы, примеры значений, кардинальность |
-| `describe_schema` | — | таблицы, логические поля, поддерживаемые операторы и measure-типы |
-
-> Рекомендация: системный промпт обязывает AI вызвать `list_events`/
-> `list_properties` перед первым аналитическим запросом по новой теме.
+| `list_events` | `app_name?`, `search?`, `with_volume?` | события + частота |
+| `list_properties` | `event?`, `with_sample_values?` | свойства, типы, примеры, кардинальность |
+| `list_metrics` | `block?`, `search?` | именованные метрики семантического слоя (имя, Atomic/Semi-Atomic, допустимые измерения) |
+| `describe_schema` | — | таблицы/слои, поля, операторы, measure-типы, когортные vs активностные измерения |
 
 ---
 
-### 4.2 `metrics_timeseries` — тренды/метрики во времени
-
-**Класс задач:** «как менялось во времени» — DAU/WAU/MAU, число событий,
-ARPDAU, средний score, конверсия и т.п.
-
-**Параметры:**
+### 5.2 `event_count` — фильтрованный подсчёт по событию (GD Tasks Блок 1)
+**Класс §3.1. Блок:** любой.
+**Что:** число событий и/или уникальных пользователей по `EventSelector` с
+условиями на параметры события, разбивкой по когортам и **сплитом по комбинациям
+значений параметров события**.
 ```jsonc
 {
-  "measures": [ Measure ],          // одна или несколько метрик
-  "event_selector": EventSelector,  // по какому событию (для count/sum)
-  "time_range": TimeRange,
-  "granularity": Granularity,
-  "breakdown": Breakdown,           // опц. разбивка серий
-  "cohort": CohortRef,              // опц. ограничение популяцией
-  "filters": FilterGroup,           // опц. доп. условия
-  "dry_run": false
+  "event_selector": EventSelector,          // ad_finished, ad_type=rewarded, placement=...
+  "measures": ["count_events","count_unique_users"],
+  "property_splits": ["event_properties.is_reward_received","event_properties.is_user_returned"],
+  "breakdown": Breakdown,                    // app/country/install_date/media_source
+  "link_to_install": true,                   // join к users для когортных разрезов
+  "time_range": TimeRange, "app_scope": AppScope, "cohort": CohortRef
 }
 ```
-**Выход:** строки `(date, [breakdown...], measure_values)`.
+**Выход:** `(breakdown..., property_splits..., events, users)`.
 
-**Эскиз SQL:**
-```sql
-SELECT date_trunc('day', e.event_timestamp) AS d,
-       u.country,
-       count(DISTINCT e.user_id) AS dau
-FROM events e
-JOIN users u USING (user_id)
-WHERE e.event_timestamp BETWEEN :from AND :to
-  AND e.event_name = 'session_start'
-GROUP BY 1, 2 ORDER BY 1;
-```
+### 5.3 `metrics_timeseries` — тренды во времени
+**Класс §3.7. Блок:** любой. Метрики (вкл. `named`: ARPDAU, Ad Impr per DAU,
+avg_playtime_d3) во времени, с `breakdown`, опц. **нормировкой к baseline-дате**
+(`rebase_to: "2025-12-01"`) для сопоставления динамик при root-cause.
 
----
+### 5.4 `segmentation` / `conversion_rate`
+`segmentation` — разрез меры по сегментам без оси времени (топ-N, доли).
+`conversion_rate` — универсальный X Rate (`numerator/denominator×100`): FTD
+Conversion, Payer Share, Level X Started Rate, доля дошедших до события.
 
-### 4.3 `segmentation` — разрез метрики по сегментам (без оси времени)
-
-**Класс задач:** «сколько / какой средний X по странам / платформам / уровням /
-кампаниям» — топ-N, доли, сравнение сегментов.
-
-**Параметры:** `measures`, `event_selector`, `breakdown` (обязателен),
-`time_range`, `filters`, `cohort`, `order_by?`, `limit?`.
-
-**Выход:** таблица `(segment..., measures...)`, отсортированная.
-
-```sql
-SELECT u.media_source, count(DISTINCT e.user_id) AS payers,
-       sum((e.event_properties->>'revenue')::numeric) AS revenue
-FROM events e JOIN users u USING (user_id)
-WHERE e.event_name = 'purchase' AND e.event_timestamp BETWEEN :from AND :to
-GROUP BY 1 ORDER BY revenue DESC LIMIT 20;
-```
-
----
-
-### 4.4 `funnel_analysis` — воронки
-
-**Класс задач:** конверсия по последовательности шагов, где отваливаются.
-Покрывает туториал, путь до первой покупки, прохождение набора уровней.
-
-**Параметры:**
+### 5.5 `adjacent_event_count` — условие на соседнее событие (GD Tasks Блок 2)
+**Класс §3.2, §3.8. Блок:** Engagement/Monetization.
+**Что:** считать событие X, у которого **соседнее** (предыдущее/следующее) событие
+в хронологии игрока = Y с заданными параметрами.
 ```jsonc
 {
-  "steps": [ EventSelector, EventSelector, ... ],  // 2+ шага по порядку
-  "order": "ordered" | "any_order",
-  "conversion_window": "24h" | "7d" | null,        // макс. время на весь путь
-  "step_window": "1h",                              // опц. окно между шагами
-  "time_range": TimeRange,                          // когда стартовала воронка
-  "breakdown": Breakdown,                           // конверсия по сегментам
-  "cohort": CohortRef,
-  "count_mode": "unique_users",
-  "include_step_timing": true                       // среднее время между шагами
+  "anchor_event": EventSelector,            // X: coins_outcome
+  "neighbor_event": EventSelector,          // Y: ad_finished placement=RewardedGameScreen
+  "relation": "next" | "prev" | "next_within" | "prev_within",
+  "within": "10m" | "1 event" | "same_session",   // окно/дистанция «соседства»
+  "measures": ["count_events","count_unique_users"],
+  "breakdown": Breakdown, "time_range": TimeRange, "app_scope": AppScope, "cohort": CohortRef
 }
 ```
-**Выход:** на каждый шаг — `users`, `conversion_from_prev`, `conversion_from_start`,
-`avg_time_to_step`; опционально с разбивкой.
+**Реализация:** оконные `LAG/LEAD` по `(user_id ORDER BY event_timestamp)` +
+условие на соседа. **Выход:** число X с совпавшим соседом (+ доля от всех X).
 
-**Реализация:** оконные функции / последовательный self-join с проверкой
-`ts_step_{i+1} > ts_step_i` и попадания в окно. Поддержать `breakdown` (например,
-сравнить воронку первой покупки по `media_source`).
-
----
-
-### 4.5 `retention_analysis` — удержание
-
-**Класс задач:** возвращаются ли игроки. Все основные модели retention.
-
-**Параметры:**
+### 5.6 `behavioral_segment_metrics` — метрики по поведенческому сегменту (GD Tasks Блок 3)
+**Класс §3.3. Блок:** Cross-block.
+**Что:** посчитать метрики **только по игрокам**, чьи per-user агрегаты проходят
+условие. Объединяет `cohort_define(having)` и расчёт метрик в одном вызове.
 ```jsonc
 {
-  "cohort_event": EventSelector,    // событие «входа» в когорту (install/first_seen/level_start)
-  "return_event": EventSelector,    // что считаем «возвратом» (любая активность по умолчанию)
-  "retention_type": "n_day"         // вернулся ровно на день N
-                  | "unbounded"     // вернулся на день N или позже
-                  | "rolling"       // активен в окне
-                  | "bracket",      // диапазоны (D1, D3-7, D8-14...)
-  "periods": [0,1,3,7,14,30],       // какие лаги считать
-  "granularity": "day" | "week" | "month",
-  "time_range": TimeRange,          // окно набора когорт
-  "breakdown": Breakdown,           // retention по сегментам/каналам
-  "cohort": CohortRef
+  "having": [
+    { "aggregate": PerUserAggregate, "operator":"gt", "value": 10 },   // hints_used > 10
+    { "aggregate": PerUserAggregate, "operator":"lt", "value": 30 }    // avg_level_time < 30
+  ],
+  "having_op": "and" | "or",
+  "measures": [ Measure ],
+  "breakdown": Breakdown, "time_range": TimeRange, "app_scope": AppScope
 }
 ```
-**Выход:** матрица retention `(cohort_period, period_offset → % вернувшихся)`
-плюс размеры когорт. Это покрывает D1/D7/D30 и стандартную retention-heatmap.
 
-```sql
-WITH first AS (
-  SELECT user_id, min(event_timestamp)::date AS cohort_day
-  FROM events WHERE event_name='session_start' GROUP BY 1)
-SELECT f.cohort_day,
-       date_diff('day', f.cohort_day, e.event_timestamp::date) AS day_n,
-       count(DISTINCT e.user_id) AS retained
-FROM first f JOIN events e USING (user_id)
-GROUP BY 1,2;
-```
-
----
-
-### 4.6 `cohort_retention_grid` — когортная сетка (acquisition-cohorts)
-
-**Класс задач:** классическая когортная таблица «по дате установки × возраст»
-с метрикой не только retention, но и ARPU/выручки/конверсии нарастающим итогом.
-
-**Параметры:** `cohort_by` (`install_date`/первое событие), `cohort_granularity`
-(`day|week|month`), `metric` (`retention | cumulative_revenue | arpu | conversion`),
-`periods`, `breakdown` (например по `media_source`), `time_range`.
-
-**Выход:** треугольная/прямоугольная матрица когорта×возраст. Это объединяет
-retention и LTV-кривые в одном представлении.
-
----
-
-### 4.7 `cohort_define` — конструктор поведенческих когорт (переиспользуемый)
-
-**Класс задач:** определить группу пользователей по поведению/атрибутам и
-**сохранить как ссылку** (`CohortRef.ref`), чтобы подставлять в любой другой тул.
-Это ключ к «как вели себя пользователи, у которых было то или иное событие».
-
-**Параметры:**
+### 5.7 `derived_segment` — динамическая (квантильная/пороговая) сегментация
+**Класс §3.4. Блок:** Cross-block.
+**Что:** разбить игроков на группы по per-user метрике — равными квантилями
+(ntile) или по заданным порогам — и **сохранить как `CohortRef`** или сразу отдать
+сегмент как измерение для других тулов.
 ```jsonc
 {
-  "user_filter": FilterGroup,           // UA-атрибуты (country, media_source...)
-  "did_events": [ EventSelector ],      // совершили эти события
-  "did_not_events": [ EventSelector ],  // и НЕ совершали эти
-  "frequency": { "event": "...", "operator": "gte", "count": 3 },  // частотный критерий
-  "within": TimeRange,
-  "name": "paid_us_reached_lvl50",
-  "materialize": "reference" | "user_list"   // вернуть handle или сам список user_id
+  "metric": PerUserAggregate,               // games_completed за d0_2
+  "method": "ntile" | "thresholds",
+  "buckets": 5,                             // ntile → low..high (5×20%)
+  "labels": ["low","middle_low","middle","middle_high","high"],
+  "thresholds": [1,5,20,50],               // для method=thresholds (ad-watch tiers)
+  "time_range": TimeRange, "app_scope": AppScope,
+  "materialize": "reference" | "dimension"
 }
 ```
-**Выход:** `cohort_ref`, размер когорты, (опц.) список `user_id`.
-**Паттерн использования:** `cohort_define` → `retention_analysis(cohort=ref)` или
-`metrics_timeseries(cohort=ref)` — то есть «взять тех, у кого было событие X, и
-посмотреть, как они себя ведут дальше».
+**Выход:** определение сегмента + размеры групп; `segment_ref` для подстановки в
+`breakdown`/`cohort` любого тула. Покрывает skill (fast/slow) и ad-watch tiers.
 
----
-
-### 4.8 `behavioral_segment` — «кто сделал X, потом Y» (сравнение групп)
-
-**Класс задач:** разбить пользователей на did/didn't (или сравнить две когорты) и
-сопоставить их по любой метрике. Быстрый ответ на «чем отличаются те, кто
-совершил событие, от тех, кто нет».
-
-**Параметры:** `group_a: CohortRef`, `group_b: CohortRef` (или
-`split_by_event: EventSelector` → автоматически did/didn't), `compare_measures`
-(retention, ARPU, sessions, avg level...), `time_range`.
-
-**Выход:** сравнительная таблица метрик A vs B (+ дельта). Может опираться на
-`cohort_define` и `metrics_timeseries` под капотом.
-
----
-
-### 4.9 `path_analysis` — пути пользователей (Pathfinder)
-
-**Класс задач:** какие события чаще всего идут **до/после** опорного, где
-нелинейные ветвления и неожиданные дропы.
-
-**Параметры:**
+### 5.8 `churn_last_action` — последнее действие перед оттоком
+**Класс §3.5. Блок:** Retention/Progression.
+**Что:** для игроков, ушедших в отток (нет активности `inactivity_days` подряд) в
+окне, найти **последнее событие** и распределить отток по нему.
 ```jsonc
 {
-  "anchor_event": EventSelector,
-  "direction": "after" | "before",
-  "steps": 3,                       // глубина пути
-  "max_paths": 20,                  // топ-N путей
-  "within_session": true,           // ограничить сессией
-  "time_range": TimeRange,
-  "cohort": CohortRef,
-  "exclude_events": ["heartbeat"]
+  "inactivity_days": 5,
+  "window": { "relative_to":"install", "from_day":0, "to_day":2 },
+  "last_action_fields": ["event_name","event_properties.level","event_properties.level_id","event_properties.ad_type","event_properties.placement"],
+  "segment_by": "derived_segment_ref | Breakdown",
+  "time_range": TimeRange, "app_scope": AppScope, "cohort": CohortRef
 }
 ```
-**Выход:** дерево/список путей с долями переходов на каждом шаге.
+**Выход:** `(segment, last_event, last_lvl, level_id, ad_type, ad_place, players,
+share_pct)` — где именно «отваливаются».
 
----
+### 5.9 `session_progression` — осыпание по номеру сессии
+**Класс §3.6. Блок:** Engagement/Onboarding.
+**Что:** по `session_number` — `players`, `share_from_start_pct`,
+`avg/median_session_duration`, `avg/median_completed_levels`.
+**Параметры:** `max_session`, `min_share_pct` (отсечь хвост), `breakdown`
+(сегменты), `window`, `time_range`, `app_scope`, `cohort`.
 
-### 4.10 `lifecycle_analysis` — жизненный цикл (new/active/resurrected/dormant/churned)
+### 5.10–5.12 Поведение во времени
+- `retention_analysis` — D1/D7/D30, n_day/unbounded/rolling/bracket, retention-heatmap,
+  `breakdown` по каналам/гео/версии, `cohort`.
+- `lifecycle_analysis` — new/active/resurrected/dormant/churned (порог = Game Churn).
+- `stickiness_analysis` — DAU/MAU-ratio, «активен X из N дней».
+- `cohort_retention_grid` — Cohort Date × Retention X Day с метрикой retention /
+  cumulative_revenue / ARPU / ROAS / LTV.
+- `behavioral_segment` — сравнить две группы (did/didn't или два `CohortRef`) по
+  набору метрик (retention, ARPU, sessions, playtime, avg level) + дельта.
 
-**Класс задач:** структура активной базы по состояниям и переходам между ними от
-периода к периоду.
+### 5.13 `distribution_profile` — распределения и профиль сегмента
+**Класс §3.4. Блок:** Progression/Engagement.
+**Что:** распределение/перцентили per-user или per-event величины; **богатый
+профиль по сегментам** (как таблицы avg/median/p25/p75/max в исследованиях).
+**Параметры:** `metric` (PerUserAggregate | event field), `mode`
+(`histogram | percentiles | per_segment_profile`), `stats`
+(`["avg","median","p25","p75","max"]`), `segment_by`, `buckets`, `time_range`,
+`app_scope`, `cohort`.
 
-**Параметры:** `active_event` (что считаем активностью), `granularity`
-(`day|week|month`), `dormant_after` (порог неактивности), `time_range`,
-`breakdown`, `cohort`.
-
-**Выход:** по каждому периоду — `new / current / resurrected / dormant / churned`
-(+ их пересечения), пригодно для stacked-area графика роста базы.
-
----
-
-### 4.11 `stickiness_analysis` — липкость
-
-**Класс задач:** DAU/MAU-ratio и «сколько дней из N пользователь активен» —
-насколько привычка сформирована.
-
-**Параметры:** `event_selector`, `window` (`week|month`), `metric`
-(`dau_mau_ratio | days_active_distribution`), `time_range`, `breakdown`, `cohort`.
-
-**Выход:** ratio во времени и/или распределение «активен X из N дней».
-
----
-
-### 4.12 `distribution_analysis` — распределения / гистограммы / частоты
-
-**Класс задач:** распределение значения свойства (score, moves, attempts,
-revenue), частота события на пользователя, перцентили.
-
-**Параметры:** `event_selector`, `field` (для числового свойства),
-`mode` (`histogram | frequency_per_user | percentiles`), `buckets`/`bucket_size`,
-`time_range`, `breakdown`, `cohort`.
-
-**Выход:** бины и их наполнение или таблица перцентилей.
-
----
-
-### 4.13 `user_timeline` / `user_profile` — отладка на уровне игрока
-
-**Класс задач:** посмотреть полную хронологию событий конкретного игрока и его
-атрибуты — для разбора кейсов и валидации гипотез.
-
-**Параметры:** `user_id` (или маленький `CohortRef` с `limit`), `time_range`,
-`event_filter`, `limit`.
-
-**Выход:** атрибуты пользователя + упорядоченная лента событий со свойствами.
-
----
-
-### 4.14 `progression_analysis` — прогрессия по уровням (игровая специфика)
-
-**Класс задач:** для пазлов/word-игр — как игроки проходят уровни: где «стена
-сложности», win-rate, среднее число попыток, отвал по уровням. По сути
-специализированная воронка по `level`.
-
-**Параметры:**
+### 5.14 `progression_analysis` — прогрессия по уровням (игровая специфика)
+**Класс §3.6, §3.8. Блок:** Progression.
 ```jsonc
 {
-  "level_field": "event_properties.level",
-  "start_event": "level_start",
-  "win_event":  "level_complete",
-  "fail_event": "level_fail",
-  "level_range": { "from": 1, "to": 200 },
-  "metrics": ["players_reached","win_rate","avg_attempts","avg_moves","churn_at_level"],
-  "time_range": TimeRange,
-  "breakdown": Breakdown,        // например по app_version (баланс уровней между версиями)
-  "cohort": CohortRef
+  "level_dimension": "by_order" | "by_id",      // Level X по порядку ИЛИ по ID
+  "start_event":"level_start","win_event":"level_complete","fail_event":"level_fail",
+  "level_range": { "from":1, "to":200 },
+  "metrics": ["players_reached","started_rate","win_rate","avg_attempts","avg_moves","churn_at_level","coins_spent_at_level"],
+  "breakdown": Breakdown,                         // напр. app_version (баланс между версиями)
+  "time_range": TimeRange, "app_scope": AppScope, "cohort": CohortRef
 }
 ```
-**Выход:** по каждому уровню — достигли / прошли / win-rate / попытки / отвал.
-Идеально для поиска проблемных уровней и балансировки сложности.
+**Выход:** по уровню — достигли/начали/прошли/попытки/отвал/трата валюты. Прямо
+поддерживает A/B по балансу уровней и поиск «стены сложности».
 
----
-
-### 4.15 `monetization_analysis` — монетизация (игровая специфика)
-
-**Класс задач:** ARPU, ARPPU, ARPDAU, конверсия в платящих, доля платящих,
-время до первой покупки, LTV-кривая, выручка по продуктам/каналам.
-
-**Параметры:**
+### 5.15 `correlation_explore` — поиск зависимостей
+**Класс §3.8. Блок:** Cross-block.
+**Что:** связь между параметром (уровня/сегмента/поведения) и исходом — таблица
+сопоставления и коэффициент связи.
 ```jsonc
 {
-  "revenue_field": "event_properties.revenue",
-  "purchase_event": "purchase",
-  "metric": "arpdau|arppu|arpu|conversion_to_payer|payer_share|time_to_first_purchase|ltv_curve|revenue_by_product",
-  "ltv_horizon": [1,7,30,90],     // для ltv_curve (по acquisition-когортам)
-  "time_range": TimeRange,
-  "granularity": Granularity,
-  "breakdown": Breakdown,         // по media_source / country / platform
-  "cohort": CohortRef
+  "unit": "level" | "user" | "segment",
+  "x": { "metric": PerUserAggregate | "event_properties.moves" },
+  "y": { "metric": "completion_rate" | "churn" | PerUserAggregate },
+  "method": "scatter_table | correlation | grouped_compare",
+  "breakdown": Breakdown, "time_range": TimeRange, "app_scope": AppScope, "cohort": CohortRef
 }
 ```
-**Выход:** запрошенная метрика во времени / по сегментам / как кривая по когортам.
+**Выход:** пары (x,y) с метрикой связи (напр. Pearson/Spearman) и оговорками
+(`assumptions`: корреляция ≠ причинность). Пример: ad usage vs completion rate.
+
+### 5.16 `economy_analysis` — экономика (игровая специфика)
+**Класс §3.9. Блок:** Economy. На базе `currency_income`/`currency_outcome`.
+```jsonc
+{
+  "income_event":"currency_income","outcome_event":"currency_outcome",
+  "resource_field":"event_properties.resource_type","amount_field":"event_properties.amount",
+  "source_field":"event_properties.source",          // free / rewarded / purchase / ...
+  "convert_to_coins": true,
+  "metric":"income|outcome|net|cumulative_income|cumulative_outcome|balance|source_structure",
+  "axis":"by_day|by_session|by_level",
+  "axis_range": { "from":0, "to":200 },
+  "breakdown": Breakdown,                              // resource_type / source / сегмент
+  "time_range": TimeRange, "app_scope": AppScope, "cohort": CohortRef
+}
+```
+**Выход:** факт/кумулятив/баланс/структура источников ресурса по оси и сегментам —
+для поиска инфляции/дефицита и анализа free vs rewarded зависимости.
+
+### 5.17 `monetization_analysis` — монетизация (IAP + реклама)
+**Класс §3.7. Блок:** IAP/Ad Monetization.
+```jsonc
+{
+  "revenue_kind":"iap|ad|total",
+  "purchase_event":"purchase","ad_event":"ad_impression",
+  "ad_type":"banner|interstitial|rewarded|all",
+  "metric":"arpdau|arppu|arpu|conversion_to_payer|payer_share|time_to_first_purchase|ltv_curve|revenue_by_product|ad_impressions_per_dau|ad_arpu",
+  "net_of_refunds": true,                  // вычитать Refunds/Cancelled
+  "ltv_horizon":[1,7,30,90,180],
+  "breakdown": Breakdown, "granularity": Granularity,
+  "time_range": TimeRange, "app_scope": AppScope, "cohort": CohortRef
+}
+```
+Где метрика есть в семантическом слое — использовать её определение (`named`).
+
+### 5.18 `post_hoc_segment_compare` — post-hoc разбор A/B
+**Класс §3.10. Блок:** Cross-block.
+**Что:** взять варианты эксперимента (`base`/`test`, по ключу из GrowthBook),
+сравнить по сегментам **новизны** (новички/1-99/100+) и поведению (last-action,
+профили), чтобы объяснить «почему» победил/проиграл. Статзначимость — из
+GrowthBook (`experiment_lookup`), а здесь — поведенческое объяснение.
+```jsonc
+{
+  "experiment_key":"ab_seg_wss_2026_04_09_android_ru_levels_v3",
+  "variants": ["base","test"],
+  "segment_by": ["newbie_segment","derived_segment_ref"],
+  "compare": ["retention","churn_last_action","avg_levels","ad_impressions","coins_spent"],
+  "time_range": TimeRange, "app_scope": AppScope
+}
+```
+
+### 5.19 `experiment_lookup` — мост к GrowthBook
+Достаёт результат эксперимента (variation, uplift, **Chance to Win**, p-value) из
+GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Имена экспериментов едины
+между Jira/Confluence/Firebase/GrowthBook.
+
+### 5.20 `user_timeline` / исполнение
+- `user_timeline` — хронология событий игрока + атрибуты (валидация гипотез/QA).
+- `dry_run:true` → только `sql`+`assumptions`. Обычный вызов → выполнить с
+  `row_limit`, таймаутом и оценкой сканируемого объёма (BigQuery-биллинг).
+- Опциональный `run_validated_sql` (read-only) — выключен по умолчанию.
 
 ---
 
-### 4.16 Исполнение: `preview_sql` и `run_query`
+## 6. Консистентность, валидация, безопасность
 
-Не отдельный класс анализа, а режимы любого тула:
-- `dry_run: true` → вернуть только `sql` + `assumptions` (ничего не выполнять).
-- обычный вызов → выполнить и вернуть `rows` (с `row_limit`, по умолчанию,
-  например, 10 000, и защитой по таймауту/сканируемому объёму).
-
-Опциональный «escape hatch» `run_validated_sql` (выполнить ревью-нутый SQL) лучше
-держать **выключенным** или строго read-only — он противоречит идее структурных
-тулов, но иногда нужен для нестандартных задач.
-
----
-
-## 5. Консистентность, валидация, безопасность
-
-- **Единый конверт ответа** у всех тулов:
+- **Единый конверт ответа:**
   ```jsonc
   {
-    "sql": "…",
-    "columns": [ {"name":"…","type":"…"} ],
-    "rows": [ … ],
-    "row_count": 123,
-    "assumptions": ["return_event по умолчанию = любая активность", …],
-    "warnings": ["breakdown по высокой кардинальности обрезан до 50"]
+    "sql":"…", "columns":[{"name":"…","type":"…"}], "rows":[…], "row_count":123,
+    "metric_source":"generated",   // всегда из events+users; "named"-рецепт повторяет формулу BI
+    "assumptions":["inactivity=5d","tz=UTC","корреляция ≠ причинность"],
+    "warnings":["semi-atomic метрику нельзя резать по активностному измерению — разбивка проигнорирована"]
   }
   ```
-- **Валидация на входе:** имена событий/свойств сверяются с метаданными; неизвестное
-  имя → ошибка с подсказкой ближайших совпадений (а не «тихий» неверный SQL).
-- **Только read-only**, параметризованные запросы, allowlist таблиц/колонок из
-  конфига → нет инъекций.
-- **Защита от «тяжёлых» запросов:** обязательный `time_range`, лимиты на
-  кардинальность `breakdown`, дефолтные `row_limit` и таймаут.
-- **Детерминизм:** одинаковые параметры → одинаковый SQL (удобно кэшировать и
-  тестировать снапшотами).
-- **Прозрачность допущений:** всё, что сервер «додумал» (дефолтный return-event,
-  окно воронки, таймзона), попадает в `assumptions`.
+- **Валидация имён** событий/свойств/метрик/измерений по метаданным; неизвестное →
+  ошибка с подсказкой ближайших совпадений.
+- **Правило Atomic/Semi-Atomic** и **когортные vs активностные** измерения — не
+  даём «тихо неверных» чисел.
+- **Мультипроектность:** без `AppScope` — предупреждение/требование.
+- **Read-only**, параметризованные запросы, allowlist таблиц/колонок → нет инъекций.
+- **Защита от тяжёлых запросов:** обязательный `time_range`, лимиты кардинальности
+  `breakdown`, дефолтные `row_limit`/таймаут, оценка байт (BigQuery).
+- **Детерминизм:** одинаковые параметры → одинаковый SQL (кэш, снапшот-тесты).
 
 ---
 
-## 6. Карта «класс задачи → тул»
+## 7. Карта «класс задачи → тул»
 
-| Вопрос бизнеса / аналитика | Тул(ы) |
-|---|---|
-| Сколько DAU/выручки и как меняется во времени | `metrics_timeseries` |
-| Топ стран/каналов по выручке, разрез метрики | `segmentation` |
-| Где отваливаются в туториале / пути до покупки | `funnel_analysis` |
-| D1/D7/D30, retention-heatmap | `retention_analysis` |
-| Когортная таблица install×возраст, LTV-кривые | `cohort_retention_grid`, `monetization_analysis` |
-| Определить группу «совершившие событие X» | `cohort_define` |
-| Как ведут себя те, у кого было событие X | `cohort_define` → любой тул с `cohort` |
-| Чем отличаются сделавшие X от не сделавших | `behavioral_segment` |
-| Что игроки делают до/после события | `path_analysis` |
-| Структура базы: новые/вернувшиеся/уходящие | `lifecycle_analysis` |
-| Насколько «липкий» продукт (DAU/MAU) | `stickiness_analysis` |
-| Распределение score/attempts/частоты | `distribution_analysis` |
-| Разбор конкретного игрока | `user_timeline` |
-| Сложность/баланс уровней, где «стена» | `progression_analysis` |
-| ARPU/ARPPU/конверсия/время до 1-й покупки | `monetization_analysis` |
-| A/B результаты эксперимента | GrowthBook MCP (см. §7) |
-
----
-
-## 7. Интеграция с уже подключёнными MCP (Cube, GrowthBook)
-
-В окружении уже доступны два MCP-сервера — это влияет на границы ответственности:
-
-- **Cube** (`cube_query_*`) — семантический слой. Если метрики/измерения уже
-  определены в Cube, часть «базовой аналитики» (§4.2–4.3) можно делегировать ему,
-  а наш сервер сосредоточить на поведенческих задачах, которые Cube не покрывает
-  «из коробки» (воронки с окнами, retention-матрицы, path, поведенческие когорты,
-  прогрессия). Возможен вариант: наши тулы генерируют **Cube-запрос**, а не сырой
-  SQL — тогда метрики остаются консистентными с остальным BI.
-- **GrowthBook** (`growthbook_*`) — эксперименты. Для A/B-задач отдельный тул не
-  нужен: результаты берём из GrowthBook. Наша роль — отдавать `CohortRef`
-  (поведенческие сегменты) и метрики, которыми можно обогащать анализ экспериментов.
-
-> Рекомендация: на старте определить, что является **источником истины для
-> метрик** (Cube vs наш SQL-генератор), чтобы цифры не расходились между
-> инструментами.
+| Вопрос исследователя | Тул(ы) | §3 |
+|---|---|---|
+| Считать событие с условиями на параметры + сплит + когорта | `event_count` | 3.1 |
+| Событие X рядом с событием Y (досмотр RV после траты монет) | `adjacent_event_count` | 3.2 |
+| Метрики только по «тем, у кого >x подсказок» | `behavioral_segment_metrics` | 3.3 |
+| Разбить на 5 квантилей по активности и сравнить профили | `derived_segment` + `distribution_profile` | 3.4 |
+| Где отваливаются: последнее действие перед оттоком | `churn_last_action` | 3.5 |
+| Осыпание по сессиям / по уровням, «стена» | `session_progression`, `progression_analysis` | 3.6 |
+| Почему упал Retention/ARPU (состав трафика, baseline) | `metrics_timeseries`(rebase), `behavioral_segment` | 3.7 |
+| Связь ad usage и completion / ходов и прохождения | `correlation_explore` | 3.8 |
+| Структура источников валюты, баланс, free vs rewarded | `economy_analysis` | 3.9 |
+| Почему вариант A/B выиграл/проиграл (по сегментам) | `post_hoc_segment_compare` (+ `experiment_lookup`) | 3.10 |
+| Как ведут себя «совершившие X» дальше | `cohort_define` → любой тул с `cohort` | — |
+| Стандартная витринная метрика | → семантический слой / `named` | §2 |
 
 ---
 
 ## 8. Минимальный план внедрения (приоритеты)
 
-1. **Фундамент:** конфиг схемы + общие типы (§3) + `describe_schema`/`list_events`/
-   `list_properties` + единый конверт ответа и `dry_run`.
-2. **Топ-5 по ценности:** `metrics_timeseries`, `segmentation`, `funnel_analysis`,
-   `retention_analysis`, `cohort_define`.
-3. **Поведение/когорты:** `behavioral_segment`, `cohort_retention_grid`,
-   `lifecycle_analysis`, `stickiness_analysis`, `path_analysis`,
-   `distribution_analysis`.
-4. **Игровая специфика:** `progression_analysis`, `monetization_analysis`.
-5. **Отладка/escape:** `user_timeline`, опционально `run_validated_sql` (read-only).
+1. **Фундамент:** конфиг схемы + общие блоки (§4, особенно `PerUserAggregate`) +
+   `describe_schema`/`list_events`/`list_properties`/`list_metrics` + единый
+   конверт, `dry_run`, `AppScope`.
+2. **Ядро ad-hoc (по GD Tasks):** `event_count` (Блок 1), `adjacent_event_count`
+   (Блок 2), `behavioral_segment_metrics` (Блок 3), `derived_segment`,
+   `cohort_define`.
+3. **Исследовательский топ:** `churn_last_action`, `session_progression`,
+   `distribution_profile`, `progression_analysis`, `correlation_explore`,
+   `metrics_timeseries`(rebase).
+4. **Поведение/когорты/деньги:** `retention_analysis`, `behavioral_segment`,
+   `cohort_retention_grid`, `lifecycle_analysis`, `economy_analysis`,
+   `monetization_analysis`.
+5. **A/B и отладка:** `post_hoc_segment_compare`, `experiment_lookup`,
+   `user_timeline`, опц. `run_validated_sql`.
 
 ---
 
-## Источники (research)
+## 9. Интеграция: разделение труда
 
+> **Главное:** наш единственный источник данных для SQL — `events` + `users`
+> (§0.1). Мы **не** запрашиваем витрины/Cube и не делегируем им расчёт; перечисленные
+> системы — это либо референс определений, либо внешние результаты, либо адресат, куда
+> уместно отослать классический витринный вопрос.
+
+- **Семантический слой (Metabase/Cube)** — классический BI: стандартные метрики,
+  дашборды, регулярные разрезы. Для нас — **референс формул и имён метрик** (чтобы
+  `named`-рецепты по `events`+`users` давали то же число), а не источник данных. Если
+  вопрос целиком закрывается витриной — корректно отослать туда, а не пересчитывать.
+- **GrowthBook** (`growthbook_*`) — статзначимость A/B (Bayesian, Chance to Win,
+  power). Мы читаем результат (`experiment_lookup`) и даём поведенческое «почему»
+  (`post_hoc_segment_compare`) — расчётом по `events`+`users`.
+- **Player Segmentation API** — готовые сегменты игроков: `CohortRef.segment_api_id`
+  ссылается на них (список `user_id` подмешивается в `WHERE`), а не дублирует логику.
+- **DWH:** физически `events` и `users` могут маппиться на модели Model/Metric-слоя
+  (`bi_data_models`, `bi_data_metrics`) — это деталь конфига schema; **логически тул
+  всегда видит ровно две детальные таблицы** и строит из них весь SQL.
+
+---
+
+## 10. Что и как исследуют в компании (реальный контекст)
+
+- **ТЗ BI-команды «GD Tasks»** прямо формулирует нужные ad-hoc примитивы
+  (фильтрованный подсчёт, условие на соседнее событие, метрики по поведенческим
+  сегментам) — это каркас §3.1–3.3.
+- **Retention deep-dives** (WO): квантильные сегменты по активности, профили
+  d0/d0_2, анализ по сессиям, last-action перед оттоком; root-cause через состав
+  трафика и avg_playtime_d3, нормировка к baseline.
+- **Экономика** (WO): структура `currency_income` free vs rewarded по ad-watch
+  сегментам и skill-сегментам (fast/middle/slow).
+- **Баланс уровней** (WO, Sudoku): модель сложности, поиск «проблемных» уровней,
+  зависимости (ходы/техники/ad usage vs прохождение) — A/B по балансу.
+- **A/B**: формализованный пайплайн в Jira (Idea→Validation→Backlog→In test→
+  Won/Lost/Inconclusive→Rollout), Value/Effort-скоринг, GrowthBook + CUPED, A/A
+  тесты, post-hoc разбор по сегментам новизны (новички/1-99/100+).
+- **Монетизация**: разборы падения ARPU/LTV, ROAS по закрытым когортам.
+
+---
+
+## Источники
+
+### Внутренние (Confluence/Jira, openmygame)
+- **GD Tasks** — BI/4971790388 (ТЗ ad-hoc задач: Блоки 1–3, 5)
+- Retention D1 deep-dive (квантильные сегменты, сессии, last-action) — WO/4874240120
+- Анализ причин падения Retention RU Android — WO/4774428695
+- Исследование экономики free/reward currency_income — WO/4927258627
+- Исследования A/B по балансу уровней — WO/4801953941; Sudoku «поиск зависимостей» — Sudoku/4124672001
+- Metabase - Исследование RewardedGameScreen — (личное пространство) /4826464352
+- Post-hoc A/B «New Balance V1» — WO/4906909697; A/A-тест (CUPED) — MW/4687396865
+- [Metabase] Semantic Layer: Metrics Calculation Guide — BI/4144398337; Metrics Documentation Overview — BI/3612573764
+- Data Warehouse Layered Architecture — BI/3396534300
+- Пайплайн A/B тестов (пирамида метрик) — PA/4881940484; A/B Statistic Engine — BI/3859152921; Power Calculation — BI/3804758049
+- Player Segmentation API — BI/4340121602
+- [Dimension] Retention X Day — BI/3508502782; Game Funnel Stage — BI/3916857510; Segment → Online Players — BI/4056481835
+
+### Внешние (таксономия и бенчмарки)
 - [Amplitude — Product Analytics Guide](https://amplitude.com/explore/analytics/product-analytics-guide)
 - [Amplitude — Funnel Analysis](https://amplitude.com/guides/funnel-analysis)
 - [Amplitude — Cohort Retention Analysis](https://amplitude.com/explore/analytics/cohort-retention-analysis)
 - [Amplitude — Pathfinder & Behavioral Cohorts](https://e-cens.com/blog/amplitude-101-advanced-analysis-with-pathfinder-cohorts/)
-- [Amplitude — Stickiness interpretation](https://amplitude.com/docs/analytics/charts/stickiness/stickiness-interpret)
 - [PostHog — Cohorts](https://posthog.com/docs/data/cohorts)
 - [Adjust — Cohort KPIs: event conversion & funnels](https://www.adjust.com/blog/demystifying-cohorts-3-tracking-custom-user-journeys-with-event-kpis/)
 - [GameAnalytics — 22 metrics all game developers should know](https://www.gameanalytics.com/blog/metrics-all-game-developers-should-know)
 - [Game Growth Advisor — Mobile Game KPIs & Benchmarks 2026](https://gamegrowthadvisor.com/blog/2026-03-17-mobile-game-kpis-benchmarks-2026/)
-- [TyrAds — Mobile Game KPIs](https://tyrads.com/mobile-game-kpis/)
-- [dbt — Creating metrics (Semantic Layer / MetricFlow)](https://docs.getdbt.com/docs/build/metrics-overview)
-- [dbt — Building semantic models](https://docs.getdbt.com/best-practices/how-we-build-our-metrics/semantic-layer-3-build-semantic-models)
+- [dbt — Semantic Layer / MetricFlow metrics](https://docs.getdbt.com/docs/build/metrics-overview)
+- [Statsig — Best Product Analytics Tools](https://www.statsig.com/comparison/best-product-analytics-tools)

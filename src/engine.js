@@ -8,11 +8,13 @@ import { renderContext } from './yaml-render.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
+import { renderSequence } from './match-recognize.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
+    this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
     this.schemas = buildSchemas(catalog);
     if (recipes) {
       this.schemas.list_recipes = { type: 'object', additionalProperties: false, properties: {} };
@@ -116,6 +118,31 @@ export class Engine {
 
   async create_semantic_model(input) {
     this._validate('create_semantic_model', input);
+
+    if (input.engine === 'match_recognize') {
+      const seq = renderSequence(this.catalog, input.sequence); // throws on bad spec
+      const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
+      ctx.state.engine = 'match_recognize';
+      ctx.state.sequence = seq;
+      (ctx.state.tasks ||= []).push(input.name);
+      this.ctxs.touch(ctx.id);
+      return {
+        context_id: ctx.id,
+        task: input.name,
+        engine: 'match_recognize',
+        mode: seq.mode,
+        steps: seq.steps,
+        dialect: this.catalog.dialect,
+        sql: this.catalog.dialect === 'bigquery' ? seq.sql_bigquery : seq.sql_postgres,
+        sql_bigquery: seq.sql_bigquery,
+        assumptions: [
+          'engine=match_recognize: server-generated row-pattern SQL (NOT MetricFlow); target BigQuery.',
+          'output is users per furthest_step; reached(step k) = sum of users at furthest_step_idx >= k.',
+        ],
+        warnings: [],
+      };
+    }
+
     const compiled = this._compile(input);
 
     if (input.dry_run) {
@@ -230,6 +257,18 @@ export class Engine {
     this._validate('query_semantic_model', input);
     const ctx = this.ctxs.get(input.context_id);
 
+    // match_recognize contexts run server-generated row-pattern SQL (not MetricFlow)
+    if (ctx.state.engine === 'match_recognize') {
+      const seq = ctx.state.sequence;
+      const sql = this.catalog.dialect === 'bigquery' ? seq.sql_bigquery : seq.sql_postgres;
+      if (input.dry_run || !this.sqlRunner) {
+        return { ok: true, engine: 'match_recognize', dry_run: true, sql, sql_bigquery: seq.sql_bigquery };
+      }
+      const res = await this.sqlRunner(sql);
+      return { ok: true, engine: 'match_recognize', command: 'sqlRunner', sql, columns: res.columns || [], rows: res.rows || [], row_count: (res.rows || []).length };
+    }
+
+    if (!input.metrics?.length) throw new ToolError('metrics is required for core (MetricFlow) queries', { stage: 'validate' });
     const known = new Set(ctx.state.metrics.map((m) => m.name));
     for (const m of input.metrics) if (!known.has(m)) throw new ToolError(`unknown metric in context: ${m}`, { stage: 'validate', field: m });
 

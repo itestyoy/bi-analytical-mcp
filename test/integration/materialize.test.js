@@ -107,10 +107,16 @@ test('transform: compress/re-slice the materialized result table (where/group_by
   assert.equal(totalR.ok, true, JSON.stringify(totalR.error));
   assert.equal(num(totalR.rows[0].total), 85);
 
-  // (b) filter (where) to one country
+  // (b) filter (where) to one country -> exact seed value (US revenue = 35)
   const us = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { where: [{ column: 'user__country', op: 'eq', value: 'US' }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
   assert.equal(us.ok, true, JSON.stringify(us.error));
-  assert.ok(num(us.rows[0].rev) > 0 && num(us.rows[0].rev) <= 85);
+  assert.equal(num(us.rows[0].rev), 35);
+
+  // (b2) injection/escaping proven on DATA: a value containing a quote+SQL is
+  // bound as a literal -> the query runs safely and simply matches nothing.
+  const inj = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { where: [{ column: 'user__country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
+  assert.equal(inj.ok, true, JSON.stringify(inj.error)); // no SQL error: the literal was escaped
+  assert.ok(inj.rows.length === 0 || num(inj.rows[0].rev) === 0 || inj.rows[0].rev == null); // matches no country
 
   // (c) group_by + having + count of qualifying groups
   const big = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { group_by: ['user__country'], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }], having: [{ fn: 'sum', column: 'mon_revenue', op: 'gte', value: 25 }], order_by: [{ key: 'rev', direction: 'desc' }] } });

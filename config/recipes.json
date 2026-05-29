@@ -33,7 +33,7 @@
       "id": "metric_by_user_segment",
       "task_type": "segmentation",
       "title": "Metric sliced by a user attribute",
-      "when_to_use": "Revenue / payers / ARPPU broken down by country, platform, media_source, acquisition_type or campaign channel.",
+      "when_to_use": "Revenue / payers / ARPPU broken down by country, platform, media_source, acquisition_type or campaign_id.",
       "required_events": ["iap_purchase_completed"],
       "required_properties": ["price_in_usd"],
       "required_user_attrs": ["country", "platform", "media_source", "acquisition_type"],
@@ -60,7 +60,7 @@
         { "metrics": ["rev_segment_arppu"], "group_by": ["user__acquisition_type"] },
         { "metrics": ["rev_segment_revenue"], "group_by": ["user__media_source"] }
       ],
-      "notes": "User attributes via implicit events.user -> users.user join; campaign channel is a 2-hop path."
+      "notes": "User attributes via the implicit events.user -> users.user join; campaign_id is a plain string attribute on dim_users (1-hop, like country/platform) — there is no separate campaigns table."
     },
     {
       "id": "step_conversion_funnel",

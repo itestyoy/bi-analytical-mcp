@@ -5,29 +5,18 @@ under `dbt_project/seeds/`. The numbers below are derived directly from the CSV
 files and are intended to be asserted verbatim by integration tests. If you edit
 any seed CSV, regenerate this document.
 
-Seed files:
-- `dbt_project/seeds/seed_campaigns.csv` -> `dim_campaigns`
+Seed files (EXACTLY TWO data sources, per the project rules):
 - `dbt_project/seeds/seed_users.csv` -> `dim_users`
 - `dbt_project/seeds/seed_events.csv` -> `fct_analytics_events`
 
 Vocabulary is restricted to `config/catalog.json` (events, event_data property
-keys, and user/campaign attributes). All monetary values are integers.
+keys, and user attributes). All monetary values are integers. `campaign_id` is a
+plain string attribute on `dim_users` (like country/platform) — there is NO
+separate campaigns table.
 
 ---
 
-## 1. Campaigns (`seed_campaigns.csv`)
-
-3 campaigns.
-
-| campaign_id | channel | network  | cost_model |
-|-------------|---------|----------|------------|
-| c1          | social  | meta     | cpi        |
-| c2          | search  | google   | cpc        |
-| c3          | video   | applovin | cpm        |
-
----
-
-## 2. Users (`seed_users.csv`)
+## 1. Users (`seed_users.csv`)
 
 12 users (`u1`..`u12`). `app_id` = `com.omg.wordsearch` for all. `app_version` = `1.0` for all.
 
@@ -52,19 +41,13 @@ keys, and user/campaign attributes). All monetary values are integers.
 - country: US = 4, GB = 3, DE = 3, BR = 2
 - media_source: meta = 3, organic = 4, google = 2, applovin = 3
 - acquisition_type: paid = 8, organic = 4
-- campaign_id: c1 = 5, c2 = 4, c3 = 3
+- campaign_id (plain user attribute on dim_users): c1 = 5, c2 = 4, c3 = 3
 - install_date: 2026-01-01 = 2 (u1,u2), 2026-01-02 = 2 (u3,u4),
   2026-01-03 = 2 (u5,u6), 2026-01-04 = 3 (u7,u8,u9), 2026-01-05 = 3 (u10,u11,u12)
 
-### Campaign -> channel mapping (via user.campaign_id join to dim_campaigns)
-
-- c1 (social/meta/cpi): u1, u3, u5, u9, u11
-- c2 (search/google/cpc): u2, u4, u8, u10
-- c3 (video/applovin/cpm): u6, u7, u12
-
 ---
 
-## 3. Events (`seed_events.csv`)
+## 2. Events (`seed_events.csv`)
 
 Total event rows: **184**
 
@@ -90,7 +73,7 @@ Total event rows: **184**
 
 ---
 
-## 4. IAP / Monetization
+## 3. IAP / Monetization
 
 `iap_purchase_completed`: 8 rows. `iap_purchase_failed`: 3 rows. `shop_opened`: 10 rows.
 Product prices (integer USD): p1 = 5, p2 = 10, p3 = 20. currency = `USD`, status = `success`.
@@ -125,7 +108,7 @@ Product prices (integer USD): p1 = 5, p2 = 10, p3 = 20. currency = `USD`, status
 
 ---
 
-## 5. Levels Funnel
+## 4. Levels Funnel
 
 level_id range 1..10. `level_completed` carries `result` (win/lose),
 `complete_time` (int sec), `attempt` (int).
@@ -155,7 +138,7 @@ users (12/12 win). Level 6 has 1 start and 0 completions (drop-off).
 
 ---
 
-## 6. Ads
+## 5. Ads
 
 `ad_started`: 12 rows. `ad_finished`: 12 rows (one finish per start).
 ad_type in {rewarded, interstitial, banner}; placement in {store, level_fail, main_menu};
@@ -184,7 +167,7 @@ plus `is_reward_received` and `is_clicked`.
 
 ---
 
-## 7. Currency
+## 6. Currency
 
 currency = `coins`. `amount` and `value_in_coins` are equal integers per row.
 
@@ -218,7 +201,7 @@ currency = `coins`. `amount` and `value_in_coins` are equal integers per row.
 
 ---
 
-## 8. Tutorial Drop-off
+## 7. Tutorial Drop-off
 
 `tutorial` carries `step_id` in {step_1, step_2, step_3}. Total tutorial rows = 16.
 
@@ -232,7 +215,7 @@ Each user appears once per step they reached, so row count = 8 + 5 + 3 = 16.
 
 ---
 
-## 9. Screen Changes
+## 8. Screen Changes
 
 `screen_changed`: 3 rows, with `screen_from` / `screen_to`.
 
@@ -244,7 +227,7 @@ Each user appears once per step they reached, so row count = 8 + 5 + 3 = 16.
 
 ---
 
-## 10. Sessions / Retention / DAU / MAU
+## 9. Sessions / Retention / DAU / MAU
 
 `new_session` events drive activity. Each new_session is paired with an
 `end_session` on the same day, so end_session counts equal new_session counts (21 each).
@@ -297,7 +280,8 @@ distinct users with any event on that day in this dataset).
 
 - All `event_data` values are valid JSON objects; inner double quotes are
   CSV-escaped by doubling. Empty payloads (`first_launch`) are `{}`.
-- `appsflyer_id` joins events to users; `campaign_id` joins users to campaigns.
+- `appsflyer_id` joins events to users. `campaign_id` is a plain string attribute
+  on `dim_users` (no separate campaigns table).
 - All monetary fields are integers: `price_in_usd` (whole USD),
   `ad_finished.revenue` (cents), `amount` / `value_in_coins` (coins).
 - `session_number` is a per-user integer (1..n) and is reused across event types

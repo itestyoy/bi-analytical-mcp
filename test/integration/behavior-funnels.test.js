@@ -196,9 +196,8 @@ test('monetization: payers = 7 (distinct buyers across the whole month)', opts, 
   assert.equal(num(r.rows[0].mon_payers), 7);
 });
 
-test('monetization: nested where (country in [US,GB] AND paid) -> u1 15 + u10 20 = 35', opts, async (t) => {
+test('monetization: nested where (country in [US,GB] AND paid) -> 5+10+15+20 = 50', opts, async (t) => {
   if (skip(t)) return;
-  // paid payers in US/GB: u1(US,15), u10(US,20); GB payers u3/u7/u11 are all... u3,u7 paid GB
   // GB paid payers: u3(5), u7(10); US paid payers: u1(15), u10(20) -> 5+10+15+20 = 50
   const r = await q('mon', { metrics: ['mon_revenue'], where: { op: 'and', conditions: [
     { field: { kind: 'dimension', path: 'user__country' }, op: 'in', value: ['US', 'GB'] },

@@ -256,6 +256,7 @@ function predicateDefs(catalog) {
 
 export function buildSchemas(catalog) {
   const modelKeys = catalog.modelKeys();
+  const userAttrCols = modelKeys.includes('users') ? catalog.modelDimensionColumns('users') : [];
   const sequenceStep = {
     type: 'object', additionalProperties: false, required: ['name', 'event_name'],
     description: 'One ordered step of the sequence/funnel: an event (optionally narrowed by event_data property values).',
@@ -299,6 +300,16 @@ export function buildSchemas(catalog) {
         properties: {
           partition_by: { enum: ['user', 'session'], default: 'user', description: 'Partition the row-pattern match per user or per session.' },
           mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order but other events may occur between them (gaps allowed); strict = each step must be the immediately next event (BigQuery target only).' },
+          filter: {
+            type: 'object', additionalProperties: false,
+            description: 'Optional PRE-FILTER applied to the events BEFORE the row-pattern match — slices the data scanned so the build/query runs faster. It narrows the population only; it does NOT redefine the steps.',
+            properties: {
+              time_range: { type: 'object', additionalProperties: false, description: 'Restrict the scan to an event-time window (ISO dates). Biggest speed-up — prunes by date.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } },
+              event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Only scan these events; drop all other event rows before matching. In ordered mode this is a safe, large speed-up (the funnel only depends on the step events).' },
+              where: { type: 'array', description: 'event_data property conditions ANDed across the WHOLE scan. Use only for properties present on every scanned event (else rows lacking the property are dropped).', items: whereItemSchema(catalog) },
+              user_segment: { type: 'array', description: 'Keep only events whose user matches these dim_users attributes (a semi-join FILTER — no columns are carried into the view; attributes for grouping still come from the semantic-layer join). E.g. country=US to build the funnel for one segment.', items: { type: 'object', additionalProperties: false, required: ['property', 'op'], properties: { property: { type: 'string', enum: userAttrCols, description: 'dim_users attribute to filter on.' }, op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator (array value for in/not_in).' }, value: { description: 'Literal value(s) to match.' } } } },
+            },
+          },
           steps: { type: 'array', minItems: 2, items: sequenceStep, description: 'The ordered funnel steps (>= 2).' },
           metrics: {
             type: 'array',

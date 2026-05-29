@@ -135,6 +135,60 @@ test('MR + semantic model: declared conversion metric sliced by a JOINED user at
   assert.ok(r.rows.every((x) => { const v = num(x.cr_launch_tut1); return !Number.isFinite(v) || (v >= -1e-9 && v <= 1 + 1e-9); }));
 });
 
+test('register_native_model filter: user_segment (country=US) slices the build to US users only', opts, async (t) => {
+  if (skip(t)) return;
+  // The pre-filter cuts the data BEFORE the row-pattern match (speed): only US
+  // users (u1,u2,u6,u10 = 4) enter the funnel. Numbers prove the slice on DATA.
+  const out = await engine.register_native_model({
+    name: 'activation_us',
+    sequence: {
+      partition_by: 'user', mode: 'ordered',
+      filter: {
+        time_range: { start: '2026-01-01' },
+        event_name: ['first_launch', 'tutorial'],
+        user_segment: [{ property: 'country', op: 'eq', value: 'US' }],
+      },
+      steps: [
+        { name: 'launch', event_name: ['first_launch'] },
+        { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_1' }] },
+      ],
+    },
+  });
+  assert.equal(out.build.ok, true, `build failed: ${JSON.stringify(out.build)}`);
+  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['reached_launch', 'reached_tut1'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(num(r.rows[0].reached_launch), 4); // exactly the 4 US users launched
+  assert.ok(num(r.rows[0].reached_tut1) <= 4 && num(r.rows[0].reached_tut1) >= 0);
+  // grouping the sliced model by country yields ONLY the US segment
+  const byC = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['reached_launch'], group_by: ['country'] });
+  assert.equal(byC.ok, true, JSON.stringify(byC.error));
+  const countries = byC.rows.map((x) => String(x.user__country));
+  assert.ok(countries.every((c) => c === 'US'), `only US expected, got ${countries.join(',')}`);
+  await engine.delete_native_model({ context_id: out.context_id });
+});
+
+test('register_native_model filter: a full-range time_range keeps all data (correctness unchanged = 12/8)', opts, async (t) => {
+  if (skip(t)) return;
+  // event-side prefilter plumbing must not drop valid rows when the window is wide
+  const out = await engine.register_native_model({
+    name: 'activation_full',
+    sequence: {
+      partition_by: 'user', mode: 'ordered',
+      filter: { time_range: { start: '2000-01-01', end: '2100-01-01' } },
+      steps: [
+        { name: 'launch', event_name: ['first_launch'] },
+        { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_1' }] },
+      ],
+    },
+  });
+  assert.equal(out.build.ok, true, JSON.stringify(out.build));
+  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['reached_launch', 'reached_tut1'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(num(r.rows[0].reached_launch), 12);
+  assert.equal(num(r.rows[0].reached_tut1), 8);
+  await engine.delete_native_model({ context_id: out.context_id });
+});
+
 test('describe_catalog: returns REAL physical columns for every model (adapter introspection)', opts, async (t) => {
   if (skip(t)) return;
   const dc = await engine.describe_catalog();

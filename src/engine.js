@@ -142,9 +142,12 @@ export class Engine {
     const modelName = `seq_${input.name}`;
     const dialect = this.catalog.dialect;
     const eventsModel = this.catalog.getModel(this.catalog.anchor).dbt_model;
-    // The view references only the events fact; the users join is declared in the
-    // semantic model (sequenceSemanticModel) and executed by MetricFlow.
-    const seqSpec = { ...input.sequence, relation: `{{ ref('${eventsModel}') }}` };
+    const usersModel = this.catalog.models.users?.dbt_model;
+    // The view references the events fact. The dimensional users JOIN is declared
+    // in the semantic model (executed by MetricFlow). usersRelation is passed only
+    // for an optional filter.user_segment SEMI-JOIN (data slicing — no columns
+    // carried into the view).
+    const seqSpec = { ...input.sequence, relation: `{{ ref('${eventsModel}') }}`, ...(usersModel ? { usersRelation: `{{ ref('${usersModel}') }}` } : {}) };
     const modelSql = dialect === 'bigquery' ? renderPerUserModelBigQuery(this.catalog, seqSpec) : renderPerUserModelPostgres(this.catalog, seqSpec);
     const bqSql = dialect === 'bigquery' ? modelSql : renderPerUserModelBigQuery(this.catalog, seqSpec);
     const sem = sequenceSemanticModel(this.catalog, seqSpec, modelName);

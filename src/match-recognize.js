@@ -25,6 +25,22 @@ export function dumpSequenceYaml(sem) {
   return body.replace(/model: "(ref\('[^']+'\))"/g, 'model: $1');
 }
 
+/** Render a single comparison `lhs OP value` with the value bound as a literal. */
+function comparePred(lhs, op, value) {
+  const arr = Array.isArray(value) ? value : [value];
+  switch (op) {
+    case 'eq': return `${lhs} = ${sqlLiteral(value)}`;
+    case 'neq': return `${lhs} != ${sqlLiteral(value)}`;
+    case 'gt': return `${lhs} > ${sqlLiteral(value)}`;
+    case 'gte': return `${lhs} >= ${sqlLiteral(value)}`;
+    case 'lt': return `${lhs} < ${sqlLiteral(value)}`;
+    case 'lte': return `${lhs} <= ${sqlLiteral(value)}`;
+    case 'in': return `${lhs} IN (${arr.map(sqlLiteral).join(', ')})`;
+    case 'not_in': return `${lhs} NOT IN (${arr.map(sqlLiteral).join(', ')})`;
+    default: throw new Error(`unsupported filter op: ${op}`);
+  }
+}
+
 export function stepPredicate(catalog, step, dialect, col) {
   const m = catalog.getModel(catalog.anchor);
   const evCol = col ? `${col}.${m.event_name.column}` : m.event_name.column;
@@ -34,21 +50,48 @@ export function stepPredicate(catalog, step, dialect, col) {
   const props = (step.where || []).map((c) => {
     const p = (m.properties || {})[c.property];
     if (!p) throw new Error(`unknown event property in step: ${c.property}`);
-    const lhs = jsonExtract(dialect, dataCol, c.property, p.type);
-    const arr = Array.isArray(c.value) ? c.value : [c.value];
-    switch (c.op) {
-      case 'eq': return `${lhs} = ${sqlLiteral(c.value)}`;
-      case 'neq': return `${lhs} != ${sqlLiteral(c.value)}`;
-      case 'gt': return `${lhs} > ${sqlLiteral(c.value)}`;
-      case 'gte': return `${lhs} >= ${sqlLiteral(c.value)}`;
-      case 'lt': return `${lhs} < ${sqlLiteral(c.value)}`;
-      case 'lte': return `${lhs} <= ${sqlLiteral(c.value)}`;
-      case 'in': return `${lhs} IN (${arr.map(sqlLiteral).join(', ')})`;
-      case 'not_in': return `${lhs} NOT IN (${arr.map(sqlLiteral).join(', ')})`;
-      default: throw new Error(`unsupported step where op: ${c.op}`);
-    }
+    return comparePred(jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value);
   });
   return [ev, ...props].join(' AND ');
+}
+
+/**
+ * WHERE clause applied to the events BEFORE the row-pattern match, to slice the
+ * data scanned (speed). Returns '' when no `filter` is declared. Narrows the
+ * population only — it does NOT redefine steps. Filters: event time window,
+ * event_name allowlist, event_data property conditions, and a dim_users
+ * user-segment SEMI-JOIN (a filter; no columns are carried into the view).
+ */
+export function buildPrefilter(catalog, spec, dialect, col) {
+  const f = spec.filter;
+  if (!f) return '';
+  const m = catalog.getModel(catalog.anchor);
+  const q = (c) => (col ? `${col}.${c}` : c);
+  const evNameCol = q(m.event_name.column);
+  const timeCol = q(m.time.column);
+  const dataCol = q(catalog.eventDataColumn());
+  const userCol = q(m.entities.user.column);
+  const clauses = [];
+  if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
+  if (f.time_range?.end) clauses.push(`${timeCol} <= ${sqlLiteral(f.time_range.end)}`);
+  if (f.event_name?.length) clauses.push(`${evNameCol} IN (${f.event_name.map(sqlLiteral).join(', ')})`);
+  for (const c of f.where || []) {
+    const p = (m.properties || {})[c.property];
+    if (!p) throw new Error(`unknown event property in filter.where: ${c.property}`);
+    clauses.push(comparePred(jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value));
+  }
+  if (f.user_segment?.length) {
+    const u = catalog.models.users;
+    if (!u) throw new Error('filter.user_segment requires a users model in the catalog');
+    const usersRel = spec.usersRelation || (dialect === 'bigquery' ? '`dim_users`' : '"public"."dim_users"');
+    const usersKey = typeof u.primary_entity === 'object' ? u.primary_entity.column : 'appsflyer_id';
+    const conds = f.user_segment.map((c) => {
+      if (!(u.dimensions || {})[c.property]) throw new Error(`unknown user attribute in filter.user_segment: ${c.property}`);
+      return comparePred(c.property, c.op, c.value);
+    });
+    clauses.push(`${userCol} IN (SELECT ${usersKey} FROM ${usersRel}${conds.length ? ` WHERE ${conds.join(' AND ')}` : ''})`);
+  }
+  return clauses.join(' AND ');
 }
 
 function resolve(catalog, spec, dialect) {
@@ -230,7 +273,8 @@ export function renderPerUserModelPostgres(catalog, spec) {
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
   const evExtra = r.propCaptures.map((c) => `    (${jsonExtract('postgres', catalog.eventDataColumn(), c.property, c.type)}) AS ${c.id}`);
   const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
-  let sql = `WITH ev AS (\n  SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${relation}\n)`;
+  const pre = buildPrefilter(catalog, spec, 'postgres', null);
+  let sql = `WITH ev AS (\n  SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${relation}${pre ? `\n  WHERE ${pre}` : ''}\n)`;
   const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
   const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
   let ctes = `r1 AS (SELECT DISTINCT ON (pk) pk, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY pk, ts)`;
@@ -279,13 +323,15 @@ export function renderPerUserModelBigQuery(catalog, spec) {
   // The view exposes ONLY sequence-derived columns. User attributes are NOT
   // joined here; the semantic model declares a shared `user` entity so MetricFlow
   // joins dim_users at SQL-generation time when a query groups by a user attr.
+  const pre = buildPrefilter(catalog, spec, 'bigquery', null);
+  const src = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
   return `  SELECT
     ${r.partCol} AS appsflyer_id,
     t1 AS first_seen_at,
     CASE ${furthestCase} END AS furthest_step_name,
     t${r.steps.length} IS NOT NULL AS completed,
 ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')}
-  FROM ${relation} MATCH_RECOGNIZE (
+  FROM ${src} MATCH_RECOGNIZE (
     PARTITION BY ${r.partCol}
     ORDER BY ${r.timeCol}
     MEASURES

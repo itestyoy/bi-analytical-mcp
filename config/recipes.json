@@ -73,24 +73,25 @@
       "metric_types": ["simple", "conversion"],
       "create_payload": {
         "name": "lvl_funnel",
+        "use_base_models": ["users"],
         "semantic_models": [
           { "from": "events", "measures": [
-            { "name": "starts", "agg": "count", "field": "*", "event_name": ["level_start"] },
-            { "name": "completes", "agg": "count", "field": "*", "event_name": ["level_complete"] }
+            { "name": "starters", "agg": "count_distinct", "field": "user_id", "event_name": ["level_start"] },
+            { "name": "completers", "agg": "count_distinct", "field": "user_id", "event_name": ["level_complete"] }
           ] }
         ],
         "metrics": [
-          { "name": "starts", "type": "simple", "measure": { "name": "starts" } },
-          { "name": "completes", "type": "simple", "measure": { "name": "completes" } },
-          { "name": "completion_rate", "type": "conversion", "base_measure": { "name": "starts" }, "conversion_measure": { "name": "completes" }, "entity": "user", "window": "1 day" }
+          { "name": "starters", "type": "simple", "measure": { "name": "starters" } },
+          { "name": "completers", "type": "simple", "measure": { "name": "completers" } },
+          { "name": "completion_rate", "type": "conversion", "base_measure": { "name": "starters" }, "conversion_measure": { "name": "completers" }, "entity": "user", "window": "1 day" }
         ]
       },
       "example_queries": [
-        { "metrics": ["lvl_funnel_starts", "lvl_funnel_completes"] },
+        { "metrics": ["lvl_funnel_starters", "lvl_funnel_completers"] },
         { "metrics": ["lvl_funnel_completion_rate"] },
-        { "metrics": ["lvl_funnel_completion_rate"], "group_by": [{ "time": "metric_time", "grain": "day" }] }
+        { "metrics": ["lvl_funnel_completion_rate"], "group_by": ["user__country"] }
       ],
-      "notes": "MetricFlow has no native N-step funnel; chain 2-step conversion metrics or use a derived metric over step counts for N steps."
+      "notes": "Conversion base/conversion measures must be count_distinct (or count/sum of 1) — a filtered SUM(CASE..) is rejected by MetricFlow. MetricFlow has no native N-step funnel; chain 2-step conversion metrics or use a derived metric over step counts for N steps."
     },
     {
       "id": "nday_retention",

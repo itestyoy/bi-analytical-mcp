@@ -1,0 +1,75 @@
+{
+  "warehouse_dialect": "postgres",
+  "anchor_model": "events",
+  "models": {
+    "events": {
+      "dbt_model": "fct_analytics_events",
+      "role": "fact",
+      "primary_entity": "event",
+      "entities": {
+        "user": { "column": "user_id", "type": "foreign" },
+        "session": { "column": "session_id", "type": "foreign" }
+      },
+      "time": { "column": "event_timestamp", "granularity": "day" },
+      "event_name": { "column": "event_name" },
+      "known_events": [
+        "session_start",
+        "session_end",
+        "level_start",
+        "level_complete",
+        "level_fail",
+        "purchase",
+        "ad_impression",
+        "ad_click",
+        "tutorial_step",
+        "item_acquired"
+      ],
+      "properties": {
+        "level": { "type": "int" },
+        "score": { "type": "int" },
+        "attempt": { "type": "int" },
+        "moves": { "type": "int" },
+        "revenue": { "type": "numeric" },
+        "currency": { "type": "string" },
+        "result": { "type": "string", "values": ["win", "lose"] },
+        "item_id": { "type": "string" },
+        "product_id": { "type": "string" },
+        "ad_network": { "type": "string" },
+        "step_id": { "type": "string" }
+      }
+    },
+    "users": {
+      "dbt_model": "dim_users",
+      "role": "dimension",
+      "primary_entity": { "name": "user", "column": "user_id" },
+      "entities": {
+        "campaign": { "column": "campaign_id", "type": "foreign" }
+      },
+      "dimensions": {
+        "install_date": { "type": "time", "granularity": "day" },
+        "platform": { "type": "string" },
+        "os_version": { "type": "string" },
+        "device_model": { "type": "string" },
+        "country": { "type": "string" },
+        "region": { "type": "string" },
+        "language": { "type": "string" },
+        "media_source": { "type": "string" },
+        "acquisition_type": { "type": "string", "values": ["organic", "paid"] },
+        "app_version": { "type": "string" }
+      },
+      "measures": {
+        "users_count": { "agg": "count", "expr": "1" }
+      }
+    },
+    "campaigns": {
+      "dbt_model": "dim_campaigns",
+      "role": "dimension",
+      "primary_entity": { "name": "campaign", "column": "campaign_id" },
+      "dimensions": {
+        "channel": { "type": "string" },
+        "network": { "type": "string" },
+        "cost_model": { "type": "string" }
+      }
+    }
+  }
+}

@@ -396,59 +396,169 @@ per-user/per-entity свёртка перед финальной агрегац�
 }
 ```
 
-### 4.13 Grain- и filter-директивы стадий (дизайн по образцу Cube)
-В multi-stage расчёте «агрегат от агрегата» две вещи нужно контролировать
-**декларативно и относительно родительской грани**: (1) на какой грани считается
-внутренняя стадия и (2) какие фильтры в неё протекают. Мы заимствуем дизайн
-директив Cube ([PR #10957](https://github.com/cube-js/cube/pull/10957)) — это
-делает наш `compose_pipeline` и пресеты-тулы предсказуемыми и совместимыми с
-семантическим слоем по смыслу.
+### 4.13 Grain- и filter-директивы стадий (контекст-трансформация по модели Cube/Tesseract)
+Полная авторитетная модель этих директив описана в отдельном документе
+[`cube_tesseract_multistage_context_directives_full_research.md`](./cube_tesseract_multistage_context_directives_full_research.md).
+Здесь — выжимка и **проекция на наши игровые ad-hoc задачи**. `filter` и `grain` —
+это не флаги, а **декларативный язык трансформации контекста** стадии относительно
+родителя. Главный принцип:
 
-**`grain` — форма партиции стадии U** (взаимоисключающие `keep_only`/`exclude`):
+> **`filter` меняет строки (`WHERE`), `grain` меняет группировку
+> (`GROUP BY`/`PARTITION BY`).** Путать их — ошибка №1.
 
-| Директива | Семантика (относительно родительской грани) | Аналог Cube / legacy |
+**Два состояния контекста.** Стадия наследует **parent state** (от стадии выше) и
+существует **root state** (исходный контекст запроса). Дефолтно стадия берёт parent;
+`filter.mode: fixed` сбрасывает к root (игнор промежуточных модификаций родителей).
+
+**`filter` — какие строки видит стадия** (`mode: relative|fixed`; `exclude` и
+`keep_only` взаимоисключающие; плюс `include`). Влияет на dimension/time-фильтры и
+сегменты, **не** на группировку.
+
+| Директива | Семантика | Игровой пример |
 |---|---|---|
-| `grain.include` | **добавить** измерения к грани (агрегат от per-entity) | `add_group_by` |
-| `grain.keep_only` | **сузить** грань строго до этих измерений (игнор грани запроса) | `group_by` |
-| `grain.exclude` | **убрать** измерения из грани (ранги/доли «across» измерения) | `reduce_by` |
+| `filter.exclude:[X]` | убрать фильтр по X из контекста | дашборд отфильтрован `ad_type='rewarded'`, а знаменатель доли — по всем типам рекламы |
+| `filter.keep_only:[X]` | оставить только фильтры по X (стабильный знаменатель) | бенчмарк по стране: знаменатель не зависит от фильтров по уровню/кампании |
+| `filter.include:[…]` | добавить локальный предикат | каноническая метрика «только success-покупки» вне зависимости от дашборда |
+| `filter.mode:fixed` | считать от root, игнор родительских правок | фиксированный baseline для сравнения |
+
+**`grain` — на какой грани агрегируется стадия** (`keep_only`/`exclude`
+взаимоисключающие; плюс `include`). Влияет на `GROUP BY`/`PARTITION BY`/ключи join,
+**не** на видимость строк. Результат грубой грани **broadcast'ится** обратно на
+тонкую грань отчёта (доля/percent-of-total — это и есть broadcast, не дублирование).
+
+| Директива | Семантика (относительно грани родителя) | Игровой пример |
+|---|---|---|
+| `grain.include:[user_id]` | **добавить** грань (per-entity, потом свернуть) | **ARPU/LTV/retention**: сначала per-user, затем avg/sum/rate по сегменту |
+| `grain.keep_only:[X]` | **пересечь** грань строго с X (broadcast обратно) | глобальный/страновой знаменатель доли источника валюты |
+| `grain.exclude:[X]` | **убрать** X из грани (across X) | доля игрока внутри страны; «итог по паку уровней» across игроков |
 
 ```jsonc
-// «средний per-user score» (внутр. грань = по игроку, поверх грани запроса)
-{ "type":"measure", "agg":"avg", "field":"event_properties.score",
+// ARPU: per-user revenue (grain.include) → среднее по сегменту (broadcast вверх)
+{ "type":"measure", "agg":"avg", "field":"event_properties.revenue",
   "grain": { "include": ["user_id"] } }
 
-// «доля игрока в выручке страны» — ранг/доля across игроков внутри country
-{ "type":"measure", "agg":"sum", "field":"event_properties.revenue",
-  "grain": { "exclude": ["user_id"] } }
+// доля rewarded-источника валюты в стране, не завися от фильтров по уровню/кампании
+{ "type":"measure", "agg":"sum", "field":"event_properties.amount",
+  "filter": { "keep_only": ["user.country"] },
+  "grain":  { "keep_only": ["user.country"] } }
 ```
-- `keep_only` **пересекается** с унаследованной гранью; `include` **дописывает**;
-  `exclude` **вычитает**. Если `keep_only` не пересекается с областью запроса →
-  пустое пересечение → схлопывание в grand total (как в Cube) — сервер должен
-  предупредить об этом в `warnings`.
-- Применяется к мерам/стадиям U; для чистых измерений-разрезов — вне scope.
 
-**`filter` — проброс условий между стадиями** (взаимоисключающие
-`keep_only`/`exclude`, + опц. `mode`): по умолчанию фильтры запроса протекают во
-внутреннюю стадию; директива позволяет **исключить** их часть или **оставить
-только** заданные, либо добавить локальное условие, действующее лишь внутри стадии.
+**Порядок операций (раздел 15 спека):** выбор base (parent/root по `mode`) →
+`filter.exclude` → `keep_only` → `include` → `grain.exclude`/`keep_only` →
+`grain.include` → `time_shift` → удалить фильтр на саму меру → построить CTE →
+broadcast обратно на грань родителя.
 
+**Важные следствия для движка (§4.12):**
+- `keep_only` (и filter, и grain) **пересекается** с текущим контекстом; если
+  заданное измерение отсутствует в гранях запроса → grand total. Сервер обязан
+  отметить это в `warnings` (это бывает намеренно, но должно быть осознанно).
+- `grain.include` всегда требует **join-path** (под-CTE более тонкой грани);
+  `grain.exclude`/`keep_only` для аддитивных агрегатов могут рендериться как
+  **window-path** (`... OVER (PARTITION BY …)`) — оптимизация.
+- Broadcast детектируется сравнением гранёй parent vs child: если измерение родителя
+  пропало в child — значение размножается обратно по полному ключу.
+
+> Каждый специализированный тул (§5) задаёт эти директивы за пользователя (пресет:
+> `monetization_analysis` → `grain.include:[user_id]`; `conversion_rate` → знаменатель
+> через `filter.exclude`/`grain.keep_only`; `correlation_explore`/доли → `grain.exclude`),
+> а `compose_pipeline` (§5.21) открывает их напрямую.
+
+### 4.14 Архитектура исполнения: виртуальная микро-куб модель под задачу
+**Это рекомендуемая форма всего движка.** Тул не строит SQL напрямую из плоских
+параметров. Вместо этого он работает в два декларативных шага, повторяя подход Cube,
+**но на нашем лёгком движке** (не на Cube как semantic-сервисе):
+
+```text
+параметры тула
+      ↓
+(1) синтез ВИРТУАЛЬНОЙ микро-модели  (cubes/measures/dimensions/joins/segments
+    поверх events+users; у measures — multi_stage + filter/grain директивы §4.13)
+      ↓
+(2) ДЕКЛАРАТИВНЫЙ запрос к этой модели (measures/dimensions/timeDimensions/
+    filters/segments/order/limit)
+      ↓
+компилятор §4.12–4.13  →  один SQL (multi-stage CTE, broadcast, partition pruning)
+```
+
+Модель **эфемерная**: она не живёт в глобальном семантическом слое, а создаётся под
+конкретную задачу из параметров тула, компилируется и (опц.) кэшируется по хэшу.
+Физический источник всегда два: `events` + `users` (§0.1).
+
+**Форма микро-модели (виртуальный мини-Cube):**
 ```jsonc
-// внутри стадии считаем только успешные покупки, не пропуская внешний фильтр по дате
-{ "type":"per_user_aggregate", "source": { "event":"purchase" }, "agg":"sum",
-  "field":"event_properties.revenue", "as":"rev",
-  "filter": { "keep_only": [ { "field":"event_properties.result", "operator":"eq", "value":"success" } ] } }
+{
+  "name": "task_model",
+  "source": { "events":"events", "users":"users" },
+  "joins": [ { "from":"events","to":"users","on":"user_id","rel":"many_to_one" } ],
+  "grains": [                       // предопределённые «rollup-сущности»
+    { "name":"player",        "keys":["user_id"] },
+    { "name":"player_day",    "keys":["user_id","activity_date"] },
+    { "name":"player_level",  "keys":["user_id","level"] },
+    { "name":"player_session","keys":["user_id","session_number"] }
+  ],
+  "windows": [ { "name":"d0_2","relative_to":"install","from_day":0,"to_day":2,"methodology":"24h" } ],
+  "dimensions": [
+    { "name":"country", "sql":"users.country", "kind":"cohort" },
+    { "name":"media_source", "sql":"users.media_source", "kind":"cohort" },
+    { "name":"level", "sql":"events.event_properties.level" },
+    { "name":"ad_type", "sql":"events.event_properties.ad_type" },
+    { "name":"install_date", "sql":"users.install_date", "type":"time" }
+  ],
+  "measures": [
+    { "name":"users", "type":"count_distinct", "sql":"events.user_id" },
+    { "name":"revenue", "type":"sum", "sql":"events.event_properties.revenue",
+      "filters":[{ "sql":"events.event_name='purchase'" }] },
+    { "name":"arpu", "type":"avg", "multi_stage":true, "sql":"{revenue}",
+      "grain":{ "include":["user_id"] } },                 // per-user → avg (broadcast)
+    { "name":"all_ad_revenue", "type":"sum", "multi_stage":true, "sql":"{ad_revenue}",
+      "filter":{ "exclude":["ad_type"] } }                 // знаменатель across ad_type
+  ],
+  "segments": [ { "name":"payers", "did":[{ "event":"purchase" }] } ]
+}
 ```
 
-> **Почему это важно у нас.** Эти директивы формализуют то, что в §4.12 описано
-> словами «считает своё и агрегирует до нужной грани»: они дают **точный, типизированный**
-> контроль грани и проброса фильтров на каждой стадии, относительно родителя — без
-> чего multi-stage SQL легко ломается (двойной счёт, не та база доли, утечка/потеря
-> фильтра). Каждый специализированный тул задаёт эти директивы за пользователя
-> (пресет), а `compose_pipeline` (§5.21) открывает их напрямую.
+**Декларативный запрос к ней:**
+```jsonc
+{
+  "model": "task_model",                 // инлайн или по ref
+  "measures": ["arpu","users"],
+  "dimensions": ["country","ad_type"],
+  "timeDimensions": [{ "dimension":"install_date","granularity":"week",
+                       "dateRange":["2026-01-01","2026-03-31"] }],
+  "filters": [{ "member":"country","operator":"equals","values":["US"] }],
+  "segments": ["payers"],
+  "order": { "users":"desc" }, "limit": 100
+}
+```
+
+**Что это даёт:**
+1. **Один движок, тонкие тулы.** Все тулы §5 — это **фабрики-пресеты**: из 3–5
+   высокоуровневых параметров они **синтезируют** микро-модель + запрос и отдают
+   компилятору. AI по-прежнему вызывает дружелюбные структурные тулы; микро-модель —
+   внутреннее представление (видна в `dry_run`/`assumptions`). Добавить новый тул =
+   написать новую фабрику, а не новый генератор SQL.
+2. **Семантическая корректность из коробки.** filter/grain/broadcast/мульти-стейдж
+   живут в одном месте; пресеты не могут «случайно» сгенерировать неверный SQL.
+3. **Композиция.** `model_ref` и `segment`/`cohort` переиспользуются между запросами
+   и тулами (поведенческая когорта → любой запрос).
+4. **Наш подход, не зависимость от Cube.** Совпадает ментально с Cube/семантическим
+   слоем (легко сверять и потом, при желании, генерировать настоящий Cube-запрос),
+   но это автономный движок над двумя детальными таблицами.
+
+**Соотношение с другими формами:** `compose_pipeline` (§5.21, императивные стадии
+E→U→S→J→A) и микро-куб (декларативная модель+запрос) — **две проекции одного ядра**:
+пайплайн «опускается» (lowers) в ту же модель/компилятор. Базовая пара
+`define_model` + `query_model` (§5.22) — это прямой доступ к этой архитектуре для
+нестандартных задач.
 
 ---
 
 ## 5. Каталог тулов
+
+> **Все тулы — фабрики-пресеты над ядром §4.14:** из высокоуровневых параметров они
+> синтезируют виртуальную микро-куб модель + декларативный запрос и отдают единому
+> компилятору. Это даёт дружелюбный структурный интерфейс для AI поверх одного
+> корректного движка. Прямой доступ к ядру — `define_model`/`query_model` (§5.22).
 
 Помечены: класс задачи из §3 и блок пирамиды метрик (Onboarding/Engagement/
 Progression/Retention/IAP/Ad/Economy/Cross-block).
@@ -464,7 +574,7 @@ Progression/Retention/IAP/Ad/Economy/Cross-block).
 | Зависимости | `correlation_explore` |
 | Игровая специфика | `progression_analysis`, `economy_analysis`, `monetization_analysis` |
 | Эксперименты | `post_hoc_segment_compare`, `experiment_lookup` |
-| Композиция (ядро) | `compose_pipeline` (multi-stage скелет, §4.12) |
+| Ядро (микро-куб) | `define_model`, `query_model` (§5.22), `compose_pipeline` (императивная проекция, §5.21) |
 | Отладка / исполнение | `user_timeline`, `preview_sql`/`run_query` |
 
 ---
@@ -708,6 +818,20 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
 свободный SQL. Любую промежуточную стадию-сегмент можно сохранить как `CohortRef`.
 Пример графа — в §4.12.
 
+### 5.22 `define_model` / `query_model` — прямой доступ к микро-куб ядру (§4.14)
+**Класс:** любой нестандартный. **Блок:** Cross-block.
+**`define_model`** — принимает спецификацию виртуальной микро-модели (cubes/measures/
+dimensions/joins/grains/segments/windows над `events`+`users`, с `multi_stage` +
+`filter`/`grain` директивами §4.13), валидирует её (имена, типы, совместимость
+гранёй, `keep_only`/`exclude` не вместе) и возвращает `model_ref` (+ компактное
+описание модели). Модель эфемерная, кэшируется по хэшу.
+**`query_model`** — принимает `model` (инлайн или `model_ref`) и **декларативный
+запрос** (`measures`/`dimensions`/`timeDimensions`/`filters`/`segments`/`order`/
+`limit`), компилирует в один SQL (multi-stage CTE, broadcast, partition pruning),
+делает `dry_run`/выполняет. Это базовая пара, в которую опускаются все пресеты §5 и
+`compose_pipeline`; нужна, когда задача не ложится в существующий пресет. Примеры
+модели и запроса — в §4.14.
+
 ---
 
 ## 6. Консистентность, валидация, безопасность
@@ -762,11 +886,13 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
 
 ## 8. Минимальный план внедрения (приоритеты)
 
-1. **Фундамент:** конфиг схемы + общие блоки (§4, особенно `PerUserAggregate`) +
-   **multi-stage движок E→U→S→J→A (§4.12)**, на котором собираются все тулы +
-   `describe_schema`/`list_events`/`list_properties`/`list_metrics` + единый
-   конверт, `dry_run`, `AppScope`, грануляция (§4.11). Сразу заложить движок как
-   общий слой — иначе тулы разъедутся в несовместимый SQL.
+1. **Фундамент (микро-куб ядро, §4.14):** компилятор «виртуальная модель +
+   декларативный запрос» с multi-stage движком E→U→S→J→A (§4.12) и `filter`/`grain`
+   директивами (§4.13), экспонированный как `define_model`/`query_model` (§5.22) +
+   общие блоки (§4, особенно `PerUserAggregate`) + грануляция (§4.11) +
+   `describe_schema`/`list_events`/`list_properties`/`list_metrics` + единый конверт,
+   `dry_run`, `AppScope`. **Все остальные тулы строятся как фабрики поверх этого
+   ядра** — иначе они разъедутся в несовместимый SQL.
 2. **Ядро ad-hoc (по GD Tasks):** `event_count` (Блок 1), `adjacent_event_count`
    (Блок 2), `behavioral_segment_metrics` (Блок 3), `derived_segment`,
    `cohort_define`.
@@ -778,8 +904,8 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
    `monetization_analysis`.
 5. **A/B и отладка:** `post_hoc_segment_compare`, `experiment_lookup`,
    `user_timeline`, опц. `run_validated_sql`.
-6. **Композиция:** `compose_pipeline` (§5.21) — как только движок §4.12 стабилен,
-   открыть структурный escape hatch для нестандартных комбинаций.
+6. **Композиция/escape:** `compose_pipeline` (§5.21, императивная проекция ядра) —
+   для нестандартных комбинаций, когда не подходит ни один пресет.
 
 ---
 
@@ -853,6 +979,7 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
 - [Amplitude — Pathfinder & Behavioral Cohorts](https://e-cens.com/blog/amplitude-101-advanced-analysis-with-pathfinder-cohorts/)
 - [Optimizely — Funnel analysis SQL (warehouse-native)](https://www.optimizely.com/insights/blog/funnel-analysis-sql/)
 - [Metabase Learn — CTEs for multi-stage SQL](https://www.metabase.com/learn/sql/working-with-sql/sql-cte)
+- **Внутренний спек:** [`cube_tesseract_multistage_context_directives_full_research.md`](./cube_tesseract_multistage_context_directives_full_research.md) — полная модель `filter`/`grain` (mode relative/fixed, root vs parent state, broadcast, window vs join path, рецепты)
 - [Cube — PR #10957: grain & filter directives for multi-stage measures](https://github.com/cube-js/cube/pull/10957)
 - [Cube — Multi-stage calculations (group_by / reduce_by / add_group_by)](https://cube.dev/docs/product/data-modeling/concepts/multi-stage-calculations)
 - [Cube — Measures reference](https://cube.dev/docs/product/data-modeling/reference/measures)

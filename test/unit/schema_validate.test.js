@@ -15,7 +15,7 @@ function v(tool, input) {
 test('create: accepts a valid declaration', () => {
   const r = v('create_semantic_model', {
     name: 'task_a',
-    semantic_models: [{ from: 'events', event_scope: { event_name: ['purchase'] }, measures: [{ name: 'rev', agg: 'sum', field: 'revenue' }] }],
+    semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'rev', agg: 'sum', field: 'price_in_usd' }] }],
     metrics: [{ name: 'rev', type: 'simple', measure: { name: 'rev' } }],
   });
   assert.ok(r.ok, JSON.stringify(r.errors));
@@ -42,7 +42,7 @@ test('create: rejects unknown event_name in scope', () => {
 test('create: rejects percentile measure without percentile value', () => {
   const r = v('create_semantic_model', {
     name: 'task_a',
-    semantic_models: [{ from: 'events', measures: [{ name: 'p', agg: 'percentile', field: 'score' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'p', agg: 'percentile', field: 'complete_time' }] }],
     metrics: [{ name: 'm', type: 'simple', measure: { name: 'p' } }],
   });
   assert.equal(r.ok, false);

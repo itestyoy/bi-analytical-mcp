@@ -47,6 +47,11 @@ export class Catalog {
     return primaryEntityName(this.getModel(key));
   }
 
+  /** Physical JSON column holding event-specific properties on the events model. */
+  eventDataColumn() {
+    return this.models[this.anchor]?.event_data_column || 'event_properties';
+  }
+
   /** event_name values enum. */
   eventNames() {
     return this.models[this.anchor]?.known_events || [];

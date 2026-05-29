@@ -9,9 +9,9 @@ test('loads catalog and derives basic enums', () => {
   const c = loadCatalog(CATALOG);
   assert.equal(c.dialect, 'postgres');
   assert.deepEqual(c.modelKeys().sort(), ['campaigns', 'events', 'users']);
-  assert.ok(c.eventNames().includes('purchase'));
-  assert.ok(c.eventProps().includes('level'));
-  assert.ok(c.eventNumericProps().includes('revenue'));
+  assert.ok(c.eventNames().includes('iap_purchase_completed'));
+  assert.ok(c.eventProps().includes('level_id'));
+  assert.ok(c.eventNumericProps().includes('price_in_usd'));
   assert.ok(!c.eventNumericProps().includes('currency'));
 });
 
@@ -38,6 +38,6 @@ test('prunes dangling foreign entities (m3)', () => {
 
 test('entity key columns and joinable models', () => {
   const c = loadCatalog(CATALOG);
-  assert.deepEqual(c.entityKeyColumns('events').sort(), ['session_id', 'user_id']);
+  assert.deepEqual(c.entityKeyColumns('events').sort(), ['appsflyer_id', 'session_number']);
   assert.deepEqual(c.joinableModelKeys().sort(), ['campaigns', 'users']);
 });

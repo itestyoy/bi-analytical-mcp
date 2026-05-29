@@ -1,9 +1,9 @@
 {{ config(materialized='table') }}
 select
     event_id,
-    user_id,
-    session_id,
+    appsflyer_id,
+    session_number,
     event_name,
-    event_timestamp,
-    event_properties
+    device_time,
+    event_data
 from {{ ref('seed_events') }}

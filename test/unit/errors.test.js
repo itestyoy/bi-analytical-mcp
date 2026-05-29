@@ -38,7 +38,7 @@ test('compile errors are returned with stage "compile" and name the bad referenc
   const eng = makeEngine();
   await assert.rejects(
     () => eng.create_semantic_model({
-      name: 'bad', semantic_models: [{ from: 'events', measures: [{ name: 'r', agg: 'sum', field: 'revenue' }] }],
+      name: 'bad', semantic_models: [{ from: 'events', measures: [{ name: 'r', agg: 'sum', field: 'price_in_usd' }] }],
       metrics: [{ name: 'm', type: 'simple', measure: { name: 'ghost_measure' } }],
     }),
     (e) => { assert.equal(e.stage, 'compile'); assert.match(e.message, /ghost_measure/); return true; },
@@ -48,7 +48,7 @@ test('compile errors are returned with stage "compile" and name the bad referenc
 test('query gives an actionable error when a path needs an unloaded model', async () => {
   const eng = makeEngine();
   const out = await eng.create_semantic_model({
-    name: 'nousers', semantic_models: [{ from: 'events', event_scope: { event_name: ['purchase'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'revenue' }] }],
+    name: 'nousers', semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
   });
   await assert.rejects(

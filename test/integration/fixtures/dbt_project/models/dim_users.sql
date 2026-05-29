@@ -1,6 +1,6 @@
 {{ config(materialized='table') }}
 select
-    user_id,
+    appsflyer_id,
     install_date,
     platform,
     os_version,
@@ -10,6 +10,7 @@ select
     language,
     media_source,
     acquisition_type,
+    app_id,
     app_version,
     campaign_id
 from {{ ref('seed_users') }}

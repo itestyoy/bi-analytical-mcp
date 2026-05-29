@@ -14,11 +14,11 @@ const DECL = {
   use_base_models: ['users', 'campaigns'],
   semantic_models: [{
     from: 'events',
-    event_scope: { event_name: ['purchase'] },
-    dimensions: [{ source: 'event_property', property: 'product_id' }, { source: 'event_property', property: 'level' }],
+    event_scope: { event_name: ['iap_purchase_completed'] },
+    dimensions: [{ source: 'event_property', property: 'product_id' }, { source: 'event_property', property: 'level_id' }],
     measures: [
-      { name: 'revenue', agg: 'sum', field: 'revenue' },
-      { name: 'payers', agg: 'count_distinct', field: 'user_id' },
+      { name: 'revenue', agg: 'sum', field: 'price_in_usd' },
+      { name: 'payers', agg: 'count_distinct', field: 'appsflyer_id' },
       { name: 'purchases', agg: 'count', field: '*' },
     ],
   }],
@@ -33,12 +33,12 @@ test('compile namespaces measures and bakes event scope into expr (M3)', () => {
   const evMeasures = c.additions.events.measures;
   const rev = evMeasures.find((m) => m.name === 'lvl_econ_revenue');
   assert.equal(rev.agg, 'sum');
-  assert.match(rev.expr, /CASE WHEN event_name = 'purchase' THEN \(event_properties->>'revenue'\)::numeric END/);
+  assert.match(rev.expr, /CASE WHEN event_name = 'iap_purchase_completed' THEN \(event_data->>'price_in_usd'\)::numeric END/);
   const payers = evMeasures.find((m) => m.name === 'lvl_econ_payers');
-  assert.match(payers.expr, /CASE WHEN event_name = 'purchase' THEN user_id END/);
+  assert.match(payers.expr, /CASE WHEN event_name = 'iap_purchase_completed' THEN appsflyer_id END/);
   const purch = evMeasures.find((m) => m.name === 'lvl_econ_purchases');
   assert.equal(purch.agg, 'sum');
-  assert.match(purch.expr, /CASE WHEN event_name = 'purchase' THEN 1 ELSE 0 END/);
+  assert.match(purch.expr, /CASE WHEN event_name = 'iap_purchase_completed' THEN 1 ELSE 0 END/);
 });
 
 test('ratio auto-creates simple metrics referencing metrics (agent-2 fix)', () => {
@@ -68,13 +68,13 @@ test('renders exactly one semantic model per table (C3) and valid YAML', () => {
 
 test('forbids time dimensions from JSON properties (m2)', () => {
   assert.throws(() => compileDeclaration(catalog, {
-    name: 't', semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'level', as_type: 'time' }] }], metrics: [],
+    name: 'tsk', semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'level_id', as_type: 'time' }] }], metrics: [],
   }), /not allowed/);
 });
 
 test('rejects metric referencing unknown measure', () => {
   assert.throws(() => compileDeclaration(catalog, {
-    name: 't', semantic_models: [{ from: 'events', measures: [{ name: 'r', agg: 'sum', field: 'revenue' }] }],
+    name: 'tsk', semantic_models: [{ from: 'events', measures: [{ name: 'r', agg: 'sum', field: 'price_in_usd' }] }],
     metrics: [{ name: 'm', type: 'simple', measure: { name: 'nonexistent' } }],
   }), /unknown measure/);
 });

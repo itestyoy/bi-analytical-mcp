@@ -39,9 +39,9 @@ const DECL = {
   name: 'lvl_econ',
   use_base_models: ['users', 'campaigns'],
   semantic_models: [{
-    from: 'events', event_scope: { event_name: ['purchase'] },
+    from: 'events', event_scope: { event_name: ['iap_purchase_completed'] },
     dimensions: [{ source: 'event_property', property: 'product_id' }],
-    measures: [{ name: 'revenue', agg: 'sum', field: 'revenue' }, { name: 'payers', agg: 'count_distinct', field: 'user_id' }],
+    measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd' }, { name: 'payers', agg: 'count_distinct', field: 'appsflyer_id' }],
   }],
   metrics: [
     { name: 'revenue', type: 'simple', measure: { name: 'revenue' } },

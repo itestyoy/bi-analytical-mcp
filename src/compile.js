@@ -57,7 +57,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     if (!isNumericType(props[field].type)) {
       throw new Error(`measure '${decl.name}': property '${field}' is not numeric`);
     }
-    valueExpr = jsonExtract(dialect, catalog.getModel(modelKey).event_name ? 'event_properties' : 'event_properties', field, props[field].type);
+    valueExpr = jsonExtract(dialect, catalog.eventDataColumn(), field, props[field].type);
   } else {
     // a physical column (entity key like user_id/session_id, or model column)
     valueExpr = field;
@@ -81,7 +81,7 @@ function compileDimension(catalog, task, modelKey, decl) {
     const p = props[decl.property];
     if (!p) throw new Error(`unknown event property: ${decl.property}`);
     if (decl.as_type === 'time') throw new Error('time dimensions from JSON properties are not allowed (m2)');
-    return { name: NS(task, decl.property), type: 'categorical', expr: jsonExtract(dialect, 'event_properties', decl.property, p.type) };
+    return { name: NS(task, decl.property), type: 'categorical', expr: jsonExtract(dialect, catalog.eventDataColumn(), decl.property, p.type) };
   }
   if (decl.source === 'model_column') {
     const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column };

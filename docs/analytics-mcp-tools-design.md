@@ -396,6 +396,55 @@ per-user/per-entity свёртка перед финальной агрегац�
 }
 ```
 
+### 4.13 Grain- и filter-директивы стадий (дизайн по образцу Cube)
+В multi-stage расчёте «агрегат от агрегата» две вещи нужно контролировать
+**декларативно и относительно родительской грани**: (1) на какой грани считается
+внутренняя стадия и (2) какие фильтры в неё протекают. Мы заимствуем дизайн
+директив Cube ([PR #10957](https://github.com/cube-js/cube/pull/10957)) — это
+делает наш `compose_pipeline` и пресеты-тулы предсказуемыми и совместимыми с
+семантическим слоем по смыслу.
+
+**`grain` — форма партиции стадии U** (взаимоисключающие `keep_only`/`exclude`):
+
+| Директива | Семантика (относительно родительской грани) | Аналог Cube / legacy |
+|---|---|---|
+| `grain.include` | **добавить** измерения к грани (агрегат от per-entity) | `add_group_by` |
+| `grain.keep_only` | **сузить** грань строго до этих измерений (игнор грани запроса) | `group_by` |
+| `grain.exclude` | **убрать** измерения из грани (ранги/доли «across» измерения) | `reduce_by` |
+
+```jsonc
+// «средний per-user score» (внутр. грань = по игроку, поверх грани запроса)
+{ "type":"measure", "agg":"avg", "field":"event_properties.score",
+  "grain": { "include": ["user_id"] } }
+
+// «доля игрока в выручке страны» — ранг/доля across игроков внутри country
+{ "type":"measure", "agg":"sum", "field":"event_properties.revenue",
+  "grain": { "exclude": ["user_id"] } }
+```
+- `keep_only` **пересекается** с унаследованной гранью; `include` **дописывает**;
+  `exclude` **вычитает**. Если `keep_only` не пересекается с областью запроса →
+  пустое пересечение → схлопывание в grand total (как в Cube) — сервер должен
+  предупредить об этом в `warnings`.
+- Применяется к мерам/стадиям U; для чистых измерений-разрезов — вне scope.
+
+**`filter` — проброс условий между стадиями** (взаимоисключающие
+`keep_only`/`exclude`, + опц. `mode`): по умолчанию фильтры запроса протекают во
+внутреннюю стадию; директива позволяет **исключить** их часть или **оставить
+только** заданные, либо добавить локальное условие, действующее лишь внутри стадии.
+
+```jsonc
+// внутри стадии считаем только успешные покупки, не пропуская внешний фильтр по дате
+{ "type":"per_user_aggregate", "source": { "event":"purchase" }, "agg":"sum",
+  "field":"event_properties.revenue", "as":"rev",
+  "filter": { "keep_only": [ { "field":"event_properties.result", "operator":"eq", "value":"success" } ] } }
+```
+
+> **Почему это важно у нас.** Эти директивы формализуют то, что в §4.12 описано
+> словами «считает своё и агрегирует до нужной грани»: они дают **точный, типизированный**
+> контроль грани и проброса фильтров на каждой стадии, относительно родителя — без
+> чего multi-stage SQL легко ломается (двойной счёт, не та база доли, утечка/потеря
+> фильтра). Каждый специализированный тул задаёт эти директивы за пользователя
+> (пресет), а `compose_pipeline` (§5.21) открывает их напрямую.
 
 ---
 
@@ -650,8 +699,10 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
 **Что:** прямой доступ к скелету E→U→S→J→A (§4.12). AI задаёт список **типизированных
 стадий** (`event_scan`, `per_user_aggregate`, `segment`, `join`, `retention`,
 `aggregate`), ссылаясь по `id`/`from`, и переиспользует те же блоки
-(`EventSelector`, `PerUserAggregate`, `FilterGroup`, `Breakdown`, `Measure`). Сервер
-валидирует граф (грани совместимы, нет fan-out), компилирует в один SQL с CTE,
+(`EventSelector`, `PerUserAggregate`, `FilterGroup`, `Breakdown`, `Measure`) плюс
+**`grain`- и `filter`-директивы стадий (§4.13)** для точного контроля грани и
+проброса фильтров. Сервер валидирует граф (грани совместимы, нет fan-out,
+`keep_only`/`exclude` не заданы одновременно), компилирует в один SQL с CTE,
 делает `dry_run`/выполняет. Это «escape hatch», который **остаётся структурным** —
 покрывает редкие комбинации, под которые нет специализированного тула, без падения в
 свободный SQL. Любую промежуточную стадию-сегмент можно сохранить как `CohortRef`.
@@ -802,6 +853,9 @@ GrowthBook (`growthbook_*`). Сам A/B не считаем (см. §9). Име�
 - [Amplitude — Pathfinder & Behavioral Cohorts](https://e-cens.com/blog/amplitude-101-advanced-analysis-with-pathfinder-cohorts/)
 - [Optimizely — Funnel analysis SQL (warehouse-native)](https://www.optimizely.com/insights/blog/funnel-analysis-sql/)
 - [Metabase Learn — CTEs for multi-stage SQL](https://www.metabase.com/learn/sql/working-with-sql/sql-cte)
+- [Cube — PR #10957: grain & filter directives for multi-stage measures](https://github.com/cube-js/cube/pull/10957)
+- [Cube — Multi-stage calculations (group_by / reduce_by / add_group_by)](https://cube.dev/docs/product/data-modeling/concepts/multi-stage-calculations)
+- [Cube — Measures reference](https://cube.dev/docs/product/data-modeling/reference/measures)
 - [PostHog — Cohorts](https://posthog.com/docs/data/cohorts)
 - [Adjust — Cohort KPIs: event conversion & funnels](https://www.adjust.com/blog/demystifying-cohorts-3-tracking-custom-user-journeys-with-event-kpis/)
 - [GameAnalytics — 22 metrics all game developers should know](https://www.gameanalytics.com/blog/metrics-all-game-developers-should-know)

@@ -138,8 +138,13 @@ export class Engine {
    * metrics/dimensions are queryable via query_semantic_model like any other.
    */
   /** Generate the view SQL + semantic model for a sequence spec. */
-  _nativeArtifacts(input) {
-    const modelName = `seq_${input.name}`;
+  _nativeArtifacts(input, ctxId) {
+    // Suffix the model name with the context id so the same task name in
+    // different contexts maps to DISTINCT warehouse relations (no collision in
+    // the shared target schema). ctxId is stable across update_native_model, so
+    // a rebuild re-materializes the same relation in place. dry_run (no context)
+    // returns the un-suffixed preview name.
+    const modelName = ctxId ? `seq_${input.name}_${ctxId}` : `seq_${input.name}`;
     const dialect = this.catalog.dialect;
     const eventsModel = this.catalog.getModel(this.catalog.anchor).dbt_model;
     // The view references only the events fact (via ref). The dimensional join is
@@ -186,11 +191,12 @@ export class Engine {
 
   async register_native_model(input) {
     this._validate('register_native_model', input);
-    const art = this._nativeArtifacts(input);
     if (input.dry_run) {
+      const art = this._nativeArtifacts(input); // un-suffixed preview (no context yet)
       return { kind: 'match_recognize', dry_run: true, model: art.modelName, materialized: input.materialized || 'view', dialect: art.dialect, model_sql: art.modelSql, model_sql_bigquery: art.bqSql, semantic_yaml: dumpSequenceYaml(art.sem), metrics: art.sem.metricNames, dimensions: art.sem.dimensionNames };
     }
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
+    const art = this._nativeArtifacts(input, ctx.id); // context-unique model name
     const m = await this._materializeNative(input, ctx, art);
     if (!m.ok) return { context_id: ctx.id, kind: 'match_recognize', ok: false, error: m.build.error };
     return {
@@ -216,7 +222,7 @@ export class Engine {
   async update_native_model(input) {
     this._validate('update_native_model', input);
     const ctx = this.ctxs.get(input.context_id);
-    const art = this._nativeArtifacts(input);
+    const art = this._nativeArtifacts(input, ctx.id); // same ctx -> same relation, rebuilt in place
     const m = await this._materializeNative(input, ctx, art);
     if (!m.ok) return { context_id: ctx.id, kind: 'match_recognize', ok: false, error: m.build.error };
     return { context_id: ctx.id, kind: 'match_recognize', model: art.modelName, materialized: m.materialized, metrics: art.sem.metricNames, groupable: art.sem.dimensionNames, build: m.build, warnings: [] };

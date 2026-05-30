@@ -214,6 +214,28 @@ test('register_native_model filter: a full-range time_range keeps all data (corr
   await engine.delete_native_model({ context_id: out.context_id });
 });
 
+test('register_native_model: same task name in two contexts -> distinct context-unique relations', opts, async (t) => {
+  if (skip(t)) return;
+  // The global context (__mrctx) already registered 'activation'. Registering the
+  // SAME name in a fresh context must yield a DIFFERENT warehouse relation.
+  const out = await engine.register_native_model({
+    name: 'activation',
+    sequence: { partition_by: 'user', mode: 'ordered', steps: [
+      { name: 'launch', event_name: ['first_launch'] },
+      { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_1' }] },
+    ] },
+  });
+  assert.equal(out.build.ok, true, JSON.stringify(out.build));
+  assert.notEqual(out.context_id, globalThis.__mrctx);
+  assert.match(out.model, /^seq_activation_[a-z0-9]{6,}$/);
+  assert.ok(out.model.includes(out.context_id));
+  const other = await engine.describe_context({ context_id: globalThis.__mrctx });
+  assert.notEqual(out.model, other.models[0].model); // distinct relations, same task name
+  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['reached_launch', 'reached_tut1'] });
+  assert.equal(num(r.rows[0].reached_launch), 12); // queries correctly on its own relation
+  await engine.delete_native_model({ context_id: out.context_id });
+});
+
 test('describe_catalog: returns REAL physical columns for every model (adapter introspection)', opts, async (t) => {
   if (skip(t)) return;
   const dc = await engine.describe_catalog();
@@ -234,7 +256,9 @@ test('describe_context: the registered native model is introspectable like a dbt
   assert.equal(d.engine, 'match_recognize');
   assert.equal(d.models.length, 1);
   const m = d.models[0];
-  assert.equal(m.model, 'seq_activation');
+  // model name is context-unique: seq_<name>_<context_id>
+  assert.match(m.model, /^seq_activation_[a-z0-9]{6,}$/);
+  assert.ok(m.model.includes(globalThis.__mrctx));
   // dimensions: furthest_step_name is LOCAL to the view; country/platform are
   // reachable via the declared join to dim_users (not columns of the view).
   assert.ok(m.dimensions.includes('furthest_step_name'));

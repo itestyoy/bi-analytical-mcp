@@ -3,7 +3,9 @@
 Agent B saw ONLY the tool JSON-Schemas (`/tmp/tool_schema.json`) and solved the 30
 tasks from `2agent-30-tasks.md`. Verdict per task + how (tool + stages/metrics).
 
-**Tally: 29 Solvable · 1 Partial (#29) · 0 Not solvable.**
+**Tally: 29 Solvable · 1 Partial (#29) · 0 Not solvable** at eval time. After the
+eval, the #29 gap was closed (struct-element binding + `json_field` compute op), so
+the surface now covers **30 / 30**.
 
 (Big jump vs the earlier 10-task run, where retention was only Partial — date_diff /
 window / pivot / unix_date now make retention, cohorts, rolling, nth-event solvable.)
@@ -43,13 +45,15 @@ window / pivot / unix_date now make retention, cohorts, rolling, nth-event solva
 26. **Nth-purchase repeat** — Solvable. where iap → compute ordinal=window row_number(partition user order ts), prev=window lag(ts), gap_days=date_diff(prev→ts,day) → aggregate group_by[ordinal] median(gap_days)+count.
 27. **Level-attempt abandonment** — Solvable. derive level_id,attempt → aggregate group_by[level_id,attempt] count + completed → compute abandonment=1−ratio (or match_recognize per level).
 28. **Screen navigation matrix** — Solvable. where screen_changed → derive screen_from,screen_to → aggregate group_by[from,to] count (optional pivot on to).
-29. **Reward-item economy (array<struct>)** — **Partial.** unnest binds ONE struct `field`, and derive op=struct_field reads the event_data array property (not an already-unnested element) — so extracting BOTH `item` and `qty` from one exploded `rewards` row isn't cleanly expressible. Count-by-item works (unnest field=item → aggregate count); sum(qty)-by-item is the gap.
+29. **Reward-item economy (array<struct>)** — Solvable *(gap closed after the eval)*. unnest `rewards` with NO field → binds the whole struct element as a JSON column `rw`; then compute op=json_field extracts each field (`item`, `qty`) from `rw`; aggregate group_by[item] count + sum(qty). (At eval time this was Partial — `unnest` bound only one struct field; the `json_field` compute op + struct-element binding were added to close it. Data-tested: coin grants=25, gem qty = 2×gem count.)
 30. **Words-collected** — Solvable. Frequency: unnest words_collected as word → aggregate group_by[word] count. Breadth: derive array_length(words_collected)=n_words → aggregate percentile 0.5/0.9.
 
 ---
 
 ## Top remaining gaps (from Agent B)
-1. **Array-of-struct multi-field unnest (#29):** can't bind two struct fields (`item` + `qty`) from one exploded element; `struct_field` targets the array property, not the unnested row. Count-by-item works; sum(qty)-by-item does not.
+1. ~~**Array-of-struct multi-field unnest (#29)**~~ — CLOSED: `unnest` with no `field`
+   binds the struct element as a JSON column; `compute op=json_field` extracts each
+   field (item, qty) from it.
 2. **Pivot requires explicitly listed values** (no dynamic pivot) — fine when the value domain is known.
 3. **get_query_result.transform lacks percentile/median/stddev** — but those are available in the pipeline `aggregate`, so no task is blocked (compute them in the original pipeline).
 4. **Event-time column** is load-bearing for date_trunc/date_diff (consistent with `metric_time`/`as_type:time` in the schema).

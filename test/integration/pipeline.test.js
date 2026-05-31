@@ -192,6 +192,27 @@ test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date
   assert.deepEqual(rolls, [5, 15]);
 });
 
+// unnest array-of-struct + json_field: extract BOTH item and qty from one element
+test('pipeline unnest struct + json_field: reward item/qty extracted together', opts, async (t) => {
+  if (skip(t)) return;
+  // seed: level-1 completions grant [coin×10, gem×2]; other completions grant [coin×5].
+  // Every level_completed row has a coin reward; gem only on level-1.
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'unnest', source: 'rewards', as: 'rw' },
+    { stage: 'compute', name: 'item', op: 'json_field', column: 'rw', field: 'item', type: 'string' },
+    { stage: 'compute', name: 'qty', op: 'json_field', column: 'rw', field: 'qty', type: 'int' },
+    { stage: 'aggregate', group_by: ['item'], measures: [{ name: 'grants', fn: 'count' }, { name: 'total_qty', fn: 'sum', column: 'qty' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const grants = Object.fromEntries(r.rows.map((x) => [String(x.item), num(x.grants)]));
+  const qty = Object.fromEntries(r.rows.map((x) => [String(x.item), num(x.total_qty)]));
+  assert.equal(grants.coin, 25); // every level_completed row grants a coin
+  assert.ok(grants.gem >= 1 && grants.gem < 25); // gem only on level-1 completions
+  assert.equal(qty.gem, 2 * grants.gem); // each gem reward qty = 2 → qty extracted correctly
+  assert.equal(qty.coin, 125 + 5 * grants.gem); // level-1 coin=10, others=5: 5*25 + 5*gemCount
+});
+
 // compute const: a literal numeric column summed = row count
 test('pipeline compute const: a numeric constant column sums to the row count (8 IAP rows)', opts, async (t) => {
   if (skip(t)) return;

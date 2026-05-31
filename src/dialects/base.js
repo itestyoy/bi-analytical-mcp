@@ -66,6 +66,8 @@ export class Dialect {
   /** Integer day number (days since 1970-01-01) of a date/timestamp expr — the
    *  portable ORDER BY key for value-based RANGE windows (e.g. last N days). */
   unixDateExpr(_expr) { throw new Error('abstract unixDateExpr'); }
+  /** Extract a scalar field from a JSON-valued column (e.g. an unnested struct element). */
+  jsonColumnField(_column, _field, _type) { throw new Error('abstract jsonColumnField'); }
   /** Statistical aggregate (stddev|variance|median|percentile) over a column. */
   statAggExpr(_fn, _columnSql, _q) { throw new Error('abstract statAggExpr'); }
 

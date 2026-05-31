@@ -42,7 +42,18 @@ export class PostgresDialect extends Dialect {
       const ct = this.castType(type);
       return { join: `CROSS JOIN LATERAL jsonb_array_elements(${prevAlias}.${column}->'${key}') AS ${e}`, element: ct ? `${base}::${ct}` : base };
     }
+    if (type === 'json') { // bind the whole struct element as a jsonb column (multi-field extraction downstream)
+      return { join: `CROSS JOIN LATERAL jsonb_array_elements(${prevAlias}.${column}->'${key}') AS ${e}`, element: e };
+    }
     return { join: `CROSS JOIN LATERAL jsonb_array_elements_text(${prevAlias}.${column}->'${key}') AS ${e}`, element: e };
+  }
+
+  /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
+  jsonColumnField(column, field, type = 'string') {
+    this.ident(field);
+    const base = `(${column}->>'${field}')`;
+    const ct = this.castType(type);
+    return ct ? `${base}::${ct}` : base;
   }
 
   // ── time / scalar / statistical ────────────────────────────────────────────

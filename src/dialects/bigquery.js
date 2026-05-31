@@ -44,7 +44,18 @@ export class BigQueryDialect extends Dialect {
       const ct = this.castType(type);
       return { join: `CROSS JOIN UNNEST(JSON_QUERY_ARRAY(${column}, '$.${key}')) AS ${e}`, element: ct ? `CAST(${base} AS ${ct})` : base };
     }
+    if (type === 'json') { // bind the whole struct element as a JSON column
+      return { join: `CROSS JOIN UNNEST(JSON_QUERY_ARRAY(${column}, '$.${key}')) AS ${alias}`, element: alias };
+    }
     return { join: `CROSS JOIN UNNEST(JSON_VALUE_ARRAY(${column}, '$.${key}')) AS ${alias}`, element: alias };
+  }
+
+  /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
+  jsonColumnField(column, field, type = 'string') {
+    this.ident(field);
+    const base = `JSON_VALUE(${column}, '$.${field}')`;
+    const ct = this.castType(type);
+    return ct ? `CAST(${base} AS ${ct})` : base;
   }
 
   // ── time / scalar / statistical ────────────────────────────────────────────

@@ -199,6 +199,7 @@ const STAGES = {
         { if: { properties: { op: { const: 'date_diff' } }, required: ['op'] }, then: { required: ['from', 'to', 'unit'] } },
         { if: { properties: { op: { const: 'date_trunc' } }, required: ['op'] }, then: { required: ['granularity'] } },
         { if: { properties: { op: { const: 'date_part' } }, required: ['op'] }, then: { required: ['part'] } },
+        { if: { properties: { op: { const: 'json_field' } }, required: ['op'] }, then: { required: ['column', 'field'] } },
         { if: { properties: { op: { const: 'case' } }, required: ['op'] }, then: { required: ['cases'] } },
         { if: { properties: { op: { const: 'window' } }, required: ['op'] }, then: { required: ['fn'] } },
       ],
@@ -206,7 +207,8 @@ const STAGES = {
       properties: {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
-        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
+        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
+        field: { type: 'string', description: 'Struct field name for op=json_field (extract from a JSON column, e.g. an unnested array-of-struct element).' },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
         from: OPERAND, to: OPERAND, // date_diff (to may be { now: true })
@@ -276,6 +278,7 @@ const STAGES = {
       else if (p.op === 'date_trunc') { expr = d.dateTrunc(p.granularity, col()); type = 'time'; }
       else if (p.op === 'date_part') { expr = d.datePart(p.part, col()); type = 'int'; }
       else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }
+      else if (p.op === 'json_field') { expr = d.jsonColumnField(col(), p.field, p.type); type = p.type || 'string'; }
       else if (p.op === 'case') {
         if (!p.cases?.length) throw new Error('case: needs at least one branch');
         const branches = p.cases.map((cs) => {
@@ -305,16 +308,20 @@ const STAGES = {
   unnest: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'source', 'as'],
-      description: 'UNNEST (pipe `|> JOIN UNNEST`): explode a JSON array property into one row per element (CHANGES GRAIN; rows without the array drop out). Solves: per-element frequency analysis (items collected, rewards). For array-of-struct, bind a struct `field`.',
+      description: 'UNNEST (pipe `|> JOIN UNNEST`): explode a JSON array property into one row per element (CHANGES GRAIN; rows without the array drop out). Solves: per-element frequency analysis (items collected, rewards). For array-of-struct: bind a single struct `field`, OR omit `field` to bind the whole struct element as a JSON column and pull multiple fields from it downstream with compute op=json_field.',
       properties: {
         stage: { const: 'unnest' },
         source: { type: 'string', enum: catalog.complexEventProps() },
         as: { type: 'string', pattern: NAME },
-        field: { type: 'string', description: 'For array-of-struct: the struct field to bind.' },
+        field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'] },
       },
     }),
-    build: ({ catalog, cols }, p) => ({ op: { op: 'unnest', column: catalog.eventDataColumn(), key: p.source, as: p.as, field: p.field, type: p.type }, cols: addCol(cols, p.as, p.type || 'string') }),
+    build: ({ catalog, cols }, p) => {
+      const isStruct = String(catalog.eventPropertySpec(p.source)?.type || '').toLowerCase() === 'array<struct>';
+      const type = p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string'));
+      return { op: { op: 'unnest', column: catalog.eventDataColumn(), key: p.source, as: p.as, field: p.field, type }, cols: addCol(cols, p.as, type) };
+    },
   },
 
   join: {

@@ -67,6 +67,7 @@ const OPERAND = { type: 'object', additionalProperties: false, properties: { col
 // an array via `value` or `right.value`.
 const CONDITION = {
   type: 'object', additionalProperties: false, required: ['op'],
+  anyOf: [{ required: ['column'] }, { required: ['left'] }], // a left side is mandatory
   description: 'A comparison: left = `column` (shorthand) or `left` operand; right = `value` constant (shorthand; array for in/not_in; [low,high] for between) or `right` operand. is_null/is_not_null take no right side.',
   properties: { column: { type: 'string' }, value: {}, left: OPERAND, right: OPERAND, op: { enum: CMP } },
 };
@@ -155,6 +156,11 @@ const STAGES = {
   derive: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'op'],
+      allOf: [
+        { if: { properties: { op: { enum: ['extract', 'array_length', 'contains', 'struct_field'] } }, required: ['op'] }, then: { required: ['source'] } },
+        { if: { properties: { op: { const: 'contains' } }, required: ['op'] }, then: { required: ['value'] } },
+        { if: { properties: { op: { const: 'struct_field' } }, required: ['op'] }, then: { required: ['field'] } },
+      ],
       description: 'EXTEND (pipe `|> EXTEND`): add ONE scalar column from an event_data JSON property — `extract` a scalar, or `array_length`/`contains`/`struct_field` for complex props. Solves: surface a payload field so it can be filtered/grouped/aggregated. For math/time/CASE/window over EXISTING columns use `compute`.',
       properties: {
         stage: { const: 'derive' },
@@ -181,7 +187,22 @@ const STAGES = {
   compute: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'op'],
-      description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, date functions (date_diff/date_trunc/date_part), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running sum…).',
+      allOf: [
+        { if: { properties: { op: { const: 'const' } }, required: ['op'] }, then: { required: ['value'] } },
+        { if: { properties: { op: { enum: ['add', 'sub', 'mul', 'div'] } }, required: ['op'] }, then: { required: ['left', 'right'] } },
+        { if: { properties: { op: { enum: ['round', 'floor', 'ceil', 'abs', 'cast', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'unix_date', 'date_trunc', 'date_part'] } }, required: ['op'] }, then: { required: ['column'] } },
+        { if: { properties: { op: { const: 'concat' } }, required: ['op'] }, then: { required: ['parts'] } },
+        { if: { properties: { op: { enum: ['coalesce', 'least', 'greatest'] } }, required: ['op'] }, then: { required: ['columns'] } },
+        { if: { properties: { op: { const: 'cast' } }, required: ['op'] }, then: { required: ['type'] } },
+        { if: { properties: { op: { const: 'replace' } }, required: ['op'] }, then: { required: ['search', 'replacement'] } },
+        { if: { properties: { op: { const: 'substring' } }, required: ['op'] }, then: { required: ['start'] } },
+        { if: { properties: { op: { const: 'date_diff' } }, required: ['op'] }, then: { required: ['from', 'to', 'unit'] } },
+        { if: { properties: { op: { const: 'date_trunc' } }, required: ['op'] }, then: { required: ['granularity'] } },
+        { if: { properties: { op: { const: 'date_part' } }, required: ['op'] }, then: { required: ['part'] } },
+        { if: { properties: { op: { const: 'case' } }, required: ['op'] }, then: { required: ['cases'] } },
+        { if: { properties: { op: { const: 'window' } }, required: ['op'] }, then: { required: ['fn'] } },
+      ],
+      description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, string fns, date functions (date_diff/date_trunc/date_part/unix_date), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running & rolling aggregates). Each op enforces its required params at the schema level.',
       properties: {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
@@ -325,7 +346,7 @@ const STAGES = {
       properties: {
         stage: { const: 'aggregate' },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
-        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'sum/avg/min/max/count/count_distinct + statistical stddev/variance/median/percentile.' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
+        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], allOf: [{ if: { properties: { fn: { const: 'percentile' } }, required: ['fn'] }, then: { required: ['q'] } }, { if: { properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count_distinct', 'stddev', 'variance', 'median', 'percentile'] } }, required: ['fn'] }, then: { required: ['column'] } }], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'sum/avg/min/max/count/count_distinct + statistical stddev/variance/median/percentile.' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
       },
     }),
     build: ({ d, cols }, p) => {

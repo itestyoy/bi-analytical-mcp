@@ -14,7 +14,7 @@ const WINDOW = '^[0-9]+ (second|minute|hour|day|week|month|quarter|year)s?$';
 
 // Reusable property-description strings (kept consistent across tools).
 const D = {
-  context_id: 'ID of the isolated execution context to operate in. Omit on create to start a NEW context (a fresh, isolated dbt overlay); pass an existing id to extend/query that same context. Every context has its own semantic models, generated SQL and target dir, so parallel tasks never collide.',
+  context_id: 'ID of the isolated execution context to operate in. Omit on create to start a NEW, isolated context; pass an existing id to extend or query that same context. Each context is fully isolated, so parallel tasks never collide.',
   measure_name: 'Unique measure name within the task (lowercase snake_case). Referenced by metrics; the final queryable name is prefixed with the task, e.g. task_<name>.',
   agg: 'Aggregation applied to `field` to form the measure: count (rows), count_distinct (unique values of an entity key — required for conversion/funnel user counts), sum, average, median, min, max, percentile (needs `percentile`), sum_boolean (counts rows where a boolean/condition holds).',
   percentile: 'Percentile in (0,1), e.g. 0.95 for p95. Required when agg=percentile.',
@@ -30,7 +30,7 @@ function whereItemSchema(catalog) {
     properties: {
       property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property to test.' },
       op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator. Use in/not_in with an array value; the rest take a scalar.' },
-      value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in. Always bound as a parameter/escaped literal (never interpolated as SQL).' },
+      value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in.' },
     },
   };
 }
@@ -73,9 +73,9 @@ function dimensionItemSchema(catalog, modelKey) {
       type: 'object',
       additionalProperties: false,
       required: ['source', 'property'],
-      description: 'A dimension extracted from a JSON event_data property (e.g. level_id, product_id) so you can group/filter by it.',
+      description: 'A dimension taken from an event_data property (e.g. level_id, product_id) so you can group/filter by it.',
       properties: {
-        source: { const: 'event_property', description: 'Extract the dimension from the event_data JSON column.' },
+        source: { const: 'event_property', description: 'Take the dimension from an event_data property.' },
         property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property key to expose as a categorical dimension.' },
         as_type: { const: 'categorical', default: 'categorical', description: 'event_data dimensions are always categorical.' },
         label: { type: 'string', description: D.label },
@@ -267,10 +267,10 @@ export function buildSchemas(catalog) {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
       description: { type: 'string', description: 'Free-text note describing what this task computes (metadata only).' },
-      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional dbt models to load so their dimensions become joinable (e.g. "users" to slice by country/platform). The events anchor is always available.' },
-      semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source dbt model) carrying the measures/dimensions for this task.' },
+      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional source models to load so their dimensions become joinable (e.g. "users" to slice by country/platform). The events source is always available.' },
+      semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
       metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
-      dry_run: { type: 'boolean', description: 'If true, render and validate the YAML and return it WITHOUT writing files or running dbt.' },
+      dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
     },
   };
 
@@ -279,12 +279,12 @@ export function buildSchemas(catalog) {
   // and materialize it. The pipeline's rows ARE the result.
   const registerModel = {
     type: 'object', additionalProperties: false, required: ['name', 'pipeline'],
-    description: 'Build a derived dbt model from a pipe-syntax PIPELINE (a `source` + ordered `stages`: where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Materialized as a dbt model whose ROWS are the result (returned, and re-readable/sliceable via get_query_result). Funnels are pipelines too: add a match_recognize stage, then slice it with downstream join/aggregate (e.g. conversion by country) — no separate engine.',
+    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — returned, and re-readable/sliceable via get_query_result. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
-      materialized: { enum: ['view', 'table'], default: 'table', description: 'dbt materialization: table (precomputed, default) or view (always fresh).' },
-      dry_run: { type: 'boolean', description: 'If true, return the generated SQL WITHOUT building anything.' },
+      materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored: table (precomputed snapshot, default) or view (always fresh).' },
+      dry_run: { type: 'boolean', description: 'If true, return the generated model definition for preview WITHOUT building anything.' },
       pipeline: {
         type: 'object', additionalProperties: false, required: ['stages'],
         description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
@@ -301,7 +301,7 @@ export function buildSchemas(catalog) {
     type: 'object',
     additionalProperties: false,
     required: ['context_id'],
-    description: 'Run a metric query (MetricFlow / dbt Core) against a context.',
+    description: 'Run a metric query against a context.',
     $defs: pdefs,
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
@@ -323,9 +323,9 @@ export function buildSchemas(catalog) {
       time_range: { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates).', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } },
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
-      materialize: { type: 'boolean', description: 'Materialize the query as a dbt table and read rows back from it (resilient, re-fetchable). Slow queries (> timeout) return a query_id; poll get_query_result.' },
-      dry_run: { type: 'boolean', description: 'If true, return the generated SQL (explain) WITHOUT executing the query.' },
-      explain: { type: 'boolean', description: 'If true, return the query PLAN (MetricFlow dataflow plan + execution plan) AND the rendered SQL WITHOUT executing — like `mf query --explain --show-dataflow-plan`. A superset of dry_run; useful for inspecting/optimizing how the metrics compile.' },
+      materialize: { type: 'boolean', description: 'Materialize the result and read rows back from it (resilient, re-fetchable). Slow queries (> timeout) return a query_id; poll get_query_result.' },
+      dry_run: { type: 'boolean', description: 'If true, validate and return the compiled query WITHOUT executing it.' },
+      explain: { type: 'boolean', description: 'If true, return the query plan (how the metrics compile) and the compiled query WITHOUT executing. A superset of dry_run; useful for inspecting/optimizing.' },
     },
   };
 
@@ -344,7 +344,7 @@ export function buildSchemas(catalog) {
       add_metrics: { type: 'array', items: metricSchema(), description: 'Metrics to add.' },
       remove_metrics: { type: 'array', items: { type: 'string' }, description: 'Names of metrics to remove.' },
       task: { type: 'string', description: 'Task name the additions belong to (defaults to the context\'s first task).' },
-      dry_run: { type: 'boolean', description: 'If true, render/validate without running dbt parse.' },
+      dry_run: { type: 'boolean', description: 'If true, validate the change WITHOUT building anything.' },
     },
   };
 
@@ -367,14 +367,14 @@ export function buildSchemas(catalog) {
       properties: {
         context_id: { type: 'string', pattern: CTX, description: D.context_id },
         query_id: { type: 'string', pattern: '^[a-f0-9]{8,16}$', description: 'ID returned by a backgrounded materialize query; poll it for status + results.' },
-        table: { type: 'string', pattern: '^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$', description: 'A known table to read directly: a query-result table (qr_<id>) or a registered pipeline model (pipe_<name>) — works even if the job record is gone.' },
+        table: { type: 'string', pattern: '^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$', description: 'A known result table to read directly (its name is returned by a prior materialize or register call) — works even if the job record is gone.' },
         limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
         offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging over the stored result). Ignored when sample=true.' },
-        sample: { type: 'boolean', description: 'If true, return a REPRESENTATIVE random subset instead of the first rows — BigQuery uses TABLESAMPLE SYSTEM (sample_percent), Postgres uses ORDER BY random() limited to `limit`.' },
-        sample_percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate % of rows for BigQuery TABLESAMPLE SYSTEM when sample=true (default 10).' },
+        sample: { type: 'boolean', description: 'If true, return a REPRESENTATIVE random subset of rows instead of the first rows — a better peek at large results.' },
+        sample_percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate % of rows to sample when sample=true (default 10).' },
         transform: {
           type: 'object', additionalProperties: false,
-          description: 'Optional read-only projection over the materialized result table (compress/re-slice WITHOUT recomputing the analytics query). Identifiers are validated; values are literal-escaped.',
+          description: 'Optional read-only re-slice of the stored result (compress/aggregate/filter it WITHOUT recomputing the original query).',
           properties: {
             where: { type: 'array', description: 'Row filters on result columns.', items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Result column to filter.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'is_null', 'is_not_null'], description: 'Comparison operator.' }, value: { description: 'Comparison value (array for in/not_in).' } } } },
             group_by: { type: 'array', items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },

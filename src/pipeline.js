@@ -150,7 +150,7 @@ const STAGES = {
   where: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
-      description: 'WHERE (pipe `|> WHERE`): keep rows where all conditions hold (ANDed). Each condition compares two operands — each a column, a literal constant, or now. Shorthand `{column, op, value}` = column vs constant; or use `{left, op, right}` for column-vs-column / constant-vs-column. Solves: scope to an event_name, a segment, a value range, or compare two columns; can run at any point (e.g. after a window/aggregate to filter on a computed column).',
+      description: 'Keep only rows where all conditions hold (ANDed). Each condition compares two operands — each a column, a literal constant, or the current time (now). Shorthand `{column, op, value}` = column vs constant; or `{left, op, right}` for column-vs-column / constant-vs-column. Use it to scope to an event, a segment, or a value range — at any point in the pipeline, including after a window or aggregate to filter on a computed column.',
       properties: {
         stage: { const: 'where' },
         conditions: { type: 'array', minItems: 1, items: CONDITION },
@@ -167,7 +167,7 @@ const STAGES = {
         { if: { properties: { op: { const: 'contains' } }, required: ['op'] }, then: { required: ['value'] } },
         { if: { properties: { op: { const: 'struct_field' } }, required: ['op'] }, then: { required: ['field'] } },
       ],
-      description: 'EXTEND (pipe `|> EXTEND`): add ONE scalar column from an event_data JSON property — `extract` a scalar, or `array_length`/`contains`/`struct_field` for complex props. Solves: surface a payload field so it can be filtered/grouped/aggregated. For math/time/CASE/window over EXISTING columns use `compute`.',
+      description: 'Add ONE scalar column from an event property — `extract` a scalar value, or `array_length`/`contains`/`struct_field` for array/struct properties. Surfaces a payload field so it can be filtered, grouped, or aggregated. For math/time/CASE/window over EXISTING columns, use `compute`.',
       properties: {
         stage: { const: 'derive' },
         name: { type: 'string', pattern: NAME },
@@ -315,7 +315,7 @@ const STAGES = {
   unnest: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'source', 'as'],
-      description: 'UNNEST (pipe `|> JOIN UNNEST`): explode a JSON array property into one row per element (CHANGES GRAIN; rows without the array drop out). Solves: per-element frequency analysis (items collected, rewards). For array-of-struct: bind a single struct `field`, OR omit `field` to bind the whole struct element as a JSON column and pull multiple fields from it downstream with compute op=json_field.',
+      description: 'Explode an array property into one row per element (CHANGES GRAIN; rows without the array drop out). For per-element analysis (e.g. items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with compute op=json_field.',
       properties: {
         stage: { const: 'unnest' },
         source: { type: 'string', enum: catalog.complexEventProps() },
@@ -334,7 +334,7 @@ const STAGES = {
   join: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'with', 'on'],
-      description: 'JOIN (pipe `|> JOIN`): 1-hop join to another catalog model on a shared entity key, exposing its attributes. Solves: enrich events with user attributes (country/platform/install_date) for segmentation or date math.',
+      description: 'Bring in attributes from a related model on a shared entity key, exposing its columns. Enriches events with user attributes (e.g. country / platform / install_date) for segmentation or date math.',
       properties: {
         stage: { const: 'join' },
         with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join.' },
@@ -356,11 +356,11 @@ const STAGES = {
   aggregate: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'measures'],
-      description: 'AGGREGATE (pipe `|> AGGREGATE … GROUP BY`): group + measures (COLLAPSES grain to the group keys). Measures: sum/avg/min/max/count/count_distinct, approx_count_distinct (HLL++ — fast approximate uniques on huge data), and statistical stddev/variance/median/percentile(q). Solves: totals, rates, DAU/MAU (count_distinct user), revenue, ARPU, distributions/percentiles.',
+      description: 'Group rows and compute measures (COLLAPSES grain to the group keys). Measures: sum/avg/min/max/count/count_distinct, approx_count_distinct (fast approximate uniques on large data), and statistical stddev/variance/median/percentile(q). For totals, rates, distinct users (DAU/MAU), revenue, ARPU, distributions/percentiles.',
       properties: {
         stage: { const: 'aggregate' },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
-        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], allOf: [{ if: { properties: { fn: { const: 'percentile' } }, required: ['fn'] }, then: { required: ['q'] } }, { if: { properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile'] } }, required: ['fn'] }, then: { required: ['column'] } }], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'sum/avg/min/max/count/count_distinct, approx_count_distinct (HLL++: BigQuery APPROX_COUNT_DISTINCT, Postgres exact fallback), and statistical stddev/variance/median/percentile.' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
+        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], allOf: [{ if: { properties: { fn: { const: 'percentile' } }, required: ['fn'] }, then: { required: ['q'] } }, { if: { properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile'] } }, required: ['fn'] }, then: { required: ['column'] } }], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'Aggregate: sum/avg/min/max/count/count_distinct, approx_count_distinct (fast approximate distinct count), statistical stddev/variance/median/percentile, and the mergeable distinct-sketch functions hll_init/hll_merge/hll_merge_partial.' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
       },
     }),
     build: ({ d, cols }, p) => {
@@ -377,7 +377,7 @@ const STAGES = {
   pivot: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'on', 'fn', 'value_column', 'values'],
-      description: 'PIVOT (pipe `|> PIVOT`): turn listed values of `on` into columns, each aggregating `value_column` (no dynamic pivot — list the values). Solves: dashboard-ready matrices (e.g. revenue as one column per country, retention day as columns).',
+      description: 'Turn listed values of `on` into columns, each aggregating `value_column` (the values must be listed explicitly). For dashboard-ready matrices (e.g. revenue as one column per country, or retention day as columns).',
       properties: {
         stage: { const: 'pivot' },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Row keys kept (empty = one row).' },
@@ -400,7 +400,7 @@ const STAGES = {
   unpivot: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'columns', 'name_as', 'value_as'],
-      description: 'UNPIVOT (pipe `|> UNPIVOT`): fold the listed columns into rows of (name_as, value_as), keeping the rest. Solves: wide→long/tidy reshape for charting; turning a pivoted/metric-per-column result back into rows.',
+      description: 'Fold the listed columns into rows of (name_as, value_as), keeping the rest. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
       properties: {
         stage: { const: 'unpivot' },
         columns: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Columns to fold into rows.' },
@@ -423,21 +423,21 @@ const STAGES = {
   order_by: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'keys'],
-      description: 'ORDER BY (pipe `|> ORDER BY`): sort rows. Solves: rankings/leaderboards (pair with limit) and stable output ordering.',
+      description: 'Sort rows. For rankings/leaderboards (pair with limit) and stable output ordering.',
       properties: { stage: { const: 'order_by' }, keys: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } } },
     }),
     build: ({ cols }, p) => { p.keys.forEach((k) => requireCol(cols, k.key)); return { op: { op: 'order_by', keys: p.keys.map((k) => ({ key: k.key, dir: k.direction })) }, cols }; },
   },
 
   limit: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'n'], description: 'LIMIT (pipe `|> LIMIT`): cap the number of rows. Solves: top-N (after order_by), previews.', properties: { stage: { const: 'limit' }, n: { type: 'integer', minimum: 1, maximum: 1000000 } } }),
+    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'n'], description: 'Cap the number of rows. For top-N (after order_by) or previews.', properties: { stage: { const: 'limit' }, n: { type: 'integer', minimum: 1, maximum: 1000000 } } }),
     build: ({ cols }, p) => ({ op: { op: 'limit', n: p.n }, cols }),
   },
 
   sample: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'percent'],
-      description: 'TABLESAMPLE (pipe `|> TABLESAMPLE`): keep roughly `percent`% of rows. Solves: scan less data for a FAST first estimate / where-to-dig signal on large tables — put it early (near the source). Approximate: results are a random subset, not exact. BigQuery uses TABLESAMPLE SYSTEM; Postgres uses a row-level random() sample (works at any stage).',
+      description: 'Keep roughly `percent`% of rows, chosen at random — a fast, approximate peek for a first estimate or where-to-dig signal on large data. Put it early. Results are a random subset, not exact.',
       properties: {
         stage: { const: 'sample' },
         percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate share of rows to keep (0 < percent <= 100).' },
@@ -447,7 +447,7 @@ const STAGES = {
   },
 
   project: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'columns'], description: 'SELECT (pipe `|> SELECT`): keep only these columns (drops the rest). Solves: trim the output to the columns of interest.', properties: { stage: { const: 'project' }, columns: { type: 'array', minItems: 1, items: { type: 'string' } } } }),
+    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'columns'], description: 'Keep only these columns (drop the rest). Trims the output to the columns of interest.', properties: { stage: { const: 'project' }, columns: { type: 'array', minItems: 1, items: { type: 'string' } } } }),
     build: ({ cols }, p) => { p.columns.forEach((c) => requireCol(cols, c)); const out = new Map(); for (const c of p.columns) out.set(c, cols.get(c) || { type: 'string' }); return { op: { op: 'project', cols: p.columns }, cols: out }; },
   },
 };

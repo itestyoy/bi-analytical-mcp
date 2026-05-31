@@ -259,11 +259,11 @@ function matchRecognizeSchema(catalog) {
   const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'avg', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
-    description: 'MATCH_RECOGNIZE (pipe `|> MATCH_RECOGNIZE`): an ordered row-pattern funnel/path over the (prepared) relation, partitioned per user/session. Emits ONE ROW PER MATCH with reached_<step> flags, furthest_step_name, completed, t-times and captured metric values — which downstream stages (join/where/aggregate/pivot) can slice/aggregate (e.g. conversion by country). Solves: funnels, conversion, time-between-steps.',
+    description: 'An ordered funnel / path detector, evaluated per user or per session. Produces one row per matched user/session with reached_<step> flags, furthest_step_name, completed, step times, and any captured metric values — which downstream stages (join/where/aggregate) can slice or aggregate (e.g. conversion by country). For funnels, conversion, and time-between-steps.',
     properties: {
       stage: { const: 'match_recognize' },
-      partition_by: { enum: ['user', 'session'], default: 'user', description: 'Partition the match per user or per session.' },
-      mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order with gaps allowed; strict = adjacent (BigQuery target only).' },
+      partition_by: { enum: ['user', 'session'], default: 'user', description: 'Match per user or per session.' },
+      mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order, other events may occur between them; strict = each step must be the immediately next event.' },
       filter: {
         type: 'object', additionalProperties: false, description: 'Optional pre-filter applied to the input BEFORE matching (speed; narrows population only).',
         properties: {

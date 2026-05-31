@@ -441,13 +441,8 @@ export function pipelineStageSchema(catalog) {
   return { oneOf: Object.values(STAGES).map((s) => s.schema(catalog)) };
 }
 
-/**
- * Lower a pipeline over an explicit base relation to one SQL text (chained-CTE
- * form), honoring a terminal stage (e.g. match_recognize) that contributes its
- * own CTEs + final SELECT. Used by the funnel: [...prepare, match_recognize].
- */
-export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages) {
-  const d = getDialect(dialectName);
+// Fold stages -> { ops, cols } (validating column references along the way).
+function buildOps(catalog, d, baseColumns, stages) {
   let cols = new Map(baseColumns);
   const ops = [];
   for (const st of stages) {
@@ -457,6 +452,12 @@ export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumn
     ops.push(res.op);
     cols = res.cols;
   }
+  return { ops, cols };
+}
+
+// Chained-CTE assembly (works for both dialects), honoring a terminal stage
+// (e.g. match_recognize) that contributes its own CTEs + final SELECT.
+function assembleCteSql(d, dialectName, baseRelation, ops) {
   let prev = baseRelation;
   const ctes = [];
   let finalSelect = null;
@@ -477,22 +478,28 @@ export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumn
 }
 
 /**
- * Render a full pipeline to SQL for `dialectName` (dialect-native form: Postgres
- * chained CTE, BigQuery pipe syntax).
+ * Lower a pipeline over an explicit base relation to one SQL text (chained-CTE
+ * form). Used by the funnel: [...prepare, match_recognize].
+ */
+export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages) {
+  const d = getDialect(dialectName);
+  const { ops } = buildOps(catalog, d, baseColumns, stages);
+  return assembleCteSql(d, dialectName, baseRelation, ops);
+}
+
+/**
+ * Render a full pipeline over a catalog `source` to SQL for `dialectName`. A
+ * pipeline WITHOUT a terminal stage uses the dialect-native form (Postgres
+ * chained CTE, BigQuery `|>` pipe syntax); a pipeline ending in a terminal stage
+ * (match_recognize) uses the chained-CTE assembly (MATCH_RECOGNIZE isn't a pipe
+ * operator).
  * @returns { sql, columns } — columns is the final tracked column set (Map).
  */
 export function renderPipeline(catalog, dialectName, source, stages = []) {
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
   const baseRelation = `{{ ref('${m.dbt_model}') }}`;
-  let cols = sourceColumns(catalog, source);
-  const ops = [];
-  for (const st of stages) {
-    const def = STAGES[st.stage];
-    if (!def) throw new Error(`unknown pipeline stage: ${st.stage}`);
-    const res = def.build({ d, catalog, cols }, st);
-    ops.push(res.op);
-    cols = res.cols;
-  }
-  return { sql: d.renderPipeline(baseRelation, ops), columns: cols };
+  const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source), stages);
+  const sql = ops.some((o) => o.terminal) ? assembleCteSql(d, dialectName, baseRelation, ops) : d.renderPipeline(baseRelation, ops);
+  return { sql, columns: cols };
 }

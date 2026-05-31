@@ -9,6 +9,7 @@ import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
 import { renderPerUserModelPostgres, renderPerUserModelBigQuery, sequenceSemanticModel, dumpSequenceYaml } from './match-recognize.js';
+import { renderPipeline } from './pipeline.js';
 import { JobManager } from './jobs.js';
 import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
@@ -196,6 +197,7 @@ export class Engine {
 
   async register_native_model(input) {
     this._validate('register_native_model', input);
+    if (input.pipeline) return this._registerPipeline(input);
     if (input.dry_run) {
       const art = this._nativeArtifacts(input); // un-suffixed preview (no context yet)
       return { kind: 'match_recognize', dry_run: true, model: art.modelName, materialized: input.materialized || 'view', dialect: art.dialect, model_sql: art.modelSql, model_sql_bigquery: art.bqSql, semantic_yaml: dumpSequenceYaml(art.sem), metrics: art.sem.metricNames, dimensions: art.sem.dimensionNames };
@@ -223,9 +225,57 @@ export class Engine {
     };
   }
 
+  /**
+   * Register (or rebuild) a general transformation PIPELINE as a dbt model.
+   * The pipeline's rows ARE the result: we materialize, build, and read them back.
+   * Re-readable/sliceable later via get_query_result(table, transform).
+   */
+  async _registerPipeline(input) {
+    const dialect = this.catalog.dialect;
+    const source = input.pipeline.source || this.catalog.anchor;
+    const renderBoth = () => ({
+      pg: renderPipeline(this.catalog, dialect, source, input.pipeline.stages),
+      bq: renderPipeline(this.catalog, 'bigquery', source, input.pipeline.stages).sql,
+    });
+    if (input.dry_run) {
+      const { pg, bq } = renderBoth();
+      return { kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect, columns: [...pg.columns.keys()], model_sql: pg.sql, model_sql_bigquery: bq };
+    }
+    const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
+    const modelName = `pipe_${input.name}_${ctx.id}`;
+    const { pg, bq } = renderBoth();
+    const materialized = input.materialized || 'table';
+    const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
+    this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${pg.sql}\n`);
+    ctx.state.engine = 'pipeline';
+    ctx.state.model = modelName;
+    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...pg.columns.keys()] };
+    if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
+    this.ctxs.touch(ctx.id);
+    let build = { ok: true, skipped: 'no runner' };
+    let rows = []; let columns = [...pg.columns.keys()];
+    if (this.runner) {
+      const r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
+      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) } };
+      const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
+      if (show.ok) { rows = show.rows; columns = show.columns || columns; }
+      else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };
+    }
+    return {
+      context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
+      columns, row_count: rows.length, rows, model_sql_bigquery: bq, build,
+      assumptions: [
+        `Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`,
+        `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
+      ],
+      warnings: [],
+    };
+  }
+
   /** Update a registered native model in place (re-generate + rebuild the view). */
   async update_native_model(input) {
     this._validate('update_native_model', input);
+    if (input.pipeline) return this._registerPipeline(input);
     const ctx = this.ctxs.get(input.context_id);
     const art = this._nativeArtifacts(input, ctx.id); // same ctx -> same relation, rebuilt in place
     const m = await this._materializeNative(input, ctx, art);
@@ -237,7 +287,7 @@ export class Engine {
   async delete_native_model(input) {
     this._validate('delete_native_model', input);
     const ctx = this.ctxs.get(input.context_id);
-    if (ctx.state.engine !== 'match_recognize') return { context_id: ctx.id, removed: false, reason: 'no native model registered in this context' };
+    if (ctx.state.engine !== 'match_recognize' && ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native model registered in this context' };
     const model = ctx.state.model;
     this.ctxs.removeGeneratedFile(ctx.id, `${model}.sql`);
     this.ctxs.removeGeneratedFile(ctx.id, 'context.yml');

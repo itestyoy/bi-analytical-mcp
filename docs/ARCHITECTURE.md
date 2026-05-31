@@ -165,9 +165,13 @@ with the YAML config header. Two consumption modes, unchanged:
    vocabulary, reused.
 
 `create_semantic_model` stays the declarative way to define measures/metrics over
-the **scalar** two-source models; `register_native_model` becomes "register a
-**pipeline** as a model" (its `sequence`+`prepare` today is the pipeline's
-`match_recognize`+`derive`/`unnest` stages).
+the **scalar** two-source models. **`register_native_model` is the pipeline
+creator**: it accepts either a `sequence` (an ordered MATCH_RECOGNIZE funnel with a
+MetricFlow semantic model on top, queryable via `query_semantic_model`) or a
+general `pipeline` (`source` + ordered stages — where/derive/compute/unnest/join/
+aggregate/pivot/unpivot/sample/window/order_by/limit/project, optionally ending in
+`match_recognize`). A `pipeline` is materialized as a dbt model whose rows ARE the
+result (returned directly, and re-readable/sliceable via `get_query_result`).
 
 ## 7. Migration path (from today's code)
 

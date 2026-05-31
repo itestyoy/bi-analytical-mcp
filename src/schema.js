@@ -5,7 +5,7 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
-import { stageSchemas } from './pipeline.js';
+import { stageSchemas, pipelineStageSchema } from './pipeline.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
@@ -305,14 +305,23 @@ export function buildSchemas(catalog) {
   // VIEW) and expose it to the semantic layer — kept SEPARATE from the semantic
   // query so the row-pattern SQL and MetricFlow don't get mixed up.
   const registerModel = {
-    type: 'object', additionalProperties: false, required: ['name', 'sequence'],
-    description: 'Build a derived dbt model from a sequence spec (MATCH_RECOGNIZE funnel/path, BigQuery target) materialized as a view, plus a semantic model on top — so its metrics/dimensions become queryable like any other model.',
+    type: 'object', additionalProperties: false, required: ['name'],
+    oneOf: [{ required: ['sequence'] }, { required: ['pipeline'] }],
+    description: 'Build a derived dbt model and materialize it. Two shapes: `sequence` = an ordered MATCH_RECOGNIZE funnel/path with a semantic model on top (its metrics/dimensions become queryable via query_semantic_model); `pipeline` = a general pipe-syntax transformation (source + ordered stages: where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, optionally ending in match_recognize) whose ROWS are the result (returned, and re-readable/sliceable via get_query_result). Provide exactly one of `sequence` or `pipeline`.',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
-      name: { type: 'string', pattern: TASK, description: 'Native model name (lowercase snake_case); the generated model is seq_<name>.' },
-      kind: { enum: ['match_recognize'], default: 'match_recognize', description: 'Derived-model engine. Only row-pattern (MATCH_RECOGNIZE) sequences are supported.' },
-      materialized: { enum: ['view', 'table'], default: 'view', description: 'dbt materialization of the generated model: view (default, always fresh) or table (precomputed snapshot).' },
-      dry_run: { type: 'boolean', description: 'If true, return the generated SQL + semantic YAML WITHOUT building anything.' },
+      name: { type: 'string', pattern: TASK, description: 'Native model name (lowercase snake_case); generated as seq_<name> (sequence) or pipe_<name> (pipeline).' },
+      kind: { enum: ['match_recognize', 'pipeline'], default: 'match_recognize', description: 'Derived-model engine: match_recognize (sequence funnel) or pipeline (general transformation).' },
+      materialized: { enum: ['view', 'table'], default: 'view', description: 'dbt materialization of the generated model: view (always fresh) or table (precomputed snapshot). Pipelines default to table.' },
+      dry_run: { type: 'boolean', description: 'If true, return the generated SQL (+ semantic YAML for sequences) WITHOUT building anything.' },
+      pipeline: {
+        type: 'object', additionalProperties: false, required: ['stages'],
+        description: 'A general transformation pipeline (pipe-syntax): a `source` table + ordered `stages`. Materialized as a dbt model whose rows ARE the result. Use for aggregate/pivot/window/compute/sample analytics; use `sequence` for ordered funnels.',
+        properties: {
+          source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table for the pipeline (default: the events fact).' },
+          stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages applied left-to-right; each transforms the previous output.' },
+        },
+      },
       sequence: {
         type: 'object', additionalProperties: false, required: ['steps'],
         description: 'Ordered steps (each = event + optional event_data property), partitioned by user/session, with optional sequence metrics.',
@@ -416,7 +425,7 @@ export function buildSchemas(catalog) {
   return {
     create_semantic_model: create,
     register_native_model: registerModel,
-    update_native_model: { ...registerModel, required: ['context_id', 'name', 'sequence'], description: 'Update a registered native model in place: regenerate the view + semantic model from a new sequence spec and rebuild.' },
+    update_native_model: { ...registerModel, required: ['context_id', 'name'], description: 'Update a registered native model in place: regenerate it from a new sequence or pipeline spec and rebuild.' },
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     query_semantic_model: query,
     get_query_result: {

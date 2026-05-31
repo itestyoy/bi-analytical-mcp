@@ -283,6 +283,56 @@ test('prepare derive contains: step filtered by a derived boolean (has_cat) reac
   await engine.delete_native_model({ context_id: out.context_id });
 });
 
+test('register_native_model (pipeline): general aggregate pipeline returns the result rows (revenue by country)', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.register_native_model({
+    name: 'rev_by_country',
+    pipeline: { source: 'events', stages: [
+      { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+      { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+      { stage: 'join', with: 'users', on: 'appsflyer_id', attrs: ['country'] },
+      { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] },
+    ] },
+  });
+  assert.equal(out.kind, 'pipeline');
+  assert.equal(out.build.ok, true, JSON.stringify(out.error || out.build));
+  const by = mapCol(out.rows, 'country', 'revenue');
+  assert.equal(by.US, 35);
+  assert.equal(by.GB, 25);
+  assert.equal(by.BR, 25);
+  await engine.delete_native_model({ context_id: out.context_id });
+});
+
+test('register_native_model (pipeline): pivot pipeline returns per-country columns', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.register_native_model({
+    name: 'rev_pivot',
+    pipeline: { stages: [
+      { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+      { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+      { stage: 'join', with: 'users', on: 'appsflyer_id', attrs: ['country'] },
+      { stage: 'pivot', group_by: [], on: 'country', fn: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
+    ] },
+  });
+  assert.equal(out.build.ok, true, JSON.stringify(out.error || out.build));
+  assert.equal(out.rows.length, 1);
+  assert.equal(num(out.rows[0].US), 35);
+  assert.equal(num(out.rows[0].GB), 25);
+  await engine.delete_native_model({ context_id: out.context_id });
+});
+
+test('register_native_model (pipeline): dry_run returns SQL without building', opts, async (t) => {
+  if (skip(t)) return;
+  const dr = await engine.register_native_model({
+    name: 'dry_pipe', dry_run: true,
+    pipeline: { stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', fn: 'count' }] }] },
+  });
+  assert.equal(dr.dry_run, true);
+  assert.equal(dr.kind, 'pipeline');
+  assert.equal(typeof dr.model_sql, 'string');
+  assert.equal(typeof dr.model_sql_bigquery, 'string');
+});
+
 test('describe_catalog: returns REAL physical columns for every model (adapter introspection)', opts, async (t) => {
   if (skip(t)) return;
   const dc = await engine.describe_catalog();

@@ -72,6 +72,8 @@ export class BigQueryDialect extends Dialect {
 
   castExpr(expr, type) { return `CAST(${expr} AS ${this.castType(type) || 'STRING'})`; }
 
+  substringExpr(expr, start, len) { return `SUBSTR(${expr}, ${Number(start)}${len != null ? `, ${Number(len)}` : ''})`; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `STDDEV(${c})`;

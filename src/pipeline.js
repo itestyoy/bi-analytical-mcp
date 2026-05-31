@@ -21,12 +21,14 @@
 //                            (extract a scalar; array_length / contains / struct_field
 //                            for complex props). Solves: surface a payload field as a column.
 //   compute    |> EXTEND     add ONE column FROM existing columns + literals:
-//                            arithmetic (+ - * /), round/floor/ceil/abs, coalesce/
-//                            least/greatest, cast, date_diff / date_trunc / date_part,
-//                            CASE (bucketing), and WINDOW functions (row_number / rank /
-//                            lag / lead / running sum…). Solves: KPIs (ARPU parts), tiers/
-//                            buckets, days-since-install & retention day, period-over-period
-//                            (lag), nth-event / repeat-purchase (row_number).
+//                            const (literal number/string/bool), arithmetic (+ - * /),
+//                            round/floor/ceil/abs, coalesce/least/greatest, cast,
+//                            STRING fns (concat/upper/lower/length/substring/trim/replace),
+//                            date_diff / date_trunc / date_part, CASE (bucketing), and
+//                            WINDOW functions (row_number / rank / lag / lead / running sum…).
+//                            Solves: constant tags/labels, KPIs (ARPU parts), string keys,
+//                            tiers/buckets, days-since-install & retention day,
+//                            period-over-period (lag), nth-event / repeat-purchase (row_number).
 //   unnest     |> JOIN UNNEST  explode a JSON array into one row per element.
 //                            Solves: per-element frequency (items collected, rewards).
 //   join       |> JOIN       1-hop join to another catalog model on a shared entity.
@@ -131,11 +133,17 @@ const STAGES = {
       properties: {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
-        op: { enum: ['add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'date_diff', 'date_trunc', 'date_part', 'case', 'window'] },
+        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'date_diff', 'date_trunc', 'date_part', 'case', 'window'] },
+        value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
         from: OPERAND, to: OPERAND, // date_diff (to may be { now: true })
-        column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/date_trunc/date_part, and for window lag/lead/sum/avg/min/max.' },
+        column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/upper/lower/length/substring/trim/replace/date_trunc/date_part, and for window lag/lead/sum/avg/min/max.' },
         columns: { type: 'array', items: { type: 'string' }, description: 'Inputs for coalesce/least/greatest.' },
+        parts: { type: 'array', items: OPERAND, minItems: 1, description: 'Operands (columns/literals) to concatenate for op=concat.' },
+        search: { type: 'string', description: 'Substring to find for op=replace.' },
+        replacement: { type: 'string', description: 'Replacement string for op=replace.' },
+        start: { type: 'integer', minimum: 1, description: '1-based start position for op=substring.' },
+        len: { type: 'integer', minimum: 0, description: 'Length (chars) for op=substring (optional).' },
         unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'date_diff unit.' },
         granularity: { enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'date_trunc granularity.' },
         part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'date_part to extract.' },
@@ -164,7 +172,20 @@ const STAGES = {
       const list = () => { (p.columns || []).forEach((c) => requireCol(cols, c)); return (p.columns || []).map((c) => d.ident(c)); };
       const ARITH = { add: '+', sub: '-', mul: '*', div: '/' };
       let expr; let type = 'numeric';
-      if (ARITH[p.op]) {
+      if (p.op === 'const') {
+        if (p.value === undefined) throw new Error('const: needs value');
+        expr = d.sqlLiteral(p.value);
+        type = typeof p.value === 'number' ? 'numeric' : typeof p.value === 'boolean' ? 'boolean' : 'string';
+      } else if (p.op === 'concat') {
+        if (!p.parts?.length) throw new Error('concat: needs parts');
+        expr = `concat(${p.parts.map((o, i) => operand(o, `part[${i}]`)).join(', ')})`; type = 'string';
+      } else if (p.op === 'upper') { expr = `upper(${col()})`; type = 'string'; }
+      else if (p.op === 'lower') { expr = `lower(${col()})`; type = 'string'; }
+      else if (p.op === 'trim') { expr = `trim(${col()})`; type = 'string'; }
+      else if (p.op === 'length') { expr = `length(${col()})`; type = 'int'; }
+      else if (p.op === 'substring') { expr = d.substringExpr(col(), p.start ?? 1, p.len); type = 'string'; }
+      else if (p.op === 'replace') { expr = `replace(${col()}, ${d.sqlLiteral(p.search ?? '')}, ${d.sqlLiteral(p.replacement ?? '')})`; type = 'string'; }
+      else if (ARITH[p.op]) {
         const l = operand(p.left, 'left'); const r = operand(p.right, 'right');
         expr = p.op === 'div' ? `(${l} / NULLIF(${r}, 0))` : `(${l} ${ARITH[p.op]} ${r})`;
       } else if (p.op === 'round') expr = d.roundExpr(col(), p.places ?? 0);

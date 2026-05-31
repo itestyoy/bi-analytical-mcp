@@ -72,6 +72,8 @@ export class PostgresDialect extends Dialect {
 
   castExpr(expr, type) { return `(${expr})::${this.castType(type) || 'text'}`; }
 
+  substringExpr(expr, start, len) { return `substring(${expr} from ${Number(start)}${len != null ? ` for ${Number(len)}` : ''})`; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `stddev_samp(${c})`;

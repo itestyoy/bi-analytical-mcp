@@ -138,6 +138,35 @@ test('pipeline compute case: price tiers low(<10)=3 rows, high(>=10)=5 rows', op
   assert.equal(by.high, 5);
 });
 
+// compute const: a literal numeric column summed = row count
+test('pipeline compute const: a numeric constant column sums to the row count (8 IAP rows)', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'compute', name: 'one', op: 'const', value: 1 },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'rows', fn: 'sum', column: 'one' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(num(r.rows[0].rows), 8);
+});
+
+// compute string ops: concat a product_id with a string constant, upper-cased
+test('pipeline compute string/const: concat + upper labels group correctly (P1=3, P2=3, P3=2)', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'derive', name: 'pid', op: 'extract', source: 'product_id', type: 'string' },
+    { stage: 'compute', name: 'label', op: 'concat', parts: [{ column: 'pid' }, { value: '_iap' }] },
+    { stage: 'compute', name: 'up', op: 'upper', column: 'label' },
+    { stage: 'aggregate', group_by: ['up'], measures: [{ name: 'n', fn: 'count' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.up), num(x.n)]));
+  assert.equal(by.P1_IAP, 3); // p1: e118, e120, e123
+  assert.equal(by.P2_IAP, 3); // p2: e119, e122, e125
+  assert.equal(by.P3_IAP, 2); // p3: e121, e124
+});
+
 // compute: date_diff against the joined install_date (days-since-install)
 test('pipeline compute date_diff: u1 purchases on install-day and +1 → sum(dsi)=1, count=2', opts, async (t) => {
   if (skip(t)) return;

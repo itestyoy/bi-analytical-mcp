@@ -61,6 +61,8 @@ export class Dialect {
   roundExpr(_expr, _places) { throw new Error('abstract roundExpr'); }
   /** Cast expr to a logical type. */
   castExpr(_expr, _type) { throw new Error('abstract castExpr'); }
+  /** Substring of a string expr (1-based start, optional length). */
+  substringExpr(_expr, _start, _len) { throw new Error('abstract substringExpr'); }
   /** Statistical aggregate (stddev|variance|median|percentile) over a column. */
   statAggExpr(_fn, _columnSql, _q) { throw new Error('abstract statAggExpr'); }
 

@@ -131,6 +131,8 @@ export class BigQueryDialect extends Dialect {
         return `|> UNPIVOT(${this.ident(op.valueAs)} FOR ${this.ident(op.nameAs)} IN (${op.columns.map((c) => this.ident(c)).join(', ')}))`;
       case 'order_by':
         return `|> ORDER BY ${op.keys.map((k) => `${this.ident(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
+      case 'sample':
+        return `|> TABLESAMPLE SYSTEM (${Number(op.percent)} PERCENT)`;
       case 'limit':
         return `|> LIMIT ${Number(op.n)}`;
       case 'project':

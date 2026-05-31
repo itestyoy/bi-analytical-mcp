@@ -40,6 +40,8 @@
 //                            Solves: dashboard-ready matrices (revenue per country column).
 //   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
 //                            format for charting; cohort/retention grids → rows.
+//   sample     |> TABLESAMPLE  keep ~N% of rows for a FAST approximate first estimate
+//                            on large data (BigQuery TABLESAMPLE SYSTEM; Postgres random()).
 //   order_by   |> ORDER BY   sort. limit |> LIMIT cap. project |> SELECT keep a column set.
 //   match_recognize |> MATCH_RECOGNIZE  (registered by match-recognize.js) row-pattern
 //                            funnel; TERMINAL stage → one row per user/session match.
@@ -366,6 +368,18 @@ const STAGES = {
   limit: {
     schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'n'], description: 'LIMIT (pipe `|> LIMIT`): cap the number of rows. Solves: top-N (after order_by), previews.', properties: { stage: { const: 'limit' }, n: { type: 'integer', minimum: 1, maximum: 1000000 } } }),
     build: ({ cols }, p) => ({ op: { op: 'limit', n: p.n }, cols }),
+  },
+
+  sample: {
+    schema: () => ({
+      type: 'object', additionalProperties: false, required: ['stage', 'percent'],
+      description: 'TABLESAMPLE (pipe `|> TABLESAMPLE`): keep roughly `percent`% of rows. Solves: scan less data for a FAST first estimate / where-to-dig signal on large tables — put it early (near the source). Approximate: results are a random subset, not exact. BigQuery uses TABLESAMPLE SYSTEM; Postgres uses a row-level random() sample (works at any stage).',
+      properties: {
+        stage: { const: 'sample' },
+        percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate share of rows to keep (0 < percent <= 100).' },
+      },
+    }),
+    build: ({ cols }, p) => ({ op: { op: 'sample', percent: p.percent }, cols }),
   },
 
   project: {

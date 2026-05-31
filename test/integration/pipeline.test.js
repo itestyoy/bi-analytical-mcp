@@ -138,6 +138,27 @@ test('pipeline compute case: price tiers low(<10)=3 rows, high(>=10)=5 rows', op
   assert.equal(by.high, 5);
 });
 
+// sample: a 100% sample keeps all rows; a partial sample stays within bounds
+test('pipeline sample: 100% keeps all 8 IAP rows; 10% returns a bounded subset', opts, async (t) => {
+  if (skip(t)) return;
+  const full = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'sample', percent: 100 },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', fn: 'count' }] },
+  ]);
+  assert.equal(full.ok, true, JSON.stringify(full));
+  assert.equal(num(full.rows[0].n), 8); // 100% keeps every row (random() < 1.0 always true)
+
+  const part = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'sample', percent: 10 },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', fn: 'count' }] },
+  ]);
+  assert.equal(part.ok, true, JSON.stringify(part));
+  const n = num(part.rows[0].n);
+  assert.ok(n >= 0 && n <= 8, `sampled count ${n} out of bounds`); // random subset
+});
+
 // where with operand constants: column-vs-constant + column-vs-now (in past)
 test('pipeline where operands: price>=10 (operand const) and device_time<now → 5 rows summing 70', opts, async (t) => {
   if (skip(t)) return;

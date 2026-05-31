@@ -130,6 +130,10 @@ export class PostgresDialect extends Dialect {
       }
       case 'order_by':
         return `SELECT * FROM ${prev} ORDER BY ${op.keys.map((k) => `${this.ident(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
+      case 'sample':
+        // TABLESAMPLE only applies to physical tables in Postgres, not CTEs, so
+        // we emulate a row-level (Bernoulli) sample that works at any pipe stage.
+        return `SELECT * FROM ${prev} WHERE random() < ${Number(op.percent) / 100}`;
       case 'limit':
         return `SELECT * FROM ${prev} LIMIT ${Number(op.n)}`;
       case 'project':

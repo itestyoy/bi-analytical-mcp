@@ -76,6 +76,7 @@ Stage = {
 | `unpivot` | `\|> UNPIVOT` | fold listed columns into (name, value) rows | **expands** |
 | `match_recognize` | `\|> MATCH_RECOGNIZE` | row-pattern sequence → one row per match (per user/session) | **collapses** to one row per partition match |
 | `project` | `\|> SELECT` | keep/rename a column set | unchanged |
+| `sample` | `\|> TABLESAMPLE` | keep ~N% of rows for a fast approximate estimate (BigQuery TABLESAMPLE SYSTEM; Postgres row-level random()) | unchanged |
 | `order_by` | `\|> ORDER BY` | sort | unchanged |
 | `limit` | `\|> LIMIT` | cap rows | unchanged |
 

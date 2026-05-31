@@ -57,19 +57,37 @@ const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 // value, or the `now` token (current timestamp).
 const OPERAND = { type: 'object', additionalProperties: false, properties: { column: { type: 'string' }, value: {}, now: { type: 'boolean' } }, description: 'One of: { column }, { value }, or { now: true }.' };
 
-function cmp(d, lhs, op, value) {
-  const arr = Array.isArray(value) ? value : [value];
-  switch (op) {
-    case 'eq': return `${lhs} = ${d.sqlLiteral(value)}`;
-    case 'neq': return `${lhs} != ${d.sqlLiteral(value)}`;
-    case 'gt': return `${lhs} > ${d.sqlLiteral(value)}`;
-    case 'gte': return `${lhs} >= ${d.sqlLiteral(value)}`;
-    case 'lt': return `${lhs} < ${d.sqlLiteral(value)}`;
-    case 'lte': return `${lhs} <= ${d.sqlLiteral(value)}`;
-    case 'in': return `${lhs} IN (${arr.map((v) => d.sqlLiteral(v)).join(', ')})`;
-    case 'not_in': return `${lhs} NOT IN (${arr.map((v) => d.sqlLiteral(v)).join(', ')})`;
-    default: throw new Error(`unsupported comparison op: ${op}`);
+const OPSYM = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
+
+// SQL for one operand: a column reference, a literal constant, or `now`.
+function operandSql(d, cols, o, label = 'operand') {
+  if (o === null || typeof o !== 'object') throw new Error(`${label}: must be { column } | { value } | { now: true }`);
+  if (o.now) return d.nowExpr();
+  if (o.column !== undefined) { requireCol(cols, o.column); return d.ident(o.column); }
+  if (o.value !== undefined) return d.sqlLiteral(o.value);
+  throw new Error(`${label}: needs column | value | now`);
+}
+
+// One comparison. Each side may be a column, a constant (value), or now:
+//   { column, op, value }        — column vs constant (shorthand)
+//   { left:{...}, op, right:{...} } — operands on both sides (column vs column,
+//                                     constant vs column, etc.)
+function condPred(d, cols, c) {
+  let lhs;
+  if (c.left !== undefined) lhs = operandSql(d, cols, c.left, 'left');
+  else if (c.column !== undefined) { requireCol(cols, c.column); lhs = d.ident(c.column); }
+  else throw new Error('condition needs `column` or `left`');
+  if (c.op === 'in' || c.op === 'not_in') {
+    const arr = c.right?.value ?? c.value;
+    if (!Array.isArray(arr)) throw new Error(`${c.op} needs an array value`);
+    return `${lhs} ${c.op === 'in' ? 'IN' : 'NOT IN'} (${arr.map((v) => d.sqlLiteral(v)).join(', ')})`;
   }
+  if (!OPSYM[c.op]) throw new Error(`unsupported comparison op: ${c.op}`);
+  let rhs;
+  if (c.right !== undefined) rhs = operandSql(d, cols, c.right, 'right');
+  else if (c.value !== undefined) rhs = d.sqlLiteral(c.value);
+  else throw new Error('condition needs `value` or `right`');
+  return `${lhs} ${OPSYM[c.op]} ${rhs}`;
 }
 
 function aggExpr(d, fn, column, q) {
@@ -88,16 +106,22 @@ const STAGES = {
   where: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
-      description: 'WHERE (pipe `|> WHERE`): keep rows where all conditions hold (ANDed). Solves: scope to an event_name, a segment, or a value range; can run at any point (e.g. after a window/aggregate to filter on a computed column).',
+      description: 'WHERE (pipe `|> WHERE`): keep rows where all conditions hold (ANDed). Each condition compares two operands — each a column, a literal constant, or now. Shorthand `{column, op, value}` = column vs constant; or use `{left, op, right}` for column-vs-column / constant-vs-column. Solves: scope to an event_name, a segment, a value range, or compare two columns; can run at any point (e.g. after a window/aggregate to filter on a computed column).',
       properties: {
         stage: { const: 'where' },
-        conditions: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Column to test.' }, op: { enum: CMP }, value: {} } } },
+        conditions: { type: 'array', minItems: 1, items: {
+          type: 'object', additionalProperties: false, required: ['op'],
+          description: 'A comparison. Left = `column` (shorthand) or `left` operand; right = `value` constant (shorthand; array for in/not_in) or `right` operand.',
+          properties: {
+            column: { type: 'string', description: 'Left column (shorthand for left:{column}).' },
+            value: { description: 'Right literal constant (shorthand for right:{value}); array for in/not_in.' },
+            left: OPERAND, right: OPERAND,
+            op: { enum: CMP },
+          },
+        } },
       },
     }),
-    build: ({ d, cols }, p) => {
-      const preds = p.conditions.map((c) => { requireCol(cols, c.column); return cmp(d, d.ident(c.column), c.op, c.value); });
-      return { op: { op: 'where', preds }, cols };
-    },
+    build: ({ d, cols }, p) => ({ op: { op: 'where', preds: p.conditions.map((c) => condPred(d, cols, c)) }, cols }),
   },
 
   derive: {
@@ -161,13 +185,7 @@ const STAGES = {
       },
     }),
     build: ({ d, cols }, p) => {
-      const operand = (o, what) => {
-        if (!o || typeof o !== 'object') throw new Error(`compute ${p.op}: missing operand ${what}`);
-        if (o.now) return d.nowExpr();
-        if (o.column !== undefined) { requireCol(cols, o.column); return d.ident(o.column); }
-        if (o.value !== undefined) return d.sqlLiteral(o.value);
-        throw new Error(`compute ${p.op}: operand ${what} needs column | value | now`);
-      };
+      const operand = (o, what) => operandSql(d, cols, o, `compute ${p.op} ${what}`);
       const col = () => { requireCol(cols, p.column); return d.ident(p.column); };
       const list = () => { (p.columns || []).forEach((c) => requireCol(cols, c)); return (p.columns || []).map((c) => d.ident(c)); };
       const ARITH = { add: '+', sub: '-', mul: '*', div: '/' };
@@ -202,7 +220,7 @@ const STAGES = {
       else if (p.op === 'case') {
         if (!p.cases?.length) throw new Error('case: needs at least one branch');
         const branches = p.cases.map((cs) => {
-          const cond = cs.when.map((c) => { requireCol(cols, c.column); return cmp(d, d.ident(c.column), c.op, c.value); }).join(' AND ');
+          const cond = cs.when.map((c) => condPred(d, cols, c)).join(' AND ');
           return `WHEN ${cond} THEN ${operand(cs.then, 'then')}`;
         });
         expr = `CASE ${branches.join(' ')}${p.else !== undefined ? ` ELSE ${operand(p.else, 'else')}` : ''} END`;

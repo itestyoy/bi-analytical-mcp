@@ -138,6 +138,23 @@ test('pipeline compute case: price tiers low(<10)=3 rows, high(>=10)=5 rows', op
   assert.equal(by.high, 5);
 });
 
+// where with operand constants: column-vs-constant + column-vs-now (in past)
+test('pipeline where operands: price>=10 (operand const) and device_time<now → 5 rows summing 70', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+    { stage: 'where', conditions: [
+      { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' },
+      { left: { column: 'price' }, op: 'gte', right: { value: 10 } }, // column vs constant operand
+      { left: { column: 'device_time' }, op: 'lt', right: { now: true } }, // column vs now
+    ] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'n', fn: 'count' }, { name: 's', fn: 'sum', column: 'price' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(num(r.rows[0].n), 5); // prices >=10: 10,20,10,20,10
+  assert.equal(num(r.rows[0].s), 70);
+});
+
 // compute const: a literal numeric column summed = row count
 test('pipeline compute const: a numeric constant column sums to the row count (8 IAP rows)', opts, async (t) => {
   if (skip(t)) return;

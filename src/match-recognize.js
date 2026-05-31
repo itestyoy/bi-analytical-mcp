@@ -60,9 +60,9 @@ export function stepPredicate(catalog, step, dialect, col, prepCols = new Map())
 /**
  * WHERE clause applied to the events BEFORE the row-pattern match, to slice the
  * data scanned (speed). Returns '' when no `filter` is declared. Narrows the
- * population only — it does NOT redefine steps. Filters: event time window,
- * event_name allowlist, event_data property conditions, and a dim_users
- * user-segment SEMI-JOIN (a filter; no columns are carried into the view).
+ * population only — it does NOT redefine steps. Event-level filters: time window,
+ * event_name allowlist, event_data property conditions. To filter by USER
+ * attributes, add a `join` (users) + `where` stage before match_recognize.
  */
 export function buildPrefilter(catalog, spec, dialect, col) {
   const f = spec.filter;
@@ -81,22 +81,6 @@ export function buildPrefilter(catalog, spec, dialect, col) {
     if (!p) throw new Error(`unknown event property in filter.where: ${c.property}`);
     clauses.push(comparePred(jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value));
   }
-  if (f.user_segment?.length) {
-    // Resolve the dimension model + keys from the catalog (by the partition
-    // entity), not hardcoded names. Semi-join filter; no columns are carried.
-    const partEntity = spec.partition_by === 'session' ? 'session' : 'user';
-    const dimKey = catalog.dimensionModelForEntity(partEntity);
-    if (!dimKey) throw new Error(`filter.user_segment requires a dimension model for entity '${partEntity}'`);
-    const u = catalog.getModel(dimKey);
-    const entCol = q(catalog.anchorEntityColumn(partEntity));
-    const usersRel = spec.usersRelation || `{{ ref('${u.dbt_model}') }}`;
-    const usersKey = u.primary_entity.column;
-    const conds = f.user_segment.map((c) => {
-      if (!(u.dimensions || {})[c.property]) throw new Error(`unknown attribute in filter.user_segment: ${c.property}`);
-      return comparePred(c.property, c.op, c.value);
-    });
-    clauses.push(`${entCol} IN (SELECT ${usersKey} FROM ${usersRel}${conds.length ? ` WHERE ${conds.join(' AND ')}` : ''})`);
-  }
   return clauses.join(' AND ');
 }
 
@@ -105,12 +89,19 @@ function resolve(catalog, spec, dialect, availableCols = null) {
     throw new Error('sequence requires at least 2 ordered steps');
   }
   const m = catalog.getModel(catalog.anchor);
-  // Partition entity (and its key column) are taken from the catalog by the
-  // declared partition_by name — no hardcoded entity/column.
-  const partEntity = spec.partition_by === 'session' ? 'session' : 'user';
-  const partCol = m.entities?.[partEntity]?.column;
-  if (!partCol) throw new Error(`anchor model has no '${partEntity}' entity to partition by`);
-  const timeCol = m.time.column;
+  // Partition key is FLEXIBLE: the caller chooses any column(s) available at this
+  // point in the pipeline (event columns, or columns added by upstream derive/
+  // compute/join stages). Convenience aliases 'user'/'session' resolve to the
+  // catalog entity columns. Default = the user entity column.
+  const entityCol = (name) => m.entities?.[name]?.column;
+  const resolvePart = (p) => (p === 'user' || p === 'session') ? (entityCol(p) || p) : p;
+  let partCols;
+  if (Array.isArray(spec.partition_by) && spec.partition_by.length) partCols = spec.partition_by.map(resolvePart);
+  else if (typeof spec.partition_by === 'string') partCols = [resolvePart(spec.partition_by)];
+  else { const u = entityCol('user'); if (!u) throw new Error('no default partition column; specify partition_by'); partCols = [u]; }
+  if (availableCols) for (const c of partCols) if (!availableCols.has(c)) throw new Error(`partition_by column '${c}' is not available at the match_recognize stage`);
+  // Order key (the sequence axis): caller may override; defaults to the event time.
+  const timeCol = spec.order_by || m.time.column;
   const mode = spec.mode || 'ordered';
   const steps = spec.steps.map((s, i) => ({ idx: i + 1, name: s.name || `s${i + 1}` }));
   const byName = new Map(steps.map((s) => [s.name, s]));
@@ -154,7 +145,7 @@ function resolve(catalog, spec, dialect, availableCols = null) {
   });
 
   const stepPreds = (d, col) => spec.steps.map((s) => stepPredicate(catalog, s, d, col, prepCols));
-  return { m, partEntity, partCol, timeCol, mode, steps, metrics: resolved, propCaptures, prepCols, stepPreds };
+  return { m, partCols, timeCol, mode, steps, metrics: resolved, propCaptures, prepCols, stepPreds };
 }
 
 function nestedPattern(steps, withGap) {
@@ -187,26 +178,30 @@ export function matchStepPostgres(r, fromRel, catalog) {
   const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
   const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
   const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
-  const ctes = [{ name: 'ev', sql: `SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${fromRel}` }];
-  ctes.push({ name: 'r1', sql: `SELECT DISTINCT ON (pk) pk, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY pk, ts` });
+  const pk = r.partCols; // one or more partition columns (composite key)
+  const pkList = pk.join(', ');
+  const pkE = pk.map((c) => `e.${c}`).join(', ');
+  const ctes = [{ name: 'ev', sql: `SELECT ${pkList}, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${fromRel}` }];
+  ctes.push({ name: 'r1', sql: `SELECT DISTINCT ON (${pkList}) ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY ${pkList}, ts` });
   for (let i = 2; i <= r.steps.length; i++) {
-    ctes.push({ name: `r${i}`, sql: `SELECT DISTINCT ON (e.pk) e.pk, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON e.pk = r${i - 1}.pk WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY e.pk, e.ts` });
+    const joinOn = pk.map((c) => `e.${c} = r${i - 1}.${c}`).join(' AND ');
+    ctes.push({ name: `r${i}`, sql: `SELECT DISTINCT ON (${pkE}) ${pkE}, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY ${pkE}, e.ts` });
   }
-  const sel = ['r1.pk', ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)), ...r.propCaptures.map((c) => `r${c.idx}.${c.id}`)];
+  const sel = [...pk.map((c) => `r1.${c}`), ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)), ...r.propCaptures.map((c) => `r${c.idx}.${c.id}`)];
   let joins = 'FROM r1';
-  for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (pk)`;
+  for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (${pkList})`;
   ctes.push({ name: 'joined', sql: `SELECT ${sel.join(', ')} ${joins}` });
   const furthestCase = r.steps.slice().reverse().map((s) => `WHEN j.t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
-  const out = [
-    `  j.pk AS ${r.partCol}`,
-    '  , j.t1 AS first_seen_at',
-    `  , CASE ${furthestCase} END AS furthest_step_name`,
-    `  , (j.t${r.steps.length} IS NOT NULL) AS completed`,
-    ...r.steps.map((s) => `  , (j.t${s.idx} IS NOT NULL) AS reached_${s.name}`),
-    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `  , EXTRACT(EPOCH FROM (j.t${m.to} - j.t${m.from})) AS secs_${m.name}`),
-    ...r.propCaptures.map((c) => `  , j.${c.id}`),
+  const outCols = [
+    ...pk.map((c) => `j.${c}`),
+    'j.t1 AS first_seen_at',
+    `CASE ${furthestCase} END AS furthest_step_name`,
+    `(j.t${r.steps.length} IS NOT NULL) AS completed`,
+    ...r.steps.map((s) => `(j.t${s.idx} IS NOT NULL) AS reached_${s.name}`),
+    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `EXTRACT(EPOCH FROM (j.t${m.to} - j.t${m.from})) AS secs_${m.name}`),
+    ...r.propCaptures.map((c) => `j.${c.id}`),
   ];
-  return `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\nSELECT\n${out.join('\n')}\nFROM joined j`;
+  return `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\nSELECT\n  ${outCols.join(',\n  ')}\nFROM joined j`;
 }
 
 /** BigQuery lowering: a single SELECT … FROM fromRel MATCH_RECOGNIZE(…). */
@@ -223,13 +218,13 @@ export function matchStepBigQuery(r, fromRel, catalog) {
   const reached = r.steps.map((s) => `    t${s.idx} IS NOT NULL AS reached_${s.name}`);
   const secs = r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `    TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`);
   return `SELECT
-    ${r.partCol},
+${r.partCols.map((c) => `    ${c},`).join('\n')}
     t1 AS first_seen_at,
     CASE ${furthestCase} END AS furthest_step_name,
     t${r.steps.length} IS NOT NULL AS completed,
 ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')}
   FROM ${fromRel} MATCH_RECOGNIZE (
-    PARTITION BY ${r.partCol}
+    PARTITION BY ${r.partCols.join(', ')}
     ORDER BY ${r.timeCol}
     MEASURES
 ${measures}
@@ -241,9 +236,10 @@ ${defines.join(',\n')}
   )`;
 }
 
-/** Per-user columns the match_recognize stage exposes (for downstream stages). */
+/** Columns the match_recognize stage exposes (for downstream stages). */
 function matchOutputColumns(r) {
-  const cols = new Map([[r.partCol, { type: 'string' }], ['first_seen_at', { type: 'time' }], ['furthest_step_name', { type: 'string' }], ['completed', { type: 'boolean' }]]);
+  const cols = new Map([['first_seen_at', { type: 'time' }], ['furthest_step_name', { type: 'string' }], ['completed', { type: 'boolean' }]]);
+  for (const c of r.partCols) cols.set(c, { type: 'string' });
   for (const s of r.steps) cols.set(`reached_${s.name}`, { type: 'boolean' });
   for (const m of r.metrics.filter((x) => x.type === 'avg_seconds_between')) cols.set(`secs_${m.name}`, { type: 'numeric' });
   for (const c of r.propCaptures) cols.set(c.id, { type: c.type });
@@ -253,24 +249,26 @@ function matchOutputColumns(r) {
 /** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
 function matchRecognizeSchema(catalog) {
   const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
-  const userAttrCols = [...new Set(catalog.joinableModelKeys().flatMap((k) => catalog.modelDimensionColumns(k)))];
   const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property or an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME }, op: { enum: CMP }, value: {} } };
   const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Event(s) that satisfy this step.' }, where: { type: 'array', items: stepWhere, description: 'Extra conditions narrowing the step.' } } };
   const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'avg', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
-    description: 'An ordered funnel / path detector, evaluated per user or per session. Produces one row per matched user/session with reached_<step> flags, furthest_step_name, completed, step times, and any captured metric values — which downstream stages (join/where/aggregate) can slice or aggregate (e.g. conversion by country). For funnels, conversion, and time-between-steps.',
+    description: 'An ordered funnel / path detector: it matches the step sequence INDEPENDENTLY within each partition, ordered by `order_by`. Produces one row per matched partition with reached_<step> flags, furthest_step_name, completed, step times, and any captured metric values — which downstream stages (join/where/aggregate) can slice or aggregate (e.g. conversion by country). For funnels, conversion, and time-between-steps.',
     properties: {
       stage: { const: 'match_recognize' },
-      partition_by: { enum: ['user', 'session'], default: 'user', description: 'Match per user or per session.' },
+      partition_by: {
+        type: 'array', items: { type: 'string', pattern: NAME }, minItems: 1,
+        description: 'Column(s) that define one independent sequence — choose them per the task from columns available at this point (event columns or ones added by upstream derive/compute/join), e.g. ["appsflyer_id"] per user, ["session_id"] per session, or a composite like ["appsflyer_id","level_id"] per user-per-level. The shorthand strings "user"/"session" resolve to the corresponding entity column. Defaults to the user column.',
+      },
+      order_by: { type: 'string', pattern: NAME, description: 'Column that orders events within each partition (the sequence axis). Defaults to the event time.' },
       mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order, other events may occur between them; strict = each step must be the immediately next event.' },
       filter: {
-        type: 'object', additionalProperties: false, description: 'Optional pre-filter applied to the input BEFORE matching (speed; narrows population only).',
+        type: 'object', additionalProperties: false, description: 'Optional event-level pre-filter applied BEFORE matching (speed; narrows the population only). To filter by USER attributes, add a join (users) + where stage before this one instead.',
         properties: {
           time_range: { type: 'object', additionalProperties: false, properties: { start: { type: 'string' }, end: { type: 'string' } }, description: 'Event-time window (ISO).' },
           event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Only scan these events.' },
           where: { type: 'array', items: stepWhere, description: 'event_data/column conditions ANDed across the scan.' },
-          user_segment: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['property', 'op'], properties: { property: { type: 'string', enum: userAttrCols }, op: { enum: CMP }, value: {} } }, description: 'Semi-join filter on dim_users attributes (e.g. country=US).' },
         },
       },
       steps: { type: 'array', minItems: 2, items: step, description: 'The ordered funnel steps (>= 2).' },

@@ -45,7 +45,7 @@ const activationSteps = [
   { name: 'tut2', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_2' }] },
   { name: 'tut3', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_3' }] },
 ];
-const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: 'user', mode: 'ordered', steps: activationSteps, ...extra });
+const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['appsflyer_id'], mode: 'ordered', steps: activationSteps, ...extra });
 
 before(async () => {
   if (!HAS_DBT) return;
@@ -69,6 +69,19 @@ test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-u
   assert.equal(reached(out.rows, 'tut1'), 8);
   assert.equal(reached(out.rows, 'tut2'), 5);
   assert.equal(reached(out.rows, 'tut3'), 3);
+});
+
+test('funnel flexible partition: "user" alias and a per-(user,session) composite key', opts, async (t) => {
+  if (skip(t)) return;
+  // The partition key is caller-chosen. The "user" alias resolves to the user
+  // column → same 12 launched as the explicit ["appsflyer_id"].
+  const alias = await pipe([matchActivation({ partition_by: ['user'] })]);
+  assert.equal(reached(alias.rows, 'launch'), 12);
+  // A COMPOSITE key matches the sequence independently per (user, session) — one
+  // row per matched (user,session); still 12 first_launch partitions (one/user).
+  const composite = await pipe([matchActivation({ partition_by: ['appsflyer_id', 'session_number'], steps: activationSteps.slice(0, 2) })]);
+  assert.ok('appsflyer_id' in composite.rows[0] && 'session_number' in composite.rows[0], 'both partition keys exposed');
+  assert.equal(reached(composite.rows, 'launch'), 12);
 });
 
 test('funnel: furthest_step_name distribution sums to 12; tut3 = 3', opts, async (t) => {
@@ -113,12 +126,15 @@ test('funnel sliced + aggregated in-pipeline: aggregate count by furthest_step_n
   for (let i = 1; i < vals.length; i++) assert.ok(vals[i - 1] >= vals[i], `not descending: ${vals}`);
 });
 
-test('funnel prefilter user_segment (country=US): only the 4 US users enter', opts, async (t) => {
+test('funnel filtered to a user segment via join+where (country=US): only the 4 US users enter', opts, async (t) => {
   if (skip(t)) return;
-  const out = await pipe([matchActivation({
-    filter: { time_range: { start: '2026-01-01' }, event_name: ['first_launch', 'tutorial'], user_segment: [{ property: 'country', op: 'eq', value: 'US' }] },
-    steps: activationSteps.slice(0, 2), // launch, tut1
-  })]);
+  // user-attribute filtering is now a pipeline concern: join dim_users, where on
+  // the attribute, THEN match_recognize — no special user_segment property.
+  const out = await pipe([
+    { stage: 'join', with: 'users', on: 'appsflyer_id', attrs: ['country'] },
+    { stage: 'where', conditions: [{ column: 'country', op: 'eq', value: 'US' }] },
+    { stage: 'match_recognize', partition_by: ['appsflyer_id'], mode: 'ordered', steps: activationSteps.slice(0, 2) },
+  ]);
   assert.equal(reached(out.rows, 'launch'), 4); // exactly the 4 US users
   assert.ok(reached(out.rows, 'tut1') <= 4);
 });
@@ -136,7 +152,7 @@ test('funnel + prepare derive (array_length): agg_at_step avg(n_words) at level 
   // step where / agg_at_step.
   const out = await pipe([
     { stage: 'derive', name: 'n_words', op: 'array_length', source: 'words_collected' },
-    { stage: 'match_recognize', partition_by: 'user', mode: 'ordered',
+    { stage: 'match_recognize', partition_by: ['appsflyer_id'], mode: 'ordered',
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ property: 'level_id', op: 'eq', value: 1 }] }],
       metrics: [{ name: 'avg_words', type: 'agg_at_step', agg: 'avg', property: 'n_words', step: 'lvl1' }] },
   ]);
@@ -150,7 +166,7 @@ test('funnel + prepare derive (contains): step filtered by derived boolean reach
   if (skip(t)) return;
   const out = await pipe([
     { stage: 'derive', name: 'has_cat', op: 'contains', source: 'words_collected', value: 'cat' },
-    { stage: 'match_recognize', partition_by: 'user', mode: 'ordered',
+    { stage: 'match_recognize', partition_by: ['appsflyer_id'], mode: 'ordered',
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'cat_lvl', event_name: ['level_completed'], where: [{ property: 'has_cat', op: 'eq', value: true }] }] },
   ]);
   assert.equal(reached(out.rows, 'cat_lvl'), 12); // every user's level-1 completion has 'cat'

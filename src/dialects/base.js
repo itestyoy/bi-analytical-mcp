@@ -63,6 +63,9 @@ export class Dialect {
   castExpr(_expr, _type) { throw new Error('abstract castExpr'); }
   /** Substring of a string expr (1-based start, optional length). */
   substringExpr(_expr, _start, _len) { throw new Error('abstract substringExpr'); }
+  /** Integer day number (days since 1970-01-01) of a date/timestamp expr — the
+   *  portable ORDER BY key for value-based RANGE windows (e.g. last N days). */
+  unixDateExpr(_expr) { throw new Error('abstract unixDateExpr'); }
   /** Statistical aggregate (stddev|variance|median|percentile) over a column. */
   statAggExpr(_fn, _columnSql, _q) { throw new Error('abstract statAggExpr'); }
 

@@ -25,10 +25,12 @@
 //                            round/floor/ceil/abs, coalesce/least/greatest, cast,
 //                            STRING fns (concat/upper/lower/length/substring/trim/replace),
 //                            date_diff / date_trunc / date_part, CASE (bucketing), and
-//                            WINDOW functions (row_number / rank / lag / lead / running sum…).
-//                            Solves: constant tags/labels, KPIs (ARPU parts), string keys,
-//                            tiers/buckets, days-since-install & retention day,
-//                            period-over-period (lag), nth-event / repeat-purchase (row_number).
+//                            WINDOW functions (row_number / rank / lag / lead / running &
+//                            ROLLING sum via a ROWS/RANGE frame), and unix_date (day number
+//                            for value-based RANGE windows). Solves: constant tags/labels,
+//                            KPIs (ARPU parts), string keys, tiers/buckets, days-since-install
+//                            & retention day, period-over-period (lag), nth-event /
+//                            repeat-purchase (row_number), rolling N-day metrics (RANGE frame).
 //   unnest     |> JOIN UNNEST  explode a JSON array into one row per element.
 //                            Solves: per-element frequency (items collected, rewards).
 //   join       |> JOIN       1-hop join to another catalog model on a shared entity.
@@ -109,6 +111,22 @@ function condPred(d, cols, c) {
   return `${lhs} ${OPSYM[c.op]} ${rhs}`;
 }
 
+// Window frame clause, e.g. ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW, or
+// RANGE BETWEEN 10 PRECEDING AND CURRENT ROW (value offsets on the order key).
+function frameClause(f) {
+  if (!f) return '';
+  const mode = f.mode === 'range' ? 'RANGE' : 'ROWS';
+  const bound = (v, dir) => {
+    if (v === 'unbounded') return `UNBOUNDED ${dir}`;
+    if (v === undefined || v === null || Number(v) === 0) return 'CURRENT ROW';
+    if (!Number.isInteger(Number(v)) || Number(v) < 0) throw new Error(`window frame: bad ${dir.toLowerCase()} offset ${v}`);
+    return `${Number(v)} ${dir}`;
+  };
+  const start = bound(f.preceding ?? 'unbounded', 'PRECEDING');
+  const end = f.following === undefined ? 'CURRENT ROW' : bound(f.following, 'FOLLOWING');
+  return ` ${mode} BETWEEN ${start} AND ${end}`;
+}
+
 function aggExpr(d, fn, column, q) {
   if (fn === 'count' && !column) return 'count(*)';
   const c = d.ident(column);
@@ -167,7 +185,7 @@ const STAGES = {
       properties: {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
-        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'date_diff', 'date_trunc', 'date_part', 'case', 'window'] },
+        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
         from: OPERAND, to: OPERAND, // date_diff (to may be { now: true })
@@ -192,6 +210,15 @@ const STAGES = {
         partition_by: { type: 'array', items: { type: 'string' }, description: 'Window partition columns.' },
         order_by: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } }, description: 'Window ordering.' },
         offset: { type: 'integer', minimum: 1, description: 'Row offset for window lag/lead (default 1).' },
+        frame: {
+          type: 'object', additionalProperties: false,
+          description: 'Window frame for aggregate window fns (sum/avg/count/min/max). ROWS = physical row offsets; RANGE = value offsets on the ORDER BY key (for a rolling N-DAY window, order by a unix_date column and use range with preceding:N). Omit for the default frame.',
+          properties: {
+            mode: { enum: ['rows', 'range'], description: 'rows = physical rows; range = value-based on the order key.' },
+            preceding: { description: 'Lower bound: an integer offset, or "unbounded" (default unbounded).' },
+            following: { description: 'Upper bound: an integer offset, "unbounded", or 0/omitted = CURRENT ROW.' },
+          },
+        },
       },
     }),
     build: ({ d, cols }, p) => {
@@ -227,6 +254,7 @@ const STAGES = {
       else if (p.op === 'date_diff') { expr = d.dateDiff(p.unit, operand(p.from, 'from'), operand(p.to, 'to')); type = p.unit === 'day' ? 'int' : 'numeric'; }
       else if (p.op === 'date_trunc') { expr = d.dateTrunc(p.granularity, col()); type = 'time'; }
       else if (p.op === 'date_part') { expr = d.datePart(p.part, col()); type = 'int'; }
+      else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }
       else if (p.op === 'case') {
         if (!p.cases?.length) throw new Error('case: needs at least one branch');
         const branches = p.cases.map((cs) => {
@@ -240,12 +268,13 @@ const STAGES = {
         (p.order_by || []).forEach((o) => requireCol(cols, o.key));
         const parts = (p.partition_by || []).map((c) => d.ident(c));
         const ords = (p.order_by || []).map((o) => `${d.ident(o.key)}${o.direction === 'desc' ? ' DESC' : ''}`);
-        const over = `OVER (${[parts.length ? `PARTITION BY ${parts.join(', ')}` : '', ords.length ? `ORDER BY ${ords.join(', ')}` : ''].filter(Boolean).join(' ')})`;
-        let call;
+        let call; let frame = '';
         if (['row_number', 'rank', 'dense_rank'].includes(p.fn)) { call = `${p.fn}()`; type = 'int'; }
         else if (['lag', 'lead'].includes(p.fn)) { call = `${p.fn}(${col()}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''})`; }
-        else if (['sum', 'avg', 'count', 'min', 'max'].includes(p.fn)) { call = p.fn === 'count' && !p.column ? 'count(*)' : `${p.fn}(${col()})`; }
+        else if (['sum', 'avg', 'count', 'min', 'max'].includes(p.fn)) { call = p.fn === 'count' && !p.column ? 'count(*)' : `${p.fn}(${col()})`; frame = frameClause(p.frame); }
         else throw new Error(`window: bad fn ${p.fn}`);
+        if (frame && !ords.length) throw new Error('window frame requires order_by');
+        const over = `OVER (${[parts.length ? `PARTITION BY ${parts.join(', ')}` : '', ords.length ? `ORDER BY ${ords.join(', ')}` : ''].filter(Boolean).join(' ')}${frame})`;
         expr = `${call} ${over}`;
       } else throw new Error(`compute: bad op ${p.op}`);
       return { op: { op: 'extend', cols: [{ name: p.name, expr }] }, cols: addCol(cols, p.name, type) };

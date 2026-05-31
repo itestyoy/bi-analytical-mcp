@@ -74,6 +74,8 @@ export class BigQueryDialect extends Dialect {
 
   substringExpr(expr, start, len) { return `SUBSTR(${expr}, ${Number(start)}${len != null ? `, ${Number(len)}` : ''})`; }
 
+  unixDateExpr(expr) { return `UNIX_DATE(CAST(${expr} AS DATE))`; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `STDDEV(${c})`;

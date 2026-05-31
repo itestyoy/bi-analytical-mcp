@@ -64,6 +64,23 @@ Then `where dsi=1` + `aggregate count_distinct(appsflyer_id)` ⇒ **D1 active us
 ```
 `|> EXTEND revenue - LAG(revenue) OVER(ORDER BY wk) AS wow`
 
+### Rolling N-day sum  (window RANGE frame + unix_date)
+```jsonc
+[ …derive(amount)…,
+  {stage:"compute", name:"day",  op:"unix_date", column:"order_completed_at"},
+  {stage:"compute", name:"roll", op:"window", fn:"sum", column:"amount",
+     partition_by:["customer_id"], order_by:[{key:"day"}],
+     frame:{mode:"range", preceding:10, following:0}} ]
+```
+Lowers to a value-based RANGE frame on an integer day key (so "10 PRECEDING" = 10
+days), matching the BigQuery idiom — order by `UNIX_DATE(CAST(... AS DATE))` (Postgres:
+`(...::date - DATE '1970-01-01')`), then `RANGE BETWEEN 10 PRECEDING AND CURRENT ROW`:
+```
+SUM(amount) OVER (PARTITION BY customer_id ORDER BY day RANGE BETWEEN 10 PRECEDING AND CURRENT ROW)
+```
+Use `frame.mode:"rows"` for physical row offsets instead, or `preceding:"unbounded"`
+for a running total.
+
 ### Price tiers (bucketing)  (CASE)
 ```jsonc
 [ …derive(price)…,

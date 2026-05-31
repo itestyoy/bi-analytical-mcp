@@ -176,6 +176,22 @@ test('pipeline where operands: price>=10 (operand const) and device_time<now →
   assert.equal(num(r.rows[0].s), 70);
 });
 
+// compute window with a RANGE frame over a unix_date day-number → rolling N-day sum
+test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date order key)', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'appsflyer_id', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+    { stage: 'compute', name: 'day', op: 'unix_date', column: 'device_time' },
+    { stage: 'compute', name: 'roll', op: 'window', fn: 'sum', column: 'price', partition_by: ['appsflyer_id'], order_by: [{ key: 'day' }], frame: { mode: 'range', preceding: 1, following: 0 } },
+    { stage: 'order_by', keys: [{ key: 'day', direction: 'asc' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const rolls = r.rows.map((x) => num(x.roll));
+  // u1: 01-01 price 5 → window [day-1,day] = 5; 01-02 price 10 → [day-1,day] = 5+10 = 15
+  assert.deepEqual(rolls, [5, 15]);
+});
+
 // compute const: a literal numeric column summed = row count
 test('pipeline compute const: a numeric constant column sums to the row count (8 IAP rows)', opts, async (t) => {
   if (skip(t)) return;

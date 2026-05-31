@@ -74,6 +74,8 @@ export class PostgresDialect extends Dialect {
 
   substringExpr(expr, start, len) { return `substring(${expr} from ${Number(start)}${len != null ? ` for ${Number(len)}` : ''})`; }
 
+  unixDateExpr(expr) { return `((${expr})::date - DATE '1970-01-01')`; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `stddev_samp(${c})`;

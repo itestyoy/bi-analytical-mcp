@@ -45,6 +45,43 @@ export class PostgresDialect extends Dialect {
     return { join: `CROSS JOIN LATERAL jsonb_array_elements_text(${prevAlias}.${column}->'${key}') AS ${e}`, element: e };
   }
 
+  // ── time / scalar / statistical ────────────────────────────────────────────
+  dateDiff(unit, from, to) {
+    switch (unit) {
+      case 'day': return `(${to}::date - ${from}::date)`;
+      case 'hour': return `(EXTRACT(EPOCH FROM (${to} - ${from})) / 3600.0)`;
+      case 'minute': return `(EXTRACT(EPOCH FROM (${to} - ${from})) / 60.0)`;
+      case 'second': return `EXTRACT(EPOCH FROM (${to} - ${from}))`;
+      default: throw new Error(`dateDiff: bad unit ${unit}`);
+    }
+  }
+
+  dateTrunc(granularity, expr) {
+    if (!['day', 'week', 'month', 'quarter', 'year'].includes(granularity)) throw new Error(`dateTrunc: bad granularity ${granularity}`);
+    return `date_trunc('${granularity}', ${expr})`;
+  }
+
+  datePart(part, expr) {
+    if (!['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'].includes(part)) throw new Error(`datePart: bad part ${part}`);
+    return `EXTRACT(${part} FROM ${expr})`;
+  }
+
+  nowExpr() { return 'now()'; }
+
+  roundExpr(expr, places = 0) { return `round((${expr})::numeric, ${Number(places)})`; }
+
+  castExpr(expr, type) { return `(${expr})::${this.castType(type) || 'text'}`; }
+
+  statAggExpr(fn, c, q) {
+    switch (fn) {
+      case 'stddev': return `stddev_samp(${c})`;
+      case 'variance': return `var_samp(${c})`;
+      case 'median': return `percentile_cont(0.5) WITHIN GROUP (ORDER BY ${c})`;
+      case 'percentile': return `percentile_cont(${Number(q)}) WITHIN GROUP (ORDER BY ${c})`;
+      default: throw new Error(`statAggExpr: bad fn ${fn}`);
+    }
+  }
+
   // ── Pipeline lowering: each op becomes a CTE `p{i}` selecting from the prior ──
   renderPipeline(baseRelation, ops) {
     if (!ops.length) return `SELECT * FROM ${baseRelation}`;

@@ -73,6 +73,100 @@ test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR
   assert.equal(num(row.BR), 25);
 });
 
+// statistical aggregates over the 8 IAP prices [5,5,5,10,10,10,20,20]
+test('pipeline statistical aggregates: median=10, stddev≈6.2317, p90=20, p25=5', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+    { stage: 'aggregate', group_by: [], measures: [
+      { name: 'n', fn: 'count' },
+      { name: 'med', fn: 'median', column: 'price' },
+      { name: 'sd', fn: 'stddev', column: 'price' },
+      { name: 'p90', fn: 'percentile', column: 'price', q: 0.9 },
+      { name: 'p25', fn: 'percentile', column: 'price', q: 0.25 },
+    ] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const row = r.rows[0];
+  assert.equal(num(row.n), 8);
+  assert.equal(num(row.med), 10);
+  assert.ok(Math.abs(num(row.sd) - 6.23176) < 1e-3, `stddev=${row.sd}`);
+  assert.equal(num(row.p90), 20);
+  assert.equal(num(row.p25), 5);
+});
+
+// compute: scalar arithmetic over a derived column
+test('pipeline compute arithmetic: sum(price*2) = 170 (= 2 × total revenue 85)', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+    { stage: 'compute', name: 'double_price', op: 'mul', left: { column: 'price' }, right: { value: 2 } },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'd', fn: 'sum', column: 'double_price' }, { name: 's', fn: 'sum', column: 'price' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(num(r.rows[0].d), 170);
+  assert.equal(num(r.rows[0].s), 85);
+});
+
+// compute window: row_number per user to find repeat purchasers
+test('pipeline compute window: row_number per user → exactly 1 user has a 2nd purchase (u1)', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'compute', name: 'pseq', op: 'window', fn: 'row_number', partition_by: ['appsflyer_id'], order_by: [{ key: 'device_time', direction: 'asc' }] },
+    { stage: 'where', conditions: [{ column: 'pseq', op: 'eq', value: 2 }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'repeat_buyers', fn: 'count' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(num(r.rows[0].repeat_buyers), 1); // only u1 purchased twice
+});
+
+// compute case: bucket prices into tiers
+test('pipeline compute case: price tiers low(<10)=3 rows, high(>=10)=5 rows', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+    { stage: 'compute', name: 'tier', op: 'case', cases: [{ when: [{ column: 'price', op: 'lt', value: 10 }], then: { value: 'low' } }], else: { value: 'high' } },
+    { stage: 'aggregate', group_by: ['tier'], measures: [{ name: 'n', fn: 'count' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.tier), num(x.n)]));
+  assert.equal(by.low, 3);
+  assert.equal(by.high, 5);
+});
+
+// compute: date_diff against the joined install_date (days-since-install)
+test('pipeline compute date_diff: u1 purchases on install-day and +1 → sum(dsi)=1, count=2', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'appsflyer_id', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'join', with: 'users', on: 'appsflyer_id', attrs: ['install_date'] },
+    { stage: 'compute', name: 'dsi', op: 'date_diff', from: { column: 'install_date' }, to: { column: 'device_time' }, unit: 'day' },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'total_dsi', fn: 'sum', column: 'dsi' }, { name: 'max_dsi', fn: 'max', column: 'dsi' }, { name: 'n', fn: 'count' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(num(r.rows[0].n), 2);
+  assert.equal(num(r.rows[0].total_dsi), 1);
+  assert.equal(num(r.rows[0].max_dsi), 1);
+});
+
+// compute: date_trunc to bucket by month
+test('pipeline compute date_trunc: all 8 IAP purchases fall in one month bucket', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'compute', name: 'mon', op: 'date_trunc', column: 'device_time', granularity: 'month' },
+    { stage: 'aggregate', group_by: ['mon'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'order_by', keys: [{ key: 'mon', direction: 'asc' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.rows.length, 1);
+  assert.equal(num(r.rows[0].n), 8);
+});
+
 // ... |> UNPIVOT: fold measures back into (metric, value) rows
 test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, async (t) => {
   if (skip(t)) return;

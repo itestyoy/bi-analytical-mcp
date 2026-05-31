@@ -16,7 +16,12 @@ import { getDialect } from './dialects/index.js';
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const NAME_RE = /^[a-z][a-z0-9_]{0,40}$/;
 const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
-const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'];
+const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct', 'stddev', 'variance', 'median', 'percentile'];
+const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
+
+// A scalar operand for `compute`: exactly one of a column reference, a literal
+// value, or the `now` token (current timestamp).
+const OPERAND = { type: 'object', additionalProperties: false, properties: { column: { type: 'string' }, value: {}, now: { type: 'boolean' } }, description: 'One of: { column }, { value }, or { now: true }.' };
 
 function cmp(d, lhs, op, value) {
   const arr = Array.isArray(value) ? value : [value];
@@ -33,10 +38,15 @@ function cmp(d, lhs, op, value) {
   }
 }
 
-function aggExpr(d, fn, column) {
+function aggExpr(d, fn, column, q) {
   if (fn === 'count' && !column) return 'count(*)';
   const c = d.ident(column);
-  return fn === 'count_distinct' ? `count(distinct ${c})` : `${fn}(${c})`;
+  if (fn === 'count_distinct') return `count(distinct ${c})`;
+  if (STAT_FNS.has(fn)) {
+    if (fn === 'percentile' && !(typeof q === 'number' && q > 0 && q < 1)) throw new Error("percentile requires q in (0,1)");
+    return d.statAggExpr(fn, c, q);
+  }
+  return `${fn}(${c})`; // sum / avg / min / max
 }
 
 // ── Stage registry ───────────────────────────────────────────────────────────
@@ -78,6 +88,85 @@ const STAGES = {
       else if (p.op === 'contains') { expr = d.jsonArrayContains(json, p.source, p.value); type = 'boolean'; }
       else if (p.op === 'struct_field') { expr = d.jsonStructField(json, p.source, p.field, p.type); type = p.type || 'string'; }
       else throw new Error(`derive: bad op ${p.op}`);
+      return { op: { op: 'extend', cols: [{ name: p.name, expr }] }, cols: addCol(cols, p.name, type) };
+    },
+  },
+
+  compute: {
+    schema: () => ({
+      type: 'object', additionalProperties: false, required: ['stage', 'name', 'op'],
+      description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, date functions (date_diff/date_trunc/date_part), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running sum…).',
+      properties: {
+        stage: { const: 'compute' },
+        name: { type: 'string', pattern: NAME },
+        op: { enum: ['add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'date_diff', 'date_trunc', 'date_part', 'case', 'window'] },
+        left: OPERAND, right: OPERAND, // arithmetic
+        from: OPERAND, to: OPERAND, // date_diff (to may be { now: true })
+        column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/date_trunc/date_part, and for window lag/lead/sum/avg/min/max.' },
+        columns: { type: 'array', items: { type: 'string' }, description: 'Inputs for coalesce/least/greatest.' },
+        unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'date_diff unit.' },
+        granularity: { enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'date_trunc granularity.' },
+        part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'date_part to extract.' },
+        places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places for round (default 0).' },
+        default: { description: 'Fallback literal for coalesce, or default for window lag/lead.' },
+        type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Target type for cast / CASE result type.' },
+        // op=case
+        cases: { type: 'array', minItems: 1, description: 'CASE branches (first matching wins).', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: {} } } }, then: OPERAND } } },
+        else: OPERAND,
+        // op=window
+        fn: { enum: ['row_number', 'rank', 'dense_rank', 'lag', 'lead', 'sum', 'avg', 'count', 'min', 'max'], description: 'Window function for op=window.' },
+        partition_by: { type: 'array', items: { type: 'string' }, description: 'Window partition columns.' },
+        order_by: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } }, description: 'Window ordering.' },
+        offset: { type: 'integer', minimum: 1, description: 'Row offset for window lag/lead (default 1).' },
+      },
+    }),
+    build: ({ d, cols }, p) => {
+      const operand = (o, what) => {
+        if (!o || typeof o !== 'object') throw new Error(`compute ${p.op}: missing operand ${what}`);
+        if (o.now) return d.nowExpr();
+        if (o.column !== undefined) { requireCol(cols, o.column); return d.ident(o.column); }
+        if (o.value !== undefined) return d.sqlLiteral(o.value);
+        throw new Error(`compute ${p.op}: operand ${what} needs column | value | now`);
+      };
+      const col = () => { requireCol(cols, p.column); return d.ident(p.column); };
+      const list = () => { (p.columns || []).forEach((c) => requireCol(cols, c)); return (p.columns || []).map((c) => d.ident(c)); };
+      const ARITH = { add: '+', sub: '-', mul: '*', div: '/' };
+      let expr; let type = 'numeric';
+      if (ARITH[p.op]) {
+        const l = operand(p.left, 'left'); const r = operand(p.right, 'right');
+        expr = p.op === 'div' ? `(${l} / NULLIF(${r}, 0))` : `(${l} ${ARITH[p.op]} ${r})`;
+      } else if (p.op === 'round') expr = d.roundExpr(col(), p.places ?? 0);
+      else if (p.op === 'floor') expr = `floor(${col()})`;
+      else if (p.op === 'ceil') expr = `ceil(${col()})`;
+      else if (p.op === 'abs') expr = `abs(${col()})`;
+      else if (p.op === 'coalesce') { const a = list(); expr = `coalesce(${[...a, ...(p.default !== undefined ? [d.sqlLiteral(p.default)] : [])].join(', ')})`; type = 'string'; }
+      else if (p.op === 'least') expr = `least(${list().join(', ')})`;
+      else if (p.op === 'greatest') expr = `greatest(${list().join(', ')})`;
+      else if (p.op === 'cast') { expr = d.castExpr(col(), p.type || 'string'); type = p.type || 'string'; }
+      else if (p.op === 'date_diff') { expr = d.dateDiff(p.unit, operand(p.from, 'from'), operand(p.to, 'to')); type = p.unit === 'day' ? 'int' : 'numeric'; }
+      else if (p.op === 'date_trunc') { expr = d.dateTrunc(p.granularity, col()); type = 'time'; }
+      else if (p.op === 'date_part') { expr = d.datePart(p.part, col()); type = 'int'; }
+      else if (p.op === 'case') {
+        if (!p.cases?.length) throw new Error('case: needs at least one branch');
+        const branches = p.cases.map((cs) => {
+          const cond = cs.when.map((c) => { requireCol(cols, c.column); return cmp(d, d.ident(c.column), c.op, c.value); }).join(' AND ');
+          return `WHEN ${cond} THEN ${operand(cs.then, 'then')}`;
+        });
+        expr = `CASE ${branches.join(' ')}${p.else !== undefined ? ` ELSE ${operand(p.else, 'else')}` : ''} END`;
+        type = p.type || 'string';
+      } else if (p.op === 'window') {
+        (p.partition_by || []).forEach((c) => requireCol(cols, c));
+        (p.order_by || []).forEach((o) => requireCol(cols, o.key));
+        const parts = (p.partition_by || []).map((c) => d.ident(c));
+        const ords = (p.order_by || []).map((o) => `${d.ident(o.key)}${o.direction === 'desc' ? ' DESC' : ''}`);
+        const over = `OVER (${[parts.length ? `PARTITION BY ${parts.join(', ')}` : '', ords.length ? `ORDER BY ${ords.join(', ')}` : ''].filter(Boolean).join(' ')})`;
+        let call;
+        if (['row_number', 'rank', 'dense_rank'].includes(p.fn)) { call = `${p.fn}()`; type = 'int'; }
+        else if (['lag', 'lead'].includes(p.fn)) { call = `${p.fn}(${col()}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''})`; }
+        else if (['sum', 'avg', 'count', 'min', 'max'].includes(p.fn)) { call = p.fn === 'count' && !p.column ? 'count(*)' : `${p.fn}(${col()})`; }
+        else throw new Error(`window: bad fn ${p.fn}`);
+        expr = `${call} ${over}`;
+      } else throw new Error(`compute: bad op ${p.op}`);
       return { op: { op: 'extend', cols: [{ name: p.name, expr }] }, cols: addCol(cols, p.name, type) };
     },
   },
@@ -126,13 +215,13 @@ const STAGES = {
       properties: {
         stage: { const: 'aggregate' },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
-        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS }, column: { type: 'string' } } } },
+        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'sum/avg/min/max/count/count_distinct + statistical stddev/variance/median/percentile.' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
       },
     }),
     build: ({ d, cols }, p) => {
       const groupBy = p.group_by || [];
       for (const g of groupBy) requireCol(cols, g);
-      const aggs = p.measures.map((m) => { if (m.column) requireCol(cols, m.column); return { as: m.name, expr: aggExpr(d, m.fn, m.column) }; });
+      const aggs = p.measures.map((m) => { if (m.column) requireCol(cols, m.column); return { as: m.name, expr: aggExpr(d, m.fn, m.column, m.q) }; });
       let out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
       for (const m of p.measures) out.set(m.name, { type: 'numeric' });

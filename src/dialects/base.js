@@ -48,6 +48,22 @@ export class Dialect {
   /** { join, element }: a FROM-join that explodes an array property + the element expr. */
   arrayUnnest(_prevAlias, _column, _key, _alias, _field, _type) { throw new Error('abstract arrayUnnest'); }
 
+  // ── Abstract time / scalar / statistical primitives (per-dialect) ──────────
+  /** Difference toExpr - fromExpr expressed in `unit` (day|hour|minute|second). */
+  dateDiff(_unit, _fromExpr, _toExpr) { throw new Error('abstract dateDiff'); }
+  /** Truncate a timestamp/date to a granularity (day|week|month|quarter|year). */
+  dateTrunc(_granularity, _expr) { throw new Error('abstract dateTrunc'); }
+  /** Extract a calendar part (dow|hour|day|week|month|quarter|year|doy) as a number. */
+  datePart(_part, _expr) { throw new Error('abstract datePart'); }
+  /** Current timestamp. */
+  nowExpr() { throw new Error('abstract nowExpr'); }
+  /** Round expr to `places` decimals. */
+  roundExpr(_expr, _places) { throw new Error('abstract roundExpr'); }
+  /** Cast expr to a logical type. */
+  castExpr(_expr, _type) { throw new Error('abstract castExpr'); }
+  /** Statistical aggregate (stddev|variance|median|percentile) over a column. */
+  statAggExpr(_fn, _columnSql, _q) { throw new Error('abstract statAggExpr'); }
+
   // ── Abstract pipeline lowering (per-dialect) ───────────────────────────────
   // Lower a base relation + ordered op IR (see pipeline.js) to a single SQL text.
   renderPipeline(_baseRelation, _ops) { throw new Error('abstract renderPipeline'); }

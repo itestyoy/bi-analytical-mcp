@@ -47,6 +47,41 @@ export class BigQueryDialect extends Dialect {
     return { join: `CROSS JOIN UNNEST(JSON_VALUE_ARRAY(${column}, '$.${key}')) AS ${alias}`, element: alias };
   }
 
+  // ── time / scalar / statistical ────────────────────────────────────────────
+  dateDiff(unit, from, to) {
+    const u = { day: 'DAY', hour: 'HOUR', minute: 'MINUTE', second: 'SECOND' }[unit];
+    if (!u) throw new Error(`dateDiff: bad unit ${unit}`);
+    return `TIMESTAMP_DIFF(${to}, ${from}, ${u})`;
+  }
+
+  dateTrunc(granularity, expr) {
+    const g = { day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
+    if (!g) throw new Error(`dateTrunc: bad granularity ${granularity}`);
+    return `TIMESTAMP_TRUNC(${expr}, ${g})`;
+  }
+
+  datePart(part, expr) {
+    const p = { dow: 'DAYOFWEEK', hour: 'HOUR', day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR', doy: 'DAYOFYEAR' }[part];
+    if (!p) throw new Error(`datePart: bad part ${part}`);
+    return `EXTRACT(${p} FROM ${expr})`;
+  }
+
+  nowExpr() { return 'CURRENT_TIMESTAMP()'; }
+
+  roundExpr(expr, places = 0) { return `ROUND(${expr}, ${Number(places)})`; }
+
+  castExpr(expr, type) { return `CAST(${expr} AS ${this.castType(type) || 'STRING'})`; }
+
+  statAggExpr(fn, c, q) {
+    switch (fn) {
+      case 'stddev': return `STDDEV(${c})`;
+      case 'variance': return `VARIANCE(${c})`;
+      case 'median': return `APPROX_QUANTILES(${c}, 2)[OFFSET(1)]`;
+      case 'percentile': return `APPROX_QUANTILES(${c}, 100)[OFFSET(CAST(${Number(q)} * 100 AS INT64))]`;
+      default: throw new Error(`statAggExpr: bad fn ${fn}`);
+    }
+  }
+
   // ── Pipeline lowering: native |> pipe operators ────────────────────────────
   renderPipeline(baseRelation, ops) {
     const lines = [`FROM ${baseRelation}`];

@@ -67,7 +67,8 @@ Stage = {
 |---|---|---|---|
 | `scan` (implicit source) | `FROM` | the events fact or users dim (catalog model) | rows of the source |
 | `where` | `\|> WHERE` | row filter (scalar event_data props, columns, metric_time) | unchanged |
-| `derive` | `\|> EXTEND` | add scalar columns (array_length / contains / struct_field / arithmetic) | unchanged |
+| `derive` | `\|> EXTEND` | add a scalar column from an event_data property (extract / array_length / contains / struct_field) | unchanged |
+| `compute` | `\|> EXTEND` | add a column over existing columns: arithmetic, round/floor/ceil/abs, coalesce/least/greatest, cast, **date_diff / date_trunc / date_part**, **CASE**, **window functions** (row_number/rank/lag/lead/running sum…) | unchanged |
 | `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows | **expands** |
 | `join` | `\|> JOIN` | join another catalog model on a shared entity (1-hop) | unchanged (1:1 / many:1) |
 | `aggregate` | `\|> AGGREGATE … GROUP BY` | group + measures | **collapses** to group keys |

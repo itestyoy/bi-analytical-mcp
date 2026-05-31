@@ -1,6 +1,10 @@
-// Execution contexts: isolated, per-context dbt overlay projects + a persistent
-// registry. Each context gets its own --project-dir / --target-path so parallel
-// tasks never share a semantic_manifest or collide on names.
+// Execution contexts: each context is its OWN fully independent dbt project — a
+// complete copy of the reference (base) project, taken verbatim (including the
+// `target/` parse artifacts: manifest, partial_parse, semantic_manifest) so the
+// context behaves exactly like the reference and re-parses incrementally. Each
+// has its own --project-dir, so parallel tasks never share a semantic_manifest or
+// collide on names. We do NOT carve selected files into a shared base; the whole
+// project is duplicated and the generated models are added under models/generated.
 
 import { randomBytes } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
@@ -123,15 +127,19 @@ export class ContextManager {
     }));
   }
 
-  /** Create a fresh context: allocate id + overlay project copied from base. */
+  /** Create a fresh context: allocate id + a FULL independent copy of the base project. */
   create() {
     const id = newContextId();
     const dir = this.dir(id);
     mkdirSync(dir, { recursive: true });
     if (this.baseProjectDir && existsSync(this.baseProjectDir)) {
+      // Copy the reference project ENTIRELY AS-IS, including target/ (parse
+      // artifacts). Exclude only runtime logs/ and the .mcp workspace dir — the
+      // latter must be skipped to avoid recursively copying other contexts when
+      // the workspace lives inside the project tree.
       cpSync(this.baseProjectDir, dir, {
         recursive: true,
-        filter: (src) => !/(\/target(\/|$)|\/logs(\/|$)|\/\.mcp(\/|$))/.test(src),
+        filter: (src) => !/(\/logs(\/|$)|\/\.mcp(\/|$))/.test(src),
       });
     }
     mkdirSync(this.generatedDir(id), { recursive: true });

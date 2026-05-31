@@ -90,6 +90,12 @@ export class BigQueryDialect extends Dialect {
   // HLL++ approximate distinct count (BigQuery's APPROX_COUNT_DISTINCT uses HLL++).
   approxCountDistinct(c) { return `APPROX_COUNT_DISTINCT(${c})`; }
 
+  // Native HLL++ mergeable sketches — the additive distinct-count workflow.
+  hllInit(c) { return `HLL_COUNT.INIT(${c})`; }
+  hllMerge(c) { return `HLL_COUNT.MERGE(${c})`; }
+  hllMergePartial(c) { return `HLL_COUNT.MERGE_PARTIAL(${c})`; }
+  hllExtract(c) { return `HLL_COUNT.EXTRACT(${c})`; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `STDDEV(${c})`;

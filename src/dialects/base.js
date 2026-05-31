@@ -72,6 +72,15 @@ export class Dialect {
   statAggExpr(_fn, _columnSql, _q) { throw new Error('abstract statAggExpr'); }
   /** Approximate distinct count (HLL++ where available). */
   approxCountDistinct(_columnSql) { throw new Error('abstract approxCountDistinct'); }
+  // ── HLL++ mergeable sketches (the additive distinct-count workflow) ─────────
+  /** Build a sketch over a column (aggregate). */
+  hllInit(_columnSql) { throw new Error('abstract hllInit'); }
+  /** Merge sketches and return the distinct cardinality (aggregate). */
+  hllMerge(_sketchSql) { throw new Error('abstract hllMerge'); }
+  /** Merge sketches into a coarser sketch — additivity for staged/rolling rollups (aggregate). */
+  hllMergePartial(_sketchSql) { throw new Error('abstract hllMergePartial'); }
+  /** Distinct cardinality from one sketch (scalar). */
+  hllExtract(_sketchSql) { throw new Error('abstract hllExtract'); }
 
   // ── Abstract pipeline lowering (per-dialect) ───────────────────────────────
   // Lower a base relation + ordered op IR (see pipeline.js) to a single SQL text.

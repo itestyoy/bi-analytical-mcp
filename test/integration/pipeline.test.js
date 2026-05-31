@@ -204,6 +204,35 @@ test('pipeline approx_count_distinct: distinct payers = 7 (exact fallback on PGl
   assert.equal(num(r.rows[0].exact), 7); // exact fallback agrees on this small set
 });
 
+// HLL sketches are ADDITIVE: per-product sketches MERGE to the true distinct count
+// (deduping the overlap), whereas summing per-product distinct counts double-counts.
+test('pipeline HLL hll_init→hll_merge: merged distinct buyers = 7 (naive sum = 8)', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'derive', name: 'pid', op: 'extract', source: 'product_id', type: 'string' },
+    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', fn: 'hll_init', column: 'appsflyer_id' }, { name: 'n', fn: 'count_distinct', column: 'appsflyer_id' }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', fn: 'hll_merge', column: 'sk' }, { name: 'naive', fn: 'sum', column: 'n' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(num(r.rows[0].merged), 7); // distinct buyers across products (u1 counted once)
+  assert.equal(num(r.rows[0].naive), 8); // 3 + 3 + 2 — double-counts u1 (proves merge is additive/dedup)
+});
+
+// hll_merge_partial keeps additivity as a coarser sketch; hll_extract reads cardinality
+test('pipeline HLL hll_merge_partial→hll_extract: staged merge then extract = 7', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'derive', name: 'pid', op: 'extract', source: 'product_id', type: 'string' },
+    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', fn: 'hll_init', column: 'appsflyer_id' }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', fn: 'hll_merge_partial', column: 'sk' }] },
+    { stage: 'compute', name: 'total', op: 'hll_extract', column: 'merged' },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(num(r.rows[0].total), 7);
+});
+
 // unnest array-of-struct + json_field: extract BOTH item and qty from one element
 test('pipeline unnest struct + json_field: reward item/qty extracted together', opts, async (t) => {
   if (skip(t)) return;

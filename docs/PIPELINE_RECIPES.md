@@ -81,6 +81,22 @@ SUM(amount) OVER (PARTITION BY customer_id ORDER BY day RANGE BETWEEN 10 PRECEDI
 Use `frame.mode:"rows"` for physical row offsets instead, or `preceding:"unbounded"`
 for a running total.
 
+### Additive distinct counts / rolling uniques  (HLL++ sketches)
+Distinct counts aren't additive — you can't sum daily uniques. HLL++ sketches are:
+build per-bucket sketches with `hll_init`, then `hll_merge` (→ cardinality) or
+`hll_merge_partial` (→ a coarser sketch) across buckets/windows, and `hll_extract`
+to read a sketch's cardinality.
+```jsonc
+// distinct buyers across products, deduped (merge), without rescanning raw events:
+[ {stage:"where", conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
+  {stage:"derive", name:"pid", op:"extract", source:"product_id", type:"string"},
+  {stage:"aggregate", group_by:["pid"], measures:[{name:"sk", fn:"hll_init", column:"appsflyer_id"}]},
+  {stage:"aggregate", group_by:[],      measures:[{name:"buyers", fn:"hll_merge", column:"sk"}]} ]
+```
+BigQuery → `HLL_COUNT.INIT/MERGE/MERGE_PARTIAL/EXTRACT`; Postgres → an exact,
+mergeable distinct-set fallback. For a rolling N-day unique: `hll_init` per day,
+then merge the trailing-N days' sketches.
+
 ### Price tiers (bucketing)  (CASE)
 ```jsonc
 [ …derive(price)…,

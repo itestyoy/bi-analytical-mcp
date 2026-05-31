@@ -91,6 +91,14 @@ export class PostgresDialect extends Dialect {
   // not approximate). Install the postgresql-hll extension for true HLL++.
   approxCountDistinct(c) { return `count(distinct ${c})`; }
 
+  // EXACT, MERGEABLE sketch fallback: a sketch is the chr(1)-joined set of distinct
+  // values. init dedups; merge_partial concatenates (a coarser sketch); merge and
+  // extract dedup-and-count. Same additive semantics as HLL++, exact (small data).
+  hllInit(c) { return `string_agg(distinct (${c})::text, chr(1))`; }
+  hllMergePartial(c) { return `string_agg(${c}, chr(1))`; }
+  hllMerge(c) { return `(SELECT count(distinct e) FROM unnest(string_to_array(string_agg(${c}, chr(1)), chr(1))) AS e)`; }
+  hllExtract(c) { return `(SELECT count(distinct e) FROM unnest(string_to_array(${c}, chr(1))) AS e)`; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `stddev_samp(${c})`;

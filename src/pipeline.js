@@ -55,7 +55,8 @@ import { getDialect } from './dialects/index.js';
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const NAME_RE = /^[a-z][a-z0-9_]{0,40}$/;
 const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'between', 'is_null', 'is_not_null'];
-const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile'];
+const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile', 'hll_init', 'hll_merge', 'hll_merge_partial'];
+const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']); // produce a sketch column
 const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
 // A scalar operand: exactly one of a column reference, a literal value, or the
@@ -134,6 +135,9 @@ function aggExpr(d, fn, column, q) {
   const c = d.ident(column);
   if (fn === 'count_distinct') return `count(distinct ${c})`;
   if (fn === 'approx_count_distinct') return d.approxCountDistinct(c);
+  if (fn === 'hll_init') return d.hllInit(c);
+  if (fn === 'hll_merge') return d.hllMerge(c);
+  if (fn === 'hll_merge_partial') return d.hllMergePartial(c);
   if (STAT_FNS.has(fn)) {
     if (fn === 'percentile' && !(typeof q === 'number' && q > 0 && q < 1)) throw new Error("percentile requires q in (0,1)");
     return d.statAggExpr(fn, c, q);
@@ -192,7 +196,7 @@ const STAGES = {
       allOf: [
         { if: { properties: { op: { const: 'const' } }, required: ['op'] }, then: { required: ['value'] } },
         { if: { properties: { op: { enum: ['add', 'sub', 'mul', 'div'] } }, required: ['op'] }, then: { required: ['left', 'right'] } },
-        { if: { properties: { op: { enum: ['round', 'floor', 'ceil', 'abs', 'cast', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'unix_date', 'date_trunc', 'date_part'] } }, required: ['op'] }, then: { required: ['column'] } },
+        { if: { properties: { op: { enum: ['round', 'floor', 'ceil', 'abs', 'cast', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'unix_date', 'date_trunc', 'date_part', 'hll_extract'] } }, required: ['op'] }, then: { required: ['column'] } },
         { if: { properties: { op: { const: 'concat' } }, required: ['op'] }, then: { required: ['parts'] } },
         { if: { properties: { op: { enum: ['coalesce', 'least', 'greatest'] } }, required: ['op'] }, then: { required: ['columns'] } },
         { if: { properties: { op: { const: 'cast' } }, required: ['op'] }, then: { required: ['type'] } },
@@ -209,7 +213,7 @@ const STAGES = {
       properties: {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
-        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
+        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
         field: { type: 'string', description: 'Struct field name for op=json_field (extract from a JSON column, e.g. an unnested array-of-struct element).' },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
@@ -281,6 +285,7 @@ const STAGES = {
       else if (p.op === 'date_part') { expr = d.datePart(p.part, col()); type = 'int'; }
       else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }
       else if (p.op === 'json_field') { expr = d.jsonColumnField(col(), p.field, p.type); type = p.type || 'string'; }
+      else if (p.op === 'hll_extract') { expr = d.hllExtract(col()); type = 'int'; }
       else if (p.op === 'case') {
         if (!p.cases?.length) throw new Error('case: needs at least one branch');
         const branches = p.cases.map((cs) => {
@@ -364,7 +369,7 @@ const STAGES = {
       const aggs = p.measures.map((m) => { if (m.column) requireCol(cols, m.column); return { as: m.name, expr: aggExpr(d, m.fn, m.column, m.q) }; });
       let out = new Map();
       for (const g of groupBy) out.set(g, cols.get(g) || { type: 'string' });
-      for (const m of p.measures) out.set(m.name, { type: 'numeric' });
+      for (const m of p.measures) out.set(m.name, { type: SKETCH_FNS.has(m.fn) ? 'sketch' : 'numeric' });
       return { op: { op: 'aggregate', groupBy, aggs }, cols: out };
     },
   },

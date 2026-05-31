@@ -1,0 +1,10 @@
+node_modules
+.dbtvenv
+.git
+.gitignore
+.mcp
+test
+docs
+*.md
+.env
+dbt_project

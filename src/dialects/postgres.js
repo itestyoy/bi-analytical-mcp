@@ -58,6 +58,9 @@ export class PostgresDialect extends Dialect {
     return `WITH ${ctes.join(',\n')}\nSELECT * FROM ${prev}`;
   }
 
+  /** CTE-form rendering of one op (used by the funnel/prepare pipeline). */
+  stepCte(prev, op) { return this._step(prev, op); }
+
   _step(prev, op) {
     switch (op.op) {
       case 'where':

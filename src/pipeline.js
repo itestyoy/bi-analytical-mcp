@@ -216,6 +216,14 @@ function requireCol(cols, name) {
   if (!cols.has(name)) throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
 }
 
+/** Register an additional stage from another module (e.g. match_recognize). */
+export function registerStage(name, def) { STAGES[name] = def; }
+
+/** JSON-Schema oneOf for a named subset of stages (e.g. the funnel `prepare` field). */
+export function stageSchemas(catalog, names) {
+  return { oneOf: names.map((n) => { if (!STAGES[n]) throw new Error(`no such stage: ${n}`); return STAGES[n].schema(catalog); }) };
+}
+
 /** Initial columns available from a catalog source model. */
 function sourceColumns(catalog, key) {
   const m = catalog.getModel(key);
@@ -232,12 +240,63 @@ function sourceColumns(catalog, key) {
   return cols;
 }
 
+/** Starting columns for the events anchor (so prepare/funnel pipelines run over it). */
+export function anchorColumns(catalog) { return sourceColumns(catalog, catalog.anchor); }
+
+/** The scalar columns a `prepare` stage list adds (name -> { type }) — threads prep columns. */
+export function prepareColumns(catalog, dialectName, stages = []) {
+  const d = getDialect(dialectName);
+  let cols = new Map();
+  for (const st of stages) {
+    const def = STAGES[st.stage];
+    if (!def) throw new Error(`unknown prepare stage: ${st.stage}`);
+    cols = def.build({ d, catalog, cols }, st).cols;
+  }
+  return cols;
+}
+
 export function pipelineStageSchema(catalog) {
   return { oneOf: Object.values(STAGES).map((s) => s.schema(catalog)) };
 }
 
 /**
- * Render a full pipeline to SQL for `dialectName`.
+ * Lower a pipeline over an explicit base relation to one SQL text (chained-CTE
+ * form), honoring a terminal stage (e.g. match_recognize) that contributes its
+ * own CTEs + final SELECT. Used by the funnel: [...prepare, match_recognize].
+ */
+export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages) {
+  const d = getDialect(dialectName);
+  let cols = new Map(baseColumns);
+  const ops = [];
+  for (const st of stages) {
+    const def = STAGES[st.stage];
+    if (!def) throw new Error(`unknown pipeline stage: ${st.stage}`);
+    const res = def.build({ d, catalog, cols }, st);
+    ops.push(res.op);
+    cols = res.cols;
+  }
+  let prev = baseRelation;
+  const ctes = [];
+  let finalSelect = null;
+  for (const op of ops) {
+    if (op.terminal) {
+      const tail = op.renderTail(prev, dialectName);
+      for (const c of tail.ctes) ctes.push(c);
+      finalSelect = tail.finalSelect;
+      break; // a terminal stage must be last
+    }
+    const name = `p${ctes.length}`;
+    ctes.push({ name, sql: d.stepCte(prev, op) });
+    prev = name;
+  }
+  if (finalSelect === null) finalSelect = `SELECT * FROM ${prev}`;
+  const head = ctes.length ? `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\n` : '';
+  return head + finalSelect;
+}
+
+/**
+ * Render a full pipeline to SQL for `dialectName` (dialect-native form: Postgres
+ * chained CTE, BigQuery pipe syntax).
  * @returns { sql, columns } — columns is the final tracked column set (Map).
  */
 export function renderPipeline(catalog, dialectName, source, stages = []) {

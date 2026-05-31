@@ -18,7 +18,7 @@
 import yaml from 'js-yaml';
 import { jsonExtract, sqlLiteral } from './dialect.js';
 import { renderBaseModel } from './yaml-render.js';
-import { renderPrepare } from './prepare.js';
+import { renderPipelineSql, registerStage, prepareColumns, anchorColumns } from './pipeline.js';
 
 /** Dump a sequence semantic model (+metrics) to dbt YAML, ref('...') unquoted. */
 export function dumpSequenceYaml(sem) {
@@ -132,7 +132,7 @@ function resolve(catalog, spec, dialect) {
 
   // Columns added by the prepare pipeline (name -> { type }); referenceable in
   // step `where` and agg_at_step like any other column.
-  const prepCols = renderPrepare(catalog, spec, dialect, '__base__').columns;
+  const prepCols = prepareColumns(catalog, dialect, spec.prepare || []);
 
   // resolve metrics + collect which property values must be captured per step
   const propCaptures = []; // { id, idx, property, type, isColumn }
@@ -285,39 +285,52 @@ export function renderSequence(catalog, spec) {
 /** Per-user sequence model SELECT (Postgres) — runnable on PGlite for data tests. */
 export function renderPerUserModelPostgres(catalog, spec) {
   const r = resolve(catalog, spec, 'postgres');
-  // The Postgres CTE chain matches the next step at any later row (gaps always
-  // allowed); it cannot enforce step adjacency. `strict` mode (contiguous match)
-  // is only honored by the BigQuery MATCH_RECOGNIZE path. Reject it here rather
-  // than silently returning ordered-with-gaps numbers under a strict label.
+  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
+  const pre = buildPrefilter(catalog, spec, 'postgres', null);
+  const baseForPrep = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
+  // The funnel IS a pipeline: prepare stages (derive/unnest) then a terminal
+  // match_recognize stage — rendered by the unified pipeline engine.
+  const stages = [...(spec.prepare || []), { stage: 'match_recognize', _resolved: r }];
+  return renderPipelineSql(catalog, 'postgres', baseForPrep, anchorColumns(catalog), stages);
+}
+
+/** Per-user sequence model SELECT (BigQuery MATCH_RECOGNIZE) — production target. */
+export function renderPerUserModelBigQuery(catalog, spec) {
+  const r = resolve(catalog, spec, 'bigquery');
+  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
+  const pre = buildPrefilter(catalog, spec, 'bigquery', null);
+  const baseForPrep = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
+  const stages = [...(spec.prepare || []), { stage: 'match_recognize', _resolved: r }];
+  return renderPipelineSql(catalog, 'bigquery', baseForPrep, anchorColumns(catalog), stages);
+}
+
+// ── match_recognize as a pipeline stage ──────────────────────────────────────
+// The row-pattern sequence is just a (terminal) stage: it consumes the prepared
+// relation and emits one row per user/session match. Registered into the shared
+// pipeline registry so the whole funnel runs through one engine.
+
+/** Postgres lowering: ev + per-step (r1..rn) + joined CTEs and the per-user SELECT. */
+export function matchTailPostgres(r, fromRel, catalog) {
   if (r.mode === 'strict') {
     throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the Postgres equivalent");
   }
-  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
   const preds = r.stepPreds('postgres', null);
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
   const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : jsonExtract('postgres', catalog.eventDataColumn(), c.property, c.type)}) AS ${c.id}`);
   const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
-  const pre = buildPrefilter(catalog, spec, 'postgres', null);
-  // prepare pipeline (unnest/derive ...) chains CTEs from the (prefiltered) base.
-  const baseForPrep = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
-  const prep = renderPrepare(catalog, spec, 'postgres', baseForPrep);
-  const prepCte = prep.ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n');
-  let sql = `WITH ${prep.ctes.length ? `${prepCte},\n` : ''}ev AS (\n  SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${prep.relation}\n)`;
   const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
   const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
-  let ctes = `r1 AS (SELECT DISTINCT ON (pk) pk, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY pk, ts)`;
+  const ctes = [{ name: 'ev', sql: `SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${fromRel}` }];
+  ctes.push({ name: 'r1', sql: `SELECT DISTINCT ON (pk) pk, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY pk, ts` });
   for (let i = 2; i <= r.steps.length; i++) {
-    ctes += `,\nr${i} AS (SELECT DISTINCT ON (e.pk) e.pk, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON e.pk = r${i - 1}.pk WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY e.pk, e.ts)`;
+    ctes.push({ name: `r${i}`, sql: `SELECT DISTINCT ON (e.pk) e.pk, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON e.pk = r${i - 1}.pk WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY e.pk, e.ts` });
   }
   const sel = ['r1.pk', ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)), ...r.propCaptures.map((c) => `r${c.idx}.${c.id}`)];
   let joins = 'FROM r1';
   for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (pk)`;
-  // per-user output columns (already qualified with j.; aliases left untouched)
+  ctes.push({ name: 'joined', sql: `SELECT ${sel.join(', ')} ${joins}` });
   const furthestCase = r.steps.slice().reverse().map((s) => `WHEN j.t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
-  // The view exposes ONLY sequence-derived columns. User attributes are NOT
-  // joined here; the semantic model declares a shared `user` entity so MetricFlow
-  // joins dim_users at SQL-generation time when a query groups by a user attr.
   const out = [
     `  j.pk AS ${r.partCol}`,
     '  , j.t1 AS first_seen_at',
@@ -327,42 +340,29 @@ export function renderPerUserModelPostgres(catalog, spec) {
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `  , EXTRACT(EPOCH FROM (j.t${m.to} - j.t${m.from})) AS secs_${m.name}`),
     ...r.propCaptures.map((c) => `  , j.${c.id}`),
   ];
-  return `${sql},\n${ctes},\njoined AS (SELECT ${sel.join(', ')} ${joins})\nSELECT\n${out.join('\n')}\nFROM joined j`;
+  return { ctes, finalSelect: `SELECT\n${out.join('\n')}\nFROM joined j` };
 }
 
-/** Per-user sequence model SELECT (BigQuery MATCH_RECOGNIZE) — production target. */
-export function renderPerUserModelBigQuery(catalog, spec) {
-  const r = resolve(catalog, spec, 'bigquery');
-  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
+/** BigQuery lowering: a single SELECT … FROM <prepared> MATCH_RECOGNIZE(…). */
+export function matchTailBigQuery(r, fromRel, catalog) {
   const preds = r.stepPreds('bigquery', null);
   const sym = r.steps.map((s) => `S${s.idx}`);
-  // MEASURES must be aggregates (one row per match). CLASSIFIER() is NOT allowed
-  // bare here; we derive furthest_step_name in the outer SELECT from the
-  // per-step reached flags (t{idx} IS NOT NULL), exactly like the Postgres path.
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
     ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
   if (r.mode !== 'strict') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
-  // furthest = highest-index step whose time is present (steps are strictly ordered).
   const furthestCase = r.steps.slice().reverse().map((s) => `WHEN t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
   const reached = r.steps.map((s) => `    t${s.idx} IS NOT NULL AS reached_${s.name}`);
   const secs = r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `    TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`);
-  // The view exposes ONLY sequence-derived columns. User attributes are NOT
-  // joined here; the semantic model declares a shared `user` entity so MetricFlow
-  // joins dim_users at SQL-generation time when a query groups by a user attr.
-  const pre = buildPrefilter(catalog, spec, 'bigquery', null);
-  const baseForPrep = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
-  const prep = renderPrepare(catalog, spec, 'bigquery', baseForPrep);
-  const withCte = prep.ctes.length ? `WITH ${prep.ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\n` : '';
-  return `${withCte}  SELECT
+  const finalSelect = `  SELECT
     ${r.partCol},
     t1 AS first_seen_at,
     CASE ${furthestCase} END AS furthest_step_name,
     t${r.steps.length} IS NOT NULL AS completed,
 ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')}
-  FROM ${prep.relation} MATCH_RECOGNIZE (
+  FROM ${fromRel} MATCH_RECOGNIZE (
     PARTITION BY ${r.partCol}
     ORDER BY ${r.timeCol}
     MEASURES
@@ -373,7 +373,32 @@ ${measures}
     DEFINE
 ${defines.join(',\n')}
   )`;
+  return { ctes: [], finalSelect };
 }
+
+/** Per-user columns the match_recognize stage exposes (for downstream stages). */
+function matchOutputColumns(r) {
+  const cols = new Map([[r.partCol, { type: 'string' }], ['first_seen_at', { type: 'time' }], ['furthest_step_name', { type: 'string' }], ['completed', { type: 'boolean' }]]);
+  for (const s of r.steps) cols.set(`reached_${s.name}`, { type: 'boolean' });
+  for (const m of r.metrics.filter((x) => x.type === 'avg_seconds_between')) cols.set(`secs_${m.name}`, { type: 'numeric' });
+  for (const c of r.propCaptures) cols.set(c.id, { type: c.type });
+  return cols;
+}
+
+registerStage('match_recognize', {
+  schema: () => ({
+    type: 'object', additionalProperties: true, required: ['stage'],
+    description: 'Row-pattern sequence (funnel) over the prepared relation — a TERMINAL stage producing one row per user/session match.',
+    properties: { stage: { const: 'match_recognize' } },
+  }),
+  build: ({ d, catalog }, p) => {
+    const r = p._resolved || resolve(catalog, p.spec, d.name);
+    return {
+      op: { op: 'match_recognize', terminal: true, renderTail: (prev, dn) => (dn === 'bigquery' ? matchTailBigQuery(r, prev, catalog) : matchTailPostgres(r, prev, catalog)) },
+      cols: matchOutputColumns(r),
+    };
+  },
+});
 
 /**
  * Core semantic-model declaration (measures/dimensions/metrics) OVER the

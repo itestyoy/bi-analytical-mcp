@@ -5,7 +5,7 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
-import { prepareStageSchema } from './prepare.js';
+import { stageSchemas } from './pipeline.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
@@ -332,7 +332,7 @@ export function buildSchemas(catalog) {
           prepare: {
             type: 'array',
             description: 'Optional ORDERED data-prep pipeline applied (after filter) BEFORE the row-pattern match — a chain of transform stages that prepare the dataset (e.g. derive a scalar from an array/struct property, or unnest an array). Each stage builds on the previous; the columns they add are referenceable in step `where` and agg_at_step metrics. Use this for complex (array / array-of-struct) event_data properties, which cannot be used directly.',
-            items: prepareStageSchema(catalog),
+            items: stageSchemas(catalog, ['derive', 'unnest']),
           },
           steps: { type: 'array', minItems: 2, items: sequenceStep, description: 'The ordered funnel steps (>= 2).' },
           metrics: {

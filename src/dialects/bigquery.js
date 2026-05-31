@@ -54,6 +54,23 @@ export class BigQueryDialect extends Dialect {
     return lines.join('\n');
   }
 
+  /** CTE-form rendering of one op (used by the funnel/prepare pipeline, where
+   *  prep stages must precede a MATCH_RECOGNIZE that reads from a relation). */
+  stepCte(prev, op) {
+    switch (op.op) {
+      case 'where':
+        return `SELECT * FROM ${prev} WHERE ${op.preds.join(' AND ')}`;
+      case 'extend':
+        return `SELECT *, ${op.cols.map((c) => `(${c.expr}) AS ${this.ident(c.name)}`).join(', ')} FROM ${prev}`;
+      case 'unnest': {
+        const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type);
+        return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
+      }
+      default:
+        throw new Error(`bigquery: op '${op.op}' is not supported as a CTE step (use the pipe-syntax pipeline)`);
+    }
+  }
+
   _step(op) {
     switch (op.op) {
       case 'where':

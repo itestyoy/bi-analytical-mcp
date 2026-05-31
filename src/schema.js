@@ -393,5 +393,13 @@ export function buildSchemas(catalog) {
     describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
     list_contexts: empty,
     describe_catalog: empty,
+    time: {
+      type: 'object', additionalProperties: false, required: ['seconds'],
+      description: 'Wait for `seconds` (capped at 60), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.',
+      properties: {
+        seconds: { type: 'number', minimum: 0, maximum: 86400, description: 'Seconds to wait; the actual wait is capped at 60 (larger values are clamped, with clamped:true in the result).' },
+        reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
+      },
+    },
   };
 }

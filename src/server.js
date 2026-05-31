@@ -59,7 +59,7 @@ KEY CONCEPTS
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
 const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over two fixed, catalog-enumerated data sources (an events fact + a user-attributes dimension) and query them by name; you never write SQL. Start with describe_catalog, then create_semantic_model / register_native_model, then query_semantic_model.';
 
-const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'describe_catalog', 'describe_context']);
+const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'describe_catalog', 'describe_context', 'time']);
 
 export function buildToolDefs(engine) {
   return Object.entries(engine.schemas).map(([name, inputSchema]) => ({

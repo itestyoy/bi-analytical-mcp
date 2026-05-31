@@ -317,6 +317,19 @@ export class Engine {
     return { contexts: this.ctxs.list() };
   }
 
+  /**
+   * Bounded wait (0–60s) so the AI can pace background-job polling: wait an
+   * interval, then poll get_query_result, repeat until ready. Purely a timer.
+   */
+  async time(input) {
+    this._validate('time', input);
+    const requested = Number(input.seconds) || 0;
+    const seconds = Math.min(Math.max(requested, 0), 60); // clamp to [0, 60]
+    const startedAt = new Date().toISOString();
+    await new Promise((resolve) => { setTimeout(resolve, seconds * 1000); });
+    return { ok: true, waited_seconds: seconds, requested_seconds: requested, clamped: requested > 60, started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
+  }
+
   async describe_context(input) {
     this._validate('describe_context', input);
     const ctx = this.ctxs.get(input.context_id);

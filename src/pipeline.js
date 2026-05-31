@@ -49,13 +49,23 @@ import { getDialect } from './dialects/index.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const NAME_RE = /^[a-z][a-z0-9_]{0,40}$/;
-const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
+const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'between', 'is_null', 'is_not_null'];
 const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct', 'stddev', 'variance', 'median', 'percentile'];
 const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
-// A scalar operand for `compute`: exactly one of a column reference, a literal
-// value, or the `now` token (current timestamp).
+// A scalar operand: exactly one of a column reference, a literal value, or the
+// `now` token (current timestamp). Shared by `where`, `compute`, and `case`.
 const OPERAND = { type: 'object', additionalProperties: false, properties: { column: { type: 'string' }, value: {}, now: { type: 'boolean' } }, description: 'One of: { column }, { value }, or { now: true }.' };
+
+// One comparison, used identically by `where` and `case` branches. Either side is
+// a column / constant / now: shorthand `{column, op, value}` (column vs constant)
+// or `{left, op, right}` (column-vs-column, constant-vs-column, …). in/not_in take
+// an array via `value` or `right.value`.
+const CONDITION = {
+  type: 'object', additionalProperties: false, required: ['op'],
+  description: 'A comparison: left = `column` (shorthand) or `left` operand; right = `value` constant (shorthand; array for in/not_in; [low,high] for between) or `right` operand. is_null/is_not_null take no right side.',
+  properties: { column: { type: 'string' }, value: {}, left: OPERAND, right: OPERAND, op: { enum: CMP } },
+};
 
 const OPSYM = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
@@ -77,10 +87,17 @@ function condPred(d, cols, c) {
   if (c.left !== undefined) lhs = operandSql(d, cols, c.left, 'left');
   else if (c.column !== undefined) { requireCol(cols, c.column); lhs = d.ident(c.column); }
   else throw new Error('condition needs `column` or `left`');
+  if (c.op === 'is_null') return `${lhs} IS NULL`;
+  if (c.op === 'is_not_null') return `${lhs} IS NOT NULL`;
   if (c.op === 'in' || c.op === 'not_in') {
     const arr = c.right?.value ?? c.value;
     if (!Array.isArray(arr)) throw new Error(`${c.op} needs an array value`);
     return `${lhs} ${c.op === 'in' ? 'IN' : 'NOT IN'} (${arr.map((v) => d.sqlLiteral(v)).join(', ')})`;
+  }
+  if (c.op === 'between') {
+    const arr = c.right?.value ?? c.value;
+    if (!Array.isArray(arr) || arr.length !== 2) throw new Error('between needs [low, high]');
+    return `${lhs} BETWEEN ${d.sqlLiteral(arr[0])} AND ${d.sqlLiteral(arr[1])}`;
   }
   if (!OPSYM[c.op]) throw new Error(`unsupported comparison op: ${c.op}`);
   let rhs;
@@ -109,16 +126,7 @@ const STAGES = {
       description: 'WHERE (pipe `|> WHERE`): keep rows where all conditions hold (ANDed). Each condition compares two operands — each a column, a literal constant, or now. Shorthand `{column, op, value}` = column vs constant; or use `{left, op, right}` for column-vs-column / constant-vs-column. Solves: scope to an event_name, a segment, a value range, or compare two columns; can run at any point (e.g. after a window/aggregate to filter on a computed column).',
       properties: {
         stage: { const: 'where' },
-        conditions: { type: 'array', minItems: 1, items: {
-          type: 'object', additionalProperties: false, required: ['op'],
-          description: 'A comparison. Left = `column` (shorthand) or `left` operand; right = `value` constant (shorthand; array for in/not_in) or `right` operand.',
-          properties: {
-            column: { type: 'string', description: 'Left column (shorthand for left:{column}).' },
-            value: { description: 'Right literal constant (shorthand for right:{value}); array for in/not_in.' },
-            left: OPERAND, right: OPERAND,
-            op: { enum: CMP },
-          },
-        } },
+        conditions: { type: 'array', minItems: 1, items: CONDITION },
       },
     }),
     build: ({ d, cols }, p) => ({ op: { op: 'where', preds: p.conditions.map((c) => condPred(d, cols, c)) }, cols }),
@@ -175,7 +183,7 @@ const STAGES = {
         default: { description: 'Fallback literal for coalesce, or default for window lag/lead.' },
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Target type for cast / CASE result type.' },
         // op=case
-        cases: { type: 'array', minItems: 1, description: 'CASE branches (first matching wins).', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string' }, op: { enum: CMP }, value: {} } } }, then: OPERAND } } },
+        cases: { type: 'array', minItems: 1, description: 'CASE branches (first matching wins); each `when` is a list of ANDed conditions, `then` an operand.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: { type: 'array', minItems: 1, items: CONDITION }, then: OPERAND } } },
         else: OPERAND,
         // op=window
         fn: { enum: ['row_number', 'rank', 'dense_rank', 'lag', 'lead', 'sum', 'avg', 'count', 'min', 'max'], description: 'Window function for op=window.' },

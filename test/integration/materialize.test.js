@@ -125,6 +125,21 @@ test('transform: compress/re-slice the materialized result table (where/group_by
   assert.ok(big.rows.reduce((s, r) => s + num(r.rev), 0) <= 85);
 });
 
+test('sample: a random subset (not first-by-order) of the materialized result', opts, async (t) => {
+  if (skip(t)) return;
+  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: ['user__country'], materialize: true });
+  assert.equal(m.status, 'ready', JSON.stringify(m));
+  // capped sample returns <= limit rows, flagged as sampled
+  const s = await engine.get_query_result({ context_id: ctxId, table: m.table, sample: true, limit: 2 });
+  assert.equal(s.ok, true, JSON.stringify(s.error));
+  assert.equal(s.sampled, true);
+  assert.ok(s.rows.length <= 2 && s.rows.length >= 1);
+  // a sample wide enough to cover everything returns the full set of countries
+  const all = await engine.get_query_result({ context_id: ctxId, table: m.table, sample: true, limit: 1000 });
+  const full = await engine.get_query_result({ context_id: ctxId, table: m.table });
+  assert.equal(all.rows.length, full.rows.length); // same rows, (randomly) reordered
+});
+
 test('materialized paging: limit/offset + has_more reconstruct the full stored result', opts, async (t) => {
   if (skip(t)) return;
   const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: ['user__country'], materialize: true });

@@ -367,9 +367,11 @@ export function buildSchemas(catalog) {
       properties: {
         context_id: { type: 'string', pattern: CTX, description: D.context_id },
         query_id: { type: 'string', pattern: '^[a-f0-9]{8,16}$', description: 'ID returned by a backgrounded materialize query; poll it for status + results.' },
-        table: { type: 'string', pattern: '^qr_[a-f0-9]{8,16}$', description: 'A known result table name (qr_<id>) to read directly — works even if the job record is gone.' },
+        table: { type: 'string', pattern: '^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$', description: 'A known table to read directly: a query-result table (qr_<id>) or a registered pipeline model (pipe_<name>) — works even if the job record is gone.' },
         limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
-        offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging over the stored result).' },
+        offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging over the stored result). Ignored when sample=true.' },
+        sample: { type: 'boolean', description: 'If true, return a REPRESENTATIVE random subset instead of the first rows — BigQuery uses TABLESAMPLE SYSTEM (sample_percent), Postgres uses ORDER BY random() limited to `limit`.' },
+        sample_percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate % of rows for BigQuery TABLESAMPLE SYSTEM when sample=true (default 10).' },
         transform: {
           type: 'object', additionalProperties: false,
           description: 'Optional read-only projection over the materialized result table (compress/re-slice WITHOUT recomputing the analytics query). Identifiers are validated; values are literal-escaped.',

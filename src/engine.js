@@ -523,19 +523,34 @@ export class Engine {
   }
 
   /** Read rows back from a materialized result table (resilient: no recompute). */
-  async _fetchResult(id, limit, transform, offset = 0) {
+  async _fetchResult(id, limit, transform, offset = 0, sample = false, samplePercent = 10) {
     const job = this.jobs.get(id);
-    return this._readTable(this.ctxs.dir(job.contextId), job.table, limit, transform, { query_id: id }, offset);
+    return this._readTable(this.ctxs.dir(job.contextId), job.table, limit, transform, { query_id: id }, offset, sample, samplePercent);
   }
 
   /** Run a (optionally projected) read over a materialized result table. */
-  async _readTable(dir, table, limit, transform, extra = {}, offset = 0) {
-    const sql = transform
-      ? buildProjection(`{{ ref('${table}') }}`, transform)
-      : `select * from {{ ref('${table}') }}`;
+  async _readTable(dir, table, limit, transform, extra = {}, offset = 0, sample = false, samplePercent = 10) {
+    const ref = `{{ ref('${table}') }}`;
+    const base = transform ? buildProjection(ref, transform) : `select * from ${ref}`;
+    if (sample) {
+      // A REPRESENTATIVE random subset rather than the first rows by physical
+      // order. BigQuery uses TABLESAMPLE SYSTEM (block sampling on the table
+      // reference); Postgres uses ORDER BY random() (reliable on small result
+      // tables, where block sampling can return nothing). Paging doesn't apply.
+      let sql;
+      if (this.catalog.dialect === 'bigquery') {
+        const sampled = `${ref} TABLESAMPLE SYSTEM (${Number(samplePercent)} PERCENT)`;
+        sql = transform ? buildProjection(sampled, transform) : `select * from ${sampled}`;
+      } else {
+        sql = `select * from (${base}) _s order by random()`;
+      }
+      const res = await this.runner.show(dir, sql, limit);
+      if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
+      return { ok: true, status: 'ready', table, ...extra, sampled: true, columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
+    }
     // Page in JS over a single read (over-fetch by 1 for has_more) rather than a
     // SQL OFFSET with no ORDER BY (which was non-deterministic across calls — H2).
-    const res = await this.runner.show(dir, sql, limit + offset + 1);
+    const res = await this.runner.show(dir, base, limit + offset + 1);
     if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
     const pageRows = res.rows.slice(offset, offset + limit);
     return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: { limit, offset, has_more: res.rows.length > offset + limit }, ...(transform ? { projected: true } : {}) };
@@ -552,17 +567,20 @@ export class Engine {
     if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
     const limit = input.limit ?? 1000;
     const offset = input.offset ?? 0;
-    // direct fetch by table (crash-resilient: works even if the job is gone)
+    const sample = !!input.sample;
+    const samplePercent = input.sample_percent ?? 10;
+    // direct fetch by table (crash-resilient: works even if the job is gone).
+    // Accepts a query-result table (qr_*) or a registered pipeline model (pipe_*).
     if (input.table) {
       this.ctxs.get(input.context_id); // validate the context exists (throws otherwise)
-      if (!/^qr_[a-f0-9]{8,16}$/.test(input.table)) throw new ToolError(`invalid result table name: ${input.table}`, { stage: 'validate', field: 'table' });
-      return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, input.transform, {}, offset);
+      if (!/^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$/.test(input.table)) throw new ToolError(`invalid result table name: ${input.table}`, { stage: 'validate', field: 'table' });
+      return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, input.transform, {}, offset, sample, samplePercent);
     }
     const job = this.jobs.get(input.query_id);
     if (!job) throw new ToolError(`unknown query_id: ${input.query_id} (pass {context_id, table} to fetch a known table directly)`, { stage: 'validate', field: 'query_id' });
     if (job.status === 'running') return { ok: true, status: 'running', query_id: job.id, table: job.table };
     if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, table: job.table, error: { stage: 'materialize', message: job.error } };
-    return this._fetchResult(job.id, limit, input.transform, offset);
+    return this._fetchResult(job.id, limit, input.transform, offset, sample, samplePercent);
   }
 
   list_query_jobs() {

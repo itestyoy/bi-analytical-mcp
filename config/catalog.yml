@@ -5,12 +5,16 @@ version: 2
 # under `meta.mcp` (model-level and column-level). The loader (src/catalog.js)
 # transforms this into the internal registry. There are EXACTLY TWO data sources.
 #
-# Conventions (column meta.mcp):
+# Types come from the NATIVE dbt `data_type` (date/timestamp -> time dimension,
+# else categorical) — not from meta. On a dimension model every non-entity column
+# is a groupable dimension automatically. meta.mcp only carries what dbt has no
+# native field for:
 #   entity:        { name, type: primary|foreign }  -> entity / join key
-#   is_time:       true (+ granularity)             -> the event time axis
+#   is_time:       true (+ granularity, default day) -> the event time axis
 #   is_event_name: true                             -> the event_name column
-#   is_event_data: true (+ properties: {..})        -> the JSON payload column
-#   dimension:     { type, granularity?, values? }  -> a groupable attribute
+#   is_event_data: true (+ properties: {..})        -> the JSON payload column (typed JSON keys)
+#   values:        [..]                             -> categorical value hints (optional)
+#   granularity:   day|week|..                      -> non-default time grain (optional)
 #
 # The warehouse dialect is NOT stored here — it is runtime config, resolved from
 # the WAREHOUSE_DIALECT env var or the dbt profile's output `type`.
@@ -57,8 +61,7 @@ models:
         description: "Event timestamp (the metric time axis)."
         meta:
           mcp:
-            is_time: true
-            granularity: day
+            is_time: true   # granularity defaults to day
       - name: event_name
         data_type: string
         description: "Event type (one of known_events)."
@@ -113,73 +116,44 @@ models:
         meta:
           mcp:
             entity: { name: user, type: primary }
+      # Non-entity columns of this dimension model are groupable dimensions; their
+      # type is inferred from the native `data_type` (date -> time, else categorical).
+      # Only value hints / non-day granularity live in meta.
       - name: install_date
         data_type: date
         description: "Acquisition (install) date — cohort time dimension."
-        meta:
-          mcp:
-            dimension: { type: time, granularity: day }
       - name: platform
         data_type: string
         description: "Device OS family the user installed on."
-        meta:
-          mcp:
-            dimension: { type: string, values: [android, ios] }
+        meta: { mcp: { values: [android, ios] } }
       - name: os_version
         data_type: string
         description: "Operating-system version string."
-        meta:
-          mcp:
-            dimension: { type: string }
       - name: device_model
         data_type: string
         description: "Device model identifier."
-        meta:
-          mcp:
-            dimension: { type: string }
       - name: country
         data_type: string
         description: "User country (ISO code) for geo segmentation."
-        meta:
-          mcp:
-            dimension: { type: string }
       - name: region
         data_type: string
         description: "Geographic region (e.g. EU, NA, LATAM)."
-        meta:
-          mcp:
-            dimension: { type: string }
       - name: language
         data_type: string
         description: "User language code."
-        meta:
-          mcp:
-            dimension: { type: string }
       - name: media_source
         data_type: string
         description: "Acquisition channel / attribution source (e.g. meta, google, organic)."
-        meta:
-          mcp:
-            dimension: { type: string }
       - name: acquisition_type
         data_type: string
         description: "Whether the user was acquired organically or via paid marketing."
-        meta:
-          mcp:
-            dimension: { type: string, values: [organic, paid] }
+        meta: { mcp: { values: [organic, paid] } }
       - name: campaign_id
         data_type: string
         description: "Plain string attribute (no separate campaigns table)."
-        meta:
-          mcp:
-            dimension: { type: string }
       - name: app_id
         data_type: string
-        meta:
-          mcp:
-            dimension: { type: string }
+        description: "Application identifier."
       - name: app_version
         data_type: string
-        meta:
-          mcp:
-            dimension: { type: string }
+        description: "Application version."

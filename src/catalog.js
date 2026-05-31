@@ -10,6 +10,14 @@ import { isNumericType } from './dialect.js';
 
 export const SUPPORTED_DIALECTS = new Set(['postgres', 'bigquery', 'snowflake']);
 
+// Native dbt `data_type`s that map to a MetricFlow time dimension.
+const TIME_DATA_TYPES = new Set(['date', 'timestamp', 'timestamptz', 'timestamp_ntz', 'timestamp_tz', 'datetime', 'time']);
+
+/** Logical dimension type derived from the native dbt column `data_type`. */
+function dimTypeFromDataType(dataType) {
+  return TIME_DATA_TYPES.has(String(dataType || '').toLowerCase()) ? 'time' : 'categorical';
+}
+
 export function loadCatalog(path, opts = {}) {
   const text = readFileSync(path, 'utf8');
   let raw;
@@ -88,23 +96,34 @@ export function dbtSchemaToCatalog(doc) {
     const entities = {};
     const dimensions = {};
     const columnDescriptions = {};
+    const isAnchor = !!mcp.anchor;
     for (const col of model.columns || []) {
       const cm = col.meta?.mcp || {};
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
       if (cm.entity) {
         if (cm.entity.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name };
         else entities[cm.entity.name] = { column: col.name, type: cm.entity.type };
+        continue; // entity key columns are not dimensions
       }
-      if (cm.is_time) m.time = { column: col.name, granularity: cm.granularity || 'day' };
-      if (cm.is_event_name) m.event_name = { column: col.name };
+      if (cm.is_time) { m.time = { column: col.name, granularity: cm.granularity || 'day' }; continue; }
+      if (cm.is_event_name) { m.event_name = { column: col.name }; continue; }
       if (cm.is_event_data) {
         m.event_data_column = col.name;
         if (cm.properties) m.properties = cm.properties;
+        continue;
       }
-      if (cm.dimension) {
-        const d = { type: cm.dimension.type };
-        if (cm.dimension.granularity) d.granularity = cm.dimension.granularity;
-        if (cm.dimension.values) d.values = cm.dimension.values;
+      // Dimensions: on a non-anchor (dimension) model, every remaining column is
+      // a groupable dimension. Its TYPE comes from the native dbt `data_type`
+      // (date/timestamp -> time, else categorical) — not from meta. Only the bits
+      // dbt has no native field for stay in meta: time `granularity` (non-day)
+      // and categorical `values` hints. `meta.mcp.dimension` is still honored.
+      if (cm.dimension || !isAnchor) {
+        const explicit = cm.dimension || {};
+        const type = explicit.type || dimTypeFromDataType(col.data_type);
+        const d = { type };
+        if (type === 'time') d.granularity = explicit.granularity || cm.granularity || 'day';
+        const values = explicit.values || cm.values;
+        if (values) d.values = values;
         dimensions[col.name] = d;
       }
     }

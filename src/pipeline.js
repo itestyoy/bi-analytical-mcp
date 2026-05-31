@@ -35,9 +35,10 @@
 //                            Solves: per-element frequency (items collected, rewards).
 //   join       |> JOIN       1-hop join to another catalog model on a shared entity.
 //                            Solves: bring user attributes (country/platform/install_date).
-//   aggregate  |> AGGREGATE  group + measures: sum/avg/min/max/count/count_distinct +
-//                            stddev/variance/median/percentile(q). Solves: totals, rates,
-//                            distributions, DAU/MAU (count_distinct), revenue, ARPU.
+//   aggregate  |> AGGREGATE  group + measures: sum/avg/min/max/count/count_distinct,
+//                            approx_count_distinct (HLL++), stddev/variance/median/
+//                            percentile(q). Solves: totals, rates, distributions,
+//                            DAU/MAU (count_distinct), fast approximate uniques, revenue, ARPU.
 //   pivot      |> PIVOT      turn listed values of a column into columns.
 //                            Solves: dashboard-ready matrices (revenue per country column).
 //   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
@@ -54,7 +55,7 @@ import { getDialect } from './dialects/index.js';
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const NAME_RE = /^[a-z][a-z0-9_]{0,40}$/;
 const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'between', 'is_null', 'is_not_null'];
-const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct', 'stddev', 'variance', 'median', 'percentile'];
+const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile'];
 const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
 // A scalar operand: exactly one of a column reference, a literal value, or the
@@ -132,6 +133,7 @@ function aggExpr(d, fn, column, q) {
   if (fn === 'count' && !column) return 'count(*)';
   const c = d.ident(column);
   if (fn === 'count_distinct') return `count(distinct ${c})`;
+  if (fn === 'approx_count_distinct') return d.approxCountDistinct(c);
   if (STAT_FNS.has(fn)) {
     if (fn === 'percentile' && !(typeof q === 'number' && q > 0 && q < 1)) throw new Error("percentile requires q in (0,1)");
     return d.statAggExpr(fn, c, q);
@@ -349,11 +351,11 @@ const STAGES = {
   aggregate: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'measures'],
-      description: 'AGGREGATE (pipe `|> AGGREGATE … GROUP BY`): group + measures (COLLAPSES grain to the group keys). Measures: sum/avg/min/max/count/count_distinct + statistical stddev/variance/median/percentile(q). Solves: totals, rates, DAU/MAU (count_distinct user), revenue, ARPU, distributions/percentiles.',
+      description: 'AGGREGATE (pipe `|> AGGREGATE … GROUP BY`): group + measures (COLLAPSES grain to the group keys). Measures: sum/avg/min/max/count/count_distinct, approx_count_distinct (HLL++ — fast approximate uniques on huge data), and statistical stddev/variance/median/percentile(q). Solves: totals, rates, DAU/MAU (count_distinct user), revenue, ARPU, distributions/percentiles.',
       properties: {
         stage: { const: 'aggregate' },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
-        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], allOf: [{ if: { properties: { fn: { const: 'percentile' } }, required: ['fn'] }, then: { required: ['q'] } }, { if: { properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count_distinct', 'stddev', 'variance', 'median', 'percentile'] } }, required: ['fn'] }, then: { required: ['column'] } }], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'sum/avg/min/max/count/count_distinct + statistical stddev/variance/median/percentile.' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
+        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], allOf: [{ if: { properties: { fn: { const: 'percentile' } }, required: ['fn'] }, then: { required: ['q'] } }, { if: { properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile'] } }, required: ['fn'] }, then: { required: ['column'] } }], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'sum/avg/min/max/count/count_distinct, approx_count_distinct (HLL++: BigQuery APPROX_COUNT_DISTINCT, Postgres exact fallback), and statistical stddev/variance/median/percentile.' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
       },
     }),
     build: ({ d, cols }, p) => {

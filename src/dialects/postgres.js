@@ -87,6 +87,10 @@ export class PostgresDialect extends Dialect {
 
   unixDateExpr(expr) { return `((${expr})::date - DATE '1970-01-01')`; }
 
+  // Postgres core has no HLL++; fall back to an EXACT distinct count (same answer,
+  // not approximate). Install the postgresql-hll extension for true HLL++.
+  approxCountDistinct(c) { return `count(distinct ${c})`; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `stddev_samp(${c})`;

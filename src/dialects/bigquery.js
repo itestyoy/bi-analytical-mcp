@@ -87,6 +87,9 @@ export class BigQueryDialect extends Dialect {
 
   unixDateExpr(expr) { return `UNIX_DATE(CAST(${expr} AS DATE))`; }
 
+  // HLL++ approximate distinct count (BigQuery's APPROX_COUNT_DISTINCT uses HLL++).
+  approxCountDistinct(c) { return `APPROX_COUNT_DISTINCT(${c})`; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `STDDEV(${c})`;

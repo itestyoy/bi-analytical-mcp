@@ -192,6 +192,18 @@ test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date
   assert.deepEqual(rolls, [5, 15]);
 });
 
+// approx_count_distinct (HLL++): BigQuery APPROX_COUNT_DISTINCT; Postgres exact fallback
+test('pipeline approx_count_distinct: distinct payers = 7 (exact fallback on PGlite)', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'payers', fn: 'approx_count_distinct', column: 'appsflyer_id' }, { name: 'exact', fn: 'count_distinct', column: 'appsflyer_id' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(num(r.rows[0].payers), 7); // u1,u3,u5,u7,u9,u10,u11
+  assert.equal(num(r.rows[0].exact), 7); // exact fallback agrees on this small set
+});
+
 // unnest array-of-struct + json_field: extract BOTH item and qty from one element
 test('pipeline unnest struct + json_field: reward item/qty extracted together', opts, async (t) => {
   if (skip(t)) return;

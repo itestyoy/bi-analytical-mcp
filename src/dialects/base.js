@@ -70,6 +70,8 @@ export class Dialect {
   jsonColumnField(_column, _field, _type) { throw new Error('abstract jsonColumnField'); }
   /** Statistical aggregate (stddev|variance|median|percentile) over a column. */
   statAggExpr(_fn, _columnSql, _q) { throw new Error('abstract statAggExpr'); }
+  /** Approximate distinct count (HLL++ where available). */
+  approxCountDistinct(_columnSql) { throw new Error('abstract approxCountDistinct'); }
 
   // ── Abstract pipeline lowering (per-dialect) ───────────────────────────────
   // Lower a base relation + ordered op IR (see pipeline.js) to a single SQL text.

@@ -72,18 +72,20 @@ export class Engine {
     const models = [];
     for (const k of c.modelKeys()) {
       const m = c.getModel(k);
+      const descs = c.columnDescriptions(k); // dbt column docs { col: description }
       const entry = {
         key: k,
         dbt_model: m.dbt_model,
         role: m.role,
         dimensions: k === c.anchor ? undefined : Object.keys(m.dimensions || {}),
         measures: Object.keys(m.measures || {}),
+        column_descriptions: descs, // available to the AI even without warehouse introspection
       };
       // REAL physical columns from the warehouse relation (adapter.get_columns_in_relation),
-      // not just declared metadata. Applies to every model (events / users / ...).
+      // not just declared metadata. Merge in the dbt column description per column.
       if (this.runner && base) {
         const cols = await this.runner.relationColumns(base, m.dbt_model);
-        entry.physical_columns = cols.ok ? cols.columns : null;
+        entry.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
         if (!cols.ok) entry.physical_columns_error = 'relation not built or introspection failed (run dbt seed + dbt run on the base project)';
       }
       models.push(entry);
@@ -93,6 +95,7 @@ export class Engine {
       models,
       event_names: c.eventNames(),
       event_properties: c.eventProps(),
+      event_property_descriptions: c.eventPropertyDescriptions(),
       event_numeric_properties: c.eventNumericProps(),
       groupable_paths: c.reachableGroupByPaths(),
       enums: {

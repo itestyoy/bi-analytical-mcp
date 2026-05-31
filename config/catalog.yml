@@ -72,31 +72,31 @@ models:
           mcp:
             is_event_data: true
             properties:
-              level_id: { type: int }
+              level_id: { type: int, description: "Level number for level_started/level_completed events." }
               chain: { type: string }
-              result: { type: string, values: [win, lose] }
+              result: { type: string, values: [win, lose], description: "Outcome of a completed level." }
               method: { type: string }
-              complete_time: { type: int }
-              attempt: { type: int }
-              amount: { type: int }
+              complete_time: { type: int, description: "Seconds taken to complete the level." }
+              attempt: { type: int, description: "Attempt number for the level." }
+              amount: { type: int, description: "Coin amount earned (currency_income) or spent (currency_outcome)." }
               currency: { type: string }
               value_in_coins: { type: int }
-              source_type: { type: string }
+              source_type: { type: string, description: "Economy source/sink category (e.g. level_reward, hint_spend)." }
               source_name: { type: string }
               monetization_type: { type: string }
-              price_in_usd: { type: numeric }
-              product_id: { type: string }
+              price_in_usd: { type: numeric, description: "IAP purchase price in USD (iap_purchase_completed)." }
+              product_id: { type: string, description: "IAP product identifier." }
               order_id: { type: string }
               status: { type: string, values: [success, failed, closed] }
-              ad_type: { type: string, values: [rewarded, interstitial, banner] }
-              ad_network: { type: string, values: [admob, unity, applovin, ironsource] }
-              placement: { type: string }
-              revenue: { type: numeric }
+              ad_type: { type: string, values: [rewarded, interstitial, banner], description: "Ad format." }
+              ad_network: { type: string, values: [admob, unity, applovin, ironsource], description: "Ad mediation network." }
+              placement: { type: string, description: "In-app ad placement (e.g. store, level_fail, main_menu)." }
+              revenue: { type: numeric, description: "Ad revenue in cents (ad_finished)." }
               is_reward_received: { type: string }
               is_clicked: { type: string }
-              screen_from: { type: string }
-              screen_to: { type: string }
-              step_id: { type: string }
+              screen_from: { type: string, description: "Origin screen for screen_changed." }
+              screen_to: { type: string, description: "Destination screen for screen_changed." }
+              step_id: { type: string, description: "Funnel/onboarding step id (e.g. tutorial step_1)." }
 
   - name: dim_users
     description: "User attributes dimension — one row per user."
@@ -121,41 +121,49 @@ models:
             dimension: { type: time, granularity: day }
       - name: platform
         data_type: string
+        description: "Device OS family the user installed on."
         meta:
           mcp:
             dimension: { type: string, values: [android, ios] }
       - name: os_version
         data_type: string
+        description: "Operating-system version string."
         meta:
           mcp:
             dimension: { type: string }
       - name: device_model
         data_type: string
+        description: "Device model identifier."
         meta:
           mcp:
             dimension: { type: string }
       - name: country
         data_type: string
+        description: "User country (ISO code) for geo segmentation."
         meta:
           mcp:
             dimension: { type: string }
       - name: region
         data_type: string
+        description: "Geographic region (e.g. EU, NA, LATAM)."
         meta:
           mcp:
             dimension: { type: string }
       - name: language
         data_type: string
+        description: "User language code."
         meta:
           mcp:
             dimension: { type: string }
       - name: media_source
         data_type: string
+        description: "Acquisition channel / attribution source (e.g. meta, google, organic)."
         meta:
           mcp:
             dimension: { type: string }
       - name: acquisition_type
         data_type: string
+        description: "Whether the user was acquired organically or via paid marketing."
         meta:
           mcp:
             dimension: { type: string, values: [organic, paid] }

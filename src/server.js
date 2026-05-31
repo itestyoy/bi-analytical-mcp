@@ -14,7 +14,7 @@ import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
 
 const TOOL_DESCRIPTIONS = {
-  describe_catalog: 'Return the registry: models, events, event properties (with types), join-reachable group-by paths, and allowed enums. Call BEFORE creating a model.',
+  describe_catalog: 'Return the registry: models with their REAL physical columns and dbt column descriptions, events, event properties (with types and descriptions), join-reachable group-by paths, and allowed enums. Call BEFORE creating a model.',
   create_semantic_model: 'Declaratively create/augment semantic models for a task (one SM per table) and metrics, in an isolated context. Omit context_id for a new task; pass it to extend the same context. Renders YAML + dbt parse.',
   register_native_model: 'Build a derived dbt model from a sequence spec (MATCH_RECOGNIZE funnel/path, target BigQuery) materialized as a view, and a semantic model on top. Kept separate from the semantic query; after registering, query its metrics/dimensions via query_semantic_model.',
   update_native_model: 'Update a registered native (MATCH_RECOGNIZE) model in place: regenerate the view + semantic model from a new sequence spec and rebuild (dbt run + parse).',
@@ -44,7 +44,7 @@ DATA MODEL (exactly two sources)
 Funnels/sequences are built ONLY from events (a step = an event + an event_data property value). Segmentation joins user attributes to events by the user entity automatically at query time.
 
 WORKFLOW
-1. describe_catalog — discover the models, events, event properties, joinable group-by paths, and the columns of each table. Call this first.
+1. describe_catalog — discover the models, events, event properties, joinable group-by paths, and the columns of each table (with their dbt descriptions). Call this first.
 2. create_semantic_model — declare measures/dimensions/metrics for a task in an ISOLATED context (returns a context_id). Pass that context_id back to extend the same context.
    - For ordered multi-step funnels/paths use register_native_model: it builds a per-user funnel model you can query like any other model, and accepts a pre-filter (time window / event subset / user segment) to narrow the data.
 3. query_semantic_model — run metrics with group_by / where / order_by / time_range. Options: dry_run (preview, no run), explain (query plan, no run), materialize (persist the result and read it back; long queries return a query_id to poll), limit/offset.

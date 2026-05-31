@@ -247,6 +247,14 @@ test('describe_catalog: returns REAL physical columns for every model (adapter i
   assert.ok(['event_name', 'appsflyer_id', 'event_data', 'device_time', 'session_number'].every((c) => evCols.includes(c)));
   assert.ok(['appsflyer_id', 'country', 'platform', 'install_date'].every((c) => uCols.includes(c)));
   assert.ok(events.physical_columns.every((c) => typeof c.dtype === 'string')); // real types present
+  // dbt column descriptions are available to the AI: as a per-model map AND
+  // merged onto the real physical columns by name.
+  assert.equal(typeof users.column_descriptions.country, 'string');
+  assert.ok(users.column_descriptions.country.length > 0);
+  const evDataCol = events.physical_columns.find((c) => c.name === 'event_data');
+  assert.equal(typeof evDataCol.description, 'string'); // merged from the catalog onto the physical column
+  // event_data property descriptions are exposed too
+  assert.equal(typeof dc.event_property_descriptions.price_in_usd, 'string');
 });
 
 test('describe_context: the registered native model is introspectable like a dbt model (properties)', opts, async (t) => {

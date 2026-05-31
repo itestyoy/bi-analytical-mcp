@@ -87,8 +87,10 @@ export function dbtSchemaToCatalog(doc) {
 
     const entities = {};
     const dimensions = {};
+    const columnDescriptions = {};
     for (const col of model.columns || []) {
       const cm = col.meta?.mcp || {};
+      if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
       if (cm.entity) {
         if (cm.entity.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name };
         else entities[cm.entity.name] = { column: col.name, type: cm.entity.type };
@@ -108,6 +110,7 @@ export function dbtSchemaToCatalog(doc) {
     }
     if (Object.keys(entities).length) m.entities = entities;
     if (Object.keys(dimensions).length) m.dimensions = dimensions;
+    if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
     out.models[key] = m;
   }
   if (!out.anchor_model) out.anchor_model = doc.anchor_model;
@@ -160,6 +163,19 @@ export class Catalog {
   /** Physical column on the anchor for an entity (e.g. the user/session key). */
   anchorEntityColumn(entity) {
     return this.models[this.anchor]?.entities?.[entity]?.column;
+  }
+
+  /** dbt column descriptions for a model: { columnName: description }. */
+  columnDescriptions(key) {
+    return this.getModel(key).column_descriptions || {};
+  }
+
+  /** event_data property descriptions (if declared): { property: description }. */
+  eventPropertyDescriptions() {
+    const props = this.models[this.anchor]?.properties || {};
+    const out = {};
+    for (const [k, v] of Object.entries(props)) if (v && v.description) out[k] = v.description;
+    return out;
   }
 
   /** Physical JSON column holding event-specific properties on the events model. */

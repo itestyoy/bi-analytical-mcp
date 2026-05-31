@@ -71,10 +71,19 @@ Stage = {
 | `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows | **expands** |
 | `join` | `\|> JOIN` | join another catalog model on a shared entity (1-hop) | unchanged (1:1 / many:1) |
 | `aggregate` | `\|> AGGREGATE … GROUP BY` | group + measures | **collapses** to group keys |
+| `pivot` | `\|> PIVOT` | turn listed values of a column into columns | **collapses** to group keys |
+| `unpivot` | `\|> UNPIVOT` | fold listed columns into (name, value) rows | **expands** |
 | `match_recognize` | `\|> MATCH_RECOGNIZE` | row-pattern sequence → one row per match (per user/session) | **collapses** to one row per partition match |
 | `project` | `\|> SELECT` | keep/rename a column set | unchanged |
 | `order_by` | `\|> ORDER BY` | sort | unchanged |
 | `limit` | `\|> LIMIT` | cap rows | unchanged |
+
+**Implemented** (`src/pipeline.js` + `src/dialects/{base,postgres,bigquery}.js`):
+`where`, `derive`, `unnest`, `join`, `aggregate`, `pivot`, `unpivot`, `order_by`,
+`limit`, `project` — lowered to a Postgres CTE chain (data-tested via `dbt show`:
+aggregate / pivot / unpivot) and to BigQuery pipe syntax. Remaining:
+`match_recognize` as a registry stage (today a dedicated renderer consuming the
+prepared relation).
 
 New stages the request adds — `aggregate` (group_by), `join`, and
 `match_recognize` (promoted from a bespoke renderer to a registry stage) — slot
@@ -121,15 +130,19 @@ an aggregate) before generating SQL.
 The pipeline is lowered to SQL by walking the stages. The **same stage `emit()`**
 targets either dialect:
 
+Exactly **two dialects** are supported — `postgres` and `bigquery` — each a class
+in its own file (`src/dialects/postgres.js`, `src/dialects/bigquery.js`)
+implementing the abstract `Dialect` (`src/dialects/base.js`). `src/dialect.js` is
+a thin functional facade that delegates to them (so existing callers are
+unchanged). The same op IR lowers two ways:
+
 - **BigQuery → native pipe syntax.** Each stage emits its `|>` operator; the
-  result is the pipeline verbatim (`FROM … |> WHERE … |> MATCH_RECOGNIZE … |>
-  AGGREGATE …`). This is the natural, first-class target.
-- **Postgres / Snowflake → nested CTE lowering.** Each stage becomes a CTE
-  `p0, p1, …`, each `SELECT … FROM p{i-1}` (exactly the chaining the `prepare`
-  pipeline already emits today). `unnest` → `CROSS JOIN LATERAL
-  jsonb_array_elements*`; `match_recognize` → the per-user CTE chain (the current
-  Postgres equivalent); `aggregate` → `GROUP BY`. Semantics match the BigQuery
-  pipe lowering step-for-step.
+  result is the pipeline verbatim (`FROM … |> WHERE … |> AGGREGATE … |> PIVOT …`).
+- **Postgres → nested CTE lowering.** Each stage becomes a CTE `p0, p1, …`, each
+  `SELECT … FROM p{i-1}`. `unnest` → `CROSS JOIN LATERAL jsonb_array_elements*`;
+  `aggregate` → `GROUP BY`; `pivot` → conditional aggregation
+  (`sum(CASE WHEN on = v THEN val END)`); `unpivot` → `CROSS JOIN LATERAL (VALUES …)`.
+  Semantics match the BigQuery pipe lowering step-for-step.
 
 A dialect that supports a stage natively uses it; one that does not uses the
 lowering (or the stage is rejected for that dialect with a clear error, as

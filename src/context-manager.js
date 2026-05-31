@@ -17,10 +17,7 @@ function timeSpineSql(dialect, start, end) {
   if (dialect === 'bigquery') {
     return `{{ config(materialized='table') }}\n${header}select d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d\n`;
   }
-  if (dialect === 'snowflake') {
-    return `{{ config(materialized='table') }}\n${header}select dateadd(day, seq4(), '${start}'::date) as date_day\nfrom table(generator(rowcount => datediff(day, '${start}'::date, '${end}'::date) + 1))\n`;
-  }
-  // postgres / default
+  // postgres (default)
   return `{{ config(materialized='table') }}\n${header}select d::date as date_day\nfrom generate_series('${start}'::date, '${end}'::date, interval '1 day') as d\n`;
 }
 

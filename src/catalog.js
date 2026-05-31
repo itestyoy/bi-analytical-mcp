@@ -6,9 +6,9 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import yaml from 'js-yaml';
-import { isNumericType } from './dialect.js';
+import { isNumericType, SUPPORTED_DIALECTS } from './dialect.js';
 
-export const SUPPORTED_DIALECTS = new Set(['postgres', 'bigquery', 'snowflake']);
+export { SUPPORTED_DIALECTS };
 
 // Native dbt `data_type`s that map to a MetricFlow time dimension.
 const TIME_DATA_TYPES = new Set(['date', 'timestamp', 'timestamptz', 'timestamp_ntz', 'timestamp_tz', 'datetime', 'time']);

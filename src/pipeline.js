@@ -10,6 +10,38 @@
 // Safety: stage params are catalog-enum / typed; column references are validated
 // against the live column set threaded through the pipeline; identifiers pass the
 // dialect guard; values are bound via sqlLiteral. No raw SQL is ever accepted.
+//
+// ─── STAGE CATALOG (what each stage does + what it solves) ───────────────────
+// Modeled on BigQuery pipe syntax (FROM t |> WHERE … |> EXTEND … |> AGGREGATE …).
+// See: https://medium.com/google-cloud/bigquery-pipe-syntax-by-example-blasetta-0f3df50ba331
+//
+//   where      |> WHERE      filter rows by column conditions.
+//                            Solves: scope to an event / segment / time window.
+//   derive     |> EXTEND     add ONE scalar column FROM an event_data JSON property
+//                            (extract a scalar; array_length / contains / struct_field
+//                            for complex props). Solves: surface a payload field as a column.
+//   compute    |> EXTEND     add ONE column FROM existing columns + literals:
+//                            arithmetic (+ - * /), round/floor/ceil/abs, coalesce/
+//                            least/greatest, cast, date_diff / date_trunc / date_part,
+//                            CASE (bucketing), and WINDOW functions (row_number / rank /
+//                            lag / lead / running sum…). Solves: KPIs (ARPU parts), tiers/
+//                            buckets, days-since-install & retention day, period-over-period
+//                            (lag), nth-event / repeat-purchase (row_number).
+//   unnest     |> JOIN UNNEST  explode a JSON array into one row per element.
+//                            Solves: per-element frequency (items collected, rewards).
+//   join       |> JOIN       1-hop join to another catalog model on a shared entity.
+//                            Solves: bring user attributes (country/platform/install_date).
+//   aggregate  |> AGGREGATE  group + measures: sum/avg/min/max/count/count_distinct +
+//                            stddev/variance/median/percentile(q). Solves: totals, rates,
+//                            distributions, DAU/MAU (count_distinct), revenue, ARPU.
+//   pivot      |> PIVOT      turn listed values of a column into columns.
+//                            Solves: dashboard-ready matrices (revenue per country column).
+//   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
+//                            format for charting; cohort/retention grids → rows.
+//   order_by   |> ORDER BY   sort. limit |> LIMIT cap. project |> SELECT keep a column set.
+//   match_recognize |> MATCH_RECOGNIZE  (registered by match-recognize.js) row-pattern
+//                            funnel; TERMINAL stage → one row per user/session match.
+//                            Solves: ordered multi-step funnels, conversion, time-between-steps.
 
 import { getDialect } from './dialects/index.js';
 
@@ -54,7 +86,7 @@ const STAGES = {
   where: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
-      description: 'Row filter: keep rows matching the conditions (ANDed).',
+      description: 'WHERE (pipe `|> WHERE`): keep rows where all conditions hold (ANDed). Solves: scope to an event_name, a segment, or a value range; can run at any point (e.g. after a window/aggregate to filter on a computed column).',
       properties: {
         stage: { const: 'where' },
         conditions: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Column to test.' }, op: { enum: CMP }, value: {} } } },
@@ -69,7 +101,7 @@ const STAGES = {
   derive: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'name', 'op'],
-      description: 'Add a scalar column from an event_data property (scalar extract, or array/struct ops).',
+      description: 'EXTEND (pipe `|> EXTEND`): add ONE scalar column from an event_data JSON property — `extract` a scalar, or `array_length`/`contains`/`struct_field` for complex props. Solves: surface a payload field so it can be filtered/grouped/aggregated. For math/time/CASE/window over EXISTING columns use `compute`.',
       properties: {
         stage: { const: 'derive' },
         name: { type: 'string', pattern: NAME },
@@ -174,7 +206,7 @@ const STAGES = {
   unnest: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'source', 'as'],
-      description: 'Explode a JSON array property into one row per element (changes grain).',
+      description: 'UNNEST (pipe `|> JOIN UNNEST`): explode a JSON array property into one row per element (CHANGES GRAIN; rows without the array drop out). Solves: per-element frequency analysis (items collected, rewards). For array-of-struct, bind a struct `field`.',
       properties: {
         stage: { const: 'unnest' },
         source: { type: 'string', enum: catalog.complexEventProps() },
@@ -189,7 +221,7 @@ const STAGES = {
   join: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'with', 'on'],
-      description: 'Join another catalog model on a shared entity key (1-hop), exposing its attributes.',
+      description: 'JOIN (pipe `|> JOIN`): 1-hop join to another catalog model on a shared entity key, exposing its attributes. Solves: enrich events with user attributes (country/platform/install_date) for segmentation or date math.',
       properties: {
         stage: { const: 'join' },
         with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join.' },
@@ -211,7 +243,7 @@ const STAGES = {
   aggregate: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'measures'],
-      description: 'Group rows and compute aggregate measures (collapses grain to the group keys).',
+      description: 'AGGREGATE (pipe `|> AGGREGATE … GROUP BY`): group + measures (COLLAPSES grain to the group keys). Measures: sum/avg/min/max/count/count_distinct + statistical stddev/variance/median/percentile(q). Solves: totals, rates, DAU/MAU (count_distinct user), revenue, ARPU, distributions/percentiles.',
       properties: {
         stage: { const: 'aggregate' },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
@@ -232,7 +264,7 @@ const STAGES = {
   pivot: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'on', 'fn', 'value_column', 'values'],
-      description: 'Pivot: turn distinct values of `on` into columns, each aggregating `value_column`. Values must be listed (no dynamic pivot).',
+      description: 'PIVOT (pipe `|> PIVOT`): turn listed values of `on` into columns, each aggregating `value_column` (no dynamic pivot — list the values). Solves: dashboard-ready matrices (e.g. revenue as one column per country, retention day as columns).',
       properties: {
         stage: { const: 'pivot' },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Row keys kept (empty = one row).' },
@@ -255,7 +287,7 @@ const STAGES = {
   unpivot: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'columns', 'name_as', 'value_as'],
-      description: 'Unpivot: turn the listed columns into rows of (name_as, value_as), keeping the rest.',
+      description: 'UNPIVOT (pipe `|> UNPIVOT`): fold the listed columns into rows of (name_as, value_as), keeping the rest. Solves: wide→long/tidy reshape for charting; turning a pivoted/metric-per-column result back into rows.',
       properties: {
         stage: { const: 'unpivot' },
         columns: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Columns to fold into rows.' },
@@ -278,19 +310,19 @@ const STAGES = {
   order_by: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'keys'],
-      description: 'Sort rows.',
+      description: 'ORDER BY (pipe `|> ORDER BY`): sort rows. Solves: rankings/leaderboards (pair with limit) and stable output ordering.',
       properties: { stage: { const: 'order_by' }, keys: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } } },
     }),
     build: ({ cols }, p) => { p.keys.forEach((k) => requireCol(cols, k.key)); return { op: { op: 'order_by', keys: p.keys.map((k) => ({ key: k.key, dir: k.direction })) }, cols }; },
   },
 
   limit: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'n'], description: 'Cap rows.', properties: { stage: { const: 'limit' }, n: { type: 'integer', minimum: 1, maximum: 1000000 } } }),
+    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'n'], description: 'LIMIT (pipe `|> LIMIT`): cap the number of rows. Solves: top-N (after order_by), previews.', properties: { stage: { const: 'limit' }, n: { type: 'integer', minimum: 1, maximum: 1000000 } } }),
     build: ({ cols }, p) => ({ op: { op: 'limit', n: p.n }, cols }),
   },
 
   project: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'columns'], description: 'Keep only these columns.', properties: { stage: { const: 'project' }, columns: { type: 'array', minItems: 1, items: { type: 'string' } } } }),
+    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'columns'], description: 'SELECT (pipe `|> SELECT`): keep only these columns (drops the rest). Solves: trim the output to the columns of interest.', properties: { stage: { const: 'project' }, columns: { type: 'array', minItems: 1, items: { type: 'string' } } } }),
     build: ({ cols }, p) => { p.columns.forEach((c) => requireCol(cols, c)); const out = new Map(); for (const c of p.columns) out.set(c, cols.get(c) || { type: 'string' }); return { op: { op: 'project', cols: p.columns }, cols: out }; },
   },
 };

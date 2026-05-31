@@ -455,26 +455,20 @@ function buildOps(catalog, d, baseColumns, stages) {
   return { ops, cols };
 }
 
-// Chained-CTE assembly (works for both dialects), honoring a terminal stage
-// (e.g. match_recognize) that contributes its own CTEs + final SELECT.
+// Chained-CTE assembly (works for both dialects). A stage that renders itself
+// (op.render, e.g. match_recognize) contributes its own self-contained SELECT as
+// one CTE; all others use the dialect's stepCte.
 function assembleCteSql(d, dialectName, baseRelation, ops) {
   let prev = baseRelation;
   const ctes = [];
-  let finalSelect = null;
   for (const op of ops) {
-    if (op.terminal) {
-      const tail = op.renderTail(prev, dialectName);
-      for (const c of tail.ctes) ctes.push(c);
-      finalSelect = tail.finalSelect;
-      break; // a terminal stage must be last
-    }
     const name = `p${ctes.length}`;
-    ctes.push({ name, sql: d.stepCte(prev, op) });
+    const sql = op.render ? op.render(prev, dialectName) : d.stepCte(prev, op);
+    ctes.push({ name, sql });
     prev = name;
   }
-  if (finalSelect === null) finalSelect = `SELECT * FROM ${prev}`;
   const head = ctes.length ? `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\n` : '';
-  return head + finalSelect;
+  return `${head}SELECT * FROM ${prev}`;
 }
 
 /**
@@ -489,10 +483,10 @@ export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumn
 
 /**
  * Render a full pipeline over a catalog `source` to SQL for `dialectName`. A
- * pipeline WITHOUT a terminal stage uses the dialect-native form (Postgres
- * chained CTE, BigQuery `|>` pipe syntax); a pipeline ending in a terminal stage
- * (match_recognize) uses the chained-CTE assembly (MATCH_RECOGNIZE isn't a pipe
- * operator).
+ * pipeline whose stages all map to pipe operators uses the dialect-native form
+ * (Postgres chained CTE, BigQuery `|>` pipe syntax); if any stage requires CTE
+ * form (e.g. match_recognize — not a pipe operator) the whole pipeline uses the
+ * chained-CTE assembly.
  * @returns { sql, columns } — columns is the final tracked column set (Map).
  */
 export function renderPipeline(catalog, dialectName, source, stages = []) {
@@ -500,6 +494,6 @@ export function renderPipeline(catalog, dialectName, source, stages = []) {
   const m = catalog.getModel(source);
   const baseRelation = `{{ ref('${m.dbt_model}') }}`;
   const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source), stages);
-  const sql = ops.some((o) => o.terminal) ? assembleCteSql(d, dialectName, baseRelation, ops) : d.renderPipeline(baseRelation, ops);
+  const sql = ops.some((o) => o.requiresCte) ? assembleCteSql(d, dialectName, baseRelation, ops) : d.renderPipeline(baseRelation, ops);
   return { sql, columns: cols };
 }

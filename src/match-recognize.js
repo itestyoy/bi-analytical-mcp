@@ -15,16 +15,10 @@
 // MATCH / AFTER MATCH SKIP keywords), nested PATTERN enforces step order, GAP =
 // any non-step row, CLASSIFIER/aggregates in MEASURES.
 
-import yaml from 'js-yaml';
 import { jsonExtract, sqlLiteral } from './dialect.js';
-import { renderBaseModel } from './yaml-render.js';
-import { renderPipelineSql, registerStage, prepareColumns, anchorColumns } from './pipeline.js';
+import { registerStage, prepareColumns } from './pipeline.js';
 
-/** Dump a sequence semantic model (+metrics) to dbt YAML, ref('...') unquoted. */
-export function dumpSequenceYaml(sem) {
-  const body = yaml.dump({ semantic_models: sem.semantic_models, metrics: sem.metrics }, { lineWidth: 120, noRefs: true, quotingType: '"' });
-  return body.replace(/model: "(ref\('[^']+'\))"/g, 'model: $1');
-}
+const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
 /** Render a single comparison `lhs OP value` with the value bound as a literal. */
 function comparePred(lhs, op, value) {
@@ -106,7 +100,7 @@ export function buildPrefilter(catalog, spec, dialect, col) {
   return clauses.join(' AND ');
 }
 
-function resolve(catalog, spec, dialect) {
+function resolve(catalog, spec, dialect, availableCols = null) {
   if (!spec || !Array.isArray(spec.steps) || spec.steps.length < 2) {
     throw new Error('sequence requires at least 2 ordered steps');
   }
@@ -130,9 +124,10 @@ function resolve(catalog, spec, dialect) {
     ? spec.metrics
     : steps.map((s) => ({ name: `reached_${s.name}`, type: 'reached', step: s.name }));
 
-  // Columns added by the prepare pipeline (name -> { type }); referenceable in
-  // step `where` and agg_at_step like any other column.
-  const prepCols = prepareColumns(catalog, dialect, spec.prepare || []);
+  // Real columns referenceable in step `where` / agg_at_step (vs event_data
+  // properties). In a pipeline these are the columns produced by earlier stages
+  // (passed in as availableCols); standalone, they come from spec.prepare.
+  const prepCols = availableCols || prepareColumns(catalog, dialect, spec.prepare || []);
 
   // resolve metrics + collect which property values must be captured per step
   const propCaptures = []; // { id, idx, property, type, isColumn }
@@ -162,9 +157,6 @@ function resolve(catalog, spec, dialect) {
   return { m, partEntity, partCol, timeCol, mode, steps, metrics: resolved, propCaptures, prepCols, stepPreds };
 }
 
-// agg names -> MetricFlow measure aggregation names.
-const MF_AGG = { avg: 'average', sum: 'sum', min: 'min', max: 'max' };
-
 function nestedPattern(steps, withGap) {
   const sym = steps.map((s) => `S${s.idx}`);
   const gap = withGap ? 'GAP* ' : '';
@@ -172,145 +164,19 @@ function nestedPattern(steps, withGap) {
   return sym.length > 1 ? `(${sym[0]} (${nestFrom(1)})?)` : `(${sym[0]})`;
 }
 
-export function renderBigQuery(catalog, spec) {
-  const r = resolve(catalog, spec, 'bigquery');
-  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
-  const preds = r.stepPreds('bigquery', null); // for DEFINE we reference unqualified cols
-  const sym = r.steps.map((s) => `S${s.idx}`);
-
-  // MEASURES: step times t{idx} + captured property values pv_*
-  const measures = [
-    ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
-  ].join(',\n');
-
-  const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
-  if (r.mode !== 'strict') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
-
-  const outCols = r.metrics.map((mt) => `  ${bqMetricExpr(mt)} AS ${mt.name}`);
-  return `-- BigQuery MATCH_RECOGNIZE sequenced-funnel metrics
-SELECT
-${outCols.join(',\n')}
-FROM (
-  SELECT * FROM ${relation} MATCH_RECOGNIZE (
-    PARTITION BY ${r.partCol}
-    ORDER BY ${r.timeCol}
-    MEASURES
-${measures}
-    PATTERN ${nestedPattern(r.steps, r.mode !== 'strict')}
-    DEFINE
-${defines.join(',\n')}
-  )
-)`;
-}
-
-function bqMetricExpr(mt) {
-  switch (mt.type) {
-    case 'reached':
-    case 'completed': return `COUNTIF(t${mt.idx} IS NOT NULL)`;
-    case 'conversion': return `SAFE_DIVIDE(COUNTIF(t${mt.to} IS NOT NULL), COUNTIF(t${mt.from} IS NOT NULL))`;
-    case 'avg_seconds_between': return `AVG(TIMESTAMP_DIFF(t${mt.to}, t${mt.from}, SECOND))`;
-    case 'agg_at_step': return `${mt.agg}(${mt.capId})`;
-    default: throw new Error(`bq metric ${mt.type}`);
-  }
-}
-
-export function renderPostgres(catalog, spec) {
-  const r = resolve(catalog, spec, 'postgres');
-  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
-  const preds = r.stepPreds('postgres', null);
-  // captured property extractions live as columns in ev, carried by r{idx}
-  const capByIdx = new Map();
-  for (const c of r.propCaptures) {
-    (capByIdx.get(c.idx) || capByIdx.set(c.idx, []).get(c.idx)).push(c);
-  }
-  const evExtra = r.propCaptures.map((c) => `    (${jsonExtract('postgres', catalog.eventDataColumn(), c.property, c.type)}) AS ${c.id}`);
-  const evCols = [
-    ...preds.map((p, i) => `    (${p}) AS is${i + 1}`),
-    ...evExtra,
-  ].join(',\n');
-
-  let sql = `WITH ev AS (\n  SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${relation}\n)`;
-
-  const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
-  const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
-  // r1: first matching row per partition; rk: first step-k row after r{k-1}
-  let ctes = `r1 AS (SELECT DISTINCT ON (pk) pk, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY pk, ts)`;
-  for (let i = 2; i <= r.steps.length; i++) {
-    ctes += `,\nr${i} AS (SELECT DISTINCT ON (e.pk) e.pk, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON e.pk = r${i - 1}.pk WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY e.pk, e.ts)`;
-  }
-  // one row per user with t1..tn + captured pv
-  const joinSel = [
-    'r1.pk',
-    ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)),
-    ...r.propCaptures.map((c) => `r${c.idx}.${c.id}`),
-  ];
-  let joins = 'FROM r1';
-  for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (pk)`;
-  const perUser = `joined AS (SELECT ${joinSel.join(', ')} ${joins})`;
-
-  const outCols = r.metrics.map((mt) => `  ${pgMetricExpr(mt)} AS ${mt.name}`);
-  return `${sql},\n${ctes},\n${perUser}\nSELECT\n${outCols.join(',\n')}\nFROM joined`;
-}
-
-function pgMetricExpr(mt) {
-  switch (mt.type) {
-    case 'reached':
-    case 'completed': return `count(t${mt.idx})`;
-    case 'conversion': return `count(t${mt.to})::float / NULLIF(count(t${mt.from}), 0)`;
-    case 'avg_seconds_between': return `avg(EXTRACT(EPOCH FROM (t${mt.to} - t${mt.from})))`;
-    case 'agg_at_step': return `${mt.agg.toLowerCase()}(${mt.capId})`;
-    default: throw new Error(`pg metric ${mt.type}`);
-  }
-}
-
-export function renderSequence(catalog, spec) {
-  const r = resolve(catalog, spec, 'postgres');
-  return {
-    mode: r.mode,
-    steps: r.steps.map((s) => s.name),
-    metrics: r.metrics.map((m) => m.name),
-    sql_bigquery: renderBigQuery(catalog, spec),
-    sql_postgres: renderPostgres(catalog, spec),
-  };
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MATERIALIZED model: one ROW PER USER (furthest step, step times, completion,
-// value-at-step), so a core MetricFlow semantic model can be built ON TOP of it
-// (count_distinct users by furthest step, conversion ratios, avg time-between,
-// JOINs to user attributes). This is the recommended pattern.
+// match_recognize as a COMPOSABLE pipeline stage. It consumes the previous
+// relation and emits ONE self-contained CTE producing one row per user/session
+// match (t-times, reached_<step> flags, furthest_step_name, completed, captured
+// metric values). Because it's a normal (non-terminal) stage, downstream stages
+// (join dim_users, where, aggregate, pivot…) slice/aggregate the funnel — e.g.
+// conversion by country — entirely within the pipeline. No separate semantic
+// model: the funnel is just part of the pipeline whose rows are the result.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Per-user sequence model SELECT (Postgres) — runnable on PGlite for data tests. */
-export function renderPerUserModelPostgres(catalog, spec) {
-  const r = resolve(catalog, spec, 'postgres');
-  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
-  const pre = buildPrefilter(catalog, spec, 'postgres', null);
-  const baseForPrep = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
-  // The funnel IS a pipeline: prepare stages (derive/unnest) then a terminal
-  // match_recognize stage — rendered by the unified pipeline engine.
-  const stages = [...(spec.prepare || []), { stage: 'match_recognize', _resolved: r }];
-  return renderPipelineSql(catalog, 'postgres', baseForPrep, anchorColumns(catalog), stages);
-}
-
-/** Per-user sequence model SELECT (BigQuery MATCH_RECOGNIZE) — production target. */
-export function renderPerUserModelBigQuery(catalog, spec) {
-  const r = resolve(catalog, spec, 'bigquery');
-  const relation = spec.relation || `{{ ref('${r.m.dbt_model}') }}`;
-  const pre = buildPrefilter(catalog, spec, 'bigquery', null);
-  const baseForPrep = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
-  const stages = [...(spec.prepare || []), { stage: 'match_recognize', _resolved: r }];
-  return renderPipelineSql(catalog, 'bigquery', baseForPrep, anchorColumns(catalog), stages);
-}
-
-// ── match_recognize as a pipeline stage ──────────────────────────────────────
-// The row-pattern sequence is just a (terminal) stage: it consumes the prepared
-// relation and emits one row per user/session match. Registered into the shared
-// pipeline registry so the whole funnel runs through one engine.
-
-/** Postgres lowering: ev + per-step (r1..rn) + joined CTEs and the per-user SELECT. */
-export function matchTailPostgres(r, fromRel, catalog) {
+/** Postgres lowering: a single SELECT (nested WITH ev/r1..rn/joined) over fromRel. */
+export function matchStepPostgres(r, fromRel, catalog) {
   if (r.mode === 'strict') {
     throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the Postgres equivalent");
   }
@@ -340,11 +206,11 @@ export function matchTailPostgres(r, fromRel, catalog) {
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `  , EXTRACT(EPOCH FROM (j.t${m.to} - j.t${m.from})) AS secs_${m.name}`),
     ...r.propCaptures.map((c) => `  , j.${c.id}`),
   ];
-  return { ctes, finalSelect: `SELECT\n${out.join('\n')}\nFROM joined j` };
+  return `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\nSELECT\n${out.join('\n')}\nFROM joined j`;
 }
 
-/** BigQuery lowering: a single SELECT … FROM <prepared> MATCH_RECOGNIZE(…). */
-export function matchTailBigQuery(r, fromRel, catalog) {
+/** BigQuery lowering: a single SELECT … FROM fromRel MATCH_RECOGNIZE(…). */
+export function matchStepBigQuery(r, fromRel, catalog) {
   const preds = r.stepPreds('bigquery', null);
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
@@ -356,7 +222,7 @@ export function matchTailBigQuery(r, fromRel, catalog) {
   const furthestCase = r.steps.slice().reverse().map((s) => `WHEN t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
   const reached = r.steps.map((s) => `    t${s.idx} IS NOT NULL AS reached_${s.name}`);
   const secs = r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `    TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`);
-  const finalSelect = `  SELECT
+  return `SELECT
     ${r.partCol},
     t1 AS first_seen_at,
     CASE ${furthestCase} END AS furthest_step_name,
@@ -373,7 +239,6 @@ ${measures}
     DEFINE
 ${defines.join(',\n')}
   )`;
-  return { ctes: [], finalSelect };
 }
 
 /** Per-user columns the match_recognize stage exposes (for downstream stages). */
@@ -385,79 +250,51 @@ function matchOutputColumns(r) {
   return cols;
 }
 
+/** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
+function matchRecognizeSchema(catalog) {
+  const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
+  const userAttrCols = [...new Set(catalog.joinableModelKeys().flatMap((k) => catalog.modelDimensionColumns(k)))];
+  const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property or an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME }, op: { enum: CMP }, value: {} } };
+  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Event(s) that satisfy this step.' }, where: { type: 'array', items: stepWhere, description: 'Extra conditions narrowing the step.' } } };
+  const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'avg', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
+  return {
+    type: 'object', additionalProperties: false, required: ['stage', 'steps'],
+    description: 'MATCH_RECOGNIZE (pipe `|> MATCH_RECOGNIZE`): an ordered row-pattern funnel/path over the (prepared) relation, partitioned per user/session. Emits ONE ROW PER MATCH with reached_<step> flags, furthest_step_name, completed, t-times and captured metric values — which downstream stages (join/where/aggregate/pivot) can slice/aggregate (e.g. conversion by country). Solves: funnels, conversion, time-between-steps.',
+    properties: {
+      stage: { const: 'match_recognize' },
+      partition_by: { enum: ['user', 'session'], default: 'user', description: 'Partition the match per user or per session.' },
+      mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order with gaps allowed; strict = adjacent (BigQuery target only).' },
+      filter: {
+        type: 'object', additionalProperties: false, description: 'Optional pre-filter applied to the input BEFORE matching (speed; narrows population only).',
+        properties: {
+          time_range: { type: 'object', additionalProperties: false, properties: { start: { type: 'string' }, end: { type: 'string' } }, description: 'Event-time window (ISO).' },
+          event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Only scan these events.' },
+          where: { type: 'array', items: stepWhere, description: 'event_data/column conditions ANDed across the scan.' },
+          user_segment: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['property', 'op'], properties: { property: { type: 'string', enum: userAttrCols }, op: { enum: CMP }, value: {} } }, description: 'Semi-join filter on dim_users attributes (e.g. country=US).' },
+        },
+      },
+      steps: { type: 'array', minItems: 2, items: step, description: 'The ordered funnel steps (>= 2).' },
+      metrics: { type: 'array', items: metric, description: 'Metrics per match; defaults to a reached flag per step.' },
+    },
+  };
+}
+
 registerStage('match_recognize', {
-  schema: () => ({
-    type: 'object', additionalProperties: true, required: ['stage'],
-    description: 'Row-pattern sequence (funnel) over the prepared relation — a TERMINAL stage producing one row per user/session match.',
-    properties: { stage: { const: 'match_recognize' } },
-  }),
-  build: ({ d, catalog }, p) => {
-    const r = p._resolved || resolve(catalog, p.spec, d.name);
+  schema: (catalog) => matchRecognizeSchema(catalog),
+  build: ({ d, catalog, cols }, p) => {
+    const spec = p._resolved ? p.spec : p; // accept a stage object OR a preresolved wrapper
+    const r = p._resolved || resolve(catalog, spec, d.name, cols);
     return {
-      op: { op: 'match_recognize', terminal: true, renderTail: (prev, dn) => (dn === 'bigquery' ? matchTailBigQuery(r, prev, catalog) : matchTailPostgres(r, prev, catalog)) },
+      op: {
+        op: 'match_recognize',
+        requiresCte: true, // MATCH_RECOGNIZE is not a pipe operator → CTE-form lowering
+        render: (prev, dn) => {
+          const pre = buildPrefilter(catalog, spec, dn, null);
+          const fromRel = pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev;
+          return dn === 'bigquery' ? matchStepBigQuery(r, fromRel, catalog) : matchStepPostgres(r, fromRel, catalog);
+        },
+      },
       cols: matchOutputColumns(r),
     };
   },
 });
-
-/**
- * Core semantic-model declaration (measures/dimensions/metrics) OVER the
- * materialized per-user model `modelName`. user is the primary entity (one row
- * per user) → joins to dim_users; furthest_step_name is a dimension.
- */
-export function sequenceSemanticModel(catalog, spec, modelName) {
-  const r = resolve(catalog, spec, 'postgres');
-  const measures = [
-    { name: 'users', agg: 'count', expr: '1' },
-    ...r.steps.map((s) => ({ name: `reached_${s.name}`, agg: 'sum_boolean', expr: `reached_${s.name}` })),
-    { name: 'completed', agg: 'sum_boolean', expr: 'completed' },
-    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => ({ name: m.name, agg: 'average', expr: `secs_${m.name}` })),
-    ...r.metrics.filter((m) => m.type === 'agg_at_step').map((m) => ({ name: m.name, agg: MF_AGG[m.agg.toLowerCase()] || m.agg.toLowerCase(), expr: m.capId })),
-  ];
-  const dedupMeasures = [...new Map(measures.map((mm) => [mm.name, mm])).values()];
-  // The view exposes ONLY its own (sequence-derived) columns as dimensions.
-  // User attributes live on dim_users and are reached by JOIN at the semantic
-  // layer (see below) — they are NOT baked into the view.
-  const dims = [
-    { name: 'first_seen', type: 'time', type_params: { time_granularity: 'day' }, expr: 'first_seen_at' },
-    { name: 'furthest_step_name', type: 'categorical' },
-  ];
-  // The view's primary entity and its key column are the partition entity and
-  // its anchor key column — both resolved from the catalog (no hardcoded
-  // 'user'/'appsflyer_id'). The key column carried into the view is r.partCol.
-  const sm = {
-    name: modelName,
-    model: `ref('${modelName}')`,
-    defaults: { agg_time_dimension: 'first_seen' },
-    entities: [{ name: r.partEntity, type: 'primary', expr: r.partCol }],
-    dimensions: dims,
-    measures: dedupMeasures.map((mm) => ({ name: mm.name, agg: mm.agg, expr: mm.expr, agg_time_dimension: 'first_seen' })),
-  };
-  const localDimensionNames = ['furthest_step_name'];
-
-  // Joinable dimension semantic model: the model whose PRIMARY entity is the
-  // partition entity (resolved from the catalog) shares that entity with the
-  // view, so MetricFlow performs the attribute join during SQL generation. The
-  // join is declared, not materialized in the view.
-  const semantic_models = [sm];
-  const userAttrNames = [];
-  const dimKey = catalog.dimensionModelForEntity(r.partEntity);
-  if (dimKey) {
-    semantic_models.push(renderBaseModel(catalog, dimKey));
-    for (const name of Object.keys(catalog.getModel(dimKey).dimensions || {})) userAttrNames.push(name);
-  }
-  const dimensionNames = [...localDimensionNames, ...userAttrNames];
-
-  // metrics: simple per measure + ratios for declared conversions
-  const metricNames = [];
-  const metrics = [];
-  const addSimple = (name) => { if (!metricNames.includes(name)) { metrics.push({ name, label: name, type: 'simple', type_params: { measure: { name } } }); metricNames.push(name); } };
-  for (const mm of dedupMeasures) addSimple(mm.name);
-  for (const m of r.metrics) {
-    if (m.type === 'conversion') {
-      metrics.push({ name: m.name, label: m.name, type: 'ratio', type_params: { numerator: { name: `reached_${spec.steps[m.to - 1].name}` }, denominator: { name: `reached_${spec.steps[m.from - 1].name}` } } });
-      metricNames.push(m.name);
-    }
-  }
-  return { semantic_models, metrics, metricNames, dimensionNames, localDimensionNames, userAttrNames, entity: r.partEntity, groupable: ['metric_time', ...dimensionNames] };
-}

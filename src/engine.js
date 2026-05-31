@@ -8,7 +8,7 @@ import { renderContext } from './yaml-render.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
-import { renderPerUserModelPostgres, renderPerUserModelBigQuery, sequenceSemanticModel, dumpSequenceYaml } from './match-recognize.js';
+import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { renderPipeline } from './pipeline.js';
 import { JobManager } from './jobs.js';
 import { buildProjection } from './projection.js';
@@ -137,92 +137,14 @@ export class Engine {
   }
 
   /**
-   * Register a derived dbt model (e.g. a MATCH_RECOGNIZE sequence VIEW) and a
-   * semantic model on top of it. Kept SEPARATE from create_semantic_model so the
-   * row-pattern SQL and MetricFlow are not mixed. After registration the model's
-   * metrics/dimensions are queryable via query_semantic_model like any other.
+   * Register a derived dbt model from a declarative PIPELINE (source + ordered
+   * stages, optionally ending in a match_recognize funnel). The pipeline's rows
+   * ARE the result. Funnels are just pipelines: match_recognize is a stage, and
+   * downstream join/aggregate slice it by user attributes — no separate engine.
    */
-  /** Generate the view SQL + semantic model for a sequence spec. */
-  _nativeArtifacts(input, ctxId) {
-    // Suffix the model name with the context id so the same task name in
-    // different contexts maps to DISTINCT warehouse relations (no collision in
-    // the shared target schema). ctxId is stable across update_native_model, so
-    // a rebuild re-materializes the same relation in place. dry_run (no context)
-    // returns the un-suffixed preview name.
-    const modelName = ctxId ? `seq_${input.name}_${ctxId}` : `seq_${input.name}`;
-    const dialect = this.catalog.dialect;
-    const eventsModel = this.catalog.getModel(this.catalog.anchor).dbt_model;
-    // The view references only the events fact (via ref). The dimensional join is
-    // declared in the semantic model (executed by MetricFlow); the optional
-    // filter.user_segment semi-join resolves its own ref() relation from the
-    // catalog. No hardcoded model names here.
-    const seqSpec = { ...input.sequence, relation: `{{ ref('${eventsModel}') }}` };
-    const modelSql = dialect === 'bigquery' ? renderPerUserModelBigQuery(this.catalog, seqSpec) : renderPerUserModelPostgres(this.catalog, seqSpec);
-    const bqSql = dialect === 'bigquery' ? modelSql : renderPerUserModelBigQuery(this.catalog, seqSpec);
-    const sem = sequenceSemanticModel(this.catalog, seqSpec, modelName);
-    return { modelName, dialect, modelSql, bqSql, sem };
-  }
-
-  /** Write the view + semantic model into the context overlay, build + parse. */
-  async _materializeNative(input, ctx, art) {
-    const materialized = input.materialized || 'view';
-    ctx.state.engine = 'match_recognize';
-    ctx.state.model = art.modelName;
-    ctx.state.seqMetrics = art.sem.metricNames;
-    ctx.state.seqGroupable = art.sem.dimensionNames;
-    ctx.state.seqEntity = art.sem.entity; // primary entity of the view (e.g. user)
-    // full introspection of the registered model (behaves like a normal dbt model)
-    ctx.state.native = {
-      model: art.modelName,
-      materialized: input.materialized || 'view',
-      entity: art.sem.entity,
-      dimensions: art.sem.dimensionNames,
-      measures: art.sem.semantic_models[0].measures.map((mm) => mm.name),
-      metrics: art.sem.metricNames,
-    };
-    if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
-    const header = sqlConfigHeader('native_model', { name: input.name, sequence: input.sequence });
-    this.ctxs.writeModel(ctx.id, art.modelName, `{{ config(materialized='${materialized}') }}\n${header}${art.modelSql}\n`);
-    this.ctxs.writeYaml(ctx.id, dumpSequenceYaml(art.sem));
-    this.ctxs.touch(ctx.id);
-    let build = { ok: true, skipped: 'no runner' };
-    if (this.runner) {
-      const r = await this.runner.run(this.ctxs.dir(ctx.id), art.modelName);
-      if (!r.ok) return { ok: false, build: { ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) } } };
-      const p = await this.runner.parse(this.ctxs.dir(ctx.id));
-      build = p.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(p.stdout, p.stderr) } };
-    }
-    return { ok: build.ok !== false, build, materialized };
-  }
-
   async register_native_model(input) {
     this._validate('register_native_model', input);
-    if (input.pipeline) return this._registerPipeline(input);
-    if (input.dry_run) {
-      const art = this._nativeArtifacts(input); // un-suffixed preview (no context yet)
-      return { kind: 'match_recognize', dry_run: true, model: art.modelName, materialized: input.materialized || 'view', dialect: art.dialect, model_sql: art.modelSql, model_sql_bigquery: art.bqSql, semantic_yaml: dumpSequenceYaml(art.sem), metrics: art.sem.metricNames, dimensions: art.sem.dimensionNames };
-    }
-    const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
-    const art = this._nativeArtifacts(input, ctx.id); // context-unique model name
-    const m = await this._materializeNative(input, ctx, art);
-    if (!m.ok) return { context_id: ctx.id, kind: 'match_recognize', ok: false, error: m.build.error };
-    return {
-      context_id: ctx.id,
-      kind: 'match_recognize',
-      model: art.modelName,
-      materialized: m.materialized,
-      dialect: art.dialect,
-      registered: { model: art.modelName, metrics: art.sem.metricNames, dimensions: art.sem.dimensionNames },
-      metrics: art.sem.metricNames,
-      groupable: art.sem.dimensionNames,
-      model_sql_bigquery: art.bqSql,
-      build: m.build,
-      assumptions: [
-        `MATCH_RECOGNIZE registered as a ${m.materialized} model (${art.modelName}); a semantic model is built on it.`,
-        'It now behaves like a base model: query its metrics/dimensions via query_semantic_model.',
-      ],
-      warnings: [],
-    };
+    return this._registerPipeline(input);
   }
 
   /**
@@ -272,15 +194,10 @@ export class Engine {
     };
   }
 
-  /** Update a registered native model in place (re-generate + rebuild the view). */
+  /** Update a registered native model in place (re-generate + rebuild). */
   async update_native_model(input) {
     this._validate('update_native_model', input);
-    if (input.pipeline) return this._registerPipeline(input);
-    const ctx = this.ctxs.get(input.context_id);
-    const art = this._nativeArtifacts(input, ctx.id); // same ctx -> same relation, rebuilt in place
-    const m = await this._materializeNative(input, ctx, art);
-    if (!m.ok) return { context_id: ctx.id, kind: 'match_recognize', ok: false, error: m.build.error };
-    return { context_id: ctx.id, kind: 'match_recognize', model: art.modelName, materialized: m.materialized, metrics: art.sem.metricNames, groupable: art.sem.dimensionNames, build: m.build, warnings: [] };
+    return this._registerPipeline(input);
   }
 
   /** Delete a registered native model: remove its files + state and re-parse. */

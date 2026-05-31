@@ -5,7 +5,7 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
-import { stageSchemas, pipelineStageSchema } from './pipeline.js';
+import { pipelineStageSchema } from './pipeline.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
@@ -31,20 +31,6 @@ function whereItemSchema(catalog) {
       property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property to test.' },
       op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator. Use in/not_in with an array value; the rest take a scalar.' },
       value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in. Always bound as a parameter/escaped literal (never interpolated as SQL).' },
-    },
-  };
-}
-
-// Sequence-step condition: a scalar event_data property OR a prepare-derived
-// column (validated at render against the prepare columns + scalar props).
-function seqWhereItem(catalog) {
-  return {
-    type: 'object', additionalProperties: false, required: ['property', 'op'],
-    description: 'A step condition on a scalar event_data property or a prepare-derived column.',
-    properties: {
-      property: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,40}$', description: 'Scalar event_data property or a prepare-derived column name.' },
-      op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' },
-      value: { description: 'Literal value(s); array for in/not_in.' },
     },
   };
 }
@@ -272,19 +258,6 @@ function predicateDefs(catalog) {
 
 export function buildSchemas(catalog) {
   const modelKeys = catalog.modelKeys();
-  // Attribute columns available for filter.user_segment = dimensions of the
-  // joinable (non-anchor) dimension models — derived from the catalog, not a
-  // hardcoded model key.
-  const userAttrCols = [...new Set(catalog.joinableModelKeys().flatMap((k) => catalog.modelDimensionColumns(k)))];
-  const sequenceStep = {
-    type: 'object', additionalProperties: false, required: ['name', 'event_name'],
-    description: 'One ordered step of the sequence/funnel: an event (optionally narrowed by event_data property values).',
-    properties: {
-      name: { type: 'string', pattern: NAME, description: 'Step name (lowercase snake_case); used in generated columns/metrics like reached_<name>.' },
-      event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Event(s) that constitute this step.' },
-      where: { type: 'array', description: 'Conditions on a scalar event_data property or a prepare-derived column that further define the step (e.g. step_id=step_1).', items: seqWhereItem(catalog) },
-    },
-  };
   const create = {
     type: 'object',
     additionalProperties: false,
@@ -301,66 +274,23 @@ export function buildSchemas(catalog) {
     },
   };
 
-  // register_native_model: build a derived dbt model (e.g. a MATCH_RECOGNIZE sequence
-  // VIEW) and expose it to the semantic layer — kept SEPARATE from the semantic
-  // query so the row-pattern SQL and MetricFlow don't get mixed up.
+  // register_native_model: build a derived dbt model from a declarative PIPELINE
+  // (a pipe-syntax transformation, optionally ending in a match_recognize funnel)
+  // and materialize it. The pipeline's rows ARE the result.
   const registerModel = {
-    type: 'object', additionalProperties: false, required: ['name'],
-    oneOf: [{ required: ['sequence'] }, { required: ['pipeline'] }],
-    description: 'Build a derived dbt model and materialize it. Two shapes: `sequence` = an ordered MATCH_RECOGNIZE funnel/path with a semantic model on top (its metrics/dimensions become queryable via query_semantic_model); `pipeline` = a general pipe-syntax transformation (source + ordered stages: where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, optionally ending in match_recognize) whose ROWS are the result (returned, and re-readable/sliceable via get_query_result). Provide exactly one of `sequence` or `pipeline`.',
+    type: 'object', additionalProperties: false, required: ['name', 'pipeline'],
+    description: 'Build a derived dbt model from a pipe-syntax PIPELINE (a `source` + ordered `stages`: where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Materialized as a dbt model whose ROWS are the result (returned, and re-readable/sliceable via get_query_result). Funnels are pipelines too: add a match_recognize stage, then slice it with downstream join/aggregate (e.g. conversion by country) — no separate engine.',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
-      name: { type: 'string', pattern: TASK, description: 'Native model name (lowercase snake_case); generated as seq_<name> (sequence) or pipe_<name> (pipeline).' },
-      kind: { enum: ['match_recognize', 'pipeline'], default: 'match_recognize', description: 'Derived-model engine: match_recognize (sequence funnel) or pipeline (general transformation).' },
-      materialized: { enum: ['view', 'table'], default: 'view', description: 'dbt materialization of the generated model: view (always fresh) or table (precomputed snapshot). Pipelines default to table.' },
-      dry_run: { type: 'boolean', description: 'If true, return the generated SQL (+ semantic YAML for sequences) WITHOUT building anything.' },
+      name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
+      materialized: { enum: ['view', 'table'], default: 'table', description: 'dbt materialization: table (precomputed, default) or view (always fresh).' },
+      dry_run: { type: 'boolean', description: 'If true, return the generated SQL WITHOUT building anything.' },
       pipeline: {
         type: 'object', additionalProperties: false, required: ['stages'],
-        description: 'A general transformation pipeline (pipe-syntax): a `source` table + ordered `stages`. Materialized as a dbt model whose rows ARE the result. Use for aggregate/pivot/window/compute/sample analytics; use `sequence` for ordered funnels.',
+        description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
         properties: {
           source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table for the pipeline (default: the events fact).' },
-          stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages applied left-to-right; each transforms the previous output.' },
-        },
-      },
-      sequence: {
-        type: 'object', additionalProperties: false, required: ['steps'],
-        description: 'Ordered steps (each = event + optional event_data property), partitioned by user/session, with optional sequence metrics.',
-        properties: {
-          partition_by: { enum: ['user', 'session'], default: 'user', description: 'Partition the row-pattern match per user or per session.' },
-          mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order but other events may occur between them (gaps allowed); strict = each step must be the immediately next event (BigQuery target only).' },
-          filter: {
-            type: 'object', additionalProperties: false,
-            description: 'Optional PRE-FILTER applied to the events BEFORE the row-pattern match — slices the data scanned so the build/query runs faster. It narrows the population only; it does NOT redefine the steps.',
-            properties: {
-              time_range: { type: 'object', additionalProperties: false, description: 'Restrict the scan to an event-time window (ISO dates). Biggest speed-up — prunes by date.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } },
-              event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Only scan these events; drop all other event rows before matching. In ordered mode this is a safe, large speed-up (the funnel only depends on the step events).' },
-              where: { type: 'array', description: 'event_data property conditions ANDed across the WHOLE scan. Use only for properties present on every scanned event (else rows lacking the property are dropped).', items: whereItemSchema(catalog) },
-              user_segment: { type: 'array', description: 'Keep only events whose user matches these dim_users attributes (a semi-join FILTER — no columns are carried into the view; attributes for grouping still come from the semantic-layer join). E.g. country=US to build the funnel for one segment.', items: { type: 'object', additionalProperties: false, required: ['property', 'op'], properties: { property: { type: 'string', enum: userAttrCols, description: 'dim_users attribute to filter on.' }, op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator (array value for in/not_in).' }, value: { description: 'Literal value(s) to match.' } } } },
-            },
-          },
-          prepare: {
-            type: 'array',
-            description: 'Optional ORDERED data-prep pipeline applied (after filter) BEFORE the row-pattern match — a chain of transform stages that prepare the dataset (e.g. derive a scalar from an array/struct property, or unnest an array). Each stage builds on the previous; the columns they add are referenceable in step `where` and agg_at_step metrics. Use this for complex (array / array-of-struct) event_data properties, which cannot be used directly.',
-            items: stageSchemas(catalog, ['derive', 'unnest']),
-          },
-          steps: { type: 'array', minItems: 2, items: sequenceStep, description: 'The ordered funnel steps (>= 2).' },
-          metrics: {
-            type: 'array',
-            description: 'Sequence metrics computed in the view and aggregated by the semantic model. If omitted, defaults to a reached-count per step.',
-            items: {
-              type: 'object', additionalProperties: false, required: ['name', 'type'],
-              description: 'A metric over each user\'s matched sequence.',
-              properties: {
-                name: { type: 'string', pattern: NAME, description: 'Metric name (lowercase snake_case).' },
-                type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'], description: 'reached: users reaching `step`; completed: users reaching the last step; conversion: reached(to)/reached(from); avg_seconds_between: mean seconds from `from` to `to`; agg_at_step: aggregate a `property` captured at `step`.' },
-                step: { type: 'string', description: 'Target step name (for reached / agg_at_step).' },
-                from: { type: 'string', description: 'Origin step name (for conversion / avg_seconds_between).' },
-                to: { type: 'string', description: 'Destination step name (for conversion / avg_seconds_between).' },
-                agg: { enum: ['sum', 'avg', 'min', 'max'], description: 'Aggregation for agg_at_step.' },
-                property: { type: 'string', pattern: NAME, description: 'Scalar event_data property OR a prepare-derived column to aggregate for agg_at_step.' },
-              },
-            },
-          },
+          stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
         },
       },
     },

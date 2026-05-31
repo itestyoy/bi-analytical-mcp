@@ -204,11 +204,10 @@ export class Engine {
   async delete_native_model(input) {
     this._validate('delete_native_model', input);
     const ctx = this.ctxs.get(input.context_id);
-    if (ctx.state.engine !== 'match_recognize' && ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native model registered in this context' };
+    if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native (pipeline) model registered in this context' };
     const model = ctx.state.model;
     this.ctxs.removeGeneratedFile(ctx.id, `${model}.sql`);
-    this.ctxs.removeGeneratedFile(ctx.id, 'context.yml');
-    delete ctx.state.engine; delete ctx.state.model; delete ctx.state.seqMetrics; delete ctx.state.seqGroupable;
+    delete ctx.state.engine; delete ctx.state.model; delete ctx.state.native;
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, skipped: 'no runner' };
@@ -321,10 +320,10 @@ export class Engine {
   async describe_context(input) {
     this._validate('describe_context', input);
     const ctx = this.ctxs.get(input.context_id);
-    // a registered native (MATCH_RECOGNIZE) model behaves like a normal dbt
-    // model: report its model name, dimensions (properties), measures, metrics,
-    // and the REAL physical columns of its view (adapter introspection).
-    if (ctx.state.engine === 'match_recognize') {
+    // A pipeline-registered model is a normal dbt model whose rows are the result.
+    // Report its model name, the pipeline's output columns, and the REAL physical
+    // columns of the relation (adapter introspection). Read it via get_query_result.
+    if (ctx.state.engine === 'pipeline') {
       const n = ctx.state.native || {};
       let physical = null;
       if (this.runner && n.model) {
@@ -333,14 +332,11 @@ export class Engine {
       }
       return {
         context_id: ctx.id,
-        engine: 'match_recognize',
+        engine: 'pipeline',
         tasks: ctx.state.tasks || [],
-        models: [{ model: n.model, materialized: n.materialized, dimensions: n.dimensions || [], measures: n.measures || [], metrics: n.metrics || [], physical_columns: physical }],
-        semantic_models: [n.model],
-        dimensions: n.dimensions || [],
-        measures: n.measures || [],
-        metrics: n.metrics || [],
-        groupable: [...(ctx.state.seqGroupable || [])],
+        models: [{ model: n.model, materialized: n.materialized, columns: n.columns || [], physical_columns: physical }],
+        columns: n.columns || [],
+        read_with: 'get_query_result',
         files: this.ctxs.generatedFiles(ctx.id),
       };
     }
@@ -361,54 +357,10 @@ export class Engine {
     this._validate('query_semantic_model', input);
     const ctx = this.ctxs.get(input.context_id);
 
-    // match_recognize contexts are a core semantic model OVER a generated VIEW;
-    // query them through MetricFlow (full metric/join power).
-    if (ctx.state.engine === 'match_recognize') {
-      const known = new Set(ctx.state.seqMetrics);
-      for (const m of input.metrics || []) if (!known.has(m)) throw new ToolError(`unknown metric in context: ${m}`, { stage: 'validate', field: m });
-      const reachable = new Set(ctx.state.seqGroupable);
-      const entity = ctx.state.seqEntity || 'user'; // the view's primary entity
-      const groupBy = [];
-      for (const g of input.group_by || []) {
-        if (typeof g === 'object' && g.time === 'metric_time') groupBy.push(`metric_time__${g.grain || 'day'}`);
-        else if (typeof g === 'string') {
-          if (!reachable.has(g)) throw new ToolError(`group_by not available on this view: ${g}. Available: ${[...reachable].join(', ')}`, { stage: 'validate', field: g });
-          // local dims + joined dimension-model attrs resolve via the shared entity
-          groupBy.push(`${entity}__${g}`);
-        }
-      }
-      // where: dimension paths resolve to <entity>__<path> (same as group_by);
-      // metric_time is handled by renderWhereClauses. (Previously dropped — H1.)
-      let where = [];
-      if (input.where) {
-        const translated = clone(input.where);
-        walkPredicates(translated, (p) => {
-          if (p.field?.kind === 'dimension') {
-            if (!reachable.has(p.field.path)) throw new ToolError(`where not available on this view: ${p.field.path}`, { stage: 'validate', field: p.field.path });
-            p.field.path = `${entity}__${p.field.path}`;
-          }
-        });
-        where = renderWhereClauses(translated);
-      }
-      // order_by keys must be a requested metric or a resolved group-by token.
-      const seqOrderable = new Set([...(input.metrics || []), ...groupBy]);
-      for (const o of input.order_by || []) {
-        if (!seqOrderable.has(o.key)) throw new ToolError(`order_by key not in metrics/group_by: ${o.key}`, { stage: 'validate', field: o.key });
-      }
-      const seqOrderBy = (input.order_by || []).map((o) => `${o.direction === 'desc' ? '-' : ''}${o.key}`);
-      if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
-      const qopts = { metrics: input.metrics, groupBy, where, orderBy: seqOrderBy, startTime: input.time_range?.start, endTime: input.time_range?.end, limit: (input.limit ?? 1000) };
-      const explain = !!(input.dry_run || input.explain);
-      if (input.materialize && !explain) return this._materialize(ctx, qopts, input);
-      const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
-      if (!res.ok) return { ok: false, engine: 'match_recognize', command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
-      if (explain) {
-        const out = { ok: true, engine: 'match_recognize', command: res.command, sql: res.sql };
-        if (input.dry_run) out.dry_run = true;
-        if (input.explain) { out.explain = true; out.plan = res.plan; }
-        return out;
-      }
-      return { ok: true, engine: 'match_recognize', command: res.command, columns: res.columns, rows: res.rows, row_count: res.rows.length };
+    // A pipeline-registered model has no MetricFlow semantic model — its rows ARE
+    // the result. Read/slice/sample them with get_query_result instead.
+    if (ctx.state.engine === 'pipeline') {
+      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}); read its rows with get_query_result (table: ${ctx.state.model}), not query_semantic_model`, { stage: 'validate' });
     }
 
     if (!input.metrics?.length) throw new ToolError('metrics is required for core (MetricFlow) queries', { stage: 'validate' });

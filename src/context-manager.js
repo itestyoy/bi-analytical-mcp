@@ -5,6 +5,7 @@
 import { randomBytes } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { sqlConfigHeader } from './sql-header.js';
 
 // A daily time spine is REQUIRED by MetricFlow for metric_time, grains,
 // cumulative and conversion metrics. We guarantee the model file is always
@@ -12,14 +13,15 @@ import { join } from 'node:path';
 // materialized in the warehouse (dbt run --select metricflow_time_spine) — that
 // is the base project's responsibility; the server only guarantees the file.
 function timeSpineSql(dialect, start, end) {
+  const header = sqlConfigHeader('time_spine', { model: 'metricflow_time_spine', dialect, start, end, granularity: 'day' });
   if (dialect === 'bigquery') {
-    return `{{ config(materialized='table') }}\nselect d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d\n`;
+    return `{{ config(materialized='table') }}\n${header}select d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d\n`;
   }
   if (dialect === 'snowflake') {
-    return `{{ config(materialized='table') }}\nselect dateadd(day, seq4(), '${start}'::date) as date_day\nfrom table(generator(rowcount => datediff(day, '${start}'::date, '${end}'::date) + 1))\n`;
+    return `{{ config(materialized='table') }}\n${header}select dateadd(day, seq4(), '${start}'::date) as date_day\nfrom table(generator(rowcount => datediff(day, '${start}'::date, '${end}'::date) + 1))\n`;
   }
   // postgres / default
-  return `{{ config(materialized='table') }}\nselect d::date as date_day\nfrom generate_series('${start}'::date, '${end}'::date, interval '1 day') as d\n`;
+  return `{{ config(materialized='table') }}\n${header}select d::date as date_day\nfrom generate_series('${start}'::date, '${end}'::date, interval '1 day') as d\n`;
 }
 
 const TIME_SPINE_YML = `models:

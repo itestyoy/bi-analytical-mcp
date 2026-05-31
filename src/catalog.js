@@ -207,9 +207,30 @@ export class Catalog {
     return this.models[this.anchor]?.known_events || [];
   }
 
-  /** event_properties keys. */
+  /** event_properties keys (all, including complex array/struct ones). */
   eventProps() {
     return Object.keys(this.models[this.anchor]?.properties || {});
+  }
+
+  /** Full spec for one event_data property ({ type, items?, fields?, values?, description? }). */
+  eventPropertySpec(name) {
+    return (this.models[this.anchor]?.properties || {})[name];
+  }
+
+  /** True if a property is a complex (array / struct / array-of-struct) type. */
+  isComplexEventProp(name) {
+    const t = String(this.eventPropertySpec(name)?.type || '').toLowerCase();
+    return t === 'array' || t === 'struct' || t === 'array<struct>';
+  }
+
+  /** SCALAR event_property keys — usable directly as categorical dims / scalar filters. */
+  scalarEventProps() {
+    return this.eventProps().filter((k) => !this.isComplexEventProp(k));
+  }
+
+  /** COMPLEX (array/struct) event_property keys — only usable via prepare stages. */
+  complexEventProps() {
+    return this.eventProps().filter((k) => this.isComplexEventProp(k));
   }
 
   /** Numeric event_properties keys (valid for sum/avg/median/percentile). */

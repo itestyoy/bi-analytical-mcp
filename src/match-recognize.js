@@ -18,6 +18,7 @@
 import yaml from 'js-yaml';
 import { jsonExtract, sqlLiteral } from './dialect.js';
 import { renderBaseModel } from './yaml-render.js';
+import { renderPrepare } from './prepare.js';
 
 /** Dump a sequence semantic model (+metrics) to dbt YAML, ref('...') unquoted. */
 export function dumpSequenceYaml(sem) {
@@ -41,15 +42,22 @@ function comparePred(lhs, op, value) {
   }
 }
 
-export function stepPredicate(catalog, step, dialect, col) {
+export function stepPredicate(catalog, step, dialect, col, prepCols = new Map()) {
   const m = catalog.getModel(catalog.anchor);
   const evCol = col ? `${col}.${m.event_name.column}` : m.event_name.column;
   const dataCol = col ? `${col}.${catalog.eventDataColumn()}` : catalog.eventDataColumn();
   const names = step.event_name;
   const ev = names.length === 1 ? `${evCol} = ${sqlLiteral(names[0])}` : `${evCol} IN (${names.map(sqlLiteral).join(', ')})`;
   const props = (step.where || []).map((c) => {
+    // a prepare-derived column is referenced directly (it's a real column now)
+    if (prepCols.has(c.property)) {
+      return comparePred(col ? `${col}.${c.property}` : c.property, c.op, c.value);
+    }
     const p = (m.properties || {})[c.property];
     if (!p) throw new Error(`unknown event property in step: ${c.property}`);
+    if (catalog.isComplexEventProp(c.property)) {
+      throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (derive/unnest), not directly`);
+    }
     return comparePred(jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value);
   });
   return [ev, ...props].join(' AND ');
@@ -122,8 +130,12 @@ function resolve(catalog, spec, dialect) {
     ? spec.metrics
     : steps.map((s) => ({ name: `reached_${s.name}`, type: 'reached', step: s.name }));
 
+  // Columns added by the prepare pipeline (name -> { type }); referenceable in
+  // step `where` and agg_at_step like any other column.
+  const prepCols = renderPrepare(catalog, spec, dialect, '__base__').columns;
+
   // resolve metrics + collect which property values must be captured per step
-  const propCaptures = []; // { id, idx, property, type }
+  const propCaptures = []; // { id, idx, property, type, isColumn }
   const resolved = metrics.map((mt) => {
     const out = { name: mt.name, type: mt.type };
     if (mt.type === 'reached') out.idx = stepIdx(mt.step);
@@ -132,17 +144,26 @@ function resolve(catalog, spec, dialect) {
     else if (mt.type === 'avg_seconds_between') { out.from = stepIdx(mt.from); out.to = stepIdx(mt.to); }
     else if (mt.type === 'agg_at_step') {
       out.idx = stepIdx(mt.step); out.agg = (mt.agg || 'sum').toUpperCase();
-      const p = (m.properties || {})[mt.property];
-      if (!p) throw new Error(`agg_at_step: unknown property '${mt.property}'`);
+      let type; const isColumn = prepCols.has(mt.property);
+      if (isColumn) type = prepCols.get(mt.property).type;
+      else {
+        const p = (m.properties || {})[mt.property];
+        if (!p) throw new Error(`agg_at_step: unknown property '${mt.property}'`);
+        if (catalog.isComplexEventProp(mt.property)) throw new Error(`agg_at_step: '${mt.property}' is array/struct; derive a scalar via a prepare stage first`);
+        type = p.type;
+      }
       out.capId = `pv_${mt.name}`;
-      propCaptures.push({ id: out.capId, idx: out.idx, property: mt.property, type: p.type });
+      propCaptures.push({ id: out.capId, idx: out.idx, property: mt.property, type, isColumn });
     } else throw new Error(`unknown sequence metric type: ${mt.type}`);
     return out;
   });
 
-  const stepPreds = (dialect, col) => spec.steps.map((s) => stepPredicate(catalog, s, dialect, col));
-  return { m, partEntity, partCol, timeCol, mode, steps, metrics: resolved, propCaptures, stepPreds };
+  const stepPreds = (d, col) => spec.steps.map((s) => stepPredicate(catalog, s, d, col, prepCols));
+  return { m, partEntity, partCol, timeCol, mode, steps, metrics: resolved, propCaptures, prepCols, stepPreds };
 }
+
+// agg names -> MetricFlow measure aggregation names.
+const MF_AGG = { avg: 'average', sum: 'sum', min: 'min', max: 'max' };
 
 function nestedPattern(steps, withGap) {
   const sym = steps.map((s) => `S${s.idx}`);
@@ -160,7 +181,7 @@ export function renderBigQuery(catalog, spec) {
   // MEASURES: step times t{idx} + captured property values pv_*
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
+    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
   ].join(',\n');
 
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
@@ -275,10 +296,14 @@ export function renderPerUserModelPostgres(catalog, spec) {
   const preds = r.stepPreds('postgres', null);
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
-  const evExtra = r.propCaptures.map((c) => `    (${jsonExtract('postgres', catalog.eventDataColumn(), c.property, c.type)}) AS ${c.id}`);
+  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : jsonExtract('postgres', catalog.eventDataColumn(), c.property, c.type)}) AS ${c.id}`);
   const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
   const pre = buildPrefilter(catalog, spec, 'postgres', null);
-  let sql = `WITH ev AS (\n  SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${relation}${pre ? `\n  WHERE ${pre}` : ''}\n)`;
+  // prepare pipeline (unnest/derive ...) chains CTEs from the (prefiltered) base.
+  const baseForPrep = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
+  const prep = renderPrepare(catalog, spec, 'postgres', baseForPrep);
+  const prepCte = prep.ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n');
+  let sql = `WITH ${prep.ctes.length ? `${prepCte},\n` : ''}ev AS (\n  SELECT ${r.partCol} AS pk, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${prep.relation}\n)`;
   const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
   const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
   let ctes = `r1 AS (SELECT DISTINCT ON (pk) pk, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY pk, ts)`;
@@ -316,7 +341,7 @@ export function renderPerUserModelBigQuery(catalog, spec) {
   // per-step reached flags (t{idx} IS NOT NULL), exactly like the Postgres path.
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
+    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
   if (r.mode !== 'strict') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
@@ -328,14 +353,16 @@ export function renderPerUserModelBigQuery(catalog, spec) {
   // joined here; the semantic model declares a shared `user` entity so MetricFlow
   // joins dim_users at SQL-generation time when a query groups by a user attr.
   const pre = buildPrefilter(catalog, spec, 'bigquery', null);
-  const src = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
-  return `  SELECT
+  const baseForPrep = pre ? `(SELECT * FROM ${relation} WHERE ${pre})` : relation;
+  const prep = renderPrepare(catalog, spec, 'bigquery', baseForPrep);
+  const withCte = prep.ctes.length ? `WITH ${prep.ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\n` : '';
+  return `${withCte}  SELECT
     ${r.partCol},
     t1 AS first_seen_at,
     CASE ${furthestCase} END AS furthest_step_name,
     t${r.steps.length} IS NOT NULL AS completed,
 ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')}
-  FROM ${src} MATCH_RECOGNIZE (
+  FROM ${prep.relation} MATCH_RECOGNIZE (
     PARTITION BY ${r.partCol}
     ORDER BY ${r.timeCol}
     MEASURES
@@ -360,7 +387,7 @@ export function sequenceSemanticModel(catalog, spec, modelName) {
     ...r.steps.map((s) => ({ name: `reached_${s.name}`, agg: 'sum_boolean', expr: `reached_${s.name}` })),
     { name: 'completed', agg: 'sum_boolean', expr: 'completed' },
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => ({ name: m.name, agg: 'average', expr: `secs_${m.name}` })),
-    ...r.metrics.filter((m) => m.type === 'agg_at_step').map((m) => ({ name: m.name, agg: m.agg.toLowerCase(), expr: m.capId })),
+    ...r.metrics.filter((m) => m.type === 'agg_at_step').map((m) => ({ name: m.name, agg: MF_AGG[m.agg.toLowerCase()] || m.agg.toLowerCase(), expr: m.capId })),
   ];
   const dedupMeasures = [...new Map(measures.map((mm) => [mm.name, mm])).values()];
   // The view exposes ONLY its own (sequence-derived) columns as dimensions.

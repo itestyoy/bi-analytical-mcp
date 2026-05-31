@@ -100,6 +100,10 @@ models:
               screen_from: { type: string, description: "Origin screen for screen_changed." }
               screen_to: { type: string, description: "Destination screen for screen_changed." }
               step_id: { type: string, description: "Funnel/onboarding step id (e.g. tutorial step_1)." }
+              # Complex (array / array-of-struct) properties — usable only via the
+              # register_native_model `prepare` pipeline (array_length/contains/unnest/struct_field).
+              words_collected: { type: array, items: string, description: "Words collected on a completed level." }
+              rewards: { type: "array<struct>", fields: { item: string, qty: int }, description: "Rewards granted on level completion (item + quantity)." }
 
   - name: dim_users
     description: "User attributes dimension — one row per user."

@@ -11,6 +11,7 @@ import { formatDbtError } from './dbt-runner.js';
 import { renderPerUserModelPostgres, renderPerUserModelBigQuery, sequenceSemanticModel, dumpSequenceYaml } from './match-recognize.js';
 import { JobManager } from './jobs.js';
 import { buildProjection } from './projection.js';
+import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, jobsDbPath }) {
@@ -179,7 +180,8 @@ export class Engine {
       metrics: art.sem.metricNames,
     };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
-    this.ctxs.writeModel(ctx.id, art.modelName, `{{ config(materialized='${materialized}') }}\n${art.modelSql}\n`);
+    const header = sqlConfigHeader('native_model', { name: input.name, sequence: input.sequence });
+    this.ctxs.writeModel(ctx.id, art.modelName, `{{ config(materialized='${materialized}') }}\n${header}${art.modelSql}\n`);
     this.ctxs.writeYaml(ctx.id, dumpSequenceYaml(art.sem));
     this.ctxs.touch(ctx.id);
     let build = { ok: true, skipped: 'no runner' };
@@ -524,7 +526,8 @@ export class Engine {
     const id = this.jobs.create({ contextId: ctx.id });
     const table = `qr_${id}`;
     this.jobs.setTable(id, table);
-    this.ctxs.writeModel(ctx.id, table, `{{ config(materialized='table') }}\n${explain.sql}\n`);
+    const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, order_by: input.order_by, time_range: input.time_range });
+    this.ctxs.writeModel(ctx.id, table, `{{ config(materialized='table') }}\n${header}${explain.sql}\n`);
 
     // Hold a lease on the context for the lifetime of the (possibly detached)
     // build so drop_context can't tear down the overlay mid-run (Reliability C1).

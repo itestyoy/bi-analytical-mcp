@@ -236,6 +236,53 @@ test('register_native_model: same task name in two contexts -> distinct context-
   await engine.delete_native_model({ context_id: out.context_id });
 });
 
+test('prepare derive array_length: avg(n_words) captured at level 1 = 3 (words [cat,dog,sun])', opts, async (t) => {
+  if (skip(t)) return;
+  // words_collected is an ARRAY property; the prepare pipeline derives a scalar
+  // n_words = array_length(words_collected), then agg_at_step averages it at the
+  // level-1 completion step. Level 1 always has 3 words, completed by all 12.
+  const out = await engine.register_native_model({
+    name: 'words_funnel',
+    sequence: {
+      partition_by: 'user', mode: 'ordered',
+      prepare: [{ stage: 'derive', name: 'n_words', source: 'words_collected', op: 'array_length' }],
+      steps: [
+        { name: 'launch', event_name: ['first_launch'] },
+        { name: 'lvl1', event_name: ['level_completed'], where: [{ property: 'level_id', op: 'eq', value: 1 }] },
+      ],
+      metrics: [{ name: 'avg_words', type: 'agg_at_step', agg: 'avg', property: 'n_words', step: 'lvl1' }],
+    },
+  });
+  assert.equal(out.build.ok, true, JSON.stringify(out.build));
+  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['reached_lvl1', 'avg_words'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(num(r.rows[0].reached_lvl1), 12);
+  assert.ok(Math.abs(num(r.rows[0].avg_words) - 3) < 1e-9, `avg_words=${r.rows[0].avg_words}`);
+  await engine.delete_native_model({ context_id: out.context_id });
+});
+
+test('prepare derive contains: step filtered by a derived boolean (has_cat) reaches the 12 level-1 completers', opts, async (t) => {
+  if (skip(t)) return;
+  // derive has_cat = words_collected contains 'cat' (only level-1 completions),
+  // then use the derived boolean in a step `where`.
+  const out = await engine.register_native_model({
+    name: 'cat_funnel',
+    sequence: {
+      partition_by: 'user', mode: 'ordered',
+      prepare: [{ stage: 'derive', name: 'has_cat', source: 'words_collected', op: 'contains', value: 'cat' }],
+      steps: [
+        { name: 'launch', event_name: ['first_launch'] },
+        { name: 'cat_lvl', event_name: ['level_completed'], where: [{ property: 'has_cat', op: 'eq', value: true }] },
+      ],
+    },
+  });
+  assert.equal(out.build.ok, true, JSON.stringify(out.build));
+  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['reached_cat_lvl'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(num(r.rows[0].reached_cat_lvl), 12); // every user's level-1 completion has 'cat'
+  await engine.delete_native_model({ context_id: out.context_id });
+});
+
 test('describe_catalog: returns REAL physical columns for every model (adapter introspection)', opts, async (t) => {
   if (skip(t)) return;
   const dc = await engine.describe_catalog();

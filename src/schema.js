@@ -5,6 +5,8 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
+import { prepareStageSchema } from './prepare.js';
+
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
 const CTX = '^[a-z0-9]{6,40}$';
@@ -24,11 +26,25 @@ const D = {
 function whereItemSchema(catalog) {
   return {
     type: 'object', additionalProperties: false, required: ['property', 'op'],
-    description: 'One condition on an event_data property.',
+    description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
     properties: {
-      property: { type: 'string', enum: catalog.eventProps(), description: 'event_data JSON property to test (must exist in the catalog).' },
+      property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property to test.' },
       op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator. Use in/not_in with an array value; the rest take a scalar.' },
       value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in. Always bound as a parameter/escaped literal (never interpolated as SQL).' },
+    },
+  };
+}
+
+// Sequence-step condition: a scalar event_data property OR a prepare-derived
+// column (validated at render against the prepare columns + scalar props).
+function seqWhereItem(catalog) {
+  return {
+    type: 'object', additionalProperties: false, required: ['property', 'op'],
+    description: 'A step condition on a scalar event_data property or a prepare-derived column.',
+    properties: {
+      property: { type: 'string', pattern: '^[a-z][a-z0-9_]{0,40}$', description: 'Scalar event_data property or a prepare-derived column name.' },
+      op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' },
+      value: { description: 'Literal value(s); array for in/not_in.' },
     },
   };
 }
@@ -74,7 +90,7 @@ function dimensionItemSchema(catalog, modelKey) {
       description: 'A dimension extracted from a JSON event_data property (e.g. level_id, product_id) so you can group/filter by it.',
       properties: {
         source: { const: 'event_property', description: 'Extract the dimension from the event_data JSON column.' },
-        property: { type: 'string', enum: catalog.eventProps(), description: 'event_data property key to expose as a categorical dimension.' },
+        property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property key to expose as a categorical dimension.' },
         as_type: { const: 'categorical', default: 'categorical', description: 'event_data dimensions are always categorical.' },
         label: { type: 'string', description: D.label },
       },
@@ -121,7 +137,7 @@ function genericDimensionItem(catalog) {
     description: 'A dimension to add to the target semantic model (a column or an event_data property).',
     oneOf: [
       { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { const: 'model_column', description: 'Use a physical table column.' }, column: { type: 'string', enum: cols, description: 'Physical column name.' }, as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
-      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from an event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: { type: 'string', enum: catalog.eventProps(), description: 'event_data property key.' }, as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
+      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property key.' }, as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
     ],
   };
 }
@@ -266,7 +282,7 @@ export function buildSchemas(catalog) {
     properties: {
       name: { type: 'string', pattern: NAME, description: 'Step name (lowercase snake_case); used in generated columns/metrics like reached_<name>.' },
       event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Event(s) that constitute this step.' },
-      where: { type: 'array', description: 'Conditions on event_data properties that further define the step (e.g. step_id=step_1).', items: whereItemSchema(catalog) },
+      where: { type: 'array', description: 'Conditions on a scalar event_data property or a prepare-derived column that further define the step (e.g. step_id=step_1).', items: seqWhereItem(catalog) },
     },
   };
   const create = {
@@ -313,6 +329,11 @@ export function buildSchemas(catalog) {
               user_segment: { type: 'array', description: 'Keep only events whose user matches these dim_users attributes (a semi-join FILTER — no columns are carried into the view; attributes for grouping still come from the semantic-layer join). E.g. country=US to build the funnel for one segment.', items: { type: 'object', additionalProperties: false, required: ['property', 'op'], properties: { property: { type: 'string', enum: userAttrCols, description: 'dim_users attribute to filter on.' }, op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator (array value for in/not_in).' }, value: { description: 'Literal value(s) to match.' } } } },
             },
           },
+          prepare: {
+            type: 'array',
+            description: 'Optional ORDERED data-prep pipeline applied (after filter) BEFORE the row-pattern match — a chain of transform stages that prepare the dataset (e.g. derive a scalar from an array/struct property, or unnest an array). Each stage builds on the previous; the columns they add are referenceable in step `where` and agg_at_step metrics. Use this for complex (array / array-of-struct) event_data properties, which cannot be used directly.',
+            items: prepareStageSchema(catalog),
+          },
           steps: { type: 'array', minItems: 2, items: sequenceStep, description: 'The ordered funnel steps (>= 2).' },
           metrics: {
             type: 'array',
@@ -327,7 +348,7 @@ export function buildSchemas(catalog) {
                 from: { type: 'string', description: 'Origin step name (for conversion / avg_seconds_between).' },
                 to: { type: 'string', description: 'Destination step name (for conversion / avg_seconds_between).' },
                 agg: { enum: ['sum', 'avg', 'min', 'max'], description: 'Aggregation for agg_at_step.' },
-                property: { type: 'string', enum: catalog.eventProps(), description: 'event_data property to aggregate for agg_at_step.' },
+                property: { type: 'string', pattern: NAME, description: 'Scalar event_data property OR a prepare-derived column to aggregate for agg_at_step.' },
               },
             },
           },

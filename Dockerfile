@@ -9,11 +9,14 @@ RUN apt-get update \
 WORKDIR /app
 
 # dbt + MetricFlow into an isolated venv; expose `dbt`/`mf` on PATH.
+# Pick the warehouse adapter at build time: requirements.txt (Postgres, default)
+# or requirements-bigquery.txt (BigQuery) — see docker-compose.bigquery.yml.
+ARG DBT_REQUIREMENTS=requirements.txt
 ENV VENV=/opt/dbtvenv
-COPY requirements.txt ./
+COPY requirements*.txt ./
 RUN python3 -m venv "$VENV" \
   && "$VENV/bin/pip" install --no-cache-dir --upgrade pip \
-  && "$VENV/bin/pip" install --no-cache-dir -r requirements.txt
+  && "$VENV/bin/pip" install --no-cache-dir -r "$DBT_REQUIREMENTS"
 ENV PATH="$VENV/bin:$PATH"
 
 # Node deps (production only — devDeps are the test harness).

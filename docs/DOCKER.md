@@ -47,3 +47,28 @@ analytics:
 - The image bundles the `dbt` + `mf` (MetricFlow) CLIs (see `requirements.txt`); swap `dbt-postgres` for your adapter (e.g. `dbt-bigquery`) and rebuild.
 - For an external/managed warehouse, delete the `warehouse` service and set the `DBT_PG_*` (or your profile's) vars to point at it.
 - Without a dbt project mounted the server still starts and validates inputs (dry-run), but build/query need the runner.
+
+## BigQuery
+BigQuery is a managed warehouse — there's no local DB service. Use the dedicated
+compose file (it builds the image with the `dbt-bigquery` adapter via the
+`DBT_REQUIREMENTS` build arg) and a GCP service-account key:
+```bash
+cp .env.bigquery.example .env     # set BQ_PROJECT / BQ_DATASET / BQ_KEYFILE
+docker compose -f docker-compose.bigquery.yml up --build
+```
+- `WAREHOUSE_DIALECT=bigquery` (set by the file) so the engine generates BigQuery SQL.
+- `BQ_PROJECT`, `BQ_DATASET`, `BQ_LOCATION` and the mounted key (`GOOGLE_APPLICATION_CREDENTIALS=/secrets/bq-key.json`) are consumed by your `profiles.yml`:
+```yaml
+analytics:
+  target: prod
+  outputs:
+    prod:
+      type: bigquery
+      method: service-account
+      keyfile: "{{ env_var('GOOGLE_APPLICATION_CREDENTIALS') }}"
+      project: "{{ env_var('BQ_PROJECT') }}"
+      dataset: "{{ env_var('BQ_DATASET') }}"
+      location: "{{ env_var('BQ_LOCATION') }}"
+      threads: 4
+```
+

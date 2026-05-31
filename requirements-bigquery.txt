@@ -1,0 +1,5 @@
+# BigQuery build: dbt CLI + BigQuery adapter + MetricFlow `mf`.
+# Used by docker-compose.bigquery.yml (build arg DBT_REQUIREMENTS).
+dbt-core==1.11.11
+dbt-bigquery>=1.10,<1.13
+dbt-metricflow==0.13.0

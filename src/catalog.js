@@ -60,14 +60,79 @@ export function loadCatalogFromProject(projectDir, opts = {}) {
   return new Catalog(raw);
 }
 
-/** model-paths from dbt_project.yml (default ['models']). */
-function readModelPaths(projectDir) {
+/** A configured path list from dbt_project.yml (e.g. model-paths), with a default. */
+function readPaths(projectDir, key, dflt) {
   try {
     const dp = yaml.load(readFileSync(join(projectDir, 'dbt_project.yml'), 'utf8')) || {};
-    const mp = dp['model-paths'] || dp.source_paths || ['models'];
-    return Array.isArray(mp) ? mp : [mp];
+    const v = dp[key] ?? dflt;
+    return Array.isArray(v) ? v : [v];
   } catch {
-    return ['models'];
+    return dflt;
+  }
+}
+function readModelPaths(projectDir) {
+  return readPaths(projectDir, 'model-paths', readPaths(projectDir, 'source-paths', ['models']));
+}
+
+/** Basenames (without extension) of files matching `extRe` under the given dirs. */
+function collectBasenames(projectDir, paths, extRe, acc = new Set()) {
+  const walk = (dir) => {
+    let entries; try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (extRe.test(e.name)) acc.add(e.name.replace(extRe, ''));
+    }
+  };
+  for (const mp of paths) walk(join(projectDir, mp));
+  return acc;
+}
+
+/** Concatenated text of every .sql under the given dirs (for macro scanning). */
+function readAllSql(projectDir, paths) {
+  let text = '';
+  const walk = (dir) => {
+    let entries; try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const p = join(dir, e.name);
+      if (e.isDirectory()) walk(p);
+      else if (/\.sql$/i.test(e.name)) { try { text += `\n${readFileSync(p, 'utf8')}`; } catch { /* skip */ } }
+    }
+  };
+  for (const mp of paths) walk(join(projectDir, mp));
+  return text;
+}
+
+// dbt macros the server shells out to (run-operation) and therefore REQUIRES.
+const REQUIRED_MACROS = ['mcp_relation_columns'];
+
+/**
+ * Validate that a dbt project implements the components the server needs:
+ *   - dbt_project.yml present
+ *   - the required macro(s) defined (column introspection)
+ *   - each catalog role's dbt node exists as a model (.sql) or seed (.csv)
+ * Throws a single, actionable error listing everything missing.
+ */
+export function validateDbtProject(projectDir, catalog) {
+  const problems = [];
+  if (!existsSync(join(projectDir, 'dbt_project.yml'))) problems.push('dbt_project.yml not found (is this a dbt project?)');
+
+  const macroText = readAllSql(projectDir, readPaths(projectDir, 'macro-paths', ['macros']));
+  for (const name of REQUIRED_MACROS) {
+    if (!new RegExp(`macro\\s+${name}\\s*\\(`).test(macroText)) {
+      problems.push(`required macro '${name}' is not defined (needed for warehouse column introspection)`);
+    }
+  }
+
+  const nodes = collectBasenames(projectDir, readModelPaths(projectDir), /\.sql$/i);
+  collectBasenames(projectDir, readPaths(projectDir, 'seed-paths', ['seeds']), /\.csv$/i, nodes);
+  for (const key of catalog.modelKeys()) {
+    const name = catalog.getModel(key).dbt_model;
+    if (name && !nodes.has(name)) problems.push(`role '${key}' references dbt node '${name}', which is not a model (.sql) or seed (.csv) in the project`);
+  }
+
+  if (problems.length) {
+    throw new Error(`dbt project at ${projectDir} is missing required components:\n  - ${problems.join('\n  - ')}`);
   }
 }
 

@@ -7,7 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { existsSync } from 'node:fs';
-import { loadCatalog } from './catalog.js';
+import { loadCatalog, validateDbtProject } from './catalog.js';
 import { loadRecipes } from './recipes.js';
 import { ContextManager } from './context-manager.js';
 import { DbtRunner } from './dbt-runner.js';
@@ -105,6 +105,9 @@ export function makeEngine(opts = {}) {
   // the bundled sample catalog. Dialect is resolved from env / the dbt profile.
   const catalogSource = opts.catalogPath || process.env.CATALOG_PATH || baseProjectDir || join(process.cwd(), 'config', 'catalog.yml');
   const catalog = loadCatalog(catalogSource, { profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, projectDir: baseProjectDir });
+  // Fail fast if the dbt project doesn't implement the required macro(s) / model
+  // nodes the server depends on (unless explicitly skipped, e.g. catalog-only dev).
+  if (baseProjectDir && process.env.SKIP_PROJECT_VALIDATION !== '1') validateDbtProject(baseProjectDir, catalog);
   const recipesPath = opts.recipesPath || process.env.RECIPES_PATH || join(process.cwd(), 'config', 'recipes.json');
   const recipes = existsSync(recipesPath) ? loadRecipes(recipesPath) : undefined;
   const ctxs = new ContextManager({

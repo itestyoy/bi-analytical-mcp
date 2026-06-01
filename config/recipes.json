@@ -2016,6 +2016,224 @@
       },
       "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call ab_test metric=cuped. Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
       "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass per-variant sufficient sums; the tool computes the pooled theta and runs Welch on the adjusted means."
+    },
+    {
+      "id": "ab_test_ratio",
+      "task_type": "ab_test",
+      "title": "A/B test — ratio metric via the delta method (e.g. level completion rate)",
+      "when_to_use": "Compare a RATIO metric between variants where the unit of analysis is finer than the randomization unit — e.g. levels completed per level started, or clicks per impression, when users (not attempts) are randomized.",
+      "required_events": [
+        "level_started",
+        "level_completed"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "required_roles": [
+        "experiments"
+      ],
+      "metric_types": [
+        "ratio"
+      ],
+      "ab_test": {
+        "metric": "ratio",
+        "group_field": "variant_group",
+        "n_field": "n",
+        "sumNum_field": "sum_num",
+        "sumDen_field": "sum_den",
+        "sumNum2_field": "sum_num2",
+        "sumDen2_field": "sum_den2",
+        "sumNumDen_field": "sum_numden"
+      },
+      "notes": "register_native_model builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call ab_test with metric=ratio: control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
+      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. ab_test metric=ratio applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
+      "register_payload": {
+        "name": "ab_level_completion_ratio",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "join",
+              "with": "experiments",
+              "on": "appsflyer_id",
+              "attrs": [
+                "experiment_name",
+                "variant_group",
+                "assigned_at",
+                "ended_at"
+              ]
+            },
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "gte",
+                  "right": {
+                    "column": "assigned_at"
+                  }
+                },
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "lte",
+                  "right": {
+                    "column": "ended_at"
+                  }
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "is_completed",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "event_name",
+                      "op": "eq",
+                      "value": "level_completed"
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "int"
+            },
+            {
+              "stage": "compute",
+              "name": "is_started",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "event_name",
+                      "op": "eq",
+                      "value": "level_started"
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "int"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group",
+                "appsflyer_id"
+              ],
+              "measures": [
+                {
+                  "name": "num",
+                  "fn": "sum",
+                  "column": "is_completed"
+                },
+                {
+                  "name": "den",
+                  "fn": "sum",
+                  "column": "is_started"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "num2",
+              "op": "mul",
+              "left": {
+                "column": "num"
+              },
+              "right": {
+                "column": "num"
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "den2",
+              "op": "mul",
+              "left": {
+                "column": "den"
+              },
+              "right": {
+                "column": "den"
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "numden",
+              "op": "mul",
+              "left": {
+                "column": "num"
+              },
+              "right": {
+                "column": "den"
+              }
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group"
+              ],
+              "measures": [
+                {
+                  "name": "n",
+                  "fn": "count"
+                },
+                {
+                  "name": "sum_num",
+                  "fn": "sum",
+                  "column": "num"
+                },
+                {
+                  "name": "sum_den",
+                  "fn": "sum",
+                  "column": "den"
+                },
+                {
+                  "name": "sum_num2",
+                  "fn": "sum",
+                  "column": "num2"
+                },
+                {
+                  "name": "sum_den2",
+                  "fn": "sum",
+                  "column": "den2"
+                },
+                {
+                  "name": "sum_numden",
+                  "fn": "sum",
+                  "column": "numden"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "variant_group",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      }
     }
   ]
 }

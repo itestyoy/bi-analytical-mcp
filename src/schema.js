@@ -402,36 +402,134 @@ export function buildSchemas(catalog) {
       },
     },
     ab_test: abTestSchema(),
+    srm_check: srmCheckSchema(),
+    sample_size: sampleSizeSchema(),
   };
 }
 
 // ── A/B test statistics (computed in JS over per-group aggregates) ────────────
+//
+// The schema is a DISCRIMINATED UNION on `metric`: each branch is fully self-
+// contained (additionalProperties:false) and its group arms accept ONLY the fields
+// that metric consumes. So a proportion test cannot carry `mean`, a mean test cannot
+// carry `conversions`, a ratio test must carry exactly the five ratio sums, etc. —
+// invalid field combinations are rejected by the schema, not just at runtime.
 function abTestSchema() {
-  const arm = {
-    type: 'object', additionalProperties: false, required: ['n'],
-    description: 'One group. proportion → conversions; mean → mean+stddev; cuped → the per-user sufficient sums sumY/sumY2/sumX/sumX2/sumXY (Y = in-experiment metric, X = pre-experiment covariate).',
+  const confidence = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.95, description: 'Confidence level (e.g. 0.95).' };
+  const alternative = { enum: ['two_sided', 'greater', 'less'], default: 'two_sided', description: 'Hypothesis direction for the variant vs control.' };
+  const correction = { enum: ['none', 'holm', 'bh'], default: 'holm', description: 'Multiple-comparison correction across the variants: holm (family-wise error rate), bh (Benjamini–Hochberg false discovery rate), or none. Adds p_value_adjusted/significant_adjusted per variant.' };
+
+  // One metric's group arm: label + n + exactly that metric's required stat fields.
+  const arm = (fields, armDesc) => ({
+    type: 'object', additionalProperties: false, required: ['n', ...Object.keys(fields)],
+    description: armDesc,
     properties: {
       label: { type: 'string', description: 'Group name (e.g. control, variant_b).' },
       n: { type: 'integer', minimum: 1, description: 'Sample size (e.g. users in the group).' },
-      conversions: { type: 'integer', minimum: 0, description: 'Number of successes (for metric=proportion).' },
-      mean: { type: 'number', description: 'Mean of the metric (for metric=mean).' },
-      stddev: { type: 'number', minimum: 0, description: 'Standard deviation of the metric (for metric=mean).' },
-      sumY: { type: 'number', description: 'Σ of the per-user in-experiment value (metric=cuped).' },
-      sumY2: { type: 'number', description: 'Σ of value² (metric=cuped).' },
-      sumX: { type: 'number', description: 'Σ of the per-user pre-experiment covariate (metric=cuped).' },
-      sumX2: { type: 'number', description: 'Σ of covariate² (metric=cuped).' },
-      sumXY: { type: 'number', description: 'Σ of value·covariate (metric=cuped).' },
+      ...fields,
+    },
+  });
+  // One metric branch of the union.
+  const branch = (metric, branchDesc, fields, armDesc) => {
+    const a = arm(fields, armDesc);
+    return {
+      type: 'object', additionalProperties: false, required: ['metric', 'control', 'variants'],
+      description: branchDesc,
+      properties: {
+        metric: { const: metric },
+        confidence, alternative, correction,
+        control: a,
+        variants: { type: 'array', minItems: 1, items: a, description: 'One or more variant groups, each tested against control.' },
+      },
+    };
+  };
+
+  return {
+    type: 'object',
+    description: 'Run an A/B significance test on PRE-AGGREGATED group stats (compute them first with a pipeline: join the experiments source, window events to the assignment period, then aggregate per group). The required group fields DEPEND ON metric (discriminated union): proportion → conversions (two-proportion z-test); mean → mean+stddev (Welch t-test); ratio → the five per-user sums sumNum/sumDen/sumNum2/sumDen2/sumNumDen (delta-method test for ratio metrics whose analysis unit is finer than the randomization unit, e.g. completed/started or clicks/impressions randomized by user); cuped → the five per-user sufficient sums sumY/sumY2/sumX/sumX2/sumXY (CUPED variance reduction via a pre-experiment covariate, then Welch). Returns each variant vs control: lift (absolute+relative, with a relative-lift CI), test statistic, p-value, confidence interval, significance, and a multiplicity-adjusted p-value across the variant family.',
+    required: ['metric'],
+    discriminator: { propertyName: 'metric' },
+    oneOf: [
+      branch('proportion', 'Conversion-rate test (two-proportion z-test): each group carries conversions out of n.',
+        { conversions: { type: 'integer', minimum: 0, description: 'Number of successes in the group.' } },
+        'A group for a proportion test: n and the number of conversions.'),
+      branch('mean', 'Continuous-metric test (Welch t-test): each group carries the per-user mean and stddev.',
+        { mean: { type: 'number', description: 'Mean of the metric over the group.' }, stddev: { type: 'number', minimum: 0, description: 'Standard deviation of the metric over the group.' } },
+        'A group for a mean test: n, mean and stddev.'),
+      branch('ratio', 'Ratio-metric test via the delta method: each group carries the per-user numerator/denominator sums plus their squares and cross-product.',
+        {
+          sumNum: { type: 'number', description: 'Σ of the per-user numerator.' },
+          sumDen: { type: 'number', exclusiveMinimum: 0, description: 'Σ of the per-user denominator (must be > 0).' },
+          sumNum2: { type: 'number', minimum: 0, description: 'Σ of numerator².' },
+          sumDen2: { type: 'number', minimum: 0, description: 'Σ of denominator².' },
+          sumNumDen: { type: 'number', description: 'Σ of numerator·denominator.' },
+        },
+        'A group for a ratio test: n and the five per-user sums (sumNum, sumDen, sumNum2, sumDen2, sumNumDen).'),
+      branch('cuped', 'CUPED variance reduction (then Welch): each group carries the per-user sufficient sums of the in-experiment value Y and the pre-experiment covariate X.',
+        {
+          sumY: { type: 'number', description: 'Σ of the per-user in-experiment value Y.' },
+          sumY2: { type: 'number', minimum: 0, description: 'Σ of Y².' },
+          sumX: { type: 'number', description: 'Σ of the per-user pre-experiment covariate X.' },
+          sumX2: { type: 'number', minimum: 0, description: 'Σ of X².' },
+          sumXY: { type: 'number', description: 'Σ of Y·X.' },
+        },
+        'A group for a CUPED test: n and the five per-user sufficient sums (sumY, sumY2, sumX, sumX2, sumXY).'),
+    ],
+  };
+}
+
+// ── Sample Ratio Mismatch guardrail ───────────────────────────────────────────
+function srmCheckSchema() {
+  return {
+    type: 'object', additionalProperties: false, required: ['groups'],
+    description: 'Sample Ratio Mismatch (SRM) guardrail: a χ² goodness-of-fit test that the OBSERVED per-group sample sizes match the intended split. A detected mismatch (p < 0.001) means randomization or logging is broken and the experiment is INVALID — run this BEFORE trusting any lift. Compute per-group n with a pipeline first.',
+    properties: {
+      groups: {
+        type: 'array', minItems: 2, description: 'Observed groups with their sample sizes.',
+        items: {
+          type: 'object', additionalProperties: false, required: ['n'],
+          properties: {
+            label: { type: 'string', description: 'Group name (e.g. control, variant_b).' },
+            n: { type: 'integer', minimum: 0, description: 'Observed sample size in this group.' },
+          },
+        },
+      },
+      expected_ratio: { type: 'array', minItems: 2, items: { type: 'number', exclusiveMinimum: 0 }, description: 'Intended split weights, same order as groups (e.g. [1,1] for 50/50, [2,1,1]). Defaults to an equal split.' },
     },
   };
+}
+
+// ── Power / sample-size planning ───────────────────────────────────────────────
+//
+// Discriminated union on `metric` (proportion needs baseline, mean needs stddev) and,
+// within each branch, EXACTLY ONE of {mde, n} is required (provide mde → solve n;
+// provide n → solve MDE). So neither "both" nor "neither" nor a mismatched dispersion
+// field can be passed.
+function sampleSizeSchema() {
+  const power = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.8, description: 'Desired statistical power (1−β).' };
+  const confidence = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.95, description: 'Confidence level (1−α).' };
+  const alternative = { enum: ['two_sided', 'greater', 'less'], default: 'two_sided', description: 'Hypothesis direction.' };
+  const mde = { type: 'number', exclusiveMinimum: 0, description: 'Absolute minimum detectable effect (e.g. +0.02 rate, or +1.5 revenue). Provide to solve for n.' };
+  const n = { type: 'integer', minimum: 2, description: 'Sample size PER GROUP. Provide to solve for the MDE instead.' };
+  const exactlyOneOfMdeN = [
+    { required: ['mde'], not: { required: ['n'] } },
+    { required: ['n'], not: { required: ['mde'] } },
+  ];
+  const branch = (metric, dispersionField, dispersionProp, branchDesc) => ({
+    type: 'object', additionalProperties: false,
+    required: ['metric', dispersionField],
+    description: branchDesc,
+    properties: { metric: { const: metric }, [dispersionField]: dispersionProp, mde, n, power, confidence, alternative },
+    oneOf: exactlyOneOfMdeN,
+  });
   return {
-    type: 'object', additionalProperties: false, required: ['metric', 'control', 'variants'],
-    description: 'Run an A/B significance test on PRE-AGGREGATED group stats (compute them first with a pipeline: join the experiments source, window events to the assignment period, then aggregate per group). metric=proportion → two-proportion z-test (conversion rates); metric=mean → Welch t-test (revenue/ARPU/time); metric=cuped → CUPED variance reduction using a pre-experiment covariate, then Welch (more power). Returns each variant vs control: lift (absolute+relative), test statistic, p-value, confidence interval, and significance.',
-    properties: {
-      metric: { enum: ['proportion', 'mean', 'cuped'], description: 'proportion = rate/conversion; mean = continuous metric; cuped = continuous metric with pre-experiment variance reduction.' },
-      confidence: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.95, description: 'Confidence level (e.g. 0.95).' },
-      alternative: { enum: ['two_sided', 'greater', 'less'], default: 'two_sided', description: 'Hypothesis direction for the variant vs control.' },
-      control: arm,
-      variants: { type: 'array', minItems: 1, items: arm, description: 'One or more variant groups, each tested against control.' },
-    },
+    type: 'object',
+    description: 'Power / sample-size planning (no warehouse). Provide a target effect (mde) to get the required sample size PER GROUP, or a sample size (n) to get the minimum detectable effect (MDE) — exactly one of the two. metric=proportion needs a baseline rate; metric=mean needs a stddev. Use it to size a test up front and to tell a true null apart from an underpowered one.',
+    required: ['metric'],
+    discriminator: { propertyName: 'metric' },
+    oneOf: [
+      branch('proportion', 'baseline', { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Baseline conversion rate.' }, 'Conversion-rate planning: needs a baseline rate, plus exactly one of mde or n.'),
+      branch('mean', 'stddev', { type: 'number', exclusiveMinimum: 0, description: 'Standard deviation of the metric.' }, 'Continuous-metric planning: needs a stddev, plus exactly one of mde or n.'),
+    ],
   };
 }

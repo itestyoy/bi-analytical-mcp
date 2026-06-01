@@ -3,7 +3,7 @@
 
 import { buildSchemas } from './schema.js';
 import { makeValidators, validateInput, ToolError } from './validate.js';
-import { twoProportionZTest, welchTTest, cupedTest } from './stats.js';
+import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration } from './compile.js';
 import { renderContext } from './yaml-render.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
@@ -322,38 +322,91 @@ export class Engine {
    * A/B significance test over PRE-AGGREGATED group stats (computed by a pipeline
    * that joins the experiments source, windows events to the assignment period,
    * and aggregates per group). proportion → two-proportion z-test; mean → Welch
-   * t-test; cuped → CUPED variance reduction (needs a pre-experiment covariate)
-   * then Welch. Each variant is compared against control. Pure stats, no warehouse.
+   * t-test; ratio → delta-method test for ratio metrics whose analysis unit is
+   * finer than the randomization unit; cuped → CUPED variance reduction (needs a
+   * pre-experiment covariate) then Welch. Each variant is compared against control,
+   * and p-values are corrected across the variant family. Pure stats, no warehouse.
    */
   ab_test(input) {
     this._validate('ab_test', input);
     const { metric, control } = input;
     const confidence = input.confidence ?? 0.95;
     const alternative = input.alternative || 'two_sided';
+    const correction = input.correction || 'holm';
     const labelOf = (g, i) => g.label || (i < 0 ? 'control' : `variant_${i + 1}`);
     const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`ab_test metric=${metric}: group '${g.label || '?'}' is missing '${f}'`, { stage: 'validate', field: f }); };
 
+    let results; const extra = {};
     if (metric === 'cuped') {
       const suff = ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY'];
       need(control, suff); for (const v of input.variants) need(v, suff);
       const pick = (g, label) => ({ label, n: g.n, sumY: g.sumY, sumY2: g.sumY2, sumX: g.sumX, sumX2: g.sumX2, sumXY: g.sumXY });
       const groups = [pick(control, labelOf(control, -1)), ...input.variants.map((v, i) => pick(v, labelOf(v, i)))];
       const out = cupedTest({ groups, alternative, confidence });
-      return { ok: true, metric, confidence, alternative, control: labelOf(control, -1), theta: out.theta, results: out.results };
+      extra.theta = out.theta; results = out.results;
+    } else if (metric === 'ratio') {
+      const suff = ['sumNum', 'sumDen', 'sumNum2', 'sumDen2', 'sumNumDen'];
+      need(control, suff); for (const v of input.variants) need(v, suff);
+      results = input.variants.map((v, i) => ({ variant: labelOf(v, i), ...ratioDeltaTest({ control, variant: v, alternative, confidence }) }));
+    } else {
+      results = input.variants.map((v, i) => {
+        let r;
+        if (metric === 'proportion') {
+          need(control, ['conversions']); need(v, ['conversions']);
+          r = twoProportionZTest({ controlConversions: control.conversions, controlN: control.n, variantConversions: v.conversions, variantN: v.n, alternative, confidence });
+        } else {
+          need(control, ['mean', 'stddev']); need(v, ['mean', 'stddev']);
+          r = welchTTest({ controlMean: control.mean, controlStddev: control.stddev, controlN: control.n, variantMean: v.mean, variantStddev: v.stddev, variantN: v.n, alternative, confidence });
+        }
+        return { variant: labelOf(v, i), ...r };
+      });
     }
 
-    const results = input.variants.map((v, i) => {
-      let r;
-      if (metric === 'proportion') {
-        need(control, ['conversions']); need(v, ['conversions']);
-        r = twoProportionZTest({ controlConversions: control.conversions, controlN: control.n, variantConversions: v.conversions, variantN: v.n, alternative, confidence });
-      } else {
-        need(control, ['mean', 'stddev']); need(v, ['mean', 'stddev']);
-        r = welchTTest({ controlMean: control.mean, controlStddev: control.stddev, controlN: control.n, variantMean: v.mean, variantStddev: v.stddev, variantN: v.n, alternative, confidence });
-      }
-      return { variant: labelOf(v, i), ...r };
-    });
-    return { ok: true, metric, confidence, alternative, control: labelOf(control, -1), results };
+    // Correct the p-values across the variant family (FWER via Holm, or FDR via BH)
+    // so several arms don't inflate false positives; raw `significant` is kept too.
+    if (correction !== 'none' && results.length > 0) {
+      const adj = adjustPValues(results.map((r) => r.p_value), correction);
+      results = results.map((r, i) => ({ ...r, p_value_adjusted: adj[i], significant_adjusted: adj[i] < 1 - confidence }));
+    }
+    return { ok: true, metric, confidence, alternative, correction, control: labelOf(control, -1), ...extra, results };
+  }
+
+  /**
+   * Sample Ratio Mismatch guardrail: χ² goodness-of-fit that the observed per-group
+   * sizes match the intended split. A detected mismatch (p < 0.001) invalidates the
+   * experiment regardless of any lift. Compute per-group n with a pipeline first.
+   */
+  srm_check(input) {
+    this._validate('srm_check', input);
+    return { ok: true, ...srmTest({ groups: input.groups, ratios: input.expected_ratio }) };
+  }
+
+  /**
+   * Power / sample-size planning (no warehouse). Given a baseline (proportion) or
+   * stddev (mean) plus a target effect, returns the required sample size PER GROUP;
+   * given a sample size, returns the minimum detectable effect (MDE). Use it to size
+   * a test up front and to tell "no effect" apart from "underpowered".
+   */
+  sample_size(input) {
+    this._validate('sample_size', input);
+    const { metric } = input;
+    const confidence = input.confidence ?? 0.95;
+    const power = input.power ?? 0.8;
+    const alternative = input.alternative || 'two_sided';
+    const common = { alpha: 1 - confidence, power, alternative };
+    const base = { ok: true, metric, power, confidence, alternative };
+    if (metric === 'proportion') {
+      const { baseline } = input;
+      if (baseline === undefined) throw new ToolError('sample_size metric=proportion requires baseline', { stage: 'validate', field: 'baseline' });
+      if (input.n !== undefined) { const mde = mdeProportion({ baseline, n: input.n, ...common }); return { ...base, n_per_group: input.n, baseline, mde, relative_mde: mde / baseline }; }
+      if (input.mde !== undefined) { const n = sampleSizeProportion({ baseline, mde: input.mde, ...common }); return { ...base, n_per_group: n, total_n: 2 * n, baseline, mde: input.mde, relative_mde: input.mde / baseline }; }
+      throw new ToolError('sample_size requires either mde (→ solve n) or n (→ solve MDE)', { stage: 'validate', field: 'mde' });
+    }
+    const { stddev } = input;
+    if (stddev === undefined) throw new ToolError('sample_size metric=mean requires stddev', { stage: 'validate', field: 'stddev' });
+    if (input.n !== undefined) { const mde = mdeMean({ stddev, n: input.n, ...common }); return { ...base, n_per_group: input.n, stddev, mde }; }
+    if (input.mde !== undefined) { const n = sampleSizeMean({ stddev, mde: input.mde, ...common }); return { ...base, n_per_group: n, total_n: 2 * n, stddev, mde: input.mde }; }
+    throw new ToolError('sample_size requires either mde (→ solve n) or n (→ solve MDE)', { stage: 'validate', field: 'mde' });
   }
 
   /**

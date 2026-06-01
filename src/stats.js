@@ -71,6 +71,27 @@ export function tCdf(t, df) {
   return t > 0 ? 1 - ib : ib;
 }
 
+/** Lower regularized incomplete gamma P(a,x) (Numerical Recipes gser/gcf). */
+function gammaP(a, x) {
+  if (x <= 0) return 0;
+  if (x < a + 1) { // series expansion
+    let ap = a; let sum = 1 / a; let del = sum;
+    for (let i = 0; i < 500; i++) { ap += 1; del *= x / ap; sum += del; if (Math.abs(del) < Math.abs(sum) * 1e-15) break; }
+    return sum * Math.exp(-x + a * Math.log(x) - logGamma(a));
+  }
+  const FPMIN = 1e-300; // continued fraction for Q(a,x) = 1 − P
+  let b = x + 1 - a; let c = 1 / FPMIN; let d = 1 / b; let h = d;
+  for (let i = 1; i <= 500; i++) {
+    const an = -i * (i - a); b += 2; d = an * d + b; if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = b + an / c; if (Math.abs(c) < FPMIN) c = FPMIN; d = 1 / d; const del = d * c; h *= del;
+    if (Math.abs(del - 1) < 1e-15) break;
+  }
+  return 1 - Math.exp(-x + a * Math.log(x) - logGamma(a)) * h;
+}
+
+/** Chi-square CDF with k degrees of freedom. */
+export function chiSquareCdf(x, k) { return gammaP(k / 2, x / 2); }
+
 /** Two-tailed/one-tailed p from a standard-normal statistic. */
 function normalP(z, alternative) {
   if (alternative === 'greater') return 1 - normalCdf(z);
@@ -102,10 +123,121 @@ export function twoProportionZTest({ controlConversions: c1, controlN: n1, varia
   const zStar = normalQuantile(1 - (1 - confidence) / 2);
   const seDiff = Math.sqrt(p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2);
   const diff = p2 - p1;
+  // CI on the RELATIVE lift (p2/p1 − 1) via the log-ratio delta method (independent groups).
+  let relCi = null;
+  if (p1 > 0 && p2 > 0) {
+    const seLog = Math.sqrt((1 - p1) / (n1 * p1) + (1 - p2) / (n2 * p2));
+    const lr = Math.log(p2 / p1);
+    relCi = [Math.exp(lr - zStar * seLog) - 1, Math.exp(lr + zStar * seLog) - 1];
+  }
   return {
     control_rate: p1, variant_rate: p2,
-    absolute_lift: diff, relative_lift: p1 ? diff / p1 : null,
+    absolute_lift: diff, relative_lift: p1 ? diff / p1 : null, relative_lift_ci: relCi,
     z, p_value: pValue, confidence_interval: [diff - zStar * seDiff, diff + zStar * seDiff],
+    significant: pValue < 1 - confidence,
+  };
+}
+
+/**
+ * Sample Ratio Mismatch (SRM) guardrail: a χ² goodness-of-fit test that the
+ * OBSERVED per-group sizes match the intended split. A tiny p (conventionally
+ * < 0.001) means randomization/logging is broken and the experiment is INVALID.
+ * `groups`: [{ label, n }]; `ratios`: intended weights (defaults to equal split).
+ */
+export function srmTest({ groups, ratios }) {
+  const total = groups.reduce((s, g) => s + g.n, 0);
+  const w = ratios && ratios.length === groups.length ? ratios : groups.map(() => 1);
+  const wsum = w.reduce((a, b) => a + b, 0);
+  let chi = 0;
+  const detail = groups.map((g, i) => {
+    const expected = total * w[i] / wsum;
+    chi += expected > 0 ? (g.n - expected) ** 2 / expected : 0;
+    return { label: g.label, observed: g.n, expected };
+  });
+  const df = groups.length - 1;
+  const pValue = 1 - chiSquareCdf(chi, df);
+  return { chi_square: chi, df, p_value: pValue, srm_detected: pValue < 0.001, groups: detail };
+}
+
+// ── power / sample-size planning (normal approximation) ───────────────────────
+
+function zAlpha(alpha, alternative) { return alternative === 'two_sided' ? normalQuantile(1 - alpha / 2) : normalQuantile(1 - alpha); }
+
+/** Required sample size PER GROUP to detect an absolute rate lift `mde` from `baseline`. */
+export function sampleSizeProportion({ baseline, mde, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
+  const p1 = baseline; const p2 = baseline + mde; const pbar = (p1 + p2) / 2;
+  const za = zAlpha(alpha, alternative); const zb = normalQuantile(power);
+  const n = (za * Math.sqrt(2 * pbar * (1 - pbar)) + zb * Math.sqrt(p1 * (1 - p1) + p2 * (1 - p2))) ** 2 / ((p2 - p1) ** 2);
+  return Math.ceil(n);
+}
+
+/** Smallest absolute rate lift detectable at `power` with `n` per group (inverse of the above). */
+export function mdeProportion({ baseline, n, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
+  let lo = 0; let hi = 1 - baseline;
+  for (let i = 0; i < 200; i++) { const mid = (lo + hi) / 2; if (sampleSizeProportion({ baseline, mde: mid, alpha, power, alternative }) > n) lo = mid; else hi = mid; }
+  return (lo + hi) / 2;
+}
+
+/** Required sample size PER GROUP to detect an absolute mean lift `mde` at spread `stddev`. */
+export function sampleSizeMean({ stddev, mde, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
+  const za = zAlpha(alpha, alternative); const zb = normalQuantile(power);
+  return Math.ceil(2 * ((za + zb) ** 2) * stddev * stddev / (mde * mde));
+}
+
+/** Smallest absolute mean lift detectable at `power` with `n` per group. */
+export function mdeMean({ stddev, n, alpha = 0.05, power = 0.8, alternative = 'two_sided' }) {
+  const za = zAlpha(alpha, alternative); const zb = normalQuantile(power);
+  return (za + zb) * stddev * Math.sqrt(2 / n);
+}
+
+/**
+ * Multiple-comparison correction over a family of p-values (one per variant when a
+ * test has several arms, or several metrics). 'holm' controls the family-wise error
+ * rate; 'bh' (Benjamini–Hochberg) controls the false discovery rate. Returns adjusted
+ * p-values in the original order.
+ */
+export function adjustPValues(pvals, method = 'holm') {
+  const m = pvals.length;
+  const order = pvals.map((p, i) => [p, i]).sort((a, b) => a[0] - b[0]);
+  const adj = new Array(m);
+  if (method === 'bh') {
+    let prev = 1;
+    for (let k = m - 1; k >= 0; k--) { const [p, i] = order[k]; prev = Math.min(prev, Math.min(p * m / (k + 1), 1)); adj[i] = prev; }
+  } else { // holm
+    let prev = 0;
+    for (let k = 0; k < m; k++) { const [p, i] = order[k]; prev = Math.max(prev, Math.min(p * (m - k), 1)); adj[i] = prev; }
+  }
+  return adj;
+}
+
+/**
+ * Ratio-metric A/B test via the DELTA METHOD, for metrics whose unit of analysis is
+ * finer than the randomization unit (e.g. clicks/impressions, levels-completed/started
+ * — randomized by user). Each group carries per-USER sufficient statistics:
+ * { n, sumNum, sumDen, sumNum2, sumDen2, sumNumDen }. The group ratio is ΣY/ΣX = Ȳ/X̄;
+ * its variance uses the delta method on the per-user means (cluster-robust), so the
+ * within-user correlation between numerator and denominator is handled correctly.
+ */
+export function ratioDeltaTest({ control, variant, alternative = 'two_sided', confidence = 0.95 }) {
+  const stat = (g) => {
+    const mY = g.sumNum / g.n; const mX = g.sumDen / g.n;
+    const varY = Math.max(g.sumNum2 / g.n - mY * mY, 0);
+    const varX = Math.max(g.sumDen2 / g.n - mX * mX, 0);
+    const covYX = g.sumNumDen / g.n - mY * mX;
+    const R = mY / mX;
+    const varR = (varY - 2 * R * covYX + R * R * varX) / (mX * mX * g.n);
+    return { R, varR };
+  };
+  const c = stat(control); const v = stat(variant);
+  const se = Math.sqrt(c.varR + v.varR);
+  const diff = v.R - c.R;
+  const z = se === 0 ? 0 : diff / se;
+  const pValue = se === 0 ? (diff === 0 ? 1 : 0) : normalP(z, alternative);
+  const zStar = normalQuantile(1 - (1 - confidence) / 2);
+  return {
+    control_ratio: c.R, variant_ratio: v.R,
+    absolute_lift: diff, relative_lift: c.R ? diff / c.R : null,
+    z, p_value: pValue, confidence_interval: [diff - zStar * se, diff + zStar * se],
     significant: pValue < 1 - confidence,
   };
 }
@@ -150,16 +282,23 @@ export function welchTTest({ controlMean: m1, controlStddev: s1, controlN: n1, v
   const se = Math.sqrt(v1 + v2);
   const diff0 = m2 - m1;
   if (se === 0) { // both groups have zero variance → no detectable spread
-    return { control_mean: m1, variant_mean: m2, absolute_lift: diff0, relative_lift: m1 ? diff0 / m1 : null, t: 0, df: n1 + n2 - 2, p_value: diff0 === 0 ? 1 : 0, confidence_interval: [diff0, diff0], significant: diff0 !== 0 };
+    return { control_mean: m1, variant_mean: m2, absolute_lift: diff0, relative_lift: m1 ? diff0 / m1 : null, relative_lift_ci: null, t: 0, df: n1 + n2 - 2, p_value: diff0 === 0 ? 1 : 0, confidence_interval: [diff0, diff0], significant: diff0 !== 0 };
   }
   const t = (m2 - m1) / se;
   const df = (v1 + v2) ** 2 / ((v1 * v1) / (n1 - 1) + (v2 * v2) / (n2 - 1));
   const pValue = tP(t, df, alternative);
   const tStar = tQuantile(1 - (1 - confidence) / 2, df);
   const diff = m2 - m1;
+  // CI on the RELATIVE lift (m2/m1 − 1) via the log-ratio delta method (positive metrics).
+  let relCi = null;
+  if (m1 > 0 && m2 > 0) {
+    const seLog = Math.sqrt(v2 / (m2 * m2) + v1 / (m1 * m1));
+    const lr = Math.log(m2 / m1);
+    relCi = [Math.exp(lr - tStar * seLog) - 1, Math.exp(lr + tStar * seLog) - 1];
+  }
   return {
     control_mean: m1, variant_mean: m2,
-    absolute_lift: diff, relative_lift: m1 ? diff / m1 : null,
+    absolute_lift: diff, relative_lift: m1 ? diff / m1 : null, relative_lift_ci: relCi,
     t, df, p_value: pValue, confidence_interval: [diff - tStar * se, diff + tStar * se],
     significant: pValue < 1 - confidence,
   };

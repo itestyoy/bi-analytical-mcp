@@ -27,7 +27,9 @@ const TOOL_DESCRIPTIONS = {
   drop_context: 'Tear down an entire isolated context (files + artifacts).',
   list_contexts: 'List active contexts.',
   describe_context: 'Describe a context: tasks, SMs, measures, metrics, reachable group-by paths.',
-  ab_test: 'Run an A/B significance test on pre-aggregated group stats (compute per-group n/conversions or mean+stddev with a pipeline first). proportion → two-proportion z-test; mean → Welch t-test. Returns lift, p-value, confidence interval and significance per variant vs control.',
+  ab_test: 'Run an A/B significance test on pre-aggregated group stats (compute per-group counts/means/ratio sums with a pipeline first). proportion → two-proportion z-test; mean → Welch t-test; ratio → delta-method test (analysis unit finer than randomization unit); cuped → variance reduction via a pre-experiment covariate. Returns lift (with a relative-lift CI), p-value, CI, significance, and a multiplicity-adjusted p-value per variant vs control.',
+  srm_check: 'Sample Ratio Mismatch guardrail: χ² test that the observed per-group sizes match the intended split. p < 0.001 means randomization/logging is broken and the experiment is invalid — check before trusting any lift.',
+  sample_size: 'Power / sample-size planning: given a baseline (proportion) or stddev (mean) and a target effect, return the required sample size per group; or given a sample size, return the minimum detectable effect (MDE). Tells a true null apart from an underpowered test.',
   list_recipes: 'List ready-made recipes (templates) for common analytics task types. Each carries a `hack` — the generalizable technique behind it — so you can pick the closest one and adapt its approach even to a novel task.',
   get_recipe: 'Get a recipe by id: a ready payload (create_semantic_model, or a register_native_model pipeline + ab_test mapping) + example queries, plus `notes` and a `hack` (the reusable technique to extrapolate to similar cases).',
 };

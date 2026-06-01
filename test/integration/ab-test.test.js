@@ -71,7 +71,7 @@ function arm(map, row) {
   const a = { label: String(row[map.group_field]), n: Number(row[map.n_field]) };
   if (map.conversions_field) a.conversions = Number(row[map.conversions_field]);
   if (map.mean_field) { a.mean = Number(row[map.mean_field]); a.stddev = Number(row[map.stddev_field]); }
-  for (const f of ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY']) if (map[`${f}_field`]) a[f] = Number(row[map[`${f}_field`]]);
+  for (const f of ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY', 'sumNum', 'sumDen', 'sumNum2', 'sumDen2', 'sumNumDen']) if (map[`${f}_field`]) a[f] = Number(row[map[`${f}_field`]]);
   return a;
 }
 
@@ -135,5 +135,38 @@ test('CUPED: DB sufficient statistics → adjusted t-test (θ=0 with no pre-peri
     close(v.control_mean, 65 / 6);             // adjusted mean == raw mean
     close(v.variant_mean, 20 / 6);
     assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
+  } finally { await engine.delete_native_model({ context_id }); }
+});
+
+test('ratio: DB per-user sums → delta-method test (level completion 16/16 vs 10/12)', opts, async (t) => {
+  if (!HAS_DBT) return t.skip('dbt/mf not installed');
+  const { map, byGroup, context_id } = await aggregatesFor('ab_test_ratio');
+  try {
+    assert.equal(Number(byGroup.control.n), 6);
+    assert.equal(Number(byGroup.variant_b.n), 6);
+    // completed (numerator) / started (denominator), summed over the group's users
+    close(Number(byGroup.control.sum_num), 15); close(Number(byGroup.control.sum_den), 16);   // 15 of 16 started levels completed
+    close(Number(byGroup.variant_b.sum_num), 10); close(Number(byGroup.variant_b.sum_den), 12); // 10 of 12 completed
+
+    const res = engine.ab_test({ metric: map.metric, control: arm(map, byGroup.control), variants: [arm(map, byGroup.variant_b)] });
+    assert.equal(res.ok, true);
+    const v = res.results[0];
+    close(v.control_ratio, 15 / 16);      // 0.9375
+    close(v.variant_ratio, 10 / 12);      // ≈ 0.8333
+    close(v.absolute_lift, 10 / 12 - 15 / 16);
+    assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
+  } finally { await engine.delete_native_model({ context_id }); }
+});
+
+test('SRM: per-variant sizes computed in the DB pass the guardrail (6 vs 6)', opts, async (t) => {
+  if (!HAS_DBT) return t.skip('dbt/mf not installed');
+  const { map, byGroup, context_id } = await aggregatesFor('ab_test_conversion');
+  try {
+    // feed the warehouse-computed group sizes into the SRM check — a clean 6/6 split
+    const groups = Object.values(byGroup).map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.n_field]) }));
+    const res = engine.srm_check({ groups });
+    assert.equal(res.ok, true);
+    close(res.chi_square, 0);             // 6 vs 6 against an even split
+    assert.equal(res.srm_detected, false);
   } finally { await engine.delete_native_model({ context_id }); }
 });

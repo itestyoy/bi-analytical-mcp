@@ -28,8 +28,8 @@ const TOOL_DESCRIPTIONS = {
   list_contexts: 'List active contexts.',
   describe_context: 'Describe a context: tasks, SMs, measures, metrics, reachable group-by paths.',
   ab_test: 'Run an A/B significance test on pre-aggregated group stats (compute per-group n/conversions or mean+stddev with a pipeline first). proportion → two-proportion z-test; mean → Welch t-test. Returns lift, p-value, confidence interval and significance per variant vs control.',
-  list_recipes: 'List ready-made recipes (templates) for common analytics task types (trends, segmentation, funnel, retention, cohort, behavioral, conversion, progression, monetization, stickiness).',
-  get_recipe: 'Get a recipe by id: a ready create_semantic_model payload + example queries + notes for a task type.',
+  list_recipes: 'List ready-made recipes (templates) for common analytics task types. Each carries a `hack` — the generalizable technique behind it — so you can pick the closest one and adapt its approach even to a novel task.',
+  get_recipe: 'Get a recipe by id: a ready payload (create_semantic_model, or a register_native_model pipeline + ab_test mapping) + example queries, plus `notes` and a `hack` (the reusable technique to extrapolate to similar cases).',
 };
 
 // Server-level documentation surfaced to the AI client (serverInfo.description):

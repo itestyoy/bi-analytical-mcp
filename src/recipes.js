@@ -27,6 +27,7 @@ export class Recipes {
       title: r.title,
       when_to_use: r.when_to_use,
       metric_types: r.metric_types,
+      hack: r.hack, // the generalizable technique — lets the AI adapt a recipe to novel tasks
     }));
   }
 

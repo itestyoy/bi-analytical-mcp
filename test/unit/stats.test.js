@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { normalCdf, normalQuantile, tCdf, twoProportionZTest, welchTTest } from '../../src/stats.js';
+import { normalCdf, normalQuantile, tCdf, twoProportionZTest, welchTTest, cupedTest } from '../../src/stats.js';
+
+// per-group sufficient statistics from explicit per-user (Y, X) pairs
+function suff(ys, xs, label) {
+  let sumY = 0; let sumY2 = 0; let sumX = 0; let sumX2 = 0; let sumXY = 0;
+  for (let i = 0; i < ys.length; i++) { sumY += ys[i]; sumY2 += ys[i] * ys[i]; sumX += xs[i]; sumX2 += xs[i] * xs[i]; sumXY += xs[i] * ys[i]; }
+  return { label, n: ys.length, sumY, sumY2, sumX, sumX2, sumXY };
+}
 
 const close = (a, b, tol = 1e-3) => assert.ok(Math.abs(a - b) <= tol, `${a} ≈ ${b}`);
 
@@ -43,6 +50,31 @@ test('Welch t-test: a large, clear difference is significant with CI excluding 0
   assert.equal(r.significant, true);
   assert.ok(r.confidence_interval[0] > 0 && r.confidence_interval[1] > 0);
   close(r.relative_lift, 0.2);
+});
+
+test('CUPED: a strongly correlated pre-covariate removes variance and gains power', () => {
+  // control Y = X (treatment 0); variant Y = X + 1 (treatment +1). Pre-covariate X
+  // explains all the spread → CUPED collapses within-group variance → clear signal.
+  const control = suff([1, 2, 3, 4, 5], [1, 2, 3, 4, 5], 'control');
+  const variant = suff([2, 3, 4, 5, 6], [1, 2, 3, 4, 5], 'B');
+  const r = cupedTest({ groups: [control, variant] });
+  close(r.theta, 1, 1e-6);                       // θ = Cov(Y,X)/Var(X) = 1
+  const res = r.results[0];
+  assert.ok(res.variance_reduction > 0.99, `variance_reduction=${res.variance_reduction}`);
+  assert.equal(res.significant, true);
+  // plain Welch on the same (unadjusted) Y is NOT significant — CUPED added power
+  const plain = welchTTest({ controlMean: 3, controlStddev: Math.sqrt(2.5), controlN: 5, variantMean: 4, variantStddev: Math.sqrt(2.5), variantN: 5 });
+  assert.equal(plain.significant, false);
+  assert.ok(res.p_value < plain.p_value);
+});
+
+test('CUPED with no pre-covariate signal (constant X) reduces to a plain t-test', () => {
+  const control = suff([1, 2, 3, 4, 5], [7, 7, 7, 7, 7], 'control');
+  const variant = suff([2, 3, 4, 5, 6], [7, 7, 7, 7, 7], 'B');
+  const r = cupedTest({ groups: [control, variant] });
+  close(r.theta, 0, 1e-9);                       // Var(X)=0 → θ=0
+  const plain = welchTTest({ controlMean: 3, controlStddev: Math.sqrt(2.5), controlN: 5, variantMean: 4, variantStddev: Math.sqrt(2.5), variantN: 5 });
+  close(r.results[0].p_value, plain.p_value, 1e-9); // identical to plain t-test
 });
 
 test('one-sided alternative halves the two-sided p (greater)', () => {

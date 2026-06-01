@@ -1694,11 +1694,25 @@
             {
               "stage": "compute",
               "name": "price0",
-              "op": "coalesce",
-              "columns": [
-                "price"
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "event_name",
+                      "op": "eq",
+                      "value": "iap_purchase_completed"
+                    }
+                  ],
+                  "then": {
+                    "column": "price"
+                  }
+                }
               ],
-              "default": 0
+              "else": {
+                "value": 0
+              },
+              "type": "numeric"
             },
             {
               "stage": "aggregate",
@@ -1759,6 +1773,249 @@
       },
       "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + avg + stddev and call ab_test metric=mean (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
       "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). ab_test metric=mean runs Welch t-test: control = control variant_group row, variants = the rest."
+    },
+    {
+      "id": "ab_test_cuped",
+      "task_type": "ab_test",
+      "title": "A/B test — CUPED variance reduction (pre-experiment covariate)",
+      "when_to_use": "Compare a continuous metric between variants with MORE POWER by adjusting for each user's pre-experiment value of the same metric (CUPED).",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd"
+      ],
+      "required_user_attrs": [],
+      "required_roles": [
+        "experiments"
+      ],
+      "metric_types": [
+        "cuped"
+      ],
+      "register_payload": {
+        "name": "ab_revenue_cuped",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "join",
+              "with": "experiments",
+              "on": "appsflyer_id",
+              "attrs": [
+                "experiment_name",
+                "variant_group",
+                "assigned_at",
+                "ended_at"
+              ]
+            },
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "price0",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "event_name",
+                      "op": "eq",
+                      "value": "iap_purchase_completed"
+                    }
+                  ],
+                  "then": {
+                    "column": "price"
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "y_val",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "left": {
+                        "column": "device_time"
+                      },
+                      "op": "gte",
+                      "right": {
+                        "column": "assigned_at"
+                      }
+                    },
+                    {
+                      "left": {
+                        "column": "device_time"
+                      },
+                      "op": "lte",
+                      "right": {
+                        "column": "ended_at"
+                      }
+                    }
+                  ],
+                  "then": {
+                    "column": "price0"
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "x_val",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "left": {
+                        "column": "device_time"
+                      },
+                      "op": "lt",
+                      "right": {
+                        "column": "assigned_at"
+                      }
+                    }
+                  ],
+                  "then": {
+                    "column": "price0"
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group",
+                "appsflyer_id"
+              ],
+              "measures": [
+                {
+                  "name": "uy",
+                  "fn": "sum",
+                  "column": "y_val"
+                },
+                {
+                  "name": "ux",
+                  "fn": "sum",
+                  "column": "x_val"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "uy2",
+              "op": "mul",
+              "left": {
+                "column": "uy"
+              },
+              "right": {
+                "column": "uy"
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "ux2",
+              "op": "mul",
+              "left": {
+                "column": "ux"
+              },
+              "right": {
+                "column": "ux"
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "uxy",
+              "op": "mul",
+              "left": {
+                "column": "ux"
+              },
+              "right": {
+                "column": "uy"
+              }
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group"
+              ],
+              "measures": [
+                {
+                  "name": "n",
+                  "fn": "count"
+                },
+                {
+                  "name": "sum_y",
+                  "fn": "sum",
+                  "column": "uy"
+                },
+                {
+                  "name": "sum_y2",
+                  "fn": "sum",
+                  "column": "uy2"
+                },
+                {
+                  "name": "sum_x",
+                  "fn": "sum",
+                  "column": "ux"
+                },
+                {
+                  "name": "sum_x2",
+                  "fn": "sum",
+                  "column": "ux2"
+                },
+                {
+                  "name": "sum_xy",
+                  "fn": "sum",
+                  "column": "uxy"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "variant_group",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "ab_test": {
+        "metric": "cuped",
+        "group_field": "variant_group",
+        "n_field": "n",
+        "sumY_field": "sum_y",
+        "sumY2_field": "sum_y2",
+        "sumX_field": "sum_x",
+        "sumX2_field": "sum_x2",
+        "sumXY_field": "sum_xy"
+      },
+      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call ab_test metric=cuped. Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
+      "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass per-variant sufficient sums; the tool computes the pooled theta and runs Welch on the adjusted means."
     }
   ]
 }

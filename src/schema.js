@@ -409,20 +409,25 @@ export function buildSchemas(catalog) {
 function abTestSchema() {
   const arm = {
     type: 'object', additionalProperties: false, required: ['n'],
-    description: 'One group. Provide conversions (for metric=proportion) or mean+stddev (for metric=mean).',
+    description: 'One group. proportion → conversions; mean → mean+stddev; cuped → the per-user sufficient sums sumY/sumY2/sumX/sumX2/sumXY (Y = in-experiment metric, X = pre-experiment covariate).',
     properties: {
       label: { type: 'string', description: 'Group name (e.g. control, variant_b).' },
       n: { type: 'integer', minimum: 1, description: 'Sample size (e.g. users in the group).' },
       conversions: { type: 'integer', minimum: 0, description: 'Number of successes (for metric=proportion).' },
       mean: { type: 'number', description: 'Mean of the metric (for metric=mean).' },
       stddev: { type: 'number', minimum: 0, description: 'Standard deviation of the metric (for metric=mean).' },
+      sumY: { type: 'number', description: 'Σ of the per-user in-experiment value (metric=cuped).' },
+      sumY2: { type: 'number', description: 'Σ of value² (metric=cuped).' },
+      sumX: { type: 'number', description: 'Σ of the per-user pre-experiment covariate (metric=cuped).' },
+      sumX2: { type: 'number', description: 'Σ of covariate² (metric=cuped).' },
+      sumXY: { type: 'number', description: 'Σ of value·covariate (metric=cuped).' },
     },
   };
   return {
     type: 'object', additionalProperties: false, required: ['metric', 'control', 'variants'],
-    description: 'Run an A/B significance test on PRE-AGGREGATED group stats (compute them first with a pipeline: join the experiments source, window events to the assignment period, then aggregate per group). metric=proportion → two-proportion z-test (conversion rates); metric=mean → Welch t-test (revenue/ARPU/time). Returns each variant vs control: lift (absolute+relative), test statistic, p-value, confidence interval, and significance.',
+    description: 'Run an A/B significance test on PRE-AGGREGATED group stats (compute them first with a pipeline: join the experiments source, window events to the assignment period, then aggregate per group). metric=proportion → two-proportion z-test (conversion rates); metric=mean → Welch t-test (revenue/ARPU/time); metric=cuped → CUPED variance reduction using a pre-experiment covariate, then Welch (more power). Returns each variant vs control: lift (absolute+relative), test statistic, p-value, confidence interval, and significance.',
     properties: {
-      metric: { enum: ['proportion', 'mean'], description: 'proportion = rate/conversion experiment; mean = continuous metric.' },
+      metric: { enum: ['proportion', 'mean', 'cuped'], description: 'proportion = rate/conversion; mean = continuous metric; cuped = continuous metric with pre-experiment variance reduction.' },
       confidence: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.95, description: 'Confidence level (e.g. 0.95).' },
       alternative: { enum: ['two_sided', 'greater', 'less'], default: 'two_sided', description: 'Hypothesis direction for the variant vs control.' },
       control: arm,

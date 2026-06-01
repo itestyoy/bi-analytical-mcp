@@ -58,6 +58,7 @@ for (const r of recipes.list) {
           const arm = { label: String(row[map.group_field]), n: Number(row[map.n_field]) };
           if (map.conversions_field) arm.conversions = Number(row[map.conversions_field]);
           if (map.mean_field) { arm.mean = Number(row[map.mean_field]); arm.stddev = Number(row[map.stddev_field]); }
+          for (const f of ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY']) if (map[`${f}_field`]) arm[f] = Number(row[map[`${f}_field`]]);
           return arm;
         });
         const [control, ...variants] = arms;

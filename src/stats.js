@@ -110,6 +110,40 @@ export function twoProportionZTest({ controlConversions: c1, controlN: n1, varia
   };
 }
 
+/**
+ * CUPED variance reduction for continuous A/B metrics. Given per-group SUFFICIENT
+ * STATISTICS over per-user pairs (Y = in-experiment metric, X = pre-experiment
+ * covariate): { n, sumY, sumY2, sumX, sumX2, sumXY } — control is groups[0].
+ * Uses the pooled θ = Cov(Y,X)/Var(X), forms the adjusted metric
+ * Y* = Y − θ(X − X̄), and runs Welch's t-test on the adjusted group means/variances
+ * (lower variance ⇒ more power). Reduces to a plain t-test when X has no signal.
+ */
+export function cupedTest({ groups, alternative = 'two_sided', confidence = 0.95 }) {
+  let N = 0; let Sx = 0; let Sy = 0; let Sxx = 0; let Sxy = 0;
+  for (const g of groups) { N += g.n; Sx += g.sumX; Sy += g.sumY; Sxx += g.sumX2; Sxy += g.sumXY; }
+  const mX = Sx / N; const mY = Sy / N;
+  const varX = Sxx / N - mX * mX;
+  const covYX = Sxy / N - mX * mY;
+  const theta = varX > 1e-12 ? covYX / varX : 0; // no covariate signal → CUPED = plain t-test
+  const adjust = (g) => {
+    const meanY = g.sumY / g.n; const meanX = g.sumX / g.n;
+    const ssYY = g.sumY2 - g.n * meanY * meanY;
+    const ssXX = g.sumX2 - g.n * meanX * meanX;
+    const ssXY = g.sumXY - g.n * meanX * meanY;
+    const adjVar = Math.max((ssYY - 2 * theta * ssXY + theta * theta * ssXX) / (g.n - 1), 0);
+    const rawVar = Math.max(ssYY / (g.n - 1), 0);
+    return { n: g.n, mean: meanY - theta * (meanX - mX), stddev: Math.sqrt(adjVar), raw_stddev: Math.sqrt(rawVar) };
+  };
+  const c = adjust(groups[0]);
+  const results = groups.slice(1).map((g) => {
+    const v = adjust(g);
+    const w = welchTTest({ controlMean: c.mean, controlStddev: c.stddev, controlN: c.n, variantMean: v.mean, variantStddev: v.stddev, variantN: v.n, alternative, confidence });
+    const variance_reduction = v.raw_stddev > 0 ? 1 - (v.stddev * v.stddev) / (v.raw_stddev * v.raw_stddev) : 0;
+    return { variant: g.label, theta, variance_reduction, ...w };
+  });
+  return { theta, results };
+}
+
 /** Welch's two-sample t-test (continuous metrics: ARPU, revenue/user, time, …). */
 export function welchTTest({ controlMean: m1, controlStddev: s1, controlN: n1, variantMean: m2, variantStddev: s2, variantN: n2, alternative = 'two_sided', confidence = 0.95 }) {
   const v1 = (s1 * s1) / n1; const v2 = (s2 * s2) / n2;

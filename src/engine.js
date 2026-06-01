@@ -3,7 +3,7 @@
 
 import { buildSchemas } from './schema.js';
 import { makeValidators, validateInput, ToolError } from './validate.js';
-import { twoProportionZTest, welchTTest } from './stats.js';
+import { twoProportionZTest, welchTTest, cupedTest } from './stats.js';
 import { compileDeclaration } from './compile.js';
 import { renderContext } from './yaml-render.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
@@ -322,7 +322,8 @@ export class Engine {
    * A/B significance test over PRE-AGGREGATED group stats (computed by a pipeline
    * that joins the experiments source, windows events to the assignment period,
    * and aggregates per group). proportion → two-proportion z-test; mean → Welch
-   * t-test. Each variant is compared against control. Pure stats, no warehouse.
+   * t-test; cuped → CUPED variance reduction (needs a pre-experiment covariate)
+   * then Welch. Each variant is compared against control. Pure stats, no warehouse.
    */
   ab_test(input) {
     this._validate('ab_test', input);
@@ -331,6 +332,15 @@ export class Engine {
     const alternative = input.alternative || 'two_sided';
     const labelOf = (g, i) => g.label || (i < 0 ? 'control' : `variant_${i + 1}`);
     const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`ab_test metric=${metric}: group '${g.label || '?'}' is missing '${f}'`, { stage: 'validate', field: f }); };
+
+    if (metric === 'cuped') {
+      const suff = ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY'];
+      need(control, suff); for (const v of input.variants) need(v, suff);
+      const pick = (g, label) => ({ label, n: g.n, sumY: g.sumY, sumY2: g.sumY2, sumX: g.sumX, sumX2: g.sumX2, sumXY: g.sumXY });
+      const groups = [pick(control, labelOf(control, -1)), ...input.variants.map((v, i) => pick(v, labelOf(v, i)))];
+      const out = cupedTest({ groups, alternative, confidence });
+      return { ok: true, metric, confidence, alternative, control: labelOf(control, -1), theta: out.theta, results: out.results };
+    }
 
     const results = input.variants.map((v, i) => {
       let r;

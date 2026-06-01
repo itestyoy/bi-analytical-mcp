@@ -114,7 +114,11 @@ export function twoProportionZTest({ controlConversions: c1, controlN: n1, varia
 export function welchTTest({ controlMean: m1, controlStddev: s1, controlN: n1, variantMean: m2, variantStddev: s2, variantN: n2, alternative = 'two_sided', confidence = 0.95 }) {
   const v1 = (s1 * s1) / n1; const v2 = (s2 * s2) / n2;
   const se = Math.sqrt(v1 + v2);
-  const t = se === 0 ? 0 : (m2 - m1) / se;
+  const diff0 = m2 - m1;
+  if (se === 0) { // both groups have zero variance → no detectable spread
+    return { control_mean: m1, variant_mean: m2, absolute_lift: diff0, relative_lift: m1 ? diff0 / m1 : null, t: 0, df: n1 + n2 - 2, p_value: diff0 === 0 ? 1 : 0, confidence_interval: [diff0, diff0], significant: diff0 !== 0 };
+  }
+  const t = (m2 - m1) / se;
   const df = (v1 + v2) ** 2 / ((v1 * v1) / (n1 - 1) + (v2 * v2) / (n2 - 1));
   const pValue = tP(t, df, alternative);
   const tStar = tQuantile(1 - (1 - confidence) / 2, df);

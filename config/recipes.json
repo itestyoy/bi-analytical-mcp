@@ -1626,6 +1626,139 @@
       ],
       "notes": "derived metric = arithmetic over other metrics; here ad revenue (cents) is converted to USD (/100) and added to IAP USD. Only metric names, numbers and + - * / ( ) are allowed in expr.",
       "hack": "derived metric = a formula over other metrics (incl. unit conversion like /100). Extrapolate: blend/normalize/combine any set of metrics into one composite number."
+    },
+    {
+      "id": "ab_test_revenue",
+      "task_type": "ab_test",
+      "title": "A/B test — revenue per user by variant (Welch t-test)",
+      "when_to_use": "Compare a CONTINUOUS metric (revenue/ARPU/time per user) between experiment variants and test significance.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd"
+      ],
+      "required_user_attrs": [],
+      "required_roles": [
+        "experiments"
+      ],
+      "metric_types": [
+        "mean"
+      ],
+      "register_payload": {
+        "name": "ab_revenue_per_user",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "join",
+              "with": "experiments",
+              "on": "appsflyer_id",
+              "attrs": [
+                "experiment_name",
+                "variant_group",
+                "assigned_at",
+                "ended_at"
+              ]
+            },
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "gte",
+                  "right": {
+                    "column": "assigned_at"
+                  }
+                },
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "lte",
+                  "right": {
+                    "column": "ended_at"
+                  }
+                }
+              ]
+            },
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "price0",
+              "op": "coalesce",
+              "columns": [
+                "price"
+              ],
+              "default": 0
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group",
+                "appsflyer_id"
+              ],
+              "measures": [
+                {
+                  "name": "user_rev",
+                  "fn": "sum",
+                  "column": "price0"
+                }
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group"
+              ],
+              "measures": [
+                {
+                  "name": "n",
+                  "fn": "count"
+                },
+                {
+                  "name": "rev_mean",
+                  "fn": "avg",
+                  "column": "user_rev"
+                },
+                {
+                  "name": "rev_sd",
+                  "fn": "stddev",
+                  "column": "user_rev"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "variant_group",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "ab_test": {
+        "metric": "mean",
+        "group_field": "variant_group",
+        "n_field": "n",
+        "mean_field": "rev_mean",
+        "stddev_field": "rev_sd"
+      },
+      "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + avg + stddev and call ab_test metric=mean (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
+      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). ab_test metric=mean runs Welch t-test: control = control variant_group row, variants = the rest."
     }
   ]
 }

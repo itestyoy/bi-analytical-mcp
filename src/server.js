@@ -99,10 +99,12 @@ function errorResult(message, stage, field) {
 }
 
 export function makeEngine(opts = {}) {
-  const catalogPath = opts.catalogPath || process.env.CATALOG_PATH || join(process.cwd(), 'config', 'catalog.yml');
   const baseProjectDir = opts.baseProjectDir || process.env.DBT_BASE_PROJECT;
-  // Dialect is resolved from WAREHOUSE_DIALECT or the dbt profile dbt runs with.
-  const catalog = loadCatalog(catalogPath, { profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, projectDir: baseProjectDir });
+  // Catalog source precedence: explicit CATALOG_PATH (a standalone catalog file) →
+  // the dbt project itself (discover MCP-tagged models from its schema YAMLs) →
+  // the bundled sample catalog. Dialect is resolved from env / the dbt profile.
+  const catalogSource = opts.catalogPath || process.env.CATALOG_PATH || baseProjectDir || join(process.cwd(), 'config', 'catalog.yml');
+  const catalog = loadCatalog(catalogSource, { profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, projectDir: baseProjectDir });
   const recipesPath = opts.recipesPath || process.env.RECIPES_PATH || join(process.cwd(), 'config', 'recipes.json');
   const recipes = existsSync(recipesPath) ? loadRecipes(recipesPath) : undefined;
   const ctxs = new ContextManager({

@@ -19,10 +19,11 @@ services:
       HOST: "0.0.0.0"
       PORT: "3000"
       WAREHOUSE_DIALECT: "bigquery"
+      # Catalog discovered from the mounted dbt project's model YAMLs (meta.mcp.role);
+      # no separate catalog file. (Set CATALOG_PATH=/config/catalog.yml to override.)
       DBT_BASE_PROJECT: "/dbt_project"
       DBT_PROFILES_DIR: "/dbt_project"
-      CATALOG_PATH: "/app/config/catalog.yml"
-      RECIPES_PATH: "/app/config/recipes.json"
+      RECIPES_PATH: "/config/recipes.json"
       MCP_WORKSPACE: "/workspace"
       QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-120}"
       CONTEXT_TTL_MS: "${CONTEXT_TTL_MS:-0}"
@@ -33,7 +34,7 @@ services:
       BQ_LOCATION: "${BQ_LOCATION:-US}"
     volumes:
       - "${DBT_PROJECT_DIR:-./dbt_project}:/dbt_project"
-      - "${CONFIG_DIR:-./config}:/app/config:ro"
+      - "${CONFIG_DIR:-./config}:/config:ro"
       - "${BQ_KEYFILE:-./bq-key.json}:/secrets/bq-key.json:ro"
       - mcp_workspace:/workspace
     restart: unless-stopped

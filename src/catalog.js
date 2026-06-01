@@ -2,7 +2,7 @@
 // graph. This is the single source of physical names; everything the AI can
 // reference is projected from here into JSON-Schema enums.
 
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import yaml from 'js-yaml';
@@ -19,6 +19,9 @@ function dimTypeFromDataType(dataType) {
 }
 
 export function loadCatalog(path, opts = {}) {
+  // A directory => a dbt project: discover the MCP-tagged models from its own
+  // schema YAMLs (no separate catalog file needed).
+  if (existsSync(path) && statSync(path).isDirectory()) return loadCatalogFromProject(path, opts);
   const text = readFileSync(path, 'utf8');
   let raw;
   if (/\.ya?ml$/i.test(path)) {
@@ -33,6 +36,54 @@ export function loadCatalog(path, opts = {}) {
   // the environment / the dbt profile dbt actually runs with — never the YAML.
   raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, fallback: raw.warehouse_dialect });
   return new Catalog(raw);
+}
+
+/**
+ * Build the catalog directly from a dbt project's OWN model-schema YAMLs — no
+ * separate catalog file. We scan the project's model-paths, collect every model
+ * entry, and keep the ones tagged with `meta.mcp.role`. Each role must be carried
+ * by EXACTLY ONE model (more than one per role is a config error).
+ */
+export function loadCatalogFromProject(projectDir, opts = {}) {
+  const models = [];
+  for (const mp of readModelPaths(projectDir)) collectSchemaModels(join(projectDir, mp), models);
+  const mcpModels = models.filter((m) => m.meta?.mcp && (m.meta.mcp.role || m.meta.mcp.key));
+  if (!mcpModels.length) throw new Error(`no MCP-tagged models found under ${projectDir} (tag a dbt model with meta.mcp.role + meta.mcp.key)`);
+  const byRole = new Map();
+  for (const m of mcpModels) {
+    const role = m.meta.mcp.role || m.meta.mcp.key;
+    if (byRole.has(role)) throw new Error(`config error: more than one model declares role '${role}' (${byRole.get(role)} and ${m.name}); exactly one model per role`);
+    byRole.set(role, m.name);
+  }
+  const raw = dbtSchemaToCatalog({ models: mcpModels });
+  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir || projectDir, projectDir, fallback: raw.warehouse_dialect });
+  return new Catalog(raw);
+}
+
+/** model-paths from dbt_project.yml (default ['models']). */
+function readModelPaths(projectDir) {
+  try {
+    const dp = yaml.load(readFileSync(join(projectDir, 'dbt_project.yml'), 'utf8')) || {};
+    const mp = dp['model-paths'] || dp.source_paths || ['models'];
+    return Array.isArray(mp) ? mp : [mp];
+  } catch {
+    return ['models'];
+  }
+}
+
+/** Recursively collect `models:` entries from every *.yml/*.yaml under dir. */
+function collectSchemaModels(dir, acc) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const p = join(dir, e.name);
+    if (e.isDirectory()) { collectSchemaModels(p, acc); continue; }
+    if (!/\.ya?ml$/i.test(e.name)) continue;
+    try {
+      const doc = yaml.load(readFileSync(p, 'utf8'));
+      if (Array.isArray(doc?.models)) for (const m of doc.models) if (m && m.name) acc.push(m);
+    } catch { /* skip unparseable YAML */ }
+  }
 }
 
 /**

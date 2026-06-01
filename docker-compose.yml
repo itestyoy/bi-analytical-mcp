@@ -17,13 +17,14 @@ services:
       PORT: "3000"
       # Which warehouse dialect the engine generates for (postgres | bigquery).
       WAREHOUSE_DIALECT: "${WAREHOUSE_DIALECT:-postgres}"
-      # The dbt project the runner builds/queries against (mounted below).
+      # The dbt project the runner builds/queries against (mounted below). The
+      # CATALOG is discovered from THIS project's model YAMLs (meta.mcp.role) — no
+      # separate catalog file. (To use a standalone catalog instead, mount it and
+      # set CATALOG_PATH, e.g. CATALOG_PATH=/config/catalog.yml.)
       DBT_BASE_PROJECT: "/dbt_project"
       DBT_PROFILES_DIR: "/dbt_project"
-      # Catalog + recipes describing the two sources (baked defaults; override by
-      # mounting your own over /app/config).
-      CATALOG_PATH: "/app/config/catalog.yml"
-      RECIPES_PATH: "/app/config/recipes.json"
+      # Optional ready-made recipes (mounted via CONFIG_DIR below).
+      RECIPES_PATH: "/config/recipes.json"
       # Persisted per-context workspace (named volume below).
       MCP_WORKSPACE: "/workspace"
       QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-60}"
@@ -37,7 +38,7 @@ services:
       DBT_PG_SCHEMA: "${DBT_PG_SCHEMA:-public}"
     volumes:
       - "${DBT_PROJECT_DIR:-./dbt_project}:/dbt_project"
-      - "${CONFIG_DIR:-./config}:/app/config:ro"
+      - "${CONFIG_DIR:-./config}:/config:ro"
       - mcp_workspace:/workspace
     depends_on:
       warehouse:

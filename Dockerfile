@@ -23,15 +23,13 @@ ENV PATH="$VENV/bin:$PATH"
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev || npm install --omit=dev
 
-# App source + default config (override config/dbt project via volumes).
+# App source ONLY. The image is generic: NO catalog, recipes, dbt project, or any
+# project-specific data is baked in — all of that is supplied at runtime via
+# volumes + env in docker-compose. Only infra defaults live here.
 COPY src ./src
-COPY config ./config
 
-# Everything below is configurable via env (see docker-compose.yml / .env.example).
 ENV HOST=0.0.0.0 \
     PORT=3000 \
-    CATALOG_PATH=/app/config/catalog.yml \
-    RECIPES_PATH=/app/config/recipes.json \
     MCP_WORKSPACE=/workspace \
     DBT_BIN=dbt \
     MF_BIN=mf

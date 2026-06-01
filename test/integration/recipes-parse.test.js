@@ -46,8 +46,18 @@ for (const r of recipes.list) {
   test(`recipe '${r.id}' is runnable end-to-end`, opts, async (t) => {
     if (!HAS_DBT) return t.skip('dbt/mf not installed');
 
+    // Tool-only recipe (no warehouse), e.g. power/sample-size planning: run each
+    // declared tool call and assert it computes a successful result.
+    if (r.tool_calls) {
+      for (const call of r.tool_calls) {
+        const res = engine[call.tool](call.args);
+        assert.equal(res.ok, true, `${r.id}: tool ${call.tool} failed: ${JSON.stringify(res)}`);
+      }
+      return;
+    }
+
     // Pipeline/register-based recipe (e.g. A/B): build the model, then — if it
-    // declares an ab_test mapping — feed its per-group rows into the ab_test tool.
+    // declares an ab_test or srm_check mapping — feed its per-group rows into the tool.
     if (r.register_payload) {
       const out = await engine.register_native_model(r.register_payload);
       assert.equal(out.build.ok, true, `build failed for ${r.id}: ${JSON.stringify(out.error || out.build)}`);
@@ -66,6 +76,13 @@ for (const r of recipes.list) {
         assert.equal(res.ok, true, `ab_test failed for ${r.id}: ${JSON.stringify(res)}`);
         assert.equal(res.results.length, variants.length);
         for (const v of res.results) assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1, `bad p_value for ${r.id}`);
+      }
+      if (r.srm_check) {
+        const map = r.srm_check;
+        const groups = out.rows.map((row) => ({ label: String(row[map.group_field]), n: Number(row[map.n_field]) }));
+        const res = engine.srm_check({ groups, ...(map.expected_ratio ? { expected_ratio: map.expected_ratio } : {}) });
+        assert.equal(res.ok, true, `srm_check failed for ${r.id}: ${JSON.stringify(res)}`);
+        assert.ok(Number.isFinite(res.p_value) && res.p_value >= 0 && res.p_value <= 1, `bad p_value for ${r.id}`);
       }
       await engine.delete_native_model({ context_id: out.context_id });
       return;

@@ -2234,6 +2234,148 @@
           ]
         }
       }
+    },
+    {
+      "id": "ab_test_srm",
+      "task_type": "ab_test",
+      "title": "A/B guardrail — Sample Ratio Mismatch (SRM) check",
+      "when_to_use": "BEFORE trusting any lift: verify the observed per-variant split matches the intended one. A mismatch means randomization or logging is broken and the whole experiment is invalid.",
+      "required_events": [
+        "new_session"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "required_roles": [
+        "experiments"
+      ],
+      "metric_types": [
+        "srm"
+      ],
+      "srm_check": {
+        "group_field": "variant_group",
+        "n_field": "n"
+      },
+      "notes": "register_native_model builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to srm_check: it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
+      "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with srm_check (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
+      "register_payload": {
+        "name": "ab_srm_counts",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "join",
+              "with": "experiments",
+              "on": "appsflyer_id",
+              "attrs": [
+                "experiment_name",
+                "variant_group",
+                "assigned_at",
+                "ended_at"
+              ]
+            },
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "gte",
+                  "right": {
+                    "column": "assigned_at"
+                  }
+                },
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "lte",
+                  "right": {
+                    "column": "ended_at"
+                  }
+                }
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group",
+                "appsflyer_id"
+              ],
+              "measures": [
+                {
+                  "name": "events_seen",
+                  "fn": "count"
+                }
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group"
+              ],
+              "measures": [
+                {
+                  "name": "n",
+                  "fn": "count"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "variant_group",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ab_test_power",
+      "task_type": "ab_test",
+      "title": "A/B planning — sample size & minimum detectable effect (power)",
+      "when_to_use": "BEFORE launching, to size the test (how many users per variant to detect a target effect), or given the traffic you have, to find the smallest effect you can detect (MDE). Also AFTER an inconclusive test, to tell 'no effect' apart from 'underpowered'.",
+      "required_events": [],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "required_roles": [],
+      "metric_types": [
+        "power"
+      ],
+      "notes": "sample_size is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev from a monetization_metrics or active_users_trend query first, then plan. Pair every ab_test with an up-front MDE so a non-significant result can be read correctly.",
+      "hack": "Up-front power analysis: baseline/stddev + target effect → required n per group; or n → MDE. Run it before the test to size it and after an inconclusive test to check it was powered. Extrapolate to any two-arm comparison (proportion z-test or mean t-test).",
+      "tool_calls": [
+        {
+          "tool": "sample_size",
+          "args": {
+            "metric": "proportion",
+            "baseline": 0.2,
+            "mde": 0.02
+          }
+        },
+        {
+          "tool": "sample_size",
+          "args": {
+            "metric": "proportion",
+            "baseline": 0.2,
+            "n": 5000
+          }
+        },
+        {
+          "tool": "sample_size",
+          "args": {
+            "metric": "mean",
+            "stddev": 12,
+            "mde": 1.5
+          }
+        }
+      ]
     }
   ]
 }

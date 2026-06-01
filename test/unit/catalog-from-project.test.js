@@ -18,7 +18,7 @@ function project(schemaFiles) {
 const eventsYml = `version: 2
 models:
   - name: fct_events
-    meta: { mcp: { key: events, role: fact, anchor: true, primary_entity: event, known_events: [login, purchase] } }
+    meta: { mcp: { role: events, primary_entity: event, known_events: [login, purchase] } }
     columns:
       - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
       - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
@@ -28,7 +28,7 @@ models:
 const usersYml = `version: 2
 models:
   - name: dim_users
-    meta: { mcp: { key: users, role: dimension } }
+    meta: { mcp: { role: users } }
     columns:
       - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
       - { name: country, data_type: string }
@@ -61,7 +61,7 @@ test('config error: more than one model declares the same role', () => {
   const dupe = eventsYml.replace('fct_events', 'fct_events_2');
   const dir = project({ 'events.yml': eventsYml, 'events2.yml': dupe });
   try {
-    assert.throws(() => loadCatalogFromProject(dir, { dialect: 'postgres' }), /more than one model declares role 'fact'/);
+    assert.throws(() => loadCatalogFromProject(dir, { dialect: 'postgres' }), /more than one model declares role 'events'/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

@@ -24,10 +24,10 @@ models:
     description: "Analytical events fact — one row per tracked event."
     meta:
       mcp:
-        key: events            # logical name used by the tools
-        role: fact
-        anchor: true           # the anchor model (funnels/metrics are built from it)
+        role: events           # the logical name the tools use (the dbt model can be named anything)
         primary_entity: event  # the grain of the fact (no physical key column)
+        # The anchor (events fact) is detected from the event_name/event_data/time
+        # columns below — no `anchor` flag needed.
         known_events:
           - first_launch
           - new_session
@@ -109,8 +109,7 @@ models:
     description: "User attributes dimension — one row per user."
     meta:
       mcp:
-        key: users
-        role: dimension
+        role: users            # logical name (the dbt model can be named anything)
         measures:
           users_count: { agg: count, expr: "1" }
     columns:

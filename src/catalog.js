@@ -200,19 +200,29 @@ export function dbtSchemaToCatalog(doc) {
   const out = { warehouse_dialect: doc.warehouse_dialect, models: {} };
   for (const model of doc.models || []) {
     const mcp = model.meta?.mcp || {};
-    const key = mcp.key;
-    if (!key) throw new Error(`catalog model '${model.name}' is missing meta.mcp.key (logical name)`);
+    // The ROLE is the logical name — the dbt model can be named anything. (`key`
+    // is still accepted as a legacy alias.) Nothing is hardcoded to a specific name.
+    const key = mcp.role || mcp.key;
+    if (!key) throw new Error(`catalog model '${model.name}' is missing meta.mcp.role`);
     const m = { dbt_model: model.name };
     if (mcp.role) m.role = mcp.role;
     if (mcp.primary_entity !== undefined) m.primary_entity = mcp.primary_entity;
     if (mcp.known_events) m.known_events = mcp.known_events;
     if (mcp.measures) m.measures = mcp.measures;
-    if (mcp.anchor) out.anchor_model = key;
+
+    // The anchor (events fact) is DETECTED structurally: the model that declares
+    // the event_name / event_data / time columns. `anchor: true` is an optional
+    // override. Exactly one model may be the fact.
+    const isAnchor = mcp.anchor === true
+      || (model.columns || []).some((c) => { const cm = c.meta?.mcp || {}; return cm.is_event_name || cm.is_event_data || cm.is_time; });
+    if (isAnchor) {
+      if (out.anchor_model && out.anchor_model !== key) throw new Error(`multiple anchor (fact) models: '${out.anchor_model}' and '${key}'. Exactly one model may declare event_name/event_data/time columns.`);
+      out.anchor_model = key;
+    }
 
     const entities = {};
     const dimensions = {};
     const columnDescriptions = {};
-    const isAnchor = !!mcp.anchor;
     for (const col of model.columns || []) {
       const cm = col.meta?.mcp || {};
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
@@ -248,7 +258,8 @@ export function dbtSchemaToCatalog(doc) {
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
     out.models[key] = m;
   }
-  if (!out.anchor_model) out.anchor_model = doc.anchor_model;
+  out.anchor_model = out.anchor_model || doc.anchor_model;
+  if (!out.anchor_model) throw new Error('no anchor (events fact) model: exactly one model must declare an event_name / event_data / time column');
   return out;
 }
 

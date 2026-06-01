@@ -1,0 +1,535 @@
+// Build JSON Schemas for the tools, with enums projected from the catalog.
+// Everything that names a column/property/event/attribute is an enum -> an AI
+// literally cannot submit an unknown name (validated by ajv at the boundary).
+//
+// Every property carries a `description` so the meaning/purpose of each
+// parameter is self-explanatory to the MCP client (the AI) without external docs.
+
+import { pipelineStageSchema } from './pipeline.js';
+
+const NAME = '^[a-z][a-z0-9_]{0,40}$';
+const TASK = '^[a-z][a-z0-9_]{2,40}$';
+const CTX = '^[a-z0-9]{6,40}$';
+const WINDOW = '^[0-9]+ (second|minute|hour|day|week|month|quarter|year)s?$';
+
+// Reusable property-description strings (kept consistent across tools).
+const D = {
+  context_id: 'ID of the isolated execution context to operate in. Omit on create to start a NEW, isolated context; pass an existing id to extend or query that same context. Each context is fully isolated, so parallel tasks never collide.',
+  measure_name: 'Unique measure name within the task (lowercase snake_case). Referenced by metrics; the final queryable name is prefixed with the task, e.g. task_<name>.',
+  agg: 'Aggregation applied to `field` to form the measure: count (rows), count_distinct (unique values of an entity key — required for conversion/funnel user counts), sum, average, median, min, max, percentile (needs `percentile`), sum_boolean (counts rows where a boolean/condition holds).',
+  percentile: 'Percentile in (0,1), e.g. 0.95 for p95. Required when agg=percentile.',
+  label: 'Human-readable label shown in BI tools / metadata. Defaults to the name when omitted.',
+  event_name: 'Event scope for THIS measure: only rows whose event_name is in this list are aggregated. This is how a funnel/conversion step is pinned to a specific event. Overrides the semantic model\'s event_scope.',
+  where_measure: 'Per-measure conditions on event_data JSON properties, ANDed with the event scope. Used to define a funnel step as event + property value (e.g. event_name=tutorial AND step_id=step_1).',
+};
+
+function whereItemSchema(catalog) {
+  return {
+    type: 'object', additionalProperties: false, required: ['property', 'op'],
+    description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
+    properties: {
+      property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property to test.' },
+      op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator. Use in/not_in with an array value; the rest take a scalar.' },
+      value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in.' },
+    },
+  };
+}
+
+function measureFieldSchema(catalog, modelKey) {
+  const opts = [{ const: '*', title: 'rows' }];
+  const keys = catalog.entityKeyColumns(modelKey);
+  if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
+  if (modelKey === catalog.anchor) {
+    const nums = catalog.eventNumericProps();
+    if (nums.length) opts.push({ type: 'string', enum: nums, title: 'event_property_numeric' });
+  } else {
+    // numeric model columns are rare in dims; allow none by default
+  }
+  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), or a numeric event_data property (for sum/average/etc.).', oneOf: opts };
+}
+
+function dimensionItemSchema(catalog, modelKey) {
+  const branches = [];
+  const cols = catalog.modelDimensionColumns(modelKey);
+  if (cols.length) {
+    branches.push({
+      title: 'model_column',
+      type: 'object',
+      additionalProperties: false,
+      required: ['source', 'column'],
+      description: 'A dimension taken directly from a physical column of the model.',
+      properties: {
+        source: { const: 'model_column', description: 'Use a physical table column as the dimension.' },
+        column: { type: 'string', enum: cols, description: 'Physical column name to expose as a dimension.' },
+        as_type: { enum: ['categorical', 'time'], default: 'categorical', description: 'Whether to treat the column as a categorical attribute or a time dimension (enables time grains).' },
+        grain: { enum: catalog.timeGranularities(), description: 'Time granularity when as_type=time (day/week/month/quarter/year).' },
+        label: { type: 'string', description: D.label },
+      },
+    });
+  }
+  if (modelKey === catalog.anchor) {
+    branches.push({
+      title: 'event_property',
+      type: 'object',
+      additionalProperties: false,
+      required: ['source', 'property'],
+      description: 'A dimension taken from an event_data property (e.g. level_id, product_id) so you can group/filter by it.',
+      properties: {
+        source: { const: 'event_property', description: 'Take the dimension from an event_data property.' },
+        property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property key to expose as a categorical dimension.' },
+        as_type: { const: 'categorical', default: 'categorical', description: 'event_data dimensions are always categorical.' },
+        label: { type: 'string', description: D.label },
+      },
+    });
+  }
+  return { type: 'object', description: 'A dimension to add to the semantic model (a column or an event_data property) for grouping/filtering.', oneOf: branches };
+}
+
+// Generic (model-agnostic) item schemas for `update`, where the target model is
+// already fixed by `semantic_model`. Field names are still catalog-constrained;
+// exact model/field coupling is re-checked in compile.
+function genericMeasureField(catalog) {
+  const opts = [{ const: '*', title: 'rows' }];
+  const keys = [...new Set(catalog.modelKeys().flatMap((k) => catalog.entityKeyColumns(k)))];
+  if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
+  const nums = catalog.eventNumericProps();
+  if (nums.length) opts.push({ type: 'string', enum: nums, title: 'numeric' });
+  return { description: 'What to aggregate: "*", an entity-key column, or a numeric event_data property.', oneOf: opts };
+}
+
+function genericMeasureItem(catalog) {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['name', 'agg'],
+    description: 'A measure to add to the target semantic model.',
+    properties: {
+      name: { type: 'string', pattern: NAME, description: D.measure_name },
+      agg: { enum: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'], description: D.agg },
+      field: genericMeasureField(catalog),
+      percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
+      label: { type: 'string', description: D.label },
+      event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: D.event_name },
+      where: { type: 'array', description: D.where_measure, items: whereItemSchema(catalog) },
+    },
+    allOf: [{ if: { properties: { agg: { const: 'percentile' } } }, then: { required: ['percentile'] } }],
+  };
+}
+
+function genericDimensionItem(catalog) {
+  const cols = [...new Set(catalog.modelKeys().flatMap((k) => catalog.modelDimensionColumns(k)))];
+  return {
+    type: 'object',
+    description: 'A dimension to add to the target semantic model (a column or an event_data property).',
+    oneOf: [
+      { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { const: 'model_column', description: 'Use a physical table column.' }, column: { type: 'string', enum: cols, description: 'Physical column name.' }, as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
+      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property key.' }, as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
+    ],
+  };
+}
+
+function measureItemSchema(catalog, modelKey) {
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['name', 'agg'],
+    description: 'A measure: an aggregation over the model, optionally scoped to specific events / property values (the building block of funnel steps and metrics).',
+    properties: {
+      name: { type: 'string', pattern: NAME, description: D.measure_name },
+      agg: { enum: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'], description: D.agg },
+      field: measureFieldSchema(catalog, modelKey),
+      percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
+      label: { type: 'string', description: D.label },
+      ...(modelKey === catalog.anchor
+        ? {
+            event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: D.event_name },
+            where: {
+              type: 'array',
+              description: D.where_measure,
+              items: whereItemSchema(catalog),
+            },
+          }
+        : {}),
+    },
+    allOf: [
+      { if: { properties: { agg: { const: 'percentile' } } }, then: { required: ['percentile'] } },
+    ],
+  };
+}
+
+function semanticModelBranch(catalog, modelKey) {
+  const props = {
+    from: { const: modelKey, description: `Source dbt model this semantic model is built from ("${modelKey}").` },
+    dimensions: { type: 'array', items: dimensionItemSchema(catalog, modelKey), description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
+    measures: { type: 'array', items: measureItemSchema(catalog, modelKey), description: 'Measures (aggregations) defined on this model; metrics reference these by name.' },
+  };
+  if (modelKey === catalog.anchor) {
+    props.event_scope = {
+      type: 'object',
+      additionalProperties: false,
+      description: 'Default event filter applied to ALL measures in this semantic model (each measure can still narrow further via its own event_name). Use when the whole task concerns one event type.',
+      properties: {
+        event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Events that scope every measure here.' },
+      },
+    };
+  }
+  return { type: 'object', additionalProperties: false, required: ['from'], description: `Semantic model built on the "${modelKey}" dbt model.`, properties: props };
+}
+
+function metricSchema() {
+  const measureRef = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['name'],
+    description: 'Reference to a measure by name.',
+    properties: { name: { type: 'string', description: 'Name of a measure defined in this task.' } },
+  };
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['name', 'type'],
+    description: 'A metric: the queryable quantity. simple wraps one measure; ratio = numerator/denominator; cumulative accumulates a measure over time; derived computes an expression over other metrics; conversion = share of a base population that later did a conversion event within a window.',
+    properties: {
+      name: { type: 'string', pattern: NAME, description: 'Unique metric name (lowercase snake_case). Queried as task_<name>.' },
+      type: { enum: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], description: 'Metric kind — determines which of the fields below are required.' },
+      label: { type: 'string', description: D.label },
+      measure: { ...measureRef, description: 'simple/cumulative: the single measure this metric exposes.' },
+      fill_nulls_with: { type: 'number', description: 'Value to substitute for NULL results (e.g. 0) so gaps in a time series render as zeros.' },
+      numerator: { ...measureRef, description: 'ratio: the measure on top of the division.' },
+      denominator: { ...measureRef, description: 'ratio: the measure on the bottom of the division.' },
+      window: { type: 'string', pattern: WINDOW, description: 'conversion: time window in which the conversion must occur after the base event, e.g. "1 day", "7 day", "1 week".' },
+      grain_to_date: { enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'cumulative: reset accumulation at the start of each period (e.g. month-to-date).' },
+      period_agg: { enum: ['first', 'last', 'average'], description: 'cumulative: how to collapse multiple values within a period.' },
+      expr: { type: 'string', description: 'derived: arithmetic expression over the input metrics, e.g. "coins_in - coins_out". Restricted to a safe arithmetic grammar (the referenced metric aliases + basic math functions).' },
+      metrics: { type: 'array', description: 'derived: the input metrics referenced by `expr`.', items: { type: 'object', additionalProperties: false, required: ['name'], properties: { name: { type: 'string', description: 'Name of an input metric.' }, alias: { type: 'string', description: 'Optional alias to use for this metric inside `expr`.' } } } },
+      base_measure: { ...measureRef, description: 'conversion: the starting population (must be count_distinct of an entity), e.g. users who launched.' },
+      conversion_measure: { ...measureRef, description: 'conversion: the converted population (count_distinct of the same entity), e.g. users who purchased.' },
+      entity: { type: 'string', description: 'conversion: the entity linking base and conversion events (e.g. "user").' },
+      calculation: { enum: ['conversion_rate', 'conversion'], description: 'conversion: return the rate (converted/base, default) or the raw converted count.' },
+      constant_properties: { type: 'array', items: { type: 'string' }, description: 'conversion: properties that must match between the base and conversion events (e.g. same product_id).' },
+    },
+    allOf: [
+      { if: { properties: { type: { const: 'simple' } } }, then: { required: ['measure'] } },
+      { if: { properties: { type: { const: 'ratio' } } }, then: { required: ['numerator', 'denominator'] } },
+      { if: { properties: { type: { const: 'cumulative' } } }, then: { required: ['measure'] } },
+      { if: { properties: { type: { const: 'derived' } } }, then: { required: ['expr', 'metrics'] } },
+      { if: { properties: { type: { const: 'conversion' } } }, then: { required: ['base_measure', 'conversion_measure', 'window'] } },
+    ],
+  };
+}
+
+function predicateDefs(catalog) {
+  const paths = catalog.reachableGroupByPaths();
+  return {
+    fieldRef: {
+      type: 'object',
+      // `path` is validated per-context in the handler (task dims are not a
+      // static enum); `_paths` documents the catalog-reachable join paths.
+      _reachable_paths: paths,
+      description: 'The field a condition applies to: a dimension path or the metric time axis.',
+      oneOf: [
+        { type: 'object', additionalProperties: false, required: ['kind', 'path'], description: 'A dimension, addressed by its (possibly entity-qualified) path.', properties: { kind: { const: 'dimension', description: 'Filter on a dimension.' }, path: { type: 'string', description: 'Dimension path: a task-local dimension name, or an entity-qualified join path like user__country. Validated against the context.' } } },
+        { type: 'object', additionalProperties: false, required: ['kind'], description: 'The metric time axis.', properties: { kind: { const: 'metric_time', description: 'Filter on the metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain to bucket by.' } } },
+      ],
+    },
+    predicate: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['field', 'op'],
+      description: 'A single filter condition (field OP value).',
+      properties: {
+        field: { $ref: '#/$defs/fieldRef' },
+        op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'between', 'is_null', 'is_not_null'], description: 'Comparison operator. between takes [low, high]; in/not_in take an array; is_null/is_not_null take no value.' },
+        value: { description: 'Value to compare against (scalar, array for in/not_in/between). Bound as an escaped literal.' },
+      },
+    },
+    predicateGroup: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['op', 'conditions'],
+      description: 'A boolean group combining conditions/sub-groups with AND or OR (compose for nested logic).',
+      properties: {
+        op: { enum: ['and', 'or'], description: 'How to combine the `conditions`.' },
+        conditions: { type: 'array', minItems: 1, description: 'Conditions and/or nested groups.', items: { oneOf: [{ $ref: '#/$defs/predicate' }, { $ref: '#/$defs/predicateGroup' }] } },
+      },
+    },
+  };
+}
+
+export function buildSchemas(catalog) {
+  const modelKeys = catalog.modelKeys();
+  const create = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['name', 'metrics'],
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context.',
+    properties: {
+      context_id: { type: 'string', pattern: CTX, description: D.context_id },
+      name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
+      description: { type: 'string', description: 'Free-text note describing what this task computes (metadata only).' },
+      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional source models to load so their dimensions become joinable (e.g. "users" to slice by country/platform). The events source is always available.' },
+      semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
+      metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
+      dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
+    },
+  };
+
+  // register_native_model: build a derived dbt model from a declarative PIPELINE
+  // (a pipe-syntax transformation, optionally ending in a match_recognize funnel)
+  // and materialize it. The pipeline's rows ARE the result.
+  const registerModel = {
+    type: 'object', additionalProperties: false, required: ['name', 'pipeline'],
+    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — returned, and re-readable/sliceable via get_query_result. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
+    properties: {
+      context_id: { type: 'string', pattern: CTX, description: D.context_id },
+      name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
+      materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored: table (precomputed snapshot, default) or view (always fresh).' },
+      dry_run: { type: 'boolean', description: 'If true, return the generated model definition for preview WITHOUT building anything.' },
+      pipeline: {
+        type: 'object', additionalProperties: false, required: ['stages'],
+        description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
+        properties: {
+          source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table for the pipeline (default: the events fact).' },
+          stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
+        },
+      },
+    },
+  };
+
+  const pdefs = predicateDefs(catalog);
+  const query = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['context_id'],
+    description: 'Run a metric query against a context.',
+    $defs: pdefs,
+    properties: {
+      context_id: { type: 'string', pattern: CTX, description: D.context_id },
+      task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
+      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Metric names to fetch (as exposed by the context, e.g. task_<metric>).' },
+      group_by: {
+        type: 'array',
+        description: 'Dimensions to break the metrics down by: either { time: "metric_time", grain } for a time series, or a dimension path string (task-local name or entity-qualified like user__country). Validated against the context.',
+        // dimension paths validated per-context in the handler (incl. task dims)
+        items: {
+          oneOf: [
+            { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { const: 'metric_time', description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
+            { type: 'string', description: 'A dimension path to group by.' },
+          ],
+        },
+      },
+      where: { $ref: '#/$defs/predicateGroup', description: 'Row filter applied before aggregation (boolean tree of conditions on dimensions / metric_time).' },
+      order_by: { type: 'array', description: 'Sort order. Each key must be a requested metric or group-by token.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Metric or group-by token to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
+      time_range: { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates).', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } },
+      limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
+      offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
+      materialize: { type: 'boolean', description: 'Materialize the result and read rows back from it (resilient, re-fetchable). Slow queries (> timeout) return a query_id; poll get_query_result.' },
+      dry_run: { type: 'boolean', description: 'If true, validate and return the compiled query WITHOUT executing it.' },
+      explain: { type: 'boolean', description: 'If true, return the query plan (how the metrics compile) and the compiled query WITHOUT executing. A superset of dry_run; useful for inspecting/optimizing.' },
+    },
+  };
+
+  const update = {
+    type: 'object',
+    additionalProperties: false,
+    required: ['context_id', 'semantic_model'],
+    description: 'Incrementally add or remove measures/dimensions/metrics on a semantic model within a context, then re-parse.',
+    properties: {
+      context_id: { type: 'string', pattern: CTX, description: D.context_id },
+      semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s semantic model to modify.' },
+      add_dimensions: { type: 'array', items: genericDimensionItem(catalog), description: 'Dimensions to add.' },
+      remove_dimensions: { type: 'array', items: { type: 'string' }, description: 'Names of dimensions to remove.' },
+      add_measures: { type: 'array', items: genericMeasureItem(catalog), description: 'Measures to add.' },
+      remove_measures: { type: 'array', items: { type: 'string' }, description: 'Names of measures to remove (fails if metrics depend on them unless cascade is used elsewhere).' },
+      add_metrics: { type: 'array', items: metricSchema(), description: 'Metrics to add.' },
+      remove_metrics: { type: 'array', items: { type: 'string' }, description: 'Names of metrics to remove.' },
+      task: { type: 'string', description: 'Task name the additions belong to (defaults to the context\'s first task).' },
+      dry_run: { type: 'boolean', description: 'If true, validate the change WITHOUT building anything.' },
+    },
+  };
+
+  const ctxRef = { type: 'object', additionalProperties: false, required: ['context_id'], description: 'Reference an existing context by id.', properties: { context_id: { type: 'string', pattern: CTX, description: D.context_id } } };
+  const del = { type: 'object', additionalProperties: false, required: ['context_id', 'semantic_model'], description: 'Remove a semantic model\'s task additions from a context.', properties: { context_id: { type: 'string', pattern: CTX, description: D.context_id }, semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s additions to remove.' }, cascade: { type: 'boolean', description: 'If true, also remove metrics that depend on the removed measures.' } } };
+  const empty = { type: 'object', additionalProperties: false, properties: {} };
+
+  return {
+    create_semantic_model: create,
+    register_native_model: registerModel,
+    update_native_model: { ...registerModel, required: ['context_id', 'name'], description: 'Update a registered native model in place: regenerate it from a new sequence or pipeline spec and rebuild.' },
+    delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
+    query_semantic_model: query,
+    get_query_result: {
+      type: 'object', additionalProperties: false,
+      // Either poll by query_id (context_id not needed — taken from the job), or
+      // fetch a known table directly (which requires its context_id).
+      anyOf: [{ required: ['query_id'] }, { required: ['table', 'context_id'] }],
+      description: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}; optionally re-slice it with a read-only transform.',
+      properties: {
+        context_id: { type: 'string', pattern: CTX, description: D.context_id },
+        query_id: { type: 'string', pattern: '^[a-f0-9]{8,16}$', description: 'ID returned by a backgrounded materialize query; poll it for status + results.' },
+        table: { type: 'string', pattern: '^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$', description: 'A known result table to read directly (its name is returned by a prior materialize or register call) — works even if the job record is gone.' },
+        limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
+        offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging over the stored result). Ignored when sample=true.' },
+        sample: { type: 'boolean', description: 'If true, return a REPRESENTATIVE random subset of rows instead of the first rows — a better peek at large results.' },
+        sample_percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate % of rows to sample when sample=true (default 10).' },
+        transform: {
+          type: 'object', additionalProperties: false,
+          description: 'Optional read-only re-slice of the stored result (compress/aggregate/filter it WITHOUT recomputing the original query).',
+          properties: {
+            where: { type: 'array', description: 'Row filters on result columns.', items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Result column to filter.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'is_null', 'is_not_null'], description: 'Comparison operator.' }, value: { description: 'Comparison value (array for in/not_in).' } } } },
+            group_by: { type: 'array', items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
+            aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function.' }, column: { type: 'string', description: 'Column to aggregate (omit for count).' }, as: { type: 'string', description: 'Output column alias.' } } } },
+            having: { type: 'array', description: 'Post-aggregation filters on aggregate values.', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' }, value: { description: 'Threshold value.' } } } },
+            order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' } } } },
+            limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows after projection.' },
+          },
+        },
+      },
+    },
+    list_query_jobs: empty,
+    update_semantic_model: update,
+    delete_semantic_model: del,
+    drop_context: { ...ctxRef, description: 'Tear down an entire isolated context (delete its files + artifacts).' },
+    describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
+    list_contexts: empty,
+    describe_catalog: empty,
+    time: {
+      type: 'object', additionalProperties: false, required: ['seconds'],
+      description: 'Wait for `seconds` (capped at 60), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.',
+      properties: {
+        seconds: { type: 'number', minimum: 0, maximum: 86400, description: 'Seconds to wait; the actual wait is capped at 60 (larger values are clamped, with clamped:true in the result).' },
+        reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
+      },
+    },
+    ab_test: abTestSchema(),
+    srm_check: srmCheckSchema(),
+    sample_size: sampleSizeSchema(),
+  };
+}
+
+// ── A/B test statistics (computed in JS over per-group aggregates) ────────────
+//
+// The schema is a DISCRIMINATED UNION on `metric`: each branch is fully self-
+// contained (additionalProperties:false) and its group arms accept ONLY the fields
+// that metric consumes. So a proportion test cannot carry `mean`, a mean test cannot
+// carry `conversions`, a ratio test must carry exactly the five ratio sums, etc. —
+// invalid field combinations are rejected by the schema, not just at runtime.
+function abTestSchema() {
+  const confidence = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.95, description: 'Confidence level (e.g. 0.95).' };
+  const alternative = { enum: ['two_sided', 'greater', 'less'], default: 'two_sided', description: 'Hypothesis direction for the variant vs control.' };
+  const correction = { enum: ['none', 'holm', 'bh'], default: 'holm', description: 'Multiple-comparison correction across the variants: holm (family-wise error rate), bh (Benjamini–Hochberg false discovery rate), or none. Adds p_value_adjusted/significant_adjusted per variant.' };
+
+  // One metric's group arm: label + n + exactly that metric's required stat fields.
+  const arm = (fields, armDesc) => ({
+    type: 'object', additionalProperties: false, required: ['n', ...Object.keys(fields)],
+    description: armDesc,
+    properties: {
+      label: { type: 'string', description: 'Group name (e.g. control, variant_b).' },
+      n: { type: 'integer', minimum: 1, description: 'Sample size (e.g. users in the group).' },
+      ...fields,
+    },
+  });
+  // One metric branch of the union.
+  const branch = (metric, branchDesc, fields, armDesc) => {
+    const a = arm(fields, armDesc);
+    return {
+      type: 'object', additionalProperties: false, required: ['metric', 'control', 'variants'],
+      description: branchDesc,
+      properties: {
+        metric: { const: metric },
+        confidence, alternative, correction,
+        control: a,
+        variants: { type: 'array', minItems: 1, items: a, description: 'One or more variant groups, each tested against control.' },
+      },
+    };
+  };
+
+  return {
+    type: 'object',
+    description: 'Run an A/B significance test on PRE-AGGREGATED group stats (compute them first with a pipeline: join the experiments source, window events to the assignment period, then aggregate per group). The required group fields DEPEND ON metric (discriminated union): proportion → conversions (two-proportion z-test); mean → mean+stddev (Welch t-test); ratio → the five per-user sums sumNum/sumDen/sumNum2/sumDen2/sumNumDen (delta-method test for ratio metrics whose analysis unit is finer than the randomization unit, e.g. completed/started or clicks/impressions randomized by user); cuped → the five per-user sufficient sums sumY/sumY2/sumX/sumX2/sumXY (CUPED variance reduction via a pre-experiment covariate, then Welch). Returns each variant vs control: lift (absolute+relative, with a relative-lift CI), test statistic, p-value, confidence interval, significance, and a multiplicity-adjusted p-value across the variant family.',
+    required: ['metric'],
+    discriminator: { propertyName: 'metric' },
+    oneOf: [
+      branch('proportion', 'Conversion-rate test (two-proportion z-test): each group carries conversions out of n.',
+        { conversions: { type: 'integer', minimum: 0, description: 'Number of successes in the group.' } },
+        'A group for a proportion test: n and the number of conversions.'),
+      branch('mean', 'Continuous-metric test (Welch t-test): each group carries the per-user mean and stddev.',
+        { mean: { type: 'number', description: 'Mean of the metric over the group.' }, stddev: { type: 'number', minimum: 0, description: 'Standard deviation of the metric over the group.' } },
+        'A group for a mean test: n, mean and stddev.'),
+      branch('ratio', 'Ratio-metric test via the delta method: each group carries the per-user numerator/denominator sums plus their squares and cross-product.',
+        {
+          sumNum: { type: 'number', description: 'Σ of the per-user numerator.' },
+          sumDen: { type: 'number', exclusiveMinimum: 0, description: 'Σ of the per-user denominator (must be > 0).' },
+          sumNum2: { type: 'number', minimum: 0, description: 'Σ of numerator².' },
+          sumDen2: { type: 'number', minimum: 0, description: 'Σ of denominator².' },
+          sumNumDen: { type: 'number', description: 'Σ of numerator·denominator.' },
+        },
+        'A group for a ratio test: n and the five per-user sums (sumNum, sumDen, sumNum2, sumDen2, sumNumDen).'),
+      branch('cuped', 'CUPED variance reduction (then Welch): each group carries the per-user sufficient sums of the in-experiment value Y and the pre-experiment covariate X.',
+        {
+          sumY: { type: 'number', description: 'Σ of the per-user in-experiment value Y.' },
+          sumY2: { type: 'number', minimum: 0, description: 'Σ of Y².' },
+          sumX: { type: 'number', description: 'Σ of the per-user pre-experiment covariate X.' },
+          sumX2: { type: 'number', minimum: 0, description: 'Σ of X².' },
+          sumXY: { type: 'number', description: 'Σ of Y·X.' },
+        },
+        'A group for a CUPED test: n and the five per-user sufficient sums (sumY, sumY2, sumX, sumX2, sumXY).'),
+    ],
+  };
+}
+
+// ── Sample Ratio Mismatch guardrail ───────────────────────────────────────────
+function srmCheckSchema() {
+  return {
+    type: 'object', additionalProperties: false, required: ['groups'],
+    description: 'Sample Ratio Mismatch (SRM) guardrail: a χ² goodness-of-fit test that the OBSERVED per-group sample sizes match the intended split. A detected mismatch (p < 0.001) means randomization or logging is broken and the experiment is INVALID — run this BEFORE trusting any lift. Compute per-group n with a pipeline first.',
+    properties: {
+      groups: {
+        type: 'array', minItems: 2, description: 'Observed groups with their sample sizes.',
+        items: {
+          type: 'object', additionalProperties: false, required: ['n'],
+          properties: {
+            label: { type: 'string', description: 'Group name (e.g. control, variant_b).' },
+            n: { type: 'integer', minimum: 0, description: 'Observed sample size in this group.' },
+          },
+        },
+      },
+      expected_ratio: { type: 'array', minItems: 2, items: { type: 'number', exclusiveMinimum: 0 }, description: 'Intended split weights, same order as groups (e.g. [1,1] for 50/50, [2,1,1]). Defaults to an equal split.' },
+    },
+  };
+}
+
+// ── Power / sample-size planning ───────────────────────────────────────────────
+//
+// Discriminated union on `metric` (proportion needs baseline, mean needs stddev) and,
+// within each branch, EXACTLY ONE of {mde, n} is required (provide mde → solve n;
+// provide n → solve MDE). So neither "both" nor "neither" nor a mismatched dispersion
+// field can be passed.
+function sampleSizeSchema() {
+  const power = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.8, description: 'Desired statistical power (1−β).' };
+  const confidence = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.95, description: 'Confidence level (1−α).' };
+  const alternative = { enum: ['two_sided', 'greater', 'less'], default: 'two_sided', description: 'Hypothesis direction.' };
+  const mde = { type: 'number', exclusiveMinimum: 0, description: 'Absolute minimum detectable effect (e.g. +0.02 rate, or +1.5 revenue). Provide to solve for n.' };
+  const n = { type: 'integer', minimum: 2, description: 'Sample size PER GROUP. Provide to solve for the MDE instead.' };
+  const exactlyOneOfMdeN = [
+    { required: ['mde'], not: { required: ['n'] } },
+    { required: ['n'], not: { required: ['mde'] } },
+  ];
+  const branch = (metric, dispersionField, dispersionProp, branchDesc) => ({
+    type: 'object', additionalProperties: false,
+    required: ['metric', dispersionField],
+    description: branchDesc,
+    properties: { metric: { const: metric }, [dispersionField]: dispersionProp, mde, n, power, confidence, alternative },
+    oneOf: exactlyOneOfMdeN,
+  });
+  return {
+    type: 'object',
+    description: 'Power / sample-size planning (no warehouse). Provide a target effect (mde) to get the required sample size PER GROUP, or a sample size (n) to get the minimum detectable effect (MDE) — exactly one of the two. metric=proportion needs a baseline rate; metric=mean needs a stddev. Use it to size a test up front and to tell a true null apart from an underpowered one.',
+    required: ['metric'],
+    discriminator: { propertyName: 'metric' },
+    oneOf: [
+      branch('proportion', 'baseline', { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Baseline conversion rate.' }, 'Conversion-rate planning: needs a baseline rate, plus exactly one of mde or n.'),
+      branch('mean', 'stddev', { type: 'number', exclusiveMinimum: 0, description: 'Standard deviation of the metric.' }, 'Continuous-metric planning: needs a stddev, plus exactly one of mde or n.'),
+    ],
+  };
+}

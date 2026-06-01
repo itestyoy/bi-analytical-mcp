@@ -1,0 +1,2381 @@
+{
+  "recipes": [
+    {
+      "id": "active_users_trend",
+      "task_type": "trends",
+      "title": "Active users & event volume over time (DAU/WAU/MAU)",
+      "when_to_use": "How many unique users / events over time, at day/week/month grain.",
+      "required_events": [
+        "new_session"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple"
+      ],
+      "create_payload": {
+        "name": "active_users",
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "active_users",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "new_session"
+                ]
+              },
+              {
+                "name": "event_volume",
+                "agg": "count",
+                "field": "*"
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "dau",
+            "type": "simple",
+            "measure": {
+              "name": "active_users"
+            }
+          },
+          {
+            "name": "events",
+            "type": "simple",
+            "measure": {
+              "name": "event_volume"
+            }
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "active_users_dau"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "active_users_dau"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "week"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "active_users_dau"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "month"
+            }
+          ]
+        }
+      ],
+      "notes": "DAU/MAU ratio (stickiness) = active_users at day vs month grain.",
+      "hack": "count_distinct of the entity key = unique actors; group_by {time: metric_time, grain} turns any measure into a time series. Extrapolate: unique-X-over-time = count_distinct(entity) scoped to the X event."
+    },
+    {
+      "id": "metric_by_user_segment",
+      "task_type": "segmentation",
+      "title": "Metric sliced by a user attribute",
+      "when_to_use": "Revenue / payers / ARPPU broken down by country, platform, media_source, acquisition_type or campaign_id.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd"
+      ],
+      "required_user_attrs": [
+        "country",
+        "platform",
+        "media_source",
+        "acquisition_type"
+      ],
+      "metric_types": [
+        "simple",
+        "ratio"
+      ],
+      "create_payload": {
+        "name": "rev_segment",
+        "use_base_models": [
+          "users"
+        ],
+        "semantic_models": [
+          {
+            "from": "events",
+            "event_scope": {
+              "event_name": [
+                "iap_purchase_completed"
+              ]
+            },
+            "measures": [
+              {
+                "name": "revenue",
+                "agg": "sum",
+                "field": "price_in_usd"
+              },
+              {
+                "name": "payers",
+                "agg": "count_distinct",
+                "field": "appsflyer_id"
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "revenue",
+            "type": "simple",
+            "measure": {
+              "name": "revenue"
+            }
+          },
+          {
+            "name": "payers",
+            "type": "simple",
+            "measure": {
+              "name": "payers"
+            }
+          },
+          {
+            "name": "arppu",
+            "type": "ratio",
+            "numerator": {
+              "name": "revenue"
+            },
+            "denominator": {
+              "name": "payers"
+            }
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "rev_segment_revenue"
+          ],
+          "group_by": [
+            "user__country"
+          ]
+        },
+        {
+          "metrics": [
+            "rev_segment_revenue"
+          ],
+          "group_by": [
+            "user__platform"
+          ]
+        },
+        {
+          "metrics": [
+            "rev_segment_revenue"
+          ],
+          "group_by": [
+            "user__media_source"
+          ]
+        },
+        {
+          "metrics": [
+            "rev_segment_arppu"
+          ],
+          "group_by": [
+            "user__acquisition_type"
+          ]
+        },
+        {
+          "metrics": [
+            "rev_segment_revenue"
+          ],
+          "group_by": [
+            "user__media_source"
+          ]
+        }
+      ],
+      "notes": "User attributes via the implicit events.user -> users.user join; campaign_id is a plain string attribute on dim_users (1-hop, like country/platform) — there is no separate campaigns table.",
+      "hack": "Any measure + group_by user__<attr> makes the semantic layer auto-join the user dimension — no join written. Extrapolate: segment ANY metric by ANY user attribute the same way."
+    },
+    {
+      "id": "step_conversion_funnel",
+      "task_type": "funnel",
+      "title": "2-step conversion funnel (level_started -> level_completed)",
+      "when_to_use": "Step conversion / completion rate between two events within a window.",
+      "required_events": [
+        "level_started",
+        "level_completed"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple",
+        "conversion"
+      ],
+      "create_payload": {
+        "name": "lvl_funnel",
+        "use_base_models": [
+          "users"
+        ],
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "starters",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "level_started"
+                ]
+              },
+              {
+                "name": "completers",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "level_completed"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "starters",
+            "type": "simple",
+            "measure": {
+              "name": "starters"
+            }
+          },
+          {
+            "name": "completers",
+            "type": "simple",
+            "measure": {
+              "name": "completers"
+            }
+          },
+          {
+            "name": "completion_rate",
+            "type": "conversion",
+            "base_measure": {
+              "name": "starters"
+            },
+            "conversion_measure": {
+              "name": "completers"
+            },
+            "entity": "user",
+            "window": "1 day"
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "lvl_funnel_starters",
+            "lvl_funnel_completers"
+          ]
+        },
+        {
+          "metrics": [
+            "lvl_funnel_completion_rate"
+          ]
+        },
+        {
+          "metrics": [
+            "lvl_funnel_completion_rate"
+          ],
+          "group_by": [
+            "user__country"
+          ]
+        }
+      ],
+      "notes": "Conversion base/conversion measures must be count_distinct. No native N-step funnel; chain 2-step conversions or use derived over step counts.",
+      "hack": "A funnel step = an event narrowed by an event_data property value, counted as count_distinct(user); step conversion = ratio(next_step / prev_step). Extrapolate to any 2-step drop-off."
+    },
+    {
+      "id": "multistep_funnel",
+      "task_type": "funnel",
+      "title": "Multi-step funnel where each step = event + property value",
+      "when_to_use": "Onboarding/activation funnels whose steps are the SAME event with a different property value (e.g. tutorial step_id=step_1 -> step_2 -> step_3), with step-to-step conversion.",
+      "required_events": [
+        "tutorial"
+      ],
+      "required_properties": [
+        "step_id"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple",
+        "conversion"
+      ],
+      "create_payload": {
+        "name": "tut_funnel",
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "s1",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "tutorial"
+                ],
+                "where": [
+                  {
+                    "property": "step_id",
+                    "op": "eq",
+                    "value": "step_1"
+                  }
+                ]
+              },
+              {
+                "name": "s2",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "tutorial"
+                ],
+                "where": [
+                  {
+                    "property": "step_id",
+                    "op": "eq",
+                    "value": "step_2"
+                  }
+                ]
+              },
+              {
+                "name": "s3",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "tutorial"
+                ],
+                "where": [
+                  {
+                    "property": "step_id",
+                    "op": "eq",
+                    "value": "step_3"
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "step1",
+            "type": "simple",
+            "measure": {
+              "name": "s1"
+            }
+          },
+          {
+            "name": "step2",
+            "type": "simple",
+            "measure": {
+              "name": "s2"
+            }
+          },
+          {
+            "name": "step3",
+            "type": "simple",
+            "measure": {
+              "name": "s3"
+            }
+          },
+          {
+            "name": "conv_1_2",
+            "type": "conversion",
+            "base_measure": {
+              "name": "s1"
+            },
+            "conversion_measure": {
+              "name": "s2"
+            },
+            "entity": "user",
+            "window": "7 day"
+          },
+          {
+            "name": "conv_2_3",
+            "type": "conversion",
+            "base_measure": {
+              "name": "s2"
+            },
+            "conversion_measure": {
+              "name": "s3"
+            },
+            "entity": "user",
+            "window": "7 day"
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "tut_funnel_step1",
+            "tut_funnel_step2",
+            "tut_funnel_step3"
+          ]
+        },
+        {
+          "metrics": [
+            "tut_funnel_conv_1_2"
+          ]
+        },
+        {
+          "metrics": [
+            "tut_funnel_conv_2_3"
+          ]
+        }
+      ],
+      "notes": "A funnel step is a measure scoped by event_name + a property `where` (event_data value). Steps chain as 2-step conversion metrics (s1->s2, s2->s3); multiply/compose for end-to-end. Could also key the step on level_id, screen_to, placement, etc.",
+      "hack": "Chain one count_distinct(user) measure per step (event + property value) and ratio metrics between consecutive steps. Extrapolate to any ordered N-step sequence."
+    },
+    {
+      "id": "nday_retention",
+      "task_type": "retention",
+      "title": "N-day retention (D1/D7) via conversion window",
+      "when_to_use": "Share of newly-acquired users who return (start a session) within N days of first launch.",
+      "required_events": [
+        "first_launch",
+        "new_session"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": [
+        "conversion"
+      ],
+      "create_payload": {
+        "name": "retention",
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "cohort",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "first_launch"
+                ]
+              },
+              {
+                "name": "returned",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "new_session"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "d1",
+            "type": "conversion",
+            "base_measure": {
+              "name": "cohort"
+            },
+            "conversion_measure": {
+              "name": "returned"
+            },
+            "entity": "user",
+            "window": "1 day"
+          },
+          {
+            "name": "d7",
+            "type": "conversion",
+            "base_measure": {
+              "name": "cohort"
+            },
+            "conversion_measure": {
+              "name": "returned"
+            },
+            "entity": "user",
+            "window": "7 day"
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "retention_d1"
+          ]
+        },
+        {
+          "metrics": [
+            "retention_d7"
+          ]
+        },
+        {
+          "metrics": [
+            "retention_d1"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        }
+      ],
+      "notes": "Cohort = users with a first_launch (acquisition); returned = users who start a new_session within the window. base_measure and conversion_measure are DIFFERENT events so the rate is meaningful (not identically 1.0). Approximates N-day retention via conversion window; exact point-in-time D-N retention is not native to MetricFlow.",
+      "hack": "Retention = a conversion metric (base = first/install event, conversion = a later activity event) with window = 'N day'. Extrapolate: change N or the base/return events for any Dn."
+    },
+    {
+      "id": "cohort_retention_grid",
+      "task_type": "cohort",
+      "title": "Acquisition-cohort grid (install date x activity)",
+      "when_to_use": "Cohort table: metric by install_date cohort and activity day.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd"
+      ],
+      "required_user_attrs": [
+        "install_date"
+      ],
+      "metric_types": [
+        "simple"
+      ],
+      "create_payload": {
+        "name": "cohort_grid",
+        "use_base_models": [
+          "users"
+        ],
+        "semantic_models": [
+          {
+            "from": "events",
+            "event_scope": {
+              "event_name": [
+                "iap_purchase_completed"
+              ]
+            },
+            "measures": [
+              {
+                "name": "revenue",
+                "agg": "sum",
+                "field": "price_in_usd"
+              },
+              {
+                "name": "buyers",
+                "agg": "count_distinct",
+                "field": "appsflyer_id"
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "revenue",
+            "type": "simple",
+            "measure": {
+              "name": "revenue"
+            }
+          },
+          {
+            "name": "buyers",
+            "type": "simple",
+            "measure": {
+              "name": "buyers"
+            }
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "cohort_grid_revenue"
+          ],
+          "group_by": [
+            "user__install_date",
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "cohort_grid_buyers"
+          ],
+          "group_by": [
+            "user__install_date"
+          ]
+        }
+      ],
+      "notes": "Group by install_date (cohort) and metric_time (age). Cumulative LTV per cohort can layer a cumulative metric.",
+      "hack": "Pivot a retention measure by install-cohort (a time dimension) against age-in-days. Extrapolate: any cohort-attribute × age-bucket grid."
+    },
+    {
+      "id": "behavioral_cohort",
+      "task_type": "behavioral",
+      "title": "Behavioral cohort: users who did / didn't do event X",
+      "when_to_use": "Segment users by whether they performed a behavior (e.g. purchased), then compare metrics.",
+      "required_events": [
+        "iap_purchase_completed",
+        "new_session"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple"
+      ],
+      "create_payload": {
+        "name": "behavior",
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "purchases",
+                "agg": "sum_boolean",
+                "event_name": [
+                  "iap_purchase_completed"
+                ]
+              },
+              {
+                "name": "sessions",
+                "agg": "count",
+                "field": "*",
+                "event_name": [
+                  "new_session"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "purchases",
+            "type": "simple",
+            "measure": {
+              "name": "purchases"
+            }
+          },
+          {
+            "name": "sessions",
+            "type": "simple",
+            "measure": {
+              "name": "sessions"
+            }
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "behavior_purchases"
+          ]
+        },
+        {
+          "metrics": [
+            "behavior_sessions"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        }
+      ],
+      "notes": "Split did/didn't with a Metric() in --where, e.g. `{{ Metric('behavior_purchases', group_by=['user']) }} > 0`.",
+      "hack": "Split the population by a behavioral flag (did event X) then measure later behavior on each arm. Extrapolate to any 'did A → compare B' cohort."
+    },
+    {
+      "id": "visit_to_purchase_conversion",
+      "task_type": "conversion",
+      "title": "Visit-to-purchase conversion (native conversion metric)",
+      "when_to_use": "Share of visitors who purchase within a window.",
+      "required_events": [
+        "new_session",
+        "iap_purchase_completed"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [
+        "country"
+      ],
+      "metric_types": [
+        "conversion"
+      ],
+      "create_payload": {
+        "name": "visit_purchase",
+        "use_base_models": [
+          "users"
+        ],
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "visits",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "new_session"
+                ]
+              },
+              {
+                "name": "buyers",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "iap_purchase_completed"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "visits",
+            "type": "simple",
+            "measure": {
+              "name": "visits"
+            }
+          },
+          {
+            "name": "conversion",
+            "type": "conversion",
+            "base_measure": {
+              "name": "visits"
+            },
+            "conversion_measure": {
+              "name": "buyers"
+            },
+            "entity": "user",
+            "window": "7 day"
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "visit_purchase_visits"
+          ]
+        },
+        {
+          "metrics": [
+            "visit_purchase_conversion"
+          ]
+        },
+        {
+          "metrics": [
+            "visit_purchase_conversion"
+          ],
+          "group_by": [
+            "user__country"
+          ]
+        }
+      ],
+      "notes": "Use constant_properties to require the same product across base/conversion events when relevant.",
+      "hack": "conversion metric linking two events by the shared user entity (base=visit, conversion=purchase). Extrapolate to any A→B funnel within a window."
+    },
+    {
+      "id": "level_progression",
+      "task_type": "progression",
+      "title": "Level progression: completion, attempts, time per level",
+      "when_to_use": "Per-level difficulty: starts, completes, completion rate, avg time/attempts.",
+      "required_events": [
+        "level_started",
+        "level_completed"
+      ],
+      "required_properties": [
+        "level_id",
+        "complete_time",
+        "attempt"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple",
+        "ratio"
+      ],
+      "create_payload": {
+        "name": "progression",
+        "semantic_models": [
+          {
+            "from": "events",
+            "dimensions": [
+              {
+                "source": "event_property",
+                "property": "level_id"
+              }
+            ],
+            "measures": [
+              {
+                "name": "starts",
+                "agg": "count",
+                "field": "*",
+                "event_name": [
+                  "level_started"
+                ]
+              },
+              {
+                "name": "completes",
+                "agg": "count",
+                "field": "*",
+                "event_name": [
+                  "level_completed"
+                ]
+              },
+              {
+                "name": "avg_time",
+                "agg": "average",
+                "field": "complete_time",
+                "event_name": [
+                  "level_completed"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "starts",
+            "type": "simple",
+            "measure": {
+              "name": "starts"
+            }
+          },
+          {
+            "name": "completes",
+            "type": "simple",
+            "measure": {
+              "name": "completes"
+            }
+          },
+          {
+            "name": "completion_rate",
+            "type": "ratio",
+            "numerator": {
+              "name": "completes"
+            },
+            "denominator": {
+              "name": "starts"
+            }
+          },
+          {
+            "name": "avg_time",
+            "type": "simple",
+            "measure": {
+              "name": "avg_time"
+            }
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "progression_starts",
+            "progression_completes"
+          ],
+          "group_by": [
+            "progression_level_id"
+          ]
+        },
+        {
+          "metrics": [
+            "progression_completion_rate"
+          ],
+          "group_by": [
+            "progression_level_id"
+          ]
+        }
+      ],
+      "notes": "Group by the JSON-extracted level_id dimension. Churn-at-level derived from starts of level N vs N+1 in post-processing.",
+      "hack": "Group an event measure by a numeric event_data ordinal (level_id) and ratio adjacent values = progression/drop-off. Extrapolate to any per-step numeric progression."
+    },
+    {
+      "id": "monetization_metrics",
+      "task_type": "monetization",
+      "title": "Monetization: revenue, ARPPU, AOV, by product/channel/day",
+      "when_to_use": "IAP revenue, payers, ARPPU, average order value over time and by segment/product.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd",
+        "product_id"
+      ],
+      "required_user_attrs": [
+        "country"
+      ],
+      "metric_types": [
+        "simple",
+        "ratio"
+      ],
+      "create_payload": {
+        "name": "monetization",
+        "use_base_models": [
+          "users"
+        ],
+        "semantic_models": [
+          {
+            "from": "events",
+            "event_scope": {
+              "event_name": [
+                "iap_purchase_completed"
+              ]
+            },
+            "dimensions": [
+              {
+                "source": "event_property",
+                "property": "product_id"
+              }
+            ],
+            "measures": [
+              {
+                "name": "revenue",
+                "agg": "sum",
+                "field": "price_in_usd"
+              },
+              {
+                "name": "payers",
+                "agg": "count_distinct",
+                "field": "appsflyer_id"
+              },
+              {
+                "name": "purchases",
+                "agg": "count",
+                "field": "*"
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "revenue",
+            "type": "simple",
+            "measure": {
+              "name": "revenue"
+            }
+          },
+          {
+            "name": "payers",
+            "type": "simple",
+            "measure": {
+              "name": "payers"
+            }
+          },
+          {
+            "name": "arppu",
+            "type": "ratio",
+            "numerator": {
+              "name": "revenue"
+            },
+            "denominator": {
+              "name": "payers"
+            }
+          },
+          {
+            "name": "aov",
+            "type": "ratio",
+            "numerator": {
+              "name": "revenue"
+            },
+            "denominator": {
+              "name": "purchases"
+            }
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "monetization_revenue"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "monetization_revenue"
+          ],
+          "group_by": [
+            "monetization_product_id"
+          ]
+        },
+        {
+          "metrics": [
+            "monetization_arppu"
+          ],
+          "group_by": [
+            "user__country"
+          ]
+        },
+        {
+          "metrics": [
+            "monetization_aov"
+          ]
+        }
+      ],
+      "notes": "LTV curve = cumulative revenue over metric_time by acquisition cohort (needs time spine).",
+      "hack": "Per-X average = a value measure ÷ a population measure via a ratio metric (revenue ÷ users = ARPU; ÷ payers = ARPPU). Extrapolate: any 'total per entity' = ratio(sum, count_distinct)."
+    },
+    {
+      "id": "ad_monetization",
+      "task_type": "ads",
+      "title": "Ad monetization: ad revenue & impressions by network/placement",
+      "when_to_use": "Ad revenue, impressions, eCPM-style splits by ad_network/placement/ad_type.",
+      "required_events": [
+        "ad_finished"
+      ],
+      "required_properties": [
+        "revenue",
+        "ad_type",
+        "placement",
+        "ad_network"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple",
+        "ratio"
+      ],
+      "create_payload": {
+        "name": "ads",
+        "semantic_models": [
+          {
+            "from": "events",
+            "event_scope": {
+              "event_name": [
+                "ad_finished"
+              ]
+            },
+            "dimensions": [
+              {
+                "source": "event_property",
+                "property": "ad_network"
+              },
+              {
+                "source": "event_property",
+                "property": "placement"
+              },
+              {
+                "source": "event_property",
+                "property": "ad_type"
+              }
+            ],
+            "measures": [
+              {
+                "name": "ad_revenue",
+                "agg": "sum",
+                "field": "revenue"
+              },
+              {
+                "name": "impressions",
+                "agg": "count",
+                "field": "*"
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "ad_revenue",
+            "type": "simple",
+            "measure": {
+              "name": "ad_revenue"
+            }
+          },
+          {
+            "name": "impressions",
+            "type": "simple",
+            "measure": {
+              "name": "impressions"
+            }
+          },
+          {
+            "name": "rev_per_imp",
+            "type": "ratio",
+            "numerator": {
+              "name": "ad_revenue"
+            },
+            "denominator": {
+              "name": "impressions"
+            }
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "ads_ad_revenue"
+          ],
+          "group_by": [
+            "ads_ad_network"
+          ]
+        },
+        {
+          "metrics": [
+            "ads_impressions"
+          ],
+          "group_by": [
+            "ads_placement"
+          ]
+        },
+        {
+          "metrics": [
+            "ads_rev_per_imp"
+          ],
+          "group_by": [
+            "ads_ad_type"
+          ]
+        }
+      ],
+      "notes": "Ad revenue lives on ad_finished.revenue. eCPM = rev_per_imp * 1000 (post-process).",
+      "hack": "Aggregate a value property (revenue) grouped by its categorical context properties (network/format/placement). Extrapolate: sum(value) by its descriptor dimensions for any breakdown."
+    },
+    {
+      "id": "currency_economy",
+      "task_type": "economy",
+      "title": "In-game economy: coin sources vs sinks",
+      "when_to_use": "Coins earned (income) vs spent (outcome) by source/placement.",
+      "required_events": [
+        "currency_income",
+        "currency_outcome"
+      ],
+      "required_properties": [
+        "amount",
+        "source_type"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple",
+        "derived"
+      ],
+      "create_payload": {
+        "name": "economy",
+        "semantic_models": [
+          {
+            "from": "events",
+            "dimensions": [
+              {
+                "source": "event_property",
+                "property": "source_type"
+              }
+            ],
+            "measures": [
+              {
+                "name": "coins_in",
+                "agg": "sum",
+                "field": "amount",
+                "event_name": [
+                  "currency_income"
+                ]
+              },
+              {
+                "name": "coins_out",
+                "agg": "sum",
+                "field": "amount",
+                "event_name": [
+                  "currency_outcome"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "coins_in",
+            "type": "simple",
+            "measure": {
+              "name": "coins_in"
+            }
+          },
+          {
+            "name": "coins_out",
+            "type": "simple",
+            "measure": {
+              "name": "coins_out"
+            }
+          },
+          {
+            "name": "net_coins",
+            "type": "derived",
+            "expr": "coins_in - coins_out",
+            "metrics": [
+              {
+                "name": "coins_in"
+              },
+              {
+                "name": "coins_out"
+              }
+            ]
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "economy_net_coins"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "economy_coins_in",
+            "economy_coins_out"
+          ]
+        },
+        {
+          "metrics": [
+            "economy_coins_in"
+          ],
+          "group_by": [
+            "economy_source_type"
+          ]
+        }
+      ],
+      "notes": "net_coins is a derived metric (income - outcome). Source/sink breakdown via source_type.",
+      "hack": "Two oppositely-scoped sum measures + a derived expr (in − out) = net flow / balance. Extrapolate to any signed two-sided quantity (faucets vs sinks, credits vs debits)."
+    },
+    {
+      "id": "stickiness_lifecycle",
+      "task_type": "stickiness",
+      "title": "Stickiness (DAU/MAU) & active base over time",
+      "when_to_use": "How sticky the product is and how the active base evolves.",
+      "required_events": [
+        "new_session"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple"
+      ],
+      "create_payload": {
+        "name": "stickiness",
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "active_users",
+                "agg": "count_distinct",
+                "field": "appsflyer_id",
+                "event_name": [
+                  "new_session"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "active_users",
+            "type": "simple",
+            "measure": {
+              "name": "active_users"
+            }
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "stickiness_active_users"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "stickiness_active_users"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "month"
+            }
+          ]
+        }
+      ],
+      "notes": "DAU/MAU ratio = active_users at day grain / active_users at month grain.",
+      "hack": "Query the SAME count_distinct measure at two grains (day vs month) and divide = stickiness. Extrapolate: ratio of one measure across two windows."
+    },
+    {
+      "id": "ab_test_conversion",
+      "task_type": "ab_test",
+      "title": "A/B test — conversion rate by variant (with significance)",
+      "when_to_use": "Compare a conversion rate (e.g. purchase) between experiment variants and test whether the difference is significant.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "required_roles": [
+        "experiments"
+      ],
+      "metric_types": [
+        "proportion"
+      ],
+      "register_payload": {
+        "name": "ab_checkout_conversion",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "join",
+              "with": "experiments",
+              "on": "appsflyer_id",
+              "attrs": [
+                "experiment_name",
+                "variant_group",
+                "assigned_at",
+                "ended_at"
+              ]
+            },
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "gte",
+                  "right": {
+                    "column": "assigned_at"
+                  }
+                },
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "lte",
+                  "right": {
+                    "column": "ended_at"
+                  }
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "is_conv",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "event_name",
+                      "op": "eq",
+                      "value": "iap_purchase_completed"
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "int"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group",
+                "appsflyer_id"
+              ],
+              "measures": [
+                {
+                  "name": "converted",
+                  "fn": "max",
+                  "column": "is_conv"
+                }
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group"
+              ],
+              "measures": [
+                {
+                  "name": "n",
+                  "fn": "count"
+                },
+                {
+                  "name": "conversions",
+                  "fn": "sum",
+                  "column": "converted"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "variant_group",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "ab_test": {
+        "metric": "proportion",
+        "group_field": "variant_group",
+        "n_field": "n",
+        "conversions_field": "conversions"
+      },
+      "notes": "register_native_model builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call ab_test with metric=proportion: control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call ab_test with metric=mean.",
+      "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call ab_test. Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
+    },
+    {
+      "id": "cumulative_revenue",
+      "task_type": "trends",
+      "title": "Cumulative & period-to-date revenue (running totals)",
+      "when_to_use": "Running total of revenue over time, and month-to-date (resets each month). Showcases the cumulative metric type.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "cumulative"
+      ],
+      "create_payload": {
+        "name": "cumulative_rev",
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "revenue",
+                "agg": "sum",
+                "field": "price_in_usd",
+                "event_name": [
+                  "iap_purchase_completed"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "running_revenue",
+            "type": "cumulative",
+            "measure": {
+              "name": "revenue"
+            }
+          },
+          {
+            "name": "mtd_revenue",
+            "type": "cumulative",
+            "measure": {
+              "name": "revenue"
+            },
+            "grain_to_date": "month"
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "cumulative_rev_running_revenue"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "cumulative_rev_mtd_revenue"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        }
+      ],
+      "notes": "cumulative with no window = running total from the start; grain_to_date:month = month-to-date (resets monthly). Add `window` (e.g. \"7 day\") for a trailing rolling-window cumulative.",
+      "hack": "cumulative metric over a sum measure = running total; grain_to_date resets each period (MTD/WTD); add a window for a trailing rolling total. Extrapolate to any accumulating quantity over time."
+    },
+    {
+      "id": "blended_revenue",
+      "task_type": "monetization",
+      "title": "Blended revenue (IAP + ads) via a derived metric",
+      "when_to_use": "Combine two revenue streams (IAP in USD + ad revenue in cents) into one blended metric. Showcases the derived metric type.",
+      "required_events": [
+        "iap_purchase_completed",
+        "ad_finished"
+      ],
+      "required_properties": [
+        "price_in_usd",
+        "revenue"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple",
+        "derived"
+      ],
+      "create_payload": {
+        "name": "blended",
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "iap_revenue",
+                "agg": "sum",
+                "field": "price_in_usd",
+                "event_name": [
+                  "iap_purchase_completed"
+                ]
+              },
+              {
+                "name": "ad_revenue_cents",
+                "agg": "sum",
+                "field": "revenue",
+                "event_name": [
+                  "ad_finished"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "iap_revenue",
+            "type": "simple",
+            "measure": {
+              "name": "iap_revenue"
+            }
+          },
+          {
+            "name": "ad_revenue_cents",
+            "type": "simple",
+            "measure": {
+              "name": "ad_revenue_cents"
+            }
+          },
+          {
+            "name": "total_revenue",
+            "type": "derived",
+            "expr": "iap_revenue + ad_revenue_cents / 100",
+            "metrics": [
+              {
+                "name": "iap_revenue"
+              },
+              {
+                "name": "ad_revenue_cents"
+              }
+            ]
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "blended_total_revenue"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "month"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "blended_iap_revenue",
+            "blended_ad_revenue_cents"
+          ]
+        }
+      ],
+      "notes": "derived metric = arithmetic over other metrics; here ad revenue (cents) is converted to USD (/100) and added to IAP USD. Only metric names, numbers and + - * / ( ) are allowed in expr.",
+      "hack": "derived metric = a formula over other metrics (incl. unit conversion like /100). Extrapolate: blend/normalize/combine any set of metrics into one composite number."
+    },
+    {
+      "id": "ab_test_revenue",
+      "task_type": "ab_test",
+      "title": "A/B test — revenue per user by variant (Welch t-test)",
+      "when_to_use": "Compare a CONTINUOUS metric (revenue/ARPU/time per user) between experiment variants and test significance.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd"
+      ],
+      "required_user_attrs": [],
+      "required_roles": [
+        "experiments"
+      ],
+      "metric_types": [
+        "mean"
+      ],
+      "register_payload": {
+        "name": "ab_revenue_per_user",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "join",
+              "with": "experiments",
+              "on": "appsflyer_id",
+              "attrs": [
+                "experiment_name",
+                "variant_group",
+                "assigned_at",
+                "ended_at"
+              ]
+            },
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "gte",
+                  "right": {
+                    "column": "assigned_at"
+                  }
+                },
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "lte",
+                  "right": {
+                    "column": "ended_at"
+                  }
+                }
+              ]
+            },
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "price0",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "event_name",
+                      "op": "eq",
+                      "value": "iap_purchase_completed"
+                    }
+                  ],
+                  "then": {
+                    "column": "price"
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group",
+                "appsflyer_id"
+              ],
+              "measures": [
+                {
+                  "name": "user_rev",
+                  "fn": "sum",
+                  "column": "price0"
+                }
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group"
+              ],
+              "measures": [
+                {
+                  "name": "n",
+                  "fn": "count"
+                },
+                {
+                  "name": "rev_mean",
+                  "fn": "avg",
+                  "column": "user_rev"
+                },
+                {
+                  "name": "rev_sd",
+                  "fn": "stddev",
+                  "column": "user_rev"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "variant_group",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "ab_test": {
+        "metric": "mean",
+        "group_field": "variant_group",
+        "n_field": "n",
+        "mean_field": "rev_mean",
+        "stddev_field": "rev_sd"
+      },
+      "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + avg + stddev and call ab_test metric=mean (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
+      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). ab_test metric=mean runs Welch t-test: control = control variant_group row, variants = the rest."
+    },
+    {
+      "id": "ab_test_cuped",
+      "task_type": "ab_test",
+      "title": "A/B test — CUPED variance reduction (pre-experiment covariate)",
+      "when_to_use": "Compare a continuous metric between variants with MORE POWER by adjusting for each user's pre-experiment value of the same metric (CUPED).",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd"
+      ],
+      "required_user_attrs": [],
+      "required_roles": [
+        "experiments"
+      ],
+      "metric_types": [
+        "cuped"
+      ],
+      "register_payload": {
+        "name": "ab_revenue_cuped",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "join",
+              "with": "experiments",
+              "on": "appsflyer_id",
+              "attrs": [
+                "experiment_name",
+                "variant_group",
+                "assigned_at",
+                "ended_at"
+              ]
+            },
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "price0",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "event_name",
+                      "op": "eq",
+                      "value": "iap_purchase_completed"
+                    }
+                  ],
+                  "then": {
+                    "column": "price"
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "y_val",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "left": {
+                        "column": "device_time"
+                      },
+                      "op": "gte",
+                      "right": {
+                        "column": "assigned_at"
+                      }
+                    },
+                    {
+                      "left": {
+                        "column": "device_time"
+                      },
+                      "op": "lte",
+                      "right": {
+                        "column": "ended_at"
+                      }
+                    }
+                  ],
+                  "then": {
+                    "column": "price0"
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "x_val",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "left": {
+                        "column": "device_time"
+                      },
+                      "op": "lt",
+                      "right": {
+                        "column": "assigned_at"
+                      }
+                    }
+                  ],
+                  "then": {
+                    "column": "price0"
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group",
+                "appsflyer_id"
+              ],
+              "measures": [
+                {
+                  "name": "uy",
+                  "fn": "sum",
+                  "column": "y_val"
+                },
+                {
+                  "name": "ux",
+                  "fn": "sum",
+                  "column": "x_val"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "uy2",
+              "op": "mul",
+              "left": {
+                "column": "uy"
+              },
+              "right": {
+                "column": "uy"
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "ux2",
+              "op": "mul",
+              "left": {
+                "column": "ux"
+              },
+              "right": {
+                "column": "ux"
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "uxy",
+              "op": "mul",
+              "left": {
+                "column": "ux"
+              },
+              "right": {
+                "column": "uy"
+              }
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group"
+              ],
+              "measures": [
+                {
+                  "name": "n",
+                  "fn": "count"
+                },
+                {
+                  "name": "sum_y",
+                  "fn": "sum",
+                  "column": "uy"
+                },
+                {
+                  "name": "sum_y2",
+                  "fn": "sum",
+                  "column": "uy2"
+                },
+                {
+                  "name": "sum_x",
+                  "fn": "sum",
+                  "column": "ux"
+                },
+                {
+                  "name": "sum_x2",
+                  "fn": "sum",
+                  "column": "ux2"
+                },
+                {
+                  "name": "sum_xy",
+                  "fn": "sum",
+                  "column": "uxy"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "variant_group",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "ab_test": {
+        "metric": "cuped",
+        "group_field": "variant_group",
+        "n_field": "n",
+        "sumY_field": "sum_y",
+        "sumY2_field": "sum_y2",
+        "sumX_field": "sum_x",
+        "sumX2_field": "sum_x2",
+        "sumXY_field": "sum_xy"
+      },
+      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call ab_test metric=cuped. Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
+      "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass per-variant sufficient sums; the tool computes the pooled theta and runs Welch on the adjusted means."
+    },
+    {
+      "id": "ab_test_ratio",
+      "task_type": "ab_test",
+      "title": "A/B test — ratio metric via the delta method (e.g. level completion rate)",
+      "when_to_use": "Compare a RATIO metric between variants where the unit of analysis is finer than the randomization unit — e.g. levels completed per level started, or clicks per impression, when users (not attempts) are randomized.",
+      "required_events": [
+        "level_started",
+        "level_completed"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "required_roles": [
+        "experiments"
+      ],
+      "metric_types": [
+        "ratio"
+      ],
+      "ab_test": {
+        "metric": "ratio",
+        "group_field": "variant_group",
+        "n_field": "n",
+        "sumNum_field": "sum_num",
+        "sumDen_field": "sum_den",
+        "sumNum2_field": "sum_num2",
+        "sumDen2_field": "sum_den2",
+        "sumNumDen_field": "sum_numden"
+      },
+      "notes": "register_native_model builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call ab_test with metric=ratio: control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
+      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. ab_test metric=ratio applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
+      "register_payload": {
+        "name": "ab_level_completion_ratio",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "join",
+              "with": "experiments",
+              "on": "appsflyer_id",
+              "attrs": [
+                "experiment_name",
+                "variant_group",
+                "assigned_at",
+                "ended_at"
+              ]
+            },
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "gte",
+                  "right": {
+                    "column": "assigned_at"
+                  }
+                },
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "lte",
+                  "right": {
+                    "column": "ended_at"
+                  }
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "is_completed",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "event_name",
+                      "op": "eq",
+                      "value": "level_completed"
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "int"
+            },
+            {
+              "stage": "compute",
+              "name": "is_started",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "event_name",
+                      "op": "eq",
+                      "value": "level_started"
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "int"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group",
+                "appsflyer_id"
+              ],
+              "measures": [
+                {
+                  "name": "num",
+                  "fn": "sum",
+                  "column": "is_completed"
+                },
+                {
+                  "name": "den",
+                  "fn": "sum",
+                  "column": "is_started"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "num2",
+              "op": "mul",
+              "left": {
+                "column": "num"
+              },
+              "right": {
+                "column": "num"
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "den2",
+              "op": "mul",
+              "left": {
+                "column": "den"
+              },
+              "right": {
+                "column": "den"
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "numden",
+              "op": "mul",
+              "left": {
+                "column": "num"
+              },
+              "right": {
+                "column": "den"
+              }
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group"
+              ],
+              "measures": [
+                {
+                  "name": "n",
+                  "fn": "count"
+                },
+                {
+                  "name": "sum_num",
+                  "fn": "sum",
+                  "column": "num"
+                },
+                {
+                  "name": "sum_den",
+                  "fn": "sum",
+                  "column": "den"
+                },
+                {
+                  "name": "sum_num2",
+                  "fn": "sum",
+                  "column": "num2"
+                },
+                {
+                  "name": "sum_den2",
+                  "fn": "sum",
+                  "column": "den2"
+                },
+                {
+                  "name": "sum_numden",
+                  "fn": "sum",
+                  "column": "numden"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "variant_group",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ab_test_srm",
+      "task_type": "ab_test",
+      "title": "A/B guardrail — Sample Ratio Mismatch (SRM) check",
+      "when_to_use": "BEFORE trusting any lift: verify the observed per-variant split matches the intended one. A mismatch means randomization or logging is broken and the whole experiment is invalid.",
+      "required_events": [
+        "new_session"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "required_roles": [
+        "experiments"
+      ],
+      "metric_types": [
+        "srm"
+      ],
+      "srm_check": {
+        "group_field": "variant_group",
+        "n_field": "n"
+      },
+      "notes": "register_native_model builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to srm_check: it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
+      "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with srm_check (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
+      "register_payload": {
+        "name": "ab_srm_counts",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "join",
+              "with": "experiments",
+              "on": "appsflyer_id",
+              "attrs": [
+                "experiment_name",
+                "variant_group",
+                "assigned_at",
+                "ended_at"
+              ]
+            },
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "gte",
+                  "right": {
+                    "column": "assigned_at"
+                  }
+                },
+                {
+                  "left": {
+                    "column": "device_time"
+                  },
+                  "op": "lte",
+                  "right": {
+                    "column": "ended_at"
+                  }
+                }
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group",
+                "appsflyer_id"
+              ],
+              "measures": [
+                {
+                  "name": "events_seen",
+                  "fn": "count"
+                }
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "experiment_name",
+                "variant_group"
+              ],
+              "measures": [
+                {
+                  "name": "n",
+                  "fn": "count"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "variant_group",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "ab_test_power",
+      "task_type": "ab_test",
+      "title": "A/B planning — sample size & minimum detectable effect (power)",
+      "when_to_use": "BEFORE launching, to size the test (how many users per variant to detect a target effect), or given the traffic you have, to find the smallest effect you can detect (MDE). Also AFTER an inconclusive test, to tell 'no effect' apart from 'underpowered'.",
+      "required_events": [],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "required_roles": [],
+      "metric_types": [
+        "power"
+      ],
+      "notes": "sample_size is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev from a monetization_metrics or active_users_trend query first, then plan. Pair every ab_test with an up-front MDE so a non-significant result can be read correctly.",
+      "hack": "Up-front power analysis: baseline/stddev + target effect → required n per group; or n → MDE. Run it before the test to size it and after an inconclusive test to check it was powered. Extrapolate to any two-arm comparison (proportion z-test or mean t-test).",
+      "tool_calls": [
+        {
+          "tool": "sample_size",
+          "args": {
+            "metric": "proportion",
+            "baseline": 0.2,
+            "mde": 0.02
+          }
+        },
+        {
+          "tool": "sample_size",
+          "args": {
+            "metric": "proportion",
+            "baseline": 0.2,
+            "n": 5000
+          }
+        },
+        {
+          "tool": "sample_size",
+          "args": {
+            "metric": "mean",
+            "stddev": 12,
+            "mde": 1.5
+          }
+        }
+      ]
+    }
+  ]
+}

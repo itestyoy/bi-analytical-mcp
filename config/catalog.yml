@@ -1,0 +1,192 @@
+version: 2
+
+# MCP catalog expressed as dbt model-schema YAML. The two data sources are
+# described as ordinary dbt models with `columns`; everything MCP-specific lives
+# under `meta.mcp` (model-level and column-level). The loader (src/catalog.js)
+# transforms this into the internal registry. There are EXACTLY TWO data sources.
+#
+# Types come from the NATIVE dbt `data_type` (date/timestamp -> time dimension,
+# else categorical) — not from meta. On a dimension model every non-entity column
+# is a groupable dimension automatically. meta.mcp only carries what dbt has no
+# native field for:
+#   entity:        { name, type: primary|foreign }  -> entity / join key
+#   is_time:       true (+ granularity, default day) -> the event time axis
+#   is_event_name: true                             -> the event_name column
+#   is_event_data: true (+ properties: {..})        -> the JSON payload column (typed JSON keys)
+#   values:        [..]                             -> categorical value hints (optional)
+#   granularity:   day|week|..                      -> non-default time grain (optional)
+#
+# The warehouse dialect is NOT stored here — it is runtime config, resolved from
+# the WAREHOUSE_DIALECT env var or the dbt profile's output `type`.
+
+models:
+  - name: fct_analytics_events
+    description: "Analytical events fact — one row per tracked event."
+    meta:
+      mcp:
+        role: events           # the logical name the tools use (the dbt model can be named anything)
+        primary_entity: event  # the grain of the fact (no physical key column)
+        # The anchor (events fact) is detected from the event_name/event_data/time
+        # columns below — no `anchor` flag needed.
+        known_events:
+          - first_launch
+          - new_session
+          - end_session
+          - level_started
+          - level_completed
+          - currency_income
+          - currency_outcome
+          - shop_opened
+          - iap_purchase_completed
+          - iap_purchase_failed
+          - ad_started
+          - ad_finished
+          - tutorial
+          - screen_changed
+    columns:
+      - name: appsflyer_id
+        data_type: string
+        description: "User identifier; joins events to dim_users."
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }
+      - name: session_number
+        data_type: integer
+        description: "Per-user session counter."
+        meta:
+          mcp:
+            entity: { name: session, type: foreign }
+      - name: device_time
+        data_type: timestamp
+        description: "Event timestamp (the metric time axis)."
+        meta:
+          mcp:
+            is_time: true   # granularity defaults to day
+      - name: event_name
+        data_type: string
+        description: "Event type (one of known_events)."
+        meta:
+          mcp:
+            is_event_name: true
+      - name: event_data
+        data_type: json
+        description: "Per-event JSON payload; typed keys below."
+        meta:
+          mcp:
+            is_event_data: true
+            properties:
+              level_id: { type: int, description: "Level number for level_started/level_completed events." }
+              chain: { type: string }
+              result: { type: string, values: [win, lose], description: "Outcome of a completed level." }
+              method: { type: string }
+              complete_time: { type: int, description: "Seconds taken to complete the level." }
+              attempt: { type: int, description: "Attempt number for the level." }
+              amount: { type: int, description: "Coin amount earned (currency_income) or spent (currency_outcome)." }
+              currency: { type: string }
+              value_in_coins: { type: int }
+              source_type: { type: string, description: "Economy source/sink category (e.g. level_reward, hint_spend)." }
+              source_name: { type: string }
+              monetization_type: { type: string }
+              price_in_usd: { type: numeric, description: "IAP purchase price in USD (iap_purchase_completed)." }
+              product_id: { type: string, description: "IAP product identifier." }
+              order_id: { type: string }
+              status: { type: string, values: [success, failed, closed] }
+              ad_type: { type: string, values: [rewarded, interstitial, banner], description: "Ad format." }
+              ad_network: { type: string, values: [admob, unity, applovin, ironsource], description: "Ad mediation network." }
+              placement: { type: string, description: "In-app ad placement (e.g. store, level_fail, main_menu)." }
+              revenue: { type: numeric, description: "Ad revenue in cents (ad_finished)." }
+              is_reward_received: { type: string }
+              is_clicked: { type: string }
+              screen_from: { type: string, description: "Origin screen for screen_changed." }
+              screen_to: { type: string, description: "Destination screen for screen_changed." }
+              step_id: { type: string, description: "Funnel/onboarding step id (e.g. tutorial step_1)." }
+              # Complex (array / array-of-struct) properties — usable only via the
+              # register_native_model `prepare` pipeline (array_length/contains/unnest/struct_field).
+              words_collected: { type: array, items: string, description: "Words collected on a completed level." }
+              rewards: { type: "array<struct>", fields: { item: string, qty: int }, description: "Rewards granted on level completion (item + quantity)." }
+
+  - name: dim_users
+    description: "User attributes dimension — one row per user."
+    meta:
+      mcp:
+        role: users            # logical name (the dbt model can be named anything)
+        measures:
+          users_count: { agg: count, expr: "1" }
+    columns:
+      - name: appsflyer_id
+        data_type: string
+        description: "User identifier (primary key; join target for events.user)."
+        meta:
+          mcp:
+            entity: { name: user, type: primary }
+      # Non-entity columns of this dimension model are groupable dimensions; their
+      # type is inferred from the native `data_type` (date -> time, else categorical).
+      # Only value hints / non-day granularity live in meta.
+      - name: install_date
+        data_type: date
+        description: "Acquisition (install) date — cohort time dimension."
+      - name: platform
+        data_type: string
+        description: "Device OS family the user installed on."
+        meta: { mcp: { values: [android, ios] } }
+      - name: os_version
+        data_type: string
+        description: "Operating-system version string."
+      - name: device_model
+        data_type: string
+        description: "Device model identifier."
+      - name: country
+        data_type: string
+        description: "User country (ISO code) for geo segmentation."
+      - name: region
+        data_type: string
+        description: "Geographic region (e.g. EU, NA, LATAM)."
+      - name: language
+        data_type: string
+        description: "User language code."
+      - name: media_source
+        data_type: string
+        description: "Acquisition channel / attribution source (e.g. meta, google, organic)."
+      - name: acquisition_type
+        data_type: string
+        description: "Whether the user was acquired organically or via paid marketing."
+        meta: { mcp: { values: [organic, paid] } }
+      - name: campaign_id
+        data_type: string
+        description: "Plain string attribute (no separate campaigns table)."
+      - name: app_id
+        data_type: string
+        description: "Application identifier."
+      - name: app_version
+        data_type: string
+        description: "Application version."
+
+  # A/B-test assignments — like the users dimension but MANY rows per user: one
+  # row per (user, experiment). Joinable to events/users by the user entity.
+  # Window events to [assigned_at, ended_at], group by experiment_name+variant_group,
+  # aggregate per group, then run the `ab_test` tool. The dbt model can be named
+  # anything; only role: experiments matters.
+  - name: fct_experiment_assignments
+    description: "A/B test assignments — one row per (user, experiment)."
+    meta:
+      mcp:
+        role: experiments
+    columns:
+      - name: appsflyer_id
+        data_type: string
+        description: "User identifier (joins to events/users)."
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }   # foreign: many rows per user
+      - name: experiment_name
+        data_type: string
+        description: "A/B test / experiment name."
+      - name: variant_group
+        data_type: string
+        description: "Assigned variant/group (e.g. control, variant_b)."
+      - name: assigned_at
+        data_type: timestamp
+        description: "When the user entered the experiment (window start)."
+      - name: ended_at
+        data_type: timestamp
+        description: "When the experiment ended for the user (window end)."

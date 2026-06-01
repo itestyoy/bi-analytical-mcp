@@ -1,0 +1,185 @@
+event_id,appsflyer_id,session_number,event_name,device_time,event_data
+e1,u1,1,first_launch,2026-01-01 08:00:00,{}
+e2,u2,1,first_launch,2026-01-01 08:00:00,{}
+e3,u3,1,first_launch,2026-01-02 08:00:00,{}
+e4,u4,1,first_launch,2026-01-02 08:00:00,{}
+e5,u5,1,first_launch,2026-01-03 08:00:00,{}
+e6,u6,1,first_launch,2026-01-03 08:00:00,{}
+e7,u7,1,first_launch,2026-01-04 08:00:00,{}
+e8,u8,1,first_launch,2026-01-04 08:00:00,{}
+e9,u9,1,first_launch,2026-01-04 08:00:00,{}
+e10,u10,1,first_launch,2026-01-05 08:00:00,{}
+e11,u11,1,first_launch,2026-01-05 08:00:00,{}
+e12,u12,1,first_launch,2026-01-05 08:00:00,{}
+e13,u1,1,new_session,2026-01-01 08:05:00,{}
+e14,u2,1,new_session,2026-01-01 08:05:00,{}
+e15,u3,1,new_session,2026-01-02 08:05:00,{}
+e16,u4,1,new_session,2026-01-02 08:05:00,{}
+e17,u5,1,new_session,2026-01-03 08:05:00,{}
+e18,u6,1,new_session,2026-01-03 08:05:00,{}
+e19,u7,1,new_session,2026-01-04 08:05:00,{}
+e20,u8,1,new_session,2026-01-04 08:05:00,{}
+e21,u9,1,new_session,2026-01-04 08:05:00,{}
+e22,u10,1,new_session,2026-01-05 08:05:00,{}
+e23,u11,1,new_session,2026-01-05 08:05:00,{}
+e24,u12,1,new_session,2026-01-05 08:05:00,{}
+e25,u1,2,new_session,2026-01-02 08:05:00,{}
+e26,u3,2,new_session,2026-01-03 08:05:00,{}
+e27,u5,2,new_session,2026-01-04 08:05:00,{}
+e28,u7,2,new_session,2026-01-05 08:05:00,{}
+e29,u1,3,new_session,2026-01-08 08:05:00,{}
+e30,u2,2,new_session,2026-01-08 08:05:00,{}
+e31,u3,3,new_session,2026-01-09 08:05:00,{}
+e32,u1,4,new_session,2026-01-05 08:05:00,{}
+e33,u4,2,new_session,2026-01-05 08:05:00,{}
+e34,u1,1,end_session,2026-01-01 08:55:00,{}
+e35,u2,1,end_session,2026-01-01 08:55:00,{}
+e36,u3,1,end_session,2026-01-02 08:55:00,{}
+e37,u4,1,end_session,2026-01-02 08:55:00,{}
+e38,u5,1,end_session,2026-01-03 08:55:00,{}
+e39,u6,1,end_session,2026-01-03 08:55:00,{}
+e40,u7,1,end_session,2026-01-04 08:55:00,{}
+e41,u8,1,end_session,2026-01-04 08:55:00,{}
+e42,u9,1,end_session,2026-01-04 08:55:00,{}
+e43,u10,1,end_session,2026-01-05 08:55:00,{}
+e44,u11,1,end_session,2026-01-05 08:55:00,{}
+e45,u12,1,end_session,2026-01-05 08:55:00,{}
+e46,u1,2,end_session,2026-01-02 08:55:00,{}
+e47,u3,2,end_session,2026-01-03 08:55:00,{}
+e48,u5,2,end_session,2026-01-04 08:55:00,{}
+e49,u7,2,end_session,2026-01-05 08:55:00,{}
+e50,u1,3,end_session,2026-01-08 08:55:00,{}
+e51,u2,2,end_session,2026-01-08 08:55:00,{}
+e52,u3,3,end_session,2026-01-09 08:55:00,{}
+e53,u1,4,end_session,2026-01-05 08:55:00,{}
+e54,u4,2,end_session,2026-01-05 08:55:00,{}
+e55,u1,1,level_started,2026-01-01 09:00:00,"{""level_id"": 1}"
+e56,u1,1,level_completed,2026-01-01 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":30,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e57,u1,1,level_started,2026-01-01 09:00:00,"{""level_id"": 2}"
+e58,u1,1,level_completed,2026-01-01 09:05:00,"{""level_id"":2,""result"":""win"",""complete_time"":45,""attempt"":1,""words_collected"":[""moon"",""star""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e59,u1,2,level_started,2026-01-02 09:00:00,"{""level_id"": 3}"
+e60,u1,2,level_completed,2026-01-02 09:05:00,"{""level_id"":3,""result"":""lose"",""complete_time"":60,""attempt"":1,""words_collected"":[""tree""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e61,u1,2,level_started,2026-01-02 09:00:00,"{""level_id"": 3}"
+e62,u1,2,level_completed,2026-01-02 09:05:00,"{""level_id"":3,""result"":""win"",""complete_time"":40,""attempt"":2,""words_collected"":[""tree""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e63,u2,1,level_started,2026-01-01 09:00:00,"{""level_id"": 1}"
+e64,u2,1,level_completed,2026-01-01 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":35,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e65,u2,1,level_started,2026-01-01 09:00:00,"{""level_id"": 2}"
+e66,u2,1,level_completed,2026-01-01 09:05:00,"{""level_id"":2,""result"":""lose"",""complete_time"":50,""attempt"":1,""words_collected"":[""moon"",""star""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e67,u3,1,level_started,2026-01-02 09:00:00,"{""level_id"": 1}"
+e68,u3,1,level_completed,2026-01-02 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":28,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e69,u3,1,level_started,2026-01-02 09:00:00,"{""level_id"": 2}"
+e70,u3,1,level_completed,2026-01-02 09:05:00,"{""level_id"":2,""result"":""win"",""complete_time"":42,""attempt"":1,""words_collected"":[""moon"",""star""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e71,u3,2,level_started,2026-01-03 09:00:00,"{""level_id"": 3}"
+e72,u3,2,level_completed,2026-01-03 09:05:00,"{""level_id"":3,""result"":""win"",""complete_time"":55,""attempt"":1,""words_collected"":[""tree""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e73,u4,1,level_started,2026-01-02 09:00:00,"{""level_id"": 1}"
+e74,u4,1,level_completed,2026-01-02 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":33,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e75,u4,1,level_started,2026-01-02 09:00:00,"{""level_id"": 2}"
+e76,u5,1,level_started,2026-01-03 09:00:00,"{""level_id"": 1}"
+e77,u5,1,level_completed,2026-01-03 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":31,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e78,u5,2,level_started,2026-01-04 09:00:00,"{""level_id"": 2}"
+e79,u5,2,level_completed,2026-01-04 09:05:00,"{""level_id"":2,""result"":""lose"",""complete_time"":48,""attempt"":1,""words_collected"":[""moon"",""star""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e80,u6,1,level_started,2026-01-03 09:00:00,"{""level_id"": 1}"
+e81,u6,1,level_completed,2026-01-03 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":29,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e82,u6,1,level_started,2026-01-03 09:00:00,"{""level_id"": 2}"
+e83,u7,1,level_started,2026-01-04 09:00:00,"{""level_id"": 1}"
+e84,u7,1,level_completed,2026-01-04 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":37,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e85,u7,1,level_started,2026-01-04 09:00:00,"{""level_id"": 4}"
+e86,u7,1,level_completed,2026-01-04 09:05:00,"{""level_id"":4,""result"":""win"",""complete_time"":70,""attempt"":1,""words_collected"":[""x""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e87,u8,1,level_started,2026-01-04 09:00:00,"{""level_id"": 1}"
+e88,u8,1,level_completed,2026-01-04 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":26,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e89,u8,1,level_started,2026-01-04 09:00:00,"{""level_id"": 5}"
+e90,u8,1,level_completed,2026-01-04 09:05:00,"{""level_id"":5,""result"":""lose"",""complete_time"":80,""attempt"":1,""words_collected"":[""x""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e91,u9,1,level_started,2026-01-04 09:00:00,"{""level_id"": 1}"
+e92,u9,1,level_completed,2026-01-04 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":34,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e93,u9,1,level_started,2026-01-04 09:00:00,"{""level_id"": 6}"
+e94,u10,1,level_started,2026-01-05 09:00:00,"{""level_id"": 1}"
+e95,u10,1,level_completed,2026-01-05 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":27,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e96,u10,1,level_started,2026-01-05 09:00:00,"{""level_id"": 7}"
+e97,u10,1,level_completed,2026-01-05 09:05:00,"{""level_id"":7,""result"":""win"",""complete_time"":90,""attempt"":1,""words_collected"":[""x""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e98,u11,1,level_started,2026-01-05 09:00:00,"{""level_id"": 1}"
+e99,u11,1,level_completed,2026-01-05 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":32,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e100,u11,1,level_started,2026-01-05 09:00:00,"{""level_id"": 8}"
+e101,u11,1,level_completed,2026-01-05 09:05:00,"{""level_id"":8,""result"":""win"",""complete_time"":95,""attempt"":1,""words_collected"":[""x""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e102,u12,1,level_started,2026-01-05 09:00:00,"{""level_id"": 1}"
+e103,u12,1,level_completed,2026-01-05 09:05:00,"{""level_id"":1,""result"":""win"",""complete_time"":36,""attempt"":1,""words_collected"":[""cat"",""dog"",""sun""],""rewards"":[{""item"":""coin"",""qty"":10},{""item"":""gem"",""qty"":2}]}"
+e104,u12,1,level_started,2026-01-05 09:00:00,"{""level_id"": 9}"
+e105,u12,1,level_completed,2026-01-05 09:05:00,"{""level_id"":9,""result"":""lose"",""complete_time"":100,""attempt"":1,""words_collected"":[""x""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e106,u1,4,level_started,2026-01-05 09:00:00,"{""level_id"": 10}"
+e107,u1,4,level_completed,2026-01-05 09:05:00,"{""level_id"":10,""result"":""win"",""complete_time"":110,""attempt"":1,""words_collected"":[""x""],""rewards"":[{""item"":""coin"",""qty"":5}]}"
+e108,u1,1,shop_opened,2026-01-01 10:00:00,"{""source_name"": ""main_menu""}"
+e109,u1,2,shop_opened,2026-01-02 10:00:00,"{""source_name"": ""main_menu""}"
+e110,u3,1,shop_opened,2026-01-02 10:00:00,"{""source_name"": ""main_menu""}"
+e111,u5,1,shop_opened,2026-01-03 10:00:00,"{""source_name"": ""main_menu""}"
+e112,u7,1,shop_opened,2026-01-04 10:00:00,"{""source_name"": ""main_menu""}"
+e113,u9,1,shop_opened,2026-01-04 10:00:00,"{""source_name"": ""main_menu""}"
+e114,u10,1,shop_opened,2026-01-05 10:00:00,"{""source_name"": ""main_menu""}"
+e115,u11,1,shop_opened,2026-01-05 10:00:00,"{""source_name"": ""main_menu""}"
+e116,u2,1,shop_opened,2026-01-01 10:00:00,"{""source_name"": ""main_menu""}"
+e117,u4,1,shop_opened,2026-01-02 10:00:00,"{""source_name"": ""main_menu""}"
+e118,u1,1,iap_purchase_completed,2026-01-01 10:05:00,"{""price_in_usd"": 5, ""product_id"": ""p1"", ""currency"": ""USD"", ""status"": ""success"", ""order_id"": ""o1"", ""monetization_type"": ""iap""}"
+e119,u1,2,iap_purchase_completed,2026-01-02 10:05:00,"{""price_in_usd"": 10, ""product_id"": ""p2"", ""currency"": ""USD"", ""status"": ""success"", ""order_id"": ""o2"", ""monetization_type"": ""iap""}"
+e120,u3,1,iap_purchase_completed,2026-01-02 10:05:00,"{""price_in_usd"": 5, ""product_id"": ""p1"", ""currency"": ""USD"", ""status"": ""success"", ""order_id"": ""o3"", ""monetization_type"": ""iap""}"
+e121,u5,1,iap_purchase_completed,2026-01-03 10:05:00,"{""price_in_usd"": 20, ""product_id"": ""p3"", ""currency"": ""USD"", ""status"": ""success"", ""order_id"": ""o4"", ""monetization_type"": ""iap""}"
+e122,u7,1,iap_purchase_completed,2026-01-04 10:05:00,"{""price_in_usd"": 10, ""product_id"": ""p2"", ""currency"": ""USD"", ""status"": ""success"", ""order_id"": ""o5"", ""monetization_type"": ""iap""}"
+e123,u9,1,iap_purchase_completed,2026-01-04 10:05:00,"{""price_in_usd"": 5, ""product_id"": ""p1"", ""currency"": ""USD"", ""status"": ""success"", ""order_id"": ""o6"", ""monetization_type"": ""iap""}"
+e124,u10,1,iap_purchase_completed,2026-01-05 10:05:00,"{""price_in_usd"": 20, ""product_id"": ""p3"", ""currency"": ""USD"", ""status"": ""success"", ""order_id"": ""o7"", ""monetization_type"": ""iap""}"
+e125,u11,1,iap_purchase_completed,2026-01-05 10:05:00,"{""price_in_usd"": 10, ""product_id"": ""p2"", ""currency"": ""USD"", ""status"": ""success"", ""order_id"": ""o8"", ""monetization_type"": ""iap""}"
+e126,u2,1,iap_purchase_failed,2026-01-01 10:06:00,"{""price_in_usd"": 5, ""product_id"": ""p1"", ""currency"": ""USD"", ""status"": ""failed"", ""order_id"": ""of1"", ""monetization_type"": ""iap""}"
+e127,u4,1,iap_purchase_failed,2026-01-02 10:06:00,"{""price_in_usd"": 10, ""product_id"": ""p2"", ""currency"": ""USD"", ""status"": ""failed"", ""order_id"": ""of2"", ""monetization_type"": ""iap""}"
+e128,u1,1,iap_purchase_failed,2026-01-01 10:06:00,"{""price_in_usd"": 20, ""product_id"": ""p3"", ""currency"": ""USD"", ""status"": ""failed"", ""order_id"": ""of3"", ""monetization_type"": ""iap""}"
+e129,u1,1,ad_started,2026-01-01 11:00:00,"{""ad_type"": ""rewarded"", ""placement"": ""level_fail"", ""ad_network"": ""admob""}"
+e130,u1,1,ad_finished,2026-01-01 11:01:00,"{""ad_type"": ""rewarded"", ""placement"": ""level_fail"", ""ad_network"": ""admob"", ""revenue"": 3, ""is_reward_received"": ""true"", ""is_clicked"": ""false""}"
+e131,u1,2,ad_started,2026-01-02 11:00:00,"{""ad_type"": ""interstitial"", ""placement"": ""main_menu"", ""ad_network"": ""unity""}"
+e132,u1,2,ad_finished,2026-01-02 11:01:00,"{""ad_type"": ""interstitial"", ""placement"": ""main_menu"", ""ad_network"": ""unity"", ""revenue"": 2, ""is_reward_received"": ""false"", ""is_clicked"": ""true""}"
+e133,u2,1,ad_started,2026-01-01 11:00:00,"{""ad_type"": ""banner"", ""placement"": ""main_menu"", ""ad_network"": ""applovin""}"
+e134,u2,1,ad_finished,2026-01-01 11:01:00,"{""ad_type"": ""banner"", ""placement"": ""main_menu"", ""ad_network"": ""applovin"", ""revenue"": 1, ""is_reward_received"": ""false"", ""is_clicked"": ""false""}"
+e135,u3,1,ad_started,2026-01-02 11:00:00,"{""ad_type"": ""rewarded"", ""placement"": ""store"", ""ad_network"": ""ironsource""}"
+e136,u3,1,ad_finished,2026-01-02 11:01:00,"{""ad_type"": ""rewarded"", ""placement"": ""store"", ""ad_network"": ""ironsource"", ""revenue"": 4, ""is_reward_received"": ""true"", ""is_clicked"": ""true""}"
+e137,u4,1,ad_started,2026-01-02 11:00:00,"{""ad_type"": ""interstitial"", ""placement"": ""level_fail"", ""ad_network"": ""admob""}"
+e138,u4,1,ad_finished,2026-01-02 11:01:00,"{""ad_type"": ""interstitial"", ""placement"": ""level_fail"", ""ad_network"": ""admob"", ""revenue"": 2, ""is_reward_received"": ""false"", ""is_clicked"": ""false""}"
+e139,u5,1,ad_started,2026-01-03 11:00:00,"{""ad_type"": ""rewarded"", ""placement"": ""level_fail"", ""ad_network"": ""unity""}"
+e140,u5,1,ad_finished,2026-01-03 11:01:00,"{""ad_type"": ""rewarded"", ""placement"": ""level_fail"", ""ad_network"": ""unity"", ""revenue"": 3, ""is_reward_received"": ""true"", ""is_clicked"": ""false""}"
+e141,u6,1,ad_started,2026-01-03 11:00:00,"{""ad_type"": ""banner"", ""placement"": ""main_menu"", ""ad_network"": ""applovin""}"
+e142,u6,1,ad_finished,2026-01-03 11:01:00,"{""ad_type"": ""banner"", ""placement"": ""main_menu"", ""ad_network"": ""applovin"", ""revenue"": 1, ""is_reward_received"": ""false"", ""is_clicked"": ""false""}"
+e143,u7,1,ad_started,2026-01-04 11:00:00,"{""ad_type"": ""rewarded"", ""placement"": ""store"", ""ad_network"": ""admob""}"
+e144,u7,1,ad_finished,2026-01-04 11:01:00,"{""ad_type"": ""rewarded"", ""placement"": ""store"", ""ad_network"": ""admob"", ""revenue"": 5, ""is_reward_received"": ""true"", ""is_clicked"": ""true""}"
+e145,u8,1,ad_started,2026-01-04 11:00:00,"{""ad_type"": ""interstitial"", ""placement"": ""main_menu"", ""ad_network"": ""ironsource""}"
+e146,u8,1,ad_finished,2026-01-04 11:01:00,"{""ad_type"": ""interstitial"", ""placement"": ""main_menu"", ""ad_network"": ""ironsource"", ""revenue"": 2, ""is_reward_received"": ""false"", ""is_clicked"": ""false""}"
+e147,u9,1,ad_started,2026-01-04 11:00:00,"{""ad_type"": ""rewarded"", ""placement"": ""level_fail"", ""ad_network"": ""unity""}"
+e148,u9,1,ad_finished,2026-01-04 11:01:00,"{""ad_type"": ""rewarded"", ""placement"": ""level_fail"", ""ad_network"": ""unity"", ""revenue"": 3, ""is_reward_received"": ""true"", ""is_clicked"": ""false""}"
+e149,u10,1,ad_started,2026-01-05 11:00:00,"{""ad_type"": ""banner"", ""placement"": ""main_menu"", ""ad_network"": ""applovin""}"
+e150,u10,1,ad_finished,2026-01-05 11:01:00,"{""ad_type"": ""banner"", ""placement"": ""main_menu"", ""ad_network"": ""applovin"", ""revenue"": 1, ""is_reward_received"": ""false"", ""is_clicked"": ""false""}"
+e151,u11,1,ad_started,2026-01-05 11:00:00,"{""ad_type"": ""interstitial"", ""placement"": ""store"", ""ad_network"": ""admob""}"
+e152,u11,1,ad_finished,2026-01-05 11:01:00,"{""ad_type"": ""interstitial"", ""placement"": ""store"", ""ad_network"": ""admob"", ""revenue"": 2, ""is_reward_received"": ""false"", ""is_clicked"": ""true""}"
+e153,u1,1,currency_income,2026-01-01 09:06:00,"{""amount"": 100, ""value_in_coins"": 100, ""currency"": ""coins"", ""source_type"": ""level_reward"", ""source_name"": ""level_complete""}"
+e154,u1,2,currency_income,2026-01-02 09:06:00,"{""amount"": 100, ""value_in_coins"": 100, ""currency"": ""coins"", ""source_type"": ""level_reward"", ""source_name"": ""level_complete""}"
+e155,u2,1,currency_income,2026-01-01 09:06:00,"{""amount"": 50, ""value_in_coins"": 50, ""currency"": ""coins"", ""source_type"": ""level_reward"", ""source_name"": ""level_complete""}"
+e156,u3,1,currency_income,2026-01-02 09:06:00,"{""amount"": 100, ""value_in_coins"": 100, ""currency"": ""coins"", ""source_type"": ""level_reward"", ""source_name"": ""level_complete""}"
+e157,u3,1,currency_income,2026-01-02 09:06:00,"{""amount"": 25, ""value_in_coins"": 25, ""currency"": ""coins"", ""source_type"": ""daily_bonus"", ""source_name"": ""login""}"
+e158,u5,1,currency_income,2026-01-03 09:06:00,"{""amount"": 75, ""value_in_coins"": 75, ""currency"": ""coins"", ""source_type"": ""level_reward"", ""source_name"": ""level_complete""}"
+e159,u7,1,currency_income,2026-01-04 09:06:00,"{""amount"": 30, ""value_in_coins"": 30, ""currency"": ""coins"", ""source_type"": ""ad_reward"", ""source_name"": ""rewarded_ad""}"
+e160,u9,1,currency_income,2026-01-04 09:06:00,"{""amount"": 30, ""value_in_coins"": 30, ""currency"": ""coins"", ""source_type"": ""ad_reward"", ""source_name"": ""rewarded_ad""}"
+e161,u1,1,currency_outcome,2026-01-01 09:07:00,"{""amount"": 20, ""value_in_coins"": 20, ""currency"": ""coins"", ""source_type"": ""hint_spend"", ""source_name"": ""gameplay""}"
+e162,u1,2,currency_outcome,2026-01-02 09:07:00,"{""amount"": 20, ""value_in_coins"": 20, ""currency"": ""coins"", ""source_type"": ""hint_spend"", ""source_name"": ""gameplay""}"
+e163,u3,1,currency_outcome,2026-01-02 09:07:00,"{""amount"": 40, ""value_in_coins"": 40, ""currency"": ""coins"", ""source_type"": ""hint_spend"", ""source_name"": ""gameplay""}"
+e164,u5,1,currency_outcome,2026-01-03 09:07:00,"{""amount"": 50, ""value_in_coins"": 50, ""currency"": ""coins"", ""source_type"": ""powerup_spend"", ""source_name"": ""gameplay""}"
+e165,u7,1,currency_outcome,2026-01-04 09:07:00,"{""amount"": 10, ""value_in_coins"": 10, ""currency"": ""coins"", ""source_type"": ""hint_spend"", ""source_name"": ""gameplay""}"
+e166,u1,1,tutorial,2026-01-01 08:10:00,"{""step_id"": ""step_1""}"
+e167,u2,1,tutorial,2026-01-01 08:10:00,"{""step_id"": ""step_1""}"
+e168,u3,1,tutorial,2026-01-02 08:10:00,"{""step_id"": ""step_1""}"
+e169,u4,1,tutorial,2026-01-02 08:10:00,"{""step_id"": ""step_1""}"
+e170,u5,1,tutorial,2026-01-03 08:10:00,"{""step_id"": ""step_1""}"
+e171,u6,1,tutorial,2026-01-03 08:10:00,"{""step_id"": ""step_1""}"
+e172,u7,1,tutorial,2026-01-04 08:10:00,"{""step_id"": ""step_1""}"
+e173,u8,1,tutorial,2026-01-04 08:10:00,"{""step_id"": ""step_1""}"
+e174,u1,1,tutorial,2026-01-01 08:11:00,"{""step_id"": ""step_2""}"
+e175,u2,1,tutorial,2026-01-01 08:11:00,"{""step_id"": ""step_2""}"
+e176,u3,1,tutorial,2026-01-02 08:11:00,"{""step_id"": ""step_2""}"
+e177,u4,1,tutorial,2026-01-02 08:11:00,"{""step_id"": ""step_2""}"
+e178,u5,1,tutorial,2026-01-03 08:11:00,"{""step_id"": ""step_2""}"
+e179,u1,1,tutorial,2026-01-01 08:12:00,"{""step_id"": ""step_3""}"
+e180,u2,1,tutorial,2026-01-01 08:12:00,"{""step_id"": ""step_3""}"
+e181,u3,1,tutorial,2026-01-02 08:12:00,"{""step_id"": ""step_3""}"
+e182,u1,1,screen_changed,2026-01-01 08:20:00,"{""screen_from"": ""main_menu"", ""screen_to"": ""shop""}"
+e183,u3,1,screen_changed,2026-01-02 08:20:00,"{""screen_from"": ""main_menu"", ""screen_to"": ""levels""}"
+e184,u5,1,screen_changed,2026-01-03 08:20:00,"{""screen_from"": ""levels"", ""screen_to"": ""gameplay""}"

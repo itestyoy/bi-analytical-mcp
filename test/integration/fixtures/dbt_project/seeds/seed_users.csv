@@ -1,0 +1,13 @@
+appsflyer_id,install_date,platform,os_version,device_model,country,region,language,media_source,acquisition_type,app_id,app_version,campaign_id
+u1,2026-01-01,ios,17,iphone,US,NA,en,meta,paid,com.omg.wordsearch,1.0,c1
+u2,2026-01-01,android,14,pixel,US,NA,en,organic,organic,com.omg.wordsearch,1.0,c2
+u3,2026-01-02,ios,17,iphone,GB,EU,en,meta,paid,com.omg.wordsearch,1.0,c1
+u4,2026-01-02,android,13,galaxy,DE,EU,de,google,paid,com.omg.wordsearch,1.0,c2
+u5,2026-01-03,ios,16,iphone,BR,LATAM,pt,organic,organic,com.omg.wordsearch,1.0,c1
+u6,2026-01-03,android,14,pixel,US,NA,en,applovin,paid,com.omg.wordsearch,1.0,c3
+u7,2026-01-04,ios,17,iphone,GB,EU,en,applovin,paid,com.omg.wordsearch,1.0,c3
+u8,2026-01-04,android,13,galaxy,DE,EU,de,organic,organic,com.omg.wordsearch,1.0,c2
+u9,2026-01-04,ios,16,iphone,BR,LATAM,pt,meta,paid,com.omg.wordsearch,1.0,c1
+u10,2026-01-05,android,14,pixel,US,NA,en,google,paid,com.omg.wordsearch,1.0,c2
+u11,2026-01-05,ios,17,iphone,GB,EU,en,organic,organic,com.omg.wordsearch,1.0,c1
+u12,2026-01-05,android,13,galaxy,DE,EU,de,applovin,paid,com.omg.wordsearch,1.0,c3

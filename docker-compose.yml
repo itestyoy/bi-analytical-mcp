@@ -1,0 +1,69 @@
+# Run the MCP server from docker compose. Everything is configured via env vars
+# (see .env.example — copy it to .env) and volumes; nothing is hardcoded.
+#
+#   cp .env.example .env      # then edit
+#   docker compose up --build
+#
+# Point DBT_PROJECT_DIR at YOUR dbt project (it must contain profiles.yml + the
+# two source models). CATALOG_PATH/RECIPES_PATH describe those models to the AI.
+
+services:
+  mcp:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      # Which warehouse dialect the engine generates for (postgres | bigquery).
+      WAREHOUSE_DIALECT: "${WAREHOUSE_DIALECT:-postgres}"
+      # The dbt project the runner builds/queries against (mounted below). The
+      # CATALOG is discovered from THIS project's model YAMLs (meta.mcp.role) — no
+      # separate catalog file. (To use a standalone catalog instead, mount it and
+      # set CATALOG_PATH, e.g. CATALOG_PATH=/config/catalog.yml.)
+      DBT_BASE_PROJECT: "/dbt_project"
+      DBT_PROFILES_DIR: "/dbt_project"
+      # Optional ready-made recipes (mounted via CONFIG_DIR below).
+      RECIPES_PATH: "/config/recipes.json"
+      # Persisted per-context workspace (named volume below).
+      MCP_WORKSPACE: "/workspace"
+      QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-60}"
+      CONTEXT_TTL_MS: "${CONTEXT_TTL_MS:-0}"
+      # Warehouse connection — referenced by your profiles.yml via env_var().
+      DBT_PG_HOST: "${DBT_PG_HOST:-warehouse}"
+      DBT_PG_PORT: "${DBT_PG_PORT:-5432}"
+      DBT_PG_USER: "${DBT_PG_USER:-analytics}"
+      DBT_PG_PASSWORD: "${DBT_PG_PASSWORD:-analytics}"
+      DBT_PG_DBNAME: "${DBT_PG_DBNAME:-analytics}"
+      DBT_PG_SCHEMA: "${DBT_PG_SCHEMA:-public}"
+    volumes:
+      - "${DBT_PROJECT_DIR:-./dbt_project}:/dbt_project"
+      - "${CONFIG_DIR:-./config}:/config:ro"
+      - mcp_workspace:/workspace
+    depends_on:
+      warehouse:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Optional local warehouse. Remove this service (and DBT_PG_HOST) if you point
+  # the dbt profile at an external/managed database.
+  warehouse:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: "${DBT_PG_USER:-analytics}"
+      POSTGRES_PASSWORD: "${DBT_PG_PASSWORD:-analytics}"
+      POSTGRES_DB: "${DBT_PG_DBNAME:-analytics}"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "${DBT_PG_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DBT_PG_USER:-analytics}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  mcp_workspace:
+  pg_data:

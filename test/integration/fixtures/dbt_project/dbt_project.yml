@@ -1,0 +1,24 @@
+name: "test_project"
+version: "1.0.0"
+config-version: 2
+profile: "test_project"
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+models:
+  test_project:
+    +materialized: table
+seeds:
+  test_project:
+    seed_events:
+      +column_types:
+        device_time: timestamp
+        event_data: jsonb
+    seed_users:
+      +column_types:
+        install_date: date
+    seed_experiments:
+      +column_types:
+        assigned_at: timestamp
+        ended_at: timestamp

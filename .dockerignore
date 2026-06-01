@@ -1,0 +1,16 @@
+node_modules
+.dbtvenv
+.git
+.gitignore
+.mcp
+test
+docs
+*.md
+.env
+.env.*
+dbt_project
+*.json
+!package.json
+!package-lock.json
+!config/recipes.json
+bq-key.json

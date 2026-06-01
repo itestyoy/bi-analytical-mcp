@@ -1,0 +1,10 @@
+node_modules/
+.dbtvenv/
+.mcp/
+target/
+logs/
+dbt_packages/
+*.log
+
+# dbt local user file
+.user.yml

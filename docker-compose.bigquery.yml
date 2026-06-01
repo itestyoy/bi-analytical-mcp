@@ -1,0 +1,43 @@
+# Run the MCP server against BigQuery (a managed warehouse — no local DB service).
+# Configure via .env (copy .env.bigquery.example) and volumes; nothing hardcoded.
+#
+#   cp .env.bigquery.example .env     # then edit (project/dataset/keyfile)
+#   docker compose -f docker-compose.bigquery.yml up --build
+#
+# Needs: your dbt project (profiles.yml targeting BigQuery + the two source models)
+# and a GCP service-account key JSON mounted read-only.
+
+services:
+  mcp:
+    build:
+      context: .
+      args:
+        DBT_REQUIREMENTS: requirements-bigquery.txt   # build with the BigQuery adapter
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      HOST: "0.0.0.0"
+      PORT: "3000"
+      WAREHOUSE_DIALECT: "bigquery"
+      # Catalog discovered from the mounted dbt project's model YAMLs (meta.mcp.role);
+      # no separate catalog file. (Set CATALOG_PATH=/config/catalog.yml to override.)
+      DBT_BASE_PROJECT: "/dbt_project"
+      DBT_PROFILES_DIR: "/dbt_project"
+      RECIPES_PATH: "/config/recipes.json"
+      MCP_WORKSPACE: "/workspace"
+      QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-120}"
+      CONTEXT_TTL_MS: "${CONTEXT_TTL_MS:-0}"
+      # BigQuery connection — referenced by your profiles.yml via env_var().
+      GOOGLE_APPLICATION_CREDENTIALS: "/secrets/bq-key.json"
+      BQ_PROJECT: "${BQ_PROJECT:?set BQ_PROJECT in .env}"
+      BQ_DATASET: "${BQ_DATASET:?set BQ_DATASET in .env}"
+      BQ_LOCATION: "${BQ_LOCATION:-US}"
+    volumes:
+      - "${DBT_PROJECT_DIR:-./dbt_project}:/dbt_project"
+      - "${CONFIG_DIR:-./config}:/config:ro"
+      - "${BQ_KEYFILE:-./bq-key.json}:/secrets/bq-key.json:ro"
+      - mcp_workspace:/workspace
+    restart: unless-stopped
+
+volumes:
+  mcp_workspace:

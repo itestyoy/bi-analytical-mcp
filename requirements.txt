@@ -1,0 +1,6 @@
+# Python tooling the dbt runner shells out to (dbt CLI + MetricFlow `mf`).
+# Pinned to the versions this server is developed/tested against.
+# Swap dbt-postgres for your warehouse adapter (dbt-bigquery, etc.) as needed.
+dbt-core==1.11.11
+dbt-postgres==1.10.0
+dbt-metricflow==0.13.0

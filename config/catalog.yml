@@ -160,3 +160,33 @@ models:
       - name: app_version
         data_type: string
         description: "Application version."
+
+  # A/B-test assignments — like the users dimension but MANY rows per user: one
+  # row per (user, experiment). Joinable to events/users by the user entity.
+  # Window events to [assigned_at, ended_at], group by experiment_name+variant_group,
+  # aggregate per group, then run the `ab_test` tool. The dbt model can be named
+  # anything; only role: experiments matters.
+  - name: fct_experiment_assignments
+    description: "A/B test assignments — one row per (user, experiment)."
+    meta:
+      mcp:
+        role: experiments
+    columns:
+      - name: appsflyer_id
+        data_type: string
+        description: "User identifier (joins to events/users)."
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }   # foreign: many rows per user
+      - name: experiment_name
+        data_type: string
+        description: "A/B test / experiment name."
+      - name: variant_group
+        data_type: string
+        description: "Assigned variant/group (e.g. control, variant_b)."
+      - name: assigned_at
+        data_type: timestamp
+        description: "When the user entered the experiment (window start)."
+      - name: ended_at
+        data_type: timestamp
+        description: "When the experiment ended for the user (window end)."

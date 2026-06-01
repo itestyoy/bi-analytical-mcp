@@ -3,6 +3,7 @@
 
 import { buildSchemas } from './schema.js';
 import { makeValidators, validateInput, ToolError } from './validate.js';
+import { twoProportionZTest, welchTTest } from './stats.js';
 import { compileDeclaration } from './compile.js';
 import { renderContext } from './yaml-render.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
@@ -315,6 +316,34 @@ export class Engine {
 
   list_contexts() {
     return { contexts: this.ctxs.list() };
+  }
+
+  /**
+   * A/B significance test over PRE-AGGREGATED group stats (computed by a pipeline
+   * that joins the experiments source, windows events to the assignment period,
+   * and aggregates per group). proportion → two-proportion z-test; mean → Welch
+   * t-test. Each variant is compared against control. Pure stats, no warehouse.
+   */
+  ab_test(input) {
+    this._validate('ab_test', input);
+    const { metric, control } = input;
+    const confidence = input.confidence ?? 0.95;
+    const alternative = input.alternative || 'two_sided';
+    const labelOf = (g, i) => g.label || (i < 0 ? 'control' : `variant_${i + 1}`);
+    const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`ab_test metric=${metric}: group '${g.label || '?'}' is missing '${f}'`, { stage: 'validate', field: f }); };
+
+    const results = input.variants.map((v, i) => {
+      let r;
+      if (metric === 'proportion') {
+        need(control, ['conversions']); need(v, ['conversions']);
+        r = twoProportionZTest({ controlConversions: control.conversions, controlN: control.n, variantConversions: v.conversions, variantN: v.n, alternative, confidence });
+      } else {
+        need(control, ['mean', 'stddev']); need(v, ['mean', 'stddev']);
+        r = welchTTest({ controlMean: control.mean, controlStddev: control.stddev, controlN: control.n, variantMean: v.mean, variantStddev: v.stddev, variantN: v.n, alternative, confidence });
+      }
+      return { variant: labelOf(v, i), ...r };
+    });
+    return { ok: true, metric, confidence, alternative, control: labelOf(control, -1), results };
   }
 
   /**

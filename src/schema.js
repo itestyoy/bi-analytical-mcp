@@ -401,5 +401,32 @@ export function buildSchemas(catalog) {
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
       },
     },
+    ab_test: abTestSchema(),
+  };
+}
+
+// ── A/B test statistics (computed in JS over per-group aggregates) ────────────
+function abTestSchema() {
+  const arm = {
+    type: 'object', additionalProperties: false, required: ['n'],
+    description: 'One group. Provide conversions (for metric=proportion) or mean+stddev (for metric=mean).',
+    properties: {
+      label: { type: 'string', description: 'Group name (e.g. control, variant_b).' },
+      n: { type: 'integer', minimum: 1, description: 'Sample size (e.g. users in the group).' },
+      conversions: { type: 'integer', minimum: 0, description: 'Number of successes (for metric=proportion).' },
+      mean: { type: 'number', description: 'Mean of the metric (for metric=mean).' },
+      stddev: { type: 'number', minimum: 0, description: 'Standard deviation of the metric (for metric=mean).' },
+    },
+  };
+  return {
+    type: 'object', additionalProperties: false, required: ['metric', 'control', 'variants'],
+    description: 'Run an A/B significance test on PRE-AGGREGATED group stats (compute them first with a pipeline: join the experiments source, window events to the assignment period, then aggregate per group). metric=proportion → two-proportion z-test (conversion rates); metric=mean → Welch t-test (revenue/ARPU/time). Returns each variant vs control: lift (absolute+relative), test statistic, p-value, confidence interval, and significance.',
+    properties: {
+      metric: { enum: ['proportion', 'mean'], description: 'proportion = rate/conversion experiment; mean = continuous metric.' },
+      confidence: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.95, description: 'Confidence level (e.g. 0.95).' },
+      alternative: { enum: ['two_sided', 'greater', 'less'], default: 'two_sided', description: 'Hypothesis direction for the variant vs control.' },
+      control: arm,
+      variants: { type: 'array', minItems: 1, items: arm, description: 'One or more variant groups, each tested against control.' },
+    },
   };
 }

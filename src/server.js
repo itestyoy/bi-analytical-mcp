@@ -27,6 +27,7 @@ const TOOL_DESCRIPTIONS = {
   drop_context: 'Tear down an entire isolated context (files + artifacts).',
   list_contexts: 'List active contexts.',
   describe_context: 'Describe a context: tasks, SMs, measures, metrics, reachable group-by paths.',
+  ab_test: 'Run an A/B significance test on pre-aggregated group stats (compute per-group n/conversions or mean+stddev with a pipeline first). proportion → two-proportion z-test; mean → Welch t-test. Returns lift, p-value, confidence interval and significance per variant vs control.',
   list_recipes: 'List ready-made recipes (templates) for common analytics task types (trends, segmentation, funnel, retention, cohort, behavioral, conversion, progression, monetization, stickiness).',
   get_recipe: 'Get a recipe by id: a ready create_semantic_model payload + example queries + notes for a task type.',
 };

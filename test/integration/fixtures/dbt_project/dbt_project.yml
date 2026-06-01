@@ -18,3 +18,7 @@ seeds:
     seed_users:
       +column_types:
         install_date: date
+    seed_experiments:
+      +column_types:
+        assigned_at: timestamp
+        ended_at: timestamp

@@ -43,8 +43,34 @@ before(async () => {
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
 
 for (const r of recipes.list) {
-  test(`recipe '${r.id}' parses and its first example query runs`, opts, async (t) => {
+  test(`recipe '${r.id}' is runnable end-to-end`, opts, async (t) => {
     if (!HAS_DBT) return t.skip('dbt/mf not installed');
+
+    // Pipeline/register-based recipe (e.g. A/B): build the model, then — if it
+    // declares an ab_test mapping — feed its per-group rows into the ab_test tool.
+    if (r.register_payload) {
+      const out = await engine.register_native_model(r.register_payload);
+      assert.equal(out.build.ok, true, `build failed for ${r.id}: ${JSON.stringify(out.error || out.build)}`);
+      assert.ok(Array.isArray(out.rows) && out.rows.length >= 2, `${r.id} expected >=2 group rows`);
+      if (r.ab_test) {
+        const map = r.ab_test;
+        const arms = out.rows.map((row) => {
+          const arm = { label: String(row[map.group_field]), n: Number(row[map.n_field]) };
+          if (map.conversions_field) arm.conversions = Number(row[map.conversions_field]);
+          if (map.mean_field) { arm.mean = Number(row[map.mean_field]); arm.stddev = Number(row[map.stddev_field]); }
+          return arm;
+        });
+        const [control, ...variants] = arms;
+        const res = engine.ab_test({ metric: map.metric, control, variants });
+        assert.equal(res.ok, true, `ab_test failed for ${r.id}: ${JSON.stringify(res)}`);
+        assert.equal(res.results.length, variants.length);
+        for (const v of res.results) assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1, `bad p_value for ${r.id}`);
+      }
+      await engine.delete_native_model({ context_id: out.context_id });
+      return;
+    }
+
+    // Semantic-model recipe: create + run its first example query.
     const out = await engine.create_semantic_model(r.create_payload);
     assert.equal(out.parse.ok, true, `parse failed for ${r.id}: ${JSON.stringify(out.parse.error || out.parse)}`);
     const example = (r.example_queries || [])[0];

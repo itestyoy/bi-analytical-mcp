@@ -1,0 +1,13 @@
+appsflyer_id,experiment_name,variant_group,assigned_at,ended_at
+u1,checkout_flow,control,2026-01-01 00:00:00,2026-02-01 00:00:00
+u2,checkout_flow,variant_b,2026-01-01 00:00:00,2026-02-01 00:00:00
+u3,checkout_flow,control,2026-01-01 00:00:00,2026-02-01 00:00:00
+u4,checkout_flow,variant_b,2026-01-01 00:00:00,2026-02-01 00:00:00
+u5,checkout_flow,control,2026-01-01 00:00:00,2026-02-01 00:00:00
+u6,checkout_flow,variant_b,2026-01-01 00:00:00,2026-02-01 00:00:00
+u7,checkout_flow,control,2026-01-01 00:00:00,2026-02-01 00:00:00
+u8,checkout_flow,variant_b,2026-01-01 00:00:00,2026-02-01 00:00:00
+u9,checkout_flow,control,2026-01-01 00:00:00,2026-02-01 00:00:00
+u10,checkout_flow,variant_b,2026-01-01 00:00:00,2026-02-01 00:00:00
+u11,checkout_flow,control,2026-01-01 00:00:00,2026-02-01 00:00:00
+u12,checkout_flow,variant_b,2026-01-01 00:00:00,2026-02-01 00:00:00

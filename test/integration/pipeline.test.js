@@ -124,6 +124,23 @@ test('pipeline raw: a verbatim SQL expression is evaluated', opts, async (t) => 
   assert.equal(String(r.rows[0].ev), 'LEVEL_COMPLETED');
 });
 
+// #8: string matching in where (starts_with / contains / like) — find by prefix/substring.
+test('pipeline where starts_with / contains: iap_purchase_* events', opts, async (t) => {
+  if (skip(t)) return;
+  const agg = async (cond) => {
+    const r = await run([
+      { stage: 'where', conditions: [cond] },
+      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+    ]);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    return Object.fromEntries(r.rows.map((x) => [String(x.event_name), num(x.n)]));
+  };
+  const byPrefix = await agg({ column: 'event_name', op: 'starts_with', value: 'iap_purchase_' });
+  assert.deepEqual(byPrefix, { iap_purchase_completed: 8, iap_purchase_failed: 3 });
+  const byContains = await agg({ column: 'event_name', op: 'contains', value: 'purchase' });
+  assert.deepEqual(byContains, { iap_purchase_completed: 8, iap_purchase_failed: 3 });
+});
+
 // ... |> PIVOT: country values become columns
 test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR=25)', opts, async (t) => {
   if (skip(t)) return;

@@ -54,7 +54,7 @@ import { getDialect } from './dialects/index.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const NAME_RE = /^[a-z][a-z0-9_]{0,40}$/;
-const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'between', 'is_null', 'is_not_null'];
+const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'between', 'is_null', 'is_not_null', 'like', 'not_like', 'contains', 'starts_with', 'ends_with'];
 const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile', 'hll_init', 'hll_merge', 'hll_merge_partial'];
 const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']); // produce a sketch column
 const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
@@ -111,6 +111,12 @@ function condPred(d, cols, c) {
     const arr = c.right?.value ?? c.value;
     if (!Array.isArray(arr) || arr.length !== 2) throw new Error('between needs [low, high]');
     return `${lhs} BETWEEN ${d.sqlLiteral(arr[0])} AND ${d.sqlLiteral(arr[1])}`;
+  }
+  if (['like', 'not_like', 'contains', 'starts_with', 'ends_with'].includes(c.op)) {
+    const v = c.right?.value ?? c.value;
+    if (typeof v !== 'string') throw new Error(`${c.op} needs a string value`);
+    const pat = c.op === 'like' || c.op === 'not_like' ? v : c.op === 'contains' ? `%${v}%` : c.op === 'starts_with' ? `${v}%` : `%${v}`;
+    return `${lhs} ${c.op === 'not_like' ? 'NOT LIKE' : 'LIKE'} ${d.sqlLiteral(pat)}`;
   }
   if (!OPSYM[c.op]) throw new Error(`unsupported comparison op: ${c.op}`);
   let rhs;

@@ -204,9 +204,21 @@ export class Engine {
   async _registerPipeline(input) {
     const dialect = this.catalog.dialect;
     const source = input.pipeline.source || this.catalog.anchor;
+    // A pipeline-level time_range is applied as a leading WHERE on the source's time
+    // column — one place to bound the window (parity with query_semantic_model).
+    let stages = input.pipeline.stages;
+    const tr = input.pipeline.time_range;
+    if (tr && (tr.start || tr.end)) {
+      const timeCol = this.catalog.getModel(source).time?.column;
+      if (!timeCol) throw new ToolError(`time_range given but source '${source}' has no time column`, { stage: 'validate', field: 'time_range' });
+      const conditions = [];
+      if (tr.start) conditions.push({ column: timeCol, op: 'gte', value: tr.start });
+      if (tr.end) conditions.push({ column: timeCol, op: 'lte', value: tr.end });
+      stages = [{ stage: 'where', conditions }, ...stages];
+    }
     const renderBoth = () => ({
-      pg: renderPipeline(this.catalog, dialect, source, input.pipeline.stages),
-      bq: renderPipeline(this.catalog, 'bigquery', source, input.pipeline.stages).sql,
+      pg: renderPipeline(this.catalog, dialect, source, stages),
+      bq: renderPipeline(this.catalog, 'bigquery', source, stages).sql,
     });
     if (input.dry_run) {
       const { pg, bq } = renderBoth();

@@ -298,6 +298,7 @@ export function buildSchemas(catalog) {
         description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
         properties: {
           source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table for the pipeline (default: the events fact).' },
+          time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } },
           stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
         },
       },

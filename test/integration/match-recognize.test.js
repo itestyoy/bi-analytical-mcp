@@ -62,6 +62,22 @@ before(async () => {
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
+// #9: a pipeline-level time_range bounds the window (applied before the stages).
+test('native pipeline time_range bounds the window: full 8 purchases vs windowed 4', opts, async (t) => {
+  if (skip(t)) return;
+  const count = async (time_range) => {
+    const out = await engine.register_native_model({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { time_range, stages: [
+      { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+    ] } });
+    assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+    ctxId = out.context_id;
+    return Number(out.rows[0].n);
+  };
+  assert.equal(await count(undefined), 8);                                  // all purchases
+  assert.equal(await count({ start: '2026-01-01', end: '2026-01-04' }), 4); // only 01-01..01-03
+});
+
 test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-user rows)', opts, async (t) => {
   if (skip(t)) return;
   const out = await pipe([matchActivation()]);

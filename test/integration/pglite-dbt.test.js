@@ -1,6 +1,6 @@
 // Focused smoke: declarative create -> dbt parse -> mf query against dbt Core +
 // MetricFlow + PGlite. Builds a monetization model (iap_purchase_completed,
-// sum price_in_usd, count_distinct appsflyer_id) and asserts the EXACT totals
+// sum price_in_usd, count_distinct internal__player_id) and asserts the EXACT totals
 // documented in test/integration/fixtures/SEED_DATA.md. Data-only assertions:
 // only res.ok / res.row_count and numeric values keyed out of res.rows.
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
@@ -44,7 +44,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 
-  const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
+  const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
@@ -55,10 +55,10 @@ before(async () => {
     use_base_models: ['users'],
     semantic_models: [{
       from: 'events', event_scope: { event_name: ['iap_purchase_completed'] },
-      dimensions: [{ source: 'event_property', property: 'product_id' }],
+      dimensions: [{ source: 'event_property', property: 'product_id_of_event_data' }],
       measures: [
-        { name: 'revenue', agg: 'sum', field: 'price_in_usd' },
-        { name: 'payers', agg: 'count_distinct', field: 'appsflyer_id' },
+        { name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' },
+        { name: 'payers', agg: 'count_distinct', field: 'internal__player_id' },
         { name: 'purchases', agg: 'count', field: '*' },
       ],
     }],
@@ -125,9 +125,9 @@ test('revenue filtered by user__acquisition_type: paid 55 / organic 30', opts, a
 // SEED_DATA: revenue by product -> p1=15, p2=30, p3=40 (local event-property dim).
 test('revenue by product_id = p1 15 / p2 30 / p3 40', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['mon_revenue'], group_by: ['mon_product_id'] });
+  const r = await q({ metrics: ['mon_revenue'], group_by: ['mon_product_id_of_event_data'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'event__mon_product_id', 'mon_revenue');
+  const by = mapCol(r.rows, 'event__mon_product_id_of_event_data', 'mon_revenue');
   assert.equal(by.p1, 15);
   assert.equal(by.p2, 30);
   assert.equal(by.p3, 40);

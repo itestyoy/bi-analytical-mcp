@@ -49,7 +49,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 
-  const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
+  const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'at-')), timeSpineDialect: 'postgres' });
   const runner = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
@@ -254,8 +254,8 @@ test('TASK level_progression: starts/completes/rate per level_id', opts, async (
   const totals = await q(ctx, { metrics: ['progression_starts', 'progression_completes'] });
   const rate = await q(ctx, { metrics: ['progression_completion_rate'] });
   const avgTime = await q(ctx, { metrics: ['progression_avg_time'] });
-  const startsByLevel = await q(ctx, { metrics: ['progression_starts'], group_by: ['progression_level_id'] });
-  const completesByLevel = await q(ctx, { metrics: ['progression_completes'], group_by: ['progression_level_id'] });
+  const startsByLevel = await q(ctx, { metrics: ['progression_starts'], group_by: ['progression_level_id_of_event_data'] });
+  const completesByLevel = await q(ctx, { metrics: ['progression_completes'], group_by: ['progression_level_id_of_event_data'] });
   for (const r of [totals, rate, avgTime, startsByLevel, completesByLevel]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(totals.rows[0].progression_starts), 28);            // total level_started 28
   assert.equal(num(totals.rows[0].progression_completes), 25);         // total level_completed 25
@@ -263,7 +263,7 @@ test('TASK level_progression: starts/completes/rate per level_id', opts, async (
   const cr = num(rate.rows[0].progression_completion_rate);
   assert.ok(Math.abs(cr - 25 / 28) < 1e-9 && cr >= 0 && cr <= 1, `rate ${cr}`); // 25/28 in [0,1]
   assert.ok(num(avgTime.rows[0].progression_avg_time) > 0);
-  const sBy = mapCol(startsByLevel.rows, 'event__progression_level_id', 'progression_starts');
+  const sBy = mapCol(startsByLevel.rows, 'event__progression_level_id_of_event_data', 'progression_starts');
   assert.equal(sBy['1'], 12); assert.equal(sBy['2'], 6); assert.equal(sBy['3'], 3); // per-level starts
   assert.equal(sumCol(startsByLevel.rows, 'progression_starts'), 28);  // grouped starts sum to 28
 });
@@ -274,7 +274,7 @@ test('TASK monetization_metrics: revenue/ARPPU/AOV by product/day/segment', opts
   const ctx = await buildRecipe(t, 'monetization_metrics');
   const totals = await q(ctx, { metrics: ['monetization_revenue', 'monetization_payers', 'monetization_purchases'] });
   const aov = await q(ctx, { metrics: ['monetization_aov'] });
-  const byProduct = await q(ctx, { metrics: ['monetization_revenue'], group_by: ['monetization_product_id'] });
+  const byProduct = await q(ctx, { metrics: ['monetization_revenue'], group_by: ['monetization_product_id_of_event_data'] });
   const byCountry = await q(ctx, { metrics: ['monetization_revenue'], group_by: ['user__country'] });
   const byDay = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   for (const r of [totals, aov, byProduct, byCountry, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
@@ -282,7 +282,7 @@ test('TASK monetization_metrics: revenue/ARPPU/AOV by product/day/segment', opts
   assert.equal(num(totals.rows[0].monetization_payers), 7);            // payers 7
   assert.equal(num(totals.rows[0].monetization_purchases), 8);         // purchases 8
   assert.ok(Math.abs(num(aov.rows[0].monetization_aov) - 85 / 8) < 1e-6, 'AOV 85/8'); // AOV 10.625
-  const pm = mapCol(byProduct.rows, 'event__monetization_product_id', 'monetization_revenue');
+  const pm = mapCol(byProduct.rows, 'event__monetization_product_id_of_event_data', 'monetization_revenue');
   assert.equal(pm.p1, 15); assert.equal(pm.p2, 30); assert.equal(pm.p3, 40); // by product
   assert.equal(sumCol(byCountry.rows, 'monetization_revenue'), 85);    // country sum == grand total
   assert.equal(sumCol(byDay.rows, 'monetization_revenue'), 85);        // per-day sum == grand total
@@ -293,14 +293,14 @@ test('TASK ad_monetization: ad revenue & impressions by network/placement', opts
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'ad_monetization');
   const totals = await q(ctx, { metrics: ['ads_ad_revenue', 'ads_impressions'] });
-  const byNetwork = await q(ctx, { metrics: ['ads_ad_revenue'], group_by: ['ads_ad_network'] });
-  const byPlacement = await q(ctx, { metrics: ['ads_impressions'], group_by: ['ads_placement'] });
+  const byNetwork = await q(ctx, { metrics: ['ads_ad_revenue'], group_by: ['ads_network_of_additional_info_of_event_data'] });
+  const byPlacement = await q(ctx, { metrics: ['ads_impressions'], group_by: ['ads_placement_of_event_data'] });
   const revPerImp = await q(ctx, { metrics: ['ads_rev_per_imp'] });
-  const byType = await q(ctx, { metrics: ['ads_impressions'], group_by: ['ads_ad_type'] });
+  const byType = await q(ctx, { metrics: ['ads_impressions'], group_by: ['ads_ad_type_of_event_data'] });
   for (const r of [totals, byNetwork, byPlacement, revPerImp, byType]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(totals.rows[0].ads_ad_revenue), 29);                // total ad revenue 29 cents
   assert.equal(num(totals.rows[0].ads_impressions), 12);              // 12 ad_finished impressions
-  const nm = mapCol(byNetwork.rows, 'event__ads_ad_network', 'ads_ad_revenue');
+  const nm = mapCol(byNetwork.rows, 'event__ads_network_of_additional_info_of_event_data', 'ads_ad_revenue');
   assert.equal(nm.admob, 12); assert.equal(nm.unity, 8); assert.equal(nm.ironsource, 6); assert.equal(nm.applovin, 3); // by network
   assert.equal(sumCol(byNetwork.rows, 'ads_ad_revenue'), 29);          // network sum == grand total
   assert.equal(sumCol(byPlacement.rows, 'ads_impressions'), 12);       // placement sum == total impressions
@@ -313,8 +313,8 @@ test('TASK currency_economy: coins in (510) vs out (140) & source split', opts, 
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'currency_economy');
   const totals = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out'] });
-  const inBySource = await q(ctx, { metrics: ['economy_coins_in'], group_by: ['economy_source_type'] });
-  const outBySource = await q(ctx, { metrics: ['economy_coins_out'], group_by: ['economy_source_type'] });
+  const inBySource = await q(ctx, { metrics: ['economy_coins_in'], group_by: ['economy_source_type_of_event_data'] });
+  const outBySource = await q(ctx, { metrics: ['economy_coins_out'], group_by: ['economy_source_type_of_event_data'] });
   const inByDay = await q(ctx, { metrics: ['economy_coins_in'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   const outByDay = await q(ctx, { metrics: ['economy_coins_out'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   for (const r of [totals, inBySource, outBySource, inByDay, outByDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));

@@ -1,6 +1,6 @@
 {{ config(materialized='table') }}
 select
-    appsflyer_id,
+    appsflyer_id as internal__player_id,
     install_date,
     platform,
     os_version,

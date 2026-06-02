@@ -22,7 +22,7 @@
               {
                 "name": "active_users",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "new_session"
                 ]
@@ -128,12 +128,12 @@
               {
                 "name": "revenue",
                 "agg": "sum",
-                "field": "price_in_usd"
+                "field": "price_in_usd_of_event_data"
               },
               {
                 "name": "payers",
                 "agg": "count_distinct",
-                "field": "appsflyer_id"
+                "field": "internal__player_id"
               }
             ]
           }
@@ -237,7 +237,7 @@
               {
                 "name": "starters",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "level_started"
                 ]
@@ -245,7 +245,7 @@
               {
                 "name": "completers",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "level_completed"
                 ]
@@ -331,13 +331,13 @@
               {
                 "name": "s1",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "tutorial"
                 ],
                 "where": [
                   {
-                    "property": "step_id",
+                    "property": "chain_of_event_data",
                     "op": "eq",
                     "value": "step_1"
                   }
@@ -346,13 +346,13 @@
               {
                 "name": "s2",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "tutorial"
                 ],
                 "where": [
                   {
-                    "property": "step_id",
+                    "property": "chain_of_event_data",
                     "op": "eq",
                     "value": "step_2"
                   }
@@ -361,13 +361,13 @@
               {
                 "name": "s3",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "tutorial"
                 ],
                 "where": [
                   {
-                    "property": "step_id",
+                    "property": "chain_of_event_data",
                     "op": "eq",
                     "value": "step_3"
                   }
@@ -469,7 +469,7 @@
               {
                 "name": "cohort",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "first_launch"
                 ]
@@ -477,7 +477,7 @@
               {
                 "name": "returned",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "new_session"
                 ]
@@ -572,12 +572,12 @@
               {
                 "name": "revenue",
                 "agg": "sum",
-                "field": "price_in_usd"
+                "field": "price_in_usd_of_event_data"
               },
               {
                 "name": "buyers",
                 "agg": "count_distinct",
-                "field": "appsflyer_id"
+                "field": "internal__player_id"
               }
             ]
           }
@@ -728,7 +728,7 @@
               {
                 "name": "visits",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "new_session"
                 ]
@@ -736,7 +736,7 @@
               {
                 "name": "buyers",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "iap_purchase_completed"
                 ]
@@ -816,7 +816,7 @@
             "dimensions": [
               {
                 "source": "event_property",
-                "property": "level_id"
+                "property": "level_id_of_event_data"
               }
             ],
             "measures": [
@@ -839,7 +839,7 @@
               {
                 "name": "avg_time",
                 "agg": "average",
-                "field": "complete_time",
+                "field": "daily_level_score_of_event_data",
                 "event_name": [
                   "level_completed"
                 ]
@@ -888,7 +888,7 @@
             "progression_completes"
           ],
           "group_by": [
-            "progression_level_id"
+            "progression_level_id_of_event_data"
           ]
         },
         {
@@ -896,7 +896,7 @@
             "progression_completion_rate"
           ],
           "group_by": [
-            "progression_level_id"
+            "progression_level_id_of_event_data"
           ]
         }
       ],
@@ -938,19 +938,19 @@
             "dimensions": [
               {
                 "source": "event_property",
-                "property": "product_id"
+                "property": "product_id_of_event_data"
               }
             ],
             "measures": [
               {
                 "name": "revenue",
                 "agg": "sum",
-                "field": "price_in_usd"
+                "field": "price_in_usd_of_event_data"
               },
               {
                 "name": "payers",
                 "agg": "count_distinct",
-                "field": "appsflyer_id"
+                "field": "internal__player_id"
               },
               {
                 "name": "purchases",
@@ -1014,7 +1014,7 @@
             "monetization_revenue"
           ],
           "group_by": [
-            "monetization_product_id"
+            "monetization_product_id_of_event_data"
           ]
         },
         {
@@ -1066,22 +1066,22 @@
             "dimensions": [
               {
                 "source": "event_property",
-                "property": "ad_network"
+                "property": "network_of_additional_info_of_event_data"
               },
               {
                 "source": "event_property",
-                "property": "placement"
+                "property": "placement_of_event_data"
               },
               {
                 "source": "event_property",
-                "property": "ad_type"
+                "property": "ad_type_of_event_data"
               }
             ],
             "measures": [
               {
                 "name": "ad_revenue",
                 "agg": "sum",
-                "field": "revenue"
+                "field": "revenue_of_event_data"
               },
               {
                 "name": "impressions",
@@ -1124,7 +1124,7 @@
             "ads_ad_revenue"
           ],
           "group_by": [
-            "ads_ad_network"
+            "ads_network_of_additional_info_of_event_data"
           ]
         },
         {
@@ -1132,7 +1132,7 @@
             "ads_impressions"
           ],
           "group_by": [
-            "ads_placement"
+            "ads_placement_of_event_data"
           ]
         },
         {
@@ -1140,7 +1140,7 @@
             "ads_rev_per_imp"
           ],
           "group_by": [
-            "ads_ad_type"
+            "ads_ad_type_of_event_data"
           ]
         }
       ],
@@ -1173,14 +1173,14 @@
             "dimensions": [
               {
                 "source": "event_property",
-                "property": "source_type"
+                "property": "source_type_of_event_data"
               }
             ],
             "measures": [
               {
                 "name": "coins_in",
                 "agg": "sum",
-                "field": "amount",
+                "field": "amount_of_event_data",
                 "event_name": [
                   "currency_income"
                 ]
@@ -1188,7 +1188,7 @@
               {
                 "name": "coins_out",
                 "agg": "sum",
-                "field": "amount",
+                "field": "amount_of_event_data",
                 "event_name": [
                   "currency_outcome"
                 ]
@@ -1249,7 +1249,7 @@
             "economy_coins_in"
           ],
           "group_by": [
-            "economy_source_type"
+            "economy_source_type_of_event_data"
           ]
         }
       ],
@@ -1278,7 +1278,7 @@
               {
                 "name": "active_users",
                 "agg": "count_distinct",
-                "field": "appsflyer_id",
+                "field": "internal__player_id",
                 "event_name": [
                   "new_session"
                 ]
@@ -1347,7 +1347,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "appsflyer_id",
+              "on": "internal__player_id",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -1406,7 +1406,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "appsflyer_id"
+                "internal__player_id"
               ],
               "measures": [
                 {
@@ -1479,7 +1479,7 @@
               {
                 "name": "revenue",
                 "agg": "sum",
-                "field": "price_in_usd",
+                "field": "price_in_usd_of_event_data",
                 "event_name": [
                   "iap_purchase_completed"
                 ]
@@ -1559,7 +1559,7 @@
               {
                 "name": "iap_revenue",
                 "agg": "sum",
-                "field": "price_in_usd",
+                "field": "price_in_usd_of_event_data",
                 "event_name": [
                   "iap_purchase_completed"
                 ]
@@ -1567,7 +1567,7 @@
               {
                 "name": "ad_revenue_cents",
                 "agg": "sum",
-                "field": "revenue",
+                "field": "revenue_of_event_data",
                 "event_name": [
                   "ad_finished"
                 ]
@@ -1653,7 +1653,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "appsflyer_id",
+              "on": "internal__player_id",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -1688,7 +1688,7 @@
               "stage": "derive",
               "name": "price",
               "op": "extract",
-              "source": "price_in_usd",
+              "source": "price_in_usd_of_event_data",
               "type": "numeric"
             },
             {
@@ -1719,7 +1719,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "appsflyer_id"
+                "internal__player_id"
               ],
               "measures": [
                 {
@@ -1800,7 +1800,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "appsflyer_id",
+              "on": "internal__player_id",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -1812,7 +1812,7 @@
               "stage": "derive",
               "name": "price",
               "op": "extract",
-              "source": "price_in_usd",
+              "source": "price_in_usd_of_event_data",
               "type": "numeric"
             },
             {
@@ -1906,7 +1906,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "appsflyer_id"
+                "internal__player_id"
               ],
               "measures": [
                 {
@@ -2054,7 +2054,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "appsflyer_id",
+              "on": "internal__player_id",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -2136,7 +2136,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "appsflyer_id"
+                "internal__player_id"
               ],
               "measures": [
                 {
@@ -2265,7 +2265,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "appsflyer_id",
+              "on": "internal__player_id",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -2301,7 +2301,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "appsflyer_id"
+                "internal__player_id"
               ],
               "measures": [
                 {

@@ -56,6 +56,25 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
   assert.equal(r.rows.reduce((s, x) => s + num(x.revenue), 0), 85);
 });
 
+// unnest a FLAT array column stored as a JSON-encoded STRING (mirrors the real
+// warehouse: words_selected lands as text like '["cat","dog"]'). meta.mcp.array
+// (encoding: json) tells the engine to parse it before exploding — no fake event_data.
+test('pipeline unnest: explode words_selected (JSON-string array) and count per word', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'unnest', source: 'words_selected_of_event_data', as: 'word' },
+    { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.word), num(x.n)]));
+  assert.equal(by.cat, 12); assert.equal(by.dog, 12); assert.equal(by.sun, 12);
+  assert.equal(by.moon, 4); assert.equal(by.star, 4); assert.equal(by.tree, 3); assert.equal(by.x, 6);
+  assert.equal(r.rows.reduce((s, x) => s + num(x.n), 0), 53); // total word occurrences across level_completed
+  assert.equal(r.rows.length, 7);                              // distinct words
+});
+
 // ... |> PIVOT: country values become columns
 test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR=25)', opts, async (t) => {
   if (skip(t)) return;

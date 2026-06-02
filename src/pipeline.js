@@ -216,6 +216,7 @@ const STAGES = {
         { if: { properties: { op: { const: 'date_trunc' } }, required: ['op'] }, then: { required: ['granularity'] } },
         { if: { properties: { op: { const: 'date_part' } }, required: ['op'] }, then: { required: ['part'] } },
         { if: { properties: { op: { const: 'json_field' } }, required: ['op'] }, then: { required: ['column', 'field'] } },
+        { if: { properties: { op: { const: 'json_parse_array' } }, required: ['op'] }, then: { required: ['column'] } },
         { if: { properties: { op: { const: 'case' } }, required: ['op'] }, then: { required: ['cases'] } },
         { if: { properties: { op: { const: 'window' } }, required: ['op'] }, then: { required: ['fn'] } },
       ],
@@ -223,7 +224,7 @@ const STAGES = {
       properties: {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
-        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
+        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'json_parse_array', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
         field: { type: 'string', description: 'Struct field name for op=json_field (extract from a JSON column, e.g. an unnested array-of-struct element).' },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
@@ -295,6 +296,7 @@ const STAGES = {
       else if (p.op === 'date_part') { expr = d.datePart(p.part, col()); type = 'int'; }
       else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }
       else if (p.op === 'json_field') { expr = d.jsonColumnField(col(), p.field, p.type); type = p.type || 'string'; }
+      else if (p.op === 'json_parse_array') { expr = d.jsonParseArray(col()); type = 'array'; } // STRING JSON array → native array (then unnest)
       else if (p.op === 'hll_extract') { expr = d.hllExtract(col()); type = 'int'; }
       else if (p.op === 'case') {
         if (!p.cases?.length) throw new Error('case: needs at least one branch');
@@ -328,16 +330,26 @@ const STAGES = {
       description: 'Explode an array property into one row per element (CHANGES GRAIN; rows without the array drop out). For per-element analysis (e.g. items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with compute op=json_field.',
       properties: {
         stage: { const: 'unnest' },
-        source: propEnum(catalog.complexEventProps(), 'array/struct event_data property to explode.'),
+        source: { type: 'string', description: 'Array/struct to explode: an array event property (see describe_catalog), or a pipeline column produced by compute op=json_parse_array. A flat ARRAY column unnests directly; a JSON-string column is parsed first.' },
         as: { type: 'string', pattern: NAME },
         field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'] },
       },
     }),
     build: ({ catalog, cols }, p) => {
-      const isStruct = String(catalog.eventPropertySpec(p.source)?.type || '').toLowerCase() === 'array<struct>';
+      const spec = catalog.eventPropertySpec(p.source);
+      let column; let key; let encoding; let isStruct = false;
+      if (spec) {
+        isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
+        if (spec.column) { column = spec.column; key = null; encoding = spec.encoding || 'native'; } // flattened array column
+        else { column = catalog.eventDataColumn(); key = p.source; encoding = 'blob'; } // legacy JSON-blob property
+      } else if (cols.has(p.source) && cols.get(p.source).type === 'array') {
+        column = p.source; key = null; encoding = 'native'; // a pipeline-derived array (e.g. from json_parse_array)
+      } else {
+        throw new Error(`unnest: '${p.source}' is not an array event property or an array column at this stage`);
+      }
       const type = p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string'));
-      return { op: { op: 'unnest', column: catalog.eventDataColumn(), key: p.source, as: p.as, field: p.field, type }, cols: addCol(cols, p.as, type) };
+      return { op: { op: 'unnest', column, key, as: p.as, field: p.field, type, encoding }, cols: addCol(cols, p.as, type) };
     },
   },
 

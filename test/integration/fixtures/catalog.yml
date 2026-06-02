@@ -162,6 +162,12 @@ models:
         data_type: string
         description: "Onboarding / funnel step id (e.g. tutorial step_1). Events: tutorial."
         meta: { mcp: { events: [tutorial] } }
+      # Array payload stored as a JSON-encoded STRING — declare how to read it via
+      # meta.mcp.array (encoding: json → parse before unnest). Events: level_completed.
+      - name: words_selected_of_event_data
+        data_type: string
+        description: "Words collected on a completed level (JSON array). Events: level_completed."
+        meta: { mcp: { events: [level_completed], array: { items: string, encoding: json } } }
 
   - name: dim_users
     description: "User attributes — one row per player."

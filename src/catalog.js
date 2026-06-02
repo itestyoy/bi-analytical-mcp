@@ -244,6 +244,23 @@ export function dbtSchemaToCatalog(doc) {
       // column scoped to specific events via meta.mcp.events) is a per-event
       // PROPERTY. Unlike the legacy JSON-blob form, these are REAL physical columns
       // — recorded with `column` so SQL references them directly (no JSON extract).
+      if (isAnchor && !cm.dimension && cm.array) {
+        // A flattened ARRAY/array<struct> payload column. `meta.mcp.array` declares how
+        // to read it: encoding 'native' (a real ARRAY/REPEATED column) or 'json' (a STRING
+        // holding a JSON array → parse before unnest). items = scalar element type;
+        // fields = struct shape. The physical `column` is referenced directly.
+        const a = cm.array;
+        flatProps[col.name] = {
+          type: a.fields ? 'array<struct>' : 'array',
+          column: col.name,
+          encoding: a.encoding || (String(col.data_type).toLowerCase() === 'string' ? 'json' : 'native'),
+          ...(a.items ? { items: a.items } : {}),
+          ...(a.fields ? { fields: a.fields } : {}),
+          ...(cm.events ? { events: cm.events } : {}),
+          ...(col.description ? { description: col.description } : {}),
+        };
+        continue;
+      }
       if (isAnchor && !cm.dimension && cm.events) {
         // A flattened event-payload property: a real column populated only on the
         // events in meta.mcp.events. The column is named directly (no `__`, which

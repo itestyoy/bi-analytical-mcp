@@ -400,7 +400,16 @@ export function buildSchemas(catalog) {
     drop_context: { ...ctxRef, description: 'Tear down an entire isolated context (delete its files + artifacts).' },
     describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
     list_contexts: empty,
-    describe_catalog: empty,
+    describe_catalog: {
+      type: 'object', additionalProperties: false,
+      description: 'Discover the catalog PROGRESSIVELY (the events fact carries ~150 event-scoped properties, so it is not dumped at once). Call with NO arguments for a compact overview (models, event names, group-by paths, enums + counts). Then drill down with ONE of: model → that model\'s entities/time/dimensions + real physical columns; event → only the properties populated on that event; property → one property\'s full spec; search → find events/properties by substring.',
+      properties: {
+        model: { enum: catalog.modelKeys(), description: 'Drill into one model: its entities, time axis, dimensions and REAL physical columns.' },
+        event: { type: 'string', description: 'An event_name (from the overview): list the event_data properties POPULATED on that event — what you can measure/group/filter for it.' },
+        property: { type: 'string', description: 'An event property name: its type, the events it is populated on, and description.' },
+        search: { type: 'string', description: 'Substring to find matching event names and properties (name or description).' },
+      },
+    },
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
       description: 'Wait for `seconds` (capped at 60), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.',

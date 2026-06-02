@@ -215,10 +215,16 @@ test('register_native_model: same name in two contexts → distinct relations', 
   assert.match(a.model, /^pipe_iso_[a-z0-9]{6,}$/);
 });
 
-test('describe_catalog: returns REAL physical columns for every model (adapter introspection)', opts, async (t) => {
+test('describe_catalog: overview lists models, then { model } drills into REAL physical columns', opts, async (t) => {
   if (skip(t)) return;
-  const dc = await engine.describe_catalog();
-  const events = dc.models.find((m) => m.key === 'events');
-  assert.ok(events, 'events model present');
-  assert.ok(Array.isArray(events.physical_columns) && events.physical_columns.length > 0, 'events has REAL physical columns');
+  const overview = await engine.describe_catalog();
+  assert.ok(overview.models.find((m) => m.key === 'events'), 'events model present in overview');
+  assert.ok(Array.isArray(overview.event_names) && overview.event_names.length > 0, 'overview lists event names');
+  assert.equal(overview.models.find((m) => m.key === 'events').physical_columns, undefined, 'overview does NOT dump physical columns');
+  // drill down for the real physical columns (adapter.get_columns_in_relation)
+  const events = await engine.describe_catalog({ model: 'events' });
+  assert.ok(Array.isArray(events.physical_columns) && events.physical_columns.length > 0, 'events { model } has REAL physical columns');
+  // { event } returns only the properties carried by that event
+  const ev = await engine.describe_catalog({ event: 'iap_purchase_completed' });
+  assert.ok(ev.property_count > 0 && ev.properties.some((p) => p.name === 'price_in_usd_of_event_data'), 'event lists its scoped properties');
 });

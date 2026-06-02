@@ -205,6 +205,7 @@ export function dbtSchemaToCatalog(doc) {
     const key = mcp.role || mcp.key;
     if (!key) throw new Error(`catalog model '${model.name}' is missing meta.mcp.role`);
     const m = { dbt_model: model.name };
+    if (model.description) m.description = model.description;
     if (mcp.role) m.role = mcp.role;
     if (mcp.primary_entity !== undefined) m.primary_entity = mcp.primary_entity;
     if (mcp.known_events) m.known_events = mcp.known_events;

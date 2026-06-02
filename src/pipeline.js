@@ -76,6 +76,12 @@ const CONDITION = {
 
 const OPSYM = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 
+// A string constrained to event-property `values`, but never an empty enum (ajv
+// rejects `enum: []` at compile time). When the catalog has no such properties
+// (e.g. a fully flattened payload with no array/struct fields) the field stays an
+// open string — there is nothing valid to pick anyway.
+const propEnum = (values, description) => (values.length ? { type: 'string', enum: values, description } : { type: 'string', description });
+
 // SQL for one operand: a column reference, a literal constant, or `now`.
 function operandSql(d, cols, o, label = 'operand') {
   if (o === null || typeof o !== 'object') throw new Error(`${label}: must be { column } | { value } | { now: true }`);
@@ -172,7 +178,7 @@ const STAGES = {
         stage: { const: 'derive' },
         name: { type: 'string', pattern: NAME },
         op: { enum: ['extract', 'array_length', 'contains', 'struct_field'] },
-        source: { type: 'string', enum: catalog.eventProps(), description: 'event_data property the value derives from.' },
+        source: propEnum(catalog.eventProps(), 'event_data property the value derives from.'),
         value: { description: 'Membership value for op=contains.' },
         field: { type: 'string', description: 'Struct field for op=struct_field.' },
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Result/extract type (default string).' },
@@ -180,8 +186,12 @@ const STAGES = {
     }),
     build: ({ d, catalog, cols }, p) => {
       const json = catalog.eventDataColumn();
+      const spec = catalog.eventPropertySpec(p.source);
       let expr; let type;
-      if (p.op === 'extract') { expr = d.jsonExtract(json, p.source, p.type || 'string'); type = p.type || 'string'; }
+      // Flattened payload (spec.column) is a real column → reference it directly;
+      // legacy JSON-blob payload is extracted from the event_data column.
+      if (p.op === 'extract' && spec?.column) { expr = spec.column; type = p.type || spec.type || 'string'; }
+      else if (p.op === 'extract') { expr = d.jsonExtract(json, p.source, p.type || 'string'); type = p.type || 'string'; }
       else if (p.op === 'array_length') { expr = d.jsonArrayLength(json, p.source); type = 'int'; }
       else if (p.op === 'contains') { expr = d.jsonArrayContains(json, p.source, p.value); type = 'boolean'; }
       else if (p.op === 'struct_field') { expr = d.jsonStructField(json, p.source, p.field, p.type); type = p.type || 'string'; }
@@ -318,7 +328,7 @@ const STAGES = {
       description: 'Explode an array property into one row per element (CHANGES GRAIN; rows without the array drop out). For per-element analysis (e.g. items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with compute op=json_field.',
       properties: {
         stage: { const: 'unnest' },
-        source: { type: 'string', enum: catalog.complexEventProps() },
+        source: propEnum(catalog.complexEventProps(), 'array/struct event_data property to explode.'),
         as: { type: 'string', pattern: NAME },
         field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'] },

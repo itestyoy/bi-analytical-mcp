@@ -222,6 +222,7 @@ export function dbtSchemaToCatalog(doc) {
 
     const entities = {};
     const dimensions = {};
+    const flatProps = {}; // anchor-only: flattened event_data__* payload columns
     const columnDescriptions = {};
     for (const col of model.columns || []) {
       const cm = col.meta?.mcp || {};
@@ -236,6 +237,23 @@ export function dbtSchemaToCatalog(doc) {
       if (cm.is_event_data) {
         m.event_data_column = col.name;
         if (cm.properties) m.properties = cm.properties;
+        continue;
+      }
+      // Flattened event payload: on the anchor, an event_data__* column (or any
+      // column scoped to specific events via meta.mcp.events) is a per-event
+      // PROPERTY. Unlike the legacy JSON-blob form, these are REAL physical columns
+      // — recorded with `column` so SQL references them directly (no JSON extract).
+      if (isAnchor && !cm.dimension && cm.events) {
+        // A flattened event-payload property: a real column populated only on the
+        // events in meta.mcp.events. The column is named directly (no `__`, which
+        // MetricFlow reserves), so it is used as-is for both the key and the expr.
+        flatProps[col.name] = {
+          type: isNumericType(col.data_type) ? 'numeric' : 'string',
+          column: col.name,
+          ...(cm.values ? { values: cm.values } : {}),
+          ...(cm.events ? { events: cm.events } : {}),
+          ...(col.description ? { description: col.description } : {}),
+        };
         continue;
       }
       // Dimensions: on a non-anchor (dimension) model, every remaining column is
@@ -253,6 +271,7 @@ export function dbtSchemaToCatalog(doc) {
         dimensions[col.name] = d;
       }
     }
+    if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
     if (Object.keys(entities).length) m.entities = entities;
     if (Object.keys(dimensions).length) m.dimensions = dimensions;
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
@@ -260,6 +279,18 @@ export function dbtSchemaToCatalog(doc) {
   }
   out.anchor_model = out.anchor_model || doc.anchor_model;
   if (!out.anchor_model) throw new Error('no anchor (events fact) model: exactly one model must declare an event_name / event_data / time column');
+  // Schema validation: names that become MetricFlow identifiers (event-property keys
+  // and dimension columns) MUST NOT contain '__' — MetricFlow reserves it as the
+  // entity/dimension separator. Fail loudly at load so the dbt schema is corrected at
+  // the source (with proper names) instead of silently rewritten in code.
+  for (const [key, m] of Object.entries(out.models)) {
+    const bad = [];
+    for (const p of Object.keys(m.properties || {})) if (p.includes('__')) bad.push(`event property '${p}'`);
+    for (const d of Object.keys(m.dimensions || {})) if (d.includes('__')) bad.push(`dimension column '${d}'`);
+    if (bad.length) {
+      throw new Error(`catalog schema invalid in model '${key}': ${bad.join(', ')} contain '__', which MetricFlow reserves as the entity/dimension separator. Give the column(s) correct names in your dbt model — e.g. an inverted '_of_' form: event_data__price_in_usd -> price_in_usd_of_event_data.`);
+    }
+  }
   return out;
 }
 
@@ -321,6 +352,19 @@ export class Catalog {
     const props = this.models[this.anchor]?.properties || {};
     const out = {};
     for (const [k, v] of Object.entries(props)) if (v && v.description) out[k] = v.description;
+    return out;
+  }
+
+  /**
+   * Which event(s) each property is populated on: { property: [event_name, ...] }.
+   * A property is NULL on any event NOT in its list, so a measure/dimension/filter on
+   * it MUST be scoped (event_name / event_scope) to those events. Only properties that
+   * declare an applicability list are included.
+   */
+  eventPropertyEvents() {
+    const props = this.models[this.anchor]?.properties || {};
+    const out = {};
+    for (const [k, v] of Object.entries(props)) if (v && Array.isArray(v.events) && v.events.length) out[k] = v.events;
     return out;
   }
 

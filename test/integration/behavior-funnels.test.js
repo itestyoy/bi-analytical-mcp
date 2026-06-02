@@ -56,7 +56,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 
-  const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
+  const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'bf-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
@@ -68,10 +68,10 @@ before(async () => {
   await create({
     name: 'mon', use_base_models: ['users'],
     semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] },
-      dimensions: [{ source: 'event_property', property: 'product_id' }],
+      dimensions: [{ source: 'event_property', property: 'product_id_of_event_data' }],
       measures: [
-        { name: 'revenue', agg: 'sum', field: 'price_in_usd' },
-        { name: 'payers', agg: 'count_distinct', field: 'appsflyer_id' },
+        { name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' },
+        { name: 'payers', agg: 'count_distinct', field: 'internal__player_id' },
         { name: 'purchases', agg: 'count', field: '*' },
       ] }],
     metrics: [
@@ -86,7 +86,7 @@ before(async () => {
   // Level progression: starts / completes per level_id (event-property dim).
   await create({
     name: 'prog',
-    semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'level_id' }],
+    semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'level_id_of_event_data' }],
       measures: [
         { name: 'starts', agg: 'count', field: '*', event_name: ['level_started'] },
         { name: 'completes', agg: 'count', field: '*', event_name: ['level_completed'] },
@@ -102,8 +102,8 @@ before(async () => {
   await create({
     name: 'conv', use_base_models: ['users'],
     semantic_models: [{ from: 'events', measures: [
-      { name: 'visitors', agg: 'count_distinct', field: 'appsflyer_id', event_name: ['new_session'] },
-      { name: 'buyers', agg: 'count_distinct', field: 'appsflyer_id', event_name: ['iap_purchase_completed'] },
+      { name: 'visitors', agg: 'count_distinct', field: 'internal__player_id', event_name: ['new_session'] },
+      { name: 'buyers', agg: 'count_distinct', field: 'internal__player_id', event_name: ['iap_purchase_completed'] },
     ] }],
     metrics: [
       { name: 'visitors', type: 'simple', measure: { name: 'visitors' } },
@@ -117,7 +117,7 @@ before(async () => {
   await create({
     name: 'beh',
     semantic_models: [{ from: 'events', measures: [
-      { name: 'active', agg: 'count_distinct', field: 'appsflyer_id', event_name: ['new_session'] },
+      { name: 'active', agg: 'count_distinct', field: 'internal__player_id', event_name: ['new_session'] },
       { name: 'purch', agg: 'sum_boolean', event_name: ['iap_purchase_completed'] },
     ] }],
     metrics: [
@@ -219,14 +219,14 @@ test('monetization: where with OR (US OR BR) -> 35 + 25 = 60', opts, async (t) =
 
 test('monetization: revenue by product_id = p1 15 / p2 30 / p3 40; order_by+limit top = 40', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: ['mon_product_id'] });
+  const r = await q('mon', { metrics: ['mon_revenue'], group_by: ['mon_product_id_of_event_data'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'event__mon_product_id', 'mon_revenue');
+  const by = mapCol(r.rows, 'event__mon_product_id_of_event_data', 'mon_revenue');
   assert.equal(by.p1, 15); assert.equal(by.p2, 30); assert.equal(by.p3, 40);
 
   const top = await q('mon', {
-    metrics: ['mon_revenue'], group_by: ['mon_product_id'],
-    where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'mon_product_id' }, op: 'is_not_null' }] },
+    metrics: ['mon_revenue'], group_by: ['mon_product_id_of_event_data'],
+    where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'mon_product_id_of_event_data' }, op: 'is_not_null' }] },
     order_by: [{ key: 'mon_revenue', direction: 'desc' }], limit: 1,
   });
   assert.equal(top.ok, true, JSON.stringify(top.error));
@@ -259,12 +259,12 @@ test('monetization: revenue by day/week/month all sum to 85', opts, async (t) =>
 
 test('progression: per-level starts = 12/6/3 and completes = 12/4/3 (levels 1-3)', opts, async (t) => {
   if (skip(t)) return;
-  const s = await q('prog', { metrics: ['prog_starts'], group_by: ['prog_level_id'] });
-  const c = await q('prog', { metrics: ['prog_completes'], group_by: ['prog_level_id'] });
+  const s = await q('prog', { metrics: ['prog_starts'], group_by: ['prog_level_id_of_event_data'] });
+  const c = await q('prog', { metrics: ['prog_completes'], group_by: ['prog_level_id_of_event_data'] });
   assert.equal(s.ok, true, JSON.stringify(s.error));
   assert.equal(c.ok, true, JSON.stringify(c.error));
-  const sBy = mapCol(s.rows, 'event__prog_level_id', 'prog_starts');
-  const cBy = mapCol(c.rows, 'event__prog_level_id', 'prog_completes');
+  const sBy = mapCol(s.rows, 'event__prog_level_id_of_event_data', 'prog_starts');
+  const cBy = mapCol(c.rows, 'event__prog_level_id_of_event_data', 'prog_completes');
   assert.equal(sBy['1'], 12); assert.equal(sBy['2'], 6); assert.equal(sBy['3'], 3);
   assert.equal(cBy['1'], 12); assert.equal(cBy['2'], 4); assert.equal(cBy['3'], 3);
 });
@@ -281,9 +281,9 @@ test('progression totals: starts = 28, completes = 25 (completers <= starters)',
 
 test('progression: completion_rate per level in [0,1]; L1=1.0; L6=0.0', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('prog', { metrics: ['prog_completion_rate'], group_by: ['prog_level_id'] });
+  const r = await q('prog', { metrics: ['prog_completion_rate'], group_by: ['prog_level_id_of_event_data'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'event__prog_level_id', 'prog_completion_rate');
+  const by = mapCol(r.rows, 'event__prog_level_id_of_event_data', 'prog_completion_rate');
   for (const v of Object.values(by)) if (Number.isFinite(v)) assert.ok(v >= 0 && v <= 1.0000001, `rate ${v}`);
   assert.ok(Math.abs(by['1'] - 1) < 1e-9, `L1=${by['1']}`);
   // level 6: 1 start, 0 completes -> rate 0

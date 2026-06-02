@@ -52,6 +52,8 @@ export function stepPredicate(catalog, step, dialect, col, prepCols = new Map())
     if (catalog.isComplexEventProp(c.property)) {
       throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (derive/unnest), not directly`);
     }
+    // flattened payload (p.column) is a real column → reference it; else extract from JSON
+    if (p.column) return comparePred(col ? `${col}.${p.column}` : p.column, c.op, c.value);
     return comparePred(jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value);
   });
   return [ev, ...props].join(' AND ');
@@ -79,7 +81,7 @@ export function buildPrefilter(catalog, spec, dialect, col) {
   for (const c of f.where || []) {
     const p = (m.properties || {})[c.property];
     if (!p) throw new Error(`unknown event property in filter.where: ${c.property}`);
-    clauses.push(comparePred(jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value));
+    clauses.push(comparePred(p.column ? q(p.column) : jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value));
   }
   return clauses.join(' AND ');
 }

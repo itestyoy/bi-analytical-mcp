@@ -100,6 +100,9 @@ export class Engine {
       event_properties: c.eventProps(),
       event_property_descriptions: c.eventPropertyDescriptions(),
       event_numeric_properties: c.eventNumericProps(),
+      // Which events each property is populated on — it is NULL on any other event,
+      // so scope a measure/dimension/filter that uses it to these event_name(s).
+      event_property_events: c.eventPropertyEvents(),
       groupable_paths: c.reachableGroupByPaths(),
       enums: {
         agg: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'],

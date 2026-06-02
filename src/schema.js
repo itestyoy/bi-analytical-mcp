@@ -23,12 +23,20 @@ const D = {
   where_measure: 'Per-measure conditions on event_data JSON properties, ANDed with the event scope. Used to define a funnel step as event + property value (e.g. event_name=tutorial AND step_id=step_1).',
 };
 
+// A string property constrained to `values` — but NEVER an empty enum (JSON
+// Schema forbids `enum: []`, and ajv rejects such a schema at compile time). When
+// the catalog yields no candidates the field stays an open string (there is
+// nothing valid to pick anyway, and compile-time checks still reject bad names).
+function strEnum(values, description) {
+  return values.length ? { type: 'string', enum: values, description } : { type: 'string', description };
+}
+
 function whereItemSchema(catalog) {
   return {
     type: 'object', additionalProperties: false, required: ['property', 'op'],
     description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
     properties: {
-      property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property to test.' },
+      property: strEnum(catalog.scalarEventProps(), 'Scalar event_data property to test. NB: each property is only populated on specific events (see describe_catalog.event_property_events); scope the measure to those event_name(s) or it reads NULL.'),
       op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator. Use in/not_in with an array value; the rest take a scalar.' },
       value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in.' },
     },
@@ -76,7 +84,7 @@ function dimensionItemSchema(catalog, modelKey) {
       description: 'A dimension taken from an event_data property (e.g. level_id, product_id) so you can group/filter by it.',
       properties: {
         source: { const: 'event_property', description: 'Take the dimension from an event_data property.' },
-        property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property key to expose as a categorical dimension.' },
+        property: strEnum(catalog.scalarEventProps(), 'Scalar event_data property to expose as a dimension. NB: only populated on specific events (see describe_catalog.event_property_events); NULL on others.'),
         as_type: { const: 'categorical', default: 'categorical', description: 'event_data dimensions are always categorical.' },
         label: { type: 'string', description: D.label },
       },
@@ -122,8 +130,8 @@ function genericDimensionItem(catalog) {
     type: 'object',
     description: 'A dimension to add to the target semantic model (a column or an event_data property).',
     oneOf: [
-      { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { const: 'model_column', description: 'Use a physical table column.' }, column: { type: 'string', enum: cols, description: 'Physical column name.' }, as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
-      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: { type: 'string', enum: catalog.scalarEventProps(), description: 'Scalar event_data property key.' }, as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
+      { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { const: 'model_column', description: 'Use a physical table column.' }, column: strEnum(cols, 'Physical column name.'), as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
+      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: strEnum(catalog.scalarEventProps(), 'Scalar event_data property. NB: only populated on specific events (see describe_catalog.event_property_events); NULL on others.'), as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
     ],
   };
 }

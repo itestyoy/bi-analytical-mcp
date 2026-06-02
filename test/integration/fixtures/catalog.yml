@@ -168,6 +168,11 @@ models:
         data_type: string
         description: "Words collected on a completed level (JSON array). Events: level_completed."
         meta: { mcp: { events: [level_completed], array: { items: string, encoding: json } } }
+      # numeric value that physically arrives as STRING — aggregating it needs a cast
+      - name: complete_time_of_event_data
+        data_type: string
+        description: "Seconds to complete the level (STRING upstream). Events: level_completed."
+        meta: { mcp: { events: [level_completed] } }
 
   - name: dim_users
     description: "User attributes — one row per player."

@@ -48,12 +48,12 @@ function measureFieldSchema(catalog, modelKey) {
   const keys = catalog.entityKeyColumns(modelKey);
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
   if (modelKey === catalog.anchor) {
-    const nums = catalog.eventNumericProps();
-    if (nums.length) opts.push({ type: 'string', enum: nums, title: 'event_property_numeric' });
+    const props = catalog.scalarEventProps();
+    if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
   } else {
     // numeric model columns are rare in dims; allow none by default
   }
-  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), or a numeric event_data property (for sum/average/etc.).', oneOf: opts };
+  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), or an event_data property. A STRING property that holds numbers needs "cast":"numeric" to sum/average it.', oneOf: opts };
 }
 
 function dimensionItemSchema(catalog, modelKey) {
@@ -100,8 +100,8 @@ function genericMeasureField(catalog) {
   const opts = [{ const: '*', title: 'rows' }];
   const keys = [...new Set(catalog.modelKeys().flatMap((k) => catalog.entityKeyColumns(k)))];
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
-  const nums = catalog.eventNumericProps();
-  if (nums.length) opts.push({ type: 'string', enum: nums, title: 'numeric' });
+  const props = catalog.scalarEventProps();
+  if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
   return { description: 'What to aggregate: "*", an entity-key column, or a numeric event_data property.', oneOf: opts };
 }
 
@@ -116,6 +116,7 @@ function genericMeasureItem(catalog) {
       agg: { enum: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'], description: D.agg },
       field: genericMeasureField(catalog),
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
+      cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
       label: { type: 'string', description: D.label },
       event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: D.event_name },
       where: { type: 'array', description: D.where_measure, items: whereItemSchema(catalog) },
@@ -147,6 +148,7 @@ function measureItemSchema(catalog, modelKey) {
       agg: { enum: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'], description: D.agg },
       field: measureFieldSchema(catalog, modelKey),
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
+      cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
       label: { type: 'string', description: D.label },
       ...(modelKey === catalog.anchor
         ? {

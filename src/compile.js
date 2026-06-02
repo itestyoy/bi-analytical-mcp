@@ -2,7 +2,7 @@
 // objects (measures/dimensions/metrics) for a single context. All physical SQL
 // and namespacing happens here; the renderer just serializes.
 
-import { jsonExtract, sqlLiteral, isNumericType } from './dialect.js';
+import { jsonExtract, sqlLiteral, isNumericType, castExpr } from './dialect.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
@@ -89,15 +89,18 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     agg = 'sum'; // count(*) rendered as sum(1) so scope folds cleanly
     valueExpr = '1';
   } else if (modelKey === catalog.anchor && props[field]) {
-    // numeric event property
-    if (!isNumericType(props[field].type)) {
-      throw new Error(`measure '${decl.name}': property '${field}' is not numeric`);
+    // an event property; numeric aggregations need a numeric type OR an explicit cast
+    // (e.g. complete_time arrives as STRING upstream → add "cast": "numeric").
+    const numericAgg = ['sum', 'average', 'median', 'min', 'max', 'percentile'].includes(decl.agg);
+    if (numericAgg && !isNumericType(props[field].type) && !decl.cast) {
+      throw new Error(`measure '${decl.name}': property '${field}' is type '${props[field].type}'; add "cast":"numeric" to aggregate it as a number`);
     }
     valueExpr = propExpr(catalog, field, props[field]);
   } else {
     // a physical column (entity key like user_id/session_id, or model column)
     valueExpr = field;
   }
+  if (decl.cast) valueExpr = castExpr(catalog.dialect, valueExpr, decl.cast);
 
   const m = { name, agg, expr: applyScope(valueExpr, scope, { numeric: true }) };
   if (decl.agg === 'percentile') {

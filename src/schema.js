@@ -281,6 +281,7 @@ export function buildSchemas(catalog) {
       semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
       metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
+      include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false). The YAML is always written to the context files regardless; omit it to keep responses small.' },
     },
   };
 
@@ -356,6 +357,7 @@ export function buildSchemas(catalog) {
       remove_metrics: { type: 'array', items: { type: 'string' }, description: 'Names of metrics to remove.' },
       task: { type: 'string', description: 'Task name the additions belong to (defaults to the context\'s first task).' },
       dry_run: { type: 'boolean', description: 'If true, validate the change WITHOUT building anything.' },
+      include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false; it is always written to the context files).' },
     },
   };
 

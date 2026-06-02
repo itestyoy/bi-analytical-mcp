@@ -301,7 +301,7 @@ export class Engine {
       context_id: ctx.id,
       task: compiled.task,
       files: [file],
-      yaml: render.yaml,
+      ...(input.include_yaml ? { yaml: render.yaml } : {}),
       semantic_models: render.semanticModels,
       joined_models: ctx.state.usedModels,
       metrics: render.metricNames,
@@ -346,7 +346,7 @@ export class Engine {
     const file = this.ctxs.writeYaml(ctx.id, render.yaml);
     this.ctxs.touch(ctx.id);
     const parse = await this._parse(ctx.id);
-    return { context_id: ctx.id, semantic_model: modelKey, files: [file], yaml: render.yaml, metrics: render.metricNames, groupable: [...this._allowedPaths(ctx)], parse, warnings: [] };
+    return { context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}), metrics: render.metricNames, groupable: [...this._allowedPaths(ctx)], parse, warnings: [] };
   }
 
   async delete_semantic_model(input) {

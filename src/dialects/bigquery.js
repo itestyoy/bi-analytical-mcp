@@ -66,6 +66,9 @@ export class BigQueryDialect extends Dialect {
     return `JSON_EXTRACT_STRING_ARRAY(${column}, '$')`;
   }
 
+  arrayElementAt(column, index) { return `${column}[SAFE_OFFSET(${Number(index) - 1})]`; } // 1-based → 0-based OFFSET
+  arrayLast(column) { return `${column}[SAFE_OFFSET(ARRAY_LENGTH(${column}) - 1)]`; }
+
   /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
   jsonColumnField(column, field, type = 'string') {
     this.ident(field);

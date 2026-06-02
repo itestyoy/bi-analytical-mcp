@@ -75,6 +75,55 @@ test('pipeline unnest: explode words_selected (JSON-string array) and count per 
   assert.equal(r.rows.length, 7);                              // distinct words
 });
 
+// #4 + json_parse_array: the flat payload column is referenceable directly in the
+// pipeline (no users-join), compute json_parse_array turns the JSON STRING into a
+// native array, and unnest explodes that derived column.
+test('pipeline json_parse_array + unnest: parse a flat JSON-string column then explode', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'compute', name: 'words_arr', op: 'json_parse_array', column: 'words_selected_of_event_data' },
+    { stage: 'unnest', source: 'words_arr', as: 'word' },
+    { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', fn: 'count' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.word), num(x.n)]));
+  assert.equal(by.cat, 12); assert.equal(by.x, 6);
+  assert.equal(r.rows.reduce((s, x) => s + num(x.n), 0), 53);
+});
+
+// #2: array primitives — last element ("последнее слово") and indexed element.
+test('pipeline array_last / element_at: last & first word per completed level', opts, async (t) => {
+  if (skip(t)) return;
+  const stages = (pick) => [
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'compute', name: 'wa', op: 'json_parse_array', column: 'words_selected_of_event_data' },
+    pick,
+    { stage: 'where', conditions: [{ column: 'w', op: 'is_not_null' }] },
+    { stage: 'aggregate', group_by: ['w'], measures: [{ name: 'n', fn: 'count' }] },
+  ];
+  const last = await run(stages({ stage: 'compute', name: 'w', op: 'array_last', column: 'wa' }));
+  assert.equal(last.ok, true, JSON.stringify(last));
+  const byLast = Object.fromEntries(last.rows.map((x) => [String(x.w), num(x.n)]));
+  assert.deepEqual(byLast, { sun: 12, star: 4, tree: 3, x: 6 });
+  const first = await run(stages({ stage: 'compute', name: 'w', op: 'element_at', column: 'wa', index: 1 }));
+  const byFirst = Object.fromEntries(first.rows.map((x) => [String(x.w), num(x.n)]));
+  assert.deepEqual(byFirst, { cat: 12, moon: 4, tree: 3, x: 6 });
+});
+
+// #2: raw SQL escape hatch — verbatim dialect expression when no built-in op fits.
+test('pipeline raw: a verbatim SQL expression is evaluated', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'compute', name: 'ev', op: 'raw', sql: 'upper(event_name)' },
+    { stage: 'aggregate', group_by: ['ev'], measures: [{ name: 'n', fn: 'count' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.rows.length, 1);
+  assert.equal(String(r.rows[0].ev), 'LEVEL_COMPLETED');
+});
+
 // ... |> PIVOT: country values become columns
 test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR=25)', opts, async (t) => {
   if (skip(t)) return;

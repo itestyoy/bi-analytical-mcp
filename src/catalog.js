@@ -18,6 +18,19 @@ function dimTypeFromDataType(dataType) {
   return TIME_DATA_TYPES.has(String(dataType || '').toLowerCase()) ? 'time' : 'categorical';
 }
 
+/** Coarse pipeline type for a physical column (so native pipelines can reference it). */
+function pipelineColumnType(cm, col) {
+  if (cm.is_time) return 'time';
+  if (cm.is_event_data) return 'json';
+  if (cm.array) {
+    const enc = cm.array.encoding || (String(col.data_type).toLowerCase() === 'string' ? 'json' : 'native');
+    return enc === 'native' ? 'array' : 'string';
+  }
+  const dt = String(col.data_type || '').toLowerCase();
+  if (TIME_DATA_TYPES.has(dt)) return 'time';
+  return isNumericType(dt) ? 'numeric' : 'string';
+}
+
 export function loadCatalog(path, opts = {}) {
   // A directory => a dbt project: discover the MCP-tagged models from its own
   // schema YAMLs (no separate catalog file needed).
@@ -225,8 +238,10 @@ export function dbtSchemaToCatalog(doc) {
     const dimensions = {};
     const flatProps = {}; // anchor-only: flattened event_data__* payload columns
     const columnDescriptions = {};
+    const allColumns = []; // EVERY physical column (name + pipeline type) — referenceable in native pipelines
     for (const col of model.columns || []) {
       const cm = col.meta?.mcp || {};
+      allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
       if (cm.entity) {
         if (cm.entity.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name };
@@ -290,6 +305,7 @@ export function dbtSchemaToCatalog(doc) {
       }
     }
     if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
+    m.columns = allColumns;
     if (Object.keys(entities).length) m.entities = entities;
     if (Object.keys(dimensions).length) m.dimensions = dimensions;
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
@@ -426,6 +442,11 @@ export class Catalog {
   eventNumericProps() {
     const props = this.models[this.anchor]?.properties || {};
     return Object.keys(props).filter((k) => isNumericType(props[k].type));
+  }
+
+  /** Every physical column of a model as { name, type } — referenceable in native pipelines. */
+  modelColumns(key) {
+    return this.getModel(key).columns || [];
   }
 
   /** Plain (non-JSON) physical columns of a model usable as categorical dims. */

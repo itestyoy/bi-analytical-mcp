@@ -217,6 +217,9 @@ const STAGES = {
         { if: { properties: { op: { const: 'date_part' } }, required: ['op'] }, then: { required: ['part'] } },
         { if: { properties: { op: { const: 'json_field' } }, required: ['op'] }, then: { required: ['column', 'field'] } },
         { if: { properties: { op: { const: 'json_parse_array' } }, required: ['op'] }, then: { required: ['column'] } },
+        { if: { properties: { op: { const: 'element_at' } }, required: ['op'] }, then: { required: ['column', 'index'] } },
+        { if: { properties: { op: { const: 'array_last' } }, required: ['op'] }, then: { required: ['column'] } },
+        { if: { properties: { op: { const: 'raw' } }, required: ['op'] }, then: { required: ['sql'] } },
         { if: { properties: { op: { const: 'case' } }, required: ['op'] }, then: { required: ['cases'] } },
         { if: { properties: { op: { const: 'window' } }, required: ['op'] }, then: { required: ['fn'] } },
       ],
@@ -224,7 +227,7 @@ const STAGES = {
       properties: {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
-        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'json_parse_array', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
+        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'json_parse_array', 'element_at', 'array_last', 'raw', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
         field: { type: 'string', description: 'Struct field name for op=json_field (extract from a JSON column, e.g. an unnested array-of-struct element).' },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
@@ -235,6 +238,8 @@ const STAGES = {
         search: { type: 'string', description: 'Substring to find for op=replace.' },
         replacement: { type: 'string', description: 'Replacement string for op=replace.' },
         start: { type: 'integer', minimum: 1, description: '1-based start position for op=substring.' },
+        index: { type: 'integer', minimum: 1, description: '1-based index for op=element_at.' },
+        sql: { type: 'string', description: 'Raw dialect SQL expression over existing columns — escape hatch for op=raw when no built-in op fits (e.g. array indexing, dialect functions). Not portable across dialects.' },
         len: { type: 'integer', minimum: 0, description: 'Length (chars) for op=substring (optional).' },
         unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'date_diff unit.' },
         granularity: { enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'date_trunc granularity.' },
@@ -297,6 +302,9 @@ const STAGES = {
       else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }
       else if (p.op === 'json_field') { expr = d.jsonColumnField(col(), p.field, p.type); type = p.type || 'string'; }
       else if (p.op === 'json_parse_array') { expr = d.jsonParseArray(col()); type = 'array'; } // STRING JSON array → native array (then unnest)
+      else if (p.op === 'element_at') { expr = d.arrayElementAt(col(), p.index); type = p.type || 'string'; }
+      else if (p.op === 'array_last') { expr = d.arrayLast(col()); type = p.type || 'string'; }
+      else if (p.op === 'raw') { if (!p.sql) throw new Error('raw: needs sql'); expr = `(${p.sql})`; type = p.type || 'string'; } // escape hatch: verbatim dialect SQL
       else if (p.op === 'hll_extract') { expr = d.hllExtract(col()); type = 'int'; }
       else if (p.op === 'case') {
         if (!p.cases?.length) throw new Error('case: needs at least one branch');
@@ -492,18 +500,22 @@ export function stageSchemas(catalog, names) {
   return { oneOf: names.map((n) => { if (!STAGES[n]) throw new Error(`no such stage: ${n}`); return STAGES[n].schema(catalog); }) };
 }
 
-/** Initial columns available from a catalog source model. */
+/** Initial columns available from a catalog source model. Every REAL physical column
+ *  is exposed (incl. flattened event payload + envelope columns like main_data__app_id),
+ *  so a native pipeline can filter/group/compute on them WITHOUT a users-join. */
 function sourceColumns(catalog, key) {
   const m = catalog.getModel(key);
   const cols = new Map();
+  for (const c of catalog.modelColumns(key)) cols.set(c.name, { type: c.type });
+  // Fallbacks for catalogs that predate column capture (keep entity/time/event_name/dims).
   if (key === catalog.anchor) {
-    if (m.event_name?.column) cols.set(m.event_name.column, { type: 'string' });
-    if (m.time?.column) cols.set(m.time.column, { type: 'time' });
-    if (m.event_data_column) cols.set(m.event_data_column, { type: 'json' });
-    for (const e of Object.values(m.entities || {})) if (e.column) cols.set(e.column, { type: 'string' });
+    if (m.event_name?.column && !cols.has(m.event_name.column)) cols.set(m.event_name.column, { type: 'string' });
+    if (m.time?.column && !cols.has(m.time.column)) cols.set(m.time.column, { type: 'time' });
+    if (m.event_data_column && !cols.has(m.event_data_column)) cols.set(m.event_data_column, { type: 'json' });
+    for (const e of Object.values(m.entities || {})) if (e.column && !cols.has(e.column)) cols.set(e.column, { type: 'string' });
   } else {
-    if (typeof m.primary_entity === 'object' && m.primary_entity.column) cols.set(m.primary_entity.column, { type: 'string' });
-    for (const [name, dd] of Object.entries(m.dimensions || {})) cols.set(name, { type: dd.type });
+    if (typeof m.primary_entity === 'object' && m.primary_entity.column && !cols.has(m.primary_entity.column)) cols.set(m.primary_entity.column, { type: 'string' });
+    for (const [name, dd] of Object.entries(m.dimensions || {})) if (!cols.has(name)) cols.set(name, { type: dd.type });
   }
   return cols;
 }

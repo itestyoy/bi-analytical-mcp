@@ -64,6 +64,9 @@ export class PostgresDialect extends Dialect {
     return `ARRAY(SELECT jsonb_array_elements_text((${column})::jsonb))`;
   }
 
+  arrayElementAt(column, index) { return `(${column})[${Number(index)}]`; }       // 1-based
+  arrayLast(column) { return `(${column})[array_length(${column}, 1)]`; }
+
   /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
   jsonColumnField(column, field, type = 'string') {
     this.ident(field);

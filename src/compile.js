@@ -21,12 +21,20 @@ export function scopeExpr(catalog, modelKey, eventScope) {
   return namesToScope(catalog, modelKey, eventScope?.event_name);
 }
 
+/**
+ * SQL expression for an event property: a REAL column reference when the payload
+ * is flattened upstream (spec.column set), else extraction from the JSON blob.
+ */
+function propExpr(catalog, name, spec) {
+  return spec.column ? spec.column : jsonExtract(catalog.dialect, catalog.eventDataColumn(), name, spec.type);
+}
+
 /** SQL for a single event_data property condition (used for funnel-step scoping). */
 function propCond(catalog, modelKey, cond) {
   const props = catalog.getModel(catalog.anchor).properties || {};
   const p = props[cond.property];
   if (!p) throw new Error(`unknown event property in where: ${cond.property}`);
-  const lhs = jsonExtract(catalog.dialect, catalog.eventDataColumn(), cond.property, p.type);
+  const lhs = propExpr(catalog, cond.property, p);
   switch (cond.op) {
     case 'eq': return `${lhs} = ${sqlLiteral(cond.value)}`;
     case 'neq': return `${lhs} != ${sqlLiteral(cond.value)}`;
@@ -60,7 +68,6 @@ function applyScope(valueExpr, scope, { numeric }) {
 /** Resolve a measure declaration to a dbt measure object (name, agg, expr, ...). */
 function compileMeasure(catalog, task, modelKey, decl, smScope) {
   const name = NS(task, decl.name);
-  const dialect = catalog.dialect;
   // a per-measure event_name (+ optional property `where`) overrides the SM-level
   // scope — this is how a funnel step is defined as "event + property value".
   const scope = measureScope(catalog, modelKey, decl, smScope);
@@ -86,7 +93,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     if (!isNumericType(props[field].type)) {
       throw new Error(`measure '${decl.name}': property '${field}' is not numeric`);
     }
-    valueExpr = jsonExtract(dialect, catalog.eventDataColumn(), field, props[field].type);
+    valueExpr = propExpr(catalog, field, props[field]);
   } else {
     // a physical column (entity key like user_id/session_id, or model column)
     valueExpr = field;
@@ -103,14 +110,13 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
 
 /** Resolve a dimension declaration to a dbt dimension object. */
 function compileDimension(catalog, task, modelKey, decl) {
-  const dialect = catalog.dialect;
   if (decl.source === 'event_property') {
     if (modelKey !== catalog.anchor) throw new Error('event_property dimensions only valid on the events model');
     const props = catalog.getModel(catalog.anchor).properties || {};
     const p = props[decl.property];
     if (!p) throw new Error(`unknown event property: ${decl.property}`);
     if (decl.as_type === 'time') throw new Error('time dimensions from JSON properties are not allowed (m2)');
-    return { name: NS(task, decl.property), type: 'categorical', expr: jsonExtract(dialect, catalog.eventDataColumn(), decl.property, p.type) };
+    return { name: NS(task, decl.property), type: 'categorical', expr: propExpr(catalog, decl.property, p) };
   }
   if (decl.source === 'model_column') {
     const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column };

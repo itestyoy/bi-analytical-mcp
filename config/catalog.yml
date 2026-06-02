@@ -1,9 +1,26 @@
 version: 2
 
-# MCP catalog expressed as dbt model-schema YAML. The two data sources are
+# MCP catalog expressed as dbt model-schema YAML. The three data sources are
 # described as ordinary dbt models with `columns`; everything MCP-specific lives
 # under `meta.mcp` (model-level and column-level). The loader (src/catalog.js)
-# transforms this into the internal registry. There are EXACTLY TWO data sources.
+# transforms this into the internal registry. There are EXACTLY THREE models, and
+# each one is a thin view over a finished bi-dbt prod table declared in sources.yml.
+# The parsing/attribution already happened upstream — we DO NOT re-parse anything;
+# we take the ready, flattened columns as-is and only re-shape (rename role columns).
+#
+# Descriptions are written for an AI consumer: each one states what the field is,
+# which event(s) it appears on, its unit/allowed values, and any gotchas. The
+# event taxonomy is documented in Confluence (space PA, "Кастомные аналитические
+# события (с девайса игрока)") and covers a portfolio of word/puzzle games
+# (Fillwords, Jigsawgram, Relax Puzzles, Sky Words, Sudoku Master, Tile Trip,
+# Word Pizza, Word Search Sea, Word Spells).
+#
+# IMPORTANT for the AI consumer: the envelope columns (main_data__*, device_info__*,
+# state__*) are present on EVERY event. Each event_data__* property, by contrast,
+# only carries a value for the events listed in its `meta.mcp.events` array (also
+# repeated as "Events:" in the description) — on any other event_name it is NULL.
+# Always filter by event_name to the relevant event(s) before using an
+# event_data__* field; do not assume a payload field exists on every row.
 #
 # Types come from the NATIVE dbt `data_type` (date/timestamp -> time dimension,
 # else categorical) — not from meta. On a dimension model every non-entity column
@@ -12,181 +29,1360 @@ version: 2
 #   entity:        { name, type: primary|foreign }  -> entity / join key
 #   is_time:       true (+ granularity, default day) -> the event time axis
 #   is_event_name: true                             -> the event_name column
-#   is_event_data: true (+ properties: {..})        -> the JSON payload column (typed JSON keys)
+#   is_event_data: true                             -> the raw JSON payload column
 #   values:        [..]                             -> categorical value hints (optional)
-#   granularity:   day|week|..                      -> non-default time grain (optional)
+#   events:        [..]                             -> event_name(s) a payload field applies to
+#
+# The grain / join key across all three models is `internal__player_id` (an INT64
+# surrogate id present on the prod events fact, installs and experiments tables).
+# The events payload is ALREADY flattened upstream into event_data__* columns, so
+# the catalog documents them as real typed dimensions/measures (the raw json is
+# still kept as `event_data` for is_event_data anchor detection).
 #
 # The warehouse dialect is NOT stored here — it is runtime config, resolved from
 # the WAREHOUSE_DIALECT env var or the dbt profile's output `type`.
 
 models:
   - name: fct_analytics_events
-    description: "Analytical events fact — one row per tracked event."
+    description: >
+      Client analytics events fact: one row per tracked in-game event sent from
+      the player's device. Every event shares an envelope (main_data context,
+      device_info, and a state snapshot of the player) plus a per-event payload
+      that has already been flattened upstream into event_data__* columns. Use
+      event_name to pick an event type, device_time for the time axis, and
+      internal__player_id to join to dim_users / fct_experiment_assignments.
+      Envelope columns (main_data__*, device_info__*, state__*) exist on every
+      event; each event_data__* field only applies to the events in its
+      meta.mcp.events array and is NULL elsewhere — always scope by event_name first.
     meta:
       mcp:
         role: events           # the logical name the tools use (the dbt model can be named anything)
         primary_entity: event  # the grain of the fact (no physical key column)
-        # The anchor (events fact) is detected from the event_name/event_data/time
-        # columns below — no `anchor` flag needed.
         known_events:
+          # activity
           - first_launch
           - new_session
           - end_session
+          # levels / puzzles / games
           - level_started
+          - fragment_started
+          - fragment_finished
           - level_completed
+          - word_selected
+          - battle_of_wits_started
+          - battle_of_wits_finished
+          - puzzle_started
+          - puzzle_part_completed
+          - puzzle_completed
+          # economy
           - currency_income
           - currency_outcome
-          - shop_opened
-          - iap_purchase_completed
-          - iap_purchase_failed
+          # in-game timed events
+          - event_start
+          - event_prize
+          - event_end
+          # advertising
+          - ad_requested
+          - ad_loaded
+          - ad_available
+          - ad_blocked
+          - ad_incident
+          - ad_analyzed
           - ad_started
           - ad_finished
-          - tutorial
+          - ad_freezed
+          - ad_redirected
+          # in-app purchases
+          - shop_opened
+          - iap_started
+          - iap_purchase_failed
+          - iap_purchase_completed
+          # interface
           - screen_changed
+          # mechanics
+          - progress_restored
+          - piggy_bank_opened
+          - tutorial
+          - wheel_spin
     columns:
-      - name: appsflyer_id
-        data_type: string
-        description: "User identifier; joins events to dim_users."
+      # ---- role columns ---------------------------------------------------
+      - name: internal__player_id
+        data_type: integer
+        description: >
+          Stable internal player id (surrogate hash of appsflyer_id + bundle_id +
+          platform). The canonical join key from events to dim_users and
+          fct_experiment_assignments. Present on every event.
         meta:
           mcp:
             entity: { name: user, type: foreign }
       - name: session_number
         data_type: integer
-        description: "Per-user session counter."
+        description: >
+          Per-player session counter that increments on each new_session. Present
+          on every event. Use it to order a player's sessions or aggregate per session.
         meta:
           mcp:
             entity: { name: session, type: foreign }
       - name: device_time
         data_type: timestamp
-        description: "Event timestamp (the metric time axis)."
+        description: >
+          When the event happened on the player's device, normalized to the
+          player's time zone. Present on every event. This is the metric time axis.
         meta:
           mcp:
             is_time: true   # granularity defaults to day
       - name: event_name
         data_type: string
-        description: "Event type (one of known_events)."
+        description: >
+          The event type. Always one of known_events (e.g. first_launch,
+          level_completed, currency_income, ad_finished, iap_purchase_completed).
+          Filter on this first to scope a query to a specific event.
         meta:
           mcp:
             is_event_name: true
+      - name: event_version
+        data_type: string
+        description: >
+          Schema version of the event. Present on every event. Some payload fields
+          only exist from a given version (e.g. currency_income gained
+          monetization_type in v1; ad events moved status from ad_started to
+          ad_finished in later versions).
       - name: event_data
         data_type: json
-        description: "Per-event JSON payload; typed keys below."
+        description: >
+          Raw per-event JSON payload, kept verbatim. The same data is already
+          flattened into the typed event_data__* columns below — prefer those for
+          querying; use this only for keys not yet flattened.
         meta:
           mcp:
             is_event_data: true
-            properties:
-              level_id: { type: int, description: "Level number for level_started/level_completed events." }
-              chain: { type: string }
-              result: { type: string, values: [win, lose], description: "Outcome of a completed level." }
-              method: { type: string }
-              complete_time: { type: int, description: "Seconds taken to complete the level." }
-              attempt: { type: int, description: "Attempt number for the level." }
-              amount: { type: int, description: "Coin amount earned (currency_income) or spent (currency_outcome)." }
-              currency: { type: string }
-              value_in_coins: { type: int }
-              source_type: { type: string, description: "Economy source/sink category (e.g. level_reward, hint_spend)." }
-              source_name: { type: string }
-              monetization_type: { type: string }
-              price_in_usd: { type: numeric, description: "IAP purchase price in USD (iap_purchase_completed)." }
-              product_id: { type: string, description: "IAP product identifier." }
-              order_id: { type: string }
-              status: { type: string, values: [success, failed, closed] }
-              ad_type: { type: string, values: [rewarded, interstitial, banner], description: "Ad format." }
-              ad_network: { type: string, values: [admob, unity, applovin, ironsource], description: "Ad mediation network." }
-              placement: { type: string, description: "In-app ad placement (e.g. store, level_fail, main_menu)." }
-              revenue: { type: numeric, description: "Ad revenue in cents (ad_finished)." }
-              is_reward_received: { type: string }
-              is_clicked: { type: string }
-              screen_from: { type: string, description: "Origin screen for screen_changed." }
-              screen_to: { type: string, description: "Destination screen for screen_changed." }
-              step_id: { type: string, description: "Funnel/onboarding step id (e.g. tutorial step_1)." }
-              # Complex (array / array-of-struct) properties — usable only via the
-              # register_native_model `prepare` pipeline (array_length/contains/unnest/struct_field).
-              words_collected: { type: array, items: string, description: "Words collected on a completed level." }
-              rewards: { type: "array<struct>", fields: { item: string, qty: int }, description: "Rewards granted on level completion (item + quantity)." }
+      - name: event_date
+        data_type: timestamp
+        description: >
+          Day-truncated event date. Present on every event. This is the partition
+          column of the source table — always constrain queries on it (or device_time).
+
+      # ---- envelope: main_data (present on EVERY event) -------------------
+      - name: bundle_id
+        data_type: string
+        description: "Resolved store bundle id of the app the event came from. Present on every event."
+      - name: main_data__app_id
+        data_type: string
+        description: >
+          Short app code identifying the game (e.g. fillwords, relax_puzzles,
+          sky_words, tile_trip, word_pizza, word_search_sea, word_spells). Present on every event.
+      - name: main_data__platform
+        data_type: string
+        description: "Operating-system family the player is on. Present on every event."
+        meta: { mcp: { values: [android, ios] } }
+      - name: main_data__country
+        data_type: string
+        description: "Player country at event time (ISO 3166-1 alpha-2). Present on every event."
+      - name: main_data__media_source
+        data_type: string
+        description: >
+          Acquisition / attribution traffic source from AppsFlyer (e.g. organic,
+          googleadwords_int, Facebook Ads). Server-derived. Present on every event.
+      - name: main_data__ab_test_group
+        data_type: string
+        description: >
+          The in-app (product-side) A/B-test group the player currently belongs to.
+          Present on every event. Distinct from monetization Applovin tests in
+          event_data__additional_info__test_name.
+      - name: main_data__appsflyer_id
+        data_type: string
+        description: "AppsFlyer device id (client-stored attribution id). Present on every event."
+      - name: main_data__appmetrica_id
+        data_type: string
+        description: "AppMetrica device id. Present on every event."
+      - name: main_data__active_day
+        data_type: integer
+        description: >
+          Ordinal calendar active-day of the player, counting from 1 on the first
+          active day. Present on every event. Useful as a lifetime/retention axis.
+      - name: main_data__playtime
+        data_type: numeric
+        description: "Cumulative playtime in seconds (including ad views). Present on every event."
+      - name: main_data__build_version
+        data_type: string
+        description: "Current app version (semantic version string) at event time. Present on every event."
+      - name: main_data__build_number
+        data_type: string
+        description: "Current app build number at event time. Present on every event."
+      - name: main_data__install_build_version
+        data_type: string
+        description: "App version the player originally installed (sent only for new players)."
+      - name: main_data__install_build_number
+        data_type: string
+        description: "App build number the player originally installed."
+      - name: main_data__install_package
+        data_type: string
+        description: >
+          Android installer / vendor package that initiated the install; empty on
+          iOS, 'undefined' for dev/sideloaded APKs.
+      - name: main_data__is_valid_install
+        data_type: string
+        description: "TRUE when install_package = com.android.vending (a legitimate Play Store install)."
+      - name: main_data__is_test
+        data_type: string
+        description: "TRUE when the player is an internal tester; exclude for production analytics."
+      - name: main_data__event_id
+        data_type: string
+        description: "Unique client-generated id of this event (used for dedup upstream). Present on every event."
+      - name: main_data__time_zone
+        data_type: string
+        description: "Player time-zone offset (±hh:mm) used to localize device_time. Present on every event."
+      - name: main_data__device_time_ms
+        data_type: integer
+        description: "Raw client event time as a local UNIX timestamp in milliseconds. Present on every event."
+      - name: main_data__first_launch_ms
+        data_type: integer
+        description: "Player's first-launch time as a local UNIX timestamp in milliseconds. Present on every event."
+
+      # ---- envelope: device_info (present on EVERY event) -----------------
+      - name: device_info__cpu_type
+        data_type: string
+        description: "Device CPU type. Present on every event."
+      - name: device_info__device_model
+        data_type: string
+        description: "Device model identifier. Present on every event."
+      - name: device_info__gpu
+        data_type: string
+        description: "Device GPU name. Present on every event."
+      - name: device_info__graphics_memory_size
+        data_type: string
+        description: "Graphics memory size in MB (string). Present on every event."
+      - name: device_info__os_version
+        data_type: string
+        description: "Operating-system version of the device. Present on every event."
+      - name: device_info__resolution
+        data_type: string
+        description: "Screen resolution string. Present on every event."
+      - name: device_info__system_memory_size
+        data_type: string
+        description: "System RAM size in MB (string). Present on every event."
+
+      # ---- envelope: state — player snapshot at event time (present on EVERY event) ----
+      - name: state__language
+        data_type: string
+        description: "In-game language (IETF code) at event time. Present on every event."
+      - name: state__level_number
+        data_type: string
+        description: >
+          Last started level of the main progression (chain=common). Present on
+          every event. NOTE: this counter starts at 0, unlike most ordinal counters
+          which start at 1.
+      - name: state__level_fragment
+        data_type: string
+        description: "Current sub-level (fragment) index within a staged level. Present on every event."
+      - name: state__puzzles_completed
+        data_type: string
+        description: "Total puzzles the player has completed so far. Present on every event."
+      - name: state__relax_level
+        data_type: string
+        description: "Relax-progress level (percent), for relax-style games. Present on every event."
+      - name: state__skill_points
+        data_type: string
+        description: "Player's accumulated skill points. Present on every event."
+      - name: state__chosen_skill_level
+        data_type: string
+        description: "Player-selected difficulty (Sudoku): not_assigned / novice / intermediate / expert."
+      - name: state__active_segments
+        data_type: string
+        description: "Firebase remote-config segments the player is currently in. Present on every event."
+      - name: state__coins_balance
+        data_type: string
+        description: "Soft-currency (coins) balance at event time. Present on every event."
+      - name: state__lives_balance
+        data_type: string
+        description: "Lives balance (deprecated in newer projects)."
+      - name: state__bonus_lives_balance
+        data_type: string
+        description: "Bonus-lives balance."
+      - name: state__spins
+        data_type: string
+        description: "Wheel/roulette spin balance."
+      - name: state__booster_all_notes_balance
+        data_type: string
+        description: "Balance of the 'all notes' booster."
+      - name: state__hint_open_first_letter_balance
+        data_type: string
+        description: "Balance of the 'open first letter' hint."
+      - name: state__hint_open_any_letter_balance
+        data_type: string
+        description: "Balance of the 'open any letter' hint."
+      - name: state__hint_open_several_letters_balance
+        data_type: string
+        description: "Balance of the 'open several letters' hint."
+      - name: state__hint_open_cell_balance
+        data_type: string
+        description: "Balance of the 'open cell' hint."
+      - name: state__hint_magnet_balance
+        data_type: string
+        description: "Balance of the 'magnet' hint."
+      - name: state__hint_cancel_balance
+        data_type: string
+        description: "Balance of the 'cancel' hint."
+      - name: state__hint_shuffle_balance
+        data_type: string
+        description: "Balance of the 'shuffle' hint."
+      - name: state__hint_clear_balance
+        data_type: string
+        description: "Balance of the 'clear' hint (deprecated)."
+      - name: state__hint_extra_slot_balance
+        data_type: string
+        description: "Balance of the 'extra slot' hint."
+      - name: state__auto_openers_balance
+        data_type: string
+        description: "Balance of auto-opener hints."
+
+      # ---- event_data: advertising ----------------------------------------
+      # (each field below carries a value ONLY for the events in meta.mcp.events)
+      - name: event_data__ad_type
+        data_type: string
+        description: "Ad format. Events: all ad_* (ad_requested, ad_loaded, ad_available, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_freezed, ad_redirected)."
+        meta:
+          mcp:
+            values: [rewarded, interstitial, banner]
+            events: [ad_requested, ad_loaded, ad_available, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_freezed, ad_redirected]
+      - name: event_data__placement
+        data_type: string
+        description: "In-app ad placement / trigger point (e.g. store, level_fail, main_menu). Events: ad_available, ad_started, ad_finished, ad_freezed."
+        meta:
+          mcp:
+            events: [ad_available, ad_started, ad_finished, ad_freezed]
+      - name: event_data__status
+        data_type: string
+        description: "Result of the ad action — ad_loaded: success/failure/expired; ad_available: ready/no_advertise/no_internet; ad_finished: success/crash/display_failed. Events: ad_loaded, ad_available, ad_finished (legacy ad_started)."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_available, ad_finished, ad_started]
+      - name: event_data__revenue
+        data_type: numeric
+        description: "Ad revenue for the impression; 0 on failure. Events: ad_loaded, ad_started, ad_finished."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_started, ad_finished]
+      - name: event_data__display_duration
+        data_type: string
+        description: "Seconds the ad was displayed on screen. Events: ad_finished."
+        meta:
+          mcp:
+            events: [ad_finished]
+      - name: event_data__is_clicked
+        data_type: string
+        description: "Whether the player clicked the ad. Events: ad_finished, ad_redirected."
+        meta:
+          mcp:
+            events: [ad_finished, ad_redirected]
+      - name: event_data__is_rewarded
+        data_type: string
+        description: "Whether the impression was a rewarded ad. Events: ad_started, ad_finished."
+        meta:
+          mcp:
+            events: [ad_started, ad_finished]
+      - name: event_data__is_reward_received
+        data_type: string
+        description: "Whether the rewarded-ad reward was granted. Events: ad_finished, ad_freezed."
+        meta:
+          mcp:
+            events: [ad_finished, ad_freezed]
+      - name: event_data__is_user_returned
+        data_type: string
+        description: "Whether the player returned to the app after the ad. Events: ad_finished."
+        meta:
+          mcp:
+            events: [ad_finished]
+      - name: event_data__tracking_id
+        data_type: string
+        description: "Ad request tracking id; correlates an ad_requested with its later ad_loaded/started/finished. Events: ad_requested, ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected."
+        meta:
+          mcp:
+            events: [ad_requested, ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected]
+      - name: event_data__substitution_reason
+        data_type: string
+        description: "Why a substitute ad was shown instead of the requested one. Events: ad_started, ad_finished."
+        meta:
+          mcp:
+            values: [higher_cost, no_fill]
+            events: [ad_started, ad_finished]
+      - name: event_data__start_watch_time
+        data_type: timestamp
+        description: "When the player started watching the ad. Events: ad_finished."
+        meta:
+          mcp:
+            events: [ad_finished]
+      - name: event_data__additional_info__creative_id
+        data_type: string
+        description: "Ad creative id (mediation metadata). Events: ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected]
+      - name: event_data__additional_info__ad_unit
+        data_type: string
+        description: "Ad unit id requested from the mediation SDK. Events: ad_requested, ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected."
+        meta:
+          mcp:
+            events: [ad_requested, ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected]
+      - name: event_data__additional_info__network
+        data_type: string
+        description: "Ad network that filled the impression (e.g. admob, unity, applovin, ironsource). Events: ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected]
+      - name: event_data__additional_info__network_code
+        data_type: string
+        description: "Network-specific status/error code. Events: ad_loaded, ad_finished."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_finished]
+      - name: event_data__additional_info__network_message
+        data_type: string
+        description: "Network-specific status/error message. Events: ad_loaded, ad_finished."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_finished]
+      - name: event_data__additional_info__test_name
+        data_type: string
+        description: "Applovin split-tool A/B test name (monetization-side experiment, e.g. 2602_sw_gp_rv_aa_test); distinct from product test main_data__ab_test_group. Events: ad_loaded, ad_started, ad_finished, ad_redirected."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_started, ad_finished, ad_redirected]
+      - name: event_data__additional_info__waterfall_latency
+        data_type: string
+        description: "Mediation waterfall latency in milliseconds. Events: ad_loaded, ad_started, ad_finished, ad_redirected."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_started, ad_finished, ad_redirected]
+      - name: event_data__additional_info__waterfall_name
+        data_type: string
+        description: "Name of the mediation waterfall used. Events: ad_loaded, ad_started, ad_finished, ad_redirected."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_started, ad_finished, ad_redirected]
+      - name: event_data__additional_info__max_code
+        data_type: string
+        description: "Applovin MAX result/error code. Events: ad_loaded, ad_finished."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_finished]
+      - name: event_data__additional_info__max_message
+        data_type: string
+        description: "Applovin MAX result/error message. Events: ad_loaded, ad_finished."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_finished]
+      - name: event_data__additional_info__response_message
+        data_type: string
+        description: "Server/mediation response message. Events: ad_loaded, ad_finished."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_finished]
+      - name: event_data__additional_info__response_type
+        data_type: string
+        description: "Server/mediation response type. Events: ad_loaded, ad_finished."
+        meta:
+          mcp:
+            events: [ad_loaded, ad_finished]
+      - name: event_data__additional_info__should_load_new_ad
+        data_type: string
+        description: "AppHarbr hint on whether to load a fresh ad after a block. Events: ad_blocked, ad_incident, ad_analyzed."
+        meta:
+          mcp:
+            events: [ad_blocked, ad_incident, ad_analyzed]
+      - name: event_data__additional_info__step
+        data_type: string
+        description: "AppHarbr pipeline step where the block/analyze occurred: load / ready / show. Events: ad_blocked, ad_incident, ad_analyzed."
+        meta:
+          mcp:
+            events: [ad_blocked, ad_incident, ad_analyzed]
+      - name: event_data__additional_info__user_defined_application
+        data_type: string
+        description: "AppHarbr user-defined application label. Events: ad_blocked, ad_incident, ad_analyzed."
+        meta:
+          mcp:
+            events: [ad_blocked, ad_incident, ad_analyzed]
+      - name: event_data__additional_info__user_defined_domain
+        data_type: string
+        description: "AppHarbr user-defined domain label. Events: ad_blocked, ad_incident, ad_analyzed."
+        meta:
+          mcp:
+            events: [ad_blocked, ad_incident, ad_analyzed]
+      - name: event_data__additional_info__block_reasons
+        data_type: array
+        description: "AppHarbr reasons the ad was blocked (string array). Events: ad_blocked, ad_incident, ad_analyzed."
+        meta:
+          mcp:
+            events: [ad_blocked, ad_incident, ad_analyzed]
+      - name: event_data__additional_info__report_reasons
+        data_type: array
+        description: "AppHarbr reasons the ad was reported (string array). Events: ad_blocked, ad_incident, ad_analyzed."
+        meta:
+          mcp:
+            events: [ad_blocked, ad_incident, ad_analyzed]
+      - name: event_data__additional_info__analyze_results
+        data_type: array
+        description: "AppHarbr ad-analysis results (string array). Events: ad_analyzed (schema shared with ad_blocked, ad_incident)."
+        meta:
+          mcp:
+            events: [ad_analyzed, ad_blocked, ad_incident]
+      - name: event_data__crash_info__type
+        data_type: string
+        description: "Crash type captured when an ad caused a crash. Events: ad_finished (status=crash)."
+        meta:
+          mcp:
+            events: [ad_finished]
+      - name: event_data__crash_info__date
+        data_type: string
+        description: "Timestamp of the ad-related crash. Events: ad_finished (status=crash)."
+        meta:
+          mcp:
+            events: [ad_finished]
+      - name: event_data__crash_info__msg
+        data_type: string
+        description: "Crash message for the ad-related crash. Events: ad_finished (status=crash)."
+        meta:
+          mcp:
+            events: [ad_finished]
+
+      # ---- event_data: economy --------------------------------------------
+      - name: event_data__amount
+        data_type: numeric
+        description: "Resource amount gained or spent. Events: currency_income, currency_outcome."
+        meta:
+          mcp:
+            events: [currency_income, currency_outcome]
+      - name: event_data__currency
+        data_type: string
+        description: "Currency/resource name. Events: currency_income, currency_outcome (economy) and iap_started, iap_purchase_failed, iap_purchase_completed (ISO 4217 for IAPs)."
+        meta:
+          mcp:
+            events: [currency_income, currency_outcome, iap_started, iap_purchase_failed, iap_purchase_completed]
+      - name: event_data__value_in_coins
+        data_type: numeric
+        description: "Transaction value expressed in soft-currency (coins) equivalent. Events: currency_income, currency_outcome."
+        meta:
+          mcp:
+            events: [currency_income, currency_outcome]
+      - name: event_data__monetization_type
+        data_type: string
+        description: "How the resource was obtained/spent (added in v1). Events: currency_income, currency_outcome."
+        meta:
+          mcp:
+            values: [free, rewarded, iap]
+            events: [currency_income, currency_outcome]
+      - name: event_data__source_type
+        data_type: string
+        description: "Economy source/sink category (e.g. level_reward, hint_spend). Events: currency_income, currency_outcome."
+        meta:
+          mcp:
+            events: [currency_income, currency_outcome]
+      - name: event_data__source_name
+        data_type: string
+        description: "Specific economy source/sink name within source_type. Events: currency_income, currency_outcome."
+        meta:
+          mcp:
+            events: [currency_income, currency_outcome]
+
+      # ---- event_data: in-app purchases -----------------------------------
+      - name: event_data__price_in_usd
+        data_type: numeric
+        description: "IAP price in USD. Events: iap_started, iap_purchase_failed, iap_purchase_completed."
+        meta:
+          mcp:
+            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+      - name: event_data__price_in_currency
+        data_type: numeric
+        description: "IAP price in the player's local currency. Events: iap_started, iap_purchase_failed, iap_purchase_completed."
+        meta:
+          mcp:
+            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+      - name: event_data__product_id
+        data_type: string
+        description: "IAP product id (without the bundle_id prefix). Events: iap_started, iap_purchase_failed, iap_purchase_completed."
+        meta:
+          mcp:
+            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+      - name: event_data__order_id
+        data_type: string
+        description: "Android purchase order id. Events: iap_purchase_completed."
+        meta:
+          mcp:
+            events: [iap_purchase_completed]
+      - name: event_data__transaction_id
+        data_type: string
+        description: "iOS transaction id. Events: iap_purchase_completed."
+        meta:
+          mcp:
+            events: [iap_purchase_completed]
+      - name: event_data__discount
+        data_type: numeric
+        description: "Discount percent applied to the IAP offer. Events: iap_started, iap_purchase_failed, iap_purchase_completed."
+        meta:
+          mcp:
+            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+      - name: event_data__location
+        data_type: string
+        description: "Where the purchase was initiated (e.g. main_shop). Events: iap_started, iap_purchase_failed, iap_purchase_completed."
+        meta:
+          mcp:
+            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+      - name: event_data__location_from
+        data_type: string
+        description: "Where the shop was opened from (e.g. button_on_main_screen, upper_panel_on_level). Events: shop_opened."
+        meta:
+          mcp:
+            events: [shop_opened]
+      - name: event_data__reason
+        data_type: string
+        description: "Reason a purchase did not complete. Events: iap_purchase_failed."
+        meta:
+          mcp:
+            events: [iap_purchase_failed]
+      - name: event_data__with_elements
+        data_type: string
+        description: "Which shop elements/offers were shown when the shop opened. Events: shop_opened."
+        meta:
+          mcp:
+            events: [shop_opened]
+      - name: event_data__coins_in_bank
+        data_type: numeric
+        description: "Coins accumulated in the piggy bank when opened. Events: piggy_bank_opened."
+        meta:
+          mcp:
+            events: [piggy_bank_opened]
+      - name: event_data__coins_limit
+        data_type: numeric
+        description: "Piggy-bank capacity. Events: piggy_bank_opened."
+        meta:
+          mcp:
+            events: [piggy_bank_opened]
+      - name: event_data__purchase_number
+        data_type: integer
+        description: "Sequential piggy-bank purchase number. Events: piggy_bank_opened."
+        meta:
+          mcp:
+            events: [piggy_bank_opened]
+
+      # ---- event_data: levels / puzzles / games ---------------------------
+      - name: event_data__level_id
+        data_type: string
+        description: "Level identifier. Events: level_started, level_completed, fragment_started, fragment_finished, word_selected, battle_of_wits_started, battle_of_wits_finished, puzzle_started, puzzle_completed."
+        meta:
+          mcp:
+            events: [level_started, level_completed, fragment_started, fragment_finished, word_selected, battle_of_wits_started, battle_of_wits_finished, puzzle_started, puzzle_completed]
+      - name: event_data__line_levels_id
+        data_type: string
+        description: "Level-pack id (MD5 hash of the level set). Events: level_started, level_completed."
+        meta:
+          mcp:
+            events: [level_started, level_completed]
+      - name: event_data__level_size
+        data_type: string
+        description: "Level size, e.g. number of letters in Fillwords. Events: level_started, level_completed, battle_of_wits_started, battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [level_started, level_completed, battle_of_wits_started, battle_of_wits_finished]
+      - name: event_data__level_seed_id
+        data_type: string
+        description: "Seed id used to generate the level board. Events: level_started, level_completed."
+        meta:
+          mcp:
+            events: [level_started, level_completed]
+      - name: event_data__chain
+        data_type: string
+        description: "Which progression track the level/tutorial belongs to. Events: level_started, fragment_started, fragment_finished, level_completed, word_selected, tutorial."
+        meta:
+          mcp:
+            values: [common, daily, repeated, battle]
+            events: [level_started, fragment_started, fragment_finished, level_completed, word_selected, tutorial]
+      - name: event_data__chain_level_number
+        data_type: string
+        description: "Level number within its chain (from 1). Events: level_started, fragment_started, fragment_finished, level_completed, word_selected, battle_of_wits_started, battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [level_started, fragment_started, fragment_finished, level_completed, word_selected, battle_of_wits_started, battle_of_wits_finished]
+      - name: event_data__mechanics
+        data_type: string
+        description: "Gameplay mechanic of the level. Events: level_started, fragment_started, fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [level_started, fragment_started, fragment_finished, level_completed]
+      - name: event_data__method
+        data_type: string
+        description: "How the level/puzzle/action was opened or paid for. Events: level_started, fragment_started, level_completed, puzzle_started, battle_of_wits_started (free/ad/coins); piggy_bank_opened (ad/iap); wheel_spin (ad/free)."
+        meta:
+          mcp:
+            values: [free, ad, coins, iap]
+            events: [level_started, fragment_started, level_completed, puzzle_started, battle_of_wits_started, piggy_bank_opened, wheel_spin]
+      - name: event_data__result
+        data_type: string
+        description: "Outcome of a completed level/puzzle/battle. Events: fragment_finished, level_completed (win/lose/exit), battle_of_wits_finished (win/lose), puzzle_completed (win/restart/new_game)."
+        meta:
+          mcp:
+            values: [win, lose, exit, restart, new_game]
+            events: [fragment_finished, level_completed, battle_of_wits_finished, puzzle_completed]
+      - name: event_data__difficulty
+        data_type: string
+        description: "Difficulty of the puzzle. Events: puzzle_started, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_completed]
+      - name: event_data__game_mode
+        data_type: string
+        description: "Puzzle game mode. Events: puzzle_started, puzzle_completed."
+        meta:
+          mcp:
+            values: [common, daily]
+            events: [puzzle_started, puzzle_completed]
+      - name: event_data__complete_time
+        data_type: string
+        description: "Clean seconds taken to complete (excludes pauses). Events: fragment_finished, level_completed, puzzle_part_completed, puzzle_completed, battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed, puzzle_part_completed, puzzle_completed, battle_of_wits_finished]
+      - name: event_data__open_number
+        data_type: integer
+        description: "How many times this level/puzzle has been opened (from 1; increments on each (re)open). Events: level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_completed."
+        meta:
+          mcp:
+            events: [level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_completed]
+      - name: event_data__start_number
+        data_type: integer
+        description: "Sequential start counter (from 1). Events: level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_part_completed, puzzle_completed."
+        meta:
+          mcp:
+            events: [level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_part_completed, puzzle_completed]
+      - name: event_data__total_words
+        data_type: integer
+        description: "Total words to find on the level. Events: level_started, fragment_started, fragment_finished, level_completed, battle_of_wits_started, battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [level_started, fragment_started, fragment_finished, level_completed, battle_of_wits_started, battle_of_wits_finished]
+      - name: event_data__main_words_found
+        data_type: integer
+        description: "Number of main words found. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__additional_words_found
+        data_type: integer
+        description: "Number of additional words found. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__bonus_words_found
+        data_type: numeric
+        description: "Number of bonus words found. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__wrong_words_found
+        data_type: integer
+        description: "Number of wrong words attempted/found. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__word_number
+        data_type: integer
+        description: "Index of the collected word. Events: word_selected (also per-entry in words_selected on fragment_finished, level_completed)."
+        meta:
+          mcp:
+            events: [word_selected]
+      - name: event_data__word_name
+        data_type: string
+        description: "The collected word. Events: word_selected (also per-entry in words_selected on fragment_finished, level_completed)."
+        meta:
+          mcp:
+            events: [word_selected]
+      - name: event_data__word_dictionary
+        data_type: string
+        description: "Dictionary classification of the collected word. Events: word_selected (also per-entry in words_selected)."
+        meta:
+          mcp:
+            values: [main, already_found, wrong]
+            events: [word_selected]
+      - name: event_data__selected_word
+        data_type: string
+        description: "Word the player selected during level gameplay. Events: level_completed, fragment_finished."
+        meta:
+          mcp:
+            events: [level_completed, fragment_finished]
+      - name: event_data__pattern
+        data_type: string
+        description: "Sorted letters / board pattern of the level. Events: level_started, fragment_started, fragment_finished, level_completed, word_selected."
+        meta:
+          mcp:
+            events: [level_started, fragment_started, fragment_finished, level_completed, word_selected]
+      - name: event_data__combo_points_earned
+        data_type: numeric
+        description: "Combo points earned. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__daily_level_score
+        data_type: numeric
+        description: "Score on a daily level. Events: level_completed (daily chain)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__score
+        data_type: numeric
+        description: "Score achieved in the match. Events: battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [battle_of_wits_finished]
+      - name: event_data__quest_progress
+        data_type: string
+        description: "Quest progress contributed by completing the level. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__active_event
+        data_type: string
+        description: "Name of the in-game timed event active when the level was played, if any. Events: level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_completed, battle_of_wits_started, battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_completed, battle_of_wits_started, battle_of_wits_finished]
+      - name: event_data__event_objects
+        data_type: string
+        description: "Event objects collected during the level. Events: level_started, fragment_started, fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [level_started, fragment_started, fragment_finished, level_completed]
+      - name: event_data__found_after_any_hint
+        data_type: boolean
+        description: "Whether the word/level was solved after using any hint. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__fragment_number
+        data_type: integer
+        description: "Sub-level (fragment) index within a staged level. Events: fragment_started, fragment_finished."
+        meta:
+          mcp:
+            events: [fragment_started, fragment_finished]
+      - name: event_data__fragments_count
+        data_type: integer
+        description: "Total fragments in the staged level (deprecated on newer events). Events: fragment_started, fragment_finished, level_started, level_completed."
+        meta:
+          mcp:
+            events: [fragment_started, fragment_finished, level_started, level_completed]
+      - name: event_data__tiles_count
+        data_type: integer
+        description: "Total tiles on the board. Events: fragment_finished."
+        meta:
+          mcp:
+            events: [fragment_finished]
+      - name: event_data__tiles_left
+        data_type: integer
+        description: "Tiles remaining when the fragment ended. Events: fragment_finished."
+        meta:
+          mcp:
+            events: [fragment_finished]
+      - name: event_data__time_from_previous
+        data_type: integer
+        description: "Seconds since the previous word was collected. Events: word_selected (also per-entry in words_selected)."
+        meta:
+          mcp:
+            events: [word_selected]
+      - name: event_data__words_selected
+        data_type: json
+        description: >
+          Per-word collection log: array of {word_number, word_name,
+          time_from_previous, mistakes_from_previous, word_dictionary}. Access via
+          the array/struct prepare pipeline. Events: fragment_finished, level_completed.
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      # battle of wits
+      - name: event_data__bot_level
+        data_type: string
+        description: "Difficulty level of the bot opponent. Events: battle_of_wits_started, battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [battle_of_wits_started, battle_of_wits_finished]
+      - name: event_data__player_rating
+        data_type: numeric
+        description: "Player rating; on battle_of_wits_finished this is the new rating after the match. Events: battle_of_wits_started, battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [battle_of_wits_started, battle_of_wits_finished]
+      - name: event_data__cup_difference
+        data_type: integer
+        description: "Cup/trophy change from the battle (real-opponent matches only). Events: battle_of_wits_started, battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [battle_of_wits_started, battle_of_wits_finished]
+      - name: event_data__opponent_type
+        data_type: string
+        description: "Type of opponent. Events: battle_of_wits_started, battle_of_wits_finished."
+        meta:
+          mcp:
+            values: [bot, real_opponent]
+            events: [battle_of_wits_started, battle_of_wits_finished]
+      - name: event_data__time_to_match
+        data_type: integer
+        description: "Matchmaking time in milliseconds. Events: battle_of_wits_started."
+        meta:
+          mcp:
+            events: [battle_of_wits_started]
+      - name: event_data__stage_number
+        data_type: integer
+        description: "Stage number within a multi-stage competition/race. Events: competition/race level events (e.g. level_completed in race modes)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__stage_place
+        data_type: string
+        description: "Player's place/rank at the stage. Events: competition/race level events."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__climb_race_reward
+        data_type: numeric
+        description: "Reward earned in a climb-race style competition. Events: competition/race level events."
+        meta:
+          mcp:
+            events: [level_completed]
+      # puzzles
+      - name: event_data__puzzle_class
+        data_type: string
+        description: "Puzzle class/category. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+      - name: event_data__puzzle_number
+        data_type: string
+        description: "Puzzle number/identifier. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+      - name: event_data__puzzle_pack
+        data_type: string
+        description: "Puzzle pack the puzzle belongs to. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+      - name: event_data__puzzle_size
+        data_type: numeric
+        description: "Puzzle size (e.g. piece count). Events: puzzle_started, puzzle_part_completed, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+      - name: event_data__parts_count
+        data_type: integer
+        description: "Total parts in the puzzle. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+      - name: event_data__part_number
+        data_type: string
+        description: "Part number being completed (from 1). Events: puzzle_part_completed."
+        meta:
+          mcp:
+            events: [puzzle_part_completed]
+      - name: event_data__mistakes_count
+        data_type: integer
+        description: "Number of mistakes made. Events: puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_completed]
+      - name: event_data__reward_coins
+        data_type: numeric
+        description: "Coins rewarded for the puzzle/part. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+      - name: event_data__reward_relax
+        data_type: numeric
+        description: "Relax-progress rewarded for the puzzle/part. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+      - name: event_data__reward_points
+        data_type: numeric
+        description: "Points rewarded. Events: puzzle_started, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_completed]
+      - name: event_data__rotate
+        data_type: boolean
+        description: "Whether puzzle-piece rotation mode was enabled. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+      # match-3 / moves mechanics
+      - name: event_data__moves_added
+        data_type: integer
+        description: "Total extra moves added on the level. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__moves_added_ad
+        data_type: integer
+        description: "Extra moves added by watching an ad. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__moves_added_coin
+        data_type: integer
+        description: "Extra moves bought with coins. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__moves_on_start
+        data_type: integer
+        description: "Moves available at level start. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__moves_left
+        data_type: integer
+        description: "Moves remaining when the level ended. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__level_continue_number
+        data_type: integer
+        description: "How many times the player continued the level after running out. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__out_of_moves_number
+        data_type: integer
+        description: "How many times the player ran out of moves on the level. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__total_complete_time
+        data_type: integer
+        description: "Total elapsed time to complete the level incl. pauses, in seconds. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+
+      # ---- event_data: hint usage -----------------------------------------
+      - name: event_data__hint_open_first_letter_used
+        data_type: string
+        description: "Count of 'open first letter' hints used. Events: fragment_finished, level_completed, battle_of_wits_finished."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed, battle_of_wits_finished]
+      - name: event_data__hint_open_any_letter_used
+        data_type: string
+        description: "Count of 'open any letter' hints used. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hint_open_several_letters_used
+        data_type: string
+        description: "Count of 'open several letters' hints used. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hint_open_cell_used
+        data_type: string
+        description: "Count of 'open cell' hints used. Events: puzzle_completed."
+        meta:
+          mcp:
+            events: [puzzle_completed]
+      - name: event_data__hints_magnet_used
+        data_type: string
+        description: "Count of magnet hints used. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hints_cancel_used
+        data_type: string
+        description: "Count of cancel hints used. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hints_shuffle_used
+        data_type: string
+        description: "Count of shuffle hints used. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hints_clear_used
+        data_type: string
+        description: "Count of clear hints used (deprecated). Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hints_extra_slot_used
+        data_type: string
+        description: "Count of extra-slot hints used. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hints_for_ad_used
+        data_type: numeric
+        description: "Count of hints obtained by watching an ad. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hints_help_used
+        data_type: integer
+        description: "Count of generic 'help' hints used. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__hint_undo_used
+        data_type: integer
+        description: "Count of undo hints used. Events: level_completed (moves-based games)."
+        meta:
+          mcp:
+            events: [level_completed]
+      - name: event_data__auto_openers_usage_free
+        data_type: string
+        description: "Count of free auto-opener usages. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hint_open_first_letter_multiplied_x2
+        data_type: string
+        description: "Count of 'open first letter' hints used with a x2 multiplier. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hint_open_several_letters_multiplied_x2
+        data_type: string
+        description: "Count of 'open several letters' hints used with a x2 multiplier. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hint_open_any_letter_multiplied_x2
+        data_type: string
+        description: "Count of 'open any letter' hints used with a x2 multiplier. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hint_open_first_letter_discount_50
+        data_type: string
+        description: "Count of 'open first letter' hints used at a 50% discount. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hint_open_several_letters_discount_50
+        data_type: string
+        description: "Count of 'open several letters' hints used at a 50% discount. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+      - name: event_data__hint_open_any_letter_discount_50
+        data_type: string
+        description: "Count of 'open any letter' hints used at a 50% discount. Events: fragment_finished, level_completed."
+        meta:
+          mcp:
+            events: [fragment_finished, level_completed]
+
+      # ---- event_data: sessions / in-game events / interface / mechanics --
+      - name: event_data__session_duration
+        data_type: numeric
+        description: "Session length in seconds, including ad views. Events: end_session."
+        meta:
+          mcp:
+            events: [end_session]
+      - name: event_data__state
+        data_type: string
+        description: "How the session began — default = fresh start, background = resumed from background. Events: new_session."
+        meta:
+          mcp:
+            values: [default, background]
+            events: [new_session]
+      - name: event_data__event_number
+        data_type: integer
+        description: "Instance number of the in-game timed event. Events: event_start, event_prize, event_end."
+        meta:
+          mcp:
+            events: [event_start, event_prize, event_end]
+      - name: event_data__event_duration
+        data_type: numeric
+        description: "Planned duration of the in-game timed event in hours. Events: event_start."
+        meta:
+          mcp:
+            events: [event_start]
+      - name: event_data__prize_number
+        data_type: integer
+        description: "Index of the prize received during an in-game event. Events: event_prize."
+        meta:
+          mcp:
+            events: [event_prize]
+      - name: event_data__goals_completed
+        data_type: integer
+        description: "Number of event goals completed when the event ended. Events: event_end."
+        meta:
+          mcp:
+            events: [event_end]
+      - name: event_data__action
+        data_type: string
+        description: "Tutorial interaction type. Events: tutorial."
+        meta:
+          mcp:
+            values: [show, close]
+            events: [tutorial]
+      - name: event_data__element
+        data_type: string
+        description: "Which tutorial element the player interacted with. Events: tutorial."
+        meta:
+          mcp:
+            events: [tutorial]
+      - name: event_data__reward_item
+        data_type: string
+        description: "Item won on the wheel spin. Events: wheel_spin."
+        meta:
+          mcp:
+            events: [wheel_spin]
+      - name: event_data__reward_amount
+        data_type: numeric
+        description: "Amount of the wheel-spin reward. Events: wheel_spin."
+        meta:
+          mcp:
+            events: [wheel_spin]
+      - name: event_data__spin_number
+        data_type: string
+        description: "Sequential spin number. Events: wheel_spin."
+        meta:
+          mcp:
+            events: [wheel_spin]
+      - name: event_data__screen_from
+        data_type: string
+        description: "Origin screen of a UI transition. Events: screen_changed."
+        meta:
+          mcp:
+            events: [screen_changed]
+      - name: event_data__screen_to
+        data_type: string
+        description: "Destination screen of a UI transition. Events: screen_changed."
+        meta:
+          mcp:
+            events: [screen_changed]
+      - name: event_data__name
+        data_type: string
+        description: "Generic name field (e.g. the in-game event name). Events: event_start, event_prize, event_end."
+        meta:
+          mcp:
+            events: [event_start, event_prize, event_end]
+      - name: event_data__previous_appsflyer_id
+        data_type: string
+        description: "AppsFlyer id of the previously-linked account restored from cloud save. Events: progress_restored."
+        meta:
+          mcp:
+            events: [progress_restored]
+      - name: event_data__previous_appmetrica_id
+        data_type: string
+        description: "AppMetrica id of the previously-linked account restored from cloud save. Events: progress_restored."
+        meta:
+          mcp:
+            events: [progress_restored]
+      - name: event_data__progress_restoration_level_number
+        data_type: integer
+        description: "Level number reached in the restored progress. Events: progress_restored."
+        meta:
+          mcp:
+            events: [progress_restored]
 
   - name: dim_users
-    description: "User attributes dimension — one row per user."
+    description: >
+      User attributes dimension: one row per player, keyed by internal__player_id,
+      built from the player's install record. Holds acquisition, geo, device and
+      app attributes used to segment and cohort players. Join to fct_analytics_events
+      and fct_experiment_assignments on internal__player_id. All columns here are
+      per-player attributes (no per-event scoping applies).
     meta:
       mcp:
         role: users            # logical name (the dbt model can be named anything)
         measures:
           users_count: { agg: count, expr: "1" }
     columns:
-      - name: appsflyer_id
-        data_type: string
-        description: "User identifier (primary key; join target for events.user)."
+      - name: internal__player_id
+        data_type: integer
+        description: "Player identifier (primary key; the join target for events and experiments)."
         meta:
           mcp:
             entity: { name: user, type: primary }
       # Non-entity columns of this dimension model are groupable dimensions; their
-      # type is inferred from the native `data_type` (date -> time, else categorical).
-      # Only value hints / non-day granularity live in meta.
+      # type is inferred from the native `data_type` (date/timestamp -> time, else
+      # categorical). Only value hints / non-day granularity live in meta.
       - name: install_date
-        data_type: date
-        description: "Acquisition (install) date — cohort time dimension."
+        data_type: timestamp
+        description: "When the player installed the app — the cohort/acquisition time dimension."
       - name: platform
         data_type: string
-        description: "Device OS family the user installed on."
+        description: "Device OS family the player installed on."
         meta: { mcp: { values: [android, ios] } }
       - name: os_version
         data_type: string
-        description: "Operating-system version string."
+        description: "Operating-system version at install time."
       - name: device_model
         data_type: string
-        description: "Device model identifier."
+        description: "Device model the player installed on."
       - name: country
         data_type: string
-        description: "User country (ISO code) for geo segmentation."
-      - name: region
-        data_type: string
-        description: "Geographic region (e.g. EU, NA, LATAM)."
+        description: "Player country (ISO 3166-1 alpha-2) for geo segmentation."
       - name: language
         data_type: string
-        description: "User language code."
+        description: "Player's in-game language code."
       - name: media_source
         data_type: string
-        description: "Acquisition channel / attribution source (e.g. meta, google, organic)."
+        description: "Acquisition channel / attribution source (e.g. organic, googleadwords_int, Facebook Ads)."
       - name: acquisition_type
         data_type: string
-        description: "Whether the user was acquired organically or via paid marketing."
-        meta: { mcp: { values: [organic, paid] } }
+        description: "Install lifecycle category from attribution (organic vs. reattributed vs. reinstalled)."
+        meta: { mcp: { values: [install, s-install, reinstall, reattribution] } }
+      - name: campaign
+        data_type: string
+        description: "Attribution campaign name the player was acquired through."
       - name: campaign_id
         data_type: string
-        description: "Plain string attribute (no separate campaigns table)."
+        description: "Attribution campaign id."
       - name: app_id
         data_type: string
-        description: "Application identifier."
+        description: "Store bundle id of the app the player installed."
+      - name: app_name
+        data_type: string
+        description: "Short app name (e.g. fillwords, sky_words, word_pizza)."
       - name: app_version
         data_type: string
-        description: "Application version."
+        description: "App version at install time."
 
-  # A/B-test assignments — like the users dimension but MANY rows per user: one
-  # row per (user, experiment). Joinable to events/users by the user entity.
+  # A/B-test assignments — like the users dimension but MANY rows per player: one
+  # row per (player, experiment). Joinable to events/users by the user entity.
   # Window events to [assigned_at, ended_at], group by experiment_name+variant_group,
   # aggregate per group, then run the `ab_test` tool. The dbt model can be named
   # anything; only role: experiments matters.
   - name: fct_experiment_assignments
-    description: "A/B test assignments — one row per (user, experiment)."
+    description: >
+      A/B-test assignments: one row per (player, experiment). Each row records
+      which experiment a player entered, the assigned variant, and the
+      [assigned_at, ended_at] window. To analyze a test, window events to that
+      interval, group by experiment_name + variant_group, aggregate per group, and
+      run the ab_test tool. Join to events/users on internal__player_id.
     meta:
       mcp:
         role: experiments
     columns:
-      - name: appsflyer_id
-        data_type: string
-        description: "User identifier (joins to events/users)."
+      - name: internal__player_id
+        data_type: integer
+        description: "Player identifier (joins to events and users; many rows per player)."
         meta:
           mcp:
-            entity: { name: user, type: foreign }   # foreign: many rows per user
+            entity: { name: user, type: foreign }   # foreign: many rows per player
       - name: experiment_name
         data_type: string
-        description: "A/B test / experiment name."
+        description: "Name of the A/B test / experiment the player was assigned to."
+      - name: experiment_type
+        data_type: string
+        description: "Experiment category."
+        meta: { mcp: { values: [monetization, product, custom] } }
       - name: variant_group
         data_type: string
-        description: "Assigned variant/group (e.g. control, variant_b)."
+        description: "Variant/group the player was assigned (e.g. control, test, variant_b)."
       - name: assigned_at
         data_type: timestamp
-        description: "When the user entered the experiment (window start)."
+        description: "When the player entered the experiment — the window start for analysis."
       - name: ended_at
         data_type: timestamp
-        description: "When the experiment ended for the user (window end)."
+        description: "When the experiment ended — the window end for analysis."

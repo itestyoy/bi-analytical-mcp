@@ -222,6 +222,7 @@ export function dbtSchemaToCatalog(doc) {
 
     const entities = {};
     const dimensions = {};
+    const flatProps = {}; // anchor-only: flattened event_data__* payload columns
     const columnDescriptions = {};
     for (const col of model.columns || []) {
       const cm = col.meta?.mcp || {};
@@ -236,6 +237,20 @@ export function dbtSchemaToCatalog(doc) {
       if (cm.is_event_data) {
         m.event_data_column = col.name;
         if (cm.properties) m.properties = cm.properties;
+        continue;
+      }
+      // Flattened event payload: on the anchor, an event_data__* column (or any
+      // column scoped to specific events via meta.mcp.events) is a per-event
+      // PROPERTY. Unlike the legacy JSON-blob form, these are REAL physical columns
+      // — recorded with `column` so SQL references them directly (no JSON extract).
+      if (isAnchor && !cm.dimension && (col.name.startsWith('event_data__') || cm.events)) {
+        flatProps[col.name] = {
+          type: isNumericType(col.data_type) ? 'numeric' : 'string',
+          column: col.name,
+          ...(cm.values ? { values: cm.values } : {}),
+          ...(cm.events ? { events: cm.events } : {}),
+          ...(col.description ? { description: col.description } : {}),
+        };
         continue;
       }
       // Dimensions: on a non-anchor (dimension) model, every remaining column is
@@ -253,6 +268,7 @@ export function dbtSchemaToCatalog(doc) {
         dimensions[col.name] = d;
       }
     }
+    if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
     if (Object.keys(entities).length) m.entities = entities;
     if (Object.keys(dimensions).length) m.dimensions = dimensions;
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;

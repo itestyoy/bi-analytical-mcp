@@ -63,7 +63,7 @@ after(async () => { backend?.close(); if (pg) await pg.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 // #9: a pipeline-level time_range bounds the window (applied before the stages).
-test('native pipeline time_range bounds the window: full 8 purchases vs windowed 4', opts, async (t) => {
+test('native pipeline time_range bounds the window: full 8 purchases vs windowed 6', opts, async (t) => {
   if (skip(t)) return;
   const count = async (time_range) => {
     const out = await engine.register_native_model({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { time_range, stages: [
@@ -75,7 +75,7 @@ test('native pipeline time_range bounds the window: full 8 purchases vs windowed
     return Number(out.rows[0].n);
   };
   assert.equal(await count(undefined), 8);                                  // all purchases
-  assert.equal(await count({ start: '2026-01-01', end: '2026-01-04' }), 4); // only 01-01..01-03
+  assert.equal(await count({ start: '2026-01-01', end: '2026-01-04' }), 6); // 01-01..01-04 inclusive (date-only end = whole day)
 });
 
 test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-user rows)', opts, async (t) => {
@@ -85,6 +85,18 @@ test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-u
   assert.equal(reached(out.rows, 'tut1'), 8);
   assert.equal(reached(out.rows, 'tut2'), 5);
   assert.equal(reached(out.rows, 'tut3'), 3);
+});
+
+// #5: rows option — one_per_partition (players) vs one_per_match (situations).
+test('match_recognize rows: one_per_partition (12 players) vs one_per_match (28 starts)', opts, async (t) => {
+  if (skip(t)) return;
+  const steps = [{ name: 'start', event_name: ['level_started'] }, { name: 'done', event_name: ['level_completed'] }];
+  const players = await pipe([{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps }]);
+  const situations = await pipe([{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], rows: 'one_per_match', steps }]);
+  assert.equal(players.rows.length, 12);               // one row per user who started a level
+  assert.equal(reached(players.rows, 'start'), 12);
+  assert.equal(situations.rows.length, 28);            // one row per level_started occurrence
+  assert.equal(reached(situations.rows, 'start'), 28);
 });
 
 test('funnel flexible partition: "user" alias and a per-(user,session) composite key', opts, async (t) => {
@@ -240,7 +252,24 @@ test('describe_catalog: overview lists models, then { model } drills into REAL p
   // drill down for the real physical columns (adapter.get_columns_in_relation)
   const events = await engine.describe_catalog({ model: 'events' });
   assert.ok(Array.isArray(events.physical_columns) && events.physical_columns.length > 0, 'events { model } has REAL physical columns');
+  // #4/#3: pipeline-referenceable columns + the time axis are discoverable
+  assert.ok(Array.isArray(events.pipeline_columns), 'events { model } lists pipeline_columns');
+  const pcNames = events.pipeline_columns.map((c) => c.name);
+  assert.ok(pcNames.includes('device_time') && pcNames.includes('player_id_of_internal'), 'pipeline_columns include time + key');
+  assert.equal(events.time, 'device_time', 'time axis (default window/match_recognize order) is reported');
   // { event } returns only the properties carried by that event
   const ev = await engine.describe_catalog({ event: 'iap_purchase_completed' });
   assert.ok(ev.property_count > 0 && ev.properties.some((p) => p.name === 'price_in_usd_of_event_data'), 'event lists its scoped properties');
+});
+
+// #2: a date-only time_range bound includes the WHOLE day (not collapsed to midnight).
+test('native pipeline time_range: single date-only day is not collapsed to a midnight instant', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.register_native_model({ name: `day_${seq++}`, context_id: ctxId, pipeline: { time_range: { start: '2026-01-05', end: '2026-01-05' }, stages: [
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+  ] } });
+  assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+  ctxId = out.context_id;
+  assert.equal(Number(out.rows[0].n), 2); // u10 + u11 purchased on 2026-01-05 — whole day, not 0
 });

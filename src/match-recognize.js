@@ -20,6 +20,16 @@ import { registerStage, prepareColumns } from './pipeline.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
+/** Date-only 'YYYY-MM-DD' end → the NEXT day (exclusive upper bound), so the whole
+ *  day is included when comparing a timestamp column. Returns null if not date-only
+ *  (a full datetime is used as-is). Avoids `<= 'YYYY-MM-DD'` collapsing to midnight. */
+export function dateEndExclusive(end) {
+  if (typeof end !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(end)) return null;
+  const d = new Date(`${end}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 /** Render a single comparison `lhs OP value` with the value bound as a literal. */
 function comparePred(lhs, op, value) {
   const arr = Array.isArray(value) ? value : [value];
@@ -76,7 +86,7 @@ export function buildPrefilter(catalog, spec, dialect, col) {
   const dataCol = q(catalog.eventDataColumn());
   const clauses = [];
   if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
-  if (f.time_range?.end) clauses.push(`${timeCol} <= ${sqlLiteral(f.time_range.end)}`);
+  if (f.time_range?.end) { const ex = dateEndExclusive(f.time_range.end); clauses.push(ex ? `${timeCol} < ${sqlLiteral(ex)}` : `${timeCol} <= ${sqlLiteral(f.time_range.end)}`); }
   if (f.event_name?.length) clauses.push(`${evNameCol} IN (${f.event_name.map(sqlLiteral).join(', ')})`);
   for (const c of f.where || []) {
     const p = (m.properties || {})[c.property];
@@ -147,7 +157,8 @@ function resolve(catalog, spec, dialect, availableCols = null) {
   });
 
   const stepPreds = (d, col) => spec.steps.map((s) => stepPredicate(catalog, s, d, col, prepCols));
-  return { m, partCols, timeCol, mode, steps, metrics: resolved, propCaptures, prepCols, stepPreds };
+  const rows = spec.rows || 'one_per_partition';
+  return { m, partCols, timeCol, mode, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
 }
 
 function nestedPattern(steps, withGap) {
@@ -183,15 +194,24 @@ export function matchStepPostgres(r, fromRel, catalog) {
   const pk = r.partCols; // one or more partition columns (composite key)
   const pkList = pk.join(', ');
   const pkE = pk.map((c) => `e.${c}`).join(', ');
+  // one_per_partition (default): the FIRST match per partition (DISTINCT ON the key).
+  // one_per_match: EVERY occurrence of the start step S1; t1 becomes part of the match
+  // identity, carried through so each S1 chains its own subsequent steps independently.
+  const perMatch = r.rows === 'one_per_match';
   const ctes = [{ name: 'ev', sql: `SELECT ${pkList}, ${r.timeCol} AS ts,\n${evCols}\n  FROM ${fromRel}` }];
-  ctes.push({ name: 'r1', sql: `SELECT DISTINCT ON (${pkList}) ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY ${pkList}, ts` });
+  ctes.push({ name: 'r1', sql: perMatch
+    ? `SELECT ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1`
+    : `SELECT DISTINCT ON (${pkList}) ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY ${pkList}, ts` });
   for (let i = 2; i <= r.steps.length; i++) {
     const joinOn = pk.map((c) => `e.${c} = r${i - 1}.${c}`).join(' AND ');
-    ctes.push({ name: `r${i}`, sql: `SELECT DISTINCT ON (${pkE}) ${pkE}, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY ${pkE}, e.ts` });
+    ctes.push({ name: `r${i}`, sql: perMatch
+      ? `SELECT DISTINCT ON (${pkE}, r${i - 1}.t1) ${pkE}, r${i - 1}.t1 AS t1, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY ${pkE}, r${i - 1}.t1, e.ts`
+      : `SELECT DISTINCT ON (${pkE}) ${pkE}, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY ${pkE}, e.ts` });
   }
   const sel = [...pk.map((c) => `r1.${c}`), ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)), ...r.propCaptures.map((c) => `r${c.idx}.${c.id}`)];
   let joins = 'FROM r1';
-  for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (${pkList})`;
+  const usingKey = perMatch ? `${pkList}, t1` : pkList;
+  for (let i = 2; i <= r.steps.length; i++) joins += ` LEFT JOIN r${i} USING (${usingKey})`;
   ctes.push({ name: 'joined', sql: `SELECT ${sel.join(', ')} ${joins}` });
   const furthestCase = r.steps.slice().reverse().map((s) => `WHEN j.t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
   const outCols = [
@@ -206,7 +226,16 @@ export function matchStepPostgres(r, fromRel, catalog) {
   return `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\nSELECT\n  ${outCols.join(',\n  ')}\nFROM joined j`;
 }
 
-/** BigQuery lowering: a single SELECT … FROM fromRel MATCH_RECOGNIZE(…). */
+/** BigQuery lowering: a single SELECT … FROM fromRel MATCH_RECOGNIZE(…).
+ *  rows handling, to stay numerically consistent with the Postgres lowering:
+ *  - one_per_match: emit `AFTER MATCH SKIP TO NEXT ROW` so a new match can begin on
+ *    the very next row — every occurrence of the start step yields a match (overlapping
+ *    matches), matching the "every S1 starts a match" Postgres CTE. (Without it,
+ *    BigQuery's default AFTER MATCH SKIP PAST LAST ROW gives NON-overlapping matches,
+ *    which would diverge from Postgres.)
+ *  - one_per_partition: keep BigQuery's default skip and take the first match per
+ *    partition via the outer QUALIFY (ROW_NUMBER ORDER BY t1 = 1) — the earliest-S1
+ *    match, equivalent regardless of skip mode. */
 export function matchStepBigQuery(r, fromRel, catalog) {
   const preds = r.stepPreds('bigquery', null);
   const sym = r.steps.map((s) => `S${s.idx}`);
@@ -229,13 +258,11 @@ ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')
     PARTITION BY ${r.partCols.join(', ')}
     ORDER BY ${r.timeCol}
     MEASURES
-${measures}
-    ONE ROW PER MATCH
-    AFTER MATCH SKIP PAST LAST ROW
+${measures}${r.rows === 'one_per_match' ? '\n    AFTER MATCH SKIP TO NEXT ROW' : ''}
     PATTERN ${nestedPattern(r.steps, r.mode !== 'strict')}
     DEFINE
 ${defines.join(',\n')}
-  )`;
+  )${r.rows === 'one_per_match' ? '' : `\n  QUALIFY ROW_NUMBER() OVER (PARTITION BY ${r.partCols.join(', ')} ORDER BY t1) = 1`}`;
 }
 
 /** Columns the match_recognize stage exposes (for downstream stages). */
@@ -256,7 +283,7 @@ function matchRecognizeSchema(catalog) {
   const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'avg', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
-    description: 'An ordered funnel / path detector: it matches the step sequence INDEPENDENTLY within each partition, ordered by `order_by`. Produces one row per matched partition with reached_<step> flags, furthest_step_name, completed, step times, and any captured metric values — which downstream stages (join/where/aggregate) can slice or aggregate (e.g. conversion by country). For funnels, conversion, and time-between-steps.',
+    description: 'An ordered funnel / path detector: it matches the step sequence INDEPENDENTLY within each partition, ordered by `order_by`. Output granularity is set by `rows`: one_per_partition (default) = one row per partition from its first match (counts players); one_per_match = one row per occurrence of the start step (counts situations). Each row has reached_<step> flags, furthest_step_name, completed, step times, and any captured metric values — which downstream stages (join/where/aggregate) slice or aggregate (e.g. conversion by country). For funnels, conversion, and time-between-steps.',
     properties: {
       stage: { const: 'match_recognize' },
       partition_by: {
@@ -265,6 +292,7 @@ function matchRecognizeSchema(catalog) {
       },
       order_by: { type: 'string', pattern: NAME, description: 'Column that orders events within each partition (the sequence axis). Defaults to the event time.' },
       mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order, other events may occur between them; strict = each step must be the immediately next event.' },
+      rows: { enum: ['one_per_partition', 'one_per_match'], default: 'one_per_partition', description: 'one_per_partition (default) = one row per partition (e.g. per user), from its FIRST match — counts "players"; one_per_match = one row per occurrence of the sequence start (the first step) — counts "situations" (a partition can yield several; matches may overlap — a new match can start on the next row).' },
       filter: {
         type: 'object', additionalProperties: false, description: 'Optional event-level pre-filter applied BEFORE matching (speed; narrows the population only). To filter by USER attributes, add a join (users) + where stage before this one instead.',
         properties: {

@@ -9,7 +9,7 @@ import { renderContext } from './yaml-render.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
-import './match-recognize.js'; // registers the match_recognize pipeline stage
+import { dateEndExclusive } from './match-recognize.js'; // registers the match_recognize pipeline stage
 import { renderPipeline } from './pipeline.js';
 import { JobManager } from './jobs.js';
 import { buildProjection } from './projection.js';
@@ -91,10 +91,14 @@ export class Engine {
       const m = c.getModel(k);
       const descs = c.columnDescriptions(k);
       const out = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description, primary_entity: c.primaryEntityName(k), entities: m.entities, time: m.time?.column, measures: Object.keys(m.measures || {}) };
+      // Columns referenceable in a native pipeline over this source (where/compute/
+      // group_by/order_by), with their types — `time` above is the default order axis
+      // for window/match_recognize stages.
+      out.pipeline_columns = c.modelColumns(k);
       if (k === c.anchor) {
         out.event_count = c.eventNames().length;
         out.property_count = c.eventProps().length;
-        out.note = 'Events fact: payload fields are event-scoped properties. Call describe_catalog({ event }) to list the properties an event carries, or ({ property }) for one property.';
+        out.note = 'Events fact: payload fields are event-scoped properties (describe_catalog({ event })). The columns above are referenceable in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
       } else {
         const dims = m.dimensions || {};
         out.dimensions = Object.keys(dims).map((d) => ({ name: d, type: dims[d].type, description: descs[d] }));
@@ -213,7 +217,7 @@ export class Engine {
       if (!timeCol) throw new ToolError(`time_range given but source '${source}' has no time column`, { stage: 'validate', field: 'time_range' });
       const conditions = [];
       if (tr.start) conditions.push({ column: timeCol, op: 'gte', value: tr.start });
-      if (tr.end) conditions.push({ column: timeCol, op: 'lte', value: tr.end });
+      if (tr.end) { const ex = dateEndExclusive(tr.end); conditions.push(ex ? { column: timeCol, op: 'lt', value: ex } : { column: timeCol, op: 'lte', value: tr.end }); }
       stages = [{ stage: 'where', conditions }, ...stages];
     }
     const renderBoth = () => ({
@@ -251,7 +255,9 @@ export class Engine {
         `Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`,
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
       ],
-      warnings: [],
+      warnings: (this.runner && tr && (tr.start || tr.end) && rows.length === 0)
+        ? ['time_range produced 0 rows — verify the window. A date-only `end` is treated as inclusive (the whole day, next-day-exclusive); pass a full datetime for finer bounds.']
+        : [],
     };
   }
 

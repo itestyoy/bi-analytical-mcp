@@ -87,6 +87,18 @@ test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-u
   assert.equal(reached(out.rows, 'tut3'), 3);
 });
 
+// #5: rows option — one_per_partition (players) vs one_per_match (situations).
+test('match_recognize rows: one_per_partition (12 players) vs one_per_match (28 starts)', opts, async (t) => {
+  if (skip(t)) return;
+  const steps = [{ name: 'start', event_name: ['level_started'] }, { name: 'done', event_name: ['level_completed'] }];
+  const players = await pipe([{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps }]);
+  const situations = await pipe([{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], rows: 'one_per_match', steps }]);
+  assert.equal(players.rows.length, 12);               // one row per user who started a level
+  assert.equal(reached(players.rows, 'start'), 12);
+  assert.equal(situations.rows.length, 28);            // one row per level_started occurrence
+  assert.equal(reached(situations.rows, 'start'), 28);
+});
+
 test('funnel flexible partition: "user" alias and a per-(user,session) composite key', opts, async (t) => {
   if (skip(t)) return;
   // The partition key is caller-chosen. The "user" alias resolves to the user

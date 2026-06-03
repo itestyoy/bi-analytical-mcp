@@ -20,6 +20,16 @@ import { registerStage, prepareColumns } from './pipeline.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
+/** Date-only 'YYYY-MM-DD' end → the NEXT day (exclusive upper bound), so the whole
+ *  day is included when comparing a timestamp column. Returns null if not date-only
+ *  (a full datetime is used as-is). Avoids `<= 'YYYY-MM-DD'` collapsing to midnight. */
+export function dateEndExclusive(end) {
+  if (typeof end !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(end)) return null;
+  const d = new Date(`${end}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + 1);
+  return d.toISOString().slice(0, 10);
+}
+
 /** Render a single comparison `lhs OP value` with the value bound as a literal. */
 function comparePred(lhs, op, value) {
   const arr = Array.isArray(value) ? value : [value];
@@ -76,7 +86,7 @@ export function buildPrefilter(catalog, spec, dialect, col) {
   const dataCol = q(catalog.eventDataColumn());
   const clauses = [];
   if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
-  if (f.time_range?.end) clauses.push(`${timeCol} <= ${sqlLiteral(f.time_range.end)}`);
+  if (f.time_range?.end) { const ex = dateEndExclusive(f.time_range.end); clauses.push(ex ? `${timeCol} < ${sqlLiteral(ex)}` : `${timeCol} <= ${sqlLiteral(f.time_range.end)}`); }
   if (f.event_name?.length) clauses.push(`${evNameCol} IN (${f.event_name.map(sqlLiteral).join(', ')})`);
   for (const c of f.where || []) {
     const p = (m.properties || {})[c.property];
@@ -230,8 +240,6 @@ ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')
     ORDER BY ${r.timeCol}
     MEASURES
 ${measures}
-    ONE ROW PER MATCH
-    AFTER MATCH SKIP PAST LAST ROW
     PATTERN ${nestedPattern(r.steps, r.mode !== 'strict')}
     DEFINE
 ${defines.join(',\n')}

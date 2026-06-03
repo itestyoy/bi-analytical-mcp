@@ -226,7 +226,16 @@ export function matchStepPostgres(r, fromRel, catalog) {
   return `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\nSELECT\n  ${outCols.join(',\n  ')}\nFROM joined j`;
 }
 
-/** BigQuery lowering: a single SELECT … FROM fromRel MATCH_RECOGNIZE(…). */
+/** BigQuery lowering: a single SELECT … FROM fromRel MATCH_RECOGNIZE(…).
+ *  rows handling, to stay numerically consistent with the Postgres lowering:
+ *  - one_per_match: emit `AFTER MATCH SKIP TO NEXT ROW` so a new match can begin on
+ *    the very next row — every occurrence of the start step yields a match (overlapping
+ *    matches), matching the "every S1 starts a match" Postgres CTE. (Without it,
+ *    BigQuery's default AFTER MATCH SKIP PAST LAST ROW gives NON-overlapping matches,
+ *    which would diverge from Postgres.)
+ *  - one_per_partition: keep BigQuery's default skip and take the first match per
+ *    partition via the outer QUALIFY (ROW_NUMBER ORDER BY t1 = 1) — the earliest-S1
+ *    match, equivalent regardless of skip mode. */
 export function matchStepBigQuery(r, fromRel, catalog) {
   const preds = r.stepPreds('bigquery', null);
   const sym = r.steps.map((s) => `S${s.idx}`);
@@ -249,7 +258,7 @@ ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')
     PARTITION BY ${r.partCols.join(', ')}
     ORDER BY ${r.timeCol}
     MEASURES
-${measures}
+${measures}${r.rows === 'one_per_match' ? '\n    AFTER MATCH SKIP TO NEXT ROW' : ''}
     PATTERN ${nestedPattern(r.steps, r.mode !== 'strict')}
     DEFINE
 ${defines.join(',\n')}
@@ -283,7 +292,7 @@ function matchRecognizeSchema(catalog) {
       },
       order_by: { type: 'string', pattern: NAME, description: 'Column that orders events within each partition (the sequence axis). Defaults to the event time.' },
       mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order, other events may occur between them; strict = each step must be the immediately next event.' },
-      rows: { enum: ['one_per_partition', 'one_per_match'], default: 'one_per_partition', description: 'one_per_partition (default) = one row per partition (e.g. per user), from its FIRST match — counts "players"; one_per_match = one row per occurrence of the sequence start (the first step) — counts "situations" (a partition can yield several).' },
+      rows: { enum: ['one_per_partition', 'one_per_match'], default: 'one_per_partition', description: 'one_per_partition (default) = one row per partition (e.g. per user), from its FIRST match — counts "players"; one_per_match = one row per occurrence of the sequence start (the first step) — counts "situations" (a partition can yield several; matches may overlap — a new match can start on the next row).' },
       filter: {
         type: 'object', additionalProperties: false, description: 'Optional event-level pre-filter applied BEFORE matching (speed; narrows the population only). To filter by USER attributes, add a join (users) + where stage before this one instead.',
         properties: {

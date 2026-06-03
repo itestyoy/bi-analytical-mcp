@@ -1,10 +1,10 @@
 {{ config(materialized='table') }}
--- Mirror the production shape: rename the user key to internal__player_id, keep
+-- Mirror the production shape: rename the user key to player_id_of_internal, keep
 -- the raw event_data JSON (for complex array properties), and flatten the scalar
 -- payload keys into real, typed event_data__* columns referenced directly.
 select
     event_id,
-    appsflyer_id                                           as internal__player_id,
+    appsflyer_id                                           as player_id_of_internal,
     session_number,
     event_name,
     device_time,

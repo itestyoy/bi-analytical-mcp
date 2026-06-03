@@ -1,6 +1,6 @@
 {{ config(materialized='table') }}
 select
-    appsflyer_id as internal__player_id,
+    appsflyer_id as player_id_of_internal,
     experiment_name,
     variant_group,
     assigned_at,

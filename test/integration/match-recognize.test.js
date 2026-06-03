@@ -45,7 +45,7 @@ const activationSteps = [
   { name: 'tut2', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_2' }] },
   { name: 'tut3', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_3' }] },
 ];
-const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['internal__player_id'], mode: 'ordered', steps: activationSteps, ...extra });
+const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps, ...extra });
 
 before(async () => {
   if (!HAS_DBT) return;
@@ -90,13 +90,13 @@ test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-u
 test('funnel flexible partition: "user" alias and a per-(user,session) composite key', opts, async (t) => {
   if (skip(t)) return;
   // The partition key is caller-chosen. The "user" alias resolves to the user
-  // column → same 12 launched as the explicit ["internal__player_id"].
+  // column → same 12 launched as the explicit ["player_id_of_internal"].
   const alias = await pipe([matchActivation({ partition_by: ['user'] })]);
   assert.equal(reached(alias.rows, 'launch'), 12);
   // A COMPOSITE key matches the sequence independently per (user, session) — one
   // row per matched (user,session); still 12 first_launch partitions (one/user).
-  const composite = await pipe([matchActivation({ partition_by: ['internal__player_id', 'session_number'], steps: activationSteps.slice(0, 2) })]);
-  assert.ok('internal__player_id' in composite.rows[0] && 'session_number' in composite.rows[0], 'both partition keys exposed');
+  const composite = await pipe([matchActivation({ partition_by: ['player_id_of_internal', 'session_number'], steps: activationSteps.slice(0, 2) })]);
+  assert.ok('player_id_of_internal' in composite.rows[0] && 'session_number' in composite.rows[0], 'both partition keys exposed');
   assert.equal(reached(composite.rows, 'launch'), 12);
 });
 
@@ -118,7 +118,7 @@ test('funnel sliced by a user attribute: join dim_users → reached_tut1 by coun
   if (skip(t)) return;
   // The funnel is sliced by joining dim_users AFTER match_recognize — all within
   // the pipeline (no separate semantic layer).
-  const out = await pipe([matchActivation(), { stage: 'join', with: 'users', on: 'internal__player_id', attrs: ['country', 'platform'] }]);
+  const out = await pipe([matchActivation(), { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country', 'platform'] }]);
   assert.ok(out.rows.every((r) => 'country' in r && 'platform' in r), 'attrs joined onto each row');
   assert.equal(reached(out.rows, 'tut1'), 8);
   const byCountry = {};
@@ -147,9 +147,9 @@ test('funnel filtered to a user segment via join+where (country=US): only the 4 
   // user-attribute filtering is now a pipeline concern: join dim_users, where on
   // the attribute, THEN match_recognize — no special user_segment property.
   const out = await pipe([
-    { stage: 'join', with: 'users', on: 'internal__player_id', attrs: ['country'] },
+    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
     { stage: 'where', conditions: [{ column: 'country', op: 'eq', value: 'US' }] },
-    { stage: 'match_recognize', partition_by: ['internal__player_id'], mode: 'ordered', steps: activationSteps.slice(0, 2) },
+    { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps.slice(0, 2) },
   ]);
   assert.equal(reached(out.rows, 'launch'), 4); // exactly the 4 US users
   assert.ok(reached(out.rows, 'tut1') <= 4);
@@ -168,7 +168,7 @@ test('funnel + prepare derive (array_length): agg_at_step avg(n_words) at level 
   // step where / agg_at_step.
   const out = await pipe([
     { stage: 'derive', name: 'n_words', op: 'array_length', source: 'words_collected' },
-    { stage: 'match_recognize', partition_by: ['internal__player_id'], mode: 'ordered',
+    { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'lvl1', event_name: ['level_completed'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] }],
       metrics: [{ name: 'avg_words', type: 'agg_at_step', agg: 'avg', property: 'n_words', step: 'lvl1' }] },
   ]);
@@ -182,7 +182,7 @@ test('funnel + prepare derive (contains): step filtered by derived boolean reach
   if (skip(t)) return;
   const out = await pipe([
     { stage: 'derive', name: 'has_cat', op: 'contains', source: 'words_collected', value: 'cat' },
-    { stage: 'match_recognize', partition_by: ['internal__player_id'], mode: 'ordered',
+    { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered',
       steps: [{ name: 'launch', event_name: ['first_launch'] }, { name: 'cat_lvl', event_name: ['level_completed'], where: [{ property: 'has_cat', op: 'eq', value: true }] }] },
   ]);
   assert.equal(reached(out.rows, 'cat_lvl'), 12); // every user's level-1 completion has 'cat'
@@ -193,7 +193,7 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'internal__player_id', attrs: ['country'] },
+    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] },
   ]);
   const by = Object.fromEntries(out.rows.map((r) => [String(r.country), num(r.revenue)]));
@@ -205,7 +205,7 @@ test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t)
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'internal__player_id', attrs: ['country'] },
+    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
     { stage: 'pivot', group_by: [], on: 'country', fn: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
   ]);
   assert.equal(out.rows.length, 1);

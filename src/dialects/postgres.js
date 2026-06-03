@@ -33,20 +33,39 @@ export class PostgresDialect extends Dialect {
     return ct ? `${base}::${ct}` : base;
   }
 
-  arrayUnnest(prevAlias, column, key, alias, field, type = 'string') {
-    this.ident(key); this.ident(alias);
+  arrayUnnest(prevAlias, column, key, alias, field, type = 'string', encoding = 'blob') {
+    this.ident(alias);
     const e = `${alias}_e`;
+    const pa = prevAlias ? `${prevAlias}.` : '';
+    // Native ARRAY column → unnest directly (no JSON parsing).
+    if (key == null && encoding === 'native') {
+      const ct = this.castType(type);
+      return { join: `CROSS JOIN LATERAL unnest(${pa}${column}) AS ${e}`, element: ct ? `${e}::${ct}` : e };
+    }
+    // The jsonb array to explode: a key inside a json column (blob), or the flat STRING
+    // column itself parsed as jsonb (encoding 'json').
+    let arr;
+    if (key != null) { this.ident(key); arr = `${pa}${column}->'${key}'`; } else { arr = `(${pa}${column})::jsonb`; }
     if (field) {
       this.ident(field);
       const base = `(${e}->>'${field}')`;
       const ct = this.castType(type);
-      return { join: `CROSS JOIN LATERAL jsonb_array_elements(${prevAlias}.${column}->'${key}') AS ${e}`, element: ct ? `${base}::${ct}` : base };
+      return { join: `CROSS JOIN LATERAL jsonb_array_elements(${arr}) AS ${e}`, element: ct ? `${base}::${ct}` : base };
     }
     if (type === 'json') { // bind the whole struct element as a jsonb column (multi-field extraction downstream)
-      return { join: `CROSS JOIN LATERAL jsonb_array_elements(${prevAlias}.${column}->'${key}') AS ${e}`, element: e };
+      return { join: `CROSS JOIN LATERAL jsonb_array_elements(${arr}) AS ${e}`, element: e };
     }
-    return { join: `CROSS JOIN LATERAL jsonb_array_elements_text(${prevAlias}.${column}->'${key}') AS ${e}`, element: e };
+    const ct = this.castType(type);
+    return { join: `CROSS JOIN LATERAL jsonb_array_elements_text(${arr}) AS ${e}`, element: ct ? `${e}::${ct}` : e };
   }
+
+  /** STRING holding a JSON array → a native text[] array (so it can be unnested as native). */
+  jsonParseArray(column) {
+    return `ARRAY(SELECT jsonb_array_elements_text((${column})::jsonb))`;
+  }
+
+  arrayElementAt(column, index) { return `(${column})[${Number(index)}]`; }       // 1-based
+  arrayLast(column) { return `(${column})[array_length(${column}, 1)]`; }
 
   /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
   jsonColumnField(column, field, type = 'string') {
@@ -132,7 +151,7 @@ export class PostgresDialect extends Dialect {
       case 'extend':
         return `SELECT *, ${op.cols.map((c) => `(${c.expr}) AS ${this.ident(c.name)}`).join(', ')} FROM ${prev}`;
       case 'unnest': {
-        const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type);
+        const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type, op.encoding);
         return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
       }
       case 'join': {

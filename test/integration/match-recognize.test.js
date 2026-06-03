@@ -62,6 +62,22 @@ before(async () => {
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
+// #9: a pipeline-level time_range bounds the window (applied before the stages).
+test('native pipeline time_range bounds the window: full 8 purchases vs windowed 4', opts, async (t) => {
+  if (skip(t)) return;
+  const count = async (time_range) => {
+    const out = await engine.register_native_model({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { time_range, stages: [
+      { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+    ] } });
+    assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+    ctxId = out.context_id;
+    return Number(out.rows[0].n);
+  };
+  assert.equal(await count(undefined), 8);                                  // all purchases
+  assert.equal(await count({ start: '2026-01-01', end: '2026-01-04' }), 4); // only 01-01..01-03
+});
+
 test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-user rows)', opts, async (t) => {
   if (skip(t)) return;
   const out = await pipe([matchActivation()]);
@@ -215,10 +231,16 @@ test('register_native_model: same name in two contexts → distinct relations', 
   assert.match(a.model, /^pipe_iso_[a-z0-9]{6,}$/);
 });
 
-test('describe_catalog: returns REAL physical columns for every model (adapter introspection)', opts, async (t) => {
+test('describe_catalog: overview lists models, then { model } drills into REAL physical columns', opts, async (t) => {
   if (skip(t)) return;
-  const dc = await engine.describe_catalog();
-  const events = dc.models.find((m) => m.key === 'events');
-  assert.ok(events, 'events model present');
-  assert.ok(Array.isArray(events.physical_columns) && events.physical_columns.length > 0, 'events has REAL physical columns');
+  const overview = await engine.describe_catalog();
+  assert.ok(overview.models.find((m) => m.key === 'events'), 'events model present in overview');
+  assert.ok(Array.isArray(overview.event_names) && overview.event_names.length > 0, 'overview lists event names');
+  assert.equal(overview.models.find((m) => m.key === 'events').physical_columns, undefined, 'overview does NOT dump physical columns');
+  // drill down for the real physical columns (adapter.get_columns_in_relation)
+  const events = await engine.describe_catalog({ model: 'events' });
+  assert.ok(Array.isArray(events.physical_columns) && events.physical_columns.length > 0, 'events { model } has REAL physical columns');
+  // { event } returns only the properties carried by that event
+  const ev = await engine.describe_catalog({ event: 'iap_purchase_completed' });
+  assert.ok(ev.property_count > 0 && ev.properties.some((p) => p.name === 'price_in_usd_of_event_data'), 'event lists its scoped properties');
 });

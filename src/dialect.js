@@ -36,3 +36,8 @@ export function jsonStructField(dialect, column, key, field, type = 'string') {
 export function jsonArrayUnnest(dialect, prevAlias, column, key, alias, field, type = 'string') {
   return getDialect(dialect).arrayUnnest(prevAlias, column, key, alias, field, type);
 }
+
+/** CAST(expr AS <type>) in the dialect's spelling (numeric/int/float). */
+export function castExpr(dialect, expr, type) {
+  return getDialect(dialect).castExpr(expr, type);
+}

@@ -56,6 +56,91 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
   assert.equal(r.rows.reduce((s, x) => s + num(x.revenue), 0), 85);
 });
 
+// unnest a FLAT array column stored as a JSON-encoded STRING (mirrors the real
+// warehouse: words_selected lands as text like '["cat","dog"]'). meta.mcp.array
+// (encoding: json) tells the engine to parse it before exploding — no fake event_data.
+test('pipeline unnest: explode words_selected (JSON-string array) and count per word', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'unnest', source: 'words_selected_of_event_data', as: 'word' },
+    { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', fn: 'count' }] },
+    { stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.word), num(x.n)]));
+  assert.equal(by.cat, 12); assert.equal(by.dog, 12); assert.equal(by.sun, 12);
+  assert.equal(by.moon, 4); assert.equal(by.star, 4); assert.equal(by.tree, 3); assert.equal(by.x, 6);
+  assert.equal(r.rows.reduce((s, x) => s + num(x.n), 0), 53); // total word occurrences across level_completed
+  assert.equal(r.rows.length, 7);                              // distinct words
+});
+
+// #4 + json_parse_array: the flat payload column is referenceable directly in the
+// pipeline (no users-join), compute json_parse_array turns the JSON STRING into a
+// native array, and unnest explodes that derived column.
+test('pipeline json_parse_array + unnest: parse a flat JSON-string column then explode', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'compute', name: 'words_arr', op: 'json_parse_array', column: 'words_selected_of_event_data' },
+    { stage: 'unnest', source: 'words_arr', as: 'word' },
+    { stage: 'aggregate', group_by: ['word'], measures: [{ name: 'n', fn: 'count' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.word), num(x.n)]));
+  assert.equal(by.cat, 12); assert.equal(by.x, 6);
+  assert.equal(r.rows.reduce((s, x) => s + num(x.n), 0), 53);
+});
+
+// #2: array primitives — last element ("последнее слово") and indexed element.
+test('pipeline array_last / element_at: last & first word per completed level', opts, async (t) => {
+  if (skip(t)) return;
+  const stages = (pick) => [
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'compute', name: 'wa', op: 'json_parse_array', column: 'words_selected_of_event_data' },
+    pick,
+    { stage: 'where', conditions: [{ column: 'w', op: 'is_not_null' }] },
+    { stage: 'aggregate', group_by: ['w'], measures: [{ name: 'n', fn: 'count' }] },
+  ];
+  const last = await run(stages({ stage: 'compute', name: 'w', op: 'array_last', column: 'wa' }));
+  assert.equal(last.ok, true, JSON.stringify(last));
+  const byLast = Object.fromEntries(last.rows.map((x) => [String(x.w), num(x.n)]));
+  assert.deepEqual(byLast, { sun: 12, star: 4, tree: 3, x: 6 });
+  const first = await run(stages({ stage: 'compute', name: 'w', op: 'element_at', column: 'wa', index: 1 }));
+  const byFirst = Object.fromEntries(first.rows.map((x) => [String(x.w), num(x.n)]));
+  assert.deepEqual(byFirst, { cat: 12, moon: 4, tree: 3, x: 6 });
+});
+
+// #2: raw SQL escape hatch — verbatim dialect expression when no built-in op fits.
+test('pipeline raw: a verbatim SQL expression is evaluated', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await run([
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] },
+    { stage: 'compute', name: 'ev', op: 'raw', sql: 'upper(event_name)' },
+    { stage: 'aggregate', group_by: ['ev'], measures: [{ name: 'n', fn: 'count' }] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.rows.length, 1);
+  assert.equal(String(r.rows[0].ev), 'LEVEL_COMPLETED');
+});
+
+// #8: string matching in where (starts_with / contains / like) — find by prefix/substring.
+test('pipeline where starts_with / contains: iap_purchase_* events', opts, async (t) => {
+  if (skip(t)) return;
+  const agg = async (cond) => {
+    const r = await run([
+      { stage: 'where', conditions: [cond] },
+      { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
+    ]);
+    assert.equal(r.ok, true, JSON.stringify(r));
+    return Object.fromEntries(r.rows.map((x) => [String(x.event_name), num(x.n)]));
+  };
+  const byPrefix = await agg({ column: 'event_name', op: 'starts_with', value: 'iap_purchase_' });
+  assert.deepEqual(byPrefix, { iap_purchase_completed: 8, iap_purchase_failed: 3 });
+  const byContains = await agg({ column: 'event_name', op: 'contains', value: 'purchase' });
+  assert.deepEqual(byContains, { iap_purchase_completed: 8, iap_purchase_failed: 3 });
+});
+
 // ... |> PIVOT: country values become columns
 test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR=25)', opts, async (t) => {
   if (skip(t)) return;

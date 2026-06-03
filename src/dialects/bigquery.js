@@ -35,20 +35,39 @@ export class BigQueryDialect extends Dialect {
     return ct ? `CAST(${base} AS ${ct})` : base;
   }
 
-  arrayUnnest(_prevAlias, column, key, alias, field, type = 'string') {
-    this.ident(key); this.ident(alias);
+  arrayUnnest(_prevAlias, column, key, alias, field, type = 'string', encoding = 'blob') {
+    this.ident(alias);
+    // Native ARRAY/REPEATED column → unnest directly.
+    if (key == null && encoding === 'native') {
+      const ct = this.castType(type);
+      return { join: `CROSS JOIN UNNEST(${column}) AS ${alias}`, element: ct ? `CAST(${alias} AS ${ct})` : alias };
+    }
+    // Array-of-JSON elements: a key inside a json column (blob), or the flat STRING column
+    // parsed as a JSON array (encoding 'json').
+    const jarr = key != null ? (this.ident(key), `JSON_QUERY_ARRAY(${column}, '$.${key}')`) : `JSON_EXTRACT_ARRAY(${column}, '$')`;
     if (field) {
       this.ident(field);
       const e = `${alias}_e`;
       const base = `JSON_VALUE(${e}, '$.${field}')`;
       const ct = this.castType(type);
-      return { join: `CROSS JOIN UNNEST(JSON_QUERY_ARRAY(${column}, '$.${key}')) AS ${e}`, element: ct ? `CAST(${base} AS ${ct})` : base };
+      return { join: `CROSS JOIN UNNEST(${jarr}) AS ${e}`, element: ct ? `CAST(${base} AS ${ct})` : base };
     }
     if (type === 'json') { // bind the whole struct element as a JSON column
-      return { join: `CROSS JOIN UNNEST(JSON_QUERY_ARRAY(${column}, '$.${key}')) AS ${alias}`, element: alias };
+      return { join: `CROSS JOIN UNNEST(${jarr}) AS ${alias}`, element: alias };
     }
-    return { join: `CROSS JOIN UNNEST(JSON_VALUE_ARRAY(${column}, '$.${key}')) AS ${alias}`, element: alias };
+    // scalar elements
+    const sarr = key != null ? `JSON_VALUE_ARRAY(${column}, '$.${key}')` : `JSON_EXTRACT_STRING_ARRAY(${column}, '$')`;
+    const ct = this.castType(type);
+    return { join: `CROSS JOIN UNNEST(${sarr}) AS ${alias}`, element: ct ? `CAST(${alias} AS ${ct})` : alias };
   }
+
+  /** STRING holding a JSON array → a native ARRAY<STRING> (so it can be unnested as native). */
+  jsonParseArray(column) {
+    return `JSON_EXTRACT_STRING_ARRAY(${column}, '$')`;
+  }
+
+  arrayElementAt(column, index) { return `${column}[SAFE_OFFSET(${Number(index) - 1})]`; } // 1-based → 0-based OFFSET
+  arrayLast(column) { return `${column}[SAFE_OFFSET(ARRAY_LENGTH(${column}) - 1)]`; }
 
   /** Extract a scalar field from a JSON-valued COLUMN (e.g. an unnested struct element). */
   jsonColumnField(column, field, type = 'string') {
@@ -123,7 +142,7 @@ export class BigQueryDialect extends Dialect {
       case 'extend':
         return `SELECT *, ${op.cols.map((c) => `(${c.expr}) AS ${this.ident(c.name)}`).join(', ')} FROM ${prev}`;
       case 'unnest': {
-        const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type);
+        const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type, op.encoding);
         return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
       }
       case 'join': {
@@ -159,7 +178,7 @@ export class BigQueryDialect extends Dialect {
       case 'extend':
         return `|> EXTEND ${op.cols.map((c) => `(${c.expr}) AS ${this.ident(c.name)}`).join(', ')}`;
       case 'unnest': {
-        const { join, element } = this.arrayUnnest(null, op.column, op.key, op.as, op.field, op.type);
+        const { join, element } = this.arrayUnnest(null, op.column, op.key, op.as, op.field, op.type, op.encoding);
         // bind the element to `as` (already so for the scalar form)
         return op.field ? `|> ${join}\n|> EXTEND ${element} AS ${this.ident(op.as)}` : `|> ${join}`;
       }

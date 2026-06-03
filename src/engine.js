@@ -69,46 +69,91 @@ export class Engine {
     return this._taskDimMap(ctx).get(path) || path;
   }
 
-  async describe_catalog() {
+  /**
+   * Progressive catalog discovery. The events fact carries ~150 event-scoped
+   * properties, so dumping everything at once is wasteful. Call with NO arguments
+   * for a compact OVERVIEW, then drill down:
+   *   { model }    → one model's entities/time/dimensions + REAL physical columns
+   *   { event }    → only the properties POPULATED on that event (what you can use)
+   *   { property } → one property's full spec (type, applicable events, description)
+   *   { search }   → events/properties whose name/description matches a substring
+   * Pass at most one drill-down key (precedence model > event > property > search).
+   */
+  async describe_catalog(input = {}) {
+    this._validate('describe_catalog', input);
     const c = this.catalog;
-    const base = this.ctxs.baseProjectDir;
-    const models = [];
-    for (const k of c.modelKeys()) {
+    const AGG = ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'];
+
+    // ── { model }: one model in depth (incl. live warehouse introspection) ──
+    if (input.model) {
+      const k = input.model;
+      if (!c.models[k]) throw new ToolError(`unknown model '${k}'. Known models: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'model' });
       const m = c.getModel(k);
-      const descs = c.columnDescriptions(k); // dbt column docs { col: description }
-      const entry = {
-        key: k,
-        dbt_model: m.dbt_model,
-        role: m.role,
-        dimensions: k === c.anchor ? undefined : Object.keys(m.dimensions || {}),
-        measures: Object.keys(m.measures || {}),
-        column_descriptions: descs, // available to the AI even without warehouse introspection
-      };
-      // REAL physical columns from the warehouse relation (adapter.get_columns_in_relation),
-      // not just declared metadata. Merge in the dbt column description per column.
+      const descs = c.columnDescriptions(k);
+      const out = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description, primary_entity: c.primaryEntityName(k), entities: m.entities, time: m.time?.column, measures: Object.keys(m.measures || {}) };
+      if (k === c.anchor) {
+        out.event_count = c.eventNames().length;
+        out.property_count = c.eventProps().length;
+        out.note = 'Events fact: payload fields are event-scoped properties. Call describe_catalog({ event }) to list the properties an event carries, or ({ property }) for one property.';
+      } else {
+        const dims = m.dimensions || {};
+        out.dimensions = Object.keys(dims).map((d) => ({ name: d, type: dims[d].type, description: descs[d] }));
+      }
+      const base = this.ctxs.baseProjectDir;
       if (this.runner && base) {
         const cols = await this.runner.relationColumns(base, m.dbt_model);
-        entry.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
-        if (!cols.ok) entry.physical_columns_error = 'relation not built or introspection failed (run dbt seed + dbt run on the base project)';
+        out.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
+        if (!cols.ok) out.physical_columns_error = 'relation not built or introspection failed (run dbt seed + dbt run on the base project)';
       }
-      models.push(entry);
+      return out;
     }
+
+    // ── { event }: the properties populated on this event (NULL on others) ──
+    if (input.event) {
+      if (!c.eventNames().includes(input.event)) throw new ToolError(`unknown event '${input.event}'. See describe_catalog().event_names`, { stage: 'validate', field: 'event' });
+      const numeric = new Set(c.eventNumericProps());
+      const applies = c.eventPropertyEvents();
+      const descs = c.eventPropertyDescriptions();
+      const props = c.eventProps().filter((p) => { const evs = applies[p]; return !evs || evs.includes(input.event); });
+      return {
+        event: input.event,
+        property_count: props.length,
+        properties: props.map((p) => ({ name: p, type: c.eventPropertySpec(p)?.type, numeric: numeric.has(p), complex: c.isComplexEventProp(p), description: descs[p] })),
+      };
+    }
+
+    // ── { property }: one property's full spec ──
+    if (input.property) {
+      const spec = c.eventPropertySpec(input.property);
+      if (!spec) throw new ToolError(`unknown event property '${input.property}'. Discover properties via describe_catalog({ event }) or ({ search })`, { stage: 'validate', field: 'property' });
+      return { property: input.property, type: spec.type, numeric: c.eventNumericProps().includes(input.property), complex: c.isComplexEventProp(input.property), events: spec.events || null, description: spec.description };
+    }
+
+    // ── { search }: find events/properties by substring ──
+    if (input.search) {
+      const q = String(input.search).toLowerCase();
+      const descs = c.eventPropertyDescriptions();
+      return {
+        query: input.search,
+        event_names: c.eventNames().filter((e) => e.toLowerCase().includes(q)),
+        properties: c.eventProps().filter((p) => p.toLowerCase().includes(q) || (descs[p] || '').toLowerCase().includes(q)).map((p) => ({ name: p, type: c.eventPropertySpec(p)?.type })),
+      };
+    }
+
+    // ── default: compact OVERVIEW (no per-property dump, no warehouse calls) ──
+    const models = c.modelKeys().map((k) => {
+      const m = c.getModel(k);
+      const head = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description };
+      if (k === c.anchor) return { ...head, kind: 'events_fact', entities: Object.keys(m.entities || {}), time: m.time?.column, event_count: c.eventNames().length, property_count: c.eventProps().length };
+      return { ...head, kind: 'dimension', dimension_count: Object.keys(m.dimensions || {}).length };
+    });
     return {
       dialect: c.dialect,
       models,
       event_names: c.eventNames(),
-      event_properties: c.eventProps(),
-      event_property_descriptions: c.eventPropertyDescriptions(),
-      event_numeric_properties: c.eventNumericProps(),
-      // Which events each property is populated on — it is NULL on any other event,
-      // so scope a measure/dimension/filter that uses it to these event_name(s).
-      event_property_events: c.eventPropertyEvents(),
       groupable_paths: c.reachableGroupByPaths(),
-      enums: {
-        agg: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'],
-        metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'],
-        time_granularity: c.timeGranularities(),
-      },
+      enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
+      next: 'Overview only. Drill down: describe_catalog({ model }) for a model\'s columns + real physical columns; ({ event }) for the properties an event carries (the events fact has ~150 properties, scoped per event); ({ property }) for one property\'s spec; ({ search }) to find events/properties by substring.',
     };
   }
 
@@ -159,9 +204,21 @@ export class Engine {
   async _registerPipeline(input) {
     const dialect = this.catalog.dialect;
     const source = input.pipeline.source || this.catalog.anchor;
+    // A pipeline-level time_range is applied as a leading WHERE on the source's time
+    // column — one place to bound the window (parity with query_semantic_model).
+    let stages = input.pipeline.stages;
+    const tr = input.pipeline.time_range;
+    if (tr && (tr.start || tr.end)) {
+      const timeCol = this.catalog.getModel(source).time?.column;
+      if (!timeCol) throw new ToolError(`time_range given but source '${source}' has no time column`, { stage: 'validate', field: 'time_range' });
+      const conditions = [];
+      if (tr.start) conditions.push({ column: timeCol, op: 'gte', value: tr.start });
+      if (tr.end) conditions.push({ column: timeCol, op: 'lte', value: tr.end });
+      stages = [{ stage: 'where', conditions }, ...stages];
+    }
     const renderBoth = () => ({
-      pg: renderPipeline(this.catalog, dialect, source, input.pipeline.stages),
-      bq: renderPipeline(this.catalog, 'bigquery', source, input.pipeline.stages).sql,
+      pg: renderPipeline(this.catalog, dialect, source, stages),
+      bq: renderPipeline(this.catalog, 'bigquery', source, stages).sql,
     });
     if (input.dry_run) {
       const { pg, bq } = renderBoth();
@@ -244,7 +301,7 @@ export class Engine {
       context_id: ctx.id,
       task: compiled.task,
       files: [file],
-      yaml: render.yaml,
+      ...(input.include_yaml ? { yaml: render.yaml } : {}),
       semantic_models: render.semanticModels,
       joined_models: ctx.state.usedModels,
       metrics: render.metricNames,
@@ -289,7 +346,7 @@ export class Engine {
     const file = this.ctxs.writeYaml(ctx.id, render.yaml);
     this.ctxs.touch(ctx.id);
     const parse = await this._parse(ctx.id);
-    return { context_id: ctx.id, semantic_model: modelKey, files: [file], yaml: render.yaml, metrics: render.metricNames, groupable: [...this._allowedPaths(ctx)], parse, warnings: [] };
+    return { context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}), metrics: render.metricNames, groupable: [...this._allowedPaths(ctx)], parse, warnings: [] };
   }
 
   async delete_semantic_model(input) {

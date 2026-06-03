@@ -14,7 +14,7 @@ import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
 
 const TOOL_DESCRIPTIONS = {
-  describe_catalog: 'Return the registry: models with their REAL physical columns and dbt column descriptions, events, event properties (with types and descriptions), join-reachable group-by paths, and allowed enums. Call BEFORE creating a model.',
+  describe_catalog: 'Discover the catalog progressively. No args → compact overview (models, event names, group-by paths, enums + counts). Drill down with { model } (a model\'s columns + real physical columns), { event } (the properties an event carries), { property } (one property\'s spec), or { search }. Call BEFORE creating a model. Avoids dumping ~150 properties at once.',
   create_semantic_model: 'Declaratively create/augment semantic models for a task (one SM per table) and metrics, in an isolated context. Omit context_id for a new task; pass it to extend the same context. Renders YAML + dbt parse.',
   register_native_model: 'Build a derived dbt model from a sequence spec (MATCH_RECOGNIZE funnel/path, target BigQuery) materialized as a view, and a semantic model on top. Kept separate from the semantic query; after registering, query its metrics/dimensions via query_semantic_model.',
   update_native_model: 'Update a registered native (MATCH_RECOGNIZE) model in place: regenerate the view + semantic model from a new sequence spec and rebuild (dbt run + parse).',
@@ -47,7 +47,7 @@ DATA MODEL (exactly two sources)
 Funnels/sequences are built ONLY from events (a step = an event + an event_data property value). Segmentation joins user attributes to events by the user entity automatically at query time.
 
 WORKFLOW
-1. describe_catalog — discover the models, events, event properties, joinable group-by paths, and the columns of each table (with their dbt descriptions). Call this first.
+1. describe_catalog — discover the catalog PROGRESSIVELY. Call it first with no arguments for an overview (models, event names, group-by paths, enums + counts), then drill down: describe_catalog({ model }) for a model's columns, ({ event }) for the properties an event carries, ({ property }) for one property, ({ search }) to find events/properties. The events fact has ~150 event-scoped properties, so they are fetched per event rather than all at once.
 2. create_semantic_model — declare measures/dimensions/metrics for a task in an ISOLATED context (returns a context_id). Pass that context_id back to extend the same context.
    - For ordered multi-step funnels/paths use register_native_model: it builds a per-user funnel model you can query like any other model, and accepts a pre-filter (time window / event subset / user segment) to narrow the data.
 3. query_semantic_model — run metrics with group_by / where / order_by / time_range. Options: dry_run (preview, no run), explain (query plan, no run), materialize (persist the result and read it back; long queries return a query_id to poll), limit/offset.
@@ -78,22 +78,57 @@ export function makeMcpServer(engine) {
     { capabilities: { tools: {} }, instructions: SERVER_DESCRIPTION },
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: buildToolDefs(engine) }));
+  server.setRequestHandler(ListToolsRequestSchema, async () => {
+    const tools = buildToolDefs(engine);
+    logLine('list_tools', `→ ${tools.length} tools`);
+    return { tools };
+  });
 
   server.setRequestHandler(CallToolRequestSchema, async (req) => {
     const { name, arguments: args } = req.params;
+    const started = Date.now();
+    logLine(name, `▶ call ${summarizeArgs(args)}`);
     if (typeof engine[name] !== 'function') {
+      logLine(name, '✗ unknown tool');
       return errorResult(`unknown tool: ${name}`);
     }
     try {
       const result = ASYNC_TOOLS.has(name) ? await engine[name](args || {}) : engine[name](args || {});
+      logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(result)}`);
       return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
     } catch (err) {
+      logLine(name, `✗ error in ${Date.now() - started}ms: ${err?.message || String(err)}${err?.field ? ` (field: ${err.field})` : ''}`);
       return errorResult(err?.message || String(err), err?.stage, err?.field);
     }
   });
 
   return server;
+}
+
+// ── console logging (to stderr) so every tool call is visible in the logs ──────
+function logLine(tool, msg) {
+  console.error(`[mcp] ${new Date().toISOString()} ${tool} ${msg}`);
+}
+
+/** Compact, truncated one-line view of the tool arguments. */
+function summarizeArgs(args) {
+  if (args === undefined || args === null) return '(no args)';
+  let s;
+  try { s = JSON.stringify(args); } catch { return '(unserializable args)'; }
+  return s.length > 800 ? `${s.slice(0, 800)}… (${s.length} chars)` : s;
+}
+
+/** A short outcome hint from the result (status, row/result counts) without dumping it. */
+function summarizeResult(result) {
+  if (!result || typeof result !== 'object') return '';
+  const bits = [];
+  if ('ok' in result) bits.push(`ok=${result.ok}`);
+  if (Array.isArray(result.rows)) bits.push(`rows=${result.rows.length}`);
+  if (Array.isArray(result.results)) bits.push(`results=${result.results.length}`);
+  if (result.context_id) bits.push(`ctx=${result.context_id}`);
+  if (result.query_id) bits.push(`query_id=${result.query_id}`);
+  if (result.status) bits.push(`status=${result.status}`);
+  return bits.length ? ` [${bits.join(' ')}]` : '';
 }
 
 function errorResult(message, stage, field) {

@@ -45,8 +45,16 @@ export class Dialect {
   jsonArrayLength(_column, _key) { throw new Error('abstract jsonArrayLength'); }
   jsonArrayContains(_column, _key, _value) { throw new Error('abstract jsonArrayContains'); }
   jsonStructField(_column, _key, _field, _type) { throw new Error('abstract jsonStructField'); }
-  /** { join, element }: a FROM-join that explodes an array property + the element expr. */
-  arrayUnnest(_prevAlias, _column, _key, _alias, _field, _type) { throw new Error('abstract arrayUnnest'); }
+  /** { join, element }: a FROM-join that explodes an array property + the element expr.
+   *  encoding: 'blob' (json column at $.key), 'json' (flat STRING holding a JSON array),
+   *  or 'native' (a real ARRAY/REPEATED column). */
+  arrayUnnest(_prevAlias, _column, _key, _alias, _field, _type, _encoding) { throw new Error('abstract arrayUnnest'); }
+  /** Parse a STRING column holding a JSON array into a real (native) array expression. */
+  jsonParseArray(_column) { throw new Error('abstract jsonParseArray'); }
+  /** Element at a 1-based index of a native array. */
+  arrayElementAt(_column, _index) { throw new Error('abstract arrayElementAt'); }
+  /** Last element of a native array. */
+  arrayLast(_column) { throw new Error('abstract arrayLast'); }
 
   // ── Abstract time / scalar / statistical primitives (per-dialect) ──────────
   /** Difference toExpr - fromExpr expressed in `unit` (day|hour|minute|second). */

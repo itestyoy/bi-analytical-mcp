@@ -48,12 +48,12 @@ function measureFieldSchema(catalog, modelKey) {
   const keys = catalog.entityKeyColumns(modelKey);
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
   if (modelKey === catalog.anchor) {
-    const nums = catalog.eventNumericProps();
-    if (nums.length) opts.push({ type: 'string', enum: nums, title: 'event_property_numeric' });
+    const props = catalog.scalarEventProps();
+    if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
   } else {
     // numeric model columns are rare in dims; allow none by default
   }
-  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), or a numeric event_data property (for sum/average/etc.).', oneOf: opts };
+  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), or an event_data property. A STRING property that holds numbers needs "cast":"numeric" to sum/average it.', oneOf: opts };
 }
 
 function dimensionItemSchema(catalog, modelKey) {
@@ -100,8 +100,8 @@ function genericMeasureField(catalog) {
   const opts = [{ const: '*', title: 'rows' }];
   const keys = [...new Set(catalog.modelKeys().flatMap((k) => catalog.entityKeyColumns(k)))];
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
-  const nums = catalog.eventNumericProps();
-  if (nums.length) opts.push({ type: 'string', enum: nums, title: 'numeric' });
+  const props = catalog.scalarEventProps();
+  if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
   return { description: 'What to aggregate: "*", an entity-key column, or a numeric event_data property.', oneOf: opts };
 }
 
@@ -116,6 +116,7 @@ function genericMeasureItem(catalog) {
       agg: { enum: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'], description: D.agg },
       field: genericMeasureField(catalog),
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
+      cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
       label: { type: 'string', description: D.label },
       event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: D.event_name },
       where: { type: 'array', description: D.where_measure, items: whereItemSchema(catalog) },
@@ -147,6 +148,7 @@ function measureItemSchema(catalog, modelKey) {
       agg: { enum: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'], description: D.agg },
       field: measureFieldSchema(catalog, modelKey),
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
+      cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
       label: { type: 'string', description: D.label },
       ...(modelKey === catalog.anchor
         ? {
@@ -279,6 +281,7 @@ export function buildSchemas(catalog) {
       semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
       metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
+      include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false). The YAML is always written to the context files regardless; omit it to keep responses small.' },
     },
   };
 
@@ -298,6 +301,7 @@ export function buildSchemas(catalog) {
         description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
         properties: {
           source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table for the pipeline (default: the events fact).' },
+          time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } },
           stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
         },
       },
@@ -353,6 +357,7 @@ export function buildSchemas(catalog) {
       remove_metrics: { type: 'array', items: { type: 'string' }, description: 'Names of metrics to remove.' },
       task: { type: 'string', description: 'Task name the additions belong to (defaults to the context\'s first task).' },
       dry_run: { type: 'boolean', description: 'If true, validate the change WITHOUT building anything.' },
+      include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false; it is always written to the context files).' },
     },
   };
 
@@ -400,7 +405,16 @@ export function buildSchemas(catalog) {
     drop_context: { ...ctxRef, description: 'Tear down an entire isolated context (delete its files + artifacts).' },
     describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
     list_contexts: empty,
-    describe_catalog: empty,
+    describe_catalog: {
+      type: 'object', additionalProperties: false,
+      description: 'Discover the catalog PROGRESSIVELY (the events fact carries ~150 event-scoped properties, so it is not dumped at once). Call with NO arguments for a compact overview (models, event names, group-by paths, enums + counts). Then drill down with ONE of: model → that model\'s entities/time/dimensions + real physical columns; event → only the properties populated on that event; property → one property\'s full spec; search → find events/properties by substring.',
+      properties: {
+        model: { enum: catalog.modelKeys(), description: 'Drill into one model: its entities, time axis, dimensions and REAL physical columns.' },
+        event: { type: 'string', description: 'An event_name (from the overview): list the event_data properties POPULATED on that event — what you can measure/group/filter for it.' },
+        property: { type: 'string', description: 'An event property name: its type, the events it is populated on, and description.' },
+        search: { type: 'string', description: 'Substring to find matching event names and properties (name or description).' },
+      },
+    },
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
       description: 'Wait for `seconds` (capped at 60), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.',

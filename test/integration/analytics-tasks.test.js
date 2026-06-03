@@ -68,6 +68,37 @@ async function buildRecipe(t, id) {
 const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...input });
 
 // ── 1. trends: active_users_trend ────────────────────────────────────────────
+// #6: a numeric value that arrives as STRING is aggregable via cast:numeric.
+test('TASK cast: sum/avg a STRING-numeric property with cast:numeric', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.create_semantic_model({
+    name: 'castq',
+    semantic_models: [{
+      from: 'events',
+      event_scope: { event_name: ['level_completed'] },
+      measures: [
+        { name: 'sum_ct', agg: 'sum', field: 'complete_time_of_event_data', cast: 'numeric' },
+        { name: 'avg_ct', agg: 'average', field: 'complete_time_of_event_data', cast: 'numeric' },
+      ],
+    }],
+    metrics: [
+      { name: 'sum_ct', type: 'simple', measure: { name: 'sum_ct' } },
+      { name: 'avg_ct', type: 'simple', measure: { name: 'avg_ct' } },
+    ],
+  });
+  assert.equal(out.parse.ok, true, JSON.stringify(out.parse.error || out.parse));
+  const r = await q(out.context_id, { metrics: ['castq_sum_ct', 'castq_avg_ct'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error || r));
+  assert.equal(num(r.rows[0].castq_sum_ct), 1263);            // exact Σ complete_time
+  assert.ok(Math.abs(num(r.rows[0].castq_avg_ct) - 50.52) < 1e-6);
+  // the same aggregation WITHOUT a cast is rejected (string is not numeric)
+  await assert.rejects(engine.create_semantic_model({
+    name: 'castbad',
+    semantic_models: [{ from: 'events', event_scope: { event_name: ['level_completed'] }, measures: [{ name: 'bad', agg: 'average', field: 'complete_time_of_event_data' }] }],
+    metrics: [{ name: 'bad', type: 'simple', measure: { name: 'bad' } }],
+  }), /not numeric|cast/i);
+});
+
 test('TASK active_users_trend: DAU/WAU/MAU & event volume', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'active_users_trend');

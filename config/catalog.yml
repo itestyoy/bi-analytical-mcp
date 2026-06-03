@@ -166,6 +166,9 @@ models:
       - name: bundle_id
         data_type: string
         description: "Resolved store bundle id of the app the event came from. Present on every event."
+        meta:
+          mcp:
+            dimension: {}   # groupable on every event → segment by app without a users-join
       - name: main_data__app_id
         data_type: string
         description: >
@@ -514,18 +517,21 @@ models:
         meta:
           mcp:
             events: [ad_blocked, ad_incident, ad_analyzed]
+            array: { items: string }
       - name: report_reasons_of_additional_info_of_event_data
         data_type: array
         description: "AppHarbr reasons the ad was reported (string array). Events: ad_blocked, ad_incident, ad_analyzed."
         meta:
           mcp:
             events: [ad_blocked, ad_incident, ad_analyzed]
+            array: { items: string }
       - name: analyze_results_of_additional_info_of_event_data
         data_type: array
         description: "AppHarbr ad-analysis results (string array). Events: ad_analyzed (schema shared with ad_blocked, ad_incident)."
         meta:
           mcp:
             events: [ad_analyzed, ad_blocked, ad_incident]
+            array: { items: string }
       - name: type_of_crash_info_of_event_data
         data_type: string
         description: "Crash type captured when an ad caused a crash. Events: ad_finished (status=crash)."
@@ -895,6 +901,9 @@ models:
         meta:
           mcp:
             events: [fragment_finished, level_completed]
+            array:
+              encoding: json
+              fields: { word_number: int, word_name: string, time_from_previous: numeric, mistakes_from_previous: int, word_dictionary: string }
       # battle of wits
       - name: bot_level_of_event_data
         data_type: string

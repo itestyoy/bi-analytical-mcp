@@ -241,7 +241,9 @@ export function dbtSchemaToCatalog(doc) {
     const allColumns = []; // EVERY physical column (name + pipeline type) — referenceable in native pipelines
     for (const col of model.columns || []) {
       const cm = col.meta?.mcp || {};
-      allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
+      // Expose every REAL column to native pipelines — except the raw is_event_data
+      // payload marker, which may not exist as a physical column once flattened.
+      if (!cm.is_event_data) allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
       if (cm.entity) {
         if (cm.entity.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name };
@@ -453,11 +455,14 @@ export class Catalog {
   modelDimensionColumns(key) {
     const m = this.getModel(key);
     if (key === this.anchor) {
-      // events: event_name + the real session key column are useful categorical columns
+      // events: event_name + the real session key column, plus any column explicitly
+      // marked meta.mcp.dimension (e.g. bundle_id — present on every event, so it
+      // can segment by app without a users-join).
       const cols = [];
       if (m.event_name?.column) cols.push(m.event_name.column);
       if (m.entities?.session?.column) cols.push(m.entities.session.column);
-      return cols;
+      cols.push(...Object.keys(m.dimensions || {}));
+      return [...new Set(cols)];
     }
     return Object.keys(m.dimensions || {});
   }

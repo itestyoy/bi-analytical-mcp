@@ -61,8 +61,8 @@ before(async () => {
       { name: 'l1', agg: 'count', field: '*', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] },
       { name: 'l2', agg: 'count', field: '*', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 2 }] },
       { name: 'l3', agg: 'count', field: '*', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 3 }] },
-      { name: 'u1', agg: 'count_distinct', field: 'internal__player_id', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] },
-      { name: 'u2', agg: 'count_distinct', field: 'internal__player_id', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 2 }] },
+      { name: 'u1', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 1 }] },
+      { name: 'u2', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['level_started'], where: [{ property: 'level_id_of_event_data', op: 'eq', value: 2 }] },
     ] }],
     metrics: [
       { name: 's1', type: 'simple', measure: { name: 'l1' } },

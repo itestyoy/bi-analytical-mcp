@@ -9,7 +9,7 @@ version: 2
 #
 # The flattened column names match production where they overlap, so the recipes
 # (config/recipes.json) validate against BOTH this fixture and the real catalog.
-# The user key is internal__player_id (production grain), not appsflyer_id.
+# The user key is player_id_of_internal (production grain), not appsflyer_id.
 
 models:
   - name: fct_analytics_events
@@ -34,7 +34,7 @@ models:
           - tutorial
           - screen_changed
     columns:
-      - name: internal__player_id
+      - name: player_id_of_internal
         data_type: string
         description: "Player identifier; joins events to dim_users / fct_experiment_assignments."
         meta:
@@ -180,7 +180,7 @@ models:
       mcp:
         role: users
     columns:
-      - name: internal__player_id
+      - name: player_id_of_internal
         data_type: string
         description: "Player identifier (primary key)."
         meta:
@@ -231,7 +231,7 @@ models:
       mcp:
         role: experiments
     columns:
-      - name: internal__player_id
+      - name: player_id_of_internal
         data_type: string
         description: "Player identifier; joins to events/users by the user entity."
         meta:

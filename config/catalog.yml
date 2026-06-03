@@ -15,12 +15,18 @@ version: 2
 # (Fillwords, Jigsawgram, Relax Puzzles, Sky Words, Sudoku Master, Tile Trip,
 # Word Pizza, Word Search Sea, Word Spells).
 #
-# IMPORTANT for the AI consumer: the envelope columns (main_data__*, device_info__*,
-# state__*) are present on EVERY event. Each event_data__* property, by contrast,
-# only carries a value for the events listed in its `meta.mcp.events` array (also
-# repeated as "Events:" in the description) — on any other event_name it is NULL.
-# Always filter by event_name to the relevant event(s) before using an
-# event_data__* field; do not assume a payload field exists on every row.
+# NAMING: hierarchical names use `_of_` (leaf-first), NEVER `__` — MetricFlow
+# reserves `__` as the entity/dimension separator. The upstream payload field
+# event_data.additional_info.network is the column `network_of_additional_info_of_event_data`;
+# envelope main_data.app_id is `app_id_of_main_data`; the grain key is `player_id_of_internal`.
+# (Alias the physical columns to these names in the dbt model.)
+#
+# IMPORTANT for the AI consumer: the envelope columns (*_of_main_data, *_of_device_info,
+# *_of_state) are present on EVERY event. Each *_of_event_data payload property, by
+# contrast, only carries a value for the events listed in its `meta.mcp.events` array
+# (also repeated as "Events:" in the description) — on any other event_name it is NULL.
+# Always filter by event_name to the relevant event(s) before using a payload field;
+# do not assume it exists on every row.
 #
 # Types come from the NATIVE dbt `data_type` (date/timestamp -> time dimension,
 # else categorical) — not from meta. On a dimension model every non-entity column
@@ -29,15 +35,16 @@ version: 2
 #   entity:        { name, type: primary|foreign }  -> entity / join key
 #   is_time:       true (+ granularity, default day) -> the event time axis
 #   is_event_name: true                             -> the event_name column
-#   is_event_data: true                             -> the raw JSON payload column
+#   dimension:     {}                               -> mark an events-fact column groupable
+#   array:         { items|fields, encoding }       -> an array column (encoding: native|json) — unnestable
 #   values:        [..]                             -> categorical value hints (optional)
 #   events:        [..]                             -> event_name(s) a payload field applies to
 #
-# The grain / join key across all three models is `internal__player_id` (an INT64
+# The grain / join key across all three models is `player_id_of_internal` (an INT64
 # surrogate id present on the prod events fact, installs and experiments tables).
-# The events payload is ALREADY flattened upstream into event_data__* columns, so
-# the catalog documents them as real typed dimensions/measures (the raw json is
-# still kept as `event_data` for is_event_data anchor detection).
+# The events payload is ALREADY flattened upstream into real typed columns
+# (*_of_event_data), referenced directly — there is no raw JSON payload column. The
+# anchor (events fact) is detected from its is_event_name + is_time columns.
 #
 # The warehouse dialect is NOT stored here — it is runtime config, resolved from
 # the WAREHOUSE_DIALECT env var or the dbt profile's output `type`.
@@ -47,12 +54,12 @@ models:
     description: >
       Client analytics events fact: one row per tracked in-game event sent from
       the player's device. Every event shares an envelope (main_data context,
-      device_info, and a state snapshot of the player) plus a per-event payload
-      that has already been flattened upstream into event_data__* columns. Use
+      device_info, and a state snapshot of the player) plus a per-event payload,
+      all flattened upstream into real typed columns (*_of_event_data). Use
       event_name to pick an event type, device_time for the time axis, and
-      internal__player_id to join to dim_users / fct_experiment_assignments.
-      Envelope columns (main_data__*, device_info__*, state__*) exist on every
-      event; each event_data__* field only applies to the events in its
+      player_id_of_internal to join to dim_users / fct_experiment_assignments.
+      Envelope columns (*_of_main_data, *_of_device_info, *_of_state) exist on every
+      event; each *_of_event_data field only applies to the events in its
       meta.mcp.events array and is NULL elsewhere — always scope by event_name first.
     meta:
       mcp:
@@ -106,7 +113,7 @@ models:
           - wheel_spin
     columns:
       # ---- role columns ---------------------------------------------------
-      - name: internal__player_id
+      - name: player_id_of_internal
         data_type: integer
         description: >
           Stable internal player id (surrogate hash of appsflyer_id + bundle_id +
@@ -147,192 +154,243 @@ models:
           only exist from a given version (e.g. currency_income gained
           monetization_type in v1; ad events moved status from ad_started to
           ad_finished in later versions).
-      - name: event_data
-        data_type: json
-        description: >
-          Raw per-event JSON payload, kept verbatim. The same data is already
-          flattened into the typed event_data__* columns below — prefer those for
-          querying; use this only for keys not yet flattened.
         meta:
           mcp:
-            is_event_data: true
+            dimension: {}   # groupable on every event (filter/segment by schema version)
       - name: event_date
         data_type: timestamp
         description: >
           Day-truncated event date. Present on every event. This is the partition
           column of the source table — always constrain queries on it (or device_time).
+        meta:
+          mcp:
+            dimension: {}   # groupable (daily buckets); device_time remains the metric_time axis
 
       # ---- envelope: main_data (present on EVERY event) -------------------
       - name: bundle_id
         data_type: string
         description: "Resolved store bundle id of the app the event came from. Present on every event."
-      - name: main_data__app_id
+        meta:
+          mcp:
+            dimension: {}   # groupable on every event → segment by app without a users-join
+      - name: app_id_of_main_data
         data_type: string
         description: >
           Short app code identifying the game (e.g. fillwords, relax_puzzles,
           sky_words, tile_trip, word_pizza, word_search_sea, word_spells). Present on every event.
-      - name: main_data__platform
+        meta:
+          mcp:
+            dimension: {}
+      - name: platform_of_main_data
         data_type: string
         description: "Operating-system family the player is on. Present on every event."
-        meta: { mcp: { values: [android, ios] } }
-      - name: main_data__country
+        meta: { mcp: { dimension: {}, values: [android, ios] } }
+      - name: country_of_main_data
         data_type: string
         description: "Player country at event time (ISO 3166-1 alpha-2). Present on every event."
-      - name: main_data__media_source
+        meta:
+          mcp:
+            dimension: {}
+      - name: media_source_of_main_data
         data_type: string
         description: >
           Acquisition / attribution traffic source from AppsFlyer (e.g. organic,
           googleadwords_int, Facebook Ads). Server-derived. Present on every event.
-      - name: main_data__ab_test_group
+        meta:
+          mcp:
+            dimension: {}
+      - name: ab_test_group_of_main_data
         data_type: string
         description: >
           The in-app (product-side) A/B-test group the player currently belongs to.
           Present on every event. Distinct from monetization Applovin tests in
           test_name_of_additional_info_of_event_data.
-      - name: main_data__appsflyer_id
+        meta:
+          mcp:
+            dimension: {}
+      - name: appsflyer_id_of_main_data
         data_type: string
         description: "AppsFlyer device id (client-stored attribution id). Present on every event."
-      - name: main_data__appmetrica_id
+      - name: appmetrica_id_of_main_data
         data_type: string
         description: "AppMetrica device id. Present on every event."
-      - name: main_data__active_day
+      - name: active_day_of_main_data
         data_type: integer
         description: >
           Ordinal calendar active-day of the player, counting from 1 on the first
           active day. Present on every event. Useful as a lifetime/retention axis.
-      - name: main_data__playtime
+      - name: playtime_of_main_data
         data_type: numeric
         description: "Cumulative playtime in seconds (including ad views). Present on every event."
-      - name: main_data__build_version
+      - name: build_version_of_main_data
         data_type: string
         description: "Current app version (semantic version string) at event time. Present on every event."
-      - name: main_data__build_number
+        meta:
+          mcp:
+            dimension: {}
+      - name: build_number_of_main_data
         data_type: string
         description: "Current app build number at event time. Present on every event."
-      - name: main_data__install_build_version
+      - name: install_build_version_of_main_data
         data_type: string
         description: "App version the player originally installed (sent only for new players)."
-      - name: main_data__install_build_number
+        meta:
+          mcp:
+            dimension: {}
+      - name: install_build_number_of_main_data
         data_type: string
         description: "App build number the player originally installed."
-      - name: main_data__install_package
+      - name: install_package_of_main_data
         data_type: string
         description: >
           Android installer / vendor package that initiated the install; empty on
           iOS, 'undefined' for dev/sideloaded APKs.
-      - name: main_data__is_valid_install
+        meta:
+          mcp:
+            dimension: {}
+      - name: is_valid_install_of_main_data
         data_type: string
         description: "TRUE when install_package = com.android.vending (a legitimate Play Store install)."
-      - name: main_data__is_test
+        meta:
+          mcp:
+            dimension: {}
+      - name: is_test_of_main_data
         data_type: string
         description: "TRUE when the player is an internal tester; exclude for production analytics."
-      - name: main_data__event_id
+        meta:
+          mcp:
+            dimension: {}
+      - name: event_id_of_main_data
         data_type: string
         description: "Unique client-generated id of this event (used for dedup upstream). Present on every event."
-      - name: main_data__time_zone
+      - name: time_zone_of_main_data
         data_type: string
         description: "Player time-zone offset (±hh:mm) used to localize device_time. Present on every event."
-      - name: main_data__device_time_ms
+      - name: device_time_ms_of_main_data
         data_type: integer
         description: "Raw client event time as a local UNIX timestamp in milliseconds. Present on every event."
-      - name: main_data__first_launch_ms
+      - name: first_launch_ms_of_main_data
         data_type: integer
         description: "Player's first-launch time as a local UNIX timestamp in milliseconds. Present on every event."
 
       # ---- envelope: device_info (present on EVERY event) -----------------
-      - name: device_info__cpu_type
+      - name: cpu_type_of_device_info
         data_type: string
         description: "Device CPU type. Present on every event."
-      - name: device_info__device_model
+        meta:
+          mcp:
+            dimension: {}
+      - name: device_model_of_device_info
         data_type: string
         description: "Device model identifier. Present on every event."
-      - name: device_info__gpu
+        meta:
+          mcp:
+            dimension: {}
+      - name: gpu_of_device_info
         data_type: string
         description: "Device GPU name. Present on every event."
-      - name: device_info__graphics_memory_size
+        meta:
+          mcp:
+            dimension: {}
+      - name: graphics_memory_size_of_device_info
         data_type: string
         description: "Graphics memory size in MB (string). Present on every event."
-      - name: device_info__os_version
+      - name: os_version_of_device_info
         data_type: string
         description: "Operating-system version of the device. Present on every event."
-      - name: device_info__resolution
+        meta:
+          mcp:
+            dimension: {}
+      - name: resolution_of_device_info
         data_type: string
         description: "Screen resolution string. Present on every event."
-      - name: device_info__system_memory_size
+        meta:
+          mcp:
+            dimension: {}
+      - name: system_memory_size_of_device_info
         data_type: string
         description: "System RAM size in MB (string). Present on every event."
 
       # ---- envelope: state — player snapshot at event time (present on EVERY event) ----
-      - name: state__language
+      - name: language_of_state
         data_type: string
         description: "In-game language (IETF code) at event time. Present on every event."
-      - name: state__level_number
+        meta:
+          mcp:
+            dimension: {}
+      - name: level_number_of_state
         data_type: string
         description: >
           Last started level of the main progression (chain=common). Present on
           every event. NOTE: this counter starts at 0, unlike most ordinal counters
           which start at 1.
-      - name: state__level_fragment
+      - name: level_fragment_of_state
         data_type: string
         description: "Current sub-level (fragment) index within a staged level. Present on every event."
-      - name: state__puzzles_completed
+      - name: puzzles_completed_of_state
         data_type: string
         description: "Total puzzles the player has completed so far. Present on every event."
-      - name: state__relax_level
+      - name: relax_level_of_state
         data_type: string
         description: "Relax-progress level (percent), for relax-style games. Present on every event."
-      - name: state__skill_points
+      - name: skill_points_of_state
         data_type: string
         description: "Player's accumulated skill points. Present on every event."
-      - name: state__chosen_skill_level
+      - name: chosen_skill_level_of_state
         data_type: string
         description: "Player-selected difficulty (Sudoku): not_assigned / novice / intermediate / expert."
-      - name: state__active_segments
+        meta:
+          mcp:
+            dimension: {}
+      - name: active_segments_of_state
         data_type: string
         description: "Firebase remote-config segments the player is currently in. Present on every event."
-      - name: state__coins_balance
+        meta:
+          mcp:
+            dimension: {}
+      - name: coins_balance_of_state
         data_type: string
         description: "Soft-currency (coins) balance at event time. Present on every event."
-      - name: state__lives_balance
+      - name: lives_balance_of_state
         data_type: string
         description: "Lives balance (deprecated in newer projects)."
-      - name: state__bonus_lives_balance
+      - name: bonus_lives_balance_of_state
         data_type: string
         description: "Bonus-lives balance."
-      - name: state__spins
+      - name: spins_of_state
         data_type: string
         description: "Wheel/roulette spin balance."
-      - name: state__booster_all_notes_balance
+      - name: booster_all_notes_balance_of_state
         data_type: string
         description: "Balance of the 'all notes' booster."
-      - name: state__hint_open_first_letter_balance
+      - name: hint_open_first_letter_balance_of_state
         data_type: string
         description: "Balance of the 'open first letter' hint."
-      - name: state__hint_open_any_letter_balance
+      - name: hint_open_any_letter_balance_of_state
         data_type: string
         description: "Balance of the 'open any letter' hint."
-      - name: state__hint_open_several_letters_balance
+      - name: hint_open_several_letters_balance_of_state
         data_type: string
         description: "Balance of the 'open several letters' hint."
-      - name: state__hint_open_cell_balance
+      - name: hint_open_cell_balance_of_state
         data_type: string
         description: "Balance of the 'open cell' hint."
-      - name: state__hint_magnet_balance
+      - name: hint_magnet_balance_of_state
         data_type: string
         description: "Balance of the 'magnet' hint."
-      - name: state__hint_cancel_balance
+      - name: hint_cancel_balance_of_state
         data_type: string
         description: "Balance of the 'cancel' hint."
-      - name: state__hint_shuffle_balance
+      - name: hint_shuffle_balance_of_state
         data_type: string
         description: "Balance of the 'shuffle' hint."
-      - name: state__hint_clear_balance
+      - name: hint_clear_balance_of_state
         data_type: string
         description: "Balance of the 'clear' hint (deprecated)."
-      - name: state__hint_extra_slot_balance
+      - name: hint_extra_slot_balance_of_state
         data_type: string
         description: "Balance of the 'extra slot' hint."
-      - name: state__auto_openers_balance
+      - name: auto_openers_balance_of_state
         data_type: string
         description: "Balance of auto-opener hints."
 
@@ -444,7 +502,7 @@ models:
             events: [ad_loaded, ad_finished]
       - name: test_name_of_additional_info_of_event_data
         data_type: string
-        description: "Applovin split-tool A/B test name (monetization-side experiment, e.g. 2602_sw_gp_rv_aa_test); distinct from product test main_data__ab_test_group. Events: ad_loaded, ad_started, ad_finished, ad_redirected."
+        description: "Applovin split-tool A/B test name (monetization-side experiment, e.g. 2602_sw_gp_rv_aa_test); distinct from product test ab_test_group_of_main_data. Events: ad_loaded, ad_started, ad_finished, ad_redirected."
         meta:
           mcp:
             events: [ad_loaded, ad_started, ad_finished, ad_redirected]
@@ -514,18 +572,21 @@ models:
         meta:
           mcp:
             events: [ad_blocked, ad_incident, ad_analyzed]
+            array: { items: string }
       - name: report_reasons_of_additional_info_of_event_data
         data_type: array
         description: "AppHarbr reasons the ad was reported (string array). Events: ad_blocked, ad_incident, ad_analyzed."
         meta:
           mcp:
             events: [ad_blocked, ad_incident, ad_analyzed]
+            array: { items: string }
       - name: analyze_results_of_additional_info_of_event_data
         data_type: array
         description: "AppHarbr ad-analysis results (string array). Events: ad_analyzed (schema shared with ad_blocked, ad_incident)."
         meta:
           mcp:
             events: [ad_analyzed, ad_blocked, ad_incident]
+            array: { items: string }
       - name: type_of_crash_info_of_event_data
         data_type: string
         description: "Crash type captured when an ad caused a crash. Events: ad_finished (status=crash)."
@@ -895,6 +956,9 @@ models:
         meta:
           mcp:
             events: [fragment_finished, level_completed]
+            array:
+              encoding: json
+              fields: { word_number: int, word_name: string, time_from_previous: numeric, mistakes_from_previous: int, word_dictionary: string }
       # battle of wits
       - name: bot_level_of_event_data
         data_type: string
@@ -1286,10 +1350,10 @@ models:
 
   - name: dim_users
     description: >
-      User attributes dimension: one row per player, keyed by internal__player_id,
+      User attributes dimension: one row per player, keyed by player_id_of_internal,
       built from the player's install record. Holds acquisition, geo, device and
       app attributes used to segment and cohort players. Join to fct_analytics_events
-      and fct_experiment_assignments on internal__player_id. All columns here are
+      and fct_experiment_assignments on player_id_of_internal. All columns here are
       per-player attributes (no per-event scoping applies).
     meta:
       mcp:
@@ -1297,7 +1361,7 @@ models:
         measures:
           users_count: { agg: count, expr: "1" }
     columns:
-      - name: internal__player_id
+      - name: player_id_of_internal
         data_type: integer
         description: "Player identifier (primary key; the join target for events and experiments)."
         meta:
@@ -1359,12 +1423,12 @@ models:
       which experiment a player entered, the assigned variant, and the
       [assigned_at, ended_at] window. To analyze a test, window events to that
       interval, group by experiment_name + variant_group, aggregate per group, and
-      run the ab_test tool. Join to events/users on internal__player_id.
+      run the ab_test tool. Join to events/users on player_id_of_internal.
     meta:
       mcp:
         role: experiments
     columns:
-      - name: internal__player_id
+      - name: player_id_of_internal
         data_type: integer
         description: "Player identifier (joins to events and users; many rows per player)."
         meta:

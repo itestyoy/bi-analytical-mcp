@@ -45,7 +45,7 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'internal__player_id', attrs: ['country'] },
+    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -147,7 +147,7 @@ test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'internal__player_id', attrs: ['country'] },
+    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
     { stage: 'pivot', group_by: [], on: 'country', fn: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -200,7 +200,7 @@ test('pipeline compute window: row_number per user → exactly 1 user has a 2nd 
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'compute', name: 'pseq', op: 'window', fn: 'row_number', partition_by: ['internal__player_id'], order_by: [{ key: 'device_time', direction: 'asc' }] },
+    { stage: 'compute', name: 'pseq', op: 'window', fn: 'row_number', partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time', direction: 'asc' }] },
     { stage: 'where', conditions: [{ column: 'pseq', op: 'eq', value: 2 }] },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'repeat_buyers', fn: 'count' }] },
   ]);
@@ -265,10 +265,10 @@ test('pipeline where operands: price>=10 (operand const) and device_time<now →
 test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date order key)', opts, async (t) => {
   if (skip(t)) return;
   const r = await run([
-    { stage: 'where', conditions: [{ column: 'internal__player_id', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'where', conditions: [{ column: 'player_id_of_internal', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
     { stage: 'compute', name: 'day', op: 'unix_date', column: 'device_time' },
-    { stage: 'compute', name: 'roll', op: 'window', fn: 'sum', column: 'price', partition_by: ['internal__player_id'], order_by: [{ key: 'day' }], frame: { mode: 'range', preceding: 1, following: 0 } },
+    { stage: 'compute', name: 'roll', op: 'window', fn: 'sum', column: 'price', partition_by: ['player_id_of_internal'], order_by: [{ key: 'day' }], frame: { mode: 'range', preceding: 1, following: 0 } },
     { stage: 'order_by', keys: [{ key: 'day', direction: 'asc' }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -282,7 +282,7 @@ test('pipeline approx_count_distinct: distinct payers = 7 (exact fallback on PGl
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'aggregate', group_by: [], measures: [{ name: 'payers', fn: 'approx_count_distinct', column: 'internal__player_id' }, { name: 'exact', fn: 'count_distinct', column: 'internal__player_id' }] },
+    { stage: 'aggregate', group_by: [], measures: [{ name: 'payers', fn: 'approx_count_distinct', column: 'player_id_of_internal' }, { name: 'exact', fn: 'count_distinct', column: 'player_id_of_internal' }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.equal(num(r.rows[0].payers), 7); // u1,u3,u5,u7,u9,u10,u11
@@ -296,7 +296,7 @@ test('pipeline HLL hll_init→hll_merge: merged distinct buyers = 7 (naive sum =
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'pid', op: 'extract', source: 'product_id_of_event_data', type: 'string' },
-    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', fn: 'hll_init', column: 'internal__player_id' }, { name: 'n', fn: 'count_distinct', column: 'internal__player_id' }] },
+    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', fn: 'hll_init', column: 'player_id_of_internal' }, { name: 'n', fn: 'count_distinct', column: 'player_id_of_internal' }] },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', fn: 'hll_merge', column: 'sk' }, { name: 'naive', fn: 'sum', column: 'n' }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -310,7 +310,7 @@ test('pipeline HLL hll_merge_partial→hll_extract: staged merge then extract = 
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'pid', op: 'extract', source: 'product_id_of_event_data', type: 'string' },
-    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', fn: 'hll_init', column: 'internal__player_id' }] },
+    { stage: 'aggregate', group_by: ['pid'], measures: [{ name: 'sk', fn: 'hll_init', column: 'player_id_of_internal' }] },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'merged', fn: 'hll_merge_partial', column: 'sk' }] },
     { stage: 'compute', name: 'total', op: 'hll_extract', column: 'merged' },
   ]);
@@ -372,8 +372,8 @@ test('pipeline compute string/const: concat + upper labels group correctly (P1=3
 test('pipeline compute date_diff: u1 purchases on install-day and +1 → sum(dsi)=1, count=2', opts, async (t) => {
   if (skip(t)) return;
   const r = await run([
-    { stage: 'where', conditions: [{ column: 'internal__player_id', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'join', with: 'users', on: 'internal__player_id', attrs: ['install_date'] },
+    { stage: 'where', conditions: [{ column: 'player_id_of_internal', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['install_date'] },
     { stage: 'compute', name: 'dsi', op: 'date_diff', from: { column: 'install_date' }, to: { column: 'device_time' }, unit: 'day' },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'total_dsi', fn: 'sum', column: 'dsi' }, { name: 'max_dsi', fn: 'max', column: 'dsi' }, { name: 'n', fn: 'count' }] },
   ]);
@@ -403,7 +403,7 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, as
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'internal__player_id', attrs: ['country'] },
+    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }, { name: 'n', fn: 'count' }] },
     { stage: 'unpivot', keep: ['country'], columns: ['revenue', 'n'], name_as: 'metric', value_as: 'value' },
   ]);

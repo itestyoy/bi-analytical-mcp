@@ -71,7 +71,7 @@ before(async () => {
       dimensions: [{ source: 'event_property', property: 'product_id_of_event_data' }],
       measures: [
         { name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' },
-        { name: 'payers', agg: 'count_distinct', field: 'internal__player_id' },
+        { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' },
         { name: 'purchases', agg: 'count', field: '*' },
       ] }],
     metrics: [
@@ -102,8 +102,8 @@ before(async () => {
   await create({
     name: 'conv', use_base_models: ['users'],
     semantic_models: [{ from: 'events', measures: [
-      { name: 'visitors', agg: 'count_distinct', field: 'internal__player_id', event_name: ['new_session'] },
-      { name: 'buyers', agg: 'count_distinct', field: 'internal__player_id', event_name: ['iap_purchase_completed'] },
+      { name: 'visitors', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['new_session'] },
+      { name: 'buyers', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['iap_purchase_completed'] },
     ] }],
     metrics: [
       { name: 'visitors', type: 'simple', measure: { name: 'visitors' } },
@@ -117,7 +117,7 @@ before(async () => {
   await create({
     name: 'beh',
     semantic_models: [{ from: 'events', measures: [
-      { name: 'active', agg: 'count_distinct', field: 'internal__player_id', event_name: ['new_session'] },
+      { name: 'active', agg: 'count_distinct', field: 'player_id_of_internal', event_name: ['new_session'] },
       { name: 'purch', agg: 'sum_boolean', event_name: ['iap_purchase_completed'] },
     ] }],
     metrics: [

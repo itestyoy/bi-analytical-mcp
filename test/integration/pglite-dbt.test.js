@@ -1,6 +1,6 @@
 // Focused smoke: declarative create -> dbt parse -> mf query against dbt Core +
 // MetricFlow + PGlite. Builds a monetization model (iap_purchase_completed,
-// sum price_in_usd, count_distinct internal__player_id) and asserts the EXACT totals
+// sum price_in_usd, count_distinct player_id_of_internal) and asserts the EXACT totals
 // documented in test/integration/fixtures/SEED_DATA.md. Data-only assertions:
 // only res.ok / res.row_count and numeric values keyed out of res.rows.
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
@@ -58,7 +58,7 @@ before(async () => {
       dimensions: [{ source: 'event_property', property: 'product_id_of_event_data' }],
       measures: [
         { name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' },
-        { name: 'payers', agg: 'count_distinct', field: 'internal__player_id' },
+        { name: 'payers', agg: 'count_distinct', field: 'player_id_of_internal' },
         { name: 'purchases', agg: 'count', field: '*' },
       ],
     }],

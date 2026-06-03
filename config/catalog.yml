@@ -178,24 +178,36 @@ models:
         description: >
           Short app code identifying the game (e.g. fillwords, relax_puzzles,
           sky_words, tile_trip, word_pizza, word_search_sea, word_spells). Present on every event.
+        meta:
+          mcp:
+            dimension: {}
       - name: platform_of_main_data
         data_type: string
         description: "Operating-system family the player is on. Present on every event."
-        meta: { mcp: { values: [android, ios] } }
+        meta: { mcp: { dimension: {}, values: [android, ios] } }
       - name: country_of_main_data
         data_type: string
         description: "Player country at event time (ISO 3166-1 alpha-2). Present on every event."
+        meta:
+          mcp:
+            dimension: {}
       - name: media_source_of_main_data
         data_type: string
         description: >
           Acquisition / attribution traffic source from AppsFlyer (e.g. organic,
           googleadwords_int, Facebook Ads). Server-derived. Present on every event.
+        meta:
+          mcp:
+            dimension: {}
       - name: ab_test_group_of_main_data
         data_type: string
         description: >
           The in-app (product-side) A/B-test group the player currently belongs to.
           Present on every event. Distinct from monetization Applovin tests in
           test_name_of_additional_info_of_event_data.
+        meta:
+          mcp:
+            dimension: {}
       - name: appsflyer_id_of_main_data
         data_type: string
         description: "AppsFlyer device id (client-stored attribution id). Present on every event."
@@ -213,12 +225,18 @@ models:
       - name: build_version_of_main_data
         data_type: string
         description: "Current app version (semantic version string) at event time. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
       - name: build_number_of_main_data
         data_type: string
         description: "Current app build number at event time. Present on every event."
       - name: install_build_version_of_main_data
         data_type: string
         description: "App version the player originally installed (sent only for new players)."
+        meta:
+          mcp:
+            dimension: {}
       - name: install_build_number_of_main_data
         data_type: string
         description: "App build number the player originally installed."
@@ -227,12 +245,21 @@ models:
         description: >
           Android installer / vendor package that initiated the install; empty on
           iOS, 'undefined' for dev/sideloaded APKs.
+        meta:
+          mcp:
+            dimension: {}
       - name: is_valid_install_of_main_data
         data_type: string
         description: "TRUE when install_package = com.android.vending (a legitimate Play Store install)."
+        meta:
+          mcp:
+            dimension: {}
       - name: is_test_of_main_data
         data_type: string
         description: "TRUE when the player is an internal tester; exclude for production analytics."
+        meta:
+          mcp:
+            dimension: {}
       - name: event_id_of_main_data
         data_type: string
         description: "Unique client-generated id of this event (used for dedup upstream). Present on every event."
@@ -250,21 +277,36 @@ models:
       - name: cpu_type_of_device_info
         data_type: string
         description: "Device CPU type. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
       - name: device_model_of_device_info
         data_type: string
         description: "Device model identifier. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
       - name: gpu_of_device_info
         data_type: string
         description: "Device GPU name. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
       - name: graphics_memory_size_of_device_info
         data_type: string
         description: "Graphics memory size in MB (string). Present on every event."
       - name: os_version_of_device_info
         data_type: string
         description: "Operating-system version of the device. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
       - name: resolution_of_device_info
         data_type: string
         description: "Screen resolution string. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
       - name: system_memory_size_of_device_info
         data_type: string
         description: "System RAM size in MB (string). Present on every event."
@@ -273,6 +315,9 @@ models:
       - name: language_of_state
         data_type: string
         description: "In-game language (IETF code) at event time. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
       - name: level_number_of_state
         data_type: string
         description: >
@@ -294,9 +339,15 @@ models:
       - name: chosen_skill_level_of_state
         data_type: string
         description: "Player-selected difficulty (Sudoku): not_assigned / novice / intermediate / expert."
+        meta:
+          mcp:
+            dimension: {}
       - name: active_segments_of_state
         data_type: string
         description: "Firebase remote-config segments the player is currently in. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
       - name: coins_balance_of_state
         data_type: string
         description: "Soft-currency (coins) balance at event time. Present on every event."

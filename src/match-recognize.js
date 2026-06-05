@@ -115,6 +115,13 @@ function resolve(catalog, spec, dialect, availableCols = null) {
   // Order key (the sequence axis): caller may override; defaults to the event time.
   const timeCol = spec.order_by || m.time.column;
   const mode = spec.mode || 'ordered';
+  // What may appear BETWEEN consecutive steps (ordered mode only):
+  //  - 'any' : any rows, including repeats of step events — i.e. "the next later
+  //            occurrence of step i+1", repeats don't break the match.
+  //  - 'gap' : only non-step events; a repeat of any step event breaks/advances.
+  //  Unset = each dialect's historical default (Postgres ~ 'any', BigQuery ~ 'gap');
+  //  set it explicitly for identical semantics across engines.
+  const betweenSteps = spec.between_steps || null;
   const steps = spec.steps.map((s, i) => ({ idx: i + 1, name: s.name || `s${i + 1}` }));
   const byName = new Map(steps.map((s) => [s.name, s]));
   const stepIdx = (name) => {
@@ -158,14 +165,24 @@ function resolve(catalog, spec, dialect, availableCols = null) {
 
   const stepPreds = (d, col) => spec.steps.map((s) => stepPredicate(catalog, s, d, col, prepCols));
   const rows = spec.rows || 'one_per_partition';
-  return { m, partCols, timeCol, mode, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
+  return { m, partCols, timeCol, mode, betweenSteps, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
 }
 
-function nestedPattern(steps, withGap) {
+// gapMode: false (strict, no filler), 'single' (one GAP = "not any step" between every
+// pair), or 'perlevel' (G_i = "not the NEXT step" before step i+1 → any-later semantics).
+function nestedPattern(steps, gapMode) {
   const sym = steps.map((s) => `S${s.idx}`);
-  const gap = withGap ? 'GAP* ' : '';
-  const nestFrom = (i) => (i === sym.length - 1 ? `${gap}${sym[i]}` : `${gap}${sym[i]} (${nestFrom(i + 1)})?`);
+  const gapFor = (i) => (!gapMode ? '' : gapMode === 'perlevel' ? `G${i}* ` : 'GAP* ');
+  const nestFrom = (i) => (i === sym.length - 1 ? `${gapFor(i)}${sym[i]}` : `${gapFor(i)}${sym[i]} (${nestFrom(i + 1)})?`);
   return sym.length > 1 ? `(${sym[0]} (${nestFrom(1)})?)` : `(${sym[0]})`;
+}
+
+/** Gap strategy for a resolved spec: strict → none; between_steps='any' → per-level
+ *  (filler = "not the next step", so repeats of other step events don't break the
+ *  match); otherwise the historical single-GAP ("not any step"). */
+function gapModeFor(r) {
+  if (r.mode === 'strict') return false;
+  return r.betweenSteps === 'any' ? 'perlevel' : 'single';
 }
 
 
@@ -202,11 +219,18 @@ export function matchStepPostgres(r, fromRel, catalog) {
   ctes.push({ name: 'r1', sql: perMatch
     ? `SELECT ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1`
     : `SELECT DISTINCT ON (${pkList}) ${pkList}, ts AS t1${carried1(1)} FROM ev WHERE is1 ORDER BY ${pkList}, ts` });
+  // between_steps='gap': forbid ANY step event between the previous step and this one
+  // (only non-step rows may fill the gap). Unset/'any' = nearest later occurrence.
+  const anyStepG = r.steps.map((_, k) => `g.is${k + 1}`).join(' OR ');
+  const gapGuard = (i) => (r.betweenSteps === 'gap'
+    ? ` AND NOT EXISTS (SELECT 1 FROM ev g WHERE ${pk.map((c) => `g.${c} = e.${c}`).join(' AND ')} AND g.ts > r${i - 1}.t${i - 1} AND g.ts < e.ts AND (${anyStepG}))`
+    : '');
   for (let i = 2; i <= r.steps.length; i++) {
     const joinOn = pk.map((c) => `e.${c} = r${i - 1}.${c}`).join(' AND ');
+    const where = `e.is${i} AND e.ts > r${i - 1}.t${i - 1}${gapGuard(i)}`;
     ctes.push({ name: `r${i}`, sql: perMatch
-      ? `SELECT DISTINCT ON (${pkE}, r${i - 1}.t1) ${pkE}, r${i - 1}.t1 AS t1, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY ${pkE}, r${i - 1}.t1, e.ts`
-      : `SELECT DISTINCT ON (${pkE}) ${pkE}, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE e.is${i} AND e.ts > r${i - 1}.t${i - 1} ORDER BY ${pkE}, e.ts` });
+      ? `SELECT DISTINCT ON (${pkE}, r${i - 1}.t1) ${pkE}, r${i - 1}.t1 AS t1, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE ${where} ORDER BY ${pkE}, r${i - 1}.t1, e.ts`
+      : `SELECT DISTINCT ON (${pkE}) ${pkE}, e.ts AS t${i}${carried(i)} FROM ev e JOIN r${i - 1} ON ${joinOn} WHERE ${where} ORDER BY ${pkE}, e.ts` });
   }
   const sel = [...pk.map((c) => `r1.${c}`), ...r.steps.map((s) => (s.idx === 1 ? 'r1.t1' : `r${s.idx}.t${s.idx}`)), ...r.propCaptures.map((c) => `r${c.idx}.${c.id}`)];
   let joins = 'FROM r1';
@@ -244,7 +268,9 @@ export function matchStepBigQuery(r, fromRel, catalog) {
     ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
-  if (r.mode !== 'strict') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
+  const gapMode = gapModeFor(r);
+  if (gapMode === 'single') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
+  else if (gapMode === 'perlevel') for (let i = 1; i < r.steps.length; i++) defines.push(`    G${i} AS NOT (${preds[i]})`);
   const furthestCase = r.steps.slice().reverse().map((s) => `WHEN t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
   const reached = r.steps.map((s) => `    t${s.idx} IS NOT NULL AS reached_${s.name}`);
   const secs = r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `    TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`);
@@ -259,7 +285,7 @@ ${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')
     ORDER BY ${r.timeCol}
     MEASURES
 ${measures}${r.rows === 'one_per_match' ? '\n    AFTER MATCH SKIP TO NEXT ROW' : ''}
-    PATTERN ${nestedPattern(r.steps, r.mode !== 'strict')}
+    PATTERN ${nestedPattern(r.steps, gapMode)}
     DEFINE
 ${defines.join(',\n')}
   )${r.rows === 'one_per_match' ? '' : `\n  QUALIFY ROW_NUMBER() OVER (PARTITION BY ${r.partCols.join(', ')} ORDER BY t1) = 1`}`;
@@ -278,12 +304,12 @@ function matchOutputColumns(r) {
 /** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
 function matchRecognizeSchema(catalog) {
   const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
-  const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property or an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME }, op: { enum: CMP }, value: {} } };
+  const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: CMP }, value: {} } };
   const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Event(s) that satisfy this step.' }, where: { type: 'array', items: stepWhere, description: 'Extra conditions narrowing the step.' } } };
   const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'avg', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
-    description: 'An ordered funnel / path detector: it matches the step sequence INDEPENDENTLY within each partition, ordered by `order_by`. Output granularity is set by `rows`: one_per_partition (default) = one row per partition from its first match (counts players); one_per_match = one row per occurrence of the start step (counts situations). Each row has reached_<step> flags, furthest_step_name, completed, step times, and any captured metric values — which downstream stages (join/where/aggregate) slice or aggregate (e.g. conversion by country). For funnels, conversion, and time-between-steps.',
+    description: 'An ordered funnel / path detector: it matches the step sequence INDEPENDENTLY within each partition, ordered by `order_by`. Output granularity is set by `rows`: one_per_partition (default) = one row per partition from its first match (counts players); one_per_match = one row per occurrence of the start step (counts situations). OUTPUT COLUMNS (all available to downstream join/where/aggregate stages): the `partition_by` column(s) are CARRIED THROUGH unchanged (e.g. the user key, so you can join dim_users after); plus first_seen_at, furthest_step_name, completed, one reached_<step> boolean per step, secs_<metric> for each avg_seconds_between metric, and one column per captured property. For funnels, conversion, and time-between-steps.',
     properties: {
       stage: { const: 'match_recognize' },
       partition_by: {
@@ -293,6 +319,7 @@ function matchRecognizeSchema(catalog) {
       order_by: { type: 'string', pattern: NAME, description: 'Column that orders events within each partition (the sequence axis). Defaults to the event time.' },
       mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order, other events may occur between them; strict = each step must be the immediately next event.' },
       rows: { enum: ['one_per_partition', 'one_per_match'], default: 'one_per_partition', description: 'one_per_partition (default) = one row per partition (e.g. per user), from its FIRST match — counts "players"; one_per_match = one row per occurrence of the sequence start (the first step) — counts "situations" (a partition can yield several; matches may overlap — a new match can start on the next row).' },
+      between_steps: { enum: ['any', 'gap'], description: 'What may appear BETWEEN consecutive steps (ordered mode). "any" = the NEXT LATER occurrence of the next step — repeats of step events in between do NOT break the match (e.g. a second currency_outcome before the reward still matches). "gap" = only NON-step events may appear between steps; a repeat of any step event breaks it. Omit for the per-dialect historical default (set it explicitly for identical results across BigQuery and the local engine).' },
       filter: {
         type: 'object', additionalProperties: false, description: 'Optional event-level pre-filter applied BEFORE matching (speed; narrows the population only). To filter by USER attributes, add a join (users) + where stage before this one instead.',
         properties: {

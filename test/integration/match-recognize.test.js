@@ -87,6 +87,47 @@ test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-u
   assert.equal(reached(out.rows, 'tut3'), 3);
 });
 
+// A1: between_steps option. 'any' = nearest-later occurrence (repeats between steps
+// don't break the match) — exactly the local engine's native behavior, so setting it
+// explicitly equals the default (the cross-engine consistency contract: the same value
+// makes BigQuery match too). 'gap' = only non-step events may fill the gap; it can
+// never ADD matches, so it is a subset of 'any'.
+test('match_recognize between_steps: explicit "any" equals the default; "gap" is a valid subset', opts, async (t) => {
+  if (skip(t)) return;
+  const steps = [{ name: 'start', event_name: ['currency_outcome'] }, { name: 'done', event_name: ['ad_finished'] }];
+  const mk = (between_steps) => [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], rows: 'one_per_match', between_steps, steps }];
+  const completed = (o) => o.rows.filter((r) => tru(r.completed)).length;
+  const A = completed(await pipe(mk('any')));
+  const D = completed(await pipe(mk(undefined)));
+  const G = completed(await pipe(mk('gap'))); // builds ok ⇒ the NOT EXISTS gap guard is valid SQL
+  assert.equal(A, 5, 'all 5 currency_outcome occurrences reach a later ad_finished');
+  assert.equal(D, A, 'explicit between_steps="any" == default (nearest-later) on the local engine');
+  assert.ok(G <= A && G >= 0, `gap (${G}) is a subset of any (${A}) — never over-matches`);
+});
+
+// A2/A4: the pipeline response documents its output columns + how to re-read it.
+test('pipeline response: output_columns (carried partition key) + read_with hint', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await pipe([matchActivation()]);
+  assert.ok(Array.isArray(out.output_columns), 'output_columns present');
+  const names = out.output_columns.map((c) => c.name);
+  assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to the output');
+  assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel columns present');
+  assert.equal(out.read_with?.tool, 'get_query_result');
+  assert.equal(out.read_with?.table, out.model);
+});
+
+// A5: dry_run returns a cheap source-volume estimate; a narrower window scans fewer rows.
+test('dry_run estimated_source_rows: real count, monotonic in the time window', opts, async (t) => {
+  if (skip(t)) return;
+  const stages = [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] }];
+  const wide = await engine.register_native_model({ dry_run: true, name: 'est_wide', pipeline: { stages } });
+  const narrow = await engine.register_native_model({ dry_run: true, name: 'est_narrow', pipeline: { time_range: { start: '2026-01-05', end: '2026-01-05' }, stages } });
+  assert.ok(Number.isInteger(wide.estimated_source_rows) && wide.estimated_source_rows > 0, 'full source count is a positive integer');
+  assert.ok(narrow.estimated_source_rows > 0 && narrow.estimated_source_rows < wide.estimated_source_rows, 'a single day scans fewer rows than the whole fact');
+  assert.ok(wide.output_columns.some((c) => c.name === 'event_name'), 'dry_run also reports output_columns');
+});
+
 // #5: rows option — one_per_partition (players) vs one_per_match (situations).
 test('match_recognize rows: one_per_partition (12 players) vs one_per_match (28 starts)', opts, async (t) => {
   if (skip(t)) return;

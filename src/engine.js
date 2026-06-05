@@ -10,6 +10,7 @@ import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
 import { dateEndExclusive } from './match-recognize.js'; // registers the match_recognize pipeline stage
+import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
 import { JobManager } from './jobs.js';
 import { buildProjection } from './projection.js';
@@ -226,7 +227,17 @@ export class Engine {
     });
     if (input.dry_run) {
       const { pg, bq } = renderBoth();
-      return { kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect, columns: [...pg.columns.keys()], model_sql: pg.sql, model_sql_bigquery: bq };
+      const resp = {
+        kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect,
+        columns: [...pg.columns.keys()],
+        output_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+        model_sql: pg.sql, model_sql_bigquery: bq,
+      };
+      // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
+      // (no full materialize). Lets the caller size the scan before committing.
+      const est = await this._estimateSourceRows(source, tr);
+      if (est != null) resp.estimated_source_rows = est;
+      return resp;
     }
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
@@ -250,7 +261,11 @@ export class Engine {
     }
     return {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
-      columns, row_count: rows.length, rows, model_sql_bigquery: bq, build,
+      columns, output_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+      row_count: rows.length, rows, model_sql_bigquery: bq, build,
+      // A4: how to read this result again — these rows are a pipeline model, re-read
+      // with get_query_result (NOT query_semantic_model, which is for metric queries).
+      read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
       assumptions: [
         `Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`,
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
@@ -259,6 +274,31 @@ export class Engine {
         ? ['time_range produced 0 rows — verify the window. A date-only `end` is treated as inclusive (the whole day, next-day-exclusive); pass a full datetime for finer bounds.']
         : [],
     };
+  }
+
+  /**
+   * A5: a cheap pre-run volume estimate — COUNT(*) over a source model within an
+   * optional time window (the same window the pipeline will apply). Lets the caller
+   * gauge the scan before materializing. Best-effort: returns null when there is no
+   * runner / base project, or the count fails.
+   */
+  async _estimateSourceRows(sourceKey, tr) {
+    const base = this.ctxs.baseProjectDir;
+    if (!this.runner || !base) return null;
+    const m = this.catalog.getModel(sourceKey);
+    const tcol = m.time?.column;
+    let where = '';
+    if (tr && (tr.start || tr.end) && tcol) {
+      const cl = [];
+      if (tr.start) cl.push(`${tcol} >= ${sqlLiteral(tr.start)}`);
+      if (tr.end) { const ex = dateEndExclusive(tr.end); cl.push(ex ? `${tcol} < ${sqlLiteral(ex)}` : `${tcol} <= ${sqlLiteral(tr.end)}`); }
+      if (cl.length) where = ` WHERE ${cl.join(' AND ')}`;
+    }
+    try {
+      const r = await this.runner.show(base, `SELECT COUNT(*) AS n FROM {{ ref('${m.dbt_model}') }}${where}`, 1);
+      if (r.ok && r.rows?.[0]) return Number(r.rows[0].n);
+    } catch { /* estimate is best-effort */ }
+    return null;
   }
 
   /** Update a registered native model in place (re-generate + rebuild). */

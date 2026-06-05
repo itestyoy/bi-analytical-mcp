@@ -26,9 +26,11 @@ export class ValueIndex {
       this._delValues = this.db.prepare('DELETE FROM prop_values WHERE property = ?');
       this._insValue = this.db.prepare('INSERT INTO prop_values (property, value, freq) VALUES (?, ?, ?)');
       this._upStats = this.db.prepare('INSERT INTO prop_stats (property, distinct_count, total_count, indexed_at) VALUES (?, ?, ?, ?) ON CONFLICT(property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, indexed_at=excluded.indexed_at');
-      this._selValues = this.db.prepare('SELECT value, freq FROM prop_values WHERE property = ? ORDER BY freq DESC LIMIT ?');
+      // value ASC tiebreak keeps ordering deterministic on ties (and identical to the
+      // in-memory fallback); value is unique per property (PK), so it fully orders ties.
+      this._selValues = this.db.prepare('SELECT value, freq FROM prop_values WHERE property = ? ORDER BY freq DESC, value ASC LIMIT ?');
       this._selStats = this.db.prepare('SELECT distinct_count, total_count, indexed_at FROM prop_stats WHERE property = ?');
-      this._searchValues = this.db.prepare("SELECT property, value, freq FROM prop_values WHERE instr(lower(value), ?) > 0 ORDER BY freq DESC LIMIT ?");
+      this._searchValues = this.db.prepare("SELECT property, value, freq FROM prop_values WHERE instr(lower(value), ?) > 0 ORDER BY freq DESC, value ASC LIMIT ?");
     } catch {
       this.db = null; // sqlite unavailable -> in-memory only
     }
@@ -54,7 +56,7 @@ export class ValueIndex {
       distinctCount: distinctCount ?? null,
       totalCount: totalCount ?? null,
       indexedAt: at,
-      values: values.map((v) => ({ value: String(v.value), freq: Number(v.freq) || 0 })).sort((a, b) => b.freq - a.freq),
+      values: values.map((v) => ({ value: String(v.value), freq: Number(v.freq) || 0 })).sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)),
     });
   }
 
@@ -80,9 +82,13 @@ export class ValueIndex {
     }
     const e = this.mem.get(property);
     if (!e) return [];
-    const cmp = col === 'value' ? (a, b) => String(a.value).localeCompare(String(b.value)) : (a, b) => a.freq - b.freq;
-    const arr = [...e.values].sort(cmp);
-    if (direction === 'desc') arr.reverse();
+    // Mirror SQLite's `ORDER BY <col> <dir>, value ASC`: primary key honors direction,
+    // ties always break on value ASC (so reversing the whole array is wrong).
+    const sign = direction === 'desc' ? -1 : 1;
+    const arr = [...e.values].sort((a, b) => {
+      const primary = col === 'value' ? String(a.value).localeCompare(String(b.value)) : a.freq - b.freq;
+      return primary !== 0 ? sign * primary : String(a.value).localeCompare(String(b.value));
+    });
     return arr.slice(offset, offset + limit).map((v) => ({ value: v.value, freq: v.freq }));
   }
 

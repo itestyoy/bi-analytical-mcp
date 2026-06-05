@@ -169,7 +169,10 @@ export class Engine {
       const dir = (input.direction === 'asc' || input.direction === 'desc') ? input.direction : (orderBy === 'value' ? 'asc' : 'desc');
       const limit = input.limit ?? 10;
       const offset = input.offset ?? 0;
-      const samples = this.valueIndex.listValues(input.property, { limit, offset, by: orderBy, dir });
+      // Over-fetch by one so has_more is accurate at the boundary (next page non-empty).
+      const fetched = this.valueIndex.listValues(input.property, { limit: limit + 1, offset, by: orderBy, dir });
+      const has_more = fetched.length > limit;
+      const samples = has_more ? fetched.slice(0, limit) : fetched;
       // Descriptive stats so the AI sees the distribution at a glance. top_value is the
       // single most frequent value; share = its fraction of indexed (non-null) rows.
       const top = this.valueIndex.sampleValues(input.property, 1)[0] || null;
@@ -180,7 +183,7 @@ export class Engine {
         indexed: !!st, indexed_at: st?.indexedAt ?? null,
         // values stored are capped (top-by-frequency); paging past them returns [].
         returned: samples.length, limit, offset, order_by: orderBy, direction: dir,
-        has_more: samples.length === limit,
+        has_more,
       };
       // Drill-down guidance: keep exploring the VALUES — trace them across the catalog,
       // and pivot to the event(s) that carry this property (≤3 concrete next moves).

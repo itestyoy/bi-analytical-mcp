@@ -122,6 +122,13 @@ test('describe_catalog({ property }) pages + orders the indexed values', opts, a
   // freq asc → least common first.
   const asc = await engine.describe_catalog({ property: 'ad_type_of_event_data', order_by: 'freq', direction: 'asc' });
   assert.deepEqual(asc.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
+  // has_more must be FALSE when the page covers all values (limit == distinct_count),
+  // and TRUE only when a non-empty next page exists (no false positive at the boundary).
+  const exact = await engine.describe_catalog({ property: 'ad_type_of_event_data', limit: 3 });
+  assert.equal(exact.value_stats.returned, 3);
+  assert.equal(exact.value_stats.has_more, false);
+  const boundary = await engine.describe_catalog({ property: 'ad_type_of_event_data', limit: 2 });
+  assert.equal(boundary.value_stats.has_more, true); // a 3rd value exists
 });
 
 // describe_catalog({ event }) adds a COMPACT distinct_count + top-3 sample_values per property.

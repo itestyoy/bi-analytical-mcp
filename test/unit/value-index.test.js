@@ -61,3 +61,20 @@ test('ValueIndex.listValues orders + pages the in-memory store', () => {
   assert.deepEqual(idx.listValues('p', { offset: 3 }), []); // past the end
   idx.close();
 });
+
+// Determinism on TIED frequencies: ordering must break ties on value ASC (so the
+// in-memory fallback matches the SQLite `ORDER BY ..., value ASC` path exactly).
+test('ValueIndex tie-break is deterministic (value ASC) on equal frequencies', () => {
+  const idx = new ValueIndex();
+  idx.upsertProperty('t', { distinctCount: 3, totalCount: 15, values: [{ value: 'zebra', freq: 5 }, { value: 'apple', freq: 5 }, { value: 'mango', freq: 5 }] });
+  // freq desc, ties → value ASC.
+  assert.deepEqual(idx.sampleValues('t').map((v) => v.value), ['apple', 'mango', 'zebra']);
+  assert.deepEqual(idx.listValues('t', { by: 'freq', dir: 'desc' }).map((v) => v.value), ['apple', 'mango', 'zebra']);
+  // freq asc, ties → still value ASC (tie-break never flips with direction).
+  assert.deepEqual(idx.listValues('t', { by: 'freq', dir: 'asc' }).map((v) => v.value), ['apple', 'mango', 'zebra']);
+  // searchValues ties → value ASC ('a' occurs in all three).
+  assert.deepEqual(idx.searchValues('a').map((v) => v.value), ['apple', 'mango', 'zebra']);
+  // paging is stable across the tie.
+  assert.deepEqual(idx.listValues('t', { limit: 1, offset: 1 }).map((v) => v.value), ['mango']);
+  idx.close();
+});

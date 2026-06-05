@@ -42,7 +42,7 @@ before(async () => {
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   // A temp-file value index so the index is real SQLite (not just the engine's default).
   const dbPath = join(mkdtempSync(join(tmpdir(), 'vi-db-')), 'value-index.sqlite');
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, valueIndexDbPath: dbPath });
+  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath });
   index = engine.valueIndex;
   indexer = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   // Await directly — do NOT rely on timers; we want the index populated before asserting.

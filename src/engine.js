@@ -19,13 +19,12 @@ import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, jobsDbPath, valueIndexDbPath, store }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
-    // ONE shared store (single db file) for the job registry + value index. Legacy
-    // jobsDbPath/valueIndexDbPath are accepted for back-compat and collapse to one path.
-    this.store = store || openStore({ dbPath: dbPath || valueIndexDbPath || jobsDbPath });
+    // ONE shared store (single db file) for the job registry + value index.
+    this.store = store || openStore({ dbPath });
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)

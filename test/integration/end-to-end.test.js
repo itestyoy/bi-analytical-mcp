@@ -79,7 +79,7 @@ before(async () => {
   recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
   // A temp-file value index so describe_index reports a REAL persisted SQLite index.
   const dbPath = join(mkdtempSync(join(tmpdir(), 'e2e-db-')), 'value-index.sqlite');
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, recipes, valueIndexDbPath: dbPath, queryTimeoutMs: 60000 });
+  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, recipes, dbPath, queryTimeoutMs: 60000 });
   index = engine.valueIndex;
   indexer = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   // Await directly so the value index is populated before the discovery assertions.

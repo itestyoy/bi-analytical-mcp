@@ -44,7 +44,7 @@ before(async () => {
   const dbPath = join(mkdtempSync(join(tmpdir(), 'vi-db-')), 'value-index.sqlite');
   engine = new Engine({ catalog, contextManager: ctxs, runner: backend, valueIndexDbPath: dbPath });
   index = engine.valueIndex;
-  indexer = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50 });
+  indexer = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   // Await directly — do NOT rely on timers; we want the index populated before asserting.
   await indexer.refresh();
 }, opts);
@@ -161,4 +161,24 @@ test('describe_catalog({ property }) returns non-empty recommendations', opts, a
   if (skip(t)) return;
   const out = await engine.describe_catalog({ property: 'ad_type_of_event_data' });
   assert.ok(Array.isArray(out.recommendations) && out.recommendations.length > 0 && out.recommendations.every((r) => typeof r === 'string' && r.length), 'property view recommends a concrete next move');
+});
+
+// describe_index reports the value-index SYNC state after the real refresh in `before`.
+test('describe_index reports the value-index sync state + jobs', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.describe_index();
+  const vi = out.value_index;
+  assert.equal(vi.persisted, true, 'real SQLite-backed index');
+  assert.equal(vi.running, false, 'the awaited refresh has finished');
+  assert.ok(vi.total_runs >= 1, 'at least the one refresh from before() is logged');
+  assert.ok(vi.indexed_properties > 0, 'properties were indexed');
+  assert.ok(vi.total_values > 0, 'values were stored');
+  assert.equal(vi.last_successful_run.status, 'ok', 'the refresh completed cleanly');
+  assert.equal(vi.last_successful_run.errors, 0);
+  assert.ok(vi.last_successful_run.properties_indexed > 0);
+  assert.ok(typeof vi.seconds_since_last_sync === 'number' && vi.seconds_since_last_sync >= 0);
+  // jobs section present (no background query jobs ran in this suite).
+  assert.equal(typeof out.query_jobs.total, 'number');
+  assert.ok(Array.isArray(out.query_jobs.running));
+  assert.ok(out.recommendations.length > 0);
 });

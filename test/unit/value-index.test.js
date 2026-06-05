@@ -78,3 +78,46 @@ test('ValueIndex tie-break is deterministic (value ASC) on equal frequencies', (
   assert.deepEqual(idx.listValues('t', { limit: 1, offset: 1 }).map((v) => v.value), ['mango']);
   idx.close();
 });
+
+// Sync-run log (consumed by describe_index): startRun/finishRun + syncStatus over the store.
+test('ValueIndex sync-run log: startRun/finishRun + syncStatus', () => {
+  const idx = new ValueIndex(); // in-memory fallback
+
+  // No runs yet.
+  let s = idx.syncStatus();
+  assert.equal(s.total_runs, 0);
+  assert.equal(s.running, false);
+  assert.equal(s.last_run, null);
+  assert.equal(s.indexed_properties, 0);
+
+  // A run in progress shows running:true with an open last_run.
+  const runId = idx.startRun();
+  s = idx.syncStatus();
+  assert.equal(s.running, true);
+  assert.equal(s.last_run.status, 'running');
+  assert.equal(s.last_run.finished_at, null);
+
+  // Index a property mid-run, then finish.
+  idx.upsertProperty('p', { distinctCount: 2, totalCount: 9, values: [{ value: 'a', freq: 5 }, { value: 'b', freq: 4 }] });
+  idx.finishRun(runId, { status: 'ok', propertiesIndexed: 1, valuesWritten: 2, errors: 0 });
+  s = idx.syncStatus();
+  assert.equal(s.running, false);
+  assert.equal(s.total_runs, 1);
+  assert.equal(s.last_run.status, 'ok');
+  assert.equal(s.last_run.properties_indexed, 1);
+  assert.equal(s.last_run.values_written, 2);
+  assert.ok(s.last_run.duration_ms >= 0);
+  assert.equal(s.indexed_properties, 1);
+  assert.equal(s.total_values, 2);
+  assert.equal(s.last_successful_run.status, 'ok');
+
+  // A second, failed run: last_run is the failure, last_successful_run stays the OK one.
+  const r2 = idx.startRun();
+  idx.finishRun(r2, { status: 'error', propertiesIndexed: 0, valuesWritten: 0, errors: 3, error: 'boom' });
+  s = idx.syncStatus();
+  assert.equal(s.total_runs, 2);
+  assert.equal(s.last_run.status, 'error');
+  assert.equal(s.last_run.error, 'boom');
+  assert.equal(s.last_successful_run.status, 'ok');
+  idx.close();
+});

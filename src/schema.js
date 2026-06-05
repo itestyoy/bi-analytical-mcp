@@ -450,6 +450,13 @@ export function buildSchemas(catalog) {
         direction: { enum: ['asc', 'desc'], description: 'For { property }: sort direction (default desc for freq → most common first; asc for value → A→Z).' },
       },
     },
+    describe_index: {
+      type: 'object', additionalProperties: false,
+      description: 'Operational state of the background machinery: the value-index SYNC state (last/recent refresh runs, when it last synced, coverage = indexed properties + stored values, whether a refresh is in flight) plus the background QUERY jobs and their statuses. Read-only and cheap; touches no warehouse. Use it to tell whether describe_catalog values are fresh/filling in, and to see what is running.',
+      properties: {
+        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'How many recent index runs / query jobs to include (default 10).' },
+      },
+    },
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
       description: 'Wait for `seconds` (capped at 60), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.',

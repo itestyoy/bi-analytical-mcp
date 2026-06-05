@@ -24,6 +24,7 @@ const TOOL_DESCRIPTIONS = {
   query_semantic_model: 'Run a query (mf query, dbt Core) against a context. metrics + group_by + where are validated against the context. Pass materialize:true to persist the result as a dbt table and read it back (resilient); slow queries return a query_id to poll.',
   get_query_result: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}. Returns status (running/ready/error) and rows read from the materialized table.',
   list_query_jobs: 'List background query jobs and their status.',
+  describe_index: 'Report operational state: the value-index SYNC status (last/recent background refresh runs, seconds since last sync, coverage = indexed properties + stored values, whether a refresh is in flight) plus background query jobs and their statuses. Read-only and cheap (no warehouse). Check it to know whether describe_catalog sample_values are fresh or still filling in, and to see what is currently running.',
   update_semantic_model: 'Add/remove task measures, dimensions or metrics for a table SM within a context; re-parses.',
   delete_semantic_model: 'Remove a table SM task additions (and dependent metrics with cascade) from a context.',
   drop_context: 'Tear down an entire isolated context (files + artifacts).',

@@ -271,6 +271,52 @@ export class Engine {
     };
   }
 
+  /**
+   * Operational state, the describe_catalog way: the value-index SYNC state (last/recent
+   * refresh runs, coverage counts, whether one is in flight) plus the background QUERY
+   * jobs and their statuses. Read-only, cheap (SQLite reads); touches no warehouse.
+   */
+  describe_index(input = {}) {
+    this._validate('describe_index', input);
+    const recent = input.recent ?? 10;
+    const sync = this.valueIndex.syncStatus ? this.valueIndex.syncStatus({ recent }) : { persisted: false, running: false, indexed_properties: 0, total_values: 0, total_runs: 0, last_run: null, last_successful_run: null, recent_runs: [] };
+    const last = sync.last_successful_run || sync.last_run;
+    const secsSince = last?.finished_at != null ? Math.round((Date.now() - last.finished_at) / 1000) : null;
+
+    const jobs = this.jobs.list(); // [{ query_id, status, table, context_id, age_ms }]
+    const running = jobs.filter((j) => j.status === 'running');
+    const byStatus = jobs.reduce((m, j) => { m[j.status] = (m[j.status] || 0) + 1; return m; }, {});
+
+    const recommendations = [];
+    if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in describe_catalog may still be filling in.`);
+    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — describe_catalog({ property }) will show no sample_values until the first sync (it runs in the background at startup).`);
+    else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the warehouse/runner.`);
+    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via describe_catalog({ property }).`);
+    if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }) or list them with list_query_jobs.`);
+    if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
+
+    return {
+      value_index: {
+        persisted: sync.persisted,
+        running: sync.running,
+        indexed_properties: sync.indexed_properties,
+        total_values: sync.total_values,
+        total_runs: sync.total_runs,
+        seconds_since_last_sync: secsSince,
+        last_run: sync.last_run,
+        last_successful_run: sync.last_successful_run,
+        recent_runs: sync.recent_runs,
+      },
+      query_jobs: {
+        total: jobs.length,
+        by_status: byStatus,
+        running,
+        recent: jobs.slice(0, recent),
+      },
+      recommendations,
+    };
+  }
+
   /** Compile, converting bad-reference errors into a clearly-staged ToolError. */
   _compile(input) {
     try {

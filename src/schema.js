@@ -308,6 +308,30 @@ export function buildSchemas(catalog) {
     },
   };
 
+  // build_native_model: compose a pipeline INCREMENTALLY, one stage at a time. A
+  // single stateful tool with an `action`; each add_step validates the stage and
+  // returns the columns now available for the NEXT stage (schema only — nothing is
+  // materialized until commit). The all-at-once register_native_model still works.
+  const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } };
+  const buildModel = {
+    type: 'object', additionalProperties: false, required: ['action'],
+    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until commit), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → commit (materializes via the same engine as register_native_model). For a pipeline you already know in full, register_native_model in one call is still fine.',
+    allOf: [
+      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'] } },
+      { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'] } },
+      { if: { properties: { action: { enum: ['preview', 'commit', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'] } },
+    ],
+    properties: {
+      action: { enum: ['start', 'add_step', 'preview', 'commit', 'discard'], description: 'start a new draft (returns a draft_id + the source columns); add_step appends ONE stage and returns the columns available after it; preview shows the accumulated steps + generated SQL; commit materializes the draft as a model; discard drops it.' },
+      draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for add_step/preview/commit/discard.' },
+      name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start.' },
+      materialized: { enum: ['view', 'table'], default: 'table', description: 'How the committed result is stored (start): table (default) or view.' },
+      source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table (start only; default the events fact).' },
+      time_range: trProp,
+      stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage to append (add_step), validated against the columns available so far.' },
+    },
+  };
+
   const pdefs = predicateDefs(catalog);
   const query = {
     type: 'object',
@@ -368,6 +392,7 @@ export function buildSchemas(catalog) {
   return {
     create_semantic_model: create,
     register_native_model: registerModel,
+    build_native_model: buildModel,
     update_native_model: { ...registerModel, required: ['context_id', 'name'], description: 'Update a registered native model in place: regenerate it from a new sequence or pipeline spec and rebuild.' },
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     query_semantic_model: query,

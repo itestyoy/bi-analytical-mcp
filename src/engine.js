@@ -295,6 +295,120 @@ export class Engine {
   }
 
   /**
+   * Compose a native pipeline INCREMENTALLY (single tool, `action`-driven). Each
+   * add_step validates the stage and returns the columns now available for the next
+   * stage — pure schema propagation via renderPipeline, NO warehouse hit until commit.
+   * The all-at-once register_native_model path is unchanged. Lifecycle:
+   * start → add_step* → (preview) → commit | discard.
+   */
+  async build_native_model(input) {
+    this._validate('build_native_model', input);
+    if (input.action === 'start') return this._draftStart(input);
+    const ctx = this.ctxs.get(input.draft_id);
+    const draft = ctx.state.draft;
+    if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
+    this.ctxs.touch(ctx.id);
+    if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage);
+    if (input.action === 'preview') return this._draftPreview(ctx, draft);
+    if (input.action === 'discard') { delete ctx.state.draft; return { draft_id: ctx.id, action: 'discard', discarded: true }; }
+    return this._draftCommit(ctx, draft); // commit
+  }
+
+  /** Columns available after a draft's accumulated stages (source columns when empty). */
+  _draftColumns(draft) {
+    if (!draft.stages.length) return this.catalog.modelColumns(draft.source);
+    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, draft.stages);
+    return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
+  }
+
+  /** Accumulated stages with the draft's time_range prepended as a leading WHERE (parity with commit). */
+  _draftEffectiveStages(draft) {
+    const tr = draft.time_range;
+    if (!tr || !(tr.start || tr.end)) return draft.stages;
+    const timeCol = this.catalog.getModel(draft.source).time?.column;
+    if (!timeCol) return draft.stages;
+    const conditions = [];
+    if (tr.start) conditions.push({ column: timeCol, op: 'gte', value: tr.start });
+    if (tr.end) { const ex = dateEndExclusive(tr.end); conditions.push(ex ? { column: timeCol, op: 'lt', value: ex } : { column: timeCol, op: 'lte', value: tr.end }); }
+    return [{ stage: 'where', conditions }, ...draft.stages];
+  }
+
+  _draftSteps(draft) {
+    return draft.stages.map((s, i) => ({ index: i + 1, ...s }));
+  }
+
+  _draftStart(input) {
+    const ctx = input.draft_id ? this.ctxs.get(input.draft_id) : this.ctxs.create();
+    const source = input.source || this.catalog.anchor;
+    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
+    this.ctxs.touch(ctx.id);
+    return {
+      draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
+      steps: [], available_columns: this.catalog.modelColumns(source),
+      next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response lists the columns then available for the following stage.',
+      recommendations: [
+        `These available_columns are the inputs your first stage can reference (where/derive/compute/aggregate/match_recognize/...).`,
+        `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
+        `When the steps look right, commit with build_native_model({ action: "commit", draft_id }).`,
+      ],
+    };
+  }
+
+  _draftAddStep(ctx, draft, stage) {
+    const trial = [...draft.stages, stage];
+    try {
+      renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
+    } catch (e) {
+      // Reject the step WITHOUT persisting it; the draft is left intact to retry.
+      throw new ToolError(e.message, { stage: 'compile', field: 'stage' });
+    }
+    draft.stages = trial;
+    this.ctxs.touch(ctx.id);
+    const available = this._draftColumns(draft);
+    return {
+      draft_id: ctx.id, action: 'add_step', step_index: draft.stages.length,
+      steps: this._draftSteps(draft), available_columns: available,
+      next: 'add_step the next stage (it may reference any of available_columns), or commit the draft.',
+      recommendations: this._draftStepRecommendations(stage, available),
+    };
+  }
+
+  /** Stage-aware next-step hints from the just-added stage + the resulting columns. */
+  _draftStepRecommendations(stage, available) {
+    const recs = [];
+    if (stage.stage === 'match_recognize') {
+      recs.push(`The funnel columns (reached_<step>, completed, furthest_step_name, secs_<metric>) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country).`);
+    } else if (stage.stage === 'aggregate') {
+      recs.push(`Aggregated: the output is now group_by keys + measures (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}); add order_by/limit or commit.`);
+    } else if (stage.stage === 'join') {
+      recs.push(`Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.`);
+    } else {
+      recs.push(`Reference any of available_columns in the next stage (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}).`);
+    }
+    recs.push(`Preview the SQL anytime with build_native_model({ action: "preview", draft_id }); commit when done.`);
+    return recs;
+  }
+
+  _draftPreview(ctx, draft) {
+    const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, steps: this._draftSteps(draft) };
+    if (!draft.stages.length) return { ...base, available_columns: this.catalog.modelColumns(draft.source), note: 'No stages yet — add_step first.' };
+    const stages = this._draftEffectiveStages(draft);
+    const pg = renderPipeline(this.catalog, this.catalog.dialect, draft.source, stages);
+    const bq = renderPipeline(this.catalog, 'bigquery', draft.source, stages).sql;
+    return { ...base, available_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: pg.sql, model_sql_bigquery: bq };
+  }
+
+  async _draftCommit(ctx, draft) {
+    if (!draft.stages.length) throw new ToolError('draft has no stages to commit — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
+    const result = await this._registerPipeline({
+      name: draft.name, context_id: ctx.id, materialized: draft.materialized,
+      pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
+    });
+    delete ctx.state.draft; // committed — clear the draft so the context holds only the built model
+    return result;
+  }
+
+  /**
    * Register (or rebuild) a general transformation PIPELINE as a dbt model.
    * The pipeline's rows ARE the result: we materialize, build, and read them back.
    * Re-readable/sliceable later via get_query_result(table, transform).

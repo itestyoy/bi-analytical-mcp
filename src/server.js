@@ -12,6 +12,7 @@ import { loadRecipes } from './recipes.js';
 import { ContextManager } from './context-manager.js';
 import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
+import { BackgroundIndexer } from './value-index.js';
 
 const TOOL_DESCRIPTIONS = {
   describe_catalog: 'Discover the catalog progressively. No args → compact overview (models, event names, group-by paths, enums + counts). Drill down with { model } (a model\'s columns + real physical columns), { event } (the properties an event carries), { property } (one property\'s spec), or { search }. Call BEFORE creating a model. Avoids dumping ~150 properties at once.',
@@ -160,7 +161,8 @@ export function makeEngine(opts = {}) {
       : null;
   const queryTimeoutMs = (Number(process.env.QUERY_TIMEOUT_SECONDS) || 60) * 1000;
   const jobsDbPath = opts.jobsDbPath || join(ctxs.workspaceRoot, 'jobs.sqlite');
-  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, jobsDbPath });
+  const valueIndexDbPath = opts.valueIndexDbPath || join(ctxs.workspaceRoot, 'value-index.sqlite');
+  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, jobsDbPath, valueIndexDbPath });
 }
 
 export function createApp(engine) {
@@ -217,6 +219,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     gcTimer.unref?.();
   }
 
+  // Background value index: populate REAL event-property values from the warehouse
+  // (top values + cardinality) for describe_catalog. Initial pass is fire-and-forget
+  // (start() does NOT await) so server startup is never blocked; then refreshes on
+  // an unref'd interval. VALUE_INDEX_REFRESH_MS=0 → one initial pass, no schedule.
+  const intervalMs = process.env.VALUE_INDEX_REFRESH_MS !== undefined ? Number(process.env.VALUE_INDEX_REFRESH_MS) : 21600000;
+  const maxValues = Number(process.env.VALUE_INDEX_MAX_VALUES) || 50;
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  indexer.start();
+
   // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.
   let shuttingDown = false;
   const shutdown = (sig) => {
@@ -224,6 +235,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     shuttingDown = true;
     console.log(`received ${sig}, shutting down`);
     if (gcTimer) clearInterval(gcTimer);
+    indexer.stop();
     httpServer.close(() => {});
     try { engine.close(); } catch { /* noop */ }
     setTimeout(() => process.exit(0), 200).unref?.();

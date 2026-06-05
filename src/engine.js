@@ -13,15 +13,17 @@ import { dateEndExclusive } from './match-recognize.js'; // registers the match_
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
 import { JobManager } from './jobs.js';
+import { ValueIndex } from './value-index.js';
 import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, jobsDbPath }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, jobsDbPath, valueIndexDbPath }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
     this.jobs = new JobManager({ dbPath: jobsDbPath }); // persisted (SQLite) if path given
+    this.valueIndex = new ValueIndex({ dbPath: valueIndexDbPath }); // real event-property values (background-populated)
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
     if (recipes) {
@@ -110,6 +112,15 @@ export class Engine {
         out.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
         if (!cols.ok) out.physical_columns_error = 'relation not built or introspection failed (run dbt seed + dbt run on the base project)';
       }
+      out.recommendations = k === c.anchor
+        ? [
+          `Pick a high-traffic event from event_names, then describe_catalog({ event }) to see the properties it carries.`,
+          `Build funnels/segmented analyses over this fact with register_native_model (where/match_recognize/aggregate stages).`,
+        ]
+        : [
+          `Use these dimensions to segment events: add them to create_semantic_model (joined via the '${c.primaryEntityName(k) || 'user'}' entity) or group_by them in query_semantic_model.`,
+          `Inspect an individual dimension's values via describe_catalog({ property }) is anchor-only; for this model the dimension list above is authoritative.`,
+        ];
       return out;
     }
 
@@ -120,10 +131,26 @@ export class Engine {
       const applies = c.eventPropertyEvents();
       const descs = c.eventPropertyDescriptions();
       const props = c.eventProps().filter((p) => { const evs = applies[p]; return !evs || evs.includes(input.event); });
+      const rows = props.map((p) => {
+        // Compact index hint: cardinality + the top 3 real values (null/[] until indexed).
+        const st = this.valueIndex.stats(p);
+        return { name: p, type: c.eventPropertySpec(p)?.type, numeric: numeric.has(p), complex: c.isComplexEventProp(p), description: descs[p], distinct_count: st?.distinctCount ?? null, sample_values: this.valueIndex.sampleValues(p, 3) };
+      });
+      // Recommend the best dimensions to segment/aggregate by, hinting from cardinality:
+      // low distinct_count → group-by; high → identifier/filter; numeric → measure.
+      const groupBy = rows.filter((r) => !r.complex && !r.numeric && r.distinct_count != null && r.distinct_count <= 50).sort((a, b) => a.distinct_count - b.distinct_count);
+      const measures = rows.filter((r) => r.numeric && !r.complex);
+      const recommendations = [];
+      if (groupBy.length) recommendations.push(`Good group_by/segmentation dimensions (low cardinality): ${groupBy.slice(0, 3).map((r) => `${r.name} (${r.distinct_count})`).join(', ')} — drill in with describe_catalog({ property }).`);
+      if (measures.length) recommendations.push(`Numeric measures (sum/average): ${measures.slice(0, 3).map((r) => r.name).join(', ')}.`);
+      const ids = rows.filter((r) => !r.complex && !r.numeric && r.distinct_count != null && r.distinct_count > 200);
+      if (ids.length) recommendations.push(`High-cardinality (likely identifiers — filter, don't group): ${ids.slice(0, 3).map((r) => r.name).join(', ')}.`);
+      if (!recommendations.length) recommendations.push(`Inspect any property's real values with describe_catalog({ property }) (cardinality not yet indexed).`);
       return {
         event: input.event,
         property_count: props.length,
-        properties: props.map((p) => ({ name: p, type: c.eventPropertySpec(p)?.type, numeric: numeric.has(p), complex: c.isComplexEventProp(p), description: descs[p] })),
+        properties: rows,
+        recommendations: recommendations.slice(0, 4),
       };
     }
 
@@ -131,17 +158,77 @@ export class Engine {
     if (input.property) {
       const spec = c.eventPropertySpec(input.property);
       if (!spec) throw new ToolError(`unknown event property '${input.property}'. Discover properties via describe_catalog({ event }) or ({ search })`, { stage: 'validate', field: 'property' });
-      return { property: input.property, type: spec.type, numeric: c.eventNumericProps().includes(input.property), complex: c.isComplexEventProp(input.property), events: spec.events || null, description: spec.description };
+      // Real VALUES from the background value index (empty/false when not yet indexed).
+      const samples = this.valueIndex.sampleValues(input.property);
+      const st = this.valueIndex.stats(input.property);
+      const numeric = c.eventNumericProps().includes(input.property);
+      const complex = c.isComplexEventProp(input.property);
+      const dc = st?.distinctCount ?? null;
+      const evScope = (spec.events && spec.events.length) ? ` (scope to event(s): ${spec.events.join(', ')})` : '';
+      // Data-aware analysis move, hinted by type + cardinality (≤3 concrete suggestions).
+      const recommendations = [];
+      if (complex) {
+        recommendations.push(`'${input.property}' is a complex (${spec.type}) property — extract a scalar in a register_native_model prepare stage before grouping/aggregating${evScope}.`);
+      } else if (numeric) {
+        recommendations.push(`Numeric: use '${input.property}' as a measure (sum/average) in create_semantic_model, or bucket it in a register_native_model derive stage${evScope}.`);
+        if (dc != null && dc <= 25) recommendations.push(`Low distinct_count (${dc}) — it doubles as a categorical group_by dimension.`);
+      } else if (dc != null && dc <= 50) {
+        recommendations.push(`Low-cardinality categorical (distinct_count ${dc}) — good group_by / funnel-segmentation dimension; add it as a create_semantic_model dimension or group_by it in a pipeline${evScope}.`);
+      } else if (dc != null) {
+        recommendations.push(`High-cardinality (distinct_count ${dc}) — likely an identifier; filter on a specific value (where '${input.property}' = ...) rather than grouping by it${evScope}.`);
+      } else {
+        recommendations.push(`Not yet indexed (no distinct_count): inspect a sample first via a register_native_model pipeline grouping by '${input.property}' to gauge cardinality${evScope}.`);
+      }
+      if (samples.length) recommendations.push(`Real values include ${samples.slice(0, 3).map((s) => `'${s.value}'`).join(', ')}; filter/segment on one of these via describe_catalog({ search: '<value>' }) or a pipeline where-stage.`);
+      return { property: input.property, type: spec.type, numeric, complex, events: spec.events || null, description: spec.description, sample_values: samples, distinct_count: dc, total_count: st?.totalCount ?? null, indexed: !!st, recommendations: recommendations.slice(0, 3) };
     }
 
     // ── { search }: find events/properties by substring ──
     if (input.search) {
       const q = String(input.search).toLowerCase();
       const descs = c.eventPropertyDescriptions();
+      const applies = c.eventPropertyEvents(); // property -> [event_name]; absent ⇒ all events
+      // EVENT-name matches: keep the name + how many properties that event carries.
+      const event_names = c.eventNames().filter((e) => e.toLowerCase().includes(q)).map((e) => {
+        const n = c.eventProps().filter((p) => { const evs = applies[p]; return !evs || evs.includes(e); }).length;
+        return { event: e, property_count: n };
+      });
+      // PROPERTY-name matches: the property's type + the events it applies to.
+      const property_matches = c.eventProps()
+        .filter((p) => p.toLowerCase().includes(q) || (descs[p] || '').toLowerCase().includes(q))
+        .map((p) => ({ property: p, type: c.eventPropertySpec(p)?.type ?? null, events: applies[p] || null }));
+      // VALUE matches: the matched value + WHERE it lives — its property, that property's
+      // type, and the event(s) carrying it (null ⇒ all events). So "rewarded" resolves to
+      // property 'ad_type_of_event_data', carried by events ['ad_started','ad_finished'].
+      const value_matches = this.valueIndex.searchValues(input.search).map((v) => ({
+        value: v.value,
+        freq: v.freq,
+        property: v.property,
+        type: c.eventPropertySpec(v.property)?.type ?? null,
+        events: applies[v.property] || null,
+      }));
+      // Data-aware next moves for whatever matched (concrete tool + arg, ≤4).
+      const recommendations = [];
+      if (value_matches.length) {
+        const top = value_matches[0];
+        recommendations.push(`Value '${top.value}' lives in property '${top.property}'${top.events ? ` (events: ${top.events.join(', ')})` : ''}; call describe_catalog({ property: '${top.property}' }) for its full value/frequency distribution.`);
+        const ev = top.events?.[0];
+        recommendations.push(ev
+          ? `To analyze it, register_native_model with a pipeline filtering '${top.property}' = '${top.value}' for event '${ev}', then group/aggregate.`
+          : `To analyze it, register_native_model with a pipeline filtering '${top.property}' = '${top.value}', then group/aggregate.`);
+      }
+      if (property_matches.length) {
+        const p = property_matches[0];
+        recommendations.push(`Inspect property '${p.property}' with describe_catalog({ property: '${p.property}' }) to see its cardinality and real values before grouping or filtering on it.`);
+      }
+      if (event_names.length) recommendations.push(`See what event '${event_names[0].event}' carries with describe_catalog({ event: '${event_names[0].event}' }).`);
+      if (!recommendations.length) recommendations.push(`No catalog match for '${input.search}'. Try describe_catalog() for the event list, or a broader substring.`);
       return {
         query: input.search,
-        event_names: c.eventNames().filter((e) => e.toLowerCase().includes(q)),
-        properties: c.eventProps().filter((p) => p.toLowerCase().includes(q) || (descs[p] || '').toLowerCase().includes(q)).map((p) => ({ name: p, type: c.eventPropertySpec(p)?.type })),
+        event_names,
+        property_matches,
+        value_matches,
+        recommendations: recommendations.slice(0, 4),
       };
     }
 
@@ -152,6 +239,7 @@ export class Engine {
       if (k === c.anchor) return { ...head, kind: 'events_fact', entities: Object.keys(m.entities || {}), time: m.time?.column, event_count: c.eventNames().length, property_count: c.eventProps().length };
       return { ...head, kind: 'dimension', dimension_count: Object.keys(m.dimensions || {}).length };
     });
+    const exEvent = c.eventNames()[0];
     return {
       dialect: c.dialect,
       models,
@@ -159,6 +247,11 @@ export class Engine {
       groupable_paths: c.reachableGroupByPaths(),
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       next: 'Overview only. Drill down: describe_catalog({ model }) for a model\'s columns + real physical columns; ({ event }) for the properties an event carries (the events fact has ~150 properties, scoped per event); ({ property }) for one property\'s spec; ({ search }) to find events/properties by substring.',
+      recommendations: [
+        `Start by inspecting an event's properties: describe_catalog({ event: '${exEvent || '<event_name>'}' }); the response flags low-cardinality group-by dimensions vs numeric measures.`,
+        `Then drill into a promising property's real values with describe_catalog({ property: '<name>' }) before grouping/filtering on it.`,
+        `Looking for a known value (e.g. an ad format or status)? describe_catalog({ search: '<value>' }) tells you which property and event(s) carry it.`,
+      ],
     };
   }
 
@@ -758,6 +851,7 @@ export class Engine {
   /** Release process resources (SQLite handle, warm runner/sidecar). */
   close() {
     try { this.jobs.close?.(); } catch { /* noop */ }
+    try { this.valueIndex?.close?.(); } catch { /* noop */ }
     try { this.runner?.close?.(); } catch { /* noop */ }
   }
 

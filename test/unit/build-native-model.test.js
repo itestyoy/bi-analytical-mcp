@@ -79,3 +79,20 @@ test('build_native_model: schema rejects malformed actions', async () => {
   await assert.rejects(() => e.build_native_model({ action: 'add_step', draft_id: 'ctx_deadbeef' }), 'add_step requires a stage');
   await assert.rejects(() => e.build_native_model({ action: 'bogus' }), 'unknown action rejected');
 });
+
+// Strictness: each action rejects fields that do not belong to it (no silent ignoring).
+test('build_native_model: schema rejects action-irrelevant fields', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'strict', source: 'events' });
+  // start must not carry a stage.
+  await assert.rejects(() => e.build_native_model({ action: 'start', name: 'x', stage: mr }), 'start + stage rejected');
+  // add_step must not carry start-only fields.
+  await assert.rejects(() => e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: mr, source: 'events' }), 'add_step + source rejected');
+  await assert.rejects(() => e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: mr, name: 'x' }), 'add_step + name rejected');
+  // preview/commit/discard take only draft_id.
+  await assert.rejects(() => e.build_native_model({ action: 'preview', draft_id: s.draft_id, stage: mr }), 'preview + stage rejected');
+  await assert.rejects(() => e.build_native_model({ action: 'commit', draft_id: s.draft_id, materialized: 'view' }), 'commit + materialized rejected');
+  // start MAY carry draft_id (legitimate context reuse) — not rejected.
+  const reuse = await e.build_native_model({ action: 'start', draft_id: s.draft_id, name: 'reused' });
+  assert.equal(reuse.draft_id, s.draft_id);
+});

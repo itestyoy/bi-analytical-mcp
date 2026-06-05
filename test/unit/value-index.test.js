@@ -1,6 +1,32 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ValueIndex } from '../../src/value-index.js';
+
+// Persistence: a dbPath-backed index survives a close + reopen (the data is a file on
+// disk). Skips cleanly if node:sqlite is unavailable (then it is an in-memory fallback).
+test('ValueIndex persists to a file on disk across reopen', () => {
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'vi-persist-')), 'value-index.sqlite');
+  const a = new ValueIndex({ dbPath });
+  if (!a.db) { a.close(); return; } // node:sqlite not available here → nothing to assert
+  const runId = a.startRun();
+  a.upsertProperty('p', { distinctCount: 2, totalCount: 9, values: [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }] });
+  a.finishRun(runId, { status: 'ok', propertiesIndexed: 1, valuesWritten: 2, errors: 0 });
+  a.close();
+
+  // Reopen the SAME file in a fresh instance — the values + run log are still there.
+  const b = new ValueIndex({ dbPath });
+  assert.ok(b.db, 'reopened a real SQLite file');
+  assert.deepEqual(b.sampleValues('p'), [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }]);
+  assert.equal(b.stats('p').distinctCount, 2);
+  const s = b.syncStatus();
+  assert.equal(s.indexed_properties, 1);
+  assert.equal(s.total_values, 2);
+  assert.equal(s.last_run.status, 'ok'); // the finished run was persisted, not reconciled to interrupted
+  b.close();
+});
 
 // Allowed non-data unit test: it exercises the in-memory STORE (no dbPath →
 // Map fallback), not any generated SQL. Round-trips upsert → sample/search/stats.

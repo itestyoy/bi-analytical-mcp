@@ -1,12 +1,12 @@
 // Streamable-HTTP MCP server exposing the declarative dbt Semantic Layer tools.
 
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import express from 'express';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { loadCatalog, validateDbtProject } from './catalog.js';
 import { loadRecipes } from './recipes.js';
 import { ContextManager } from './context-manager.js';
@@ -169,8 +169,13 @@ export function makeEngine(opts = {}) {
       ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir })
       : null;
   const queryTimeoutMs = (Number(process.env.QUERY_TIMEOUT_SECONDS) || 60) * 1000;
-  const jobsDbPath = opts.jobsDbPath || join(ctxs.workspaceRoot, 'jobs.sqlite');
-  const valueIndexDbPath = opts.valueIndexDbPath || join(ctxs.workspaceRoot, 'value-index.sqlite');
+  // SQLite db files. Both default to <workspaceRoot>/<name>.sqlite, but each path can be
+  // pinned explicitly via an env var (e.g. to a persistent volume separate from the workspace).
+  const jobsDbPath = opts.jobsDbPath || process.env.JOBS_DB || join(ctxs.workspaceRoot, 'jobs.sqlite');
+  const valueIndexDbPath = opts.valueIndexDbPath || process.env.VALUE_INDEX_DB || join(ctxs.workspaceRoot, 'value-index.sqlite');
+  // Ensure each db's parent dir exists so a custom env path persists (a missing dir would
+  // make the SQLite open fail and silently fall back to an in-memory store).
+  for (const p of [jobsDbPath, valueIndexDbPath]) { try { mkdirSync(dirname(p), { recursive: true }); } catch { /* best effort */ } }
   return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, jobsDbPath, valueIndexDbPath });
 }
 

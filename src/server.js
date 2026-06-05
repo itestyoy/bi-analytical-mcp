@@ -18,7 +18,7 @@ const TOOL_DESCRIPTIONS = {
   describe_catalog: 'Discover the catalog progressively. No args → compact overview (models, event names, group-by paths, enums + counts). Drill down with { model } (a model\'s columns + real physical columns), { event } (the properties an event carries), { property } (one property\'s spec), or { search }. Call BEFORE creating a model. Avoids dumping ~150 properties at once.',
   create_semantic_model: 'Declaratively create/augment semantic models for a task (one SM per table) and metrics, in an isolated context. Omit context_id for a new task; pass it to extend the same context. Renders YAML + dbt parse.',
   register_native_model: 'Build a derived dbt model from a declarative PIPELINE (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage), materialized as a table/view. Its ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). The pipeline can join catalog sources (users/experiments) and aggregate internally, so it is self-contained; it is NOT re-exposed as a MetricFlow semantic model with metrics/dimensions.',
-  build_native_model: 'Compose a native pipeline model INCREMENTALLY (single `action`-driven tool): start a draft, add_step one stage at a time — each add_step validates the stage and returns the exact columns then available for the NEXT stage (pure schema, NOTHING materialized until commit) — optionally preview the SQL, then commit (same engine as register_native_model). Use it to build a pipeline with full per-stage visibility instead of declaring it all up front; register_native_model remains for known pipelines.',
+  build_native_model: 'Build a derived dbt model from a PIPELINE, composed INCREMENTALLY (single `action`-driven tool): start a draft, add_step one stage at a time (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage) — each add_step validates the stage and returns the exact columns then available for the NEXT stage (pure schema, NOTHING materialized until commit) — optionally preview the SQL, then commit. The committed model\'s ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
   update_native_model: 'Update a registered native (MATCH_RECOGNIZE) model in place: regenerate the view + semantic model from a new sequence spec and rebuild (dbt run + parse).',
   delete_native_model: 'Delete a registered native model: remove its generated view + semantic model from the context and re-parse.',
   query_semantic_model: 'Run a query (mf query, dbt Core) against a context. metrics + group_by + where are validated against the context. Pass materialize:true to persist the result as a dbt table and read it back (resilient); slow queries return a query_id to poll.',
@@ -33,7 +33,7 @@ const TOOL_DESCRIPTIONS = {
   srm_check: 'Sample Ratio Mismatch guardrail: χ² test that the observed per-group sizes match the intended split. p < 0.001 means randomization/logging is broken and the experiment is invalid — check before trusting any lift.',
   sample_size: 'Power / sample-size planning: given a baseline (proportion) or stddev (mean) and a target effect, return the required sample size per group; or given a sample size, return the minimum detectable effect (MDE). Tells a true null apart from an underpowered test.',
   list_recipes: 'List ready-made recipes (templates) for common analytics task types. Each carries a `hack` — the generalizable technique behind it — so you can pick the closest one and adapt its approach even to a novel task.',
-  get_recipe: 'Get a recipe by id: a ready payload (create_semantic_model, or a register_native_model pipeline + ab_test mapping) + example queries, plus `notes` and a `hack` (the reusable technique to extrapolate to similar cases).',
+  get_recipe: 'Get a recipe by id: a ready payload (create_semantic_model, or a native-model pipeline + ab_test mapping) + example queries, plus `notes` and a `hack` (the reusable technique to extrapolate to similar cases). Feed a pipeline payload through build_native_model (add its stages, then commit).',
 };
 
 // Server-level documentation surfaced to the AI client (serverInfo.description):
@@ -51,7 +51,7 @@ Funnels/sequences are built ONLY from events (a step = an event + an event_data 
 WORKFLOW
 1. describe_catalog — discover the catalog PROGRESSIVELY. Call it first with no arguments for an overview (models, event names, group-by paths, enums + counts), then drill down: describe_catalog({ model }) for a model's columns, ({ event }) for the properties an event carries, ({ property }) for one property, ({ search }) to find events/properties. The events fact has ~150 event-scoped properties, so they are fetched per event rather than all at once.
 2. create_semantic_model — declare measures/dimensions/metrics for a task in an ISOLATED context (returns a context_id). Pass that context_id back to extend the same context.
-   - For ordered multi-step funnels/paths (and any custom transform) use register_native_model: it builds a model whose ROWS are the result — read/slice them with get_query_result (a pipeline context is not queried via query_semantic_model). It accepts a time_range and an internal pre-filter (event subset / user segment).
+   - For ordered multi-step funnels/paths (and any custom transform) use build_native_model: compose a PIPELINE one stage at a time (start → add_step* → commit; each add_step shows the columns available next), building a model whose ROWS are the result — read/slice them with get_query_result (a pipeline context is not queried via query_semantic_model). It accepts a time_range and an internal pre-filter (event subset / user segment).
 3. query_semantic_model — run metrics with group_by / where / order_by / time_range. Options: dry_run (preview, no run), explain (query plan, no run), materialize (persist the result and read it back; long queries return a query_id to poll), limit/offset.
 4. get_query_result — poll a backgrounded query by query_id, or re-read/re-slice a stored result (where/group_by/aggregations/having) WITHOUT recomputing.
 
@@ -62,16 +62,23 @@ KEY CONCEPTS
 - recipes: list_recipes / get_recipe — ready-made templates for common task families (trends, segmentation, funnels, retention, cohorts, behavioral, conversion, progression, monetization, ads, economy, stickiness).`;
 
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
-const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over two fixed, catalog-enumerated data sources (an events fact + a user-attributes dimension) and query them by name; you never write SQL. Start with describe_catalog, then create_semantic_model / register_native_model, then query_semantic_model.';
+const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over two fixed, catalog-enumerated data sources (an events fact + a user-attributes dimension) and query them by name; you never write SQL. Start with describe_catalog, then create_semantic_model / build_native_model, then query_semantic_model.';
 
 const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'build_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'describe_catalog', 'describe_context', 'time']);
 
+// Tools that still EXIST (schema + engine method + dispatch) but are no longer
+// advertised to the AI — superseded by a newer tool. The code is kept so existing
+// callers/recipes keep working and it can be re-exposed by deleting it from this set.
+const HIDDEN_TOOLS = new Set(['register_native_model']); // superseded by build_native_model
+
 export function buildToolDefs(engine) {
-  return Object.entries(engine.schemas).map(([name, inputSchema]) => ({
-    name,
-    description: TOOL_DESCRIPTIONS[name] || name,
-    inputSchema,
-  }));
+  return Object.entries(engine.schemas)
+    .filter(([name]) => !HIDDEN_TOOLS.has(name))
+    .map(([name, inputSchema]) => ({
+      name,
+      description: TOOL_DESCRIPTIONS[name] || name,
+      inputSchema,
+    }));
 }
 
 export function makeMcpServer(engine) {

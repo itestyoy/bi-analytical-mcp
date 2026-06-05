@@ -41,3 +41,23 @@ test('ValueIndex in-memory fallback round-trips upsert → sampleValues/stats/se
   assert.equal(idx.searchValues('rewarded').length, 0);
   idx.close();
 });
+
+// listValues: ordering (freq/value, asc/desc) + paging (limit/offset) over the store.
+test('ValueIndex.listValues orders + pages the in-memory store', () => {
+  const idx = new ValueIndex();
+  idx.upsertProperty('p', { distinctCount: 3, totalCount: 24, values: [{ value: 'rewarded', freq: 10 }, { value: 'interstitial', freq: 8 }, { value: 'banner', freq: 6 }] });
+
+  // default: freq desc.
+  assert.deepEqual(idx.listValues('p').map((v) => v.value), ['rewarded', 'interstitial', 'banner']);
+  // freq asc.
+  assert.deepEqual(idx.listValues('p', { by: 'freq', dir: 'asc' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
+  // value asc (alphabetical) — default dir for value is asc.
+  assert.deepEqual(idx.listValues('p', { by: 'value' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
+  // value desc.
+  assert.deepEqual(idx.listValues('p', { by: 'value', dir: 'desc' }).map((v) => v.value), ['rewarded', 'interstitial', 'banner']);
+  // paging: limit + offset over freq desc.
+  assert.deepEqual(idx.listValues('p', { limit: 1 }).map((v) => v.value), ['rewarded']);
+  assert.deepEqual(idx.listValues('p', { limit: 1, offset: 1 }).map((v) => v.value), ['interstitial']);
+  assert.deepEqual(idx.listValues('p', { offset: 3 }), []); // past the end
+  idx.close();
+});

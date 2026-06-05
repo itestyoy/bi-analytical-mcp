@@ -97,6 +97,31 @@ test('describe_catalog({ property }) returns sample_values + counts matching the
   assert.equal(out.total_count, 24);
   assert.deepEqual(new Set(out.sample_values.map((v) => v.value)), new Set(['rewarded', 'interstitial', 'banner']));
   assert.equal(valOf(out.sample_values, 'rewarded').freq, 10);
+  // descriptive stats: most-frequent value + its share of the 24 indexed rows.
+  assert.equal(out.value_stats.distinct_count, 3);
+  assert.equal(out.value_stats.total_count, 24);
+  assert.equal(out.value_stats.top_value, 'rewarded');
+  assert.equal(out.value_stats.top_freq, 10);
+  assert.equal(out.value_stats.top_share, Math.round((10 / 24) * 1000) / 1000); // ~0.417
+});
+
+// describe_catalog({ property }) value listing is pageable + orderable (limit/offset/order_by/direction).
+test('describe_catalog({ property }) pages + orders the indexed values', opts, async (t) => {
+  if (skip(t)) return;
+  // freq desc, top 1 → 'rewarded' (10); next page → 'interstitial' (8).
+  const p1 = await engine.describe_catalog({ property: 'ad_type_of_event_data', limit: 1 });
+  assert.deepEqual(p1.sample_values.map((v) => v.value), ['rewarded']);
+  assert.equal(p1.value_stats.has_more, true);
+  const p2 = await engine.describe_catalog({ property: 'ad_type_of_event_data', limit: 1, offset: 1 });
+  assert.deepEqual(p2.sample_values.map((v) => v.value), ['interstitial']);
+  // order_by value asc → alphabetical.
+  const alpha = await engine.describe_catalog({ property: 'ad_type_of_event_data', order_by: 'value' });
+  assert.deepEqual(alpha.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
+  assert.equal(alpha.value_stats.order_by, 'value');
+  assert.equal(alpha.value_stats.has_more, false);
+  // freq asc → least common first.
+  const asc = await engine.describe_catalog({ property: 'ad_type_of_event_data', order_by: 'freq', direction: 'asc' });
+  assert.deepEqual(asc.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
 });
 
 // describe_catalog({ event }) adds a COMPACT distinct_count + top-3 sample_values per property.

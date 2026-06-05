@@ -158,18 +158,36 @@ export class Engine {
     if (input.property) {
       const spec = c.eventPropertySpec(input.property);
       if (!spec) throw new ToolError(`unknown event property '${input.property}'. Discover properties via describe_catalog({ event }) or ({ search })`, { stage: 'validate', field: 'property' });
-      // Real VALUES from the background value index (empty/false when not yet indexed).
-      const samples = this.valueIndex.sampleValues(input.property);
       const st = this.valueIndex.stats(input.property);
       const numeric = c.eventNumericProps().includes(input.property);
       const complex = c.isComplexEventProp(input.property);
       const dc = st?.distinctCount ?? null;
+      const total = st?.totalCount ?? null;
       const evs = (spec.events && spec.events.length) ? spec.events : null;
+      // Pageable/orderable view of the real indexed VALUES (limit/offset/order_by/direction).
+      const orderBy = input.order_by === 'value' ? 'value' : 'freq';
+      const dir = (input.direction === 'asc' || input.direction === 'desc') ? input.direction : (orderBy === 'value' ? 'asc' : 'desc');
+      const limit = input.limit ?? 10;
+      const offset = input.offset ?? 0;
+      const samples = this.valueIndex.listValues(input.property, { limit, offset, by: orderBy, dir });
+      // Descriptive stats so the AI sees the distribution at a glance. top_value is the
+      // single most frequent value; share = its fraction of indexed (non-null) rows.
+      const top = this.valueIndex.sampleValues(input.property, 1)[0] || null;
+      const value_stats = {
+        distinct_count: dc, total_count: total,
+        top_value: top ? top.value : null, top_freq: top ? top.freq : null,
+        top_share: top && total ? Math.round((top.freq / total) * 1000) / 1000 : null,
+        indexed: !!st, indexed_at: st?.indexedAt ?? null,
+        // values stored are capped (top-by-frequency); paging past them returns [].
+        returned: samples.length, limit, offset, order_by: orderBy, direction: dir,
+        has_more: samples.length === limit,
+      };
       // Drill-down guidance: keep exploring the VALUES — trace them across the catalog,
       // and pivot to the event(s) that carry this property (≤3 concrete next moves).
       const recommendations = [];
       if (samples.length) {
-        recommendations.push(`Top values: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}${dc != null ? ` — of ${dc} distinct` : ''}.`);
+        recommendations.push(`${dc != null ? `${dc} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
+        if (value_stats.has_more) recommendations.push(`More values exist — page with describe_catalog({ property: '${input.property}', offset: ${offset + limit} }), or re-order with order_by:'value'.`);
         recommendations.push(`Trace any of these values across the catalog (which other properties/events carry it): describe_catalog({ search: '<value>' }).`);
       } else if (complex) {
         recommendations.push(`Complex (${spec.type}) property — its values are nested; explore the carrying event(s) for context.`);
@@ -177,7 +195,7 @@ export class Engine {
         recommendations.push(`No values indexed yet (the background value index may not have run).${dc != null ? ` distinct_count is ${dc}.` : ''}`);
       }
       if (evs) recommendations.push(`Carried by event(s) ${evs.join(', ')} — see everything they carry: describe_catalog({ event: '${evs[0]}' }).`);
-      return { property: input.property, type: spec.type, numeric, complex, events: spec.events || null, description: spec.description, sample_values: samples, distinct_count: dc, total_count: st?.totalCount ?? null, indexed: !!st, recommendations: recommendations.slice(0, 3) };
+      return { property: input.property, type: spec.type, numeric, complex, events: spec.events || null, description: spec.description, sample_values: samples, distinct_count: dc, total_count: total, indexed: !!st, value_stats, recommendations: recommendations.slice(0, 3) };
     }
 
     // ── { search }: find events/properties by substring ──
@@ -197,7 +215,7 @@ export class Engine {
       // VALUE matches: the matched value + WHERE it lives — its property, that property's
       // type, and the event(s) carrying it (null ⇒ all events). So "rewarded" resolves to
       // property 'ad_type_of_event_data', carried by events ['ad_started','ad_finished'].
-      const value_matches = this.valueIndex.searchValues(input.search).map((v) => ({
+      const value_matches = this.valueIndex.searchValues(input.search, input.limit ?? 20).map((v) => ({
         value: v.value,
         freq: v.freq,
         property: v.property,

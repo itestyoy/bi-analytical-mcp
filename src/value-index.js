@@ -65,6 +65,27 @@ export class ValueIndex {
     return e ? e.values.slice(0, limit).map((v) => ({ value: v.value, freq: v.freq })) : [];
   }
 
+  /**
+   * Pageable + orderable view of a property's stored values: order by 'freq' (default)
+   * or 'value', asc/desc, with limit/offset. `by`/`dir` are whitelisted, never raw input.
+   */
+  listValues(property, { limit = 10, offset = 0, by = 'freq', dir } = {}) {
+    const col = by === 'value' ? 'value' : 'freq';
+    const direction = (dir === 'asc' || dir === 'desc') ? dir : (col === 'value' ? 'asc' : 'desc');
+    if (this.db) {
+      // col/direction are from a closed whitelist above (safe to interpolate); value
+      // tiebreak keeps paging stable. limit/offset stay bound parameters.
+      const stmt = this.db.prepare(`SELECT value, freq FROM prop_values WHERE property = ? ORDER BY ${col} ${direction.toUpperCase()}, value ASC LIMIT ? OFFSET ?`);
+      return stmt.all(property, limit, offset).map((r) => ({ value: r.value, freq: Number(r.freq) }));
+    }
+    const e = this.mem.get(property);
+    if (!e) return [];
+    const cmp = col === 'value' ? (a, b) => String(a.value).localeCompare(String(b.value)) : (a, b) => a.freq - b.freq;
+    const arr = [...e.values].sort(cmp);
+    if (direction === 'desc') arr.reverse();
+    return arr.slice(offset, offset + limit).map((v) => ({ value: v.value, freq: v.freq }));
+  }
+
   /** { distinctCount, totalCount, indexedAt } | null. */
   stats(property) {
     if (this.db) {

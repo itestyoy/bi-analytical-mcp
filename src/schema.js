@@ -432,12 +432,16 @@ export function buildSchemas(catalog) {
     list_contexts: empty,
     describe_catalog: {
       type: 'object', additionalProperties: false,
-      description: 'Discover the catalog PROGRESSIVELY (the events fact carries ~150 event-scoped properties, so it is not dumped at once). Call with NO arguments for a compact overview (models, event names, group-by paths, enums + counts). Then drill down with ONE of: model → that model\'s entities/time/dimensions + real physical columns; event → only the properties populated on that event; property → one property\'s full spec; search → find events/properties by substring.',
+      description: 'Discover the catalog PROGRESSIVELY (the events fact carries ~150 event-scoped properties, so it is not dumped at once). Call with NO arguments for a compact overview (models, event names, group-by paths, enums + counts). Then drill down with ONE of: model → that model\'s entities/time/dimensions + real physical columns; event → only the properties populated on that event; property → one property\'s full spec + descriptive stats (distinct/total counts) and its real indexed VALUES, pageable with limit/offset/order_by/direction; search → find events/properties/values by substring.',
       properties: {
         model: { enum: catalog.modelKeys(), description: 'Drill into one model: its entities, time axis, dimensions and REAL physical columns.' },
         event: { type: 'string', description: 'An event_name (from the overview): list the event_data properties POPULATED on that event — what you can measure/group/filter for it.' },
-        property: { type: 'string', description: 'An event property name: its type, the events it is populated on, and description.' },
-        search: { type: 'string', description: 'Substring to find matching event names and properties (name or description).' },
+        property: { type: 'string', description: 'An event property name: its type, the events it is populated on, description, descriptive stats (distinct_count/total_count), and its real indexed values (paged by the params below).' },
+        search: { type: 'string', description: 'Substring to find matching event names, properties (name or description), and indexed VALUES.' },
+        limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'For { property }/{ search }: how many indexed values to return (default 10 for property, 20 for search). Page further with offset.' },
+        offset: { type: 'integer', minimum: 0, description: 'For { property }: skip this many values first — page through a property\'s value list.' },
+        order_by: { enum: ['freq', 'value'], description: 'For { property }: order the returned values by frequency (default) or alphabetically by value.' },
+        direction: { enum: ['asc', 'desc'], description: 'For { property }: sort direction (default desc for freq → most common first; asc for value → A→Z).' },
       },
     },
     time: {

@@ -308,6 +308,36 @@ export function buildSchemas(catalog) {
     },
   };
 
+  // build_native_model: compose a pipeline INCREMENTALLY, one stage at a time. A
+  // single stateful tool with an `action`; each add_step validates the stage and
+  // returns the columns now available for the NEXT stage (schema only — nothing is
+  // materialized until commit). The all-at-once register_native_model still works.
+  const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } };
+  // A then-clause fragment that forbids the named properties (valid only when ALL are absent).
+  const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
+  const buildModel = {
+    type: 'object', additionalProperties: false, required: ['action'],
+    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until commit), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → commit (materializes via the same engine as register_native_model). For a pipeline you already know in full, register_native_model in one call is still fine.',
+    // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
+    // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
+    // preview/commit/discard take just draft_id. `forbid` rejects any field that does not
+    // belong to the action, so a stray param is an error rather than silently ignored.
+    allOf: [
+      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'], ...forbid(['stage']) } },
+      { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range']) } },
+      { if: { properties: { action: { enum: ['preview', 'commit', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage']) } },
+    ],
+    properties: {
+      action: { enum: ['start', 'add_step', 'preview', 'commit', 'discard'], description: 'start a new draft (returns a draft_id + the source columns); add_step appends ONE stage and returns the columns available after it; preview shows the accumulated steps + generated SQL; commit materializes the draft as a model; discard drops it.' },
+      draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for add_step/preview/commit/discard.' },
+      name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start.' },
+      materialized: { enum: ['view', 'table'], default: 'table', description: 'How the committed result is stored (start): table (default) or view.' },
+      source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table (start only; default the events fact).' },
+      time_range: trProp,
+      stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage to append (add_step), validated against the columns available so far.' },
+    },
+  };
+
   const pdefs = predicateDefs(catalog);
   const query = {
     type: 'object',
@@ -368,6 +398,7 @@ export function buildSchemas(catalog) {
   return {
     create_semantic_model: create,
     register_native_model: registerModel,
+    build_native_model: buildModel,
     update_native_model: { ...registerModel, required: ['context_id', 'name'], description: 'Update a registered native model in place: regenerate it from a new sequence or pipeline spec and rebuild.' },
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     query_semantic_model: query,
@@ -407,12 +438,23 @@ export function buildSchemas(catalog) {
     list_contexts: empty,
     describe_catalog: {
       type: 'object', additionalProperties: false,
-      description: 'Discover the catalog PROGRESSIVELY (the events fact carries ~150 event-scoped properties, so it is not dumped at once). Call with NO arguments for a compact overview (models, event names, group-by paths, enums + counts). Then drill down with ONE of: model → that model\'s entities/time/dimensions + real physical columns; event → only the properties populated on that event; property → one property\'s full spec; search → find events/properties by substring.',
+      description: 'Discover the catalog PROGRESSIVELY (the events fact carries ~150 event-scoped properties, so it is not dumped at once). Call with NO arguments for a compact overview (models, event names, group-by paths, enums + counts). Then drill down with ONE of: model → that model\'s entities/time/dimensions + real physical columns; event → only the properties populated on that event; property → one property\'s full spec + descriptive stats (distinct/total counts) and its real indexed VALUES, pageable with limit/offset/order_by/direction; search → find events/properties/values by substring.',
       properties: {
         model: { enum: catalog.modelKeys(), description: 'Drill into one model: its entities, time axis, dimensions and REAL physical columns.' },
         event: { type: 'string', description: 'An event_name (from the overview): list the event_data properties POPULATED on that event — what you can measure/group/filter for it.' },
-        property: { type: 'string', description: 'An event property name: its type, the events it is populated on, and description.' },
-        search: { type: 'string', description: 'Substring to find matching event names and properties (name or description).' },
+        property: { type: 'string', description: 'An event property name: its type, the events it is populated on, description, descriptive stats (distinct_count/total_count), and its real indexed values (paged by the params below).' },
+        search: { type: 'string', description: 'Substring to find matching event names, properties (name or description), and indexed VALUES.' },
+        limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'For { property }/{ search }: how many indexed values to return (default 10 for property, 20 for search). Page further with offset.' },
+        offset: { type: 'integer', minimum: 0, description: 'For { property }: skip this many values first — page through a property\'s value list.' },
+        order_by: { enum: ['freq', 'value'], description: 'For { property }: order the returned values by frequency (default) or alphabetically by value.' },
+        direction: { enum: ['asc', 'desc'], description: 'For { property }: sort direction (default desc for freq → most common first; asc for value → A→Z).' },
+      },
+    },
+    describe_index: {
+      type: 'object', additionalProperties: false,
+      description: 'Operational state of the background machinery: the value-index SYNC state (last/recent refresh runs, when it last synced, coverage = indexed properties + stored values, whether a refresh is in flight) plus the background QUERY jobs and their statuses. Read-only and cheap; touches no warehouse. Use it to tell whether describe_catalog values are fresh/filling in, and to see what is running.',
+      properties: {
+        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'How many recent index runs / query jobs to include (default 10).' },
       },
     },
     time: {

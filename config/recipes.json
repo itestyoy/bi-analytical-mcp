@@ -1452,7 +1452,7 @@
         "n_field": "n",
         "conversions_field": "conversions"
       },
-      "notes": "register_native_model builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call ab_test with metric=proportion: control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call ab_test with metric=mean.",
+      "notes": "The native-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call ab_test with metric=proportion: control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call ab_test with metric=mean.",
       "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call ab_test. Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
     },
     {
@@ -2044,7 +2044,7 @@
         "sumDen2_field": "sum_den2",
         "sumNumDen_field": "sum_numden"
       },
-      "notes": "register_native_model builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call ab_test with metric=ratio: control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
+      "notes": "The native-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call ab_test with metric=ratio: control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
       "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. ab_test metric=ratio applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
       "register_payload": {
         "name": "ab_level_completion_ratio",
@@ -2255,7 +2255,7 @@
         "group_field": "variant_group",
         "n_field": "n"
       },
-      "notes": "register_native_model builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to srm_check: it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
+      "notes": "The native-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to srm_check: it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
       "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with srm_check (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
       "register_payload": {
         "name": "ab_srm_counts",

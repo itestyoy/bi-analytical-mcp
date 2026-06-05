@@ -10,17 +10,24 @@ import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
 import { dateEndExclusive } from './match-recognize.js'; // registers the match_recognize pipeline stage
+import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
 import { JobManager } from './jobs.js';
+import { ValueIndex } from './value-index.js';
+import { openStore } from './store.js';
 import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, jobsDbPath }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
-    this.jobs = new JobManager({ dbPath: jobsDbPath }); // persisted (SQLite) if path given
+    // ONE shared store (single db file) for the job registry + value index.
+    this.store = store || openStore({ dbPath });
+    this._ownsStore = !store;
+    this.jobs = new JobManager({ store: this.store }); // persisted if the store is
+    this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
     if (recipes) {
@@ -109,6 +116,16 @@ export class Engine {
         out.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
         if (!cols.ok) out.physical_columns_error = 'relation not built or introspection failed (run dbt seed + dbt run on the base project)';
       }
+      out.recommendations = k === c.anchor
+        ? [
+          `Drill into an event to see the properties it carries: describe_catalog({ event: '${c.eventNames()[0] || '<event_name>'}' }).`,
+          `Then inspect a property's real values + frequency distribution: describe_catalog({ property: '<name>' }).`,
+          `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: describe_catalog({ search: '<value>' }).`,
+        ]
+        : [
+          `This model's attributes are listed above; explore the events fact to see what they can describe: describe_catalog({ event: '${c.eventNames()[0] || '<event_name>'}' }).`,
+          `Looking for a known attribute value? describe_catalog({ search: '<value>' }) tells you where it occurs.`,
+        ];
       return out;
     }
 
@@ -119,10 +136,25 @@ export class Engine {
       const applies = c.eventPropertyEvents();
       const descs = c.eventPropertyDescriptions();
       const props = c.eventProps().filter((p) => { const evs = applies[p]; return !evs || evs.includes(input.event); });
+      const rows = props.map((p) => {
+        // Compact index hint: cardinality + the top 3 real values (null/[] until indexed).
+        const st = this.valueIndex.stats(p);
+        return { name: p, type: c.eventPropertySpec(p)?.type, numeric: numeric.has(p), complex: c.isComplexEventProp(p), description: descs[p], distinct_count: st?.distinctCount ?? null, sample_values: this.valueIndex.sampleValues(p, 3) };
+      });
+      // Drill-down guidance: point at properties whose real values are worth inspecting
+      // next (prefer ones already indexed so the AI sees data), plus value search.
+      const recommendations = [];
+      const withValues = rows.filter((r) => !r.complex && r.sample_values.length);
+      const pick = (withValues.length ? withValues : rows.filter((r) => !r.complex)).slice(0, 3);
+      if (pick.length) recommendations.push(`Drill into a property's real values + full frequency distribution: ${pick.map((r) => `describe_catalog({ property: '${r.name}' })`).join(', ')}.`);
+      if (withValues.length) recommendations.push(`Spot a value you recognise in the samples above? Find every property/event it occurs in: describe_catalog({ search: '<value>' }).`);
+      if (rows.some((r) => r.complex)) recommendations.push(`Complex (array/struct) properties carry nested values — describe_catalog({ property }) shows the shape before you explore inside them.`);
+      if (!recommendations.length) recommendations.push(`Inspect any property's real values with describe_catalog({ property }).`);
       return {
         event: input.event,
         property_count: props.length,
-        properties: props.map((p) => ({ name: p, type: c.eventPropertySpec(p)?.type, numeric: numeric.has(p), complex: c.isComplexEventProp(p), description: descs[p] })),
+        properties: rows,
+        recommendations: recommendations.slice(0, 4),
       };
     }
 
@@ -130,17 +162,93 @@ export class Engine {
     if (input.property) {
       const spec = c.eventPropertySpec(input.property);
       if (!spec) throw new ToolError(`unknown event property '${input.property}'. Discover properties via describe_catalog({ event }) or ({ search })`, { stage: 'validate', field: 'property' });
-      return { property: input.property, type: spec.type, numeric: c.eventNumericProps().includes(input.property), complex: c.isComplexEventProp(input.property), events: spec.events || null, description: spec.description };
+      const st = this.valueIndex.stats(input.property);
+      const numeric = c.eventNumericProps().includes(input.property);
+      const complex = c.isComplexEventProp(input.property);
+      const dc = st?.distinctCount ?? null;
+      const total = st?.totalCount ?? null;
+      const evs = (spec.events && spec.events.length) ? spec.events : null;
+      // Pageable/orderable view of the real indexed VALUES (limit/offset/order_by/direction).
+      const orderBy = input.order_by === 'value' ? 'value' : 'freq';
+      const dir = (input.direction === 'asc' || input.direction === 'desc') ? input.direction : (orderBy === 'value' ? 'asc' : 'desc');
+      const limit = input.limit ?? 10;
+      const offset = input.offset ?? 0;
+      // Over-fetch by one so has_more is accurate at the boundary (next page non-empty).
+      const fetched = this.valueIndex.listValues(input.property, { limit: limit + 1, offset, by: orderBy, dir });
+      const has_more = fetched.length > limit;
+      const samples = has_more ? fetched.slice(0, limit) : fetched;
+      // Descriptive stats so the AI sees the distribution at a glance. top_value is the
+      // single most frequent value; share = its fraction of indexed (non-null) rows.
+      const top = this.valueIndex.sampleValues(input.property, 1)[0] || null;
+      const value_stats = {
+        distinct_count: dc, total_count: total,
+        top_value: top ? top.value : null, top_freq: top ? top.freq : null,
+        top_share: top && total ? Math.round((top.freq / total) * 1000) / 1000 : null,
+        indexed: !!st, indexed_at: st?.indexedAt ?? null,
+        // values stored are capped (top-by-frequency); paging past them returns [].
+        returned: samples.length, limit, offset, order_by: orderBy, direction: dir,
+        has_more,
+      };
+      // Drill-down guidance: keep exploring the VALUES — trace them across the catalog,
+      // and pivot to the event(s) that carry this property (≤3 concrete next moves).
+      const recommendations = [];
+      if (samples.length) {
+        recommendations.push(`${dc != null ? `${dc} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
+        if (value_stats.has_more) recommendations.push(`More values exist — page with describe_catalog({ property: '${input.property}', offset: ${offset + limit} }), or re-order with order_by:'value'.`);
+        recommendations.push(`Trace any of these values across the catalog (which other properties/events carry it): describe_catalog({ search: '<value>' }).`);
+      } else if (complex) {
+        recommendations.push(`Complex (${spec.type}) property — its values are nested; explore the carrying event(s) for context.`);
+      } else {
+        recommendations.push(`No values indexed yet (the background value index may not have run).${dc != null ? ` distinct_count is ${dc}.` : ''}`);
+      }
+      if (evs) recommendations.push(`Carried by event(s) ${evs.join(', ')} — see everything they carry: describe_catalog({ event: '${evs[0]}' }).`);
+      return { property: input.property, type: spec.type, numeric, complex, events: spec.events || null, description: spec.description, sample_values: samples, distinct_count: dc, total_count: total, indexed: !!st, value_stats, recommendations: recommendations.slice(0, 3) };
     }
 
     // ── { search }: find events/properties by substring ──
     if (input.search) {
       const q = String(input.search).toLowerCase();
       const descs = c.eventPropertyDescriptions();
+      const applies = c.eventPropertyEvents(); // property -> [event_name]; absent ⇒ all events
+      // EVENT-name matches: keep the name + how many properties that event carries.
+      const event_names = c.eventNames().filter((e) => e.toLowerCase().includes(q)).map((e) => {
+        const n = c.eventProps().filter((p) => { const evs = applies[p]; return !evs || evs.includes(e); }).length;
+        return { event: e, property_count: n };
+      });
+      // PROPERTY-name matches: the property's type + the events it applies to.
+      const property_matches = c.eventProps()
+        .filter((p) => p.toLowerCase().includes(q) || (descs[p] || '').toLowerCase().includes(q))
+        .map((p) => ({ property: p, type: c.eventPropertySpec(p)?.type ?? null, events: applies[p] || null }));
+      // VALUE matches: the matched value + WHERE it lives — its property, that property's
+      // type, and the event(s) carrying it (null ⇒ all events). So "rewarded" resolves to
+      // property 'ad_type_of_event_data', carried by events ['ad_started','ad_finished'].
+      const value_matches = this.valueIndex.searchValues(input.search, input.limit ?? 20).map((v) => ({
+        value: v.value,
+        freq: v.freq,
+        property: v.property,
+        type: c.eventPropertySpec(v.property)?.type ?? null,
+        events: applies[v.property] || null,
+      }));
+      // Drill-down guidance: from a match, keep descending — full value distribution of
+      // the property, and the event(s) that carry it (concrete next moves, ≤4).
+      const recommendations = [];
+      if (value_matches.length) {
+        const top = value_matches[0];
+        recommendations.push(`Value '${top.value}' lives in property '${top.property}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: describe_catalog({ property: '${top.property}' }).`);
+        if (top.events?.[0]) recommendations.push(`See everything event '${top.events[0]}' carries: describe_catalog({ event: '${top.events[0]}' }).`);
+      }
+      if (property_matches.length) {
+        const p = property_matches[0];
+        recommendations.push(`Drill into property '${p.property}' for its real values + cardinality: describe_catalog({ property: '${p.property}' }).`);
+      }
+      if (event_names.length) recommendations.push(`See what event '${event_names[0].event}' carries: describe_catalog({ event: '${event_names[0].event}' }).`);
+      if (!recommendations.length) recommendations.push(`No catalog match for '${input.search}'. Try describe_catalog() for the event list, or a broader substring.`);
       return {
         query: input.search,
-        event_names: c.eventNames().filter((e) => e.toLowerCase().includes(q)),
-        properties: c.eventProps().filter((p) => p.toLowerCase().includes(q) || (descs[p] || '').toLowerCase().includes(q)).map((p) => ({ name: p, type: c.eventPropertySpec(p)?.type })),
+        event_names,
+        property_matches,
+        value_matches,
+        recommendations: recommendations.slice(0, 4),
       };
     }
 
@@ -151,6 +259,7 @@ export class Engine {
       if (k === c.anchor) return { ...head, kind: 'events_fact', entities: Object.keys(m.entities || {}), time: m.time?.column, event_count: c.eventNames().length, property_count: c.eventProps().length };
       return { ...head, kind: 'dimension', dimension_count: Object.keys(m.dimensions || {}).length };
     });
+    const exEvent = c.eventNames()[0];
     return {
       dialect: c.dialect,
       models,
@@ -158,6 +267,57 @@ export class Engine {
       groupable_paths: c.reachableGroupByPaths(),
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       next: 'Overview only. Drill down: describe_catalog({ model }) for a model\'s columns + real physical columns; ({ event }) for the properties an event carries (the events fact has ~150 properties, scoped per event); ({ property }) for one property\'s spec; ({ search }) to find events/properties by substring.',
+      recommendations: [
+        `Start by inspecting an event's properties: describe_catalog({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
+        `Then drill into a property's full value/frequency distribution: describe_catalog({ property: '<name>' }).`,
+        `Looking for a known value (e.g. an ad format or status)? describe_catalog({ search: '<value>' }) tells you which property and event(s) carry it.`,
+      ],
+    };
+  }
+
+  /**
+   * Operational state, the describe_catalog way: the value-index SYNC state (last/recent
+   * refresh runs, coverage counts, whether one is in flight) plus the background QUERY
+   * jobs and their statuses. Read-only, cheap (SQLite reads); touches no warehouse.
+   */
+  describe_index(input = {}) {
+    this._validate('describe_index', input);
+    const recent = input.recent ?? 10;
+    const sync = this.valueIndex.syncStatus ? this.valueIndex.syncStatus({ recent }) : { persisted: false, running: false, indexed_properties: 0, total_values: 0, total_runs: 0, last_run: null, last_successful_run: null, recent_runs: [] };
+    const last = sync.last_successful_run || sync.last_run;
+    const secsSince = last?.finished_at != null ? Math.round((Date.now() - last.finished_at) / 1000) : null;
+
+    const jobs = this.jobs.list(); // [{ query_id, status, table, context_id, age_ms }]
+    const running = jobs.filter((j) => j.status === 'running');
+    const byStatus = jobs.reduce((m, j) => { m[j.status] = (m[j.status] || 0) + 1; return m; }, {});
+
+    const recommendations = [];
+    if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in describe_catalog may still be filling in.`);
+    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — describe_catalog({ property }) will show no sample_values until the first sync (it runs in the background at startup).`);
+    else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the warehouse/runner.`);
+    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via describe_catalog({ property }).`);
+    if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }) or list them with list_query_jobs.`);
+    if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
+
+    return {
+      value_index: {
+        persisted: sync.persisted,
+        running: sync.running,
+        indexed_properties: sync.indexed_properties,
+        total_values: sync.total_values,
+        total_runs: sync.total_runs,
+        seconds_since_last_sync: secsSince,
+        last_run: sync.last_run,
+        last_successful_run: sync.last_successful_run,
+        recent_runs: sync.recent_runs,
+      },
+      query_jobs: {
+        total: jobs.length,
+        by_status: byStatus,
+        running,
+        recent: jobs.slice(0, recent),
+      },
+      recommendations,
     };
   }
 
@@ -201,6 +361,120 @@ export class Engine {
   }
 
   /**
+   * Compose a native pipeline INCREMENTALLY (single tool, `action`-driven). Each
+   * add_step validates the stage and returns the columns now available for the next
+   * stage — pure schema propagation via renderPipeline, NO warehouse hit until commit.
+   * The all-at-once register_native_model path is unchanged. Lifecycle:
+   * start → add_step* → (preview) → commit | discard.
+   */
+  async build_native_model(input) {
+    this._validate('build_native_model', input);
+    if (input.action === 'start') return this._draftStart(input);
+    const ctx = this.ctxs.get(input.draft_id);
+    const draft = ctx.state.draft;
+    if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
+    this.ctxs.touch(ctx.id);
+    if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage);
+    if (input.action === 'preview') return this._draftPreview(ctx, draft);
+    if (input.action === 'discard') { delete ctx.state.draft; return { draft_id: ctx.id, action: 'discard', discarded: true }; }
+    return this._draftCommit(ctx, draft); // commit
+  }
+
+  /** Columns available after a draft's accumulated stages (source columns when empty). */
+  _draftColumns(draft) {
+    if (!draft.stages.length) return this.catalog.modelColumns(draft.source);
+    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, draft.stages);
+    return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
+  }
+
+  /** Accumulated stages with the draft's time_range prepended as a leading WHERE (parity with commit). */
+  _draftEffectiveStages(draft) {
+    const tr = draft.time_range;
+    if (!tr || !(tr.start || tr.end)) return draft.stages;
+    const timeCol = this.catalog.getModel(draft.source).time?.column;
+    if (!timeCol) return draft.stages;
+    const conditions = [];
+    if (tr.start) conditions.push({ column: timeCol, op: 'gte', value: tr.start });
+    if (tr.end) { const ex = dateEndExclusive(tr.end); conditions.push(ex ? { column: timeCol, op: 'lt', value: ex } : { column: timeCol, op: 'lte', value: tr.end }); }
+    return [{ stage: 'where', conditions }, ...draft.stages];
+  }
+
+  _draftSteps(draft) {
+    return draft.stages.map((s, i) => ({ index: i + 1, ...s }));
+  }
+
+  _draftStart(input) {
+    const ctx = input.draft_id ? this.ctxs.get(input.draft_id) : this.ctxs.create();
+    const source = input.source || this.catalog.anchor;
+    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
+    this.ctxs.touch(ctx.id);
+    return {
+      draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
+      steps: [], available_columns: this.catalog.modelColumns(source),
+      next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response lists the columns then available for the following stage.',
+      recommendations: [
+        `These available_columns are the inputs your first stage can reference (where/derive/compute/aggregate/match_recognize/...).`,
+        `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
+        `When the steps look right, commit with build_native_model({ action: "commit", draft_id }).`,
+      ],
+    };
+  }
+
+  _draftAddStep(ctx, draft, stage) {
+    const trial = [...draft.stages, stage];
+    try {
+      renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
+    } catch (e) {
+      // Reject the step WITHOUT persisting it; the draft is left intact to retry.
+      throw new ToolError(e.message, { stage: 'compile', field: 'stage' });
+    }
+    draft.stages = trial;
+    this.ctxs.touch(ctx.id);
+    const available = this._draftColumns(draft);
+    return {
+      draft_id: ctx.id, action: 'add_step', step_index: draft.stages.length,
+      steps: this._draftSteps(draft), available_columns: available,
+      next: 'add_step the next stage (it may reference any of available_columns), or commit the draft.',
+      recommendations: this._draftStepRecommendations(stage, available),
+    };
+  }
+
+  /** Stage-aware next-step hints from the just-added stage + the resulting columns. */
+  _draftStepRecommendations(stage, available) {
+    const recs = [];
+    if (stage.stage === 'match_recognize') {
+      recs.push(`The funnel columns (reached_<step>, completed, furthest_step_name, secs_<metric>) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country).`);
+    } else if (stage.stage === 'aggregate') {
+      recs.push(`Aggregated: the output is now group_by keys + measures (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}); add order_by/limit or commit.`);
+    } else if (stage.stage === 'join') {
+      recs.push(`Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.`);
+    } else {
+      recs.push(`Reference any of available_columns in the next stage (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}).`);
+    }
+    recs.push(`Preview the SQL anytime with build_native_model({ action: "preview", draft_id }); commit when done.`);
+    return recs;
+  }
+
+  _draftPreview(ctx, draft) {
+    const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, steps: this._draftSteps(draft) };
+    if (!draft.stages.length) return { ...base, available_columns: this.catalog.modelColumns(draft.source), note: 'No stages yet — add_step first.' };
+    const stages = this._draftEffectiveStages(draft);
+    const pg = renderPipeline(this.catalog, this.catalog.dialect, draft.source, stages);
+    const bq = renderPipeline(this.catalog, 'bigquery', draft.source, stages).sql;
+    return { ...base, available_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: pg.sql, model_sql_bigquery: bq };
+  }
+
+  async _draftCommit(ctx, draft) {
+    if (!draft.stages.length) throw new ToolError('draft has no stages to commit — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
+    const result = await this._registerPipeline({
+      name: draft.name, context_id: ctx.id, materialized: draft.materialized,
+      pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
+    });
+    delete ctx.state.draft; // committed — clear the draft so the context holds only the built model
+    return result;
+  }
+
+  /**
    * Register (or rebuild) a general transformation PIPELINE as a dbt model.
    * The pipeline's rows ARE the result: we materialize, build, and read them back.
    * Re-readable/sliceable later via get_query_result(table, transform).
@@ -226,7 +500,17 @@ export class Engine {
     });
     if (input.dry_run) {
       const { pg, bq } = renderBoth();
-      return { kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect, columns: [...pg.columns.keys()], model_sql: pg.sql, model_sql_bigquery: bq };
+      const resp = {
+        kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect,
+        columns: [...pg.columns.keys()],
+        output_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+        model_sql: pg.sql, model_sql_bigquery: bq,
+      };
+      // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
+      // (no full materialize). Lets the caller size the scan before committing.
+      const est = await this._estimateSourceRows(source, tr);
+      if (est != null) resp.estimated_source_rows = est;
+      return resp;
     }
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
@@ -250,7 +534,11 @@ export class Engine {
     }
     return {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
-      columns, row_count: rows.length, rows, model_sql_bigquery: bq, build,
+      columns, output_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+      row_count: rows.length, rows, model_sql_bigquery: bq, build,
+      // A4: how to read this result again — these rows are a pipeline model, re-read
+      // with get_query_result (NOT query_semantic_model, which is for metric queries).
+      read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
       assumptions: [
         `Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`,
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
@@ -259,6 +547,31 @@ export class Engine {
         ? ['time_range produced 0 rows — verify the window. A date-only `end` is treated as inclusive (the whole day, next-day-exclusive); pass a full datetime for finer bounds.']
         : [],
     };
+  }
+
+  /**
+   * A5: a cheap pre-run volume estimate — COUNT(*) over a source model within an
+   * optional time window (the same window the pipeline will apply). Lets the caller
+   * gauge the scan before materializing. Best-effort: returns null when there is no
+   * runner / base project, or the count fails.
+   */
+  async _estimateSourceRows(sourceKey, tr) {
+    const base = this.ctxs.baseProjectDir;
+    if (!this.runner || !base) return null;
+    const m = this.catalog.getModel(sourceKey);
+    const tcol = m.time?.column;
+    let where = '';
+    if (tr && (tr.start || tr.end) && tcol) {
+      const cl = [];
+      if (tr.start) cl.push(`${tcol} >= ${sqlLiteral(tr.start)}`);
+      if (tr.end) { const ex = dateEndExclusive(tr.end); cl.push(ex ? `${tcol} < ${sqlLiteral(ex)}` : `${tcol} <= ${sqlLiteral(tr.end)}`); }
+      if (cl.length) where = ` WHERE ${cl.join(' AND ')}`;
+    }
+    try {
+      const r = await this.runner.show(base, `SELECT COUNT(*) AS n FROM {{ ref('${m.dbt_model}') }}${where}`, 1);
+      if (r.ok && r.rows?.[0]) return Number(r.rows[0].n);
+    } catch { /* estimate is best-effort */ }
+    return null;
   }
 
   /** Update a registered native model in place (re-generate + rebuild). */
@@ -715,9 +1028,10 @@ export class Engine {
     return this.ctxs.gc(maxIdleMs);
   }
 
-  /** Release process resources (SQLite handle, warm runner/sidecar). */
+  /** Release process resources (shared store handle, warm runner/sidecar). */
   close() {
-    try { this.jobs.close?.(); } catch { /* noop */ }
+    // Managers share the store and don't own it; the Engine closes it once.
+    try { if (this._ownsStore) this.store?.close?.(); } catch { /* noop */ }
     try { this.runner?.close?.(); } catch { /* noop */ }
   }
 

@@ -87,6 +87,87 @@ test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-u
   assert.equal(reached(out.rows, 'tut3'), 3);
 });
 
+// A1: between_steps option. 'any' = nearest-later occurrence (repeats between steps
+// don't break the match) — exactly the local engine's native behavior, so setting it
+// explicitly equals the default (the cross-engine consistency contract: the same value
+// makes BigQuery match too). 'gap' = only non-step events may fill the gap; it can
+// never ADD matches, so it is a subset of 'any'.
+test('match_recognize between_steps: explicit "any" equals the default; "gap" is a valid subset', opts, async (t) => {
+  if (skip(t)) return;
+  const steps = [{ name: 'start', event_name: ['currency_outcome'] }, { name: 'done', event_name: ['ad_finished'] }];
+  const mk = (between_steps) => [{ stage: 'match_recognize', partition_by: ['player_id_of_internal'], rows: 'one_per_match', between_steps, steps }];
+  const completed = (o) => o.rows.filter((r) => tru(r.completed)).length;
+  const A = completed(await pipe(mk('any')));
+  const D = completed(await pipe(mk(undefined)));
+  const G = completed(await pipe(mk('gap'))); // builds ok ⇒ the NOT EXISTS gap guard is valid SQL
+  assert.equal(A, 5, 'all 5 currency_outcome occurrences reach a later ad_finished');
+  assert.equal(D, A, 'explicit between_steps="any" == default (nearest-later) on the local engine');
+  assert.ok(G <= A && G >= 0, `gap (${G}) is a subset of any (${A}) — never over-matches`);
+});
+
+// A2/A4: the pipeline response documents its output columns + how to re-read it.
+test('pipeline response: output_columns (carried partition key) + read_with hint', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await pipe([matchActivation()]);
+  assert.ok(Array.isArray(out.output_columns), 'output_columns present');
+  const names = out.output_columns.map((c) => c.name);
+  assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to the output');
+  assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel columns present');
+  assert.equal(out.read_with?.tool, 'get_query_result');
+  assert.equal(out.read_with?.table, out.model);
+});
+
+// A5: dry_run returns a cheap source-volume estimate; a narrower window scans fewer rows.
+test('dry_run estimated_source_rows: real count, monotonic in the time window', opts, async (t) => {
+  if (skip(t)) return;
+  const stages = [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] }];
+  const wide = await engine.register_native_model({ dry_run: true, name: 'est_wide', pipeline: { stages } });
+  const narrow = await engine.register_native_model({ dry_run: true, name: 'est_narrow', pipeline: { time_range: { start: '2026-01-05', end: '2026-01-05' }, stages } });
+  assert.ok(Number.isInteger(wide.estimated_source_rows) && wide.estimated_source_rows > 0, 'full source count is a positive integer');
+  assert.ok(narrow.estimated_source_rows > 0 && narrow.estimated_source_rows < wide.estimated_source_rows, 'a single day scans fewer rows than the whole fact');
+  assert.ok(wide.output_columns.some((c) => c.name === 'event_name'), 'dry_run also reports output_columns');
+});
+
+// Feature C: incremental build_native_model. Each add_step returns the columns
+// available for the next stage; a committed draft yields the SAME rows as the
+// all-at-once register_native_model (fidelity), proven on the activation funnel.
+test('build_native_model incremental: per-step columns + commit equals all-at-once (12/8/5/3)', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_native_model({ action: 'start', name: 'inc_funnel', source: 'events' });
+  assert.ok(s.draft_id, 'start returns a draft_id');
+  assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
+  // add the funnel as one match_recognize stage; its output columns must be reported.
+  const a1 = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: matchActivation() });
+  assert.equal(a1.step_index, 1);
+  const names = a1.available_columns.map((c) => c.name);
+  assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to next stage');
+  assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel output columns available next');
+  // preview renders SQL without materializing.
+  const pv = await engine.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL');
+  assert.equal(pv.steps.length, 1);
+  // commit materializes; rows MATCH the all-at-once funnel exactly.
+  const c = await engine.build_native_model({ action: 'commit', draft_id: s.draft_id });
+  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+  assert.equal(reached(c.rows, 'launch'), 12);
+  assert.equal(reached(c.rows, 'tut1'), 8);
+  assert.equal(reached(c.rows, 'tut2'), 5);
+  assert.equal(reached(c.rows, 'tut3'), 3);
+});
+
+// Lifecycle/validation guard: a rejected stage must NOT mutate the draft.
+test('build_native_model add_step rejects an invalid stage without mutating the draft', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_native_model({ action: 'start', name: 'inc_guard', source: 'events' });
+  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
+  await assert.rejects(
+    () => engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'project', columns: ['no_such_column'] } }),
+    'a stage referencing a missing column is rejected',
+  );
+  const pv = await engine.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  assert.equal(pv.steps.length, 1, 'the rejected step was not persisted');
+});
+
 // #5: rows option — one_per_partition (players) vs one_per_match (situations).
 test('match_recognize rows: one_per_partition (12 players) vs one_per_match (28 starts)', opts, async (t) => {
   if (skip(t)) return;

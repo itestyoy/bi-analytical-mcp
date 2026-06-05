@@ -1,39 +1,24 @@
 // Tracks background (materialized) query jobs. Results live in the warehouse (a
 // materialized table), not in memory — so they survive crashes and are
 // re-fetchable. This store tracks status + which context/table to read from,
-// persisted in a minimal SQLite db so the job registry survives restarts.
+// persisted in the shared store (one SQLite db, see store.js) so the job registry
+// survives restarts. Falls back to in-memory when no persistent store is available.
 
 import { randomBytes } from 'node:crypto';
-import { createRequire } from 'node:module';
-
-const require = createRequire(import.meta.url);
+import { openStore } from './store.js';
 
 export class JobManager {
-  constructor({ dbPath } = {}) {
+  constructor({ dbPath, store } = {}) {
+    // The working set lives in this Map; the store's `jobs` repository provides durability.
+    // Use an injected (shared) store, else open one (in-memory backend when no path/sqlite).
+    this.store = store || openStore({ dbPath });
+    this._ownsStore = !store; // only close what we opened
     this.jobs = new Map();
-    this.db = null;
-    if (dbPath) this._openDb(dbPath);
-  }
-
-  _openDb(dbPath) {
-    try {
-      const { DatabaseSync } = require('node:sqlite');
-      this.db = new DatabaseSync(dbPath);
-      this.db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
-      this._upsert = this.db.prepare('INSERT INTO jobs (id, context_id, table_name, status, error, started_at, ready_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET context_id=excluded.context_id, table_name=excluded.table_name, status=excluded.status, error=excluded.error, ready_at=excluded.ready_at');
-      // a job left 'running' across a restart can never complete (its build
-      // promise is gone) -> reconcile to a terminal error so clients stop polling.
-      this.db.prepare("UPDATE jobs SET status='error', error='interrupted by server restart; re-issue the query' WHERE status='running'").run();
-      for (const row of this.db.prepare('SELECT * FROM jobs').all()) {
-        this.jobs.set(row.id, { id: row.id, contextId: row.context_id, table: row.table_name, status: row.status, error: row.error, startedAt: row.started_at, readyAt: row.ready_at });
-      }
-    } catch {
-      this.db = null; // sqlite unavailable -> in-memory only
-    }
+    for (const row of this.store.jobs.init()) this.jobs.set(row.id, row);
   }
 
   _persist(j) {
-    if (this._upsert) this._upsert.run(j.id, j.contextId ?? null, j.table ?? null, j.status, j.error ?? null, j.startedAt, j.readyAt ?? null);
+    this.store.jobs.upsert(j);
   }
 
   create(meta = {}) {
@@ -68,8 +53,7 @@ export class JobManager {
   }
 
   close() {
-    try { this.db?.close(); } catch { /* already closed */ }
-    this.db = null;
-    this._upsert = null;
+    if (this._ownsStore) { try { this.store?.close(); } catch { /* already closed */ } }
+    this.store = null;
   }
 }

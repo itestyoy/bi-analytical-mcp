@@ -10,7 +10,7 @@ import { ValueIndex } from '../../src/value-index.js';
 test('ValueIndex persists to a file on disk across reopen', () => {
   const dbPath = join(mkdtempSync(join(tmpdir(), 'vi-persist-')), 'value-index.sqlite');
   const a = new ValueIndex({ dbPath });
-  if (!a.db) { a.close(); return; } // node:sqlite not available here → nothing to assert
+  if (!a.persistent) { a.close(); return; } // node:sqlite not available here → nothing to assert
   const runId = a.startRun();
   a.upsertProperty('p', { distinctCount: 2, totalCount: 9, values: [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }] });
   a.finishRun(runId, { status: 'ok', propertiesIndexed: 1, valuesWritten: 2, errors: 0 });
@@ -18,7 +18,7 @@ test('ValueIndex persists to a file on disk across reopen', () => {
 
   // Reopen the SAME file in a fresh instance — the values + run log are still there.
   const b = new ValueIndex({ dbPath });
-  assert.ok(b.db, 'reopened a real SQLite file');
+  assert.ok(b.persistent, 'reopened a real persistent store');
   assert.deepEqual(b.sampleValues('p'), [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }]);
   assert.equal(b.stats('p').distinctCount, 2);
   const s = b.syncStatus();

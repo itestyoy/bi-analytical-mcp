@@ -169,14 +169,13 @@ export function makeEngine(opts = {}) {
       ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir })
       : null;
   const queryTimeoutMs = (Number(process.env.QUERY_TIMEOUT_SECONDS) || 60) * 1000;
-  // SQLite db files. Both default to <workspaceRoot>/<name>.sqlite, but each path can be
-  // pinned explicitly via an env var (e.g. to a persistent volume separate from the workspace).
-  const jobsDbPath = opts.jobsDbPath || process.env.JOBS_DB || join(ctxs.workspaceRoot, 'jobs.sqlite');
-  const valueIndexDbPath = opts.valueIndexDbPath || process.env.VALUE_INDEX_DB || join(ctxs.workspaceRoot, 'value-index.sqlite');
-  // Ensure each db's parent dir exists so a custom env path persists (a missing dir would
-  // make the SQLite open fail and silently fall back to an in-memory store).
-  for (const p of [jobsDbPath, valueIndexDbPath]) { try { mkdirSync(dirname(p), { recursive: true }); } catch { /* best effort */ } }
-  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, jobsDbPath, valueIndexDbPath });
+  // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
+  // <workspaceRoot>/mcp.sqlite; pin it elsewhere (e.g. a persistent volume) via MCP_DB.
+  const dbPath = opts.dbPath || process.env.MCP_DB || join(ctxs.workspaceRoot, 'mcp.sqlite');
+  // Ensure the parent dir exists so a custom path persists (a missing dir would make the
+  // open fail and silently fall back to an in-memory store).
+  try { mkdirSync(dirname(dbPath), { recursive: true }); } catch { /* best effort */ }
+  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath });
 }
 
 export function createApp(engine) {

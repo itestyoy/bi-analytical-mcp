@@ -1,175 +1,79 @@
-// Background-populated index of REAL event-property values (top values by
-// frequency + cardinality), surfaced in describe_catalog so the AI sees not just
-// property NAMES/types but the actual VALUES a property carries. Persisted in a
-// minimal SQLite db (graceful in-memory fallback when node:sqlite is unavailable,
-// mirroring src/jobs.js). The BackgroundIndexer populates it NON-BLOCKING from the
-// warehouse at startup + on a schedule.
+// Background-populated index of REAL event-property values (top values by frequency +
+// cardinality), surfaced in describe_catalog so the AI sees not just property NAMES/types
+// but the actual VALUES a property carries. Persistence is delegated to a swappable store
+// backend (see store.js) — this class holds NO SQL, just the domain operations. The
+// BackgroundIndexer populates it NON-BLOCKING from the warehouse at startup + on a schedule.
 
-import { createRequire } from 'node:module';
 import { jsonExtract } from './dialect.js';
-
-const require = createRequire(import.meta.url);
+import { openStore } from './store.js';
 
 export class ValueIndex {
-  constructor({ dbPath } = {}) {
-    this.db = null;
-    this.mem = new Map(); // property -> { distinctCount, totalCount, indexedAt, values: [{value, freq}] }
-    this.memRuns = []; // in-memory fallback for the sync-run log
-    this._memRunSeq = 0;
-    if (dbPath) this._openDb(dbPath);
+  constructor({ dbPath, store } = {}) {
+    // Injected (shared) store, else open one (in-memory backend when no path/sqlite).
+    this.store = store || openStore({ dbPath });
+    this._ownsStore = !store; // only close what we opened
+    this.store.runs.reconcile(); // a run left 'running' across a restart → 'interrupted'
   }
 
-  _openDb(dbPath) {
-    try {
-      const { DatabaseSync } = require('node:sqlite');
-      this.db = new DatabaseSync(dbPath);
-      this.db.exec('CREATE TABLE IF NOT EXISTS prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
-      this.db.exec('CREATE TABLE IF NOT EXISTS prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, indexed_at INTEGER)');
-      // Sync-run log: one row per BackgroundIndexer.refresh() — when it ran, its status,
-      // and how much it touched. Lets describe_index report the indexing state over time.
-      this.db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
-      this._delValues = this.db.prepare('DELETE FROM prop_values WHERE property = ?');
-      this._insValue = this.db.prepare('INSERT INTO prop_values (property, value, freq) VALUES (?, ?, ?)');
-      this._upStats = this.db.prepare('INSERT INTO prop_stats (property, distinct_count, total_count, indexed_at) VALUES (?, ?, ?, ?) ON CONFLICT(property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, indexed_at=excluded.indexed_at');
-      // value ASC tiebreak keeps ordering deterministic on ties (and identical to the
-      // in-memory fallback); value is unique per property (PK), so it fully orders ties.
-      this._selValues = this.db.prepare('SELECT value, freq FROM prop_values WHERE property = ? ORDER BY freq DESC, value ASC LIMIT ?');
-      this._selStats = this.db.prepare('SELECT distinct_count, total_count, indexed_at FROM prop_stats WHERE property = ?');
-      this._searchValues = this.db.prepare("SELECT property, value, freq FROM prop_values WHERE instr(lower(value), ?) > 0 ORDER BY freq DESC, value ASC LIMIT ?");
-      this._insRun = this.db.prepare("INSERT INTO index_runs (started_at, status) VALUES (?, 'running')");
-      this._finRun = this.db.prepare('UPDATE index_runs SET finished_at=?, status=?, properties_indexed=?, values_written=?, errors=?, error=? WHERE id=?');
-      // A run left 'running' across a restart can never finish (its indexer is gone) →
-      // reconcile to a terminal 'interrupted' so the state never shows a phantom sync.
-      this.db.prepare("UPDATE index_runs SET status='interrupted', finished_at=started_at WHERE finished_at IS NULL").run();
-    } catch {
-      this.db = null; // sqlite unavailable -> in-memory only
-    }
-  }
+  /** Whether values survive a restart (persistent backend) vs in-memory only. */
+  get persistent() { return this.store.persistent; }
 
   /** Replace the stored values + stats for one property (cap = top N the caller already trimmed). */
-  upsertProperty(property, { distinctCount, totalCount, values = [] } = {}) {
-    const at = Date.now();
-    if (this.db) {
-      this.db.exec('BEGIN');
-      try {
-        this._delValues.run(property);
-        for (const v of values) this._insValue.run(property, String(v.value), Number(v.freq) || 0);
-        this._upStats.run(property, distinctCount ?? null, totalCount ?? null, at);
-        this.db.exec('COMMIT');
-      } catch (e) {
-        try { this.db.exec('ROLLBACK'); } catch { /* noop */ }
-        throw e;
-      }
-      return;
-    }
-    this.mem.set(property, {
-      distinctCount: distinctCount ?? null,
-      totalCount: totalCount ?? null,
-      indexedAt: at,
-      values: values.map((v) => ({ value: String(v.value), freq: Number(v.freq) || 0 })).sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)),
-    });
+  upsertProperty(property, spec = {}) {
+    this.store.values.replaceProperty(property, spec);
   }
 
-  /** Top `limit` values for a property, ordered by freq desc. */
+  /** Top `limit` values for a property, ordered by freq desc (value-ASC tiebreak). */
   sampleValues(property, limit = 10) {
-    if (this.db) return this._selValues.all(property, limit).map((r) => ({ value: r.value, freq: Number(r.freq) }));
-    const e = this.mem.get(property);
-    return e ? e.values.slice(0, limit).map((v) => ({ value: v.value, freq: v.freq })) : [];
+    return this.store.values.top(property, limit);
   }
 
   /**
    * Pageable + orderable view of a property's stored values: order by 'freq' (default)
-   * or 'value', asc/desc, with limit/offset. `by`/`dir` are whitelisted, never raw input.
+   * or 'value', asc/desc, with limit/offset. `by`/`dir` are normalised to a closed set
+   * here, so the backend never sees raw input in an ORDER BY position.
    */
   listValues(property, { limit = 10, offset = 0, by = 'freq', dir } = {}) {
     const col = by === 'value' ? 'value' : 'freq';
     const direction = (dir === 'asc' || dir === 'desc') ? dir : (col === 'value' ? 'asc' : 'desc');
-    if (this.db) {
-      // col/direction are from a closed whitelist above (safe to interpolate); value
-      // tiebreak keeps paging stable. limit/offset stay bound parameters.
-      const stmt = this.db.prepare(`SELECT value, freq FROM prop_values WHERE property = ? ORDER BY ${col} ${direction.toUpperCase()}, value ASC LIMIT ? OFFSET ?`);
-      return stmt.all(property, limit, offset).map((r) => ({ value: r.value, freq: Number(r.freq) }));
-    }
-    const e = this.mem.get(property);
-    if (!e) return [];
-    // Mirror SQLite's `ORDER BY <col> <dir>, value ASC`: primary key honors direction,
-    // ties always break on value ASC (so reversing the whole array is wrong).
-    const sign = direction === 'desc' ? -1 : 1;
-    const arr = [...e.values].sort((a, b) => {
-      const primary = col === 'value' ? String(a.value).localeCompare(String(b.value)) : a.freq - b.freq;
-      return primary !== 0 ? sign * primary : String(a.value).localeCompare(String(b.value));
-    });
-    return arr.slice(offset, offset + limit).map((v) => ({ value: v.value, freq: v.freq }));
+    return this.store.values.page(property, { limit, offset, col, direction });
   }
 
   /** { distinctCount, totalCount, indexedAt } | null. */
   stats(property) {
-    if (this.db) {
-      const r = this._selStats.get(property);
-      return r ? { distinctCount: r.distinct_count, totalCount: r.total_count, indexedAt: r.indexed_at } : null;
-    }
-    const e = this.mem.get(property);
-    return e ? { distinctCount: e.distinctCount, totalCount: e.totalCount, indexedAt: e.indexedAt } : null;
+    return this.store.values.stats(property);
   }
 
   /** [{ property, value, freq }] where value contains `query` (case-insensitive), freq desc. */
   searchValues(query, limit = 20) {
-    const q = String(query).toLowerCase();
-    if (this.db) return this._searchValues.all(q, limit).map((r) => ({ property: r.property, value: r.value, freq: Number(r.freq) }));
-    const out = [];
-    for (const [property, e] of this.mem) {
-      for (const v of e.values) if (v.value.toLowerCase().includes(q)) out.push({ property, value: v.value, freq: v.freq });
-    }
-    return out.sort((a, b) => b.freq - a.freq).slice(0, limit);
+    return this.store.values.search(query, limit);
   }
 
   close() {
-    try { this.db?.close(); } catch { /* already closed */ }
-    this.db = null;
+    if (this._ownsStore) { try { this.store.close(); } catch { /* already closed */ } }
   }
 
   // ── sync-run log (consumed by describe_index) ──────────────────────────────
   /** Record the start of a refresh pass; returns a run id to pass to finishRun. */
-  startRun() {
-    const at = Date.now();
-    if (this.db) return Number(this._insRun.run(at).lastInsertRowid);
-    const id = ++this._memRunSeq;
-    this.memRuns.push({ id, started_at: at, finished_at: null, status: 'running', properties_indexed: null, values_written: null, errors: null, error: null });
-    return id;
-  }
+  startRun() { return this.store.runs.start(); }
 
   /** Mark a run terminal with its outcome. status: 'ok' | 'partial' | 'error'. */
-  finishRun(runId, { status = 'ok', propertiesIndexed = null, valuesWritten = null, errors = null, error = null } = {}) {
+  finishRun(runId, fields = {}) {
     if (runId == null) return;
-    const at = Date.now();
-    if (this.db) { this._finRun.run(at, status, propertiesIndexed, valuesWritten, errors, error, runId); return; }
-    const r = this.memRuns.find((x) => x.id === runId);
-    if (r) Object.assign(r, { finished_at: at, status, properties_indexed: propertiesIndexed, values_written: valuesWritten, errors, error });
-  }
-
-  _allRuns() {
-    if (this.db) return this.db.prepare('SELECT * FROM index_runs ORDER BY id DESC').all();
-    return [...this.memRuns].sort((a, b) => b.id - a.id);
+    this.store.runs.finish(runId, { status: 'ok', propertiesIndexed: null, valuesWritten: null, errors: null, error: null, ...fields });
   }
 
   /** Snapshot of the indexing state: coverage counts + the run history. */
   syncStatus({ recent = 10 } = {}) {
-    const runs = this._allRuns();
+    const runs = this.store.runs.all();
     const fmt = (r) => (r ? { started_at: r.started_at, finished_at: r.finished_at, status: r.status, properties_indexed: r.properties_indexed, values_written: r.values_written, errors: r.errors, error: r.error, duration_ms: (r.finished_at != null && r.started_at != null) ? r.finished_at - r.started_at : null } : null);
     const lastFinished = runs.find((r) => r.finished_at != null) || null;
-    let indexedProps; let totalValues;
-    if (this.db) {
-      indexedProps = Number(this.db.prepare('SELECT COUNT(*) AS n FROM prop_stats').get().n);
-      totalValues = Number(this.db.prepare('SELECT COUNT(*) AS n FROM prop_values').get().n);
-    } else {
-      indexedProps = this.mem.size;
-      totalValues = [...this.mem.values()].reduce((s, e) => s + e.values.length, 0);
-    }
+    const { properties, values } = this.store.values.counts();
     return {
-      persisted: !!this.db,
+      persisted: this.store.persistent,
       running: runs.some((r) => r.status === 'running'),
-      indexed_properties: indexedProps,
-      total_values: totalValues,
+      indexed_properties: properties,
+      total_values: values,
       total_runs: runs.length,
       last_run: fmt(runs[0]),
       last_successful_run: fmt(lastFinished && lastFinished.status !== 'error' ? lastFinished : runs.find((r) => r.status === 'ok')) || null,

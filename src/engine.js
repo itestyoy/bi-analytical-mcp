@@ -14,16 +14,21 @@ import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
+import { openStore } from './store.js';
 import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, jobsDbPath, valueIndexDbPath }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, jobsDbPath, valueIndexDbPath, store }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
-    this.jobs = new JobManager({ dbPath: jobsDbPath }); // persisted (SQLite) if path given
-    this.valueIndex = new ValueIndex({ dbPath: valueIndexDbPath }); // real event-property values (background-populated)
+    // ONE shared store (single db file) for the job registry + value index. Legacy
+    // jobsDbPath/valueIndexDbPath are accepted for back-compat and collapse to one path.
+    this.store = store || openStore({ dbPath: dbPath || valueIndexDbPath || jobsDbPath });
+    this._ownsStore = !store;
+    this.jobs = new JobManager({ store: this.store }); // persisted if the store is
+    this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
     if (recipes) {
@@ -1024,10 +1029,10 @@ export class Engine {
     return this.ctxs.gc(maxIdleMs);
   }
 
-  /** Release process resources (SQLite handle, warm runner/sidecar). */
+  /** Release process resources (shared store handle, warm runner/sidecar). */
   close() {
-    try { this.jobs.close?.(); } catch { /* noop */ }
-    try { this.valueIndex?.close?.(); } catch { /* noop */ }
+    // Managers share the store and don't own it; the Engine closes it once.
+    try { if (this._ownsStore) this.store?.close?.(); } catch { /* noop */ }
     try { this.runner?.close?.(); } catch { /* noop */ }
   }
 

@@ -453,9 +453,11 @@ export function buildSchemas(catalog) {
     },
     describe_index: {
       type: 'object', additionalProperties: false,
-      description: 'Operational state of the background machinery: the value-index SYNC state (last/recent refresh runs, when it last synced, coverage = indexed properties + stored values, whether a refresh is in flight) plus the background QUERY jobs and their statuses. Read-only and cheap; touches no warehouse. Use it to tell whether describe_catalog values are fresh/filling in, and to see what is running.',
+      description: 'Operational state of the background machinery: the value-index SYNC state (last/recent refresh runs, when it last synced, coverage = indexed properties + stored values, whether a refresh is in flight, the slowest properties of the last run) plus the background QUERY jobs and their statuses. Read-only and cheap; touches no warehouse. DRILL DOWN with { run } for the full per-property timing of one sync (slowest first), or { property } for one property\'s timing across syncs.',
       properties: {
-        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'How many recent index runs / query jobs to include (default 10).' },
+        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'How many recent index runs / query jobs / history rows to include (default 10).' },
+        run: { type: 'integer', minimum: 1, description: 'Drill into ONE sync run by id (from value_index.recent_runs[].id): per-property timing/coverage for that run, slowest first.' },
+        property: { type: 'string', description: 'Drill into ONE property: its per-sync timing history (ms, values, distinct/total) across recent runs + the average.' },
       },
     },
     time: {

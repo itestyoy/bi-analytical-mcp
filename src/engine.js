@@ -283,9 +283,37 @@ export class Engine {
   describe_index(input = {}) {
     this._validate('describe_index', input);
     const recent = input.recent ?? 10;
+    const propRow = (r) => ({ property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) });
+
+    // ── drill-down: one property's per-sync timing history ──
+    if (input.property) {
+      const hist = this.valueIndex.propertyHistory(input.property, { limit: recent }).map((r) => ({ run_id: r.run_id, started_at: r.started_at, ...propRow(r) }));
+      const timed = hist.filter((r) => r.ms != null);
+      const avg = timed.length ? Math.round(timed.reduce((s, r) => s + r.ms, 0) / timed.length) : null;
+      return {
+        property: input.property, runs: hist.length, avg_ms: avg, history: hist,
+        recommendations: [hist.length ? `'${input.property}' took ${hist[0].ms}ms in the latest sync (${hist[0].values} values, ${hist[0].distinct_count} distinct); avg ${avg}ms over ${timed.length} runs.` : `No per-property timing recorded for '${input.property}' yet.`],
+      };
+    }
+
+    // ── drill-down: per-property breakdown within one sync run (slowest first) ──
+    if (input.run != null) {
+      const run = this.valueIndex.runById(input.run);
+      if (!run) throw new ToolError(`unknown index run '${input.run}'. See describe_index().value_index.recent_runs[].id`, { stage: 'validate', field: 'run' });
+      const props = this.valueIndex.runProperties(input.run).map(propRow);
+      return {
+        run: { id: run.id, started_at: run.started_at, finished_at: run.finished_at, status: run.status, properties_indexed: run.properties_indexed, values_written: run.values_written, errors: run.errors, duration_ms: (run.finished_at != null && run.started_at != null) ? run.finished_at - run.started_at : null },
+        property_count: props.length,
+        properties: props,
+        recommendations: [props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with describe_index({ property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`],
+      };
+    }
+
     const sync = this.valueIndex.syncStatus ? this.valueIndex.syncStatus({ recent }) : { persisted: false, running: false, indexed_properties: 0, total_values: 0, total_runs: 0, last_run: null, last_successful_run: null, recent_runs: [] };
     const last = sync.last_successful_run || sync.last_run;
     const secsSince = last?.finished_at != null ? Math.round((Date.now() - last.finished_at) / 1000) : null;
+    // Preview the slowest properties of the last run; full per-property timing via drill-down.
+    const slowest = last?.id != null ? this.valueIndex.runProperties(last.id, { limit: 5 }).map(propRow) : [];
 
     const jobs = this.jobs.list(); // [{ query_id, status, table, context_id, age_ms }]
     const running = jobs.filter((j) => j.status === 'running');
@@ -297,6 +325,7 @@ export class Engine {
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the warehouse/runner.`);
     else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via describe_catalog({ property }).`);
     if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }) or list them with list_query_jobs.`);
+    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: describe_index({ run: ${last.id} }) for the full breakdown, or describe_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
     if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
 
     return {
@@ -309,6 +338,7 @@ export class Engine {
         seconds_since_last_sync: secsSince,
         last_run: sync.last_run,
         last_successful_run: sync.last_successful_run,
+        slowest_properties: slowest,
         recent_runs: sync.recent_runs,
       },
       query_jobs: {

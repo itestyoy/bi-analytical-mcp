@@ -33,6 +33,7 @@ export class MemoryBackend {
     this.persistent = false;
     const props = new Map(); // property -> { distinctCount, totalCount, indexedAt, values:[{value,freq}] }
     const runs = [];
+    const runProps = []; // { run_id, property, ms, values_written, distinct_count, total_count, status, error, started_at }
     let runSeq = 0;
 
     this.jobs = {
@@ -82,6 +83,14 @@ export class MemoryBackend {
       start: () => { const id = ++runSeq; runs.push({ id, started_at: Date.now(), finished_at: null, status: 'running', properties_indexed: null, values_written: null, errors: null, error: null }); return id; },
       finish: (id, f = {}) => { const r = runs.find((x) => x.id === id); if (r) Object.assign(r, { finished_at: Date.now(), status: f.status, properties_indexed: f.propertiesIndexed ?? null, values_written: f.valuesWritten ?? null, errors: f.errors ?? null, error: f.error ?? null }); },
       all: () => [...runs].sort((a, b) => b.id - a.id),
+      get: (id) => runs.find((x) => x.id === id) || null,
+      recordProperty: (runId, p = {}) => {
+        const row = { run_id: runId, property: p.property, ms: p.ms ?? null, values_written: p.valuesWritten ?? null, distinct_count: p.distinctCount ?? null, total_count: p.totalCount ?? null, status: p.status ?? null, error: p.error ?? null, started_at: runs.find((x) => x.id === runId)?.started_at ?? null };
+        const i = runProps.findIndex((x) => x.run_id === runId && x.property === p.property);
+        if (i >= 0) runProps[i] = row; else runProps.push(row);
+      },
+      properties: (runId, { limit = 1000 } = {}) => runProps.filter((x) => x.run_id === runId).sort((a, b) => (b.ms ?? -1) - (a.ms ?? -1) || String(a.property).localeCompare(b.property)).slice(0, limit),
+      propertyHistory: (property, { limit = 20 } = {}) => runProps.filter((x) => x.property === property).sort((a, b) => b.run_id - a.run_id).slice(0, limit),
     };
   }
 
@@ -100,6 +109,8 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
     db.exec('CREATE TABLE IF NOT EXISTS prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, indexed_at INTEGER)');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
+    // Per-property timing within a run — detailed stats drilled into via describe_index.
+    db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
     const s = this;
 
     this.jobs = {
@@ -151,6 +162,13 @@ export class SqliteBackend {
       start() { return Number(s._run("INSERT INTO index_runs (started_at, status) VALUES (?, 'running')", Date.now()).lastInsertRowid); },
       finish(id, f = {}) { s._run('UPDATE index_runs SET finished_at=?, status=?, properties_indexed=?, values_written=?, errors=?, error=? WHERE id=?', Date.now(), f.status, f.propertiesIndexed ?? null, f.valuesWritten ?? null, f.errors ?? null, f.error ?? null, id); },
       all() { return s._all('SELECT * FROM index_runs ORDER BY id DESC'); },
+      get(id) { return s._get('SELECT * FROM index_runs WHERE id = ?', id) || null; },
+      // per-property timing/coverage within a run
+      recordProperty(runId, p = {}) {
+        s._run('INSERT INTO index_run_props (run_id, property, ms, values_written, distinct_count, total_count, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, property) DO UPDATE SET ms=excluded.ms, values_written=excluded.values_written, distinct_count=excluded.distinct_count, total_count=excluded.total_count, status=excluded.status, error=excluded.error', runId, p.property, p.ms ?? null, p.valuesWritten ?? null, p.distinctCount ?? null, p.totalCount ?? null, p.status ?? null, p.error ?? null);
+      },
+      properties(runId, { limit = 1000 } = {}) { return s._all('SELECT * FROM index_run_props WHERE run_id = ? ORDER BY ms DESC, property ASC LIMIT ?', runId, limit); },
+      propertyHistory(property, { limit = 20 } = {}) { return s._all('SELECT p.*, r.started_at FROM index_run_props p JOIN index_runs r ON r.id = p.run_id WHERE p.property = ? ORDER BY p.run_id DESC LIMIT ?', property, limit); },
     };
   }
 

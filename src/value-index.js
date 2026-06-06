@@ -63,10 +63,25 @@ export class ValueIndex {
     this.store.runs.finish(runId, { status: 'ok', propertiesIndexed: null, valuesWritten: null, errors: null, error: null, ...fields });
   }
 
+  /** Record how long ONE property took within a run (+ what it produced). */
+  recordPropertyTiming(runId, fields = {}) {
+    if (runId == null || !fields.property) return;
+    this.store.runs.recordProperty(runId, fields);
+  }
+
+  /** Per-property timing/coverage for a run (slowest first). */
+  runProperties(runId, opts = {}) { return this.store.runs.properties(runId, opts); }
+
+  /** A single run's header row, or null. */
+  runById(runId) { return this.store.runs.get(runId); }
+
+  /** Per-run timing history for one property (most recent first). */
+  propertyHistory(property, opts = {}) { return this.store.runs.propertyHistory(property, opts); }
+
   /** Snapshot of the indexing state: coverage counts + the run history. */
   syncStatus({ recent = 10 } = {}) {
     const runs = this.store.runs.all();
-    const fmt = (r) => (r ? { started_at: r.started_at, finished_at: r.finished_at, status: r.status, properties_indexed: r.properties_indexed, values_written: r.values_written, errors: r.errors, error: r.error, duration_ms: (r.finished_at != null && r.started_at != null) ? r.finished_at - r.started_at : null } : null);
+    const fmt = (r) => (r ? { id: r.id, started_at: r.started_at, finished_at: r.finished_at, status: r.status, properties_indexed: r.properties_indexed, values_written: r.values_written, errors: r.errors, error: r.error, duration_ms: (r.finished_at != null && r.started_at != null) ? r.finished_at - r.started_at : null } : null);
     const lastFinished = runs.find((r) => r.finished_at != null) || null;
     const { properties, values } = this.store.values.counts();
     return {
@@ -142,6 +157,7 @@ export class BackgroundIndexer {
         i += 1;
         // Sequential await between properties yields to the event loop, keeping
         // tool calls responsive during a refresh.
+        const tProp = Date.now(); // per-property timing (detailed stats for describe_index)
         try {
           const spec = c.eventPropertySpec(name);
           if (!spec) continue;
@@ -150,17 +166,23 @@ export class BackgroundIndexer {
           // show --limit), so a trailing LIMIT here would be invalid SQL. Cap with
           // the show limit (= maxValues) instead — GROUP BY + ORDER BY keep the top N.
           const top = await this.runner.show(this.baseProjectDir, `SELECT ${expr} AS v, COUNT(*) AS n FROM ${ref} WHERE ${expr} IS NOT NULL GROUP BY 1 ORDER BY n DESC`, this.maxValues);
-          if (!top.ok) { this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': skipped (query not ok)`); continue; }
+          if (!top.ok) {
+            this.index.recordPropertyTiming?.(runId, { property: name, ms: Date.now() - tProp, status: 'skipped' });
+            this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': skipped (query not ok)`); continue;
+          }
           const card = await this.runner.show(this.baseProjectDir, `SELECT COUNT(DISTINCT ${expr}) AS d, COUNT(${expr}) AS t FROM ${ref}`, 1);
           const stat = card.ok && card.rows?.[0] ? card.rows[0] : {};
           const vals = (top.rows || []).filter((r) => r.v != null).map((r) => ({ value: r.v, freq: Number(r.n) }));
           const distinct = stat.d != null ? Number(stat.d) : null;
           const total = stat.t != null ? Number(stat.t) : null;
           this.index.upsertProperty(name, { distinctCount: distinct, totalCount: total, values: vals });
+          const ms = Date.now() - tProp;
           props += 1; values += vals.length;
-          this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': ${vals.length} values stored, ${distinct ?? '?'} distinct / ${total ?? '?'} total`);
+          this.index.recordPropertyTiming?.(runId, { property: name, ms, valuesWritten: vals.length, distinctCount: distinct, totalCount: total, status: 'ok' });
+          this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': ${vals.length} values stored, ${distinct ?? '?'} distinct / ${total ?? '?'} total (${ms}ms)`);
         } catch (e) {
           errors += 1; lastError = e?.message || String(e);
+          this.index.recordPropertyTiming?.(runId, { property: name, ms: Date.now() - tProp, status: 'error', error: lastError });
           this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': FAILED — ${lastError}`);
         }
       }

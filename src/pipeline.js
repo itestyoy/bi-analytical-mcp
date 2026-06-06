@@ -308,8 +308,8 @@ const STAGES = {
       else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }
       else if (p.op === 'json_field') { expr = d.jsonColumnField(col(), p.field, p.type); type = p.type || 'string'; }
       else if (p.op === 'json_parse_array') { expr = d.jsonParseArray(col()); type = 'array'; } // STRING JSON array → native array (then unnest)
-      else if (p.op === 'element_at') { expr = d.arrayElementAt(col(), p.index); type = p.type || 'string'; }
-      else if (p.op === 'array_last') { expr = d.arrayLast(col()); type = p.type || 'string'; }
+      else if (p.op === 'element_at') { requireArrayCol(cols, p.column, 'element_at'); expr = d.arrayElementAt(col(), p.index); type = p.type || 'string'; }
+      else if (p.op === 'array_last') { requireArrayCol(cols, p.column, 'array_last'); expr = d.arrayLast(col()); type = p.type || 'string'; }
       else if (p.op === 'raw') { if (!p.sql) throw new Error('raw: needs sql'); expr = `(${p.sql})`; type = p.type || 'string'; } // escape hatch: verbatim dialect SQL
       else if (p.op === 'hll_extract') { expr = d.hllExtract(col()); type = 'int'; }
       else if (p.op === 'case') {
@@ -496,6 +496,17 @@ function addCol(cols, name, type) {
 }
 function requireCol(cols, name) {
   if (!cols.has(name)) throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
+}
+
+// Static type guard so a JSON/string column passed to an array op is rejected when the
+// stage is ADDED (renderPipeline), not at warehouse run time. Only KNOWN-bad types fail;
+// 'array' and unknown/untyped columns are allowed (benefit of the doubt for raw/native).
+function requireArrayCol(cols, name, op) {
+  requireCol(cols, name);
+  const t = cols.get(name)?.type;
+  if (t && t !== 'array' && t !== 'unknown') {
+    throw new Error(`compute ${op}: column '${name}' is '${t}', not an array — produce an array first (compute op=json_parse_array on a JSON/string column, or unnest a native array column), then ${op}.`);
+  }
 }
 
 /** Register an additional stage from another module (e.g. match_recognize). */

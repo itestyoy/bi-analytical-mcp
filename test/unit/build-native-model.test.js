@@ -96,3 +96,19 @@ test('build_native_model: schema rejects action-irrelevant fields', async () => 
   const reuse = await e.build_native_model({ action: 'start', draft_id: s.draft_id, name: 'reused' });
   assert.equal(reuse.draft_id, s.draft_id);
 });
+
+// #2: array ops are type-checked at add_step (not only at commit/runtime).
+test('build_native_model: array op on a non-array column is rejected at add_step', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'arr', source: 'events' });
+  // array_last over a string column → rejected when the stage is ADDED, with a fix hint.
+  await assert.rejects(
+    () => e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'last', op: 'array_last', column: 'player_id_of_internal' } }),
+    /not an array/,
+  );
+  // correct flow: json_parse_array (string → array) first, then array_last passes validation.
+  const s2 = await e.build_native_model({ action: 'start', name: 'arr2', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'arr', op: 'json_parse_array', column: 'player_id_of_internal' } });
+  const ok = await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'last', op: 'array_last', column: 'arr' } });
+  assert.equal(ok.steps.length, 2, 'array_last on a parsed array column is accepted');
+});

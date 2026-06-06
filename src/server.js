@@ -175,7 +175,11 @@ export function makeEngine(opts = {}) {
   // Ensure the parent dir exists so a custom path persists (a missing dir would make the
   // open fail and silently fall back to an in-memory store).
   try { mkdirSync(dirname(dbPath), { recursive: true }); } catch { /* best effort */ }
-  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath });
+  // MCP_DB_RESET wipes the store (jobs + value index) on startup — a clean slate each run.
+  // DEFAULT ON: reset unless explicitly disabled (MCP_DB_RESET=false/0/no/off).
+  const resetDb = !/^(0|false|no|off)$/i.test(String(process.env.MCP_DB_RESET ?? 'true').trim());
+  if (resetDb) console.error(`[mcp] ${new Date().toISOString()} MCP_DB_RESET on (default) — clearing the store on startup; set MCP_DB_RESET=false to keep it`);
+  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb });
 }
 
 export function createApp(engine) {

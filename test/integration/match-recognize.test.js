@@ -133,11 +133,11 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
 // all-at-once register_native_model (fidelity), proven on the activation funnel.
 test('build_native_model incremental: per-step columns + commit equals all-at-once (12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'inc_funnel', source: 'events' });
+  const s = await engine.build_native_model({ action: 'start', name: 'inc_funnel', source: 'events', include_columns: true });
   assert.ok(s.draft_id, 'start returns a draft_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   // add the funnel as one match_recognize stage; its output columns must be reported.
-  const a1 = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: matchActivation() });
+  const a1 = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: matchActivation(), include_columns: true });
   assert.equal(a1.step_index, 1);
   const names = a1.available_columns.map((c) => c.name);
   assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to next stage');
@@ -166,6 +166,25 @@ test('build_native_model add_step rejects an invalid stage without mutating the 
   );
   const pv = await engine.build_native_model({ action: 'preview', draft_id: s.draft_id });
   assert.equal(pv.steps.length, 1, 'the rejected step was not persisted');
+});
+
+// #4a: a model column (session_number — a physical column, NOT an event_data property)
+// is usable directly inside match_recognize's filter.where AND a step.where, with no
+// separate where stage. We prove the filter.where path equals the separate-where workaround.
+test('match_recognize accepts model columns in filter/step where (no separate where needed)', opts, async (t) => {
+  if (skip(t)) return;
+  const cond = { property: 'session_number', op: 'gte', value: 1 };
+  const colCond = { column: 'session_number', op: 'gte', value: 1 };
+  // model-column condition INSIDE match_recognize.filter.where …
+  const viaFilter = await pipe([matchActivation({ filter: { where: [cond] } })]);
+  // … equals expressing it as a separate leading where stage (the old workaround).
+  const viaWhere = await pipe([{ stage: 'where', conditions: [colCond] }, matchActivation()]);
+  assert.equal(reached(viaFilter.rows, 'launch'), reached(viaWhere.rows, 'launch'));
+  assert.equal(reached(viaFilter.rows, 'tut3'), reached(viaWhere.rows, 'tut3'));
+  // and a model column works in a STEP's where too (builds + runs; pipe asserts build.ok).
+  const base = await pipe([matchActivation()]);
+  const stepFiltered = await pipe([matchActivation({ steps: [{ ...activationSteps[0], where: [cond] }, ...activationSteps.slice(1)] })]);
+  assert.ok(reached(stepFiltered.rows, 'launch') <= reached(base.rows, 'launch'), 'step model-column filter applied (≤ baseline)');
 });
 
 // #5: rows option — one_per_partition (players) vs one_per_match (situations).
@@ -312,7 +331,9 @@ test('register_native_model: dry_run returns SQL without building', opts, async 
   assert.equal(dr.dry_run, true);
   assert.equal(dr.kind, 'pipeline');
   assert.equal(typeof dr.model_sql, 'string');
-  assert.equal(typeof dr.model_sql_bigquery, 'string');
+  // SQL is rendered in the ACTIVE warehouse dialect only — no second-dialect blob.
+  assert.equal(dr.dialect, engine.catalog.dialect);
+  assert.equal(dr.model_sql_bigquery, undefined);
 });
 
 test('register_native_model: same name in two contexts → distinct relations', opts, async (t) => {

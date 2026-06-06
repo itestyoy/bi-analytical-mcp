@@ -19,12 +19,13 @@ import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
-    // ONE shared store (single db file) for the job registry + value index.
-    this.store = store || openStore({ dbPath });
+    // ONE shared store (single db file) for the job registry + value index. resetDb wipes
+    // it on open (MCP_DB_RESET) before the managers read it.
+    this.store = store || openStore({ dbPath, reset: resetDb });
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
@@ -283,9 +284,37 @@ export class Engine {
   describe_index(input = {}) {
     this._validate('describe_index', input);
     const recent = input.recent ?? 10;
+    const propRow = (r) => ({ property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) });
+
+    // ── drill-down: one property's per-sync timing history ──
+    if (input.property) {
+      const hist = this.valueIndex.propertyHistory(input.property, { limit: recent }).map((r) => ({ run_id: r.run_id, started_at: r.started_at, ...propRow(r) }));
+      const timed = hist.filter((r) => r.ms != null);
+      const avg = timed.length ? Math.round(timed.reduce((s, r) => s + r.ms, 0) / timed.length) : null;
+      return {
+        property: input.property, runs: hist.length, avg_ms: avg, history: hist,
+        recommendations: [hist.length ? `'${input.property}' took ${hist[0].ms}ms in the latest sync (${hist[0].values} values, ${hist[0].distinct_count} distinct); avg ${avg}ms over ${timed.length} runs.` : `No per-property timing recorded for '${input.property}' yet.`],
+      };
+    }
+
+    // ── drill-down: per-property breakdown within one sync run (slowest first) ──
+    if (input.run != null) {
+      const run = this.valueIndex.runById(input.run);
+      if (!run) throw new ToolError(`unknown index run '${input.run}'. See describe_index().value_index.recent_runs[].id`, { stage: 'validate', field: 'run' });
+      const props = this.valueIndex.runProperties(input.run).map(propRow);
+      return {
+        run: { id: run.id, started_at: run.started_at, finished_at: run.finished_at, status: run.status, properties_indexed: run.properties_indexed, values_written: run.values_written, errors: run.errors, duration_ms: (run.finished_at != null && run.started_at != null) ? run.finished_at - run.started_at : null },
+        property_count: props.length,
+        properties: props,
+        recommendations: [props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with describe_index({ property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`],
+      };
+    }
+
     const sync = this.valueIndex.syncStatus ? this.valueIndex.syncStatus({ recent }) : { persisted: false, running: false, indexed_properties: 0, total_values: 0, total_runs: 0, last_run: null, last_successful_run: null, recent_runs: [] };
     const last = sync.last_successful_run || sync.last_run;
     const secsSince = last?.finished_at != null ? Math.round((Date.now() - last.finished_at) / 1000) : null;
+    // Preview the slowest properties of the last run; full per-property timing via drill-down.
+    const slowest = last?.id != null ? this.valueIndex.runProperties(last.id, { limit: 5 }).map(propRow) : [];
 
     const jobs = this.jobs.list(); // [{ query_id, status, table, context_id, age_ms }]
     const running = jobs.filter((j) => j.status === 'running');
@@ -297,6 +326,7 @@ export class Engine {
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the warehouse/runner.`);
     else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via describe_catalog({ property }).`);
     if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }) or list them with list_query_jobs.`);
+    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: describe_index({ run: ${last.id} }) for the full breakdown, or describe_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
     if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
 
     return {
@@ -309,6 +339,7 @@ export class Engine {
         seconds_since_last_sync: secsSince,
         last_run: sync.last_run,
         last_successful_run: sync.last_successful_run,
+        slowest_properties: slowest,
         recent_runs: sync.recent_runs,
       },
       query_jobs: {
@@ -374,7 +405,7 @@ export class Engine {
     const draft = ctx.state.draft;
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
-    if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage);
+    if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns);
     if (input.action === 'preview') return this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { draft_id: ctx.id, action: 'discard', discarded: true }; }
     return this._draftCommit(ctx, draft); // commit
@@ -408,19 +439,23 @@ export class Engine {
     const source = input.source || this.catalog.anchor;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
-    return {
+    const cols = this.catalog.modelColumns(source);
+    const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
-      steps: [], available_columns: this.catalog.modelColumns(source),
-      next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response lists the columns then available for the following stage.',
+      steps: [], column_count: cols.length,
+      next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response shows only the columns that stage added/removed (use include_columns:true or preview for the full list).',
       recommendations: [
-        `These available_columns are the inputs your first stage can reference (where/derive/compute/aggregate/match_recognize/...).`,
+        `The source has ${cols.length} columns your first stage can reference; get the full list with build_native_model({ action: "start", ..., include_columns: true }) or inspect via describe_catalog({ model: '${source}' }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
         `When the steps look right, commit with build_native_model({ action: "commit", draft_id }).`,
       ],
     };
+    if (input.include_columns) resp.available_columns = cols;
+    return resp;
   }
 
-  _draftAddStep(ctx, draft, stage) {
+  _draftAddStep(ctx, draft, stage, includeColumns = false) {
+    const before = this._draftColumns(draft); // columns BEFORE this stage
     const trial = [...draft.stages, stage];
     try {
       renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
@@ -430,13 +465,23 @@ export class Engine {
     }
     draft.stages = trial;
     this.ctxs.touch(ctx.id);
-    const available = this._draftColumns(draft);
-    return {
+    const after = this._draftColumns(draft);
+    // Default to a DIFF (what this stage added/removed) instead of dumping the whole
+    // schema every step — the full list is noise after the first call. Pass
+    // include_columns:true (or use preview) for the complete set.
+    const beforeNames = new Set(before.map((c) => c.name));
+    const afterNames = new Set(after.map((c) => c.name));
+    const resp = {
       draft_id: ctx.id, action: 'add_step', step_index: draft.stages.length,
-      steps: this._draftSteps(draft), available_columns: available,
-      next: 'add_step the next stage (it may reference any of available_columns), or commit the draft.',
-      recommendations: this._draftStepRecommendations(stage, available),
+      steps: this._draftSteps(draft),
+      column_count: after.length,
+      columns_added: after.filter((c) => !beforeNames.has(c.name)),
+      columns_removed: before.filter((c) => !afterNames.has(c.name)).map((c) => c.name),
+      next: 'add_step the next stage, commit the draft, or pass include_columns:true / preview for the full column list.',
+      recommendations: this._draftStepRecommendations(stage, after),
     };
+    if (includeColumns) resp.available_columns = after;
+    return resp;
   }
 
   /** Stage-aware next-step hints from the just-added stage + the resulting columns. */
@@ -456,12 +501,14 @@ export class Engine {
   }
 
   _draftPreview(ctx, draft) {
-    const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, steps: this._draftSteps(draft) };
+    const dialect = this.catalog.dialect;
+    const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft) };
     if (!draft.stages.length) return { ...base, available_columns: this.catalog.modelColumns(draft.source), note: 'No stages yet — add_step first.' };
     const stages = this._draftEffectiveStages(draft);
-    const pg = renderPipeline(this.catalog, this.catalog.dialect, draft.source, stages);
-    const bq = renderPipeline(this.catalog, 'bigquery', draft.source, stages).sql;
-    return { ...base, available_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: pg.sql, model_sql_bigquery: bq };
+    // Render ONLY the active warehouse dialect, so every response is consistent with where
+    // the pipeline actually runs (bigquery → `|>`, postgres → CTEs).
+    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages);
+    return { ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql };
   }
 
   async _draftCommit(ctx, draft) {
@@ -494,17 +541,16 @@ export class Engine {
       if (tr.end) { const ex = dateEndExclusive(tr.end); conditions.push(ex ? { column: timeCol, op: 'lt', value: ex } : { column: timeCol, op: 'lte', value: tr.end }); }
       stages = [{ stage: 'where', conditions }, ...stages];
     }
-    const renderBoth = () => ({
-      pg: renderPipeline(this.catalog, dialect, source, stages),
-      bq: renderPipeline(this.catalog, 'bigquery', source, stages).sql,
-    });
+    // Render ONLY the active warehouse dialect — every response is in the dialect the
+    // pipeline actually runs on, never a mix.
+    const render = () => renderPipeline(this.catalog, dialect, source, stages);
     if (input.dry_run) {
-      const { pg, bq } = renderBoth();
+      const out = render();
       const resp = {
         kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect,
-        columns: [...pg.columns.keys()],
-        output_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
-        model_sql: pg.sql, model_sql_bigquery: bq,
+        columns: [...out.columns.keys()],
+        output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+        model_sql: out.sql,
       };
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before committing.
@@ -514,28 +560,31 @@ export class Engine {
     }
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
-    const { pg, bq } = renderBoth();
+    const out = render();
     const materialized = input.materialized || 'table';
     const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
-    this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${pg.sql}\n`);
+    this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
-    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...pg.columns.keys()] };
+    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()] };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);
-    let build = { ok: true, skipped: 'no runner' };
-    let rows = []; let columns = [...pg.columns.keys()];
+    // Honest status: `executed` makes it unambiguous whether the model was actually built
+    // and run, vs only written to disk (no runner). `ok` stays for backward-compatible checks.
+    let build = { ok: true, executed: false, reason: 'no runner configured — model written but not built/executed (dry/unit mode)' };
+    let rows = []; let columns = [...out.columns.keys()];
     if (this.runner) {
       const r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
       if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) } };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };
+      build = { ok: true, executed: true };
     }
     return {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
-      columns, output_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
-      row_count: rows.length, rows, model_sql_bigquery: bq, build,
+      columns, output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+      row_count: rows.length, rows, model_sql: out.sql, build,
       // A4: how to read this result again — these rows are a pipeline model, re-read
       // with get_query_result (NOT query_semantic_model, which is for metric queries).
       read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
@@ -590,7 +639,7 @@ export class Engine {
     delete ctx.state.engine; delete ctx.state.model; delete ctx.state.native;
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
-    const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, skipped: 'no runner' };
+    const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
     return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: 'model definition removed; the warehouse view may persist until the context is dropped (drop_context) or the warehouse cleans ephemeral objects' };
   }
 
@@ -874,12 +923,16 @@ export class Engine {
       });
       where = renderWhereClauses(translated);
     }
-    // order_by keys must be a requested metric or group-by token (defense in depth)
+    // order_by keys must be a requested metric or group-by token. `metric_time` is a
+    // convenience alias that resolves to the GRAINED token a time group_by actually
+    // produces (e.g. metric_time__day), so callers don't have to guess the suffix.
     const orderable = new Set([...input.metrics, ...groupBy]);
-    for (const o of input.order_by || []) {
-      if (!orderable.has(o.key)) throw new ToolError(`order_by key not in metrics/group_by: ${o.key}`, { stage: 'validate', field: o.key });
-    }
-    const orderBy = (input.order_by || []).map((o) => `${o.direction === 'desc' ? '-' : ''}${o.key}`);
+    const metricTimeTok = groupBy.find((g) => g.startsWith('metric_time__'));
+    const orderBy = (input.order_by || []).map((o) => {
+      const key = (o.key === 'metric_time' && metricTimeTok) ? metricTimeTok : o.key;
+      if (!orderable.has(key)) throw new ToolError(`order_by key '${o.key}' is not a requested metric or group_by token. Orderable: ${[...orderable].join(', ')}`, { stage: 'validate', field: o.key });
+      return `${o.direction === 'desc' ? '-' : ''}${key}`;
+    });
 
     if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
 
@@ -895,7 +948,7 @@ export class Engine {
 
     if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
     if (explain) {
-      const out = { ok: true, command: res.command, sql: res.sql };
+      const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: [...orderable] };
       if (input.dry_run) out.dry_run = true;
       if (input.explain) { out.explain = true; out.plan = res.plan; }
       return out;
@@ -1036,7 +1089,7 @@ export class Engine {
   }
 
   async _parse(ctxId) {
-    if (!this.runner) return { ok: true, skipped: 'no runner (unit mode)' };
+    if (!this.runner) return { ok: true, executed: false, reason: 'no runner configured — not parsed (unit mode)' };
     const r = await this.runner.parse(this.ctxs.dir(ctxId));
     if (!r.ok) return { ok: false, error: { stage: 'parse', message: formatDbtError(r.stdout, r.stderr) } };
     return { ok: true, manifest: r.manifest };

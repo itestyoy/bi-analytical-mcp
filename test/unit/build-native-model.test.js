@@ -21,26 +21,30 @@ function engine() {
 
 const mr = { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'] }] };
 
-test('build_native_model: start returns a draft + source columns', async () => {
+test('build_native_model: start returns a draft + source column count (full list on include_columns)', async () => {
   const e = engine();
   const s = await e.build_native_model({ action: 'start', name: 'inc', source: 'events' });
   assert.match(s.draft_id, /\w+/);
   assert.equal(s.action, 'start');
   assert.deepEqual(s.steps, []);
-  assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns surfaced');
+  assert.ok(s.column_count > 0, 'source column count reported');
+  assert.equal(s.available_columns, undefined, 'full list not dumped by default');
+  // opt in to the full list.
+  const full = await e.build_native_model({ action: 'start', name: 'inc2', source: 'events', include_columns: true });
+  assert.ok(full.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns surfaced with include_columns');
   assert.ok(Array.isArray(s.recommendations) && s.recommendations.length > 0);
 });
 
 test('build_native_model: add_step propagates columns; bad step is rejected without mutating the draft', async () => {
   const e = engine();
   const s = await e.build_native_model({ action: 'start', name: 'inc', source: 'events' });
-  const a1 = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: mr });
+  const a1 = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: mr, include_columns: true });
   assert.equal(a1.step_index, 1);
   const cols = a1.available_columns.map((c) => c.name);
   assert.ok(cols.includes('player_id_of_internal'), 'partition key carried');
   assert.ok(cols.includes('reached_a') && cols.includes('completed'), 'funnel output columns available');
   // a second stage references the funnel output produced by the first.
-  const a2 = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', fn: 'count' }] } });
+  const a2 = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', fn: 'count' }] }, include_columns: true });
   assert.equal(a2.step_index, 2);
   assert.deepEqual(a2.available_columns.map((c) => c.name), ['completed', 'n']);
   // a stage referencing a missing column is rejected and NOT persisted.
@@ -48,6 +52,23 @@ test('build_native_model: add_step propagates columns; bad step is rejected with
   const pv = await e.build_native_model({ action: 'preview', draft_id: s.draft_id });
   assert.equal(pv.steps.length, 2, 'rejected step not persisted');
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL (schema-only)');
+});
+
+// #1: by default add_step returns a DIFF (what this stage changed), not the whole schema.
+test('build_native_model: add_step returns a column diff by default', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'diff', source: 'events' });
+  const a1 = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: mr });
+  assert.equal(a1.available_columns, undefined, 'no full dump by default');
+  assert.ok(typeof a1.column_count === 'number' && a1.column_count > 0);
+  const added = a1.columns_added.map((c) => c.name);
+  assert.ok(added.includes('reached_a') && added.includes('completed'), 'diff shows the funnel columns this stage added');
+  assert.ok(!a1.columns_removed.includes('player_id_of_internal'), 'the carried partition key is not reported as removed');
+  // aggregate then collapses to group keys + measures: prior event columns show as removed.
+  const a2 = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', fn: 'count' }] } });
+  assert.deepEqual(a2.columns_added.map((c) => c.name), ['n']); // group key 'completed' persisted; 'n' is new
+  assert.ok(a2.columns_removed.includes('reached_a'), 'aggregated-away columns reported as removed');
+  assert.equal(a2.column_count, 2);
 });
 
 test('build_native_model: discard drops the draft; later actions error cleanly', async () => {
@@ -95,4 +116,20 @@ test('build_native_model: schema rejects action-irrelevant fields', async () => 
   // start MAY carry draft_id (legitimate context reuse) — not rejected.
   const reuse = await e.build_native_model({ action: 'start', draft_id: s.draft_id, name: 'reused' });
   assert.equal(reuse.draft_id, s.draft_id);
+});
+
+// #2: array ops are type-checked at add_step (not only at commit/runtime).
+test('build_native_model: array op on a non-array column is rejected at add_step', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'arr', source: 'events' });
+  // array_last over a string column → rejected when the stage is ADDED, with a fix hint.
+  await assert.rejects(
+    () => e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'last', op: 'array_last', column: 'player_id_of_internal' } }),
+    /not an array/,
+  );
+  // correct flow: json_parse_array (string → array) first, then array_last passes validation.
+  const s2 = await e.build_native_model({ action: 'start', name: 'arr2', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'arr', op: 'json_parse_array', column: 'player_id_of_internal' } });
+  const ok = await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'last', op: 'array_last', column: 'arr' } });
+  assert.equal(ok.steps.length, 2, 'array_last on a parsed array column is accepted');
 });

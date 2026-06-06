@@ -181,15 +181,16 @@ test('2b. the value index holds the exact seeded values (direct read)', opts, as
 // ───────────────────────── 3. NATIVE PIPELINE (incremental) ─────────────────────────
 test('3a. build_native_model: start → add_step (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'e2e_funnel', source: 'events' });
+  const s = await engine.build_native_model({ action: 'start', name: 'e2e_funnel', source: 'events', include_columns: true });
   assert.ok(s.draft_id, 'start returns a draft_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   S.draftId = s.draft_id;
 
+  // default add_step returns a DIFF; the funnel columns show up as added.
   const a1 = await engine.build_native_model({ action: 'add_step', draft_id: S.draftId, stage: matchActivation() });
   assert.equal(a1.step_index, 1);
-  const cols = a1.available_columns.map((c) => c.name);
-  assert.ok(cols.includes('reached_launch') && cols.includes('completed'), 'funnel output columns available');
+  const cols = a1.columns_added.map((c) => c.name);
+  assert.ok(cols.includes('reached_launch') && cols.includes('completed'), 'funnel output columns reported as added');
 
   const pv = await engine.build_native_model({ action: 'preview', draft_id: S.draftId });
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL (existence only)');

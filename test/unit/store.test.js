@@ -54,3 +54,28 @@ test('a custom backend can be registered and selected (database is swappable)', 
 test('openStore throws on an unknown backend name', () => {
   assert.throws(() => openStore({ backend: 'nope' }), /unknown store backend/);
 });
+
+test('openStore({ reset: true }) wipes all state on open (MCP_DB_RESET)', () => {
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'store-reset-')), 'mcp.sqlite');
+  const probe = new ValueIndex({ store: openStore({ dbPath }) });
+  if (!probe.persistent) return; // no node:sqlite here
+
+  // seed a persistent store with a job + indexed values + a run.
+  const seed = openStore({ dbPath });
+  const jobs = new JobManager({ store: seed });
+  const idx = new ValueIndex({ store: seed });
+  jobs.ready(jobs.create({ contextId: 'c1' }));
+  const r = idx.startRun();
+  idx.upsertProperty('p', { distinctCount: 1, totalCount: 1, values: [{ value: 'v', freq: 1 }] });
+  idx.finishRun(r, { status: 'ok' });
+  seed.close();
+
+  // reopen WITH reset → everything is gone.
+  const fresh = openStore({ dbPath, reset: true });
+  const jobs2 = new JobManager({ store: fresh });
+  const idx2 = new ValueIndex({ store: fresh });
+  assert.equal(jobs2.list().length, 0, 'jobs cleared');
+  assert.deepEqual(idx2.sampleValues('p'), [], 'values cleared');
+  assert.equal(idx2.syncStatus().total_runs, 0, 'run log cleared');
+  fresh.close();
+});

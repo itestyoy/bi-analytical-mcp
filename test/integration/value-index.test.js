@@ -181,4 +181,22 @@ test('describe_index reports the value-index sync state + jobs', opts, async (t)
   assert.equal(typeof out.query_jobs.total, 'number');
   assert.ok(Array.isArray(out.query_jobs.running));
   assert.ok(out.recommendations.length > 0);
+
+  // per-property timing drill-down: by RUN (slowest first) and by PROPERTY (history).
+  const runId = vi.last_run.id;
+  assert.ok(Number.isInteger(runId));
+  const byRun = await engine.describe_index({ run: runId });
+  assert.equal(byRun.run.id, runId);
+  assert.ok(byRun.property_count > 0, 'per-property timing recorded for the run');
+  const adRow = byRun.properties.find((p) => p.property === 'ad_type_of_event_data');
+  assert.ok(adRow, 'ad_type appears in the per-property breakdown');
+  assert.ok(typeof adRow.ms === 'number' && adRow.ms >= 0, 'each property has a measured duration');
+  assert.equal(adRow.distinct_count, 3); // matches the indexed cardinality
+  // slowest-first ordering holds.
+  const msList = byRun.properties.map((p) => p.ms);
+  assert.deepEqual(msList, [...msList].sort((a, b) => b - a));
+  // by PROPERTY: timing history for ad_type.
+  const byProp = await engine.describe_index({ property: 'ad_type_of_event_data' });
+  assert.ok(byProp.runs >= 1 && byProp.history[0].run_id === runId);
+  assert.equal(byProp.history[0].distinct_count, 3);
 });

@@ -48,6 +48,7 @@ function comparePred(lhs, op, value) {
 
 export function stepPredicate(catalog, step, dialect, col, prepCols = new Map()) {
   const m = catalog.getModel(catalog.anchor);
+  const modelCols = new Set(catalog.modelColumns(catalog.anchor).map((x) => x.name));
   const evCol = col ? `${col}.${m.event_name.column}` : m.event_name.column;
   const dataCol = col ? `${col}.${catalog.eventDataColumn()}` : catalog.eventDataColumn();
   const names = step.event_name;
@@ -58,7 +59,12 @@ export function stepPredicate(catalog, step, dialect, col, prepCols = new Map())
       return comparePred(col ? `${col}.${c.property}` : c.property, c.op, c.value);
     }
     const p = (m.properties || {})[c.property];
-    if (!p) throw new Error(`unknown event property in step: ${c.property}`);
+    if (!p) {
+      // a physical model column (envelope/dimension column like bundle_id) → compare it
+      // directly, so a step filter can use model columns without a separate where stage.
+      if (modelCols.has(c.property)) return comparePred(col ? `${col}.${c.property}` : c.property, c.op, c.value);
+      throw new Error(`unknown event property or column in step: ${c.property}`);
+    }
     if (catalog.isComplexEventProp(c.property)) {
       throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (derive/unnest), not directly`);
     }
@@ -88,9 +94,14 @@ export function buildPrefilter(catalog, spec, dialect, col) {
   if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
   if (f.time_range?.end) { const ex = dateEndExclusive(f.time_range.end); clauses.push(ex ? `${timeCol} < ${sqlLiteral(ex)}` : `${timeCol} <= ${sqlLiteral(f.time_range.end)}`); }
   if (f.event_name?.length) clauses.push(`${evNameCol} IN (${f.event_name.map(sqlLiteral).join(', ')})`);
+  const modelCols = new Set(catalog.modelColumns(catalog.anchor).map((x) => x.name));
   for (const c of f.where || []) {
     const p = (m.properties || {})[c.property];
-    if (!p) throw new Error(`unknown event property in filter.where: ${c.property}`);
+    if (!p) {
+      // physical model column (e.g. bundle_id) → direct comparison; no separate where needed.
+      if (modelCols.has(c.property)) { clauses.push(comparePred(q(c.property), c.op, c.value)); continue; }
+      throw new Error(`unknown event property or column in filter.where: ${c.property}`);
+    }
     clauses.push(comparePred(p.column ? q(p.column) : jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value));
   }
   return clauses.join(' AND ');

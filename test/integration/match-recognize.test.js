@@ -168,6 +168,25 @@ test('build_native_model add_step rejects an invalid stage without mutating the 
   assert.equal(pv.steps.length, 1, 'the rejected step was not persisted');
 });
 
+// #4a: a model column (session_number — a physical column, NOT an event_data property)
+// is usable directly inside match_recognize's filter.where AND a step.where, with no
+// separate where stage. We prove the filter.where path equals the separate-where workaround.
+test('match_recognize accepts model columns in filter/step where (no separate where needed)', opts, async (t) => {
+  if (skip(t)) return;
+  const cond = { property: 'session_number', op: 'gte', value: 1 };
+  const colCond = { column: 'session_number', op: 'gte', value: 1 };
+  // model-column condition INSIDE match_recognize.filter.where …
+  const viaFilter = await pipe([matchActivation({ filter: { where: [cond] } })]);
+  // … equals expressing it as a separate leading where stage (the old workaround).
+  const viaWhere = await pipe([{ stage: 'where', conditions: [colCond] }, matchActivation()]);
+  assert.equal(reached(viaFilter.rows, 'launch'), reached(viaWhere.rows, 'launch'));
+  assert.equal(reached(viaFilter.rows, 'tut3'), reached(viaWhere.rows, 'tut3'));
+  // and a model column works in a STEP's where too (builds + runs; pipe asserts build.ok).
+  const base = await pipe([matchActivation()]);
+  const stepFiltered = await pipe([matchActivation({ steps: [{ ...activationSteps[0], where: [cond] }, ...activationSteps.slice(1)] })]);
+  assert.ok(reached(stepFiltered.rows, 'launch') <= reached(base.rows, 'launch'), 'step model-column filter applied (≤ baseline)');
+});
+
 // #5: rows option — one_per_partition (players) vs one_per_match (situations).
 test('match_recognize rows: one_per_partition (12 players) vs one_per_match (28 starts)', opts, async (t) => {
   if (skip(t)) return;

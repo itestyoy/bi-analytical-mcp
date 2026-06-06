@@ -878,12 +878,16 @@ export class Engine {
       });
       where = renderWhereClauses(translated);
     }
-    // order_by keys must be a requested metric or group-by token (defense in depth)
+    // order_by keys must be a requested metric or group-by token. `metric_time` is a
+    // convenience alias that resolves to the GRAINED token a time group_by actually
+    // produces (e.g. metric_time__day), so callers don't have to guess the suffix.
     const orderable = new Set([...input.metrics, ...groupBy]);
-    for (const o of input.order_by || []) {
-      if (!orderable.has(o.key)) throw new ToolError(`order_by key not in metrics/group_by: ${o.key}`, { stage: 'validate', field: o.key });
-    }
-    const orderBy = (input.order_by || []).map((o) => `${o.direction === 'desc' ? '-' : ''}${o.key}`);
+    const metricTimeTok = groupBy.find((g) => g.startsWith('metric_time__'));
+    const orderBy = (input.order_by || []).map((o) => {
+      const key = (o.key === 'metric_time' && metricTimeTok) ? metricTimeTok : o.key;
+      if (!orderable.has(key)) throw new ToolError(`order_by key '${o.key}' is not a requested metric or group_by token. Orderable: ${[...orderable].join(', ')}`, { stage: 'validate', field: o.key });
+      return `${o.direction === 'desc' ? '-' : ''}${key}`;
+    });
 
     if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
 
@@ -899,7 +903,7 @@ export class Engine {
 
     if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
     if (explain) {
-      const out = { ok: true, command: res.command, sql: res.sql };
+      const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: [...orderable] };
       if (input.dry_run) out.dry_run = true;
       if (input.explain) { out.explain = true; out.plan = res.plan; }
       return out;

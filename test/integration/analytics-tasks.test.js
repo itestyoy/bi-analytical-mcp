@@ -124,6 +124,14 @@ test('TASK active_users_trend: DAU/WAU/MAU & event volume', opts, async (t) => {
   assert.ok(ex.plan && typeof ex.plan === 'object');                     // plan object returned
   assert.ok(typeof ex.plan.dataflow_plan === 'string' && ex.plan.dataflow_plan.length > 0); // dataflow plan present
   assert.ok(typeof ex.plan.execution_plan === 'string' && ex.plan.execution_plan.length > 0); // execution plan present
+
+  // #4b: order_by accepts the `metric_time` alias (resolves to metric_time__day, so the
+  // suffix need not be guessed); explain surfaces the orderable tokens; a bad key lists them.
+  assert.ok(ex.orderable_keys.includes('metric_time__day') && ex.orderable_keys.includes('active_users_dau'), `orderable_keys: ${JSON.stringify(ex.orderable_keys)}`);
+  const sorted = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time' }] });
+  assert.equal(sorted.ok, true, JSON.stringify(sorted.error || sorted));
+  assert.equal(sorted.row_count, 7); // same 7 days, now ordered by the resolved metric_time__day
+  await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'nonsense' }] }), /Orderable:/);
 });
 
 // ── 2. segmentation: metric_by_user_segment ──────────────────────────────────

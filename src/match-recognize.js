@@ -302,6 +302,60 @@ ${defines.join(',\n')}
   )${r.rows === 'one_per_match' ? '' : `\n  QUALIFY ROW_NUMBER() OVER (PARTITION BY ${r.partCols.join(', ')} ORDER BY t1) = 1`}`;
 }
 
+/** BigQuery PIPE lowering: the funnel as `|> MATCH_RECOGNIZE` pipe operators (BigQuery
+ *  pipe syntax supports MATCH_RECOGNIZE as a pipe operator), so the whole pipeline stays
+ *  pipe-form. Same MEASURES/PATTERN/DEFINE semantics as the table form; the derived
+ *  reached/completed/secs columns become `|> EXTEND`, the one_per_partition first-match
+ *  pick becomes a ROW_NUMBER window + `|> WHERE`, and a final `|> SELECT` projects the
+ *  output columns (dropping the internal t1..tn). */
+export function matchStepBigQueryPipe(r, spec, catalog) {
+  const preds = r.stepPreds('bigquery', null);
+  const sym = r.steps.map((s) => `S${s.idx}`);
+  const measures = [
+    ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
+    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
+  ].join(',\n');
+  const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
+  const gapMode = gapModeFor(r);
+  if (gapMode === 'single') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
+  else if (gapMode === 'perlevel') for (let i = 1; i < r.steps.length; i++) defines.push(`    G${i} AS NOT (${preds[i]})`);
+  const furthestCase = r.steps.slice().reverse().map((s) => `WHEN t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
+  const derived = [
+    't1 AS first_seen_at',
+    `CASE ${furthestCase} END AS furthest_step_name`,
+    `(t${r.steps.length} IS NOT NULL) AS completed`,
+    ...r.steps.map((s) => `(t${s.idx} IS NOT NULL) AS reached_${s.name}`),
+    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`),
+  ];
+  const outCols = [
+    ...r.partCols,
+    'first_seen_at', 'furthest_step_name', 'completed',
+    ...r.steps.map((s) => `reached_${s.name}`),
+    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `secs_${m.name}`),
+    ...r.propCaptures.map((c) => c.id),
+  ];
+  const pre = buildPrefilter(catalog, spec, 'bigquery', null);
+  const lines = [];
+  if (pre) lines.push(`|> WHERE ${pre}`);
+  lines.push(`|> MATCH_RECOGNIZE (
+    PARTITION BY ${r.partCols.join(', ')}
+    ORDER BY ${r.timeCol}
+    MEASURES
+${measures}${r.rows === 'one_per_match' ? '\n    AFTER MATCH SKIP TO NEXT ROW' : ''}
+    PATTERN ${nestedPattern(r.steps, gapMode)}
+    DEFINE
+${defines.join(',\n')}
+  )`);
+  lines.push(`|> EXTEND ${derived.join(', ')}`);
+  if (r.rows !== 'one_per_match') {
+    // keep the earliest match per partition (parity with the table-form QUALIFY).
+    lines.push(`|> EXTEND ROW_NUMBER() OVER (PARTITION BY ${r.partCols.join(', ')} ORDER BY t1) AS _mr_rn`);
+    lines.push('|> WHERE _mr_rn = 1');
+  }
+  lines.push(`|> SELECT ${outCols.join(', ')}`);
+  return lines.join('\n');
+}
+
 /** Columns the match_recognize stage exposes (for downstream stages). */
 function matchOutputColumns(r) {
   const cols = new Map([['first_seen_at', { type: 'time' }], ['furthest_step_name', { type: 'string' }], ['completed', { type: 'boolean' }]]);
@@ -353,7 +407,11 @@ registerStage('match_recognize', {
     return {
       op: {
         op: 'match_recognize',
-        requiresCte: true, // MATCH_RECOGNIZE is not a pipe operator → CTE-form lowering
+        // BigQuery has a native `|> MATCH_RECOGNIZE` pipe operator, so the funnel stays
+        // pipe-form (bqPipe below). Other engines have no MATCH_RECOGNIZE → emulate it as
+        // a self-contained CTE (render), which forces the whole pipeline to CTE-form.
+        requiresCte: d.name !== 'bigquery',
+        bqPipe: d.name === 'bigquery' ? matchStepBigQueryPipe(r, spec, catalog) : null,
         render: (prev, dn) => {
           const pre = buildPrefilter(catalog, spec, dn, null);
           const fromRel = pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev;

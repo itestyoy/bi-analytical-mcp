@@ -132,9 +132,9 @@ export class BigQueryDialect extends Dialect {
     return lines.join('\n');
   }
 
-  /** CTE-form rendering of one op (used whenever a pipeline contains a stage that
-   *  is not a pipe operator, e.g. match_recognize, so the whole pipeline lowers to
-   *  a chained CTE). Standard SQL — valid on BigQuery. */
+  /** CTE-form rendering of one op (fallback used only when a pipeline must lower to a
+   *  chained CTE). match_recognize stays pipe-form on BigQuery (see _step), so this is
+   *  rarely hit here. Standard SQL — valid on BigQuery. */
   stepCte(prev, op) {
     switch (op.op) {
       case 'where':
@@ -200,6 +200,10 @@ export class BigQueryDialect extends Dialect {
         return `|> LIMIT ${Number(op.n)}`;
       case 'project':
         return `|> SELECT ${op.cols.map((c) => this.ident(c)).join(', ')}`;
+      case 'match_recognize':
+        // BigQuery pipe-native funnel: `|> MATCH_RECOGNIZE (...)` + derived EXTEND/WHERE/SELECT
+        // (pre-rendered in match-recognize.js, which owns the funnel semantics).
+        return op.bqPipe;
       default:
         throw new Error(`bigquery: unknown pipeline op '${op.op}'`);
     }

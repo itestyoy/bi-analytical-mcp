@@ -16,12 +16,12 @@ import { BackgroundIndexer } from './value-index.js';
 
 const TOOL_DESCRIPTIONS = {
   describe_catalog: 'Discover the catalog progressively. No args → compact overview (models, event names, group-by paths, enums + counts). Drill down with { model } (a model\'s columns + real physical columns), { event } (the properties an event carries), { property } (one property\'s spec), or { search }. Call BEFORE creating a model. Avoids dumping ~150 properties at once.',
-  create_semantic_model: 'Declaratively create/augment semantic models for a task (one SM per table) and metrics, in an isolated context. Omit context_id for a new task; pass it to extend the same context. Renders YAML + dbt parse.',
-  register_native_model: 'Build a derived dbt model from a declarative PIPELINE (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage), materialized as a table/view. Its ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). The pipeline can join catalog sources (users/experiments) and aggregate internally, so it is self-contained; it is NOT re-exposed as a MetricFlow semantic model with metrics/dimensions.',
+  create_semantic_model: 'Declaratively create/augment semantic models for a task (one SM per table) and metrics, in an isolated context. Omit context_id for a new task; pass it to extend the same context. Validated and registered in the context.',
+  register_native_model: 'Build a derived dbt model from a declarative PIPELINE (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage), materialized as a table/view. Its ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). The pipeline can join catalog sources (users/experiments) and aggregate internally, so it is self-contained; it is NOT re-exposed as a queryable semantic model with metrics/dimensions.',
   build_native_model: 'Build a derived dbt model from a PIPELINE, composed INCREMENTALLY (single `action`-driven tool): start a draft, add_step one stage at a time (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage) — each add_step validates the stage and returns the exact columns then available for the NEXT stage (pure schema, NOTHING materialized until commit) — optionally preview the SQL, then commit. The committed model\'s ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
-  update_native_model: 'Update a registered native (MATCH_RECOGNIZE) model in place: regenerate the view + semantic model from a new sequence spec and rebuild (dbt run + parse).',
-  delete_native_model: 'Delete a registered native model: remove its generated view + semantic model from the context and re-parse.',
-  query_semantic_model: 'Run a query (mf query, dbt Core) against a context. metrics + group_by + where are validated against the context. Pass materialize:true to persist the result as a dbt table and read it back (resilient); slow queries return a query_id to poll.',
+  update_native_model: 'Update a registered native model in place: regenerate it from a new pipeline spec and rebuild.',
+  delete_native_model: 'Delete the native model built in a context: remove it and re-parse. Targeted alternative to drop_context (which tears down the whole context).',
+  query_semantic_model: 'Run a metric query against a context. metrics + group_by + where are validated against the context. Pass materialize:true to persist the result and read it back (resilient); slow queries return a query_id to poll.',
   get_query_result: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}. Returns status (running/ready/error) and rows read from the materialized table.',
   list_query_jobs: 'List background query jobs and their status.',
   describe_index: 'Report operational state: the value-index SYNC status (last/recent background refresh runs, seconds since last sync, coverage = indexed properties + stored values, whether a refresh is in flight) plus background query jobs and their statuses. Read-only and cheap (no warehouse). Check it to know whether describe_catalog sample_values are fresh or still filling in, and to see what is currently running.',
@@ -70,7 +70,9 @@ const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', '
 // Tools that still EXIST (schema + engine method + dispatch) but are no longer
 // advertised to the AI — superseded by a newer tool. The code is kept so existing
 // callers/recipes keep working and it can be re-exposed by deleting it from this set.
-const HIDDEN_TOOLS = new Set(['register_native_model']); // superseded by build_native_model
+// register_native_model + update_native_model are the all-at-once create/edit path,
+// superseded by the incremental build_native_model (to edit, rebuild with the same name).
+const HIDDEN_TOOLS = new Set(['register_native_model', 'update_native_model']);
 
 export function buildToolDefs(engine) {
   return Object.entries(engine.schemas)

@@ -597,11 +597,11 @@ export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumn
 }
 
 /**
- * Render a full pipeline over a catalog `source` to SQL for `dialectName`. A
- * pipeline whose stages all map to pipe operators uses the dialect-native form
- * (Postgres chained CTE, BigQuery `|>` pipe syntax); if any stage requires CTE
- * form (e.g. match_recognize — not a pipe operator) the whole pipeline uses the
- * chained-CTE assembly.
+ * Render a full pipeline over a catalog `source` to SQL for `dialectName`. The
+ * dialect-native form is used (Postgres chained CTE, BigQuery `|>` pipe syntax)
+ * unless a stage requires CTE form on THIS dialect (e.g. match_recognize on engines
+ * without a native row-pattern operator — BigQuery DOES have `|> MATCH_RECOGNIZE`, so
+ * it stays pipe; Postgres emulates it as a CTE, forcing chained-CTE assembly).
  * @returns { sql, columns } — columns is the final tracked column set (Map).
  */
 export function renderPipeline(catalog, dialectName, source, stages = []) {

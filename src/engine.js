@@ -19,12 +19,13 @@ import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
-    // ONE shared store (single db file) for the job registry + value index.
-    this.store = store || openStore({ dbPath });
+    // ONE shared store (single db file) for the job registry + value index. resetDb wipes
+    // it on open (MCP_DB_RESET) before the managers read it.
+    this.store = store || openStore({ dbPath, reset: resetDb });
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)

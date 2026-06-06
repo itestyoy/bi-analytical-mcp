@@ -78,6 +78,9 @@ export class MemoryBackend {
       counts: () => ({ properties: props.size, values: [...props.values()].reduce((s, e) => s + e.values.length, 0) }),
     };
 
+    // Wipe ALL state (used by MCP_DB_RESET on startup).
+    this.reset = () => { props.clear(); runs.length = 0; runProps.length = 0; runSeq = 0; };
+
     this.runs = {
       reconcile: () => {},
       start: () => { const id = ++runSeq; runs.push({ id, started_at: Date.now(), finished_at: null, status: 'running', properties_indexed: null, values_written: null, errors: null, error: null }); return id; },
@@ -182,6 +185,13 @@ export class SqliteBackend {
   _get(sql, ...params) { return this._prep(sql).get(...params); }
   _all(sql, ...params) { return this._prep(sql).all(...params); }
 
+  /** Wipe ALL persisted state (used by MCP_DB_RESET on startup). Keeps the schema. */
+  reset() {
+    this._tx(() => {
+      for (const t of ['jobs', 'prop_values', 'prop_stats', 'index_runs', 'index_run_props']) this._run(`DELETE FROM ${t}`);
+    });
+  }
+
   _tx(fn) {
     this._db.exec('BEGIN');
     try { const r = fn(); this._db.exec('COMMIT'); return r; }
@@ -218,9 +228,11 @@ registerStoreBackend('sqlite', ({ dbPath }) => {
  * ALWAYS returns a backend: falls back to the in-memory backend when no persistent one is
  * available, so callers never branch on null.
  */
-export function openStore({ dbPath, backend } = {}) {
+export function openStore({ dbPath, backend, reset = false } = {}) {
   const name = backend || process.env.MCP_DB_BACKEND || 'sqlite';
   const factory = BACKENDS.get(name);
   if (!factory) throw new Error(`unknown store backend '${name}'. Registered: ${storeBackends().join(', ')}`);
-  return factory({ dbPath }) || new MemoryBackend();
+  const store = factory({ dbPath }) || new MemoryBackend();
+  if (reset) store.reset?.(); // wipe all state BEFORE any manager reads it (MCP_DB_RESET)
+  return store;
 }

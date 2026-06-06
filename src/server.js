@@ -20,7 +20,7 @@ const TOOL_DESCRIPTIONS = {
   register_native_model: 'Build a derived dbt model from a declarative PIPELINE (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage), materialized as a table/view. Its ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). The pipeline can join catalog sources (users/experiments) and aggregate internally, so it is self-contained; it is NOT re-exposed as a queryable semantic model with metrics/dimensions.',
   build_native_model: 'Build a derived dbt model from a PIPELINE, composed INCREMENTALLY (single `action`-driven tool): start a draft, add_step one stage at a time (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage) — each add_step validates the stage and returns the exact columns then available for the NEXT stage (pure schema, NOTHING materialized until commit) — optionally preview the SQL, then commit. The committed model\'s ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
   update_native_model: 'Update a registered native model in place: regenerate it from a new pipeline spec and rebuild.',
-  delete_native_model: 'Delete a registered native model: remove its generated view + semantic model from the context and re-parse.',
+  delete_native_model: 'Delete the native model built in a context: remove it and re-parse. Targeted alternative to drop_context (which tears down the whole context).',
   query_semantic_model: 'Run a metric query against a context. metrics + group_by + where are validated against the context. Pass materialize:true to persist the result and read it back (resilient); slow queries return a query_id to poll.',
   get_query_result: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}. Returns status (running/ready/error) and rows read from the materialized table.',
   list_query_jobs: 'List background query jobs and their status.',
@@ -70,7 +70,9 @@ const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', '
 // Tools that still EXIST (schema + engine method + dispatch) but are no longer
 // advertised to the AI — superseded by a newer tool. The code is kept so existing
 // callers/recipes keep working and it can be re-exposed by deleting it from this set.
-const HIDDEN_TOOLS = new Set(['register_native_model']); // superseded by build_native_model
+// register_native_model + update_native_model are the all-at-once create/edit path,
+// superseded by the incremental build_native_model (to edit, rebuild with the same name).
+const HIDDEN_TOOLS = new Set(['register_native_model', 'update_native_model']);
 
 export function buildToolDefs(engine) {
   return Object.entries(engine.schemas)

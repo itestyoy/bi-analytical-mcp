@@ -335,6 +335,7 @@ export function buildSchemas(catalog) {
       source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table (start only; default the events fact).' },
       time_range: trProp,
       stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage to append (add_step), validated against the columns available so far.' },
+      include_columns: { type: 'boolean', description: 'start/add_step: also return the FULL available_columns list. Off by default — add_step returns only the per-step diff (columns_added/columns_removed + column_count) to avoid re-dumping the whole schema each step; use preview for the full list too.' },
     },
   };
 

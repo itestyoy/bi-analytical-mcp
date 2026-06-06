@@ -374,7 +374,7 @@ export class Engine {
     const draft = ctx.state.draft;
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
-    if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage);
+    if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns);
     if (input.action === 'preview') return this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { draft_id: ctx.id, action: 'discard', discarded: true }; }
     return this._draftCommit(ctx, draft); // commit
@@ -408,19 +408,23 @@ export class Engine {
     const source = input.source || this.catalog.anchor;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
-    return {
+    const cols = this.catalog.modelColumns(source);
+    const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
-      steps: [], available_columns: this.catalog.modelColumns(source),
-      next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response lists the columns then available for the following stage.',
+      steps: [], column_count: cols.length,
+      next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response shows only the columns that stage added/removed (use include_columns:true or preview for the full list).',
       recommendations: [
-        `These available_columns are the inputs your first stage can reference (where/derive/compute/aggregate/match_recognize/...).`,
+        `The source has ${cols.length} columns your first stage can reference; get the full list with build_native_model({ action: "start", ..., include_columns: true }) or inspect via describe_catalog({ model: '${source}' }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
         `When the steps look right, commit with build_native_model({ action: "commit", draft_id }).`,
       ],
     };
+    if (input.include_columns) resp.available_columns = cols;
+    return resp;
   }
 
-  _draftAddStep(ctx, draft, stage) {
+  _draftAddStep(ctx, draft, stage, includeColumns = false) {
+    const before = this._draftColumns(draft); // columns BEFORE this stage
     const trial = [...draft.stages, stage];
     try {
       renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
@@ -430,13 +434,23 @@ export class Engine {
     }
     draft.stages = trial;
     this.ctxs.touch(ctx.id);
-    const available = this._draftColumns(draft);
-    return {
+    const after = this._draftColumns(draft);
+    // Default to a DIFF (what this stage added/removed) instead of dumping the whole
+    // schema every step — the full list is noise after the first call. Pass
+    // include_columns:true (or use preview) for the complete set.
+    const beforeNames = new Set(before.map((c) => c.name));
+    const afterNames = new Set(after.map((c) => c.name));
+    const resp = {
       draft_id: ctx.id, action: 'add_step', step_index: draft.stages.length,
-      steps: this._draftSteps(draft), available_columns: available,
-      next: 'add_step the next stage (it may reference any of available_columns), or commit the draft.',
-      recommendations: this._draftStepRecommendations(stage, available),
+      steps: this._draftSteps(draft),
+      column_count: after.length,
+      columns_added: after.filter((c) => !beforeNames.has(c.name)),
+      columns_removed: before.filter((c) => !afterNames.has(c.name)).map((c) => c.name),
+      next: 'add_step the next stage, commit the draft, or pass include_columns:true / preview for the full column list.',
+      recommendations: this._draftStepRecommendations(stage, after),
     };
+    if (includeColumns) resp.available_columns = after;
+    return resp;
   }
 
   /** Stage-aware next-step hints from the just-added stage + the resulting columns. */

@@ -133,11 +133,11 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
 // all-at-once register_native_model (fidelity), proven on the activation funnel.
 test('build_native_model incremental: per-step columns + commit equals all-at-once (12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'inc_funnel', source: 'events' });
+  const s = await engine.build_native_model({ action: 'start', name: 'inc_funnel', source: 'events', include_columns: true });
   assert.ok(s.draft_id, 'start returns a draft_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   // add the funnel as one match_recognize stage; its output columns must be reported.
-  const a1 = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: matchActivation() });
+  const a1 = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: matchActivation(), include_columns: true });
   assert.equal(a1.step_index, 1);
   const names = a1.available_columns.map((c) => c.name);
   assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to next stage');

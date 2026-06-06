@@ -115,7 +115,7 @@ export class Engine {
       if (this.runner && base) {
         const cols = await this.runner.relationColumns(base, m.dbt_model);
         out.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
-        if (!cols.ok) out.physical_columns_error = 'relation not built or introspection failed (run dbt seed + dbt run on the base project)';
+        if (!cols.ok) out.physical_columns_error = 'physical columns unavailable — the underlying table is not built yet';
       }
       out.recommendations = k === c.anchor
         ? [
@@ -896,7 +896,7 @@ export class Engine {
       throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}); read its rows with get_query_result (table: ${ctx.state.model}), not query_semantic_model`, { stage: 'validate' });
     }
 
-    if (!input.metrics?.length) throw new ToolError('metrics is required for core (MetricFlow) queries', { stage: 'validate' });
+    if (!input.metrics?.length) throw new ToolError('metrics is required for a metric query', { stage: 'validate' });
     const known = new Set(ctx.state.metrics.map((m) => m.name));
     for (const m of input.metrics) if (!known.has(m)) throw new ToolError(`unknown metric in context: ${m}`, { stage: 'validate', field: m });
 
@@ -934,7 +934,7 @@ export class Engine {
       return `${o.direction === 'desc' ? '-' : ''}${key}`;
     });
 
-    if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
+    if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
 
     const limit = input.limit ?? 1000;
     const offset = input.offset ?? 0;
@@ -974,7 +974,7 @@ export class Engine {
    * BACKGROUND and a query_id is returned; poll get_query_result.
    */
   async _materialize(ctx, qopts, input) {
-    if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
+    if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     const dir = this.ctxs.dir(ctx.id);
     const explain = await this.runner.query(dir, { ...qopts, explain: true });
     if (!explain.ok) return { ok: false, error: { stage: 'query', message: formatDbtError(explain.stdout, explain.stderr) } };
@@ -1053,7 +1053,7 @@ export class Engine {
    */
   async get_query_result(input) {
     this._validate('get_query_result', input);
-    if (!this.runner) throw new ToolError('no dbt runner configured', { stage: 'query' });
+    if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     const limit = input.limit ?? 1000;
     const offset = input.offset ?? 0;
     const sample = !!input.sample;
@@ -1096,9 +1096,9 @@ export class Engine {
   }
 
   _assumptions(ctx) {
-    const a = [`one semantic model per table in context ${ctx.id} (C3)`];
-    if (ctx.state.additions[this.catalog.anchor]) a.push('event_scope baked into measure expr (M3)');
-    a.push('metric_time/cumulative/conversion require a materialized time spine in the base project (C2)');
+    const a = [`one semantic model per table in context ${ctx.id}`];
+    if (ctx.state.additions[this.catalog.anchor]) a.push('the event scope is applied inside each measure');
+    a.push('metric_time / cumulative / conversion metrics require a configured time dimension');
     return a;
   }
 }

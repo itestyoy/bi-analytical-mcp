@@ -169,7 +169,7 @@ function measureItemSchema(catalog, modelKey) {
 
 function semanticModelBranch(catalog, modelKey) {
   const props = {
-    from: { const: modelKey, description: `Source dbt model this semantic model is built from ("${modelKey}").` },
+    from: { const: modelKey, description: `Source model this semantic model is built from ("${modelKey}").` },
     dimensions: { type: 'array', items: dimensionItemSchema(catalog, modelKey), description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
     measures: { type: 'array', items: measureItemSchema(catalog, modelKey), description: 'Measures (aggregations) defined on this model; metrics reference these by name.' },
   };
@@ -183,7 +183,7 @@ function semanticModelBranch(catalog, modelKey) {
       },
     };
   }
-  return { type: 'object', additionalProperties: false, required: ['from'], description: `Semantic model built on the "${modelKey}" dbt model.`, properties: props };
+  return { type: 'object', additionalProperties: false, required: ['from'], description: `Semantic model built on the "${modelKey}" model.`, properties: props };
 }
 
 function metricSchema() {

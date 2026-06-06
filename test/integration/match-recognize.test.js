@@ -312,7 +312,9 @@ test('register_native_model: dry_run returns SQL without building', opts, async 
   assert.equal(dr.dry_run, true);
   assert.equal(dr.kind, 'pipeline');
   assert.equal(typeof dr.model_sql, 'string');
-  assert.equal(typeof dr.model_sql_bigquery, 'string');
+  // SQL is rendered in the ACTIVE warehouse dialect only — no second-dialect blob.
+  assert.equal(dr.dialect, engine.catalog.dialect);
+  assert.equal(dr.model_sql_bigquery, undefined);
 });
 
 test('register_native_model: same name in two contexts → distinct relations', opts, async (t) => {

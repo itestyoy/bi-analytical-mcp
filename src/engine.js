@@ -456,12 +456,14 @@ export class Engine {
   }
 
   _draftPreview(ctx, draft) {
-    const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, steps: this._draftSteps(draft) };
+    const dialect = this.catalog.dialect;
+    const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft) };
     if (!draft.stages.length) return { ...base, available_columns: this.catalog.modelColumns(draft.source), note: 'No stages yet — add_step first.' };
     const stages = this._draftEffectiveStages(draft);
-    const pg = renderPipeline(this.catalog, this.catalog.dialect, draft.source, stages);
-    const bq = renderPipeline(this.catalog, 'bigquery', draft.source, stages).sql;
-    return { ...base, available_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: pg.sql, model_sql_bigquery: bq };
+    // Render ONLY the active warehouse dialect, so every response is consistent with where
+    // the pipeline actually runs (bigquery → `|>`, postgres → CTEs).
+    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages);
+    return { ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql };
   }
 
   async _draftCommit(ctx, draft) {
@@ -494,17 +496,16 @@ export class Engine {
       if (tr.end) { const ex = dateEndExclusive(tr.end); conditions.push(ex ? { column: timeCol, op: 'lt', value: ex } : { column: timeCol, op: 'lte', value: tr.end }); }
       stages = [{ stage: 'where', conditions }, ...stages];
     }
-    const renderBoth = () => ({
-      pg: renderPipeline(this.catalog, dialect, source, stages),
-      bq: renderPipeline(this.catalog, 'bigquery', source, stages).sql,
-    });
+    // Render ONLY the active warehouse dialect — every response is in the dialect the
+    // pipeline actually runs on, never a mix.
+    const render = () => renderPipeline(this.catalog, dialect, source, stages);
     if (input.dry_run) {
-      const { pg, bq } = renderBoth();
+      const out = render();
       const resp = {
         kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect,
-        columns: [...pg.columns.keys()],
-        output_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
-        model_sql: pg.sql, model_sql_bigquery: bq,
+        columns: [...out.columns.keys()],
+        output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+        model_sql: out.sql,
       };
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before committing.
@@ -514,28 +515,31 @@ export class Engine {
     }
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
-    const { pg, bq } = renderBoth();
+    const out = render();
     const materialized = input.materialized || 'table';
     const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
-    this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${pg.sql}\n`);
+    this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
-    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...pg.columns.keys()] };
+    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()] };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);
-    let build = { ok: true, skipped: 'no runner' };
-    let rows = []; let columns = [...pg.columns.keys()];
+    // Honest status: `executed` makes it unambiguous whether the model was actually built
+    // and run, vs only written to disk (no runner). `ok` stays for backward-compatible checks.
+    let build = { ok: true, executed: false, reason: 'no runner configured — model written but not built/executed (dry/unit mode)' };
+    let rows = []; let columns = [...out.columns.keys()];
     if (this.runner) {
       const r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
       if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) } };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };
+      build = { ok: true, executed: true };
     }
     return {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
-      columns, output_columns: [...pg.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
-      row_count: rows.length, rows, model_sql_bigquery: bq, build,
+      columns, output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+      row_count: rows.length, rows, model_sql: out.sql, build,
       // A4: how to read this result again — these rows are a pipeline model, re-read
       // with get_query_result (NOT query_semantic_model, which is for metric queries).
       read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
@@ -590,7 +594,7 @@ export class Engine {
     delete ctx.state.engine; delete ctx.state.model; delete ctx.state.native;
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
-    const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, skipped: 'no runner' };
+    const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
     return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: 'model definition removed; the warehouse view may persist until the context is dropped (drop_context) or the warehouse cleans ephemeral objects' };
   }
 
@@ -1036,7 +1040,7 @@ export class Engine {
   }
 
   async _parse(ctxId) {
-    if (!this.runner) return { ok: true, skipped: 'no runner (unit mode)' };
+    if (!this.runner) return { ok: true, executed: false, reason: 'no runner configured — not parsed (unit mode)' };
     const r = await this.runner.parse(this.ctxs.dir(ctxId));
     if (!r.ok) return { ok: false, error: { stage: 'parse', message: formatDbtError(r.stdout, r.stderr) } };
     return { ok: true, manifest: r.manifest };

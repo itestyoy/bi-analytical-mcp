@@ -10,24 +10,14 @@ and cite the Confluence page as the definition of record.
 > `describe_catalog({ event })` / `({ property })` / `({ search })` to get the exact names
 > and real values. The names below describe the *business* concept + where it lives.
 
-## Events (the events fact)
-A step/measure is an `event_name` + a value inside its payload. Key OMG events:
-
-- **Level events** — `level_started` / `level_completed` (a `result` like win/lose, plus
-  level id, attempt, score, time). Basis of progression funnels and *Game Completion Rate*.
-- **`ad_finished`** (also `ad_started`) — rewarded/interstitial/banner ad shown/finished.
-  The ad network is the `network` param **inside `additional_info`** (not top-level).
-- **`iap_purchase_completed`** — a real-money purchase; the placement is `location` **inside
-  `event_data`**; reconciled to AppsFlyer by `order_id` (Android) / `transaction_id` (iOS).
-- **`currency_income` / `currency_outcome`** — in-game resource flow; carry `source_type`,
-  `source_name`, `currency` (and amount). Basis of the economy metrics.
-- **Session / launch events** — `first_launch`, session boundaries; basis of *Cumulative
-  Sessions* / *Session Duration* and `session_number`.
-
-**Envelopes** to remember when reading a payload: `event_data` (the event's own fields),
-`additional_info` (e.g. ad `network`), `main_data` (e.g. `time_zone`, `chosen_skill_level`),
-`device_info` (e.g. `system_memory_size`). `describe_catalog` flattens these to property
-names — use `{ search }` to find which one a field lives in.
+## Events (the events fact) — see `reference/events.md`
+Events are the foundation; the full event catalogue, envelope structure
+(`main_data`/`device_info`/`state`/`event_data`/`additional_info`), per-project
+applicability and the event-level gotchas live in **`reference/events.md`**. In short, the
+events most analyses touch: lifecycle (`first_launch`/`install`/`new_session`), progression
+(`level_started`/`level_completed`, `puzzle_*`), economy (`currency_income`/`currency_outcome`),
+ads (`ad_started`/`ad_finished`, …), IAP (`iap_purchase_completed`). The dimensions and
+metrics below are built on top of these events.
 
 ## Dimensions (segment / group-by) — Confluence `[Dimension] …`
 Player attributes resolve via the **users** dimension; event-scoped ones via `event_data`.

@@ -38,7 +38,10 @@ The **canonical definitions** of every metric and dimension live in Confluence (
   variant_group, assigned_at, ended_at), joined to events by the player entity.
 
 Funnels/steps are built **only** from events (a step = an event + an `event_data` value).
-See `reference/data-model.md` for the OMG event/dimension/metric catalog + Confluence links.
+**Events are the foundation of every analysis** — a measure/step is an `event_name` + a
+payload value — so start from the event taxonomy: `reference/events.md` (the event
+catalogue, envelope structure, and event gotchas). Dimensions/metrics built on top:
+`reference/data-model.md`.
 
 ## Workflow (do this every time)
 1. **Clarify** the request before touching data: time window, game/project, platform/geo,
@@ -91,8 +94,11 @@ See `reference/data-model.md` for the OMG event/dimension/metric catalog + Confl
   it (see gotchas) — most `event_data` properties are event-specific.
 
 ## Reference (read on demand)
-- `reference/data-model.md` — OMG events, `event_data` properties, dimensions and metrics,
-  each with its Confluence definition + the gotchas (wrong-answer modes).
+- `reference/events.md` — **the events foundation**: master Events Schema, event envelope
+  structure (`main_data`/`device_info`/`state`/`event_data`/`additional_info`), the full
+  event catalogue by domain, per-project applicability, and the event-level gotchas.
+- `reference/data-model.md` — dimensions and metrics built on the events, each with its
+  Confluence definition + gotchas.
 - `reference/playbooks.md` — analysis patterns → exact MCP tool sequences (trends, funnels,
   retention, monetization IAP+ads, in-game economy, A/B).
 

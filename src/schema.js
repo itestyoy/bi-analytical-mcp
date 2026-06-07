@@ -481,20 +481,40 @@ export function buildSchemas(catalog) {
 // that metric consumes. So a proportion test cannot carry `mean`, a mean test cannot
 // carry `conversions`, a ratio test must carry exactly the five ratio sums, etc. —
 // invalid field combinations are rejected by the schema, not just at runtime.
+//
+// A typed top-level `properties` (the UNION of all group fields) sits alongside the
+// oneOf so MCP clients see the real argument types (control = object, variants = array,
+// confidence = number, conversions = integer, …) and serialize them correctly; the oneOf
+// still enforces the exact per-metric field set on the selected branch.
 function abTestSchema() {
   const confidence = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, default: 0.95, description: 'Confidence level (e.g. 0.95).' };
   const alternative = { enum: ['two_sided', 'greater', 'less'], default: 'two_sided', description: 'Hypothesis direction for the variant vs control.' };
   const correction = { enum: ['none', 'holm', 'bh'], default: 'holm', description: 'Multiple-comparison correction across the variants: holm (family-wise error rate), bh (Benjamini–Hochberg false discovery rate), or none. Adds p_value_adjusted/significant_adjusted per variant.' };
 
-  // One metric's group arm: label + n + exactly that metric's required stat fields.
+  // Per-metric stat fields (kept DRY between the union arm and the strict branches).
+  const F = {
+    conversions: { type: 'integer', minimum: 0, description: 'proportion: number of successes in the group.' },
+    mean: { type: 'number', description: 'mean: mean of the metric over the group.' },
+    stddev: { type: 'number', minimum: 0, description: 'mean: standard deviation over the group.' },
+    sumNum: { type: 'number', description: 'ratio: Σ of the per-user numerator.' },
+    sumDen: { type: 'number', exclusiveMinimum: 0, description: 'ratio: Σ of the per-user denominator (must be > 0).' },
+    sumNum2: { type: 'number', minimum: 0, description: 'ratio: Σ of numerator².' },
+    sumDen2: { type: 'number', minimum: 0, description: 'ratio: Σ of denominator².' },
+    sumNumDen: { type: 'number', description: 'ratio: Σ of numerator·denominator.' },
+    sumY: { type: 'number', description: 'cuped: Σ of the per-user in-experiment value Y.' },
+    sumY2: { type: 'number', minimum: 0, description: 'cuped: Σ of Y².' },
+    sumX: { type: 'number', description: 'cuped: Σ of the per-user pre-experiment covariate X.' },
+    sumX2: { type: 'number', minimum: 0, description: 'cuped: Σ of X².' },
+    sumXY: { type: 'number', description: 'cuped: Σ of Y·X.' },
+  };
+  const label = { type: 'string', description: 'Group name (e.g. control, variant_b).' };
+  const n = { type: 'integer', minimum: 1, description: 'Sample size (e.g. users in the group).' };
+
+  // One metric's group arm (strict): label + n + exactly that metric's required fields.
   const arm = (fields, armDesc) => ({
     type: 'object', additionalProperties: false, required: ['n', ...Object.keys(fields)],
     description: armDesc,
-    properties: {
-      label: { type: 'string', description: 'Group name (e.g. control, variant_b).' },
-      n: { type: 'integer', minimum: 1, description: 'Sample size (e.g. users in the group).' },
-      ...fields,
-    },
+    properties: { label, n, ...fields },
   });
   // One metric branch of the union.
   const branch = (metric, branchDesc, fields, armDesc) => {
@@ -510,36 +530,33 @@ function abTestSchema() {
       },
     };
   };
+  // Permissive top-level arm (all metric fields optional) — gives clients full inner types;
+  // the selected oneOf branch enforces the exact required set + rejects foreign fields.
+  const unionArm = { type: 'object', required: ['n'], description: 'A group: n plus the stat fields the chosen metric needs.', properties: { label, n, ...F } };
 
   return {
     type: 'object',
     description: 'Run an A/B significance test on PRE-AGGREGATED group stats (compute them first with a pipeline: join the experiments source, window events to the assignment period, then aggregate per group). The required group fields DEPEND ON metric (discriminated union): proportion → conversions (two-proportion z-test); mean → mean+stddev (Welch t-test); ratio → the five per-user sums sumNum/sumDen/sumNum2/sumDen2/sumNumDen (delta-method test for ratio metrics whose analysis unit is finer than the randomization unit, e.g. completed/started or clicks/impressions randomized by user); cuped → the five per-user sufficient sums sumY/sumY2/sumX/sumX2/sumXY (CUPED variance reduction via a pre-experiment covariate, then Welch). Returns each variant vs control: lift (absolute+relative, with a relative-lift CI), test statistic, p-value, confidence interval, significance, and a multiplicity-adjusted p-value across the variant family.',
-    required: ['metric'],
+    required: ['metric', 'control', 'variants'],
+    properties: {
+      metric: { enum: ['proportion', 'mean', 'ratio', 'cuped'], description: 'Which test to run and which group fields are required: proportion→conversions; mean→mean,stddev; ratio→sumNum,sumDen,sumNum2,sumDen2,sumNumDen; cuped→sumY,sumY2,sumX,sumX2,sumXY.' },
+      confidence, alternative, correction,
+      control: unionArm,
+      variants: { type: 'array', minItems: 1, items: unionArm, description: 'One or more variant groups, each tested against control.' },
+    },
     discriminator: { propertyName: 'metric' },
     oneOf: [
       branch('proportion', 'Conversion-rate test (two-proportion z-test): each group carries conversions out of n.',
-        { conversions: { type: 'integer', minimum: 0, description: 'Number of successes in the group.' } },
+        { conversions: F.conversions },
         'A group for a proportion test: n and the number of conversions.'),
       branch('mean', 'Continuous-metric test (Welch t-test): each group carries the per-user mean and stddev.',
-        { mean: { type: 'number', description: 'Mean of the metric over the group.' }, stddev: { type: 'number', minimum: 0, description: 'Standard deviation of the metric over the group.' } },
+        { mean: F.mean, stddev: F.stddev },
         'A group for a mean test: n, mean and stddev.'),
       branch('ratio', 'Ratio-metric test via the delta method: each group carries the per-user numerator/denominator sums plus their squares and cross-product.',
-        {
-          sumNum: { type: 'number', description: 'Σ of the per-user numerator.' },
-          sumDen: { type: 'number', exclusiveMinimum: 0, description: 'Σ of the per-user denominator (must be > 0).' },
-          sumNum2: { type: 'number', minimum: 0, description: 'Σ of numerator².' },
-          sumDen2: { type: 'number', minimum: 0, description: 'Σ of denominator².' },
-          sumNumDen: { type: 'number', description: 'Σ of numerator·denominator.' },
-        },
+        { sumNum: F.sumNum, sumDen: F.sumDen, sumNum2: F.sumNum2, sumDen2: F.sumDen2, sumNumDen: F.sumNumDen },
         'A group for a ratio test: n and the five per-user sums (sumNum, sumDen, sumNum2, sumDen2, sumNumDen).'),
       branch('cuped', 'CUPED variance reduction (then Welch): each group carries the per-user sufficient sums of the in-experiment value Y and the pre-experiment covariate X.',
-        {
-          sumY: { type: 'number', description: 'Σ of the per-user in-experiment value Y.' },
-          sumY2: { type: 'number', minimum: 0, description: 'Σ of Y².' },
-          sumX: { type: 'number', description: 'Σ of the per-user pre-experiment covariate X.' },
-          sumX2: { type: 'number', minimum: 0, description: 'Σ of X².' },
-          sumXY: { type: 'number', description: 'Σ of Y·X.' },
-        },
+        { sumY: F.sumY, sumY2: F.sumY2, sumX: F.sumX, sumX2: F.sumX2, sumXY: F.sumXY },
         'A group for a CUPED test: n and the five per-user sufficient sums (sumY, sumY2, sumX, sumX2, sumXY).'),
     ],
   };
@@ -582,21 +599,28 @@ function sampleSizeSchema() {
     { required: ['mde'], not: { required: ['n'] } },
     { required: ['n'], not: { required: ['mde'] } },
   ];
-  const branch = (metric, dispersionField, dispersionProp, branchDesc) => ({
+  const baseline = { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'proportion: baseline conversion rate.' };
+  const stddev = { type: 'number', exclusiveMinimum: 0, description: 'mean: standard deviation of the metric.' };
+  const dispersion = { proportion: baseline, mean: stddev };
+  const branch = (metric, dispersionField, branchDesc) => ({
     type: 'object', additionalProperties: false,
     required: ['metric', dispersionField],
     description: branchDesc,
-    properties: { metric: { const: metric }, [dispersionField]: dispersionProp, mde, n, power, confidence, alternative },
+    properties: { metric: { const: metric }, [dispersionField]: dispersion[metric], mde, n, power, confidence, alternative },
     oneOf: exactlyOneOfMdeN,
   });
+  // Typed top-level `properties` (union of both metrics' fields) sits alongside the oneOf so
+  // MCP clients send proper numbers (not JSON strings); the oneOf still enforces the exact
+  // per-metric field set + exactly one of {mde, n}.
   return {
     type: 'object',
     description: 'Power / sample-size planning (no warehouse). Provide a target effect (mde) to get the required sample size PER GROUP, or a sample size (n) to get the minimum detectable effect (MDE) — exactly one of the two. metric=proportion needs a baseline rate; metric=mean needs a stddev. Use it to size a test up front and to tell a true null apart from an underpowered one.',
     required: ['metric'],
+    properties: { metric: { enum: ['proportion', 'mean'], description: 'proportion → needs baseline; mean → needs stddev. Provide exactly one of mde (→ solve n) or n (→ solve MDE).' }, baseline, stddev, mde, n, power, confidence, alternative },
     discriminator: { propertyName: 'metric' },
     oneOf: [
-      branch('proportion', 'baseline', { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Baseline conversion rate.' }, 'Conversion-rate planning: needs a baseline rate, plus exactly one of mde or n.'),
-      branch('mean', 'stddev', { type: 'number', exclusiveMinimum: 0, description: 'Standard deviation of the metric.' }, 'Continuous-metric planning: needs a stddev, plus exactly one of mde or n.'),
+      branch('proportion', 'baseline', 'Conversion-rate planning: needs a baseline rate, plus exactly one of mde or n.'),
+      branch('mean', 'stddev', 'Continuous-metric planning: needs a stddev, plus exactly one of mde or n.'),
     ],
   };
 }

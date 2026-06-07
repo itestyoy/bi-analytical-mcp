@@ -14,10 +14,11 @@ and cite the Confluence page as the definition of record.
 Events are the foundation; the full event catalogue, envelope structure
 (`main_data`/`device_info`/`state`/`event_data`/`additional_info`), per-project
 applicability and the event-level gotchas live in **`reference/events.md`**. In short, the
-events most analyses touch: lifecycle (`first_launch`/`install`/`new_session`), progression
-(`level_started`/`level_completed`, `puzzle_*`), economy (`currency_income`/`currency_outcome`),
-ads (`ad_started`/`ad_finished`, …), IAP (`iap_purchase_completed`). The dimensions and
-metrics below are built on top of these events.
+events most analyses touch: lifecycle (`first_launch`/`new_session`/`end_session`; install
+attrs live in `main_data`), progression (`level_started`/`level_completed`, `puzzle_*`),
+economy (`currency_income`/`currency_outcome`), ads (`ad_started`/`ad_finished`, …),
+IAP (`iap_purchase_completed`). The dimensions and metrics below are built on top of these
+events.
 
 ## Dimensions (segment / group-by) — Confluence `[Dimension] …`
 Player attributes resolve via the **users** dimension; event-scoped ones via `event_data`.

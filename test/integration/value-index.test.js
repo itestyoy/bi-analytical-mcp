@@ -200,3 +200,34 @@ test('describe_index reports the value-index sync state + jobs', opts, async (t)
   assert.ok(byProp.runs >= 1 && byProp.history[0].run_id === runId);
   assert.equal(byProp.history[0].distinct_count, 3);
 });
+
+// describe_index({ property }) reports null coverage from real seed counts: ad_type is
+// populated ONLY on the 24 ad events; the other 160 of 184 rows are NULL. The per-event
+// breakdown marks which events the property applies to, so expected NULLs (non-ad events)
+// are distinguishable from real gaps (there are none here — both ad events are 100% filled).
+test('describe_index({ property }) reports null_count + per-event coverage from the seed', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.describe_index({ property: 'ad_type_of_event_data' });
+  // overall: 24 non-null of 184 rows → 160 NULL.
+  assert.equal(out.value_stats.non_null_count, 24);
+  assert.equal(out.value_stats.row_count, 184);
+  assert.equal(out.value_stats.null_count, 160);
+  assert.equal(out.value_stats.null_fraction, Math.round((160 / 184) * 10000) / 10000);
+  // declared applicability comes from the catalog (meta.mcp.events).
+  assert.deepEqual(new Set(out.applies_to_events), new Set(['ad_started', 'ad_finished']));
+  // per-event_name coverage: the two ad events are fully populated (null_count 0, applies);
+  const cov = Object.fromEntries(out.event_coverage.map((e) => [e.event_name, e]));
+  assert.equal(cov.ad_started.non_null, 12);
+  assert.equal(cov.ad_started.null_count, 0);
+  assert.equal(cov.ad_started.applies, true);
+  assert.equal(cov.ad_finished.null_count, 0);
+  assert.equal(cov.ad_finished.applies, true);
+  // ...a non-ad event carries the field on NONE of its rows, and is flagged not-applicable.
+  assert.equal(cov.first_launch.non_null, 0);
+  assert.equal(cov.first_launch.null_count, 12); // 12 first_launch rows, all NULL
+  assert.equal(cov.first_launch.applies, false);
+  // the coverage row_counts partition the whole fact (every one of the 184 rows is accounted for).
+  assert.equal(out.event_coverage.reduce((s, e) => s + e.row_count, 0), 184);
+  // NO real gaps: there is no applicable event with NULLs (data quality is clean in the seed).
+  assert.equal(out.event_coverage.filter((e) => e.applies && e.null_count > 0).length, 0);
+});

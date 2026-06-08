@@ -286,14 +286,37 @@ export class Engine {
     const recent = input.recent ?? 10;
     const propRow = (r) => ({ property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) });
 
-    // ── drill-down: one property's per-sync timing history ──
+    // ── drill-down: one property's per-sync timing history + null/coverage breakdown ──
     if (input.property) {
       const hist = this.valueIndex.propertyHistory(input.property, { limit: recent }).map((r) => ({ run_id: r.run_id, started_at: r.started_at, ...propRow(r) }));
       const timed = hist.filter((r) => r.ms != null);
       const avg = timed.length ? Math.round(timed.reduce((s, r) => s + r.ms, 0) / timed.length) : null;
+
+      // Null coverage from the latest sync: overall null_count + a per-event_name breakdown.
+      // A property is NULL on events it does not apply to — annotate each event with `applies`
+      // (declared in meta.mcp.events) so expected NULLs are distinguishable from real gaps.
+      const st = this.valueIndex.stats(input.property);
+      const rowCount = (st && st.totalCount != null && st.nullCount != null) ? st.totalCount + st.nullCount : null;
+      const frac = (n, d) => (d ? Number((n / d).toFixed(4)) : null);
+      const valueStats = st ? { distinct_count: st.distinctCount, non_null_count: st.totalCount, null_count: st.nullCount, row_count: rowCount, null_fraction: (st.nullCount != null && rowCount) ? frac(st.nullCount, rowCount) : null } : null;
+      const declared = this.catalog.eventPropertyEvents()[input.property] || null; // null ⇒ applies to ALL events
+      const declaredSet = declared ? new Set(declared) : null;
+      const coverage = this.valueIndex.coverage(input.property).map((e) => ({
+        event_name: e.event_name, row_count: e.row_count, non_null: e.non_null, null_count: e.null_count,
+        null_fraction: frac(e.null_count, e.row_count), applies: declaredSet ? declaredSet.has(e.event_name) : true,
+      }));
+      // Real data-quality gaps: events the property SHOULD populate but where rows are NULL.
+      const gaps = coverage.filter((e) => e.applies && e.null_count > 0);
+
+      const recs = [hist.length ? `'${input.property}' took ${hist[0].ms}ms in the latest sync (${hist[0].values} values, ${hist[0].distinct_count} distinct); avg ${avg}ms over ${timed.length} runs.` : `No per-property timing recorded for '${input.property}' yet.`];
+      if (valueStats && valueStats.null_count != null) recs.push(`${valueStats.null_count} of ${valueStats.row_count} rows are NULL (${valueStats.null_fraction != null ? Math.round(valueStats.null_fraction * 100) : '?'}%)${declared ? `; the property applies to events: ${declared.join(', ')}` : ' (applies to all events)'}.`);
+      if (gaps.length) recs.push(`Possible data gaps: ${gaps.slice(0, 5).map((g) => `${g.event_name} (${g.null_count}/${g.row_count} NULL)`).join(', ')} — these events SHOULD carry '${input.property}' but have NULLs.`);
+      else if (declaredSet && coverage.length) recs.push(`NULLs outside the applicable events are expected (the property is only populated on ${declared.join(', ')}).`);
+
       return {
-        property: input.property, runs: hist.length, avg_ms: avg, history: hist,
-        recommendations: [hist.length ? `'${input.property}' took ${hist[0].ms}ms in the latest sync (${hist[0].values} values, ${hist[0].distinct_count} distinct); avg ${avg}ms over ${timed.length} runs.` : `No per-property timing recorded for '${input.property}' yet.`],
+        property: input.property, runs: hist.length, avg_ms: avg,
+        value_stats: valueStats, applies_to_events: declared, event_coverage: coverage,
+        history: hist, recommendations: recs,
       };
     }
 

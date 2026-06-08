@@ -12,7 +12,7 @@ test('ValueIndex persists to a file on disk across reopen', () => {
   const a = new ValueIndex({ dbPath });
   if (!a.persistent) { a.close(); return; } // node:sqlite not available here → nothing to assert
   const runId = a.startRun();
-  a.upsertProperty('p', { distinctCount: 2, totalCount: 9, values: [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }] });
+  a.upsertProperty('p', { distinctCount: 2, totalCount: 9, nullCount: 3, values: [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }], coverage: [{ event: 'e1', rowCount: 12, nonNull: 9 }] });
   a.finishRun(runId, { status: 'ok', propertiesIndexed: 1, valuesWritten: 2, errors: 0 });
   a.close();
 
@@ -21,6 +21,8 @@ test('ValueIndex persists to a file on disk across reopen', () => {
   assert.ok(b.persistent, 'reopened a real persistent store');
   assert.deepEqual(b.sampleValues('p'), [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }]);
   assert.equal(b.stats('p').distinctCount, 2);
+  assert.equal(b.stats('p').nullCount, 3); // null_count persisted
+  assert.deepEqual(b.coverage('p'), [{ event_name: 'e1', row_count: 12, non_null: 9, null_count: 3 }]); // coverage persisted
   const s = b.syncStatus();
   assert.equal(s.indexed_properties, 1);
   assert.equal(s.total_values, 2);
@@ -65,6 +67,38 @@ test('ValueIndex in-memory fallback round-trips upsert → sampleValues/stats/se
   idx.upsertProperty('ad_type_of_event_data', { distinctCount: 1, totalCount: 5, values: [{ value: 'banner', freq: 5 }] });
   assert.deepEqual(idx.sampleValues('ad_type_of_event_data').map((v) => v.value), ['banner']);
   assert.equal(idx.searchValues('rewarded').length, 0);
+  idx.close();
+});
+
+// Null/coverage round-trip: stats carry null_count and a per-event_name coverage breakdown
+// survives upsert (and the persistent backend, when available, across reopen).
+test('ValueIndex stores null_count + per-event coverage and round-trips them', () => {
+  const idx = new ValueIndex();
+  idx.upsertProperty('ad_type_of_event_data', {
+    distinctCount: 3, totalCount: 24, nullCount: 160,
+    values: [{ value: 'rewarded', freq: 10 }],
+    coverage: [
+      { event: 'ad_started', rowCount: 12, nonNull: 12 },
+      { event: 'ad_finished', rowCount: 12, nonNull: 12 },
+      { event: 'first_launch', rowCount: 160, nonNull: 0 }, // applies to no ad event → all NULL
+    ],
+  });
+  const st = idx.stats('ad_type_of_event_data');
+  assert.equal(st.totalCount, 24);
+  assert.equal(st.nullCount, 160);
+  // coverage is ordered by row_count desc, with null_count derived per event.
+  const cov = idx.coverage('ad_type_of_event_data');
+  assert.deepEqual(cov, [
+    { event_name: 'first_launch', row_count: 160, non_null: 0, null_count: 160 },
+    { event_name: 'ad_finished', row_count: 12, non_null: 12, null_count: 0 },
+    { event_name: 'ad_started', row_count: 12, non_null: 12, null_count: 0 },
+  ]);
+  // re-upsert REPLACES coverage (no stale events linger).
+  idx.upsertProperty('ad_type_of_event_data', { distinctCount: 1, totalCount: 5, nullCount: 0, values: [], coverage: [{ event: 'ad_started', rowCount: 5, nonNull: 5 }] });
+  assert.deepEqual(idx.coverage('ad_type_of_event_data'), [{ event_name: 'ad_started', row_count: 5, non_null: 5, null_count: 0 }]);
+  assert.equal(idx.stats('ad_type_of_event_data').nullCount, 0);
+  // unknown property → empty coverage, never throws.
+  assert.deepEqual(idx.coverage('nope'), []);
   idx.close();
 });
 

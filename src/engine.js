@@ -454,59 +454,15 @@ export class Engine {
     return resp;
   }
 
-  /** Physical column names of a source's relation (cached), or null if unknown
-   *  (no runner / relation not built / introspection failed → guard is skipped). */
-  async _physicalColumns(source) {
-    if (!this.runner || !this.ctxs.baseProjectDir) return null;
-    this._physCache ??= new Map();
-    if (this._physCache.has(source)) return this._physCache.get(source);
-    let set = null;
-    try {
-      const cols = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
-      if (cols.ok) set = new Set(cols.columns.map((c) => c.name));
-    } catch { /* introspection unavailable → no guard */ }
-    this._physCache.set(source, set);
-    return set;
-  }
-
-  /** Catalog-declared columns of `source` that are NOT materialized in the physical table
-   *  (e.g. user attributes denormalized in the schema but absent from the fact). null = unknown. */
-  async _phantomColumns(source) {
-    const phys = await this._physicalColumns(source);
-    if (!phys) return null;
-    return new Set(this.catalog.modelColumns(source).map((c) => c.name).filter((c) => !phys.has(c)));
-  }
-
-  /** Reject if the generated SQL references a catalog column that isn't materialized —
-   *  converts a late warehouse "Unrecognized name" into an early, actionable error. */
-  async _assertMaterialized(sql, source) {
-    const phantom = await this._phantomColumns(source);
-    if (!phantom || !phantom.size || !sql) return;
-    const hit = [...phantom].filter((c) => new RegExp(`(^|[^A-Za-z0-9_])${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9_]|$)`).test(sql));
-    if (!hit.length) return;
-    const model = this.catalog.getModel(source).dbt_model;
-    throw new ToolError(
-      `column(s) ${hit.join(', ')} are declared in the catalog but NOT materialized in '${model}'. `
-      + `They are likely user attributes — join the 'users' model and group/filter by user__<name> instead, `
-      + `or drop them. (describe_catalog({ model: '${source}' }) lists the real physical_columns.)`,
-      { stage: 'validate', field: hit[0] },
-    );
-  }
-
   async _draftAddStep(ctx, draft, stage, includeColumns = false) {
     const before = this._draftColumns(draft); // columns BEFORE this stage
     const trial = [...draft.stages, stage];
-    let rendered;
     try {
-      rendered = renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
+      renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
     } catch (e) {
       // Reject the step WITHOUT persisting it; the draft is left intact to retry.
       throw new ToolError(e.message, { stage: 'compile', field: 'stage' });
     }
-    // A catalog column that isn't materialized in the physical table would pass the
-    // schema check above but fail at commit on the warehouse ("Unrecognized name"). When a
-    // runner is available, reject it HERE (before wasting the build) with guidance.
-    await this._assertMaterialized(rendered.sql, draft.source);
     draft.stages = trial;
     this.ctxs.touch(ctx.id);
     const after = this._draftColumns(draft);
@@ -590,7 +546,6 @@ export class Engine {
     const render = () => renderPipeline(this.catalog, dialect, source, stages);
     if (input.dry_run) {
       const out = render();
-      await this._assertMaterialized(out.sql, source); // catch non-materialized catalog columns early
       const resp = {
         kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect,
         columns: [...out.columns.keys()],
@@ -606,7 +561,6 @@ export class Engine {
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
     const out = render();
-    await this._assertMaterialized(out.sql, source); // fail fast (before dbt run) on non-materialized columns
     const materialized = input.materialized || 'table';
     const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
     this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);

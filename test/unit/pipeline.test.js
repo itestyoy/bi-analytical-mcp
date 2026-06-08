@@ -20,6 +20,40 @@ test('pipeline rejects a reference to a column not present at that stage', () =>
   ]), /unknown column 'nope'/);
 });
 
+// Data-model contract (config/catalog.yml): the events fact declares ONLY columns
+// physically materialized per event. User/install attributes are NOT denormalized onto
+// the fact — they live on the users dimension and are reached via a join. This guards the
+// reported bug (catalog over-declaring *_of_main_data user attrs → "Unrecognized name" at
+// commit). It is a catalog-structure + validation-guard check, not a generated-SQL match.
+test('user/install attributes are on dim_users, NOT on the events fact', () => {
+  const eventCols = new Set(catalog.modelColumns('events').map((c) => c.name));
+  const userCols = new Set(catalog.modelColumns('users').map((c) => c.name));
+  // these belong to the user/install record — must be absent from the fact...
+  for (const attr of ['platform', 'country', 'media_source', 'ab_test_group', 'is_valid_install', 'install_package', 'install_build_number']) {
+    assert.ok(!eventCols.has(attr), `'${attr}' must not be a column of the events fact`);
+    assert.ok(!eventCols.has(`${attr}_of_main_data`), `denormalized '${attr}_of_main_data' must not be on the events fact`);
+  }
+  // ...and the segmentable ones are reachable via the users dimension instead.
+  for (const attr of ['platform', 'country', 'media_source', 'install_package', 'install_build_number', 'is_valid_install']) {
+    assert.ok(userCols.has(attr), `'${attr}' must be a column of dim_users (reached via a users-join)`);
+  }
+});
+
+// Consequence of the above: referencing a user attribute directly on the events fact
+// (no join) is rejected by the pipeline compiler; the correct path is `join with:'users'`.
+test('user attribute is rejected on the fact directly, accepted via a users-join', () => {
+  // direct reference on the fact → unknown column (it is not materialized there).
+  assert.throws(() => renderPipeline(catalog, 'postgres', 'events', [
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', fn: 'count' }] },
+  ]), /unknown column 'country'/);
+  // joined from the users dimension → resolves and renders.
+  const { sql } = renderPipeline(catalog, 'postgres', 'events', [
+    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', fn: 'count' }] },
+  ]);
+  assert.ok(sql.length > 0);
+});
+
 test('pivot rejects an unsafe value (non-identifier)', () => {
   assert.throws(() => renderPipeline(catalog, 'postgres', 'events', [
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },

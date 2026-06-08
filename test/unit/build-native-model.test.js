@@ -133,3 +133,31 @@ test('build_native_model: array op on a non-array column is rejected at add_step
   const ok = await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'last', op: 'array_last', column: 'arr' } });
   assert.equal(ok.steps.length, 2, 'array_last on a parsed array column is accepted');
 });
+
+// Physical-column guard: a catalog column that isn't materialized in the real table
+// (e.g. a user attribute denormalized in the schema) passes the schema check but would
+// fail at commit on the warehouse — when a runner can introspect, reject it at add_step.
+test('build_native_model: rejects a catalog column not materialized in the physical table', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  // Stub introspection: the physical fct_events has only these columns.
+  const runner = { relationColumns: async () => ({ ok: true, columns: [{ name: 'event_name' }, { name: 'device_time' }, { name: 'player_id_of_internal' }] }) };
+  const e = new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/phantom', workspaceRoot: mkdtempSync(join(tmpdir(), 'ph-')) }) });
+  const s = await e.build_native_model({ action: 'start', name: 'phantom', source: 'events' });
+  // a physical column is fine
+  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
+  // session_number is in the catalog but NOT in the physical table → rejected with guidance, not persisted
+  await assert.rejects(
+    () => e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['session_number'], measures: [{ name: 'n', fn: 'count' }] } }),
+    /not materialized/i,
+  );
+  const pv = await e.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  assert.equal(pv.steps.length, 1, 'rejected step was not persisted');
+});
+
+// No runner → guard is skipped (no introspection), so building proceeds as before.
+test('build_native_model: physical guard is skipped without a runner', async () => {
+  const e = engine(); // no runner
+  const s = await e.build_native_model({ action: 'start', name: 'noguard', source: 'events' });
+  const a = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['session_number'], measures: [{ name: 'n', fn: 'count' }] } });
+  assert.equal(a.step_index, 1); // accepted (cannot verify physical columns offline)
+});

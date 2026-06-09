@@ -139,7 +139,7 @@ test('ValueIndex tie-break is deterministic (value ASC) on equal frequencies', (
   idx.close();
 });
 
-// Sync-run log (consumed by describe_index): startRun/finishRun + syncStatus over the store.
+// Sync-run log (consumed by semantic_index): startRun/finishRun + syncStatus over the store.
 test('ValueIndex sync-run log: startRun/finishRun + syncStatus', () => {
   const idx = new ValueIndex(); // in-memory fallback
 

@@ -18,7 +18,7 @@ Design docs:
 
 | Tool | Purpose |
 |---|---|
-| `describe_catalog` | registry: models, events, properties, reachable group-by paths, enums |
+| `semantic_index` | registry: models, events, properties, reachable group-by paths, enums |
 | `create_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table) |
 | `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
 | `update_semantic_model` | add/remove task measures, dimensions, metrics in a context |

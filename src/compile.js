@@ -37,7 +37,7 @@ function propExpr(catalog, name, spec) {
 function propCond(catalog, modelKey, cond) {
   const props = catalog.getModel(catalog.anchor).properties || {};
   const p = props[cond.property];
-  if (!p) fail(`unknown event property in where: '${cond.property}'. Discover properties via describe_catalog({ event })`, 'where.property');
+  if (!p) fail(`unknown event property in where: '${cond.property}'. Discover properties via semantic_index({ event })`, 'where.property');
   const lhs = propExpr(catalog, cond.property, p);
   switch (cond.op) {
     case 'eq': return `${lhs} = ${sqlLiteral(cond.value)}`;
@@ -121,7 +121,7 @@ function compileDimension(catalog, task, modelKey, decl) {
     if (modelKey !== catalog.anchor) fail('event_property dimensions only valid on the events model', 'dimensions.source');
     const props = catalog.getModel(catalog.anchor).properties || {};
     const p = props[decl.property];
-    if (!p) fail(`unknown event property: '${decl.property}'. Discover properties via describe_catalog({ event })`, 'dimensions.property');
+    if (!p) fail(`unknown event property: '${decl.property}'. Discover properties via semantic_index({ event })`, 'dimensions.property');
     if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
     return { name: NS(task, decl.property), type: 'categorical', expr: propExpr(catalog, decl.property, p) };
   }

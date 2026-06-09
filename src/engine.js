@@ -83,19 +83,39 @@ export class Engine {
   }
 
   /**
-   * Progressive catalog discovery. The events fact carries ~150 event-scoped
-   * properties, so dumping everything at once is wasteful. Call with NO arguments
-   * for a compact OVERVIEW, then drill down:
-   *   { model }    → one model's entities/time/dimensions + REAL physical columns
+   * THE semantic index: one progressive view over everything the data means AND how
+   * well it is indexed. The events fact carries ~150 event-scoped properties, so
+   * dumping everything at once is wasteful. Call with NO arguments for a compact
+   * OVERVIEW, then drill down:
+   *   { model }    → one model's entities/time/dimensions (with real values) + physical columns
    *   { event }    → only the properties POPULATED on that event (what you can use)
-   *   { property } → one property's full spec (type, applicable events, description)
-   *   { search }   → events/properties whose name/description matches a substring
-   * Pass at most one drill-down key (precedence model > event > property > search).
+   *   { property } → one property/attribute: spec + real value distribution + NULL
+   *                  coverage per event + indexing history (one page per column)
+   *   { search }   → events/properties/attributes/VALUES/recipes matching a substring
+   *   { status }   → operational state: value-index sync runs + background query jobs
+   *   { run }      → one sync run's per-property breakdown (slowest first)
+   * Pass at most one drill-down key (precedence run > status > model > event > property > search).
    */
-  async describe_catalog(input = {}) {
-    this._validate('describe_catalog', input);
+  async semantic_index(input = {}) {
+    this._validate('semantic_index', input);
+    // STRICT view contract (nothing is ever silently ignored): at most ONE view key,
+    // and paging/ordering/recency params only on the views they apply to.
+    const views = ['run', 'status', 'model', 'event', 'property', 'search'].filter((k) => input[k] !== undefined && input[k] !== false);
+    if (views.length > 1) {
+      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
+    }
+    if (input.limit !== undefined && !(input.property || input.search)) throw new ToolError('limit only applies to the { property } and { search } views', { stage: 'validate', field: 'limit' });
+    for (const k of ['offset', 'order_by', 'direction']) {
+      if (input[k] !== undefined && !input.property) throw new ToolError(`${k} only applies to the { property } view`, { stage: 'validate', field: k });
+    }
+    if (input.recent !== undefined && !(input.status || input.run != null || input.property)) throw new ToolError('recent only applies to the { status }, { run } and { property } views', { stage: 'validate', field: 'recent' });
+
     const c = this.catalog;
     const AGG = ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'];
+
+    // ── operational views (sync state / one run) ──
+    if (input.run != null) return this._indexRun(input);
+    if (input.status) return this._indexStatus(input);
 
     // ── { model }: one model in depth (incl. live warehouse introspection) ──
     if (input.model) {
@@ -118,7 +138,7 @@ export class Engine {
           out.partition_column = m.partition_column;
           out.cost_hint = `The physical table is partitioned by ${m.partition_column} — ALWAYS bound queries with time_range (or a where on ${m.partition_column}/${m.time?.column || 'the time column'}) to avoid a full scan.`;
         }
-        out.note = 'Events fact: payload fields are event-scoped properties (describe_catalog({ event })). The columns above are referenceable in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
+        out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The columns above are referenceable in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
       } else {
         // Dimension attributes WITH their real indexed values (cardinality + top 3) — the
         // index stores them under namespaced '<model>.<column>' keys (e.g. 'users.country').
@@ -136,20 +156,20 @@ export class Engine {
       }
       out.recommendations = k === c.anchor
         ? [
-          `Drill into an event to see the properties it carries: describe_catalog({ event: '${c.eventNames()[0] || '<event_name>'}' }).`,
-          `Then inspect a property's real values + frequency distribution: describe_catalog({ property: '<name>' }).`,
-          `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: describe_catalog({ search: '<value>' }).`,
+          `Drill into an event to see the properties it carries: semantic_index({ event: '${c.eventNames()[0] || '<event_name>'}' }).`,
+          `Then inspect a property's real values + frequency distribution: semantic_index({ property: '<name>' }).`,
+          `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ search: '<value>' }).`,
         ]
         : [
-          `Drill into an attribute's full value/frequency distribution: describe_catalog({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
-          `Looking for a known attribute value? describe_catalog({ search: '<value>' }) tells you where it occurs.`,
+          `Drill into an attribute's full value/frequency distribution: semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
+          `Looking for a known attribute value? semantic_index({ search: '<value>' }) tells you where it occurs.`,
         ];
       return out;
     }
 
     // ── { event }: the properties populated on this event (NULL on others) ──
     if (input.event) {
-      if (!c.eventNames().includes(input.event)) throw new ToolError(`unknown event '${input.event}'. See describe_catalog().event_names`, { stage: 'validate', field: 'event' });
+      if (!c.eventNames().includes(input.event)) throw new ToolError(`unknown event '${input.event}'. See semantic_index().event_names`, { stage: 'validate', field: 'event' });
       const numeric = new Set(c.eventNumericProps());
       const applies = c.eventPropertyEvents();
       const descs = c.eventPropertyDescriptions();
@@ -165,9 +185,9 @@ export class Engine {
       const recommendations = [];
       const withValues = rows.filter((r) => !r.complex && r.sample_values.length);
       const pick = (withValues.length ? withValues : rows.filter((r) => !r.complex)).slice(0, 3);
-      if (pick.length) recommendations.push(`Drill into a property's real values + full frequency distribution: ${pick.map((r) => `describe_catalog({ property: '${r.name}' })`).join(', ')}.`);
-      if (withValues.length) recommendations.push(`Spot a value you recognise in the samples above? Find every property/event it occurs in: describe_catalog({ search: '<value>' }).`);
-      if (rows.some((r) => r.complex)) recommendations.push(`Complex (array/struct) properties carry nested values — describe_catalog({ property }) shows the shape before you explore inside them.`);
+      if (pick.length) recommendations.push(`Drill into a property's real values + full frequency distribution: ${pick.map((r) => `semantic_index({ property: '${r.name}' })`).join(', ')}.`);
+      if (withValues.length) recommendations.push(`Spot a value you recognise in the samples above? Find every property/event it occurs in: semantic_index({ search: '<value>' }).`);
+      if (rows.some((r) => r.complex)) recommendations.push(`Complex (array/struct) properties carry nested values — semantic_index({ property }) shows the shape before you explore inside them.`);
       if (!props.length) {
         // No payload at all (e.g. first_launch) is NOT a dead end: the event's value is
         // its OCCURRENCE — say what it is good for instead of returning an empty page.
@@ -175,7 +195,7 @@ export class Engine {
         const role = Object.entries(sem).find(([, ev]) => ev === input.event)?.[0];
         recommendations.push(`'${input.event}' carries no event-specific payload — its value is the occurrence itself${role ? ` (it is the ${role.replace(/_/g, ' ')})` : ''}: use it as a measure base (count / count_distinct of the user key, event_name: ['${input.event}']) for retention, conversion or funnel metrics.`);
       }
-      if (!recommendations.length) recommendations.push(`Inspect any property's real values with describe_catalog({ property }).`);
+      if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ property }).`);
       return {
         event: input.event,
         property_count: props.length,
@@ -194,13 +214,20 @@ export class Engine {
       if (dot > 0) {
         const mk = p.slice(0, dot); const col = p.slice(dot + 1);
         const dim = (mk !== c.anchor && c.models[mk]) ? (c.getModel(mk).dimensions || {})[col] : undefined;
-        if (!dim) throw new ToolError(`unknown attribute '${p}'. Dimension attributes are '<model>.<column>' — see describe_catalog({ model: '${c.models[mk] ? mk : 'users'}' }) for the list; bare names are event properties`, { stage: 'validate', field: 'property' });
+        if (!dim) throw new ToolError(`unknown attribute '${p}'. Dimension attributes are '<model>.<column>' — see semantic_index({ model: '${c.models[mk] ? mk : 'users'}' }) for the list; bare names are event properties`, { stage: 'validate', field: 'property' });
         const dDescs = c.columnDescriptions(mk);
         const { samples, value_stats } = this._valueListing(p, input);
+        // NULL coverage + indexing freshness make this ONE page the full truth about the
+        // column: meaning, values, completeness, and how recently it was profiled.
+        // (event_coverage is [] here — attributes live on the dimension model, not on
+        // events — but the SHAPE matches the event-property page exactly.)
+        const { nulls, coverage: attrCoverage, recs: nullRecs } = this._nullCoverage(p, null);
+        Object.assign(value_stats, nulls);
         const ent = c.primaryEntityName(mk);
         const recommendations = [];
         if (samples.length) recommendations.push(`${value_stats.distinct_count != null ? `${value_stats.distinct_count} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
         else recommendations.push(`No values indexed yet (the background value index may not have run).${dim.values ? ` Declared values: ${dim.values.join(', ')}.` : ''}`);
+        recommendations.push(...nullRecs);
         recommendations.push(ent
           ? `Group/filter by it in metric queries via '${ent}__${col}', or reference '${col}' after a pipeline join with:'${mk}'.`
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
@@ -209,37 +236,51 @@ export class Engine {
           ...(dim.values ? { declared_values: dim.values } : {}),
           description: dDescs[col],
           sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
-          indexed: value_stats.indexed, value_stats, recommendations: recommendations.slice(0, 3),
+          indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
+          indexing: this._indexHistory(p, input.recent ?? 10),
+          recommendations: recommendations.slice(0, 3),
         };
       }
       const spec = c.eventPropertySpec(p);
-      if (!spec) throw new ToolError(`unknown event property '${p}'. Discover properties via describe_catalog({ event }) or ({ search }); user/experiment attributes are namespaced ('users.country')`, { stage: 'validate', field: 'property' });
+      if (!spec) throw new ToolError(`unknown event property '${p}'. Discover properties via semantic_index({ event }) or ({ search }); user/experiment attributes are namespaced ('users.country')`, { stage: 'validate', field: 'property' });
       const numeric = c.eventNumericProps().includes(p);
       const complex = c.isComplexEventProp(p);
       const evs = (spec.events && spec.events.length) ? spec.events : null;
-      // Pageable/orderable view of the real indexed VALUES (limit/offset/order_by/direction).
+      // Pageable/orderable view of the real indexed VALUES (limit/offset/order_by/direction)
+      // + NULL coverage per event + indexing freshness: ONE page = the full truth about the
+      // column (meaning, values, completeness, profiling recency).
       const { samples, value_stats } = this._valueListing(p, input);
+      const { nulls, coverage, recs: nullRecs } = this._nullCoverage(p, evs);
+      Object.assign(value_stats, nulls);
       const dc = value_stats.distinct_count;
       // Drill-down guidance: keep exploring the VALUES — trace them across the catalog,
-      // and pivot to the event(s) that carry this property (≤3 concrete next moves).
+      // and pivot to the event(s) that carry this property (≤4 concrete next moves).
       const recommendations = [];
       if (samples.length) {
         recommendations.push(`${dc != null ? `${dc} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
-        if (value_stats.has_more) recommendations.push(`More values exist — page with describe_catalog({ property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} }), or re-order with order_by:'value'.`);
-        recommendations.push(`Trace any of these values across the catalog (which other properties/events carry it): describe_catalog({ search: '<value>' }).`);
+        if (value_stats.has_more) recommendations.push(`More values exist — page with semantic_index({ property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} }), or re-order with order_by:'value'.`);
+        recommendations.push(`Trace any of these values across the catalog (which other properties/events carry it): semantic_index({ search: '<value>' }).`);
       } else if (complex) {
         recommendations.push(`Complex (${spec.type}) property — its values are nested; explore the carrying event(s) for context.`);
       } else {
         recommendations.push(`No values indexed yet (the background value index may not have run).${dc != null ? ` distinct_count is ${dc}.` : ''}`);
       }
-      if (evs) recommendations.push(`Carried by event(s) ${evs.join(', ')} — see everything they carry: describe_catalog({ event: '${evs[0]}' }).`);
+      recommendations.push(...nullRecs);
+      if (evs) recommendations.push(`Carried by event(s) ${evs.join(', ')} — see everything they carry: semantic_index({ event: '${evs[0]}' }).`);
       // Unit-aware cast hint: a numeric-in-meaning value (declared unit) physically typed
       // string must be cast before aggregation — say so HERE, before a query mixes units
       // or averages a string.
-      const out = { property: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric, complex, events: spec.events || null, description: spec.description, sample_values: samples, distinct_count: dc, total_count: value_stats.total_count, indexed: value_stats.indexed, value_stats, recommendations: recommendations.slice(0, 3) };
+      const out = {
+        property: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric, complex,
+        events: spec.events || null, description: spec.description,
+        sample_values: samples, distinct_count: dc, total_count: value_stats.total_count,
+        indexed: value_stats.indexed, value_stats, event_coverage: coverage,
+        indexing: this._indexHistory(p, input.recent ?? 10),
+        recommendations: recommendations.slice(0, 4),
+      };
       if (spec.unit && spec.type === 'string') {
         out.cast_hint = 'numeric';
-        out.recommendations = [...out.recommendations.slice(0, 2), `Values are ${spec.unit} but physically typed string — add "cast":"numeric" (semantic measures) or a compute cast (pipelines) before sum/avg.`];
+        out.recommendations = [...out.recommendations.slice(0, 3), `Values are ${spec.unit} but physically typed string — add "cast":"numeric" (semantic measures) or a compute cast (pipelines) before sum/avg.`];
       }
       return out;
     }
@@ -272,13 +313,14 @@ export class Engine {
       });
       // DIMENSION-attribute matches on the non-anchor models (users/experiments) — by
       // column name or description — so "country"/"media source" lead to the join path.
+      // The key is `property` (CONSISTENT with the { property } drill-down that accepts it).
       const dimension_matches = [];
       for (const mk of c.modelKeys()) {
         if (mk === c.anchor) continue;
         const dDescs = c.columnDescriptions(mk);
         for (const [col, dspec] of Object.entries(c.getModel(mk).dimensions || {})) {
           if (col.toLowerCase().includes(q) || (dDescs[col] || '').toLowerCase().includes(q)) {
-            dimension_matches.push({ attribute: `${mk}.${col}`, model: mk, type: dspec.type, description: dDescs[col] });
+            dimension_matches.push({ property: `${mk}.${col}`, model: mk, type: dspec.type, description: dDescs[col] });
           }
         }
       }
@@ -295,17 +337,17 @@ export class Engine {
       const recommendations = [];
       if (value_matches.length) {
         const top = value_matches[0];
-        recommendations.push(`Value '${top.value}' lives in ${top.model ? `attribute '${top.property}' (the '${top.model}' model)` : `property '${top.property}'`}${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: describe_catalog({ property: '${top.property}' }).`);
-        if (top.events?.[0]) recommendations.push(`See everything event '${top.events[0]}' carries: describe_catalog({ event: '${top.events[0]}' }).`);
+        recommendations.push(`Value '${top.value}' lives in ${top.model ? `attribute '${top.property}' (the '${top.model}' model)` : `property '${top.property}'`}${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ property: '${top.property}' }).`);
+        if (top.events?.[0]) recommendations.push(`See everything event '${top.events[0]}' carries: semantic_index({ event: '${top.events[0]}' }).`);
       }
       if (recipe_matches.length) recommendations.push(`Recipe '${recipe_matches[0].id}' covers this task type — get_recipe({ id: '${recipe_matches[0].id}' }) returns a ready payload + the reusable technique.`);
-      if (dimension_matches.length) recommendations.push(`Attribute '${dimension_matches[0].attribute}' matches — drill its values with describe_catalog({ property: '${dimension_matches[0].attribute}' }).`);
+      if (dimension_matches.length) recommendations.push(`Attribute '${dimension_matches[0].property}' matches — drill its values with semantic_index({ property: '${dimension_matches[0].property}' }).`);
       if (property_matches.length) {
         const p = property_matches[0];
-        recommendations.push(`Drill into property '${p.property}' for its real values + cardinality: describe_catalog({ property: '${p.property}' }).`);
+        recommendations.push(`Drill into property '${p.property}' for its real values + cardinality: semantic_index({ property: '${p.property}' }).`);
       }
-      if (event_names.length) recommendations.push(`See what event '${event_names[0].event}' carries: describe_catalog({ event: '${event_names[0].event}' }).`);
-      if (!recommendations.length) recommendations.push(`No catalog match for '${input.search}'. Try describe_catalog() for the event list, or a broader substring.`);
+      if (event_names.length) recommendations.push(`See what event '${event_names[0].event}' carries: semantic_index({ event: '${event_names[0].event}' }).`);
+      if (!recommendations.length) recommendations.push(`No catalog match for '${input.search}'. Try semantic_index() for the event list, or a broader substring.`);
       return {
         query: input.search,
         event_names,
@@ -358,11 +400,11 @@ export class Engine {
         seconds_since_last_sync: lastSync?.finished_at != null ? Math.round((Date.now() - lastSync.finished_at) / 1000) : null,
       } : null,
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
-      next: 'Overview only. Drill down: describe_catalog({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring.',
+      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring.',
       recommendations: [
-        `Start by inspecting an event's properties: describe_catalog({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
-        `Segmentation attributes live on the dimension models: describe_catalog({ model: '${userModel || 'users'}' }) shows them with real values; drill one via describe_catalog({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
-        `Looking for a known value (a country code, an experiment name, an ad format)? describe_catalog({ search: '<value>' }) tells you exactly where it lives.`,
+        `Start by inspecting an event's properties: semantic_index({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
+        `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
+        `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,
       ],
     };
   }
@@ -397,62 +439,63 @@ export class Engine {
     return { samples, value_stats };
   }
 
+  /** Compact row for a property's per-run indexing record. */
+  _indexPropRow(r) {
+    return { property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) };
+  }
+
   /**
-   * Operational state, the describe_catalog way: the value-index SYNC state (last/recent
-   * refresh runs, coverage counts, whether one is in flight) plus the background QUERY
-   * jobs and their statuses. Read-only, cheap (SQLite reads); touches no warehouse.
+   * NULL coverage of one indexed key (from the latest sync): overall null counts +
+   * a per-event_name breakdown. A property is NULL on events it does not apply to —
+   * each event is annotated with `applies` (from meta.mcp.events) so EXPECTED nulls
+   * are distinguishable from real data gaps. Returns null fields when not indexed.
    */
-  describe_index(input = {}) {
-    this._validate('describe_index', input);
+  _nullCoverage(key, declared) {
+    const st = this.valueIndex.stats(key);
+    const rowCount = (st && st.totalCount != null && st.nullCount != null) ? st.totalCount + st.nullCount : null;
+    const frac = (n, d) => (d ? Number((n / d).toFixed(4)) : null);
+    const nulls = { non_null_count: st?.totalCount ?? null, null_count: st?.nullCount ?? null, row_count: rowCount, null_fraction: (st?.nullCount != null && rowCount) ? frac(st.nullCount, rowCount) : null };
+    const declaredSet = declared ? new Set(declared) : null;
+    const coverage = this.valueIndex.coverage(key).map((e) => ({
+      event_name: e.event_name, row_count: e.row_count, non_null: e.non_null, null_count: e.null_count,
+      null_fraction: frac(e.null_count, e.row_count), applies: declaredSet ? declaredSet.has(e.event_name) : true,
+    }));
+    const gaps = coverage.filter((e) => e.applies && e.null_count > 0);
+    const recs = [];
+    if (nulls.null_count != null && nulls.row_count) recs.push(`${nulls.null_count} of ${nulls.row_count} rows are NULL (${nulls.null_fraction != null ? Math.round(nulls.null_fraction * 100) : '?'}%)${declared ? `; the property applies to events: ${declared.join(', ')}` : ''}.`);
+    if (gaps.length) recs.push(`Possible data gaps: ${gaps.slice(0, 5).map((g) => `${g.event_name} (${g.null_count}/${g.row_count} NULL)`).join(', ')} — these events SHOULD carry '${key}' but have NULLs.`);
+    else if (declaredSet && coverage.length) recs.push(`NULLs outside the applicable events are expected (the property is only populated on ${declared.join(', ')}).`);
+    return { nulls, coverage, recs };
+  }
+
+  /** Per-sync indexing history of one key: { runs, avg_ms, history } (most recent first). */
+  _indexHistory(key, recent = 10) {
+    const history = this.valueIndex.propertyHistory(key, { limit: recent }).map((r) => ({ run_id: r.run_id, started_at: r.started_at, ...this._indexPropRow(r) }));
+    const timed = history.filter((r) => r.ms != null);
+    return { runs: history.length, avg_ms: timed.length ? Math.round(timed.reduce((s, r) => s + r.ms, 0) / timed.length) : null, history };
+  }
+
+  /** semantic_index({ run }): per-property breakdown within one sync run (slowest first). */
+  _indexRun(input) {
+    const run = this.valueIndex.runById(input.run);
+    if (!run) throw new ToolError(`unknown index run '${input.run}'. See semantic_index({ status: true }).value_index.recent_runs[].id`, { stage: 'validate', field: 'run' });
+    const props = this.valueIndex.runProperties(input.run).map((r) => this._indexPropRow(r));
+    return {
+      run: { id: run.id, started_at: run.started_at, finished_at: run.finished_at, status: run.status, properties_indexed: run.properties_indexed, values_written: run.values_written, errors: run.errors, duration_ms: (run.finished_at != null && run.started_at != null) ? run.finished_at - run.started_at : null },
+      property_count: props.length,
+      properties: props,
+      recommendations: [props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`],
+    };
+  }
+
+  /**
+   * semantic_index({ status: true }): operational state — the value-index SYNC state
+   * (last/recent refresh runs, coverage counts, whether one is in flight) plus the
+   * background QUERY jobs and their statuses. Read-only, cheap; touches no warehouse.
+   */
+  _indexStatus(input = {}) {
     const recent = input.recent ?? 10;
-    const propRow = (r) => ({ property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) });
-
-    // ── drill-down: one property's per-sync timing history + null/coverage breakdown ──
-    if (input.property) {
-      const hist = this.valueIndex.propertyHistory(input.property, { limit: recent }).map((r) => ({ run_id: r.run_id, started_at: r.started_at, ...propRow(r) }));
-      const timed = hist.filter((r) => r.ms != null);
-      const avg = timed.length ? Math.round(timed.reduce((s, r) => s + r.ms, 0) / timed.length) : null;
-
-      // Null coverage from the latest sync: overall null_count + a per-event_name breakdown.
-      // A property is NULL on events it does not apply to — annotate each event with `applies`
-      // (declared in meta.mcp.events) so expected NULLs are distinguishable from real gaps.
-      const st = this.valueIndex.stats(input.property);
-      const rowCount = (st && st.totalCount != null && st.nullCount != null) ? st.totalCount + st.nullCount : null;
-      const frac = (n, d) => (d ? Number((n / d).toFixed(4)) : null);
-      const valueStats = st ? { distinct_count: st.distinctCount, non_null_count: st.totalCount, null_count: st.nullCount, row_count: rowCount, null_fraction: (st.nullCount != null && rowCount) ? frac(st.nullCount, rowCount) : null } : null;
-      const declared = this.catalog.eventPropertyEvents()[input.property] || null; // null ⇒ applies to ALL events
-      const declaredSet = declared ? new Set(declared) : null;
-      const coverage = this.valueIndex.coverage(input.property).map((e) => ({
-        event_name: e.event_name, row_count: e.row_count, non_null: e.non_null, null_count: e.null_count,
-        null_fraction: frac(e.null_count, e.row_count), applies: declaredSet ? declaredSet.has(e.event_name) : true,
-      }));
-      // Real data-quality gaps: events the property SHOULD populate but where rows are NULL.
-      const gaps = coverage.filter((e) => e.applies && e.null_count > 0);
-
-      const recs = [hist.length ? `'${input.property}' took ${hist[0].ms}ms in the latest sync (${hist[0].values} values, ${hist[0].distinct_count} distinct); avg ${avg}ms over ${timed.length} runs.` : `No per-property timing recorded for '${input.property}' yet.`];
-      if (valueStats && valueStats.null_count != null) recs.push(`${valueStats.null_count} of ${valueStats.row_count} rows are NULL (${valueStats.null_fraction != null ? Math.round(valueStats.null_fraction * 100) : '?'}%)${declared ? `; the property applies to events: ${declared.join(', ')}` : ' (applies to all events)'}.`);
-      if (gaps.length) recs.push(`Possible data gaps: ${gaps.slice(0, 5).map((g) => `${g.event_name} (${g.null_count}/${g.row_count} NULL)`).join(', ')} — these events SHOULD carry '${input.property}' but have NULLs.`);
-      else if (declaredSet && coverage.length) recs.push(`NULLs outside the applicable events are expected (the property is only populated on ${declared.join(', ')}).`);
-
-      return {
-        property: input.property, runs: hist.length, avg_ms: avg,
-        value_stats: valueStats, applies_to_events: declared, event_coverage: coverage,
-        history: hist, recommendations: recs,
-      };
-    }
-
-    // ── drill-down: per-property breakdown within one sync run (slowest first) ──
-    if (input.run != null) {
-      const run = this.valueIndex.runById(input.run);
-      if (!run) throw new ToolError(`unknown index run '${input.run}'. See describe_index().value_index.recent_runs[].id`, { stage: 'validate', field: 'run' });
-      const props = this.valueIndex.runProperties(input.run).map(propRow);
-      return {
-        run: { id: run.id, started_at: run.started_at, finished_at: run.finished_at, status: run.status, properties_indexed: run.properties_indexed, values_written: run.values_written, errors: run.errors, duration_ms: (run.finished_at != null && run.started_at != null) ? run.finished_at - run.started_at : null },
-        property_count: props.length,
-        properties: props,
-        recommendations: [props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with describe_index({ property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`],
-      };
-    }
+    const propRow = (r) => this._indexPropRow(r);
 
     const sync = this.valueIndex.syncStatus ? this.valueIndex.syncStatus({ recent }) : { persisted: false, running: false, indexed_properties: 0, total_values: 0, total_runs: 0, last_run: null, last_successful_run: null, recent_runs: [] };
     const last = sync.last_successful_run || sync.last_run;
@@ -465,12 +508,12 @@ export class Engine {
     const byStatus = jobs.reduce((m, j) => { m[j.status] = (m[j.status] || 0) + 1; return m; }, {});
 
     const recommendations = [];
-    if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in describe_catalog may still be filling in.`);
-    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — describe_catalog({ property }) will show no sample_values until the first sync (it runs in the background at startup).`);
+    if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in semantic_index may still be filling in.`);
+    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ property }) will show no sample_values until the first sync (it runs in the background at startup).`);
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the warehouse/runner.`);
-    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via describe_catalog({ property }).`);
+    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ property }).`);
     if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }) or list them with list_query_jobs.`);
-    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: describe_index({ run: ${last.id} }) for the full breakdown, or describe_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
+    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
     if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
 
     return {
@@ -612,7 +655,7 @@ export class Engine {
       steps: [], column_count: cols.length,
       next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response shows only the columns that stage added/removed (use include_columns:true or preview for the full list).',
       recommendations: [
-        `The source has ${cols.length} columns your first stage can reference; get the full list with build_native_model({ action: "start", ..., include_columns: true }) or inspect via describe_catalog({ model: '${source}' }).`,
+        `The source has ${cols.length} columns your first stage can reference; get the full list with build_native_model({ action: "start", ..., include_columns: true }) or inspect via semantic_index({ model: '${source}' }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
         `When the steps look right, commit with build_native_model({ action: "commit", draft_id }).`,
       ],

@@ -19,10 +19,10 @@ You answer product-analytics questions for OpenMyGame games by driving the
 events, properties, dimensions and metrics by name, and the engine compiles + runs them.
 
 The **canonical definitions** of every event, metric and dimension live in **Confluence**
-(and the live shape lives in the **catalog** via `describe_catalog`). They CHANGE over time,
+(and the live shape lives in the **catalog** via `semantic_index`). They CHANGE over time,
 so this skill does **not** copy them — it is a persistent **navigator + procedure**: it tells
 you which Confluence pages to read and how to drive the MCP. Always open the linked page and
-run `describe_catalog` for current definitions; never trust a value memorized here. Cite the
+run `semantic_index` for current definitions; never trust a value memorized here. Cite the
 page you relied on. Start map: `reference/confluence-map.md`.
 
 > `data ≠ software`: a question usually has ONE correct answer and there is no test that
@@ -49,7 +49,7 @@ catalogue, envelope structure, and event gotchas). Dimensions/metrics built on t
    player segment, and the *decision* behind the question. Resolve relative time to a
    **complete** period ("last week" = last full calendar week, not trailing 7 days), and
    anchor freshness on the latest event time, not "today".
-2. **Discover** with `describe_catalog` — call it first with no args (overview), then drill
+2. **Discover** with `semantic_index` — call it first with no args (overview), then drill
    down: `{ event }` for an event's properties, `{ property }` for one property's real
    values + cardinality, `{ search }` to map a business word/value to the property and the
    event(s) that carry it. This narrows the entity space before you commit.
@@ -74,8 +74,8 @@ catalogue, envelope structure, and event gotchas). Dimensions/metrics built on t
 ## Tool map
 | Need | Tool |
 | --- | --- |
-| Discover events / properties / values / map a term | `describe_catalog` (overview → `{model\|event\|property\|search}`) |
-| Is the value index fresh / what's running | `describe_index` (sync state, per-property timing, jobs) |
+| Discover events / properties / values / map a term | `semantic_index` (overview → `{model\|event\|property\|search}`) |
+| Is the value index fresh / what's running | `semantic_index` (sync state, per-property timing, jobs) |
 | Define + query a governed metric | `create_semantic_model` → `query_semantic_model` |
 | Custom funnel / path / bespoke transform | `build_native_model` (start → add_step → commit) → `get_query_result` |
 | A/B significance | `ab_test`; guardrail `srm_check`; planning `sample_size` |
@@ -97,7 +97,7 @@ catalogue, envelope structure, and event gotchas). Dimensions/metrics built on t
 ## Reference (pointers — read the Confluence pages they link, don't trust copies)
 - `reference/confluence-map.md` — **start here**: which Confluence space/page holds what, the
   anchor pages (master Events Schema, QA rules, A/B process), and how to find a specific
-  event/dimension/metric (search patterns + labels) and confirm it via `describe_catalog`.
+  event/dimension/metric (search patterns + labels) and confirm it via `semantic_index`.
 - `reference/events.md` — **the events foundation**: where to read event meaning/params/when
   (the master schema), an orientation map of the event families, and how to use events in the
   MCP + traps to avoid.
@@ -107,4 +107,4 @@ catalogue, envelope structure, and event gotchas). Dimensions/metrics built on t
   retention, monetization IAP+ads, in-game economy, A/B), each pointing at the relevant page.
 
 When OMG ships data-model changes, the Confluence `[Metric]`/`[Dimension]` pages are
-updated first — re-read them (and `describe_catalog`) rather than trusting memory.
+updated first — re-read them (and `semantic_index`) rather than trusting memory.

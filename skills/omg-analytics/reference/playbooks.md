@@ -1,7 +1,7 @@
 # Playbooks — analysis pattern → MCP tool sequence
 
 Each pattern: when to use it, the tool sequence, and the gotcha to check. Always
-**clarify** (window/project/segment) and **discover** (`describe_catalog`) first, and check
+**clarify** (window/project/segment) and **discover** (`semantic_index`) first, and check
 `list_recipes` / `get_recipe` — a recipe often carries the ready payload + the reusable
 technique (`hack`). Report the tier (governed metric › pipeline) + freshness + Confluence link.
 
@@ -89,6 +89,6 @@ Process + naming conventions: **Product Analytics** space
 ## Provenance footer (end every answer with)
 - **Tier:** governed metric (name + Confluence link) ▸ or custom pipeline.
 - **Scope:** grain, filters, segment, time window (complete period), project/platform.
-- **Freshness:** latest event time used (and `describe_index` sync state if values were used).
+- **Freshness:** latest event time used (and `semantic_index` sync state if values were used).
 - **Caveats:** any gotcha that applies (reconciliation, ATT split, reinstalls, partial cohort).
 - Separate **observation** from **interpretation**.

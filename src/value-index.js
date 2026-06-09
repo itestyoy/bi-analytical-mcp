@@ -1,5 +1,5 @@
 // Background-populated index of REAL event-property values (top values by frequency +
-// cardinality), surfaced in describe_catalog so the AI sees not just property NAMES/types
+// cardinality), surfaced in semantic_index so the AI sees not just property NAMES/types
 // but the actual VALUES a property carries. Persistence is delegated to a swappable store
 // backend (see store.js) — this class holds NO SQL, just the domain operations. The
 // BackgroundIndexer populates it NON-BLOCKING from the warehouse at startup + on a schedule.
@@ -58,7 +58,7 @@ export class ValueIndex {
     if (this._ownsStore) { try { this.store.close(); } catch { /* already closed */ } }
   }
 
-  // ── sync-run log (consumed by describe_index) ──────────────────────────────
+  // ── sync-run log (consumed by semantic_index) ──────────────────────────────
   /** Record the start of a refresh pass; returns a run id to pass to finishRun. */
   startRun() { return this.store.runs.start(); }
 
@@ -151,7 +151,7 @@ export class BackgroundIndexer {
    * coverage) PLUS the categorical dimension columns of every non-anchor model
    * (users / experiments), stored under namespaced keys like 'users.country' or
    * 'experiments.experiment_name' — so user-attribute values and experiment names
-   * are just as discoverable via describe_catalog search/drill-down as event values.
+   * are just as discoverable via semantic_index search/drill-down as event values.
    */
   _targets() {
     const c = this.catalog;
@@ -178,7 +178,7 @@ export class BackgroundIndexer {
     if (this._running) return;
     if (!this.runner || !this.baseProjectDir) return;
     this._running = true;
-    const runId = this.index.startRun?.(); // log the sync run (state for describe_index)
+    const runId = this.index.startRun?.(); // log the sync run (state for semantic_index)
     const startedAt = Date.now();
     let props = 0; let values = 0; let errors = 0; let lastError = null;
     const c = this.catalog;
@@ -191,7 +191,7 @@ export class BackgroundIndexer {
         i += 1;
         // Sequential await between properties yields to the event loop, keeping
         // tool calls responsive during a refresh.
-        const tProp = Date.now(); // per-property timing (detailed stats for describe_index)
+        const tProp = Date.now(); // per-property timing (detailed stats for semantic_index)
         try {
           // No SQL-level LIMIT: `runner.show` appends its own `limit` clause (dbt
           // show --limit), so a trailing LIMIT here would be invalid SQL. Cap with

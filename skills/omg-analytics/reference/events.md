@@ -13,11 +13,11 @@ Schema** and confirm against the live catalog.
 - **Event QA rules** — required fields, enum/null rules, banner-ad exceptions, anomaly checks.
   → `https://openmygame.atlassian.net/wiki/spaces/BI/pages/4797726777`
 - **Game-specific event spec** — search the game's space (e.g. `space = JCS AND title ~ "currency"`).
-- **What's live here** — `describe_catalog({ event })` / `({ property })` / `({ search })`
+- **What's live here** — `semantic_index({ event })` / `({ property })` / `({ search })`
   for the exact (flattened) field names, real values and cardinality in this deployment.
 
 ## Orientation (so you know what to look for in the schema)
-Confirm names/params/availability in the schema + `describe_catalog` — this is just a map of
+Confirm names/params/availability in the schema + `semantic_index` — this is just a map of
 the families and roughly where each event's data sits.
 - **Sessions / lifecycle:** `first_launch`, `new_session`, `end_session`. Install attributes
   are NOT a separate event — they're parameters in the `main_data` block.
@@ -34,12 +34,12 @@ the families and roughly where each event's data sits.
 
 Event payloads are organized into blocks (flattened in the catalog): `main_data`,
 `device_info`, `state`, `event_data`, `additional_info` — the schema page is authoritative
-on which block holds which field; `describe_catalog({ search })` finds it in the live data.
+on which block holds which field; `semantic_index({ search })` finds it in the live data.
 
 ## Using events in the MCP (procedure)
-1. Discover: `describe_catalog()` → events; `({ event })` → its properties; `({ property })`
+1. Discover: `semantic_index()` → events; `({ event })` → its properties; `({ property })`
    → real values/cardinality; `({ search })` → map a term/value to its event + block. Check
-   `describe_index` for value-index freshness.
+   `semantic_index` for value-index freshness.
 2. Funnels/paths: a `build_native_model` pipeline with a `match_recognize` stage (a step =
    event + an `event_data` value), then read rows with `get_query_result`.
 3. Governed rates/volumes: `create_semantic_model` + `query_semantic_model` (after reading
@@ -47,9 +47,9 @@ on which block holds which field; `describe_catalog({ search })` finds it in the
 
 ## Traps to avoid (verify specifics in the schema)
 - **Scope to `event_name`.** A payload property is populated only on the event(s) that emit
-  it; unscoped, it reads NULL. `describe_catalog({ property })` lists which events carry it.
+  it; unscoped, it reads NULL. `semantic_index({ property })` lists which events carry it.
 - **Find the block, don't assume top-level.** Fields nest in `event_data` / `additional_info`
-  / `main_data` / `device_info`; use `describe_catalog({ search })`.
+  / `main_data` / `device_info`; use `semantic_index({ search })`.
 - **Per-project + versioned.** The same event may be implemented/partial/absent per game, and
   parameters were added across versions (and some deprecated). The schema page is the
   authority — re-read it, don't rely on memory.

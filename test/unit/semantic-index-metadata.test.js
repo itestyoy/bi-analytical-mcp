@@ -15,7 +15,7 @@ const catalog = loadCatalog(new URL('../../config/catalog.yml', import.meta.url)
 const engine = () => new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dm-')) }) });
 
 test('overview surfaces event_semantics + partition_column for the events fact', async () => {
-  const out = await engine().describe_catalog({});
+  const out = await engine().semantic_index({});
   const ev = out.models.find((m) => m.kind === 'events_fact');
   assert.equal(ev.event_semantics.acquisition_event, 'first_launch');
   assert.equal(ev.event_semantics.session_event, 'new_session');
@@ -23,8 +23,8 @@ test('overview surfaces event_semantics + partition_column for the events fact',
   assert.equal(ev.partition_column, 'event_date');
 });
 
-test('describe_catalog({ model: events }) carries the static partition/cost hint', async () => {
-  const out = await engine().describe_catalog({ model: 'events' });
+test('semantic_index({ model: events }) carries the static partition/cost hint', async () => {
+  const out = await engine().semantic_index({ model: 'events' });
   assert.equal(out.partition_column, 'event_date'); // static — no live runner needed
   assert.ok(typeof out.cost_hint === 'string' && out.cost_hint.length > 0);
   assert.deepEqual(out.event_semantics.session_end_event, 'end_session');
@@ -33,18 +33,18 @@ test('describe_catalog({ model: events }) carries the static partition/cost hint
 test('property drill-down surfaces unit; string-typed numeric gets a cast_hint', async () => {
   const e = engine();
   // numeric-typed with a declared unit → unit surfaced, NO cast needed.
-  const rev = await e.describe_catalog({ property: 'revenue_of_event_data' });
+  const rev = await e.semantic_index({ property: 'revenue_of_event_data' });
   assert.equal(rev.unit, 'usd');
   assert.equal(rev.cast_hint, undefined);
   // string-typed but seconds-in-meaning → unit + cast_hint:'numeric'.
-  const ct = await e.describe_catalog({ property: 'complete_time_of_event_data' });
+  const ct = await e.semantic_index({ property: 'complete_time_of_event_data' });
   assert.equal(ct.unit, 'seconds');
   assert.equal(ct.type, 'string');
   assert.equal(ct.cast_hint, 'numeric');
 });
 
 test('event drill-down rows carry the unit per property', async () => {
-  const out = await engine().describe_catalog({ event: 'level_completed' });
+  const out = await engine().semantic_index({ event: 'level_completed' });
   const ct = out.properties.find((p) => p.name === 'complete_time_of_event_data');
   assert.equal(ct.unit, 'seconds');
   const noUnit = out.properties.find((p) => p.name === 'result_of_event_data');
@@ -81,13 +81,13 @@ test('compile errors name the offending field', () => {
 
 test('overview carries join_note + value_index_status; payload-less event is not a dead end', async () => {
   const e = engine();
-  const out = await e.describe_catalog({});
+  const out = await e.semantic_index({});
   assert.ok(out.join_note.includes('user__'), 'join_note explains entity-qualified paths');
   assert.ok(out.join_note.includes("use_base_models"), 'join_note names the declaration');
   assert.equal(out.value_index_status.ready, false); // no indexer ran in this unit engine
   assert.equal(typeof out.value_index_status.indexed_properties, 'number');
   // first_launch carries no event-specific payload — the response says what it IS for.
-  const fl = await e.describe_catalog({ event: 'first_launch' });
+  const fl = await e.semantic_index({ event: 'first_launch' });
   assert.equal(fl.properties.filter((p) => p.events?.includes?.('first_launch')).length, 0);
   assert.ok(fl.recommendations.some((r) => r.includes('acquisition') || r.includes('occurrence')), JSON.stringify(fl.recommendations));
 });

@@ -104,10 +104,12 @@ export class ValueIndex {
 
 /**
  * Non-blocking background indexer: walks the SCALAR, non-complex event properties
- * of the anchor (events) model and stores, per property, the top values by
- * frequency + cardinality/total. Runs an initial pass fire-and-forget at start()
- * and then on an unref'd interval. Per-property errors are swallowed so one bad
- * property never aborts a run or crashes the server.
+ * of the anchor (events) model PLUS the categorical dimension attributes of the
+ * non-anchor models (users/experiments — under 'users.country'-style keys) and
+ * stores, per property, the top values by frequency + cardinality/total. Runs an
+ * initial pass fire-and-forget at start() and then on an unref'd interval.
+ * Per-property errors are swallowed so one bad property never aborts a run or
+ * crashes the server.
  */
 export class BackgroundIndexer {
   constructor({ catalog, runner, index, baseProjectDir, intervalMs = 21600000, maxValues = 50, logger } = {}) {
@@ -144,7 +146,34 @@ export class BackgroundIndexer {
     return jsonExtract(this.catalog.dialect, this.catalog.eventDataColumn(), name, spec.type);
   }
 
-  /** One resilient pass over the scalar event properties. Skips if already running. */
+  /**
+   * Indexing worklist: the anchor's scalar event properties (with per-event_name
+   * coverage) PLUS the categorical dimension columns of every non-anchor model
+   * (users / experiments), stored under namespaced keys like 'users.country' or
+   * 'experiments.experiment_name' — so user-attribute values and experiment names
+   * are just as discoverable via describe_catalog search/drill-down as event values.
+   */
+  _targets() {
+    const c = this.catalog;
+    const anchorRef = `{{ ref('${c.getModel(c.anchor).dbt_model}') }}`;
+    const evCol = c.eventNameColumn();
+    const targets = c.scalarEventProps().map((name) => {
+      const spec = c.eventPropertySpec(name);
+      return spec ? { property: name, ref: anchorRef, expr: this._valueExpr(name, spec), eventCol: evCol } : null;
+    }).filter(Boolean);
+    for (const key of c.modelKeys()) {
+      if (key === c.anchor) continue;
+      const m = c.getModel(key);
+      const ref = `{{ ref('${m.dbt_model}') }}`;
+      for (const [col, spec] of Object.entries(m.dimensions || {})) {
+        if (String(spec?.type || '').toLowerCase() === 'time') continue; // dates aren't enumerable value sets
+        targets.push({ property: `${key}.${col}`, ref, expr: col, eventCol: null });
+      }
+    }
+    return targets;
+  }
+
+  /** One resilient pass over the indexable properties/attributes. Skips if already running. */
   async refresh() {
     if (this._running) return;
     if (!this.runner || !this.baseProjectDir) return;
@@ -153,28 +182,24 @@ export class BackgroundIndexer {
     const startedAt = Date.now();
     let props = 0; let values = 0; let errors = 0; let lastError = null;
     const c = this.catalog;
-    const names = c.scalarEventProps();
-    const evCol = c.eventNameColumn(); // for per-event null/coverage breakdown
-    this.logger?.(`sync #${runId} started: indexing ${names.length} scalar event properties from ${c.getModel(c.anchor).dbt_model}`);
+    const targets = this._targets();
+    const nEvent = targets.filter((t) => t.eventCol).length;
+    this.logger?.(`sync #${runId} started: indexing ${nEvent} scalar event properties from ${c.getModel(c.anchor).dbt_model} + ${targets.length - nEvent} dimension attributes (users/experiments)`);
     try {
-      const ref = `{{ ref('${c.getModel(c.anchor).dbt_model}') }}`;
       let i = 0;
-      for (const name of names) {
+      for (const { property: name, ref, expr, eventCol } of targets) {
         i += 1;
         // Sequential await between properties yields to the event loop, keeping
         // tool calls responsive during a refresh.
         const tProp = Date.now(); // per-property timing (detailed stats for describe_index)
         try {
-          const spec = c.eventPropertySpec(name);
-          if (!spec) continue;
-          const expr = this._valueExpr(name, spec);
           // No SQL-level LIMIT: `runner.show` appends its own `limit` clause (dbt
           // show --limit), so a trailing LIMIT here would be invalid SQL. Cap with
           // the show limit (= maxValues) instead — GROUP BY + ORDER BY keep the top N.
           const top = await this.runner.show(this.baseProjectDir, `SELECT ${expr} AS v, COUNT(*) AS n FROM ${ref} WHERE ${expr} IS NOT NULL GROUP BY 1 ORDER BY n DESC`, this.maxValues);
           if (!top.ok) {
             this.index.recordPropertyTiming?.(runId, { property: name, ms: Date.now() - tProp, status: 'skipped' });
-            this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': skipped (query not ok)`); continue;
+            this.logger?.(`sync #${runId} [${i}/${targets.length}] '${name}': skipped (query not ok)`); continue;
           }
           // d=distinct, t=non-null count, rows_total=all rows → null_count = rows_total - t.
           const card = await this.runner.show(this.baseProjectDir, `SELECT COUNT(DISTINCT ${expr}) AS d, COUNT(${expr}) AS t, COUNT(*) AS rows_total FROM ${ref}`, 1);
@@ -184,23 +209,23 @@ export class BackgroundIndexer {
           const total = stat.t != null ? Number(stat.t) : null;
           const rowsTotal = stat.rows_total != null ? Number(stat.rows_total) : null;
           const nullCount = (rowsTotal != null && total != null) ? rowsTotal - total : null;
-          // Per-event_name null/coverage: how many rows of each event carry a value vs NULL.
-          // A field is expected to be NULL on events it does not apply to — this lets the
-          // caller tell that (normal) from genuine gaps on events it should populate.
+          // Per-event_name null/coverage (anchor properties only): how many rows of each
+          // event carry a value vs NULL. A field is expected to be NULL on events it does
+          // not apply to — this lets the caller tell that (normal) from genuine gaps.
           let coverage = [];
-          if (evCol) {
-            const cov = await this.runner.show(this.baseProjectDir, `SELECT ${evCol} AS ev, COUNT(*) AS row_count, COUNT(${expr}) AS non_null FROM ${ref} GROUP BY ${evCol}`, 500);
+          if (eventCol) {
+            const cov = await this.runner.show(this.baseProjectDir, `SELECT ${eventCol} AS ev, COUNT(*) AS row_count, COUNT(${expr}) AS non_null FROM ${ref} GROUP BY ${eventCol}`, 500);
             if (cov.ok) coverage = (cov.rows || []).filter((r) => r.ev != null).map((r) => ({ event: r.ev, rowCount: Number(r.row_count), nonNull: Number(r.non_null) }));
           }
           this.index.upsertProperty(name, { distinctCount: distinct, totalCount: total, nullCount, values: vals, coverage });
           const ms = Date.now() - tProp;
           props += 1; values += vals.length;
           this.index.recordPropertyTiming?.(runId, { property: name, ms, valuesWritten: vals.length, distinctCount: distinct, totalCount: total, status: 'ok' });
-          this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': ${vals.length} values stored, ${distinct ?? '?'} distinct / ${total ?? '?'} non-null / ${nullCount ?? '?'} null of ${rowsTotal ?? '?'} rows, ${coverage.length} events covered (${ms}ms)`);
+          this.logger?.(`sync #${runId} [${i}/${targets.length}] '${name}': ${vals.length} values stored, ${distinct ?? '?'} distinct / ${total ?? '?'} non-null / ${nullCount ?? '?'} null of ${rowsTotal ?? '?'} rows, ${coverage.length} events covered (${ms}ms)`);
         } catch (e) {
           errors += 1; lastError = e?.message || String(e);
           this.index.recordPropertyTiming?.(runId, { property: name, ms: Date.now() - tProp, status: 'error', error: lastError });
-          this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': FAILED — ${lastError}`);
+          this.logger?.(`sync #${runId} [${i}/${targets.length}] '${name}': FAILED — ${lastError}`);
         }
       }
     } finally {
@@ -208,7 +233,7 @@ export class BackgroundIndexer {
       const status = errors ? (props ? 'partial' : 'error') : 'ok';
       const ms = Date.now() - startedAt;
       try { this.index.finishRun?.(runId, { status, propertiesIndexed: props, valuesWritten: values, errors, error: lastError }); } catch { /* never let logging break the indexer */ }
-      this.logger?.(`sync #${runId} done: status=${status}, properties=${props}/${names.length}, values=${values}, errors=${errors}, duration=${ms}ms`);
+      this.logger?.(`sync #${runId} done: status=${status}, properties=${props}/${targets.length}, values=${values}, errors=${errors}, duration=${ms}ms`);
     }
   }
 }

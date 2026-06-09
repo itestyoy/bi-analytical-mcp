@@ -18,6 +18,12 @@ models:
       mcp:
         role: events
         primary_entity: event
+        event_semantics:
+          acquisition_event: first_launch
+          session_event: new_session
+          session_end_event: end_session
+          purchase_event: iap_purchase_completed
+          ad_impression_event: ad_finished
         known_events:
           - first_launch
           - new_session
@@ -141,7 +147,7 @@ models:
       - name: revenue_of_event_data
         data_type: numeric
         description: "Ad revenue for the impression. Events: ad_finished."
-        meta: { mcp: { events: [ad_finished] } }
+        meta: { mcp: { unit: usd_cents, events: [ad_finished] } }
       - name: is_reward_received_of_event_data
         data_type: string
         description: "Whether the rewarded-ad reward was granted. Events: ad_finished."
@@ -158,9 +164,9 @@ models:
         data_type: string
         description: "Destination screen. Events: screen_changed."
         meta: { mcp: { events: [screen_changed] } }
-      - name: chain_of_event_data
+      - name: element_of_event_data
         data_type: string
-        description: "Onboarding / funnel step id (e.g. tutorial step_1). Events: tutorial."
+        description: "Which tutorial element/step the player interacted with (the funnel step id, e.g. step_1). Events: tutorial."
         meta: { mcp: { events: [tutorial] } }
       # Array payload stored as a JSON-encoded STRING — declare how to read it via
       # meta.mcp.array (encoding: json → parse before unnest). Events: level_completed.
@@ -172,7 +178,7 @@ models:
       - name: complete_time_of_event_data
         data_type: string
         description: "Seconds to complete the level (STRING upstream). Events: level_completed."
-        meta: { mcp: { events: [level_completed] } }
+        meta: { mcp: { unit: seconds, events: [level_completed] } }
 
   - name: dim_users
     description: "User attributes — one row per player."

@@ -58,9 +58,9 @@ const S = {}; // S.semCtx, S.draftId, S.pipeCtx, S.pipeTable, S.abCtx
 // The canonical 4-step activation funnel (copied verbatim from match-recognize.test.js).
 const activationSteps = [
   { name: 'launch', event_name: ['first_launch'] },
-  { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_1' }] },
-  { name: 'tut2', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_2' }] },
-  { name: 'tut3', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_3' }] },
+  { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
+  { name: 'tut2', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_2' }] },
+  { name: 'tut3', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_3' }] },
 ];
 const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps, ...extra });
 

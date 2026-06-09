@@ -301,7 +301,7 @@ export function buildSchemas(catalog) {
         description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
         properties: {
           source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table for the pipeline (default: the events fact).' },
-          time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } },
+          time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
           stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
         },
       },
@@ -312,7 +312,7 @@ export function buildSchemas(catalog) {
   // single stateful tool with an `action`; each add_step validates the stage and
   // returns the columns now available for the NEXT stage (schema only — nothing is
   // materialized until commit). The all-at-once register_native_model still works.
-  const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } };
+  const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone: start/end are wall-clock in this zone, converted to UTC instants.' } } };
   // A then-clause fragment that forbids the named properties (valid only when ALL are absent).
   const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
   const buildModel = {
@@ -363,7 +363,7 @@ export function buildSchemas(catalog) {
       },
       where: { $ref: '#/$defs/predicateGroup', description: 'Row filter applied before aggregation (boolean tree of conditions on dimensions / metric_time).' },
       order_by: { type: 'array', description: 'Sort order. Each key must be a requested metric or group-by token.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Metric or group-by token to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
-      time_range: { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates).', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime).' } } },
+      time_range: { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
       materialize: { type: 'boolean', description: 'Materialize the result and read rows back from it (resilient, re-fetchable). Slow queries (> timeout) return a query_id; poll get_query_result.' },
@@ -439,12 +439,12 @@ export function buildSchemas(catalog) {
     list_contexts: empty,
     describe_catalog: {
       type: 'object', additionalProperties: false,
-      description: 'Discover the catalog PROGRESSIVELY (the events fact carries ~150 event-scoped properties, so it is not dumped at once). Call with NO arguments for a compact overview (models, event names, group-by paths, enums + counts). Then drill down with ONE of: model → that model\'s entities/time/dimensions + real physical columns; event → only the properties populated on that event; property → one property\'s full spec + descriptive stats (distinct/total counts) and its real indexed VALUES, pageable with limit/offset/order_by/direction; search → find events/properties/values by substring.',
+      description: 'Discover the catalog PROGRESSIVELY (the events fact carries ~150 event-scoped properties, so it is not dumped at once). Call with NO arguments for a compact overview (models, event names, group-by paths, enums + counts). Then drill down with ONE of: model → that model\'s entities/time/dimensions (with real indexed sample values) + real physical columns; event → only the properties populated on that event; property → one property\'s/attribute\'s full spec + descriptive stats (distinct/total counts) and its real indexed VALUES, pageable with limit/offset/order_by/direction; search → find events, properties, dimension attributes, indexed values, and recipes by substring.',
       properties: {
-        model: { enum: catalog.modelKeys(), description: 'Drill into one model: its entities, time axis, dimensions and REAL physical columns.' },
-        event: { type: 'string', description: 'An event_name (from the overview): list the event_data properties POPULATED on that event — what you can measure/group/filter for it.' },
-        property: { type: 'string', description: 'An event property name: its type, the events it is populated on, description, descriptive stats (distinct_count/total_count), and its real indexed values (paged by the params below).' },
-        search: { type: 'string', description: 'Substring to find matching event names, properties (name or description), and indexed VALUES.' },
+        model: { enum: catalog.modelKeys(), description: 'Drill into one model: its entities, time axis, dimensions (with indexed sample values) and REAL physical columns.' },
+        event: strEnum(catalog.eventNames(), 'An event_name (from the overview): list the event_data properties POPULATED on that event — what you can measure/group/filter for it.'),
+        property: { type: 'string', description: 'An event property (bare name, e.g. "ad_type_of_event_data") OR a dimension attribute as "<model>.<column>" (e.g. "users.country", "experiments.experiment_name"): type, where it applies, description, descriptive stats, and its real indexed values (paged by the params below).' },
+        search: { type: 'string', description: 'Substring to find matching event names, event properties, dimension attributes (users/experiments columns), indexed VALUES, and recipes.' },
         limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'For { property }/{ search }: how many indexed values to return (default 10 for property, 20 for search). Page further with offset.' },
         offset: { type: 'integer', minimum: 0, description: 'For { property }: skip this many values first — page through a property\'s value list.' },
         order_by: { enum: ['freq', 'value'], description: 'For { property }: order the returned values by frequency (default) or alphabetically by value.' },
@@ -516,8 +516,14 @@ function abTestSchema() {
     description: armDesc,
     properties: { label, n, ...fields },
   });
+  // Cross-metric multiplicity: p-values of the experiment's OTHER metrics join the
+  // correction family, so a 10-metric scorecard cannot fish significance.
+  const familyP = { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, description: 'p-values of OTHER metrics in the same experiment readout — included in the multiplicity-correction family (Holm/BH) alongside the variants.' };
+  const sequential = { type: 'boolean', description: 'Also compute an ALWAYS-VALID p per variant (mixture SPRT): p_value_sequential stays honest under repeated peeking at a RUNNING experiment, unlike the fixed-horizon p_value. proportion/mean only.' };
+  const expectedEffect = { type: 'number', exclusiveMinimum: 0, description: 'Optional expected ABSOLUTE effect size — sets the sequential test\'s mixture prior scale (more power near this effect). Default: the observed sampling noise scale.' };
+
   // One metric branch of the union.
-  const branch = (metric, branchDesc, fields, armDesc) => {
+  const branch = (metric, branchDesc, fields, armDesc, extraProps = {}) => {
     const a = arm(fields, armDesc);
     return {
       type: 'object', additionalProperties: false, required: ['metric', 'control', 'variants'],
@@ -525,6 +531,8 @@ function abTestSchema() {
       properties: {
         metric: { const: metric },
         confidence, alternative, correction,
+        family_p_values: familyP,
+        ...extraProps,
         control: a,
         variants: { type: 'array', minItems: 1, items: a, description: 'One or more variant groups, each tested against control.' },
       },
@@ -541,6 +549,9 @@ function abTestSchema() {
     properties: {
       metric: { enum: ['proportion', 'mean', 'ratio', 'cuped'], description: 'Which test to run and which group fields are required: proportion→conversions; mean→mean,stddev; ratio→sumNum,sumDen,sumNum2,sumDen2,sumNumDen; cuped→sumY,sumY2,sumX,sumX2,sumXY.' },
       confidence, alternative, correction,
+      family_p_values: familyP,
+      sequential,
+      expected_effect: expectedEffect,
       control: unionArm,
       variants: { type: 'array', minItems: 1, items: unionArm, description: 'One or more variant groups, each tested against control.' },
     },
@@ -548,10 +559,12 @@ function abTestSchema() {
     oneOf: [
       branch('proportion', 'Conversion-rate test (two-proportion z-test): each group carries conversions out of n.',
         { conversions: F.conversions },
-        'A group for a proportion test: n and the number of conversions.'),
+        'A group for a proportion test: n and the number of conversions.',
+        { sequential, expected_effect: expectedEffect }),
       branch('mean', 'Continuous-metric test (Welch t-test): each group carries the per-user mean and stddev.',
         { mean: F.mean, stddev: F.stddev },
-        'A group for a mean test: n, mean and stddev.'),
+        'A group for a mean test: n, mean and stddev.',
+        { sequential, expected_effect: expectedEffect }),
       branch('ratio', 'Ratio-metric test via the delta method: each group carries the per-user numerator/denominator sums plus their squares and cross-product.',
         { sumNum: F.sumNum, sumDen: F.sumDen, sumNum2: F.sumNum2, sumDen2: F.sumDen2, sumNumDen: F.sumNumDen },
         'A group for a ratio test: n and the five per-user sums (sumNum, sumDen, sumNum2, sumDen2, sumNumDen).'),

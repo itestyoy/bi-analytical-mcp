@@ -15,7 +15,7 @@ import { Engine } from './engine.js';
 import { BackgroundIndexer } from './value-index.js';
 
 const TOOL_DESCRIPTIONS = {
-  describe_catalog: 'Discover the catalog progressively. No args → compact overview (models, event names, group-by paths, enums + counts). Drill down with { model } (a model\'s columns + real physical columns), { event } (the properties an event carries), { property } (one property\'s spec), or { search }. Call BEFORE creating a model. Avoids dumping ~150 properties at once.',
+  describe_catalog: 'Discover the catalog progressively. No args → compact overview (models, event names, group-by paths, enums + counts). Drill down with { model } (a model\'s columns + dimension attributes with real sample values + physical columns), { event } (the properties an event carries), { property } (an event property by bare name, or a user/experiment attribute as "users.country" / "experiments.experiment_name" — real indexed values either way), or { search } (events, properties, attributes, VALUES, and recipes by substring — e.g. searching a country code or an experiment name finds where it lives). Call BEFORE creating a model. Avoids dumping ~150 properties at once.',
   create_semantic_model: 'Declaratively create/augment semantic models for a task (one SM per table) and metrics, in an isolated context. Omit context_id for a new task; pass it to extend the same context. Validated and registered in the context.',
   register_native_model: 'Build a derived dbt model from a declarative PIPELINE (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage), materialized as a table/view. Its ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). The pipeline can join catalog sources (users/experiments) and aggregate internally, so it is self-contained; it is NOT re-exposed as a queryable semantic model with metrics/dimensions.',
   build_native_model: 'Build a derived dbt model from a PIPELINE, composed INCREMENTALLY (single `action`-driven tool): start a draft, add_step one stage at a time (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage) — each add_step validates the stage and returns the exact columns then available for the NEXT stage (pure schema, NOTHING materialized until commit) — optionally preview the SQL, then commit. The committed model\'s ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
@@ -42,15 +42,16 @@ const TOOL_DESCRIPTIONS = {
 const SERVER_DESCRIPTION = `Declarative semantic layer for product analytics.
 
 WHAT IT DOES
-You define "virtual" semantic models — measures, dimensions, and metrics — on the fly over a FIXED set of two data sources, and query them by name. You never write SQL. Everything you can reference (events, properties, user attributes, join paths) is enumerated by the catalog and enforced by schema, so you cannot name a field that does not exist.
+You define "virtual" semantic models — measures, dimensions, and metrics — on the fly over a FIXED set of catalog data sources, and query them by name. You never write SQL. Everything you can reference (events, properties, user attributes, join paths) is enumerated by the catalog and enforced by schema, so you cannot name a field that does not exist.
 
-DATA MODEL (exactly two sources)
-- events fact: one row per analytical event — a user id, a session id, an event timestamp (the time axis), an event_name, and a JSON payload of typed event-data properties.
-- users dimension: one row per user — categorical attributes (country, platform, media_source, acquisition_type, campaign_id, install_date, ...).
-Funnels/sequences are built ONLY from events (a step = an event + an event_data property value). Segmentation joins user attributes to events by the user entity automatically at query time.
+DATA MODEL (fixed roles)
+- events fact: one row per analytical event — a user id, a session id, an event timestamp (the time axis), an event_name, and typed event-data properties. ONLY per-event columns live here.
+- users dimension: one row per user — attributes (country, platform, media_source, acquisition_type, install_date, ...). Reached by JOIN: group/filter via user__<attr> paths in metric queries (declare use_base_models: ['users']), or a join stage in pipelines. User attributes are NEVER columns of the fact.
+- experiments: one row per user×experiment (experiment_name, variant_group, assigned_at, ended_at) — join to events by the user entity, window to the assignment period, aggregate per group, then ab_test/srm_check.
+Funnels/sequences are built ONLY from events (a step = an event + an event_data property value).
 
 WORKFLOW
-1. describe_catalog — discover the catalog PROGRESSIVELY. Call it first with no arguments for an overview (models, event names, group-by paths, enums + counts), then drill down: describe_catalog({ model }) for a model's columns, ({ event }) for the properties an event carries, ({ property }) for one property, ({ search }) to find events/properties. The events fact has ~150 event-scoped properties, so they are fetched per event rather than all at once.
+1. describe_catalog — discover the catalog PROGRESSIVELY. Call it first with no arguments for an overview (models, event names, group-by paths, event_semantics = which event marks install/session/purchase, value-index freshness), then drill down: describe_catalog({ model }) for a model's columns and attributes (with REAL sample values), ({ event }) for the properties an event carries, ({ property }) for one property or a "users.country"-style attribute with its real value distribution, ({ search }) to find events/properties/attributes/values/recipes. The events fact has ~150 event-scoped properties, so they are fetched per event rather than all at once.
 2. create_semantic_model — declare measures/dimensions/metrics for a task in an ISOLATED context (returns a context_id). Pass that context_id back to extend the same context.
    - For ordered multi-step funnels/paths (and any custom transform) use build_native_model: compose a PIPELINE one stage at a time (start → add_step* → commit; each add_step shows the columns available next), building a model whose ROWS are the result — read/slice them with get_query_result (a pipeline context is not queried via query_semantic_model). It accepts a time_range and an internal pre-filter (event subset / user segment).
 3. query_semantic_model — run metrics with group_by / where / order_by / time_range. Options: dry_run (preview, no run), explain (query plan, no run), materialize (persist the result and read it back; long queries return a query_id to poll), limit/offset.
@@ -63,7 +64,7 @@ KEY CONCEPTS
 - recipes: list_recipes / get_recipe — ready-made templates for common task families (trends, segmentation, funnels, retention, cohorts, behavioral, conversion, progression, monetization, ads, economy, stickiness).`;
 
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
-const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over two fixed, catalog-enumerated data sources (an events fact + a user-attributes dimension) and query them by name; you never write SQL. Start with describe_catalog, then create_semantic_model / build_native_model, then query_semantic_model.';
+const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over fixed, catalog-enumerated data sources (an events fact + a user-attributes dimension + experiment assignments) and query them by name; you never write SQL. Start with describe_catalog, then create_semantic_model / build_native_model, then query_semantic_model.';
 
 const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'build_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'describe_catalog', 'describe_context', 'time']);
 
@@ -154,7 +155,10 @@ export function makeEngine(opts = {}) {
   // the dbt project itself (discover MCP-tagged models from its schema YAMLs) →
   // the bundled sample catalog. Dialect is resolved from env / the dbt profile.
   const catalogSource = opts.catalogPath || process.env.CATALOG_PATH || baseProjectDir || join(process.cwd(), 'config', 'catalog.yml');
-  const catalog = loadCatalog(catalogSource, { profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, projectDir: baseProjectDir });
+  // MCP_REQUIRE_TIME_RANGE=1 (or anchor meta.mcp.require_time_range) blocks unbounded
+  // (no time window) queries — the cost guardrail for partitioned warehouses.
+  const requireTimeRange = process.env.MCP_REQUIRE_TIME_RANGE != null ? !/^(0|false|no|off)$/i.test(String(process.env.MCP_REQUIRE_TIME_RANGE).trim()) : undefined;
+  const catalog = loadCatalog(catalogSource, { profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, projectDir: baseProjectDir, requireTimeRange });
   // Fail fast if the dbt project doesn't implement the required macro(s) / model
   // nodes the server depends on (unless explicitly skipped, e.g. catalog-only dev).
   if (baseProjectDir && process.env.SKIP_PROJECT_VALIDATION !== '1') validateDbtProject(baseProjectDir, catalog);

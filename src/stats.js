@@ -139,6 +139,23 @@ export function twoProportionZTest({ controlConversions: c1, controlN: n1, varia
 }
 
 /**
+ * Always-valid p-value via the mixture SPRT (mSPRT, Johari et al. "Always Valid
+ * Inference"): for an approximately normal effect estimate `delta` with sampling
+ * variance `variance`, the mixture (normal prior, variance tau2) likelihood ratio is
+ *   Λ = sqrt(V/(V+τ²)) · exp(Δ² τ² / (2 V (V+τ²)))
+ * and p = min(1, 1/Λ) is valid at EVERY look — peeking at a live experiment never
+ * inflates the false-positive rate (unlike a fixed-horizon z/t p-value).
+ * tau2 defaults to `variance` (prior scaled to the current sampling noise); pass an
+ * expected-effect-based tau2 for more power around that effect size.
+ */
+export function alwaysValidP({ delta, variance, tau2 }) {
+  if (!(variance > 0)) return 1;
+  const t2 = tau2 > 0 ? tau2 : variance;
+  const logLr = 0.5 * Math.log(variance / (variance + t2)) + (delta * delta * t2) / (2 * variance * (variance + t2));
+  return Math.min(1, Math.exp(-logLr));
+}
+
+/**
  * Sample Ratio Mismatch (SRM) guardrail: a χ² goodness-of-fit test that the
  * OBSERVED per-group sizes match the intended split. A tiny p (conventionally
  * < 0.001) means randomization/logging is broken and the experiment is INVALID.

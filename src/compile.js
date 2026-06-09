@@ -8,6 +8,10 @@ import { jsonExtract, sqlLiteral, isNumericType, castExpr } from './dialect.js';
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
 const NS = (task, name) => `${task}_${name}`;
 
+/** Throw a compile error that CARRIES the input field it refers to — the engine
+ *  surfaces it as ToolError.field so the caller knows exactly what to fix. */
+function fail(msg, field) { const e = new Error(msg); e.field = field; throw e; }
+
 /** SQL predicate for a list of event names on the events model, or null. */
 export function namesToScope(catalog, modelKey, names) {
   if (modelKey !== catalog.anchor || !names?.length) return null;
@@ -33,7 +37,7 @@ function propExpr(catalog, name, spec) {
 function propCond(catalog, modelKey, cond) {
   const props = catalog.getModel(catalog.anchor).properties || {};
   const p = props[cond.property];
-  if (!p) throw new Error(`unknown event property in where: ${cond.property}`);
+  if (!p) fail(`unknown event property in where: '${cond.property}'. Discover properties via describe_catalog({ event })`, 'where.property');
   const lhs = propExpr(catalog, cond.property, p);
   switch (cond.op) {
     case 'eq': return `${lhs} = ${sqlLiteral(cond.value)}`;
@@ -47,7 +51,7 @@ function propCond(catalog, modelKey, cond) {
       const arr = Array.isArray(cond.value) ? cond.value : [cond.value];
       return `${lhs} ${cond.op === 'in' ? 'in' : 'not in'} (${arr.map(sqlLiteral).join(', ')})`;
     }
-    default: throw new Error(`unsupported where op: ${cond.op}`);
+    default: fail(`unsupported where op: ${cond.op}`, 'where.op');
   }
 }
 
@@ -84,7 +88,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
   const field = decl.field;
   if (field === '*' || field === undefined) {
     if (decl.agg !== 'count' && decl.agg !== 'sum') {
-      throw new Error(`measure '${decl.name}': field '*' is only valid with agg count/sum`);
+      fail(`measure '${decl.name}': field '*' is only valid with agg count/sum`, 'measures.field');
     }
     agg = 'sum'; // count(*) rendered as sum(1) so scope folds cleanly
     valueExpr = '1';
@@ -93,7 +97,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     // (e.g. complete_time arrives as STRING upstream → add "cast": "numeric").
     const numericAgg = ['sum', 'average', 'median', 'min', 'max', 'percentile'].includes(decl.agg);
     if (numericAgg && !isNumericType(props[field].type) && !decl.cast) {
-      throw new Error(`measure '${decl.name}': property '${field}' is type '${props[field].type}'; add "cast":"numeric" to aggregate it as a number`);
+      fail(`measure '${decl.name}': property '${field}' is type '${props[field].type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
     }
     valueExpr = propExpr(catalog, field, props[field]);
   } else {
@@ -104,7 +108,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
 
   const m = { name, agg, expr: applyScope(valueExpr, scope, { numeric: true }) };
   if (decl.agg === 'percentile') {
-    if (typeof decl.percentile !== 'number') throw new Error(`measure '${decl.name}': percentile required`);
+    if (typeof decl.percentile !== 'number') fail(`measure '${decl.name}': percentile required`, 'measures.percentile');
     m.agg = 'percentile';
     m.agg_params = { percentile: decl.percentile, use_discrete_percentile: false };
   }
@@ -114,11 +118,11 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
 /** Resolve a dimension declaration to a dbt dimension object. */
 function compileDimension(catalog, task, modelKey, decl) {
   if (decl.source === 'event_property') {
-    if (modelKey !== catalog.anchor) throw new Error('event_property dimensions only valid on the events model');
+    if (modelKey !== catalog.anchor) fail('event_property dimensions only valid on the events model', 'dimensions.source');
     const props = catalog.getModel(catalog.anchor).properties || {};
     const p = props[decl.property];
-    if (!p) throw new Error(`unknown event property: ${decl.property}`);
-    if (decl.as_type === 'time') throw new Error('time dimensions from JSON properties are not allowed (m2)');
+    if (!p) fail(`unknown event property: '${decl.property}'. Discover properties via describe_catalog({ event })`, 'dimensions.property');
+    if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
     return { name: NS(task, decl.property), type: 'categorical', expr: propExpr(catalog, decl.property, p) };
   }
   if (decl.source === 'model_column') {
@@ -126,7 +130,7 @@ function compileDimension(catalog, task, modelKey, decl) {
     if (dim.type === 'time') dim.type_params = { time_granularity: decl.grain || 'day' };
     return dim;
   }
-  throw new Error(`unknown dimension source: ${decl.source}`);
+  fail(`unknown dimension source: ${decl.source}`, 'dimensions.source');
 }
 
 /**
@@ -136,7 +140,7 @@ function compileDimension(catalog, task, modelKey, decl) {
  */
 export function compileDeclaration(catalog, decl) {
   const task = decl.name;
-  if (!task) throw new Error('name (task) is required');
+  if (!task) fail('name (task) is required', 'name');
 
   const additions = {}; // modelKey -> { measures:[], dimensions:[] }
   const declaredMeasures = new Set(); // namespaced
@@ -144,7 +148,7 @@ export function compileDeclaration(catalog, decl) {
 
   const usedModels = new Set([catalog.anchor]);
   for (const k of decl.use_base_models || []) {
-    if (!catalog.models[k]) throw new Error(`use_base_models: unknown model '${k}'`);
+    if (!catalog.models[k]) fail(`use_base_models: unknown model '${k}'. Known models: ${Object.keys(catalog.models).join(', ')}`, 'use_base_models');
     usedModels.add(k);
   }
 
@@ -152,7 +156,7 @@ export function compileDeclaration(catalog, decl) {
   let eventScope = null;
   for (const sm of decl.semantic_models || []) {
     const modelKey = sm.from;
-    if (!catalog.models[modelKey]) throw new Error(`semantic_models.from: unknown model '${modelKey}'`);
+    if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}`, 'semantic_models.from');
     usedModels.add(modelKey);
     const scope = scopeExpr(catalog, modelKey, sm.event_scope);
     if (modelKey === catalog.anchor && scope) eventScope = scope;
@@ -169,7 +173,7 @@ export function compileDeclaration(catalog, decl) {
     const nsName = NS(task, ref);
     if (declaredMeasures.has(nsName)) return nsName;
     if (baseMeasureRefs.has(ref)) return ref; // base measure (already global name)
-    throw new Error(`metric references unknown measure '${ref}'`);
+    fail(`metric references unknown measure '${ref}'. Declared in this task: ${[...declaredMeasures].join(', ') || '(none)'}`, 'metrics.measure');
   };
 
   const metrics = [];
@@ -214,13 +218,13 @@ export function compileDeclaration(catalog, decl) {
       // identifier must be a declared input metric alias or a safe math fn.
       const expr = md.expr || '';
       if (!/^[A-Za-z0-9_+\-*/().,\s]+$/.test(expr)) {
-        throw new Error(`derived metric '${md.name}': expr contains illegal characters (only metric names, numbers, + - * / ( ) . , allowed)`);
+        fail(`derived metric '${md.name}': expr contains illegal characters (only metric names, numbers, + - * / ( ) . , allowed)`, 'metrics.expr');
       }
       const aliases = new Set((md.metrics || []).map((x) => x.alias || x.name));
       const SAFE_FNS = new Set(['nullif', 'coalesce', 'abs', 'round', 'least', 'greatest', 'floor', 'ceil', 'ceiling', 'power', 'sqrt', 'ln', 'log', 'exp', 'mod']);
       for (const tok of expr.match(/[A-Za-z_][A-Za-z0-9_]*/g) || []) {
         if (!aliases.has(tok) && !SAFE_FNS.has(tok)) {
-          throw new Error(`derived metric '${md.name}': expr references unknown identifier '${tok}' (only input metric names + safe math functions allowed)`);
+          fail(`derived metric '${md.name}': expr references unknown identifier '${tok}' (only input metric names + safe math functions allowed)`, 'metrics.expr');
         }
       }
       // input metrics are namespaced; alias each to the raw name so the user's
@@ -238,7 +242,7 @@ export function compileDeclaration(catalog, decl) {
       if (md.constant_properties) ctp.constant_properties = md.constant_properties;
       addMetric({ name, type: 'conversion', type_params: { conversion_type_params: ctp } });
     } else {
-      throw new Error(`unknown metric type: ${md.type}`);
+      fail(`unknown metric type: ${md.type}`, 'metrics.type');
     }
   }
 

@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
+import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
@@ -42,7 +43,8 @@ before(async () => {
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   // A temp-file value index so the index is real SQLite (not just the engine's default).
   const dbPath = join(mkdtempSync(join(tmpdir(), 'vi-db-')), 'value-index.sqlite');
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath });
+  const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
+  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath, recipes });
   index = engine.valueIndex;
   indexer = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   // Await directly — do NOT rely on timers; we want the index populated before asserting.
@@ -230,4 +232,81 @@ test('describe_index({ property }) reports null_count + per-event coverage from 
   assert.equal(out.event_coverage.reduce((s, e) => s + e.row_count, 0), 184);
   // NO real gaps: there is no applicable event with NULLs (data quality is clean in the seed).
   assert.equal(out.event_coverage.filter((e) => e.applies && e.null_count > 0).length, 0);
+});
+
+// ── Non-anchor attribute indexing (users / experiments) — DATA from the seed ──
+
+// users.country is indexed under its namespaced key with the SEED distribution:
+// US=4, GB=3, DE=3, BR=2 (12 users), no NULLs.
+test('users.country is indexed with the real seed distribution (US4/GB3/DE3/BR2)', opts, async (t) => {
+  if (skip(t)) return;
+  const vals = index.sampleValues('users.country');
+  assert.deepEqual(new Set(vals.map((v) => v.value)), new Set(['US', 'GB', 'DE', 'BR']));
+  assert.equal(valOf(vals, 'US').freq, 4);
+  assert.equal(valOf(vals, 'GB').freq, 3);
+  assert.equal(valOf(vals, 'DE').freq, 3);
+  assert.equal(valOf(vals, 'BR').freq, 2);
+  const st = index.stats('users.country');
+  assert.equal(st.distinctCount, 4);
+  assert.equal(st.totalCount, 12);  // one row per user, none NULL
+  assert.equal(st.nullCount, 0);
+});
+
+// Experiments become DISCOVERABLE: experiment names + variant groups are indexed.
+test('experiments.experiment_name / variant_group are indexed (checkout_flow; control 6 / variant_b 6)', opts, async (t) => {
+  if (skip(t)) return;
+  const names = index.sampleValues('experiments.experiment_name');
+  assert.deepEqual(names, [{ value: 'checkout_flow', freq: 12 }]);
+  const variants = index.sampleValues('experiments.variant_group');
+  assert.deepEqual(new Set(variants.map((v) => v.value)), new Set(['control', 'variant_b']));
+  assert.equal(valOf(variants, 'control').freq, 6);
+  assert.equal(valOf(variants, 'variant_b').freq, 6);
+});
+
+// describe_catalog({ model: 'users' }) surfaces each dimension WITH its indexed values.
+test('describe_catalog({ model: "users" }) lists dimensions with sample_values + cardinality', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.describe_catalog({ model: 'users' });
+  const country = out.dimensions.find((d) => d.name === 'country');
+  assert.equal(country.distinct_count, 4);
+  assert.ok(country.sample_values.some((v) => v.value === 'US' && v.freq === 4), `US(4) in samples: ${JSON.stringify(country.sample_values)}`);
+  const ms = out.dimensions.find((d) => d.name === 'media_source');
+  assert.equal(ms.distinct_count, 4); // meta/organic/google/applovin
+});
+
+// describe_catalog({ property: 'users.country' }) drills a namespaced attribute like a property.
+test('describe_catalog({ property: "users.country" }) returns the attribute value distribution', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.describe_catalog({ property: 'users.country' });
+  assert.equal(out.model, 'users');
+  assert.equal(out.column, 'country');
+  assert.equal(out.distinct_count, 4);
+  assert.equal(valOf(out.sample_values, 'US').freq, 4);
+  assert.equal(out.value_stats.top_value, 'US');
+  // the guidance names the JOIN path (user attributes are reached via the users join).
+  assert.ok(out.recommendations.some((r) => r.includes('user__country') || r.includes("join with:'users'")), JSON.stringify(out.recommendations));
+  // unknown attribute → clear error, not a silent empty result.
+  await assert.rejects(() => engine.describe_catalog({ property: 'users.nope' }), /unknown attribute/);
+});
+
+// search now finds: attribute VALUES (a country code), dimension attributes by name,
+// experiment names, and matching recipes — the full discovery loop in one call.
+test('describe_catalog({ search }) finds attribute values, dimensions, experiments and recipes', opts, async (t) => {
+  if (skip(t)) return;
+  // a known country code resolves to the users.country attribute.
+  const de = await engine.describe_catalog({ search: 'DE' });
+  const deHit = de.value_matches.find((m) => m.property === 'users.country' && m.value === 'DE');
+  assert.ok(deHit, `expected users.country DE value match: ${JSON.stringify(de.value_matches)}`);
+  assert.equal(deHit.freq, 3);
+  assert.equal(deHit.model, 'users');
+  // an experiment name is discoverable by substring.
+  const exp = await engine.describe_catalog({ search: 'checkout' });
+  assert.ok(exp.value_matches.some((m) => m.property === 'experiments.experiment_name' && m.value === 'checkout_flow'), JSON.stringify(exp.value_matches));
+  // a dimension attribute is discoverable by its name.
+  const dim = await engine.describe_catalog({ search: 'country' });
+  assert.ok(dim.dimension_matches.some((d) => d.attribute === 'users.country'), JSON.stringify(dim.dimension_matches));
+  // a recipe is discoverable by task keyword.
+  const ret = await engine.describe_catalog({ search: 'retention' });
+  assert.ok(ret.recipe_matches.some((r) => r.id === 'nday_retention'), JSON.stringify(ret.recipe_matches));
+  assert.ok(ret.recommendations.some((r) => r.includes('get_recipe')), 'search guides to get_recipe');
 });

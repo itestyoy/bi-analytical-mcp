@@ -103,3 +103,59 @@ test('srm_check: detects a broken split, passes a balanced one', () => {
   assert.equal(engine.srm_check({ groups: [{ label: 'a', n: 500 }, { label: 'b', n: 500 }] }).srm_detected, false);
   assert.equal(engine.srm_check({ groups: [{ label: 'a', n: 600 }, { label: 'b', n: 400 }] }).srm_detected, true);
 });
+
+// Sequential (mSPRT) always-valid p: monotone in evidence, conservative vs fixed-horizon,
+// and exactly 1 when there is no effect signal.
+test('ab_test sequential: always-valid p is conservative and ordered by evidence', () => {
+  const strong = engine.ab_test({
+    metric: 'proportion', sequential: true,
+    control: { n: 10000, conversions: 2000 },
+    variants: [{ label: 'B', n: 10000, conversions: 2400 }], // big, well-powered lift
+  });
+  const b = strong.results[0];
+  assert.ok(b.p_value_sequential > 0 && b.p_value_sequential <= 1);
+  assert.ok(b.p_value_sequential >= b.p_value, 'always-valid p is never smaller than the fixed-horizon p');
+  assert.equal(b.significant_sequential, true, 'a strong effect is detected even sequentially');
+
+  const flat = engine.ab_test({
+    metric: 'proportion', sequential: true,
+    control: { n: 1000, conversions: 200 },
+    variants: [{ label: 'B', n: 1000, conversions: 200 }], // identical groups
+  });
+  assert.equal(flat.results[0].p_value_sequential, 1, 'no signal → p stays at 1');
+  // a weaker (but real) lift yields a LARGER sequential p than the strong one.
+  const weak = engine.ab_test({
+    metric: 'proportion', sequential: true,
+    control: { n: 1000, conversions: 200 },
+    variants: [{ label: 'B', n: 1000, conversions: 220 }],
+  });
+  assert.ok(weak.results[0].p_value_sequential > b.p_value_sequential);
+  // mean path also carries the sequential fields.
+  const m = engine.ab_test({
+    metric: 'mean', sequential: true, expected_effect: 0.5,
+    control: { n: 500, mean: 10, stddev: 3 },
+    variants: [{ label: 'B', n: 500, mean: 10.6, stddev: 3 }],
+  });
+  assert.ok(Number.isFinite(m.results[0].p_value_sequential));
+});
+
+// Cross-metric multiplicity: other metrics' p-values join the Holm family and can
+// flip a borderline variant to non-significant.
+test('ab_test family_p_values: cross-metric correction tightens the verdict', () => {
+  const base = engine.ab_test({
+    metric: 'proportion',
+    control: { n: 1000, conversions: 200 },
+    variants: [{ label: 'B', n: 1000, conversions: 245 }], // borderline-significant alone
+  });
+  const alone = base.results[0];
+  assert.equal(alone.significant_adjusted, true, 'significant when tested alone');
+  const withFamily = engine.ab_test({
+    metric: 'proportion',
+    family_p_values: [0.2, 0.4, 0.6, 0.8], // four other metrics in the same readout
+    control: { n: 1000, conversions: 200 },
+    variants: [{ label: 'B', n: 1000, conversions: 245 }],
+  });
+  const fam = withFamily.results[0];
+  assert.ok(fam.p_value_adjusted > alone.p_value_adjusted, 'family inflates the adjusted p');
+  assert.equal(fam.p_value, alone.p_value, 'raw p unchanged');
+});

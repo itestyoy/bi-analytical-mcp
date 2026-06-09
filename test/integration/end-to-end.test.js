@@ -137,16 +137,21 @@ test('1d. semantic_index({ search: "rewarded" }) traces value → property → e
 });
 
 // ───────────────────────── 2. INDEX STATE ─────────────────────────
-test('2. semantic_index reports a clean value-index sync with EXACT coverage', opts, async (t) => {
+test('2. semantic_index({ status }) reports a clean value-index sync with EXACT coverage', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index();
+  const out = await engine.semantic_index({ status: true });
   const vi = out.value_index;
   assert.equal(vi.persisted, true);
   assert.equal(vi.running, false);
   assert.equal(vi.last_successful_run.status, 'ok');
   assert.equal(vi.last_successful_run.errors, 0);
-  // EXACT coverage: every scalar event property was indexed (no silent gaps)…
-  assert.equal(vi.indexed_properties, engine.catalog.scalarEventProps().length, 'one prop_stats row per scalar event property');
+  // EXACT coverage: every scalar event property PLUS every categorical dimension
+  // attribute of the non-anchor models (users/experiments) was indexed — no silent gaps…
+  const dimTargets = engine.catalog.modelKeys()
+    .filter((k) => k !== engine.catalog.anchor)
+    .flatMap((k) => Object.entries(engine.catalog.getModel(k).dimensions || {})
+      .filter(([, s]) => String(s?.type || '').toLowerCase() !== 'time'));
+  assert.equal(vi.indexed_properties, engine.catalog.scalarEventProps().length + dimTargets.length, 'one prop_stats row per indexable property/attribute');
   // …and the persisted counts equal what the run itself reported (DB COUNT == run counters).
   assert.equal(vi.indexed_properties, vi.last_successful_run.properties_indexed);
   assert.equal(vi.total_values, vi.last_successful_run.values_written);

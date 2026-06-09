@@ -409,6 +409,11 @@ export class Catalog {
     return this.models[this.anchor]?.event_data_column || 'event_properties';
   }
 
+  /** Physical column on the anchor that carries the event type, or null. */
+  eventNameColumn() {
+    return this.models[this.anchor]?.event_name?.column || null;
+  }
+
   /** event_name values enum. */
   eventNames() {
     return this.models[this.anchor]?.known_events || [];

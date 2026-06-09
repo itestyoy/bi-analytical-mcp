@@ -286,14 +286,37 @@ export class Engine {
     const recent = input.recent ?? 10;
     const propRow = (r) => ({ property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) });
 
-    // ── drill-down: one property's per-sync timing history ──
+    // ── drill-down: one property's per-sync timing history + null/coverage breakdown ──
     if (input.property) {
       const hist = this.valueIndex.propertyHistory(input.property, { limit: recent }).map((r) => ({ run_id: r.run_id, started_at: r.started_at, ...propRow(r) }));
       const timed = hist.filter((r) => r.ms != null);
       const avg = timed.length ? Math.round(timed.reduce((s, r) => s + r.ms, 0) / timed.length) : null;
+
+      // Null coverage from the latest sync: overall null_count + a per-event_name breakdown.
+      // A property is NULL on events it does not apply to — annotate each event with `applies`
+      // (declared in meta.mcp.events) so expected NULLs are distinguishable from real gaps.
+      const st = this.valueIndex.stats(input.property);
+      const rowCount = (st && st.totalCount != null && st.nullCount != null) ? st.totalCount + st.nullCount : null;
+      const frac = (n, d) => (d ? Number((n / d).toFixed(4)) : null);
+      const valueStats = st ? { distinct_count: st.distinctCount, non_null_count: st.totalCount, null_count: st.nullCount, row_count: rowCount, null_fraction: (st.nullCount != null && rowCount) ? frac(st.nullCount, rowCount) : null } : null;
+      const declared = this.catalog.eventPropertyEvents()[input.property] || null; // null ⇒ applies to ALL events
+      const declaredSet = declared ? new Set(declared) : null;
+      const coverage = this.valueIndex.coverage(input.property).map((e) => ({
+        event_name: e.event_name, row_count: e.row_count, non_null: e.non_null, null_count: e.null_count,
+        null_fraction: frac(e.null_count, e.row_count), applies: declaredSet ? declaredSet.has(e.event_name) : true,
+      }));
+      // Real data-quality gaps: events the property SHOULD populate but where rows are NULL.
+      const gaps = coverage.filter((e) => e.applies && e.null_count > 0);
+
+      const recs = [hist.length ? `'${input.property}' took ${hist[0].ms}ms in the latest sync (${hist[0].values} values, ${hist[0].distinct_count} distinct); avg ${avg}ms over ${timed.length} runs.` : `No per-property timing recorded for '${input.property}' yet.`];
+      if (valueStats && valueStats.null_count != null) recs.push(`${valueStats.null_count} of ${valueStats.row_count} rows are NULL (${valueStats.null_fraction != null ? Math.round(valueStats.null_fraction * 100) : '?'}%)${declared ? `; the property applies to events: ${declared.join(', ')}` : ' (applies to all events)'}.`);
+      if (gaps.length) recs.push(`Possible data gaps: ${gaps.slice(0, 5).map((g) => `${g.event_name} (${g.null_count}/${g.row_count} NULL)`).join(', ')} — these events SHOULD carry '${input.property}' but have NULLs.`);
+      else if (declaredSet && coverage.length) recs.push(`NULLs outside the applicable events are expected (the property is only populated on ${declared.join(', ')}).`);
+
       return {
-        property: input.property, runs: hist.length, avg_ms: avg, history: hist,
-        recommendations: [hist.length ? `'${input.property}' took ${hist[0].ms}ms in the latest sync (${hist[0].values} values, ${hist[0].distinct_count} distinct); avg ${avg}ms over ${timed.length} runs.` : `No per-property timing recorded for '${input.property}' yet.`],
+        property: input.property, runs: hist.length, avg_ms: avg,
+        value_stats: valueStats, applies_to_events: declared, event_coverage: coverage,
+        history: hist, recommendations: recs,
       };
     }
 
@@ -454,59 +477,15 @@ export class Engine {
     return resp;
   }
 
-  /** Physical column names of a source's relation (cached), or null if unknown
-   *  (no runner / relation not built / introspection failed → guard is skipped). */
-  async _physicalColumns(source) {
-    if (!this.runner || !this.ctxs.baseProjectDir) return null;
-    this._physCache ??= new Map();
-    if (this._physCache.has(source)) return this._physCache.get(source);
-    let set = null;
-    try {
-      const cols = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
-      if (cols.ok) set = new Set(cols.columns.map((c) => c.name));
-    } catch { /* introspection unavailable → no guard */ }
-    this._physCache.set(source, set);
-    return set;
-  }
-
-  /** Catalog-declared columns of `source` that are NOT materialized in the physical table
-   *  (e.g. user attributes denormalized in the schema but absent from the fact). null = unknown. */
-  async _phantomColumns(source) {
-    const phys = await this._physicalColumns(source);
-    if (!phys) return null;
-    return new Set(this.catalog.modelColumns(source).map((c) => c.name).filter((c) => !phys.has(c)));
-  }
-
-  /** Reject if the generated SQL references a catalog column that isn't materialized —
-   *  converts a late warehouse "Unrecognized name" into an early, actionable error. */
-  async _assertMaterialized(sql, source) {
-    const phantom = await this._phantomColumns(source);
-    if (!phantom || !phantom.size || !sql) return;
-    const hit = [...phantom].filter((c) => new RegExp(`(^|[^A-Za-z0-9_])${c.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}([^A-Za-z0-9_]|$)`).test(sql));
-    if (!hit.length) return;
-    const model = this.catalog.getModel(source).dbt_model;
-    throw new ToolError(
-      `column(s) ${hit.join(', ')} are declared in the catalog but NOT materialized in '${model}'. `
-      + `They are likely user attributes — join the 'users' model and group/filter by user__<name> instead, `
-      + `or drop them. (describe_catalog({ model: '${source}' }) lists the real physical_columns.)`,
-      { stage: 'validate', field: hit[0] },
-    );
-  }
-
   async _draftAddStep(ctx, draft, stage, includeColumns = false) {
     const before = this._draftColumns(draft); // columns BEFORE this stage
     const trial = [...draft.stages, stage];
-    let rendered;
     try {
-      rendered = renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
+      renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
     } catch (e) {
       // Reject the step WITHOUT persisting it; the draft is left intact to retry.
       throw new ToolError(e.message, { stage: 'compile', field: 'stage' });
     }
-    // A catalog column that isn't materialized in the physical table would pass the
-    // schema check above but fail at commit on the warehouse ("Unrecognized name"). When a
-    // runner is available, reject it HERE (before wasting the build) with guidance.
-    await this._assertMaterialized(rendered.sql, draft.source);
     draft.stages = trial;
     this.ctxs.touch(ctx.id);
     const after = this._draftColumns(draft);
@@ -590,7 +569,6 @@ export class Engine {
     const render = () => renderPipeline(this.catalog, dialect, source, stages);
     if (input.dry_run) {
       const out = render();
-      await this._assertMaterialized(out.sql, source); // catch non-materialized catalog columns early
       const resp = {
         kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect,
         columns: [...out.columns.keys()],
@@ -606,7 +584,6 @@ export class Engine {
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
     const out = render();
-    await this._assertMaterialized(out.sql, source); // fail fast (before dbt run) on non-materialized columns
     const materialized = input.materialized || 'table';
     const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
     this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);

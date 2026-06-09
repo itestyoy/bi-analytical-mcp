@@ -23,6 +23,11 @@ export class ValueIndex {
     this.store.values.replaceProperty(property, spec);
   }
 
+  /** Per-event_name coverage for a property: [{ event_name, row_count, non_null, null_count }]. */
+  coverage(property) {
+    return this.store.values.coverage ? this.store.values.coverage(property) : [];
+  }
+
   /** Top `limit` values for a property, ordered by freq desc (value-ASC tiebreak). */
   sampleValues(property, limit = 10) {
     return this.store.values.top(property, limit);
@@ -149,6 +154,7 @@ export class BackgroundIndexer {
     let props = 0; let values = 0; let errors = 0; let lastError = null;
     const c = this.catalog;
     const names = c.scalarEventProps();
+    const evCol = c.eventNameColumn(); // for per-event null/coverage breakdown
     this.logger?.(`sync #${runId} started: indexing ${names.length} scalar event properties from ${c.getModel(c.anchor).dbt_model}`);
     try {
       const ref = `{{ ref('${c.getModel(c.anchor).dbt_model}') }}`;
@@ -170,16 +176,27 @@ export class BackgroundIndexer {
             this.index.recordPropertyTiming?.(runId, { property: name, ms: Date.now() - tProp, status: 'skipped' });
             this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': skipped (query not ok)`); continue;
           }
-          const card = await this.runner.show(this.baseProjectDir, `SELECT COUNT(DISTINCT ${expr}) AS d, COUNT(${expr}) AS t FROM ${ref}`, 1);
+          // d=distinct, t=non-null count, rows_total=all rows → null_count = rows_total - t.
+          const card = await this.runner.show(this.baseProjectDir, `SELECT COUNT(DISTINCT ${expr}) AS d, COUNT(${expr}) AS t, COUNT(*) AS rows_total FROM ${ref}`, 1);
           const stat = card.ok && card.rows?.[0] ? card.rows[0] : {};
           const vals = (top.rows || []).filter((r) => r.v != null).map((r) => ({ value: r.v, freq: Number(r.n) }));
           const distinct = stat.d != null ? Number(stat.d) : null;
           const total = stat.t != null ? Number(stat.t) : null;
-          this.index.upsertProperty(name, { distinctCount: distinct, totalCount: total, values: vals });
+          const rowsTotal = stat.rows_total != null ? Number(stat.rows_total) : null;
+          const nullCount = (rowsTotal != null && total != null) ? rowsTotal - total : null;
+          // Per-event_name null/coverage: how many rows of each event carry a value vs NULL.
+          // A field is expected to be NULL on events it does not apply to — this lets the
+          // caller tell that (normal) from genuine gaps on events it should populate.
+          let coverage = [];
+          if (evCol) {
+            const cov = await this.runner.show(this.baseProjectDir, `SELECT ${evCol} AS ev, COUNT(*) AS row_count, COUNT(${expr}) AS non_null FROM ${ref} GROUP BY ${evCol}`, 500);
+            if (cov.ok) coverage = (cov.rows || []).filter((r) => r.ev != null).map((r) => ({ event: r.ev, rowCount: Number(r.row_count), nonNull: Number(r.non_null) }));
+          }
+          this.index.upsertProperty(name, { distinctCount: distinct, totalCount: total, nullCount, values: vals, coverage });
           const ms = Date.now() - tProp;
           props += 1; values += vals.length;
           this.index.recordPropertyTiming?.(runId, { property: name, ms, valuesWritten: vals.length, distinctCount: distinct, totalCount: total, status: 'ok' });
-          this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': ${vals.length} values stored, ${distinct ?? '?'} distinct / ${total ?? '?'} total (${ms}ms)`);
+          this.logger?.(`sync #${runId} [${i}/${names.length}] '${name}': ${vals.length} values stored, ${distinct ?? '?'} distinct / ${total ?? '?'} non-null / ${nullCount ?? '?'} null of ${rowsTotal ?? '?'} rows, ${coverage.length} events covered (${ms}ms)`);
         } catch (e) {
           errors += 1; lastError = e?.message || String(e);
           this.index.recordPropertyTiming?.(runId, { property: name, ms: Date.now() - tProp, status: 'error', error: lastError });

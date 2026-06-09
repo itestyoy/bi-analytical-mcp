@@ -8,10 +8,11 @@
 // Repository contract (all backends implement it):
 //   jobs.init()                       -> rows[]  (ensure schema, reconcile running→error)
 //   jobs.upsert(job)
-//   values.replaceProperty(prop, { distinctCount, totalCount, values:[{value,freq}] })
+//   values.replaceProperty(prop, { distinctCount, totalCount, nullCount, values:[{value,freq}], coverage:[{event,rowCount,nonNull}] })
 //   values.top(prop, limit)           -> [{value,freq}]  (freq desc, value asc)
 //   values.page(prop, { limit, offset, col:'freq'|'value', direction:'asc'|'desc' })
-//   values.stats(prop)                -> { distinctCount, totalCount, indexedAt } | null
+//   values.stats(prop)                -> { distinctCount, totalCount, nullCount, indexedAt } | null
+//   values.coverage(prop)             -> [{event_name, row_count, non_null, null_count}] (row_count desc)
 //   values.search(query, limit)       -> [{property,value,freq}] (substring, freq desc)
 //   values.counts()                   -> { properties, values }
 //   runs.reconcile()                  (mark running→interrupted)
@@ -31,7 +32,7 @@ export class MemoryBackend {
   constructor() {
     this.kind = 'memory';
     this.persistent = false;
-    const props = new Map(); // property -> { distinctCount, totalCount, indexedAt, values:[{value,freq}] }
+    const props = new Map(); // property -> { distinctCount, totalCount, nullCount, indexedAt, values:[{value,freq}], coverage:[{event_name,row_count,non_null}] }
     const runs = [];
     const runProps = []; // { run_id, property, ms, values_written, distinct_count, total_count, status, error, started_at }
     let runSeq = 0;
@@ -42,12 +43,15 @@ export class MemoryBackend {
     };
 
     this.values = {
-      replaceProperty: (property, { distinctCount, totalCount, values = [] } = {}) => {
+      replaceProperty: (property, { distinctCount, totalCount, nullCount, values = [], coverage = [] } = {}) => {
         props.set(property, {
           distinctCount: distinctCount ?? null,
           totalCount: totalCount ?? null,
+          nullCount: nullCount ?? null,
           indexedAt: Date.now(),
           values: values.map((v) => ({ value: String(v.value), freq: Number(v.freq) || 0 })).sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)),
+          coverage: coverage.map((e) => ({ event_name: String(e.event), row_count: Number(e.rowCount) || 0, non_null: Number(e.nonNull) || 0 }))
+            .sort((a, b) => b.row_count - a.row_count || a.event_name.localeCompare(b.event_name)),
         });
       },
       top: (property, limit) => {
@@ -67,7 +71,11 @@ export class MemoryBackend {
       },
       stats: (property) => {
         const e = props.get(property);
-        return e ? { distinctCount: e.distinctCount, totalCount: e.totalCount, indexedAt: e.indexedAt } : null;
+        return e ? { distinctCount: e.distinctCount, totalCount: e.totalCount, nullCount: e.nullCount, indexedAt: e.indexedAt } : null;
+      },
+      coverage: (property) => {
+        const e = props.get(property);
+        return e ? e.coverage.map((c) => ({ event_name: c.event_name, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null })) : [];
       },
       search: (query, limit) => {
         const q = String(query).toLowerCase();
@@ -110,7 +118,12 @@ export class SqliteBackend {
     this._stmts = new Map();
     db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
     db.exec('CREATE TABLE IF NOT EXISTS prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
-    db.exec('CREATE TABLE IF NOT EXISTS prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, indexed_at INTEGER)');
+    db.exec('CREATE TABLE IF NOT EXISTS prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER)');
+    // null_count was added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
+    try { db.exec('ALTER TABLE prop_stats ADD COLUMN null_count INTEGER'); } catch { /* column already present */ }
+    // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
+    // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
+    db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(property, event_name))');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
     // Per-property timing within a run — detailed stats drilled into via describe_index.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
@@ -128,11 +141,13 @@ export class SqliteBackend {
     };
 
     this.values = {
-      replaceProperty(property, { distinctCount, totalCount, values = [] } = {}) {
+      replaceProperty(property, { distinctCount, totalCount, nullCount, values = [], coverage = [] } = {}) {
         s._tx(() => {
           s._run('DELETE FROM prop_values WHERE property = ?', property);
           for (const v of values) s._run('INSERT INTO prop_values (property, value, freq) VALUES (?, ?, ?)', property, String(v.value), Number(v.freq) || 0);
-          s._run('INSERT INTO prop_stats (property, distinct_count, total_count, indexed_at) VALUES (?, ?, ?, ?) ON CONFLICT(property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, indexed_at=excluded.indexed_at', property, distinctCount ?? null, totalCount ?? null, Date.now());
+          s._run('DELETE FROM prop_coverage WHERE property = ?', property);
+          for (const e of coverage) s._run('INSERT INTO prop_coverage (property, event_name, row_count, non_null) VALUES (?, ?, ?, ?)', property, String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
+          s._run('INSERT INTO prop_stats (property, distinct_count, total_count, null_count, indexed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, null_count=excluded.null_count, indexed_at=excluded.indexed_at', property, distinctCount ?? null, totalCount ?? null, nullCount ?? null, Date.now());
         });
       },
       // value ASC tiebreak → deterministic on ties (value is unique per property via the PK).
@@ -147,8 +162,12 @@ export class SqliteBackend {
         return s._all(`SELECT value, freq FROM prop_values WHERE property = ? ORDER BY ${c} ${d}, value ASC LIMIT ? OFFSET ?`, property, limit, offset).map((r) => ({ value: r.value, freq: Number(r.freq) }));
       },
       stats(property) {
-        const r = s._get('SELECT distinct_count, total_count, indexed_at FROM prop_stats WHERE property = ?', property);
-        return r ? { distinctCount: r.distinct_count, totalCount: r.total_count, indexedAt: r.indexed_at } : null;
+        const r = s._get('SELECT distinct_count, total_count, null_count, indexed_at FROM prop_stats WHERE property = ?', property);
+        return r ? { distinctCount: r.distinct_count, totalCount: r.total_count, nullCount: r.null_count, indexedAt: r.indexed_at } : null;
+      },
+      coverage(property) {
+        return s._all('SELECT event_name, row_count, non_null FROM prop_coverage WHERE property = ? ORDER BY row_count DESC, event_name ASC', property)
+          .map((r) => ({ event_name: r.event_name, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
       },
       search(query, limit) {
         const q = String(query).toLowerCase();
@@ -188,7 +207,7 @@ export class SqliteBackend {
   /** Wipe ALL persisted state (used by MCP_DB_RESET on startup). Keeps the schema. */
   reset() {
     this._tx(() => {
-      for (const t of ['jobs', 'prop_values', 'prop_stats', 'index_runs', 'index_run_props']) this._run(`DELETE FROM ${t}`);
+      for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'index_runs', 'index_run_props']) this._run(`DELETE FROM ${t}`);
     });
   }
 

@@ -13,7 +13,7 @@ calculation, then reproduce it in the MCP with `create_semantic_model`.
   `bi-economics-dimension`, `bi-ad-quality-dimension`, `bi-player-dynamic-dimension`,
   `bi-stability-dimension`, `mtz-dimension`.
 - **Events feeding it:** the page's Calculation names the event + param; cross-check the
-  master Events Schema (see `reference/events.md`) and `describe_catalog`.
+  master Events Schema (see `reference/events.md`) and `semantic_index`.
 - **Player attributes** (country/platform/ATT/GDPR/language/device/skill, …) resolve via the
   **users** dimension; **event-scoped** ones via `event_data` on the relevant event.
 
@@ -44,4 +44,4 @@ BI space filtered by label — this index is a starting map, not the authority.
 2. Reproduce the metric with `create_semantic_model` (measure over the right event scope),
    query with `query_semantic_model`; segment by a `users` attribute or an `event_data`
    dimension. Prefer governed metrics over ad-hoc aggregates.
-3. Confirm the exact field name + real values with `describe_catalog` before relying on them.
+3. Confirm the exact field name + real values with `semantic_index` before relying on them.

@@ -48,6 +48,7 @@ export function loadCatalog(path, opts = {}) {
   // The warehouse dialect is runtime config, NOT catalog data: resolve it from
   // the environment / the dbt profile dbt actually runs with — never the YAML.
   raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, fallback: raw.warehouse_dialect });
+  if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
 }
 
@@ -70,6 +71,7 @@ export function loadCatalogFromProject(projectDir, opts = {}) {
   }
   const raw = dbtSchemaToCatalog({ models: mcpModels });
   raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir || projectDir, projectDir, fallback: raw.warehouse_dialect });
+  if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
 }
 
@@ -223,6 +225,15 @@ export function dbtSchemaToCatalog(doc) {
     if (mcp.primary_entity !== undefined) m.primary_entity = mcp.primary_entity;
     if (mcp.known_events) m.known_events = mcp.known_events;
     if (mcp.measures) m.measures = mcp.measures;
+    // Business meaning of key events (e.g. acquisition_event: first_launch) — lets an
+    // AI pick the right base events for retention/conversion without guessing.
+    if (mcp.event_semantics) m.event_semantics = mcp.event_semantics;
+    // The physical partition column (cost hint): queries should constrain it (or the
+    // time column) to prune the scan. Surfaced statically — no live runner needed.
+    if (mcp.partition_column) m.partition_column = mcp.partition_column;
+    // Cost guardrail: when the anchor declares require_time_range, unbounded queries
+    // (no time window) are rejected instead of full-scanning the warehouse.
+    if (mcp.require_time_range != null) m.require_time_range = !!mcp.require_time_range;
 
     // The anchor (events fact) is DETECTED structurally: the model that declares
     // the event_name / event_data / time columns. `anchor: true` is an optional
@@ -274,6 +285,7 @@ export function dbtSchemaToCatalog(doc) {
           ...(a.items ? { items: a.items } : {}),
           ...(a.fields ? { fields: a.fields } : {}),
           ...(cm.events ? { events: cm.events } : {}),
+          ...(cm.unit ? { unit: cm.unit } : {}),
           ...(col.description ? { description: col.description } : {}),
         };
         continue;
@@ -282,11 +294,14 @@ export function dbtSchemaToCatalog(doc) {
         // A flattened event-payload property: a real column populated only on the
         // events in meta.mcp.events. The column is named directly (no `__`, which
         // MetricFlow reserves), so it is used as-is for both the key and the expr.
+        // `unit` (meta.mcp.unit, e.g. 'seconds', 'usd_cents') is machine-readable so
+        // values in different units are never blindly mixed/summed.
         flatProps[col.name] = {
           type: isNumericType(col.data_type) ? 'numeric' : 'string',
           column: col.name,
           ...(cm.values ? { values: cm.values } : {}),
           ...(cm.events ? { events: cm.events } : {}),
+          ...(cm.unit ? { unit: cm.unit } : {}),
           ...(col.description ? { description: col.description } : {}),
         };
         continue;
@@ -345,6 +360,9 @@ export class Catalog {
     if (!this.models?.[this.anchor]) {
       throw new Error(`anchor_model '${this.anchor}' not found in catalog.models`);
     }
+    // Cost guardrail: reject unbounded (no time window) queries when the anchor model
+    // (or a loadCatalog override) demands a bounded window. See engine guards.
+    this.requireTimeRange = !!(raw.require_time_range ?? this.models[this.anchor]?.require_time_range);
     // Map: entity name -> model key that owns it as primary/unique (join target).
     this.primaryByEntity = {};
     for (const [key, m] of Object.entries(this.models)) {

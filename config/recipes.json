@@ -310,12 +310,12 @@
       "id": "multistep_funnel",
       "task_type": "funnel",
       "title": "Multi-step funnel where each step = event + property value",
-      "when_to_use": "Onboarding/activation funnels whose steps are the SAME event with a different property value (e.g. tutorial step_id=step_1 -> step_2 -> step_3), with step-to-step conversion.",
+      "when_to_use": "Onboarding/activation funnels whose steps are the SAME event with a different property value (e.g. tutorial element_of_event_data=step_1 -> step_2 -> step_3), with step-to-step conversion.",
       "required_events": [
         "tutorial"
       ],
       "required_properties": [
-        "step_id"
+        "element_of_event_data"
       ],
       "required_user_attrs": [],
       "metric_types": [
@@ -337,7 +337,7 @@
                 ],
                 "where": [
                   {
-                    "property": "chain_of_event_data",
+                    "property": "element_of_event_data",
                     "op": "eq",
                     "value": "step_1"
                   }
@@ -352,7 +352,7 @@
                 ],
                 "where": [
                   {
-                    "property": "chain_of_event_data",
+                    "property": "element_of_event_data",
                     "op": "eq",
                     "value": "step_2"
                   }
@@ -367,7 +367,7 @@
                 ],
                 "where": [
                   {
-                    "property": "chain_of_event_data",
+                    "property": "element_of_event_data",
                     "op": "eq",
                     "value": "step_3"
                   }
@@ -443,7 +443,7 @@
           ]
         }
       ],
-      "notes": "A funnel step is a measure scoped by event_name + a property `where` (event_data value). Steps chain as 2-step conversion metrics (s1->s2, s2->s3); multiply/compose for end-to-end. Could also key the step on level_id, screen_to, placement, etc.",
+      "notes": "A funnel step is a measure scoped by event_name + a property `where` (event_data value). Steps chain as 2-step conversion metrics (s1->s2, s2->s3); multiply/compose for end-to-end. IMPORTANT: the step VALUES here (step_1..step_3) are an example — discover the real step values of your data first via semantic_index({ property: 'element_of_event_data' }) and substitute them. Could also key the step on level_id, screen_to, placement, etc.",
       "hack": "Chain one count_distinct(user) measure per step (event + property value) and ratio metrics between consecutive steps. Extrapolate to any ordered N-step sequence."
     },
     {
@@ -2376,6 +2376,481 @@
           }
         }
       ]
+    },
+    {
+      "id": "retention_by_segment",
+      "task_type": "retention",
+      "title": "D1/D7 retention split by a user attribute (country / platform / source)",
+      "when_to_use": "Diagnose a retention change: which segment (country, platform, media_source, acquisition_type) drives the drop or growth in D1/D7 retention.",
+      "required_events": [
+        "first_launch",
+        "new_session"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [
+        "country"
+      ],
+      "metric_types": [
+        "conversion"
+      ],
+      "create_payload": {
+        "name": "retention_seg",
+        "use_base_models": [
+          "users"
+        ],
+        "semantic_models": [
+          {
+            "from": "events",
+            "measures": [
+              {
+                "name": "cohort",
+                "agg": "count_distinct",
+                "field": "player_id_of_internal",
+                "event_name": [
+                  "first_launch"
+                ]
+              },
+              {
+                "name": "returned",
+                "agg": "count_distinct",
+                "field": "player_id_of_internal",
+                "event_name": [
+                  "new_session"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "d1",
+            "type": "conversion",
+            "base_measure": {
+              "name": "cohort"
+            },
+            "conversion_measure": {
+              "name": "returned"
+            },
+            "entity": "user",
+            "window": "1 day"
+          },
+          {
+            "name": "d7",
+            "type": "conversion",
+            "base_measure": {
+              "name": "cohort"
+            },
+            "conversion_measure": {
+              "name": "returned"
+            },
+            "entity": "user",
+            "window": "7 day"
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "retention_seg_d1"
+          ],
+          "group_by": [
+            "user__country"
+          ]
+        },
+        {
+          "metrics": [
+            "retention_seg_d1",
+            "retention_seg_d7"
+          ],
+          "group_by": [
+            "user__platform"
+          ]
+        },
+        {
+          "metrics": [
+            "retention_seg_d1"
+          ],
+          "group_by": [
+            "user__media_source",
+            "user__country"
+          ]
+        }
+      ],
+      "notes": "Same conversion-window construction as nday_retention, plus use_base_models:['users'] so the user attributes are JOINABLE: group_by any user__<attr> path. Compare segments side by side to localize a retention change before investigating causes.",
+      "hack": "ANY metric becomes a per-segment diagnostic by adding use_base_models:['users'] + group_by user__<attr>. Localize first (which segment moved), then drill into that segment."
+    },
+    {
+      "id": "dn_retention_exact",
+      "task_type": "retention",
+      "title": "Exact day-N retention curve (returned ON day N, not within N days)",
+      "when_to_use": "Classic game-analytics retention curve: for each day-offset N since install, how many users were active exactly on that day. Use when 'within N days' (nday_retention) is not strict enough.",
+      "required_events": [
+        "new_session"
+      ],
+      "required_properties": [],
+      "required_user_attrs": [
+        "install_date"
+      ],
+      "metric_types": [],
+      "register_payload": {
+        "name": "dn_retention_curve",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "column": "event_name",
+                  "op": "eq",
+                  "value": "new_session"
+                }
+              ]
+            },
+            {
+              "stage": "join",
+              "with": "users",
+              "on": "player_id_of_internal",
+              "attrs": [
+                "install_date"
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "day_n",
+              "op": "date_diff",
+              "from": {
+                "column": "install_date"
+              },
+              "to": {
+                "column": "device_time"
+              },
+              "unit": "day"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "day_n"
+              ],
+              "measures": [
+                {
+                  "name": "returners",
+                  "fn": "count_distinct",
+                  "column": "player_id_of_internal"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "day_n",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "notes": "day_n = date_diff(install_date -> device_time) buckets every session by its exact day offset since install; returners at day_n=N over the cohort size = exact D-N retention. Divide by the cohort (day_n=0 row, or a separate first_launch count) to get rates. This is point-in-time retention — stricter than the conversion-window approximation in nday_retention.",
+      "hack": "Exact Dn = join the install date, date_diff it against the activity time, group by the offset. The same offset axis powers cohort heatmaps and lifetime curves."
+    },
+    {
+      "id": "sessionize_events",
+      "task_type": "engagement",
+      "title": "Sessionization: rebuild sessions from raw events by inactivity gap",
+      "when_to_use": "Session metrics (length, depth, events-per-session) when you cannot trust a client session counter — rebuild sessions server-side as bursts of activity separated by an inactivity gap (30 min here).",
+      "required_events": [],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": [],
+      "register_payload": {
+        "name": "gap_sessions",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "compute",
+              "name": "prev_ts",
+              "op": "window",
+              "fn": "lag",
+              "column": "device_time",
+              "partition_by": [
+                "player_id_of_internal"
+              ],
+              "order_by": [
+                {
+                  "key": "device_time",
+                  "direction": "asc"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "gap_s",
+              "op": "date_diff",
+              "from": {
+                "column": "prev_ts"
+              },
+              "to": {
+                "column": "device_time"
+              },
+              "unit": "second"
+            },
+            {
+              "stage": "compute",
+              "name": "is_session_start",
+              "op": "case",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "gap_s",
+                      "op": "is_null"
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                },
+                {
+                  "when": [
+                    {
+                      "column": "gap_s",
+                      "op": "gt",
+                      "value": 1800
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              },
+              "type": "int"
+            },
+            {
+              "stage": "compute",
+              "name": "session_idx",
+              "op": "window",
+              "fn": "sum",
+              "column": "is_session_start",
+              "partition_by": [
+                "player_id_of_internal"
+              ],
+              "order_by": [
+                {
+                  "key": "device_time",
+                  "direction": "asc"
+                }
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal",
+                "session_idx"
+              ],
+              "measures": [
+                {
+                  "name": "events_in_session",
+                  "fn": "count"
+                },
+                {
+                  "name": "session_start",
+                  "fn": "min",
+                  "column": "device_time"
+                },
+                {
+                  "name": "session_end",
+                  "fn": "max",
+                  "column": "device_time"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "session_seconds",
+              "op": "date_diff",
+              "from": {
+                "column": "session_start"
+              },
+              "to": {
+                "column": "session_end"
+              },
+              "unit": "second"
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "player_id_of_internal",
+                  "direction": "asc"
+                },
+                {
+                  "key": "session_idx",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "notes": "lag() gives the previous event time per user; a NULL or >30min gap starts a new session; the running sum of session starts assigns a session index; aggregating by (user, session_idx) yields one row per rebuilt session with depth and duration. Tune the 1800s threshold to your product.",
+      "hack": "Gap-based sessionization = lag -> gap -> CASE flag -> running-sum id -> aggregate. The same flag+running-sum pattern builds ANY 'episode' grouping (streaks, visits, bouts)."
+    },
+    {
+      "id": "period_over_period",
+      "task_type": "trend",
+      "title": "Period-over-period comparison (revenue by day with delta vs previous period)",
+      "when_to_use": "WoW/DoD/MoM readouts: a metric per period plus its change vs the previous period, in one result.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd_of_event_data"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [],
+      "register_payload": {
+        "name": "revenue_pop",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "column": "event_name",
+                  "op": "eq",
+                  "value": "iap_purchase_completed"
+                }
+              ]
+            },
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "period",
+              "op": "date_trunc",
+              "column": "device_time",
+              "granularity": "day"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "period"
+              ],
+              "measures": [
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "prev_revenue",
+              "op": "window",
+              "fn": "lag",
+              "column": "revenue",
+              "order_by": [
+                {
+                  "key": "period",
+                  "direction": "asc"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "delta",
+              "op": "sub",
+              "left": {
+                "column": "revenue"
+              },
+              "right": {
+                "column": "prev_revenue"
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "pct_change",
+              "op": "div",
+              "left": {
+                "column": "delta"
+              },
+              "right": {
+                "column": "prev_revenue"
+              }
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "period",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "notes": "lag(revenue) over the period axis gives the previous period in the same row; delta/pct_change follow with plain arithmetic. CAVEAT: lag is the previous ROW — if periods can be missing (days with zero revenue), densify the axis first or compare at a coarser grain (week/month via date_trunc granularity).",
+      "hack": "Period-over-period = aggregate to the period grain, then window lag + sub/div. Swap the measure or the grain freely; the same lag pattern yields growth rates and streak detection."
+    },
+    {
+      "id": "data_quality_event_volume",
+      "task_type": "data_quality",
+      "title": "Data-quality check: event volume + distinct users per event",
+      "when_to_use": "FIRST move when a metric looks anomalous: did the underlying events change volume (tracking broke, release dropped an event) or did real behavior change? Also a fast map of which events dominate the data.",
+      "required_events": [],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "metric_types": [],
+      "register_payload": {
+        "name": "event_volume_audit",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "event_name"
+              ],
+              "measures": [
+                {
+                  "name": "rows",
+                  "fn": "count"
+                },
+                {
+                  "name": "users",
+                  "fn": "count_distinct",
+                  "column": "player_id_of_internal"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "rows",
+                  "direction": "desc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "notes": "Compare volumes and per-event user counts against expectation/history; a vanished or collapsed event usually means broken tracking, not changed behavior. Drill NULL coverage of a suspicious property with semantic_index({ property }) — it separates expected NULLs (property not applicable to the event) from real gaps. Add a time_range to audit a specific release window, or group_by a user attribute (join 'users') to localize a client-side break.",
+      "hack": "Anomaly triage order: (1) event volumes, (2) property NULL coverage, (3) only then the metric itself. Most 'metric drops' are tracking changes."
     }
   ]
 }

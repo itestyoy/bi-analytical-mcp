@@ -1,10 +1,10 @@
 // END-TO-END integration test: ONE realistic analytics workflow that exercises ALL
 // the MCP tools together and verifies they chain correctly. A single seed+run feeds
 // every hop. The story (an analyst onboarding into a new dataset):
-//   1. DISCOVERY   — describe_catalog overview → event → property (paged/ordered) →
+//   1. DISCOVERY   — semantic_index overview → event → property (paged/ordered) →
 //                    value search, asserting the rewarded → ad_type → ad_finished
 //                    provenance fact from the value index.
-//   2. INDEX STATE — describe_index reports the value-index sync after refresh().
+//   2. INDEX STATE — semantic_index reports the value-index sync after refresh().
 //   3. NATIVE PIPE — build_native_model (start/add_step/preview/commit) builds the
 //                    activation funnel; rows read back via get_query_result; the
 //                    committed counts equal the all-at-once register path (12/8/5/3).
@@ -58,9 +58,9 @@ const S = {}; // S.semCtx, S.draftId, S.pipeCtx, S.pipeTable, S.abCtx
 // The canonical 4-step activation funnel (copied verbatim from match-recognize.test.js).
 const activationSteps = [
   { name: 'launch', event_name: ['first_launch'] },
-  { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_1' }] },
-  { name: 'tut2', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_2' }] },
-  { name: 'tut3', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_3' }] },
+  { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
+  { name: 'tut2', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_2' }] },
+  { name: 'tut3', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_3' }] },
 ];
 const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps, ...extra });
 
@@ -77,7 +77,7 @@ before(async () => {
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'e2e-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
-  // A temp-file value index so describe_index reports a REAL persisted SQLite index.
+  // A temp-file value index so semantic_index reports a REAL persisted SQLite index.
   const dbPath = join(mkdtempSync(join(tmpdir(), 'e2e-db-')), 'value-index.sqlite');
   engine = new Engine({ catalog, contextManager: ctxs, runner: backend, recipes, dbPath, queryTimeoutMs: 60000 });
   index = engine.valueIndex;
@@ -89,46 +89,46 @@ before(async () => {
 after(async () => { backend?.close(); index?.close(); if (pg) await pg.stop(); });
 
 // ───────────────────────── 1. DISCOVERY ─────────────────────────
-test('1a. describe_catalog overview lists models + event names (no column dump)', opts, async (t) => {
+test('1a. semantic_index overview lists models + event names (no column dump)', opts, async (t) => {
   if (skip(t)) return;
-  const overview = await engine.describe_catalog();
+  const overview = await engine.semantic_index();
   assert.ok(overview.models.find((m) => m.key === 'events'), 'events model present');
   assert.ok(Array.isArray(overview.event_names) && overview.event_names.includes('ad_finished'), 'overview lists event names incl. ad_finished');
   assert.equal(overview.models.find((m) => m.key === 'events').physical_columns, undefined, 'overview stays compact');
 });
 
-test('1b. describe_catalog({ event: "ad_finished" }) scopes to that event\'s properties + index hints', opts, async (t) => {
+test('1b. semantic_index({ event: "ad_finished" }) scopes to that event\'s properties + index hints', opts, async (t) => {
   if (skip(t)) return;
-  const ev = await engine.describe_catalog({ event: 'ad_finished' });
+  const ev = await engine.semantic_index({ event: 'ad_finished' });
   const p = ev.properties.find((x) => x.name === 'ad_type_of_event_data');
   assert.ok(p, 'ad_finished carries ad_type_of_event_data');
   assert.equal(p.distinct_count, 3); // rewarded/interstitial/banner over the whole fact
   assert.ok(p.sample_values.length <= 3 && p.sample_values.some((v) => v.value === 'rewarded'), 'compact top-3 hint includes rewarded');
 });
 
-test('1c. describe_catalog({ property }) pages + orders the indexed values (10/8/6)', opts, async (t) => {
+test('1c. semantic_index({ property }) pages + orders the indexed values (10/8/6)', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.describe_catalog({ property: 'ad_type_of_event_data' });
+  const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
   assert.equal(out.distinct_count, 3);
   assert.equal(out.total_count, 24); // 12 ad_started + 12 ad_finished
   assert.equal(valOf(out.sample_values, 'rewarded').freq, 10);
   assert.equal(valOf(out.sample_values, 'interstitial').freq, 8);
   assert.equal(valOf(out.sample_values, 'banner').freq, 6);
   // paging: top 1 by freq desc, then offset 1
-  const p1 = await engine.describe_catalog({ property: 'ad_type_of_event_data', limit: 1 });
+  const p1 = await engine.semantic_index({ property: 'ad_type_of_event_data', limit: 1 });
   assert.deepEqual(p1.sample_values.map((v) => v.value), ['rewarded']);
   assert.equal(p1.value_stats.has_more, true);
-  const p2 = await engine.describe_catalog({ property: 'ad_type_of_event_data', limit: 1, offset: 1 });
+  const p2 = await engine.semantic_index({ property: 'ad_type_of_event_data', limit: 1, offset: 1 });
   assert.deepEqual(p2.sample_values.map((v) => v.value), ['interstitial']);
   // order_by value asc → alphabetical
-  const alpha = await engine.describe_catalog({ property: 'ad_type_of_event_data', order_by: 'value' });
+  const alpha = await engine.semantic_index({ property: 'ad_type_of_event_data', order_by: 'value' });
   assert.deepEqual(alpha.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   assert.ok(Array.isArray(out.recommendations) && out.recommendations.length > 0 && out.recommendations.every((r) => typeof r === 'string' && r.length), 'actionable recommendations');
 });
 
-test('1d. describe_catalog({ search: "rewarded" }) traces value → property → event provenance', opts, async (t) => {
+test('1d. semantic_index({ search: "rewarded" }) traces value → property → event provenance', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.describe_catalog({ search: 'rewarded' });
+  const out = await engine.semantic_index({ search: 'rewarded' });
   const hit = out.value_matches.find((m) => m.value === 'rewarded' && m.property === 'ad_type_of_event_data');
   assert.ok(hit, `expected rewarded → ad_type match; got ${JSON.stringify(out.value_matches)}`);
   assert.equal(hit.freq, 10);
@@ -137,16 +137,21 @@ test('1d. describe_catalog({ search: "rewarded" }) traces value → property →
 });
 
 // ───────────────────────── 2. INDEX STATE ─────────────────────────
-test('2. describe_index reports a clean value-index sync with EXACT coverage', opts, async (t) => {
+test('2. semantic_index({ status }) reports a clean value-index sync with EXACT coverage', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.describe_index();
+  const out = await engine.semantic_index({ status: true });
   const vi = out.value_index;
   assert.equal(vi.persisted, true);
   assert.equal(vi.running, false);
   assert.equal(vi.last_successful_run.status, 'ok');
   assert.equal(vi.last_successful_run.errors, 0);
-  // EXACT coverage: every scalar event property was indexed (no silent gaps)…
-  assert.equal(vi.indexed_properties, engine.catalog.scalarEventProps().length, 'one prop_stats row per scalar event property');
+  // EXACT coverage: every scalar event property PLUS every categorical dimension
+  // attribute of the non-anchor models (users/experiments) was indexed — no silent gaps…
+  const dimTargets = engine.catalog.modelKeys()
+    .filter((k) => k !== engine.catalog.anchor)
+    .flatMap((k) => Object.entries(engine.catalog.getModel(k).dimensions || {})
+      .filter(([, s]) => String(s?.type || '').toLowerCase() !== 'time'));
+  assert.equal(vi.indexed_properties, engine.catalog.scalarEventProps().length + dimTargets.length, 'one prop_stats row per indexable property/attribute');
   // …and the persisted counts equal what the run itself reported (DB COUNT == run counters).
   assert.equal(vi.indexed_properties, vi.last_successful_run.properties_indexed);
   assert.equal(vi.total_values, vi.last_successful_run.values_written);
@@ -154,7 +159,7 @@ test('2. describe_index reports a clean value-index sync with EXACT coverage', o
   assert.equal(typeof out.query_jobs.total, 'number');
 });
 
-// 2b. Read the index DIRECTLY (bypassing describe_catalog): the exact seeded values landed.
+// 2b. Read the index DIRECTLY (bypassing semantic_index): the exact seeded values landed.
 test('2b. the value index holds the exact seeded values (direct read)', opts, async (t) => {
   if (skip(t)) return;
   const vi = engine.valueIndex;

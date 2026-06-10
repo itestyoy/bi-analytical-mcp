@@ -31,7 +31,7 @@ select
     (event_data->>'is_clicked')                            as is_clicked_of_event_data,
     (event_data->>'screen_from')                           as screen_from_of_event_data,
     (event_data->>'screen_to')                             as screen_to_of_event_data,
-    (event_data->>'step_id')                               as chain_of_event_data,
+    (event_data->>'step_id')                               as element_of_event_data,
     -- payload array stored as a JSON-encoded STRING (mirrors the real warehouse,
     -- where words_selected lands as text like '["cat","dog"]' and must be parsed)
     (event_data->>'words_collected')                       as words_selected_of_event_data,

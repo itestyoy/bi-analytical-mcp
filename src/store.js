@@ -14,6 +14,7 @@
 //   values.stats(prop)                -> { distinctCount, totalCount, nullCount, indexedAt } | null
 //   values.coverage(prop)             -> [{event_name, row_count, non_null, null_count}] (row_count desc)
 //   values.search(query, limit)       -> [{property,value,freq}] (substring, freq desc)
+//   values.candidates(cap)            -> [{property,value,freq}] (top-freq pool for JS fuzzy rank)
 //   values.counts()                   -> { properties, values }
 //   runs.reconcile()                  (mark running→interrupted)
 //   runs.start()                      -> id
@@ -83,6 +84,13 @@ export class MemoryBackend {
         for (const [property, e] of props) for (const v of e.values) if (v.value.toLowerCase().includes(q)) out.push({ property, value: v.value, freq: v.freq });
         return out.sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)).slice(0, limit);
       },
+      // Bounded candidate pool for a fuzzy (typo-tolerant) value match, ranked in JS by
+      // the caller. Highest-frequency values first so the cap keeps the most relevant.
+      candidates: (cap = 5000) => {
+        const out = [];
+        for (const [property, e] of props) for (const v of e.values) out.push({ property, value: v.value, freq: v.freq });
+        return out.sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)).slice(0, cap);
+      },
       counts: () => ({ properties: props.size, values: [...props.values()].reduce((s, e) => s + e.values.length, 0) }),
     };
 
@@ -125,7 +133,7 @@ export class SqliteBackend {
     // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
     db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(property, event_name))');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
-    // Per-property timing within a run — detailed stats drilled into via describe_index.
+    // Per-property timing within a run — detailed stats drilled into via semantic_index.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
     const s = this;
 
@@ -172,6 +180,11 @@ export class SqliteBackend {
       search(query, limit) {
         const q = String(query).toLowerCase();
         return s._all('SELECT property, value, freq FROM prop_values WHERE instr(lower(value), ?) > 0 ORDER BY freq DESC, value ASC LIMIT ?', q, limit).map((r) => ({ property: r.property, value: r.value, freq: Number(r.freq) }));
+      },
+      // Bounded candidate pool for a fuzzy (typo-tolerant) value match, ranked in JS by
+      // the caller. Highest-frequency values first so the cap keeps the most relevant.
+      candidates(cap = 5000) {
+        return s._all('SELECT property, value, freq FROM prop_values ORDER BY freq DESC, value ASC LIMIT ?', cap).map((r) => ({ property: r.property, value: r.value, freq: Number(r.freq) }));
       },
       counts() {
         return { properties: Number(s._get('SELECT COUNT(*) AS n FROM prop_stats').n), values: Number(s._get('SELECT COUNT(*) AS n FROM prop_values').n) };

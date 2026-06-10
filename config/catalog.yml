@@ -65,6 +65,17 @@ models:
       mcp:
         role: events           # the logical name the tools use (the dbt model can be named anything)
         primary_entity: event  # the grain of the fact (no physical key column)
+        # The physical partition column — queries MUST constrain it (or device_time)
+        # or the warehouse scans the whole fact. Surfaced as a static cost hint.
+        partition_column: event_date
+        # Business meaning of the key events — which event marks an install, a return
+        # visit, a purchase — so retention/conversion metrics anchor on the RIGHT events.
+        event_semantics:
+          acquisition_event: first_launch        # install / first activity (cohort anchor)
+          session_event: new_session             # return-visit marker (DAU, retention)
+          session_end_event: end_session         # carries session_duration
+          purchase_event: iap_purchase_completed # realized IAP revenue
+          ad_impression_event: ad_finished       # realized ad revenue (revenue field)
         known_events:
           # activity
           - first_launch
@@ -200,6 +211,9 @@ models:
       - name: playtime_of_main_data
         data_type: numeric
         description: "Cumulative playtime in seconds (including ad views). Present on every event."
+        meta:
+          mcp:
+            unit: seconds
       - name: build_version_of_main_data
         data_type: string
         description: "Current app version (semantic version string) at event time. Present on every event."
@@ -224,9 +238,15 @@ models:
       - name: device_time_ms_of_main_data
         data_type: integer
         description: "Raw client event time as a local UNIX timestamp in milliseconds. Present on every event."
+        meta:
+          mcp:
+            unit: epoch_milliseconds
       - name: first_launch_ms_of_main_data
         data_type: integer
         description: "Player's first-launch time as a local UNIX timestamp in milliseconds. Present on every event."
+        meta:
+          mcp:
+            unit: epoch_milliseconds
 
       # ---- envelope: device_info (present on EVERY event) -----------------
       - name: cpu_type_of_device_info
@@ -375,12 +395,14 @@ models:
         description: "Ad revenue for the impression; 0 on failure. Events: ad_loaded, ad_started, ad_finished."
         meta:
           mcp:
+            unit: usd      # NOT comparable with coins amounts; declare the real unit of YOUR pipeline here
             events: [ad_loaded, ad_started, ad_finished]
       - name: display_duration_of_event_data
         data_type: string
         description: "Seconds the ad was displayed on screen. Events: ad_finished."
         meta:
           mcp:
+            unit: seconds  # numeric-in-meaning but typed string -> cast before aggregating
             events: [ad_finished]
       - name: is_clicked_of_event_data
         data_type: string
@@ -466,6 +488,7 @@ models:
         description: "Mediation waterfall latency in milliseconds. Events: ad_loaded, ad_started, ad_finished, ad_redirected."
         meta:
           mcp:
+            unit: milliseconds  # numeric-in-meaning but typed string -> cast before aggregating
             events: [ad_loaded, ad_started, ad_finished, ad_redirected]
       - name: waterfall_name_of_additional_info_of_event_data
         data_type: string
@@ -606,6 +629,7 @@ models:
         description: "IAP price in USD. Events: iap_started, iap_purchase_failed, iap_purchase_completed."
         meta:
           mcp:
+            unit: usd
             events: [iap_started, iap_purchase_failed, iap_purchase_completed]
       - name: price_in_currency_of_event_data
         data_type: numeric
@@ -756,6 +780,7 @@ models:
         description: "Clean seconds taken to complete (excludes pauses). Events: fragment_finished, level_completed, puzzle_part_completed, puzzle_completed, battle_of_wits_finished."
         meta:
           mcp:
+            unit: seconds  # numeric-in-meaning but typed string -> cast before aggregating
             events: [fragment_finished, level_completed, puzzle_part_completed, puzzle_completed, battle_of_wits_finished]
       - name: open_number_of_event_data
         data_type: integer
@@ -945,6 +970,7 @@ models:
         description: "Matchmaking time in milliseconds. Events: battle_of_wits_started."
         meta:
           mcp:
+            unit: milliseconds
             events: [battle_of_wits_started]
       - name: stage_number_of_event_data
         data_type: integer
@@ -1079,6 +1105,7 @@ models:
         description: "Total elapsed time to complete the level incl. pauses, in seconds. Events: level_completed (moves-based games)."
         meta:
           mcp:
+            unit: seconds
             events: [level_completed]
 
       # ---- event_data: hint usage -----------------------------------------
@@ -1203,6 +1230,7 @@ models:
         description: "Session length in seconds, including ad views. Events: end_session."
         meta:
           mcp:
+            unit: seconds
             events: [end_session]
       - name: state_of_event_data
         data_type: string

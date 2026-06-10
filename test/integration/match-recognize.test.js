@@ -41,9 +41,9 @@ async function pipe(stages, name) {
 // The canonical 4-step activation funnel as a single match_recognize stage.
 const activationSteps = [
   { name: 'launch', event_name: ['first_launch'] },
-  { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_1' }] },
-  { name: 'tut2', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_2' }] },
-  { name: 'tut3', event_name: ['tutorial'], where: [{ property: 'chain_of_event_data', op: 'eq', value: 'step_3' }] },
+  { name: 'tut1', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_1' }] },
+  { name: 'tut2', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_2' }] },
+  { name: 'tut3', event_name: ['tutorial'], where: [{ property: 'element_of_event_data', op: 'eq', value: 'step_3' }] },
 ];
 const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps, ...extra });
 
@@ -345,14 +345,14 @@ test('register_native_model: same name in two contexts → distinct relations', 
   assert.match(a.model, /^pipe_iso_[a-z0-9]{6,}$/);
 });
 
-test('describe_catalog: overview lists models, then { model } drills into REAL physical columns', opts, async (t) => {
+test('semantic_index: overview lists models, then { model } drills into REAL physical columns', opts, async (t) => {
   if (skip(t)) return;
-  const overview = await engine.describe_catalog();
+  const overview = await engine.semantic_index();
   assert.ok(overview.models.find((m) => m.key === 'events'), 'events model present in overview');
   assert.ok(Array.isArray(overview.event_names) && overview.event_names.length > 0, 'overview lists event names');
   assert.equal(overview.models.find((m) => m.key === 'events').physical_columns, undefined, 'overview does NOT dump physical columns');
   // drill down for the real physical columns (adapter.get_columns_in_relation)
-  const events = await engine.describe_catalog({ model: 'events' });
+  const events = await engine.semantic_index({ model: 'events' });
   assert.ok(Array.isArray(events.physical_columns) && events.physical_columns.length > 0, 'events { model } has REAL physical columns');
   // #4/#3: pipeline-referenceable columns + the time axis are discoverable
   assert.ok(Array.isArray(events.pipeline_columns), 'events { model } lists pipeline_columns');
@@ -360,7 +360,7 @@ test('describe_catalog: overview lists models, then { model } drills into REAL p
   assert.ok(pcNames.includes('device_time') && pcNames.includes('player_id_of_internal'), 'pipeline_columns include time + key');
   assert.equal(events.time, 'device_time', 'time axis (default window/match_recognize order) is reported');
   // { event } returns only the properties carried by that event
-  const ev = await engine.describe_catalog({ event: 'iap_purchase_completed' });
+  const ev = await engine.semantic_index({ event: 'iap_purchase_completed' });
   assert.ok(ev.property_count > 0 && ev.properties.some((p) => p.name === 'price_in_usd_of_event_data'), 'event lists its scoped properties');
 });
 

@@ -13,7 +13,7 @@ import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
-import { rankFuzzy } from './fuzzy.js';
+import { CatalogSearch } from './search.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { openStore } from './store.js';
@@ -31,6 +31,7 @@ export class Engine {
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
+    this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
     if (recipes) {
@@ -287,86 +288,12 @@ export class Engine {
       return out;
     }
 
-    // ── { search }: find events/properties/attributes/values/recipes ──
-    // FUZZY by default (typo- and paraphrase-tolerant): exact substring hits rank first,
-    // then close matches by similarity. Each match carries { score, match } consistently.
-    // fuzzy:false restricts to exact substring. Tier-1 exact + fuzzy fallback for values.
+    // ── { search }: fuzzy discovery across events/properties/attributes/values/recipes ──
+    // Owned by the CatalogSearch subsystem (src/search.js): exact substring hits first,
+    // then typo/approximate matches by similarity; each carries { score, match }.
+    // fuzzy:false restricts to exact substring.
     if (input.search) {
-      const query = String(input.search);
-      const fuzzy = input.fuzzy !== false;
-      const limit = input.limit ?? 20;
-      const descs = c.eventPropertyDescriptions();
-      const applies = c.eventPropertyEvents(); // property -> [event_name]; absent ⇒ all events
-      // One ranking pass per corpus → [{ item, score, match }], exact-first.
-      const rank = (items, fields, tiebreak) => rankFuzzy(query, items, { fields, threshold: fuzzy ? 0.6 : 1.01, tiebreak });
-
-      // EVENT-name matches: the name + how many properties that event carries.
-      const event_names = rank(c.eventNames(), (e) => [e], (e) => e).map(({ item: e, score, match }) => ({
-        event: e, property_count: c.eventProps().filter((p) => { const evs = applies[p]; return !evs || evs.includes(e); }).length, score: round3(score), match,
-      }));
-      // PROPERTY-name matches: name OR description, with the property's type + events.
-      const property_matches = rank(c.eventProps(), (p) => [p, descs[p] || ''], (p) => p)
-        .map(({ item: p, score, match }) => ({ property: p, type: c.eventPropertySpec(p)?.type ?? null, events: applies[p] || null, score: round3(score), match }));
-      // DIMENSION-attribute matches on the non-anchor models (users/experiments) — by
-      // column name OR description — so "country"/"media source" lead to the join path.
-      // The key is `property` (CONSISTENT with the { property } drill-down that accepts it).
-      const dimItems = [];
-      for (const mk of c.modelKeys()) {
-        if (mk === c.anchor) continue;
-        const dDescs = c.columnDescriptions(mk);
-        for (const [col, dspec] of Object.entries(c.getModel(mk).dimensions || {})) dimItems.push({ mk, col, type: dspec.type, desc: dDescs[col] });
-      }
-      const dimension_matches = rank(dimItems, (d) => [d.col, `${d.mk}.${d.col}`, d.desc || ''], (d) => `${d.mk}.${d.col}`)
-        .map(({ item: d, score, match }) => ({ property: `${d.mk}.${d.col}`, model: d.mk, type: d.type, description: d.desc, score: round3(score), match }));
-      // VALUE matches: the matched value + WHERE it lives. Namespaced keys ('users.country',
-      // 'experiments.experiment_name') are dimension attributes; bare keys are event
-      // properties with the event(s) carrying them (null ⇒ all events). So "rewarded"
-      // resolves to 'ad_type_of_event_data'; a mistyped "rewardd"/"germny" still surfaces.
-      const value_matches = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
-        const dot = v.property.indexOf('.');
-        const base = { value: v.value, freq: v.freq, property: v.property, score: round3(v.score ?? 1), match: v.match || 'exact' };
-        if (dot > 0) {
-          const mk = v.property.slice(0, dot); const col = v.property.slice(dot + 1);
-          return { ...base, type: c.models[mk]?.dimensions?.[col]?.type ?? null, model: mk, events: null };
-        }
-        return { ...base, type: c.eventPropertySpec(v.property)?.type ?? null, events: applies[v.property] || null };
-      });
-      // RECIPE matches: ready-made task templates whose id/title/use-case match the query
-      // (e.g. "retention"/"retenton" → nday_retention), so the AI lands on a proven pattern.
-      const recipe_matches = this.recipes
-        ? rankFuzzy(query, this.recipes.summary(), { fields: (r) => [r.id, r.title, r.when_to_use, r.task_type, r.hack].map((s) => String(s || '')), threshold: fuzzy ? 0.6 : 1.01, tiebreak: (r) => r.id })
-          .map(({ item: r, score, match }) => ({ id: r.id, title: r.title, task_type: r.task_type, score: round3(score), match }))
-        : [];
-      // Drill-down guidance: from a match, keep descending — full value distribution of
-      // the property, and the event(s) that carry it (concrete next moves, ≤4).
-      const recommendations = [];
-      if (value_matches.length) {
-        const top = value_matches[0];
-        recommendations.push(`Value '${top.value}' lives in ${top.model ? `attribute '${top.property}' (the '${top.model}' model)` : `property '${top.property}'`}${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ property: '${top.property}' }).`);
-        if (top.events?.[0]) recommendations.push(`See everything event '${top.events[0]}' carries: semantic_index({ event: '${top.events[0]}' }).`);
-      }
-      if (recipe_matches.length) recommendations.push(`Recipe '${recipe_matches[0].id}' covers this task type — get_recipe({ id: '${recipe_matches[0].id}' }) returns a ready payload + the reusable technique.`);
-      if (dimension_matches.length) recommendations.push(`Attribute '${dimension_matches[0].property}' matches — drill its values with semantic_index({ property: '${dimension_matches[0].property}' }).`);
-      if (property_matches.length) {
-        const p = property_matches[0];
-        recommendations.push(`Drill into property '${p.property}' for its real values + cardinality: semantic_index({ property: '${p.property}' }).`);
-      }
-      if (event_names.length) recommendations.push(`See what event '${event_names[0].event}' carries: semantic_index({ event: '${event_names[0].event}' }).`);
-      // Transparency: when nothing matched exactly, say the hits are fuzzy ("did you mean").
-      const allMatches = [...event_names, ...property_matches, ...dimension_matches, ...value_matches, ...recipe_matches];
-      const anyExact = allMatches.some((m) => m.match === 'exact');
-      if (allMatches.length && !anyExact) recommendations.unshift(`No exact match for '${query}' — these are the closest matches by similarity (fuzzy). Refine the spelling if none fit.`);
-      if (!allMatches.length) recommendations.push(`No catalog match for '${query}'${fuzzy ? '' : ' (fuzzy disabled)'}. Try semantic_index() for the event list, a broader substring${fuzzy ? '' : ', or drop fuzzy:false'}.`);
-      return {
-        query,
-        fuzzy,
-        event_names,
-        property_matches,
-        dimension_matches,
-        value_matches,
-        recipe_matches,
-        recommendations: recommendations.slice(0, 4),
-      };
+      return this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? 20 });
     }
 
     // ── default: compact OVERVIEW (no per-property dump, no warehouse calls) ──
@@ -1397,9 +1324,4 @@ function walkPredicates(group, fn) {
 
 function clone(x) {
   return JSON.parse(JSON.stringify(x ?? null));
-}
-
-/** Round a similarity score to 3 decimals for compact, stable output. */
-function round3(n) {
-  return n == null ? null : Math.round(n * 1000) / 1000;
 }

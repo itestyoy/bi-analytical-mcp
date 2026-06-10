@@ -1,101 +1,97 @@
-// Dependency-free fuzzy matching for catalog/vocabulary search. Pure functions, no
-// state — the search layer feeds candidate strings and gets a similarity score back.
+// Fuzzy matching for catalog/vocabulary search, powered by Fuse.js (Bitap).
 //
-// Design (best-practice tiered scoring, deterministic, no npm dep):
-//   1. EXACT substring            → 1.0  (always ranked first)
-//   2. token prefix / containment → 0.9–0.95
-//   3. ordered subsequence        → up to ~0.85 (all query chars appear in order)
-//   4. Levenshtein similarity     → 1 − dist/len, taken over the CLOSEST token
-// Matching is token-aware: a target is split on non-alphanumerics, so a typo is
-// compared against the nearest WORD (works for long descriptions, not just names).
-// A threshold gate keeps unrelated strings out; very short queries fall back to
-// exact-only (fuzzing 1–2 chars is pure noise).
+// Two layers:
+//   FuzzyIndex — a REUSABLE index over a fixed item list. Build it ONCE for a static
+//     corpus (the catalog never changes at runtime) and query it many times; the Fuse
+//     index and the exact-substring corpus are built up front, not per search.
+//   rankFuzzy — a one-shot convenience (build + search) for AD-HOC corpora that change,
+//     e.g. the value-index candidate pool.
+//
+// Both return [{ item, score, match }] with the EXACT tier first:
+//   tier 1  EXACT substring (case-insensitive) — always matches, ranked first, and the
+//           ONLY tier when fuzzy is off;
+//   tier 2  Fuse fuzzy — typo/approximate hits at/above the per-call similarity floor.
+// Fuse scores are DISTANCES (0 = perfect … 1 = no match); we expose similarity =
+// 1 − distance so callers reason in "how close", and gate by it per call.
 
-/** Levenshtein edit distance (iterative, two-row). */
-export function levenshtein(a, b) {
-  if (a === b) return 0;
-  if (!a.length) return b.length;
-  if (!b.length) return a.length;
-  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
-  let cur = new Array(b.length + 1);
-  for (let i = 1; i <= a.length; i += 1) {
-    cur[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost);
+import Fuse from 'fuse.js';
+
+const norm = (s) => String(s ?? '').toLowerCase();
+const round3 = (n) => Math.round(n * 1000) / 1000;
+const MIN_FUZZY_LEN = 3; // queries shorter than this are matched exact-only (1–2 chars fuzz to noise)
+
+// Build-time Fuse distance ceiling. Kept liberal so a single index serves any per-call
+// similarity floor; the floor is applied by filtering results in search().
+const FUSE_DISTANCE_CEILING = 0.6;
+
+/**
+ * Reusable fuzzy index over `items`. `keys` describe the string fields to match:
+ *   [{ name, weight?, get(item) -> string | string[] }]
+ * Higher weight = more influential (e.g. a name over a description). `tiebreak(item)`
+ * gives a stable string for deterministic ordering within a tier.
+ */
+export class FuzzyIndex {
+  constructor(items, { keys, tiebreak } = {}) {
+    this.items = items;
+    this._tiebreak = tiebreak;
+    const docs = items.map((item, i) => {
+      const d = { __i: i };
+      for (const k of keys) d[k.name] = k.get(item);
+      return d;
+    });
+    this._fuse = new Fuse(docs, {
+      keys: keys.map((k) => ({ name: k.name, weight: k.weight ?? 1 })),
+      includeScore: true,
+      ignoreLocation: true, // match anywhere in the field, not only near the start
+      threshold: FUSE_DISTANCE_CEILING,
+      minMatchCharLength: MIN_FUZZY_LEN,
+    });
+    // Lowercased field strings per item, for the exact-substring tier (Fuse-independent
+    // → exact hits are always found and deterministic, even for <3-char queries).
+    this._exact = items.map((item) => keys.flatMap((k) => {
+      const v = k.get(item);
+      return (Array.isArray(v) ? v : [v]).map(norm);
+    }));
+  }
+
+  /**
+   * Rank items by similarity to `query`. Options: threshold (similarity floor in [0,1],
+   * default 0.6), limit, fuzzy (default true — false = exact substring only).
+   */
+  search(query, { threshold = 0.6, limit, fuzzy = true } = {}) {
+    const q = String(query ?? '').trim();
+    if (!q) return [];
+    const ql = norm(q);
+    const tb = (item) => (this._tiebreak ? String(this._tiebreak(item)) : '');
+
+    // tier 1 — exact substring.
+    const exactIdx = new Set();
+    const exact = [];
+    this._exact.forEach((fields, i) => {
+      if (fields.some((f) => f.includes(ql))) { exact.push({ item: this.items[i], score: 1, match: 'exact' }); exactIdx.add(i); }
+    });
+    exact.sort((a, b) => tb(a.item).localeCompare(tb(b.item)));
+
+    // tier 2 — Fuse fuzzy, gated by the per-call similarity floor.
+    let fuzzyHits = [];
+    if (fuzzy && q.length >= MIN_FUZZY_LEN) {
+      fuzzyHits = this._fuse.search(q)
+        .filter((r) => !exactIdx.has(r.item.__i) && 1 - (r.score ?? 0) >= threshold)
+        .map((r) => ({ item: this.items[r.item.__i], score: round3(1 - (r.score ?? 0)), match: 'fuzzy' }))
+        .sort((a, b) => b.score - a.score || tb(a.item).localeCompare(tb(b.item)));
     }
-    [prev, cur] = [cur, prev];
+
+    const out = [...exact, ...fuzzyHits];
+    return limit != null ? out.slice(0, limit) : out;
   }
-  return prev[b.length];
-}
-
-/** Edit-distance similarity in [0,1] (1 = identical). */
-function simRatio(a, b) {
-  const m = Math.max(a.length, b.length);
-  return m === 0 ? 1 : 1 - levenshtein(a, b) / m;
-}
-
-/** True if every char of q appears in t in order (subsequence). */
-function isSubsequence(q, t) {
-  let i = 0;
-  for (let j = 0; j < t.length && i < q.length; j += 1) if (t[j] === q[i]) i += 1;
-  return i === q.length;
-}
-
-const MIN_FUZZY_LEN = 3; // queries shorter than this are matched exact-only
-
-/**
- * Similarity of `query` to `target` in [0,1]; 0 means "no match". Combines exact
- * substring, token prefix/containment, subsequence and the best per-token edit
- * similarity, so typos and word forms score highly while unrelated strings stay low.
- */
-export function fuzzyScore(query, target) {
-  const q = String(query ?? '').toLowerCase().trim();
-  const t = String(target ?? '').toLowerCase();
-  if (!q || !t) return 0;
-  if (t.includes(q)) return 1; // exact substring — the strongest signal
-  if (q.length < MIN_FUZZY_LEN) return 0; // too short to fuzz safely
-
-  const tokens = t.split(/[^a-z0-9]+/).filter(Boolean);
-  let best = simRatio(q, t); // whole-string ratio (handles single-token targets)
-  for (const tok of tokens) {
-    if (tok.includes(q)) { best = Math.max(best, 0.95); continue; }
-    if (tok.startsWith(q) || q.startsWith(tok)) best = Math.max(best, 0.9);
-    best = Math.max(best, simRatio(q, tok));
-  }
-  // Ordered-subsequence credit (e.g. "convrate" ⊂ "conversion_rate"): partial, capped.
-  if (best < 0.85 && (isSubsequence(q, t) || tokens.some((tok) => isSubsequence(q, tok)))) {
-    best = Math.max(best, 0.7 + 0.15 * (q.length / Math.max(q.length, t.length)));
-  }
-  return best;
 }
 
 /**
- * Best similarity of `query` across several target fields (e.g. a property's name +
- * description). Returns { score, exact } where exact = a 1.0 substring hit.
- */
-export function fuzzyScoreFields(query, fields) {
-  let score = 0;
-  for (const f of fields) { const s = fuzzyScore(query, f); if (s > score) score = s; }
-  return { score, exact: score >= 1 };
-}
-
-/**
- * Rank `items` by fuzzy similarity to `query`. `fields(item)` returns the strings to
- * match against. Keeps items scoring ≥ threshold, EXACT substring hits first, then by
- * score desc, then by the stable `tiebreak(item)` string. Each kept item is returned
- * as { item, score, match: 'exact' | 'fuzzy' }.
+ * One-shot rank of an ad-hoc `items` list. `fields(item) -> string[]`. Pass threshold > 1
+ * for exact-substring only. Prefer a cached FuzzyIndex for static, frequently-searched corpora.
  */
 export function rankFuzzy(query, items, { fields, threshold = 0.6, limit, tiebreak } = {}) {
-  const scored = [];
-  for (const item of items) {
-    const { score, exact } = fuzzyScoreFields(query, fields(item));
-    if (score >= (exact ? 1 : threshold)) scored.push({ item, score, match: exact ? 'exact' : 'fuzzy' });
-  }
-  scored.sort((a, b) => {
-    if (a.match !== b.match) return a.match === 'exact' ? -1 : 1; // exact tier first
-    if (b.score !== a.score) return b.score - a.score;
-    return tiebreak ? String(tiebreak(a.item)).localeCompare(String(tiebreak(b.item))) : 0;
-  });
-  return limit != null ? scored.slice(0, limit) : scored;
+  if (!items.length) return [];
+  const idx = new FuzzyIndex(items, { keys: [{ name: 'f', get: fields }], tiebreak });
+  return idx.search(query, { threshold, limit, fuzzy: threshold <= 1 });
 }

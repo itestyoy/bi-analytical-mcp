@@ -31,6 +31,25 @@ function pipelineColumnType(cm, col) {
   return isNumericType(dt) ? 'numeric' : 'string';
 }
 
+/**
+ * Reconcile a catalog against the warehouse: introspect each model's physical columns
+ * (via the runner, same call semantic_index uses) and PRUNE declared columns/properties/
+ * dimensions the table does not have — so the desync ("catalog declares a column the
+ * physical table lacks") can never surface anywhere downstream. Best-effort: a model
+ * whose relation can't be introspected is left as declared. Returns { pruned }.
+ */
+export async function groundCatalogToPhysical(catalog, runner, baseProjectDir) {
+  if (!runner || !baseProjectDir || typeof runner.relationColumns !== 'function') return { pruned: {} };
+  const phys = {};
+  for (const key of catalog.modelKeys()) {
+    try {
+      const r = await runner.relationColumns(baseProjectDir, catalog.getModel(key).dbt_model);
+      if (r && r.ok && Array.isArray(r.columns)) phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
+    } catch { /* relation not built / introspection failed → keep declared for this model */ }
+  }
+  return catalog.groundToPhysical(phys);
+}
+
 export function loadCatalog(path, opts = {}) {
   // A directory => a dbt project: discover the MCP-tagged models from its own
   // schema YAMLs (no separate catalog file needed).
@@ -369,6 +388,40 @@ export class Catalog {
       const name = primaryEntityName(m);
       if (name) this.primaryByEntity[name] = key;
     }
+  }
+
+  /**
+   * Reconcile the DECLARED catalog against PHYSICAL truth. Given each model's real
+   * column names, PRUNE every declared column / event-payload property / dimension the
+   * table does not actually have — so nothing that isn't physically present is EVER
+   * surfaced anywhere (the tool schemas, semantic_index, and the value indexer all
+   * derive from these maps). Models absent from `physByModel` (introspection
+   * unavailable / relation not built) are left untouched. Returns { pruned } for logs.
+   * Call BEFORE building schemas (so the enums reflect physical reality).
+   */
+  groundToPhysical(physByModel) {
+    const get = (k) => (physByModel instanceof Map ? physByModel.get(k) : physByModel?.[k]);
+    const pruned = {};
+    for (const [key, m] of Object.entries(this.models)) {
+      const raw = get(key);
+      if (!raw) continue; // unknown physical shape → keep declared as-is
+      const phys = raw instanceof Set ? raw : new Set([...raw].map((n) => String(n).toLowerCase()));
+      const has = (n) => phys.has(String(n).toLowerCase());
+      const gone = new Set();
+      // Physical columns referenceable in a pipeline.
+      if (Array.isArray(m.columns)) m.columns = m.columns.filter((c) => { if (has(c.name)) return true; gone.add(c.name); return false; });
+      // Event-payload properties: a flattened property is pruned by its physical column;
+      // a property read from the JSON blob survives iff the event_data column is physical.
+      if (m.properties) for (const [name, spec] of Object.entries(m.properties)) {
+        const col = spec.column || m.event_data_column;
+        if (col && !has(col)) { delete m.properties[name]; gone.add(name); }
+      }
+      // Groupable dimensions (semantic-layer group-by + schema enums).
+      if (m.dimensions) for (const name of Object.keys(m.dimensions)) if (!has(name)) { delete m.dimensions[name]; gone.add(name); }
+      if (m.column_descriptions) for (const name of Object.keys(m.column_descriptions)) if (!has(name)) delete m.column_descriptions[name];
+      if (gone.size) pruned[key] = [...gone];
+    }
+    return { pruned };
   }
 
   modelKeys() {

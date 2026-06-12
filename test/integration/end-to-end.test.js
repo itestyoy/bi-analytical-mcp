@@ -43,7 +43,10 @@ const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'd
 const MF_BIN = process.env.MF_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'mf');
 const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'python');
 const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
-const opts = { timeout: 300000 };
+// 10-min budget: before() awaits a FULL real indexer pass (37 targets × ~3 mf round-trips
+// each ≈ several minutes); the production indexer is background/non-blocking, but the test
+// awaits it synchronously to assert on populated values, so give the hook ample headroom.
+const opts = { timeout: 600000 };
 
 const num = (v) => Number(v);
 const tru = (v) => v === true || v === 't' || v === 'true' || v === 1 || v === '1';

@@ -7,7 +7,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { existsSync, mkdirSync } from 'node:fs';
-import { loadCatalog, validateDbtProject } from './catalog.js';
+import { loadCatalog, validateDbtProject, groundCatalogToPhysical } from './catalog.js';
 import { loadRecipes } from './recipes.js';
 import { ContextManager } from './context-manager.js';
 import { DbtRunner } from './dbt-runner.js';
@@ -148,7 +148,7 @@ function errorResult(message, stage, field) {
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
 }
 
-export function makeEngine(opts = {}) {
+export async function makeEngine(opts = {}) {
   const baseProjectDir = opts.baseProjectDir || process.env.DBT_BASE_PROJECT;
   // Catalog source precedence: explicit CATALOG_PATH (a standalone catalog file) →
   // the dbt project itself (discover MCP-tagged models from its schema YAMLs) →
@@ -184,6 +184,16 @@ export function makeEngine(opts = {}) {
   // DEFAULT ON: reset unless explicitly disabled (MCP_DB_RESET=false/0/no/off).
   const resetDb = !/^(0|false|no|off)$/i.test(String(process.env.MCP_DB_RESET ?? 'true').trim());
   if (resetDb) console.error(`[mcp] ${new Date().toISOString()} MCP_DB_RESET on (default) — clearing the store on startup; set MCP_DB_RESET=false to keep it`);
+  // GROUND the catalog to the physical warehouse BEFORE building the engine (its tool
+  // schemas + value index derive from the catalog): a column the dbt schema declares but
+  // the physical table lacks is pruned, so it never appears in any tool. Best-effort and
+  // opt-out via MCP_GROUND_CATALOG=0 (e.g. offline/catalog-only dev).
+  if (runner && baseProjectDir && !/^(0|false|no|off)$/i.test(String(process.env.MCP_GROUND_CATALOG ?? 'true').trim())) {
+    try {
+      const { pruned } = await groundCatalogToPhysical(catalog, runner, baseProjectDir);
+      for (const [k, names] of Object.entries(pruned)) console.error(`[mcp] ${new Date().toISOString()} catalog grounding: '${k}' — excluded ${names.length} declared field(s) absent from the physical table: ${names.slice(0, 12).join(', ')}${names.length > 12 ? ', …' : ''}`);
+    } catch (e) { console.error(`[mcp] ${new Date().toISOString()} catalog grounding skipped: ${e?.message || e}`); }
+  }
   return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb });
 }
 
@@ -227,7 +237,7 @@ export function createApp(engine) {
 
 // Entry point
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const engine = makeEngine();
+  const engine = await makeEngine();
   const app = createApp(engine);
   const port = Number(process.env.PORT || 3000);
   const host = process.env.HOST || '127.0.0.1'; // localhost by default; set HOST=0.0.0.0 in containers

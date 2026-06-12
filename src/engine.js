@@ -156,6 +156,15 @@ export class Engine {
         const cols = await this.runner.relationColumns(base, m.dbt_model);
         out.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
         if (!cols.ok) out.physical_columns_error = 'physical columns unavailable — the underlying table is not built yet';
+        else {
+          // GROUND the referenceable columns to physical truth: a catalog column the
+          // table does not have is excluded from pipeline_columns and called out in
+          // not_materialized (fix the source dbt model/schema to align them).
+          const physSet = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
+          const phantom = out.pipeline_columns.filter((col) => !physSet.has(col.name.toLowerCase())).map((col) => col.name);
+          out.pipeline_columns = out.pipeline_columns.filter((col) => physSet.has(col.name.toLowerCase()));
+          if (phantom.length) out.not_materialized = phantom;
+        }
       }
       out.recommendations = k === c.anchor
         ? [
@@ -537,10 +546,40 @@ export class Engine {
     return this._draftCommit(ctx, draft); // commit
   }
 
-  /** Columns available after a draft's accumulated stages (source columns when empty). */
-  _draftColumns(draft) {
-    if (!draft.stages.length) return this.catalog.modelColumns(draft.source);
-    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, draft.stages);
+  /**
+   * Physical column NAMES (lowercased Set) of a source's relation, via the same
+   * introspection semantic_index({ model }) uses — cached per source. null when it
+   * cannot be known (no runner / relation not built / introspection failed), in which
+   * case the catalog's declared columns are used as-is (grounding is skipped).
+   */
+  async _physicalCols(source) {
+    if (!this.runner || !this.ctxs.baseProjectDir) return null;
+    this._physColCache ??= new Map();
+    if (this._physColCache.has(source)) return this._physColCache.get(source);
+    let set = null;
+    try {
+      const r = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
+      if (r.ok && Array.isArray(r.columns)) set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
+    } catch { /* introspection unavailable → grounding skipped */ }
+    this._physColCache.set(source, set);
+    return set;
+  }
+
+  /** Declared source columns GROUNDED to physical truth: { cols, phantom } where phantom
+   *  lists declared-but-not-materialized names (empty when grounding is unavailable). */
+  _groundedDeclared(source, physSet) {
+    const declared = this.catalog.modelColumns(source);
+    if (!physSet) return { cols: declared, phantom: [] };
+    const cols = []; const phantom = [];
+    for (const c of declared) (physSet.has(c.name.toLowerCase()) ? cols : phantom).push(c);
+    return { cols, phantom: phantom.map((c) => c.name) };
+  }
+
+  /** Columns available after a draft's accumulated stages (source columns when empty),
+   *  grounded to the physical relation (phantom catalog columns excluded). */
+  _draftColumns(draft, physSet) {
+    if (!draft.stages.length) return this._groundedDeclared(draft.source, physSet).cols;
+    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, draft.stages, { physicalCols: physSet });
     return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   }
 
@@ -581,12 +620,16 @@ export class Engine {
     return draft.stages.map((s, i) => ({ index: i + 1, ...s }));
   }
 
-  _draftStart(input) {
+  async _draftStart(input) {
     const ctx = input.draft_id ? this.ctxs.get(input.draft_id) : this.ctxs.create();
     const source = input.source || this.catalog.anchor;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
-    const cols = this.catalog.modelColumns(source);
+    // Ground the referenceable columns to the physical relation: a column the catalog
+    // declares but the table does not have is excluded here (not offered, not buildable)
+    // rather than failing later as a raw warehouse "Unrecognized name" at commit.
+    const physSet = await this._physicalCols(source);
+    const { cols, phantom } = this._groundedDeclared(source, physSet);
     const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
       steps: [], column_count: cols.length,
@@ -597,22 +640,29 @@ export class Engine {
         `When the steps look right, commit with build_native_model({ action: "commit", draft_id }).`,
       ],
     };
+    // Surface the desync (catalog declares them, the physical table does not) so it is
+    // visible, not silent — these names are excluded from the referenceable columns.
+    if (phantom.length) {
+      resp.not_materialized = phantom;
+      resp.recommendations.push(`${phantom.length} catalog column(s) are NOT in the physical '${this.catalog.getModel(source).dbt_model}' and were excluded (e.g. ${phantom.slice(0, 5).join(', ')}). Fix the source dbt model/schema to materialize or drop them.`);
+    }
     if (input.include_columns) resp.available_columns = cols;
     return resp;
   }
 
   async _draftAddStep(ctx, draft, stage, includeColumns = false) {
-    const before = this._draftColumns(draft); // columns BEFORE this stage
+    const physSet = await this._physicalCols(draft.source);
+    const before = this._draftColumns(draft, physSet); // columns BEFORE this stage
     const trial = [...draft.stages, stage];
     try {
-      renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
+      renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial, { physicalCols: physSet }); // validates refs/stage against PHYSICAL columns (no warehouse)
     } catch (e) {
       // Reject the step WITHOUT persisting it; the draft is left intact to retry.
       throw new ToolError(e.message, { stage: 'compile', field: 'stage' });
     }
     draft.stages = trial;
     this.ctxs.touch(ctx.id);
-    const after = this._draftColumns(draft);
+    const after = this._draftColumns(draft, physSet);
     // Default to a DIFF (what this stage added/removed) instead of dumping the whole
     // schema every step — the full list is noise after the first call. Pass
     // include_columns:true (or use preview) for the complete set.
@@ -647,14 +697,15 @@ export class Engine {
     return recs;
   }
 
-  _draftPreview(ctx, draft) {
+  async _draftPreview(ctx, draft) {
     const dialect = this.catalog.dialect;
+    const physSet = await this._physicalCols(draft.source);
     const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft) };
-    if (!draft.stages.length) return { ...base, available_columns: this.catalog.modelColumns(draft.source), note: 'No stages yet — add_step first.' };
+    if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No stages yet — add_step first.' };
     const stages = this._draftEffectiveStages(draft);
     // Render ONLY the active warehouse dialect, so every response is consistent with where
-    // the pipeline actually runs (bigquery → `|>`, postgres → CTEs).
-    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages);
+    // the pipeline actually runs (bigquery → `|>`, postgres → CTEs). Grounded to physical.
+    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages, { physicalCols: physSet });
     return { ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql };
   }
 
@@ -695,8 +746,11 @@ export class Engine {
       );
     }
     // Render ONLY the active warehouse dialect — every response is in the dialect the
-    // pipeline actually runs on, never a mix.
-    const render = () => renderPipeline(this.catalog, dialect, source, stages);
+    // pipeline actually runs on, never a mix. Grounded to the physical relation so a
+    // phantom catalog column is rejected as "unknown column" here, not as a raw
+    // warehouse error after the build.
+    const physSet = await this._physicalCols(source);
+    const render = () => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet });
     if (input.dry_run) {
       const out = render();
       const resp = {

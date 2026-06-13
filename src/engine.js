@@ -529,9 +529,9 @@ export class Engine {
   /**
    * Compose a native pipeline INCREMENTALLY (single tool, `action`-driven). Each
    * add_step validates the stage and returns the columns now available for the next
-   * stage — pure schema propagation via renderPipeline, NO warehouse hit until commit.
+   * stage — pure schema propagation via renderPipeline, NO warehouse hit until materialize.
    * The all-at-once register_native_model path is unchanged. Lifecycle:
-   * start → add_step* → (preview) → commit | discard.
+   * start → add_step* → (preview) → materialize | discard.
    */
   async build_native_model(input) {
     this._validate('build_native_model', input);
@@ -543,7 +543,7 @@ export class Engine {
     if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns);
     if (input.action === 'preview') return this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { draft_id: ctx.id, action: 'discard', discarded: true }; }
-    return this._draftCommit(ctx, draft); // commit
+    return this._draftMaterialize(ctx, draft); // materialize (the final build step)
   }
 
   /**
@@ -610,7 +610,7 @@ export class Engine {
     return stages.some((s) => s.stage === 'where' && (s.conditions || []).some((c) => bounds.has(c.column)));
   }
 
-  /** Accumulated stages with the draft's time_range prepended as a leading WHERE (parity with commit). */
+  /** Accumulated stages with the draft's time_range prepended as a leading WHERE (parity with materialize). */
   _draftEffectiveStages(draft) {
     const conditions = this._timeRangeConditions(draft.source, draft.time_range);
     return conditions ? [{ stage: 'where', conditions }, ...draft.stages] : draft.stages;
@@ -627,7 +627,7 @@ export class Engine {
     this.ctxs.touch(ctx.id);
     // Ground the referenceable columns to the physical relation: a column the catalog
     // declares but the table does not have is excluded here (not offered, not buildable)
-    // rather than failing later as a raw warehouse "Unrecognized name" at commit.
+    // rather than failing later as a raw warehouse "Unrecognized name" at materialize time.
     const physSet = await this._physicalCols(source);
     const { cols, phantom } = this._groundedDeclared(source, physSet);
     const resp = {
@@ -637,7 +637,7 @@ export class Engine {
       recommendations: [
         `The source has ${cols.length} columns your first stage can reference; get the full list with build_native_model({ action: "start", ..., include_columns: true }) or inspect via semantic_index({ model: '${source}' }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
-        `When the steps look right, commit with build_native_model({ action: "commit", draft_id }).`,
+        `When the steps look right, materialize with build_native_model({ action: "materialize", draft_id }).`,
       ],
     };
     // Surface the desync (catalog declares them, the physical table does not) so it is
@@ -674,7 +674,7 @@ export class Engine {
       column_count: after.length,
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
       columns_removed: before.filter((c) => !afterNames.has(c.name)).map((c) => c.name),
-      next: 'add_step the next stage, commit the draft, or pass include_columns:true / preview for the full column list.',
+      next: 'add_step the next stage, materialize the draft, or pass include_columns:true / preview for the full column list.',
       recommendations: this._draftStepRecommendations(stage, after),
     };
     if (includeColumns) resp.available_columns = after;
@@ -687,13 +687,13 @@ export class Engine {
     if (stage.stage === 'match_recognize') {
       recs.push(`The funnel columns (reached_<step>, completed, furthest_step_name, secs_<metric>) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country).`);
     } else if (stage.stage === 'aggregate') {
-      recs.push(`Aggregated: the output is now group_by keys + measures (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}); add order_by/limit or commit.`);
+      recs.push(`Aggregated: the output is now group_by keys + measures (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}); add order_by/limit or materialize.`);
     } else if (stage.stage === 'join') {
       recs.push(`Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.`);
     } else {
       recs.push(`Reference any of available_columns in the next stage (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}).`);
     }
-    recs.push(`Preview the SQL anytime with build_native_model({ action: "preview", draft_id }); commit when done.`);
+    recs.push(`Preview the SQL anytime with build_native_model({ action: "preview", draft_id }); materialize when done.`);
     return recs;
   }
 
@@ -709,13 +709,13 @@ export class Engine {
     return { ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql };
   }
 
-  async _draftCommit(ctx, draft) {
-    if (!draft.stages.length) throw new ToolError('draft has no stages to commit — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
+  async _draftMaterialize(ctx, draft) {
+    if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
     const result = await this._registerPipeline({
       name: draft.name, context_id: ctx.id, materialized: draft.materialized,
       pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
     });
-    delete ctx.state.draft; // committed — clear the draft so the context holds only the built model
+    delete ctx.state.draft; // materialized — clear the draft so the context holds only the built model
     return result;
   }
 
@@ -760,7 +760,7 @@ export class Engine {
         model_sql: out.sql,
       };
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
-      // (no full materialize). Lets the caller size the scan before committing.
+      // (no full materialize). Lets the caller size the scan before materializing.
       const est = await this._estimateSourceRows(source, tr);
       if (est != null) resp.estimated_source_rows = est;
       return resp;

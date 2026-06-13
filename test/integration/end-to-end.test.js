@@ -204,7 +204,7 @@ test('3a. build_native_model: start → add_step (funnel) → preview → commit
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL (existence only)');
   assert.equal(pv.steps.length, 1);
 
-  const c = await engine.build_native_model({ action: 'commit', draft_id: S.draftId });
+  const c = await engine.build_native_model({ action: 'materialize', draft_id: S.draftId });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(reached(c.rows, 'launch'), 12);
   assert.equal(reached(c.rows, 'tut1'), 8);
@@ -304,7 +304,7 @@ test('5a. build_native_model fed the conversion recipe stages → per-variant ag
     const a = await engine.build_native_model({ action: 'add_step', draft_id: start.draft_id, stage });
     assert.ok(Number.isInteger(a.step_index), 'each add_step advances the draft');
   }
-  const commit = await engine.build_native_model({ action: 'commit', draft_id: start.draft_id });
+  const commit = await engine.build_native_model({ action: 'materialize', draft_id: start.draft_id });
   assert.equal(commit.build?.ok, true, JSON.stringify(commit.error || commit.build));
   S.abCtx = commit.context_id;
 

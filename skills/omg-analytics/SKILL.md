@@ -61,7 +61,7 @@ catalogue, envelope structure, and event gotchas). Dimensions/metrics built on t
    bespoke aggregates).
 4. **Query**: `query_semantic_model` for metrics (group_by `metric_time`/grain or a user
    attribute path; `where`; `time_range`). For pipelines, `build_native_model`
-   (start → add_step → commit) then read rows with `get_query_result`.
+   (start → add_step → materialize) then read rows with `get_query_result`.
 5. **Review** (adversarial): before trusting a number, challenge it — 0 rows? a property
    that's NULL on most events because you didn't scope to its event? a grain mismatch
    (per-event vs per-player)? a rate with a zero denominator? a segment that silently
@@ -77,7 +77,7 @@ catalogue, envelope structure, and event gotchas). Dimensions/metrics built on t
 | Discover events / properties / values / map a term | `semantic_index` (overview → `{model\|event\|property\|search}`) |
 | Is the value index fresh / what's running | `semantic_index` (sync state, per-property timing, jobs) |
 | Define + query a governed metric | `create_semantic_model` → `query_semantic_model` |
-| Custom funnel / path / bespoke transform | `build_native_model` (start → add_step → commit) → `get_query_result` |
+| Custom funnel / path / bespoke transform | `build_native_model` (start → add_step → materialize) → `get_query_result` |
 | A/B significance | `ab_test`; guardrail `srm_check`; planning `sample_size` |
 | Ready templates (with the reusable technique) | `list_recipes` / `get_recipe` |
 | Isolated workspace mgmt | `list_contexts` / `describe_context` / `drop_context` |

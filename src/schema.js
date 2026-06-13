@@ -311,27 +311,27 @@ export function buildSchemas(catalog) {
   // build_native_model: compose a pipeline INCREMENTALLY, one stage at a time. A
   // single stateful tool with an `action`; each add_step validates the stage and
   // returns the columns now available for the NEXT stage (schema only — nothing is
-  // materialized until commit). The all-at-once register_native_model still works.
+  // materialized until materialize). The all-at-once register_native_model still works.
   const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone: start/end are wall-clock in this zone, converted to UTC instants.' } } };
   // A then-clause fragment that forbids the named properties (valid only when ALL are absent).
   const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
   const buildModel = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until commit), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → commit (materializes via the same engine as register_native_model). For a pipeline you already know in full, register_native_model in one call is still fine.',
+    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model via the same engine as register_native_model). For a pipeline you already know in full, register_native_model in one call is still fine.',
     // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
     // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
-    // preview/commit/discard take just draft_id. `forbid` rejects any field that does not
+    // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
     // belong to the action, so a stray param is an error rather than silently ignored.
     allOf: [
       { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'], ...forbid(['stage']) } },
       { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range']) } },
-      { if: { properties: { action: { enum: ['preview', 'commit', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage']) } },
+      { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage']) } },
     ],
     properties: {
-      action: { enum: ['start', 'add_step', 'preview', 'commit', 'discard'], description: 'start a new draft (returns a draft_id + the source columns); add_step appends ONE stage and returns the columns available after it; preview shows the accumulated steps + generated SQL; commit materializes the draft as a model; discard drops it.' },
-      draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for add_step/preview/commit/discard.' },
+      action: { enum: ['start', 'add_step', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + the source columns); add_step appends ONE stage and returns the columns available after it; preview shows the accumulated steps + generated SQL; materialize builds the draft as a dbt model (the final step after the stages); discard drops it.' },
+      draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for add_step/preview/materialize/discard.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start.' },
-      materialized: { enum: ['view', 'table'], default: 'table', description: 'How the committed result is stored (start): table (default) or view.' },
+      materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
       source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table (start only; default the events fact).' },
       time_range: trProp,
       stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage to append (add_step), validated against the columns available so far.' },

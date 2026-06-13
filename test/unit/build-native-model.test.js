@@ -112,7 +112,7 @@ test('build_native_model: schema rejects action-irrelevant fields', async () => 
   await assert.rejects(() => e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: mr, name: 'x' }), 'add_step + name rejected');
   // preview/commit/discard take only draft_id.
   await assert.rejects(() => e.build_native_model({ action: 'preview', draft_id: s.draft_id, stage: mr }), 'preview + stage rejected');
-  await assert.rejects(() => e.build_native_model({ action: 'commit', draft_id: s.draft_id, materialized: 'view' }), 'commit + materialized rejected');
+  await assert.rejects(() => e.build_native_model({ action: 'materialize', draft_id: s.draft_id, materialized: 'view' }), 'commit + materialized rejected');
   // start MAY carry draft_id (legitimate context reuse) — not rejected.
   const reuse = await e.build_native_model({ action: 'start', draft_id: s.draft_id, name: 'reused' });
   assert.equal(reuse.draft_id, s.draft_id);

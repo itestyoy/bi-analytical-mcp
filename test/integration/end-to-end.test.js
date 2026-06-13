@@ -214,6 +214,10 @@ test('3a. build_native_model: start → add_step (funnel) → preview → commit
   S.pipeTable = c.model;
   assert.equal(c.read_with?.tool, 'get_query_result');
   assert.equal(c.read_with?.table, c.model);
+  // Provenance: a pipeline result is tagged tier=pipeline with the source + real data freshness.
+  assert.equal(c.provenance?.tier, 'pipeline');
+  assert.equal(c.provenance?.source, 'events');
+  assert.ok(typeof c.provenance?.data_freshness === 'string' && c.provenance.data_freshness.length > 0, 'data freshness = latest event time');
 });
 
 test('3b. get_query_result re-reads the committed pipeline rows (same 12/8/5/3)', opts, async (t) => {
@@ -259,6 +263,10 @@ test('4a. create_semantic_model (IAP revenue) → query by country = US35/GB25/B
   assert.equal(by.GB, 25);
   assert.equal(by.BR, 25);
   assert.equal(Object.values(by).reduce((s, n) => s + n, 0), 85); // grand total revenue
+  // Provenance: a metric query is tagged tier=governed_metric with the metrics + data freshness.
+  assert.equal(r.provenance?.tier, 'governed_metric');
+  assert.deepEqual(r.provenance?.metrics, ['e2e_mon_revenue']);
+  assert.ok(typeof r.provenance?.data_freshness === 'string' && r.provenance.data_freshness.length > 0, 'data freshness present');
 });
 
 test('4b. update_semantic_model adds a payers metric; re-query = 7 distinct payers', opts, async (t) => {
@@ -274,6 +282,17 @@ test('4b. update_semantic_model adds a payers metric; re-query = 7 distinct paye
   const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].e2e_mon_payers), 7); // distinct payers = 7 (SEED_DATA §3)
+
+  // Recommendation #4: count_distinct grouped by time is non-additive → prefer HLL sketches.
+  const byDay = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'], group_by: [{ time: 'metric_time', grain: 'day' }] });
+  assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
+  // Recommendation #2: a query that matches nothing returns 0 rows with a scoping-bug hint.
+  const zero = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'], time_range: { start: '2099-01-01', end: '2099-01-02' } });
+  assert.equal(zero.row_count, 0);
+  assert.ok(zero.recommendations.some((x) => x.startsWith('0 rows')), `zero-result diagnosis: ${JSON.stringify(zero.recommendations)}`);
+  // Recommendation #1: a window past the latest data flags staleness; provenance carries freshness.
+  assert.ok(typeof zero.provenance.data_freshness === 'string');
+  assert.ok(zero.recommendations.some((x) => /current only through/i.test(x)), 'staleness note when window is past the latest data');
 });
 
 test('4c. context({describe|list}) + semantic_index({status}) reflect the registered task', opts, async (t) => {

@@ -82,6 +82,71 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
   await assert.rejects(() => e.semantic_index({ recipe: 'no_such_recipe' }), /invalid input/);
 });
 
+// A pipeline with a sample stage produces an APPROXIMATE result, flagged loudly with
+// safe/unsafe guidance + how to get the exact number (never silently misleading).
+test('a sampled pipeline flags the result approximate with guidance', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'sampled', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'sample', percent: 10 } });
+  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
+  const out = await e.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(out.provenance.approximate, true, 'provenance marks the result approximate');
+  assert.equal(out.sampling.approximate, true);
+  assert.equal(out.sampling.sample_percent, 10);
+  assert.ok(out.sampling.not_reliable_for && out.sampling.get_exact, 'carries safe/unsafe + how-to-get-exact');
+  // a non-sampled pipeline has neither flag.
+  const s2 = await e.build_native_model({ action: 'start', name: 'exact', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
+  const out2 = await e.build_native_model({ action: 'materialize', draft_id: s2.draft_id });
+  assert.equal(out2.provenance.approximate, undefined);
+  assert.equal(out2.sampling, undefined);
+});
+
+// Recipes are building blocks reached THROUGH semantic_index, not a standalone tool.
+test('recipes have no standalone tool; get_recipe payload is framed as a building block', async () => {
+  const names = buildToolDefs(engine()).map((d) => d.name);
+  assert.ok(!names.includes('get_recipe') && !names.includes('list_recipes'), 'no standalone recipe tools');
+  const r = await engine().semantic_index({ recipe: 'nday_retention' });
+  assert.ok(r.building_block && r.hack, 'recipe is presented as a reusable building block (+ hack technique)');
+});
+
+// #3 gotcha: referencing an event-specific property without scoping its event(s) reads NULL.
+test('add_step warns when an event-specific property is used without its event scope', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'scopewarn', source: 'events' });
+  // ad_type_of_event_data is populated only on ad_started/ad_finished.
+  const a = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] } });
+  assert.ok(a.recommendations.some((r) => r.includes('ad_type_of_event_data') && r.includes('populated only on event')), JSON.stringify(a.recommendations));
+  // with an upstream where scoping event_name to those events → no NULL warning.
+  const s2 = await e.build_native_model({ action: 'start', name: 'scoped', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] } });
+  const a2 = await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] } });
+  assert.ok(!a2.recommendations.some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
+});
+
+// HLL is promoted as the preferred distinct-count method (mergeable, high-accuracy).
+test('guide promotes HLL sketches for distinct counts', async () => {
+  const g = await engine().semantic_index({ guide: true });
+  assert.ok(g.routing_triggers.some((t) => /distinct/i.test(t.if) && /HLL/i.test(t.do) && /merge/i.test(t.do)), 'guide carries an HLL distinct-count trigger');
+});
+
+// The analyst procedure is served THROUGH the MCP: semantic_index({ guide }).
+test('semantic_index({ guide }) serves the workflow + routing triggers + per-task recipes', async () => {
+  const e = engine();
+  const g = await e.semantic_index({ guide: true });
+  assert.ok(Array.isArray(g.workflow) && g.workflow.length >= 4, 'workflow steps present');
+  assert.ok(Array.isArray(g.routing_triggers) && g.routing_triggers.every((t) => t.if && t.do), 'IF/DO routing triggers present');
+  assert.ok(g.tasks && Array.isArray(g.tasks.retention) && g.tasks.retention.some((r) => r.id === 'nday_retention'), 'per-task recipe families listed');
+  // narrow to one family.
+  const gt = await e.semantic_index({ guide: 'retention' });
+  assert.equal(gt.task, 'retention');
+  assert.ok(gt.recipes.some((r) => r.id === 'retention_by_segment'));
+  // overview points at the guide; guide is a mutually-exclusive view.
+  const ov = await e.semantic_index();
+  assert.ok(typeof ov.guide === 'string' && /guide/.test(ov.guide));
+  await assert.rejects(() => e.semantic_index({ guide: true, model: 'events' }), /at most ONE view/);
+});
+
 // Without recipes configured, the recipe view + overview list are simply absent.
 test('semantic_index recipe view is absent when no recipes configured', async () => {
   const catalog = loadCatalog(CATALOG, {});

@@ -396,7 +396,7 @@ const STAGES = {
       properties: {
         stage: { const: 'aggregate' },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
-        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], allOf: [{ if: { properties: { fn: { const: 'percentile' } }, required: ['fn'] }, then: { required: ['q'] } }, { if: { properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile'] } }, required: ['fn'] }, then: { required: ['column'] } }], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'Aggregate: sum/avg/min/max/count/count_distinct, approx_count_distinct (fast approximate distinct count), statistical stddev/variance/median/percentile, and the mergeable distinct-sketch functions hll_init/hll_merge/hll_merge_partial.' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
+        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], allOf: [{ if: { properties: { fn: { const: 'percentile' } }, required: ['fn'] }, then: { required: ['q'] } }, { if: { properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile'] } }, required: ['fn'] }, then: { required: ['column'] } }], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'Aggregate: sum/avg/min/max/count/count_distinct; statistical stddev/variance/median/percentile. For DISTINCT counts PREFER the HLL sketch path — approx_count_distinct (one-shot HLL++), or hll_init (build a sketch per group) → hll_merge (combine sketches): high accuracy AND mergeable, so a distinct count re-aggregates across time buckets / segments and composes incrementally (exact count_distinct is NOT additive across groups — use it only for an exact integer on a small set).' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
       },
     }),
     build: ({ d, cols }, p) => {
@@ -473,7 +473,7 @@ const STAGES = {
   sample: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'percent'],
-      description: 'Keep roughly `percent`% of rows, chosen at random — a fast, approximate peek for a first estimate or where-to-dig signal on large data. Put it early. Results are a random subset, not exact.',
+      description: 'Keep roughly `percent`% of rows, chosen at random — a fast, APPROXIMATE read of the population for a first estimate / where-to-dig signal on large data (no need to scan everything just to see the direction). Put it early. The result is flagged `approximate` with safe/unsafe guidance; re-run WITHOUT this stage for any exact number you will act on (sampling error flips rates near 0/1, small segments, distinct counts).',
       properties: {
         stage: { const: 'sample' },
         percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate share of rows to keep (0 < percent <= 100).' },

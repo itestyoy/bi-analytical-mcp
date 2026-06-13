@@ -14,6 +14,7 @@ import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-ran
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
 import { CatalogSearch } from './search.js';
+import { buildGuide } from './guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { openStore } from './store.js';
@@ -34,29 +35,32 @@ export class Engine {
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
-    if (recipes) {
-      this.schemas.list_recipes = { type: 'object', additionalProperties: false, properties: {} };
-      this.schemas.get_recipe = { type: 'object', additionalProperties: false, required: ['id'], properties: { id: { type: 'string', enum: recipes.ids() } } };
-      // Recipes are now reached via semantic_index({ recipe: id }); constrain it to real ids.
-      if (this.schemas.semantic_index?.properties?.recipe) this.schemas.semantic_index.properties.recipe.enum = recipes.ids();
-    }
+    // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
+    // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
+    // Constrain the recipe view to real ids when recipes are configured.
+    if (recipes && this.schemas.semantic_index?.properties?.recipe) this.schemas.semantic_index.properties.recipe.enum = recipes.ids();
     this.validators = makeValidators(this.schemas);
     this.ctxs = contextManager || new ContextManager({});
     this.runner = runner; // optional; required for non-dry_run parse/query
   }
 
+  // Internal helpers (no longer standalone tools — reached via semantic_index({ recipe })
+  // / overview / { guide }). Kept for the recipe view + the recipe-driven tests.
   list_recipes() {
     if (!this.recipes) return { recipes: [], note: 'Recipes are not configured on this server.' };
     return { recipes: this.recipes.summary() };
   }
 
   get_recipe(input) {
-    this._validate('get_recipe', input);
-    if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'id' });
+    if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
     const r = this.recipes.get(input.id);
-    // The naming rule is a hidden transform otherwise: metrics declared as `name: dau`
-    // under task `active_users` are QUERIED as `active_users_dau` (task_<metric>).
-    return { ...r, naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).' };
+    // A recipe is a reusable BUILDING BLOCK: a ready payload for a task family PLUS `hack`
+    // — the generalizable technique to adapt it to a novel question.
+    return {
+      ...r,
+      naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
+      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question; feed a pipeline payload through build_native_model, a create_payload through create_semantic_model.',
+    };
   }
 
   _validate(tool, input) {
@@ -97,6 +101,7 @@ export class Engine {
    *                  coverage per event + indexing history (one page per column)
    *   { search }   → events/properties/attributes/VALUES/recipes matching a substring
    *   { recipe }   → one ready-made recipe by id (payload + example_queries + hack)
+   *   { guide }    → the analyst procedure + IF/DO routing (how to approach a question)
    *   { status }   → operational state: value-index sync runs + background query jobs
    *   { run }      → one sync run's per-property breakdown (slowest first)
    * Pass at most one drill-down key (mutually exclusive views).
@@ -105,9 +110,9 @@ export class Engine {
     this._validate('semantic_index', input);
     // STRICT view contract (nothing is ever silently ignored): at most ONE view key,
     // and paging/ordering/recency params only on the views they apply to.
-    const views = ['run', 'status', 'model', 'event', 'property', 'search', 'recipe'].filter((k) => input[k] !== undefined && input[k] !== false);
+    const views = ['run', 'status', 'guide', 'model', 'event', 'property', 'search', 'recipe'].filter((k) => input[k] !== undefined && input[k] !== false);
     if (views.length > 1) {
-      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
+      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { guide } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
     }
     if (input.limit !== undefined && !(input.property || input.search)) throw new ToolError('limit only applies to the { property } and { search } views', { stage: 'validate', field: 'limit' });
     for (const k of ['offset', 'order_by', 'direction']) {
@@ -122,6 +127,12 @@ export class Engine {
     // ── operational views (sync state / one run) ──
     if (input.run != null) return this._indexRun(input);
     if (input.status) return this._indexStatus(input);
+
+    // ── { guide }: the analyst procedure + routing (workflow, IF/DO triggers, per-task
+    // recipes) — the generic skill knowledge served through the MCP, single-sourced. ──
+    if (input.guide !== undefined && input.guide !== false) {
+      return buildGuide(this.catalog, this.recipes, { task: typeof input.guide === 'string' ? input.guide : undefined });
+    }
 
     // ── { recipe }: one ready-made recipe by id (folded in from the old get_recipe tool) ──
     if (input.recipe) {
@@ -174,6 +185,8 @@ export class Engine {
           out.pipeline_columns = out.pipeline_columns.filter((col) => physSet.has(col.name.toLowerCase()));
           if (phantom.length) out.not_materialized = phantom;
         }
+        // Data freshness: latest value of the time column (how up-to-date the data is).
+        if (m.time?.column) { const fresh = await this._dataFreshness(k); if (fresh) out.data_freshness = fresh; }
       }
       out.recommendations = k === c.anchor
         ? [
@@ -357,8 +370,12 @@ export class Engine {
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
       ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
-      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring; ({ recipe }) → a ready-made recipe by id.',
+      // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW
+      // to approach a question (which tool, in what order, with what guardrails).
+      guide: 'semantic_index({ guide: true }) → the analyst procedure (workflow), IF/DO routing triggers, and per-task recipes. Read it before building a query.',
+      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring; ({ recipe }) → a ready-made recipe by id; ({ guide }) → how to approach a question (workflow + routing).',
       recommendations: [
+        `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
         `Start by inspecting an event's properties: semantic_index({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
         `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
         `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,
@@ -686,10 +703,26 @@ export class Engine {
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
       columns_removed: before.filter((c) => !afterNames.has(c.name)).map((c) => c.name),
       next: 'add_step the next stage, materialize the draft, or pass include_columns:true / preview for the full column list.',
-      recommendations: this._draftStepRecommendations(stage, after),
+      recommendations: [...this._eventScopeWarnings(draft, stage), ...this._draftStepRecommendations(stage, after)],
     };
     if (includeColumns) resp.available_columns = after;
     return resp;
+  }
+
+  /** #3 gotcha: the just-added stage references an event-specific property whose event(s)
+   *  are not scoped by an upstream where on event_name → it reads NULL elsewhere. */
+  _eventScopeWarnings(draft, stage) {
+    const applies = this.catalog.eventPropertyEvents(); // prop -> [event_name]
+    const s = JSON.stringify(stage);
+    const referenced = Object.keys(applies).filter((p) => s.includes(`"${p}"`));
+    if (!referenced.length) return [];
+    const evCol = this.catalog.eventNameColumn();
+    const scoped = new Set(); let hasScope = false;
+    for (const st of draft.stages) if (st.stage === 'where') for (const c of st.conditions || []) if (c.column === evCol) { hasScope = true; (Array.isArray(c.value) ? c.value : [c.value]).forEach((v) => scoped.add(v)); }
+    const risky = referenced.filter((p) => { const evs = applies[p]; return !evs || !evs.every((e) => scoped.has(e)); });
+    if (!risky.length) return [];
+    const p = risky[0]; const evs = applies[p] || [];
+    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ property: '${p}' }).event_coverage).`];
   }
 
   /** Stage-aware next-step hints from the just-added stage + the resulting columns. */
@@ -803,6 +836,11 @@ export class Engine {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
       columns, output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
       row_count: rows.length, rows, model_sql: out.sql, build,
+      // Provenance: a custom pipeline (not a governed metric), its source, and how fresh
+      // the underlying data is — so the rows are self-trustable. A sample stage makes the
+      // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
+      provenance: { tier: 'pipeline', source, data_freshness: await this._dataFreshness(source), ...(stages.some((s) => s.stage === 'sample') ? { approximate: true } : {}) },
+      ...(stages.some((s) => s.stage === 'sample') ? { sampling: samplingNote(stages.find((s) => s.stage === 'sample').percent ?? 10) } : {}),
       // A4: how to read this result again — these rows are a pipeline model, re-read
       // with get_query_result (NOT query_semantic_model, which is for metric queries).
       read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
@@ -810,10 +848,32 @@ export class Engine {
         `Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`,
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
       ],
-      warnings: (this.runner && tr && (tr.start || tr.end) && rows.length === 0)
-        ? ['time_range produced 0 rows — verify the window. A date-only `end` is treated as inclusive (the whole day, next-day-exclusive); pass a full datetime for finer bounds.']
+      warnings: (this.runner && rows.length === 0)
+        ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
         : [],
     };
+  }
+
+  /**
+   * Data FRESHNESS of a source: the latest value of its time column (MAX), i.e. how
+   * up-to-date the underlying data is — a trust signal distinct from value-index
+   * freshness. Cached per source for the engine's life (best-effort; null when there
+   * is no runner / time column / the query fails).
+   */
+  async _dataFreshness(sourceKey) {
+    const base = this.ctxs.baseProjectDir;
+    const m = this.catalog.getModel(sourceKey);
+    const tcol = m.time?.column;
+    if (!this.runner || !base || !tcol) return null;
+    this._freshCache ??= new Map();
+    if (this._freshCache.has(sourceKey)) return this._freshCache.get(sourceKey);
+    let latest = null;
+    try {
+      const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}`, 1);
+      if (r.ok && r.rows?.[0]?.latest != null) latest = String(r.rows[0].latest);
+    } catch { /* freshness is best-effort */ }
+    this._freshCache.set(sourceKey, latest);
+    return latest;
   }
 
   /**
@@ -1250,6 +1310,26 @@ export class Engine {
 
     const pageRows = res.rows.slice(offset, offset + limit);
     const page = { limit, offset, has_more: res.rows.length > offset + limit };
+    const fresh = await this._dataFreshness(this.catalog.anchor);
+    // Situational recommendations: surface a risk ONLY when it is actually present.
+    const recs = [];
+    // #1 STALENESS/incompleteness: the window reaches past the latest data → empty/partial tail.
+    if (fresh) {
+      const freshDay = String(fresh).slice(0, 10);
+      const endDay = input.time_range?.end ? String(input.time_range.end).slice(0, 10) : null;
+      if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (latest event time)${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
+    }
+    // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
+    if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ property }).');
+    // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
+    const distinctMeasures = new Set();
+    for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
+    const usesDistinct = distinctMeasures.size && input.metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...distinctMeasures].some((dm) => metricUsesMeasure(metric, dm)); });
+    if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
+      recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_native_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
+    }
+    if (page.has_more) recs.push(`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`);
+    recs.push('Re-slice or persist: pass materialize:true to keep the result as a table readable via get_query_result; group differently or compare segments by re-querying with another group_by.');
     return {
       ok: true,
       command: res.command,
@@ -1257,11 +1337,11 @@ export class Engine {
       rows: pageRows,
       row_count: pageRows.length,
       page,
+      // Provenance so the result is self-trustable: which tier produced it, the source,
+      // and how fresh the underlying data is (latest event time).
+      provenance: { tier: 'governed_metric', metrics: input.metrics, source: this.catalog.anchor, data_freshness: fresh },
       warnings: windowWarnings,
-      recommendations: [
-        ...(page.has_more ? [`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`] : []),
-        `Re-slice or persist: pass materialize:true to keep the result as a table readable via get_query_result; group differently or compare segments by re-querying with another group_by.`,
-      ],
+      recommendations: recs,
     };
   }
 
@@ -1334,7 +1414,7 @@ export class Engine {
       }
       const res = await this.runner.show(dir, sql, limit);
       if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
-      return { ok: true, status: 'ready', table, ...extra, sampled: true, columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
+      return { ok: true, status: 'ready', table, ...extra, sampled: true, sampling: samplingNote(samplePercent), columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
     }
     // Page in JS over a single read (over-fetch by 1 for has_more) rather than a
     // SQL OFFSET with no ORDER BY (which was non-deterministic across calls — H2).
@@ -1418,4 +1498,20 @@ function walkPredicates(group, fn) {
 
 function clone(x) {
   return JSON.parse(JSON.stringify(x ?? null));
+}
+
+/**
+ * The mandatory APPROXIMATE warning attached to any result computed over a random
+ * sample: what it is safe for, what it is NOT, and how to get the exact answer. So the
+ * caller is never misled into acting on a sampled number, and always has the choice.
+ */
+function samplingNote(percent) {
+  return {
+    approximate: true,
+    sample_percent: percent,
+    why: `These rows were computed over a ~${percent}% RANDOM sample of the source for a FAST directional read — NOT the full population.`,
+    safe_for: 'getting the shape/direction: top categories, rough proportions, whether a segment is non-trivial, sanity-checking a pipeline before a full run.',
+    not_reliable_for: 'exact totals/counts, rates near 0 or 1, small segments, distinct counts, or ranking values that are close — sampling error can change or flip these.',
+    get_exact: 'For a number you will act on, re-run WITHOUT sampling (omit the sample stage, or pass sample:false) to compute over ALL the data.',
+  };
 }

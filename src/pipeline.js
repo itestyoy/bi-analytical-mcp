@@ -514,7 +514,7 @@ export function registerStage(name, def) { STAGES[name] = def; }
 
 /** JSON-Schema oneOf for a named subset of stages (e.g. the funnel `prepare` field). */
 export function stageSchemas(catalog, names) {
-  return { oneOf: names.map((n) => { if (!STAGES[n]) throw new Error(`no such stage: ${n}`); return STAGES[n].schema(catalog); }) };
+  return { discriminator: { propertyName: 'stage' }, oneOf: names.map((n) => { if (!STAGES[n]) throw new Error(`no such stage: ${n}`); return STAGES[n].schema(catalog); }) };
 }
 
 /** Initial columns available from a catalog source model. Every REAL physical column
@@ -558,7 +558,9 @@ export function prepareColumns(catalog, dialectName, stages = []) {
 }
 
 export function pipelineStageSchema(catalog) {
-  return { oneOf: Object.values(STAGES).map((s) => s.schema(catalog)) };
+  // discriminator on `stage` → a bad stage reports only THAT stage's requirements, not every
+  // stage's (each stage schema pins stage:{const} + requires it), so errors stay actionable.
+  return { discriminator: { propertyName: 'stage' }, oneOf: Object.values(STAGES).map((s) => s.schema(catalog)) };
 }
 
 // Fold stages -> { ops, cols } (validating column references along the way).

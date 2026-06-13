@@ -45,6 +45,22 @@ test('experiment tool: plan / check_split / analyze dispatch + strict fields', (
   assert.throws(() => e.experiment({ action: 'check_split' }), /invalid input/);
   assert.throws(() => e.experiment({ action: 'plan', metric: 'ratio', mde: 0.1 }), /invalid input/);
   assert.throws(() => e.experiment({ action: 'bogus' }), /invalid input/);
+  // proportion guard: a success count cannot exceed the sample size (rate > 100% is impossible).
+  assert.throws(
+    () => e.experiment({ action: 'analyze', metric: 'proportion', control: { n: 100, conversions: 110 }, variants: [{ label: 'b', n: 100, conversions: 50 }] }),
+    /cannot exceed n/,
+  );
+  // a variant over n is rejected too.
+  assert.throws(
+    () => e.experiment({ action: 'analyze', metric: 'proportion', control: { n: 100, conversions: 10 }, variants: [{ label: 'b', n: 100, conversions: 150 }] }),
+    /cannot exceed n/,
+  );
+  // strict group shape: an unknown field inside control/variant is rejected (closed arm),
+  // even via experiment (which composes the group props without the per-metric oneOf).
+  assert.throws(
+    () => e.experiment({ action: 'analyze', metric: 'proportion', control: { n: 100, conversions: 10, bogus: 1 }, variants: [{ label: 'b', n: 100, conversions: 20 }] }),
+    /invalid input/,
+  );
 });
 
 // context({ action }) — the unified lifecycle tool — dispatches + validates strictly.

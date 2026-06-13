@@ -147,10 +147,10 @@ export class Engine {
       const m = c.getModel(k);
       const descs = c.columnDescriptions(k);
       const out = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description, primary_entity: c.primaryEntityName(k), entities: m.entities, time: m.time?.column, measures: Object.keys(m.measures || {}) };
-      // Columns referenceable in a native pipeline over this source (where/compute/
-      // group_by/order_by), with their types — `time` above is the default order axis
-      // for window/match_recognize stages.
-      out.pipeline_columns = c.modelColumns(k);
+      // The ONE list of columns you can work with on this source (reference in where/
+      // compute/group_by/order_by/match_recognize). `time` above is the default order axis.
+      // It is silently grounded to the physical table below — only real columns appear.
+      out.columns = c.modelColumns(k);
       if (k === c.anchor) {
         out.event_count = c.eventNames().length;
         out.property_count = c.eventProps().length;
@@ -161,7 +161,7 @@ export class Engine {
           out.partition_column = m.partition_column;
           out.cost_hint = `The physical table is partitioned by ${m.partition_column} — ALWAYS bound queries with time_range (or a where on ${m.partition_column}/${m.time?.column || 'the time column'}) to avoid a full scan.`;
         }
-        out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The columns above are referenceable in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
+        out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The `columns` above are what you can reference in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
       } else {
         // Dimension attributes WITH their real indexed values (cardinality + top 3) — the
         // index stores them under namespaced '<model>.<column>' keys (e.g. 'users.country').
@@ -174,16 +174,12 @@ export class Engine {
       const base = this.ctxs.baseProjectDir;
       if (this.runner && base) {
         const cols = await this.runner.relationColumns(base, m.dbt_model);
-        out.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
-        if (!cols.ok) out.physical_columns_error = 'physical columns unavailable — the underlying table is not built yet';
-        else {
-          // GROUND the referenceable columns to physical truth: a catalog column the
-          // table does not have is excluded from pipeline_columns and called out in
-          // not_materialized (fix the source dbt model/schema to align them).
+        // Silent internal guard: keep ONLY columns that physically exist, so a name that
+        // is not really in the table never surfaces anywhere. One list, grounded to truth.
+        // Best-effort — if introspection fails (table not built yet) keep the declared set.
+        if (cols.ok) {
           const physSet = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
-          const phantom = out.pipeline_columns.filter((col) => !physSet.has(col.name.toLowerCase())).map((col) => col.name);
-          out.pipeline_columns = out.pipeline_columns.filter((col) => physSet.has(col.name.toLowerCase()));
-          if (phantom.length) out.not_materialized = phantom;
+          out.columns = out.columns.filter((col) => physSet.has(col.name.toLowerCase()));
         }
         // Data freshness: latest value of the time column (how up-to-date the data is).
         if (m.time?.column) { const fresh = await this._dataFreshness(k); if (fresh) out.data_freshness = fresh; }
@@ -653,11 +649,11 @@ export class Engine {
     const source = input.source || this.catalog.anchor;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
-    // Ground the referenceable columns to the physical relation: a column the catalog
-    // declares but the table does not have is excluded here (not offered, not buildable)
-    // rather than failing later as a raw warehouse "Unrecognized name" at materialize time.
+    // The referenceable columns are SILENTLY grounded to the physical relation: a column
+    // the catalog declares but the table lacks simply does not appear (a clean internal
+    // guard) — never offered, never buildable, not called out. Only real columns exist.
     const physSet = await this._physicalCols(source);
-    const { cols, phantom } = this._groundedDeclared(source, physSet);
+    const { cols } = this._groundedDeclared(source, physSet);
     const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
       steps: [], column_count: cols.length,
@@ -668,12 +664,6 @@ export class Engine {
         `When the steps look right, materialize with build_native_model({ action: "materialize", draft_id }).`,
       ],
     };
-    // Surface the desync (catalog declares them, the physical table does not) so it is
-    // visible, not silent — these names are excluded from the referenceable columns.
-    if (phantom.length) {
-      resp.not_materialized = phantom;
-      resp.recommendations.push(`${phantom.length} catalog column(s) are NOT in the physical table '${this.catalog.getModel(source).dbt_model}' and were excluded (e.g. ${phantom.slice(0, 5).join(', ')}). Fix the source model/schema to materialize or drop them.`);
-    }
     if (input.include_columns) resp.available_columns = cols;
     return resp;
   }
@@ -1194,21 +1184,25 @@ export class Engine {
     this._validate('describe_context', input);
     const ctx = this.ctxs.get(input.context_id);
     // A pipeline-registered model is a normal dbt model whose rows are the result.
-    // Report its model name, the pipeline's output columns, and the REAL physical
-    // columns of the relation (adapter introspection). Read it via get_query_result.
+    // Report its model name and the output columns you can read. Read it via
+    // get_query_result. The columns are grounded to the real relation below.
     if (ctx.state.engine === 'pipeline') {
       const n = ctx.state.native || {};
-      let physical = null;
+      let columns = n.columns || [];
       if (this.runner && n.model) {
         const cols = await this.runner.relationColumns(this.ctxs.dir(ctx.id), n.model);
-        physical = cols.ok ? cols.columns : null;
+        if (cols.ok) {
+          const names = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
+          const declared = (n.columns || []).filter((col) => names.has(String(col).toLowerCase()));
+          columns = declared.length ? declared : cols.columns.map((col) => col.name);
+        }
       }
       return {
         context_id: ctx.id,
         engine: 'pipeline',
         tasks: ctx.state.tasks || [],
-        models: [{ model: n.model, materialized: n.materialized, columns: n.columns || [], physical_columns: physical }],
-        columns: n.columns || [],
+        models: [{ model: n.model, materialized: n.materialized, columns }],
+        columns,
         read_with: 'get_query_result',
         files: this.ctxs.generatedFiles(ctx.id),
       };

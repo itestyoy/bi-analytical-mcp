@@ -150,7 +150,8 @@ test('build_native_model grounds source columns to the physical relation', async
   const names = s.available_columns.map((c) => c.name);
   assert.ok(names.includes('result_of_event_data'), 'a physically-present column is offered');
   assert.ok(!names.includes('complete_time_of_event_data'), 'a phantom catalog column is NOT offered');
-  assert.ok(s.not_materialized.includes('complete_time_of_event_data'), 'the desync is surfaced in not_materialized');
+  // The phantom is silently dropped — the desync is an internal guard, not surfaced.
+  assert.equal(s.not_materialized, undefined, 'grounding is silent — no not_materialized field');
 
   // a physically-present column builds fine through add_step.
   await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'is_not_null' }] } });

@@ -345,19 +345,20 @@ test('register_native_model: same name in two contexts → distinct relations', 
   assert.match(a.model, /^pipe_iso_[a-z0-9]{6,}$/);
 });
 
-test('semantic_index: overview lists models, then { model } drills into REAL physical columns', opts, async (t) => {
+test('semantic_index: overview lists models, then { model } drills into the usable columns', opts, async (t) => {
   if (skip(t)) return;
   const overview = await engine.semantic_index();
   assert.ok(overview.models.find((m) => m.key === 'events'), 'events model present in overview');
   assert.ok(Array.isArray(overview.event_names) && overview.event_names.length > 0, 'overview lists event names');
-  assert.equal(overview.models.find((m) => m.key === 'events').physical_columns, undefined, 'overview does NOT dump physical columns');
-  // drill down for the real physical columns (adapter.get_columns_in_relation)
+  assert.equal(overview.models.find((m) => m.key === 'events').columns, undefined, 'overview does NOT dump columns');
+  // drill down for the ONE list of usable columns (grounded to the real relation)
   const events = await engine.semantic_index({ model: 'events' });
-  assert.ok(Array.isArray(events.physical_columns) && events.physical_columns.length > 0, 'events { model } has REAL physical columns');
-  // #4/#3: pipeline-referenceable columns + the time axis are discoverable
-  assert.ok(Array.isArray(events.pipeline_columns), 'events { model } lists pipeline_columns');
-  const pcNames = events.pipeline_columns.map((c) => c.name);
-  assert.ok(pcNames.includes('device_time') && pcNames.includes('player_id_of_internal'), 'pipeline_columns include time + key');
+  assert.equal(events.physical_columns, undefined, 'no second physical_columns list');
+  assert.equal(events.pipeline_columns, undefined, 'no separate pipeline_columns list');
+  // #4/#3: the usable columns + the time axis are discoverable
+  assert.ok(Array.isArray(events.columns), 'events { model } lists columns');
+  const pcNames = events.columns.map((c) => c.name);
+  assert.ok(pcNames.includes('device_time') && pcNames.includes('player_id_of_internal'), 'columns include time + key');
   assert.equal(events.time, 'device_time', 'time axis (default window/match_recognize order) is reported');
   // { event } returns only the properties carried by that event
   const ev = await engine.semantic_index({ event: 'iap_purchase_completed' });

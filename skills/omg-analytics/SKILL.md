@@ -61,6 +61,12 @@ OMG cautions on top of the generic procedure:
   the gotchas in `reference/playbooks.md`.
 - **Report** with the Confluence definition you relied on, and separate observation from
   interpretation.
+- **Record what you learn**: when you track a fuzzy OMG term down to a real field, hit a
+  non-obvious gotcha, or rely on a specific Confluence page, save it with the **`memory`** tool
+  — linked to the field/event it concerns (`targets`) and the words the user used (`aliases`),
+  with the page as a `link`. It resurfaces through `semantic_index` (the linked views + search)
+  next time, turning one investigation into durable shared knowledge. (Put findings in the live
+  memory store, NOT as copied definitions in this skill — same no-drift reason.)
 
 ## Reference (pointers — read the Confluence pages they link, don't trust copies)
 - `reference/confluence-map.md` — **start here**: which Confluence space/page holds what, the

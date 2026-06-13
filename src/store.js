@@ -20,6 +20,11 @@
 //   runs.start()                      -> id
 //   runs.finish(id, { status, propertiesIndexed, valuesWritten, errors, error })
 //   runs.all()                        -> rows[] (desc by id)
+//   memory.add({ id, note, targets, aliases, links, created_at }) -> id
+//   memory.get(id)                    -> { id, note, targets:[], aliases:[], links:[], created_at } | null
+//   memory.remove(id)                 -> bool (a row existed)
+//   memory.all({ limit })             -> rows[] (most recent first)
+//   memory.counts()                   -> { notes }
 //   close()
 
 import { createRequire } from 'node:module';
@@ -36,6 +41,7 @@ export class MemoryBackend {
     const props = new Map(); // property -> { distinctCount, totalCount, nullCount, indexedAt, values:[{value,freq}], coverage:[{event_name,row_count,non_null}] }
     const runs = [];
     const runProps = []; // { run_id, property, ms, values_written, distinct_count, total_count, status, error, started_at }
+    const memory = new Map(); // id -> { id, note, targets:[], aliases:[], links:[], created_at }
     let runSeq = 0;
 
     this.jobs = {
@@ -94,7 +100,19 @@ export class MemoryBackend {
       counts: () => ({ properties: props.size, values: [...props.values()].reduce((s, e) => s + e.values.length, 0) }),
     };
 
-    // Wipe ALL state (used by MCP_DB_RESET on startup).
+    // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
+    // (targets/aliases/links are arrays here — the SQLite backend JSON-encodes them).
+    this.memory = {
+      add: (e) => { memory.set(e.id, { id: e.id, note: String(e.note), targets: [...(e.targets || [])], aliases: [...(e.aliases || [])], links: [...(e.links || [])], created_at: e.created_at ?? Date.now() }); return e.id; },
+      get: (id) => { const e = memory.get(id); return e ? { ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] } : null; },
+      remove: (id) => memory.delete(id),
+      all: ({ limit = 200 } = {}) => [...memory.values()].sort((a, b) => b.created_at - a.created_at || String(b.id).localeCompare(a.id)).slice(0, limit).map((e) => ({ ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] })),
+      counts: () => ({ notes: memory.size }),
+    };
+
+    // Wipe state (used by MCP_DB_RESET on startup). Memory is curated knowledge that is
+    // NOT re-derivable (unlike the value index, which the background indexer repopulates),
+    // so a routine clean-slate reset deliberately PRESERVES it.
     this.reset = () => { props.clear(); runs.length = 0; runProps.length = 0; runSeq = 0; };
 
     this.runs = {
@@ -135,6 +153,8 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
+    // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
+    db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER)');
     const s = this;
 
     this.jobs = {
@@ -205,6 +225,17 @@ export class SqliteBackend {
       properties(runId, { limit = 1000 } = {}) { return s._all('SELECT * FROM index_run_props WHERE run_id = ? ORDER BY ms DESC, property ASC LIMIT ?', runId, limit); },
       propertyHistory(property, { limit = 20 } = {}) { return s._all('SELECT p.*, r.started_at FROM index_run_props p JOIN index_runs r ON r.id = p.run_id WHERE p.property = ? ORDER BY p.run_id DESC LIMIT ?', property, limit); },
     };
+
+    // Analyst memory (curated findings). JSON columns are decoded back to arrays on read.
+    const parseArr = (v) => { try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } };
+    const memRow = (r) => (r ? { id: r.id, note: r.note, targets: parseArr(r.targets), aliases: parseArr(r.aliases), links: parseArr(r.links), created_at: Number(r.created_at) } : null);
+    this.memory = {
+      add(e) { s._run('INSERT INTO memory (id, note, targets, aliases, links, created_at) VALUES (?, ?, ?, ?, ?, ?)', e.id, String(e.note), JSON.stringify(e.targets || []), JSON.stringify(e.aliases || []), JSON.stringify(e.links || []), e.created_at ?? Date.now()); return e.id; },
+      get(id) { return memRow(s._get('SELECT * FROM memory WHERE id = ?', id)); },
+      remove(id) { return s._run('DELETE FROM memory WHERE id = ?', id).changes > 0; },
+      all({ limit = 200 } = {}) { return s._all('SELECT * FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
+      counts() { return { notes: Number(s._get('SELECT COUNT(*) AS n FROM memory').n) }; },
+    };
   }
 
   _prep(sql) {
@@ -217,7 +248,11 @@ export class SqliteBackend {
   _get(sql, ...params) { return this._prep(sql).get(...params); }
   _all(sql, ...params) { return this._prep(sql).all(...params); }
 
-  /** Wipe ALL persisted state (used by MCP_DB_RESET on startup). Keeps the schema. */
+  /**
+   * Wipe persisted state (used by MCP_DB_RESET on startup). Keeps the schema. The `memory`
+   * table is deliberately PRESERVED — it is curated, non-re-derivable knowledge (unlike the
+   * value index, which the background indexer repopulates from the warehouse).
+   */
   reset() {
     this._tx(() => {
       for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'index_runs', 'index_run_props']) this._run(`DELETE FROM ${t}`);

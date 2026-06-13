@@ -17,6 +17,7 @@ import { CatalogSearch } from './search.js';
 import { buildGuide } from './guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
+import { MemoryStore } from './memory.js';
 import { openStore } from './store.js';
 import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
@@ -32,6 +33,7 @@ export class Engine {
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
+    this.memoryStore = new MemoryStore({ store: this.store }); // durable analyst findings, linked to catalog entities (the `memory` tool)
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
@@ -66,6 +68,92 @@ export class Engine {
   _validate(tool, input) {
     const res = validateInput(this.validators[tool], input || {});
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
+  }
+
+  /**
+   * Resolve a memory TARGET string to a canonical, typed key so a saved finding links to a
+   * real semantic_index view. A '<model>.<column>' attribute or a known model/event/event-
+   * property resolves to that entity; anything else is kept as a free `term` (the user's
+   * fuzzy phrasing) so it is still searchable and can map back to whatever it describes.
+   */
+  _resolveMemoryTarget(t) {
+    const c = this.catalog;
+    const s = String(t).trim();
+    const dot = s.indexOf('.');
+    if (dot > 0) {
+      const mk = s.slice(0, dot); const col = s.slice(dot + 1);
+      if (mk !== c.anchor && c.models[mk] && (c.getModel(mk).dimensions || {})[col]) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
+    }
+    if (c.models[s]) return { kind: 'model', key: s, canon: `model:${s}` };
+    if (c.eventNames().includes(s)) return { kind: 'event', key: s, canon: `event:${s}` };
+    if (c.eventProps().includes(s)) return { kind: 'property', key: s, canon: `property:${s}` };
+    return { kind: 'term', key: s, canon: `term:${s.toLowerCase()}` };
+  }
+
+  /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
+  _memorySurfaceHint({ kind, key }) {
+    if (kind === 'property') return `semantic_index({ property: '${key}' })`;
+    if (kind === 'event') return `semantic_index({ event: '${key}' })`;
+    if (kind === 'model') return `semantic_index({ model: '${key}' })`;
+    return `semantic_index({ search: '${key}' })`; // term
+  }
+
+  /** Compact notes linked to any of `canonKeys`, for attaching to a semantic_index view. */
+  _memoryFor(canonKeys) {
+    return this.memoryStore.forTargets(canonKeys).map(memoryView);
+  }
+
+  /**
+   * THE analyst memory tool. Save a FINDING the AI made (a vague phrasing tracked down to a
+   * real field, a non-obvious gotcha, an associated source/link) and LINK it to the catalog
+   * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { model }/
+   * { event }/{ property } views and { search }) next time the same word/field comes up.
+   *   action:'record' → save a note (+ targets it is about, + aliases the user used, + links)
+   *   action:'list'   → all notes, or those linked to one { target }
+   *   action:'search' → notes matching a word (text / alias / target)
+   *   action:'forget' → delete one note by id
+   */
+  memory(input = {}) {
+    this._validate('memory', input);
+    const action = input.action;
+
+    if (action === 'record') {
+      const note = String(input.note ?? '').trim();
+      if (!note) throw new ToolError('note is required and must be a non-empty finding', { stage: 'validate', field: 'note' });
+      const resolved = (input.targets || []).map((t) => this._resolveMemoryTarget(t));
+      const aliases = [...new Set((input.aliases || []).map((a) => String(a).trim()).filter(Boolean))];
+      const links = (input.links || []).map((l) => (typeof l === 'string' ? { url: l } : { url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) }));
+      const entry = this.memoryStore.record({ note, targets: resolved.map((r) => r.canon), aliases, links });
+      return {
+        saved: true,
+        id: entry.id,
+        note: entry.note,
+        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.key, surfaces_in: this._memorySurfaceHint(r) })),
+        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.key) } : {}),
+        aliases, links,
+        next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
+      };
+    }
+
+    if (action === 'list') {
+      if (input.target !== undefined) {
+        const r = this._resolveMemoryTarget(input.target);
+        return { target: r.key, kind: r.kind, notes: this.memoryStore.forTargets([r.canon]).map(memoryView) };
+      }
+      return { total: this.memoryStore.counts().notes, notes: this.memoryStore.all({ limit: input.limit ?? 50 }).map(memoryView) };
+    }
+
+    if (action === 'search') {
+      const notes = this.memoryStore.search(input.query, { limit: input.limit ?? 20 }).map(memoryView);
+      return { query: input.query, notes };
+    }
+
+    if (action === 'forget') {
+      if (!this.memoryStore.forget(input.id)) throw new ToolError(`no memory note with id '${input.id}'`, { stage: 'validate', field: 'id' });
+      return { forgotten: true, id: input.id };
+    }
+
+    throw new ToolError(`unknown action '${action}'`, { stage: 'validate', field: 'action' });
   }
 
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
@@ -194,6 +282,9 @@ export class Engine {
           `Drill into an attribute's full value/frequency distribution: semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
           `Looking for a known attribute value? semantic_index({ search: '<value>' }) tells you where it occurs.`,
         ];
+      // Saved findings about this model (memory tool) — surface them where they belong.
+      const mem = this._memoryFor([`model:${k}`]);
+      if (mem.length) out.memory = mem;
       return out;
     }
 
@@ -226,10 +317,12 @@ export class Engine {
         recommendations.push(`'${input.event}' carries no event-specific payload — its value is the occurrence itself${role ? ` (it is the ${role.replace(/_/g, ' ')})` : ''}: use it as a measure base (count / count_distinct of the user key, event_name: ['${input.event}']) for retention, conversion or funnel metrics.`);
       }
       if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ property }).`);
+      const mem = this._memoryFor([`event:${input.event}`]);
       return {
         event: input.event,
         property_count: props.length,
         properties: rows,
+        ...(mem.length ? { memory: mem } : {}),
         recommendations: recommendations.slice(0, 4),
       };
     }
@@ -261,6 +354,7 @@ export class Engine {
         recommendations.push(ent
           ? `Group/filter by it in metric queries via '${ent}__${col}', or reference '${col}' after a pipeline join with:'${mk}'.`
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
+        const mem = this._memoryFor([`property:${p}`]);
         return {
           property: p, model: mk, column: col, type: dim.type,
           ...(dim.values ? { declared_values: dim.values } : {}),
@@ -268,6 +362,7 @@ export class Engine {
           sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
           indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
           indexing: this._indexHistory(p, input.recent ?? 10),
+          ...(mem.length ? { memory: mem } : {}),
           recommendations: recommendations.slice(0, 3),
         };
       }
@@ -312,6 +407,8 @@ export class Engine {
         out.cast_hint = 'numeric';
         out.recommendations = [...out.recommendations.slice(0, 3), `Values are ${spec.unit} but physically typed string — add "cast":"numeric" (semantic measures) or a compute cast (pipelines) before sum/avg.`];
       }
+      const mem = this._memoryFor([`property:${p}`]);
+      if (mem.length) out.memory = mem;
       return out;
     }
 
@@ -320,7 +417,12 @@ export class Engine {
     // then typo/approximate matches by similarity; each carries { score, match }.
     // fuzzy:false restricts to exact substring.
     if (input.search) {
-      return this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? 20 });
+      const res = this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? 20 });
+      // Saved findings (memory tool) matching the same word — so a fuzzy term the user once
+      // used, recorded as an alias, resolves straight back to the real field it described.
+      const memHits = this.memoryStore.search(input.search, { limit: 10 }).map(memoryView);
+      if (memHits.length) res.memory_matches = memHits;
+      return res;
     }
 
     // ── default: compact OVERVIEW (no per-property dump, no warehouse calls) ──
@@ -346,11 +448,15 @@ export class Engine {
     const lastSync = sync?.last_successful_run || sync?.last_run || null;
     const userModel = c.modelKeys().find((k) => c.getModel(k).role === 'users');
     const exAttr = userModel ? Object.keys(c.getModel(userModel).dimensions || {})[0] : null;
+    const memCount = this.memoryStore.counts().notes;
     return {
       dialect: c.dialect,
       models,
       event_names: c.eventNames(),
       groupable_paths: c.reachableGroupByPaths(),
+      // Saved analyst findings (the memory tool): how many are stored + how to reach them.
+      // They also surface inline on the entity views/{ search } they were linked to.
+      ...(memCount ? { memory: { notes: memCount, note: 'Saved findings (resolved vague terms, gotchas, sources). They surface on the linked semantic_index views and via { search }; list/manage with the memory tool.' } } : {}),
       // How attributes are REACHED: entity-qualified paths in metric queries (semantic
       // layer auto-joins), or an explicit join stage in native pipelines. The fact holds
       // only per-event columns — user/experiment attributes always come via their model.
@@ -1492,6 +1598,22 @@ function walkPredicates(group, fn) {
 
 function clone(x) {
   return JSON.parse(JSON.stringify(x ?? null));
+}
+
+/**
+ * Presentation shape for a stored memory note: decode the canonical "<kind>:<key>" targets
+ * back into typed { kind, key } objects, expose the note/aliases/links, and stamp the time.
+ */
+function memoryView(e) {
+  const targets = (e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? { kind: t.slice(0, i), key: t.slice(i + 1) } : { kind: 'term', key: String(t) }; });
+  return {
+    id: e.id,
+    note: e.note,
+    ...(targets.length ? { about: targets } : {}),
+    ...(e.aliases && e.aliases.length ? { aliases: e.aliases } : {}),
+    ...(e.links && e.links.length ? { links: e.links } : {}),
+    recorded_at: e.created_at ? new Date(e.created_at).toISOString() : null,
+  };
 }
 
 /**

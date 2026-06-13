@@ -272,7 +272,7 @@ export function buildSchemas(catalog) {
     type: 'object',
     additionalProperties: false,
     required: ['name', 'metrics'],
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context.',
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). For a one-off derived TABLE (funnel/sessionization/window/pivot — things MetricFlow cannot express, read back with get_query_result), use build_native_model instead.',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
@@ -317,7 +317,7 @@ export function buildSchemas(catalog) {
   const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
   const buildModel = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model via the same engine as register_native_model). For a pipeline you already know in full, register_native_model in one call is still fine.',
+    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything MetricFlow cannot express; read the rows back with get_query_result. For REUSABLE named metrics you query many ways (group_by / time / filters), use create_semantic_model instead (the governed path).',
     // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
     // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
     // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not

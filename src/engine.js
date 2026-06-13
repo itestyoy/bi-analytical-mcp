@@ -871,7 +871,7 @@ export class Engine {
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: 'model definition removed; the warehouse view may persist until the context is dropped (drop_context) or the warehouse cleans ephemeral objects' };
+    return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the warehouse view may persist until the context is dropped (context({ action: 'drop' })) or the warehouse cleans ephemeral objects" };
   }
 
   async create_semantic_model(input) {
@@ -913,7 +913,7 @@ export class Engine {
       next: `Query it: query_semantic_model({ context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end } }) — optionally group_by one of: ${groupable.slice(0, 5).join(', ')}${groupable.length > 5 ? ', …' : ''}.`,
       recommendations: [
         `Bound every query with time_range and group by a path from \`groupable\` (e.g. ${groupable.find((g) => g.includes('__')) || groupable[0] || 'metric_time'}).`,
-        `Extend this task later with update_semantic_model({ context_id: '${ctx.id}', ... }); inspect it anytime with describe_context.`,
+        `Extend this task later with update_semantic_model({ context_id: '${ctx.id}', ... }); inspect it anytime with context({ action: 'describe', context_id: '${ctx.id}' }).`,
       ],
     };
   }

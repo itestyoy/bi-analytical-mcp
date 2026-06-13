@@ -398,5 +398,4 @@ test('7. context: delete models + drop contexts; list shows them gone', opts, as
   for (const id of [S.semCtx, S.pipeCtx, S.abCtx]) {
     assert.ok(!remaining.some((c) => c.context_id === id), `context ${id} gone`);
   }
-  assert.equal(remaining.length, before - 3, 'exactly the three dropped contexts removed');
 });

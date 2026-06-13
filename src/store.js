@@ -25,9 +25,13 @@
 //   memory.remove(id)                 -> bool (a row existed)
 //   memory.all({ limit })             -> rows[] (most recent first)
 //   memory.counts()                   -> { notes }
+//   memory.vectorPut(id, vec, model)  (store/mirror a note's embedding for semantic search)
+//   memory.vectorIds(model)           -> Set<id> (notes already embedded for this model)
+//   memory.vectorSearch(qvec, { limit, model }) -> [{ id, score }] (cosine; KNN via sqlite-vec)
 //   close()
 
 import { createRequire } from 'node:module';
+import { cosineSimilarity } from './embeddings.js';
 
 const require = createRequire(import.meta.url);
 
@@ -42,6 +46,7 @@ export class MemoryBackend {
     const runs = [];
     const runProps = []; // { run_id, property, ms, values_written, distinct_count, total_count, status, error, started_at }
     const memory = new Map(); // id -> { id, note, targets:[], aliases:[], links:[], created_at }
+    const vectors = new Map(); // id -> { vec:number[], model } (semantic memory search)
     let runSeq = 0;
 
     this.jobs = {
@@ -105,9 +110,17 @@ export class MemoryBackend {
     this.memory = {
       add: (e) => { memory.set(e.id, { id: e.id, note: String(e.note), targets: [...(e.targets || [])], aliases: [...(e.aliases || [])], links: [...(e.links || [])], created_at: e.created_at ?? Date.now() }); return e.id; },
       get: (id) => { const e = memory.get(id); return e ? { ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] } : null; },
-      remove: (id) => memory.delete(id),
+      remove: (id) => { vectors.delete(id); return memory.delete(id); },
       all: ({ limit = 200 } = {}) => [...memory.values()].sort((a, b) => b.created_at - a.created_at || String(b.id).localeCompare(a.id)).slice(0, limit).map((e) => ({ ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] })),
       counts: () => ({ notes: memory.size }),
+      // ── semantic (vector) search: JS cosine over stored embeddings (no native dep) ──
+      vectorPut: (id, vec, model) => { if (memory.has(id)) vectors.set(id, { vec: Array.from(vec), model }); },
+      vectorIds: (model) => new Set([...vectors.entries()].filter(([, v]) => v.model === model).map(([id]) => id)),
+      vectorSearch: (qvec, { limit = 20, model } = {}) => [...vectors.entries()]
+        .filter(([, v]) => v.model === model)
+        .map(([id, v]) => ({ id, score: cosineSimilarity(qvec, v.vec) }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, limit),
     };
 
     // Wipe state (used by MCP_DB_RESET on startup). Memory is curated knowledge that is
@@ -154,7 +167,16 @@ export class SqliteBackend {
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
     // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
-    db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER)');
+    db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER, embedding TEXT, embedding_model TEXT)');
+    // embedding columns were added later; bring an older DB up to schema.
+    try { db.exec('ALTER TABLE memory ADD COLUMN embedding TEXT'); } catch { /* already present */ }
+    try { db.exec('ALTER TABLE memory ADD COLUMN embedding_model TEXT'); } catch { /* already present */ }
+    // Optional sqlite-vec extension → a vec0 virtual table gives true KNN (semantic memory
+    // search). Best-effort: if it cannot load, vectorSearch falls back to in-SQL cosine.
+    this._vec = false;
+    try { require('sqlite-vec').load(db); this._vec = true; } catch { /* extension unavailable */ }
+    // Track the vec0 table's fixed dimensionality/model; a change rebuilds it.
+    db.exec('CREATE TABLE IF NOT EXISTS memory_vec_meta (only_row INTEGER PRIMARY KEY CHECK (only_row = 1), dims INTEGER, model TEXT)');
     const s = this;
 
     this.jobs = {
@@ -232,10 +254,55 @@ export class SqliteBackend {
     this.memory = {
       add(e) { s._run('INSERT INTO memory (id, note, targets, aliases, links, created_at) VALUES (?, ?, ?, ?, ?, ?)', e.id, String(e.note), JSON.stringify(e.targets || []), JSON.stringify(e.aliases || []), JSON.stringify(e.links || []), e.created_at ?? Date.now()); return e.id; },
       get(id) { return memRow(s._get('SELECT * FROM memory WHERE id = ?', id)); },
-      remove(id) { return s._run('DELETE FROM memory WHERE id = ?', id).changes > 0; },
-      all({ limit = 200 } = {}) { return s._all('SELECT * FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
+      remove(id) { if (s._vec) try { s._run('DELETE FROM memory_vec WHERE id = ?', id); } catch { /* no vec table */ } return s._run('DELETE FROM memory WHERE id = ?', id).changes > 0; },
+      all({ limit = 200 } = {}) { return s._all('SELECT id, note, targets, aliases, links, created_at FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
       counts() { return { notes: Number(s._get('SELECT COUNT(*) AS n FROM memory').n) }; },
+
+      // ── semantic (vector) search ──────────────────────────────────────────────
+      // Store the vector on the note (source of truth) and mirror it into the vec0
+      // index when sqlite-vec is loaded. The vec0 table has a FIXED dim/model; a change
+      // rebuilds it (rows get re-embedded by the caller's backfill on the next search).
+      vectorPut(id, vec, model) {
+        const arr = Array.from(vec);
+        s._run('UPDATE memory SET embedding = ?, embedding_model = ? WHERE id = ?', JSON.stringify(arr), model, id);
+        if (!s._vec) return;
+        const meta = s._get('SELECT dims, model FROM memory_vec_meta WHERE only_row = 1');
+        if (!meta) {
+          s._ensureVecTable(arr.length);
+          s._run('INSERT INTO memory_vec_meta (only_row, dims, model) VALUES (1, ?, ?)', arr.length, model);
+        } else if (meta.dims !== arr.length || meta.model !== model) {
+          s._run('DROP TABLE IF EXISTS memory_vec');
+          s._ensureVecTable(arr.length);
+          s._run('UPDATE memory_vec_meta SET dims = ?, model = ? WHERE only_row = 1', arr.length, model);
+        }
+        // vec0 virtual tables do not support UPSERT → delete-then-insert to re-put a vector.
+        s._run('DELETE FROM memory_vec WHERE id = ?', id);
+        s._run('INSERT INTO memory_vec (id, embedding) VALUES (?, ?)', id, JSON.stringify(arr));
+      },
+      vectorIds(model) {
+        return new Set(s._all('SELECT id FROM memory WHERE embedding IS NOT NULL AND embedding_model = ?', model).map((r) => r.id));
+      },
+      vectorSearch(qvec, { limit = 20, model } = {}) {
+        const q = JSON.stringify(Array.from(qvec));
+        const meta = s._vec ? s._get('SELECT dims, model FROM memory_vec_meta WHERE only_row = 1') : null;
+        if (s._vec && meta && meta.model === model && Array.from(qvec).length === meta.dims) {
+          // True KNN via sqlite-vec (cosine distance → similarity = 1 - distance).
+          try { return s._all('SELECT id, distance FROM memory_vec WHERE embedding MATCH ? AND k = ? ORDER BY distance', q, limit).map((r) => ({ id: r.id, score: 1 - Number(r.distance) })); }
+          catch { /* fall through to in-SQL cosine */ }
+        }
+        // Fallback: JS cosine over the stored JSON vectors (extension absent / model mismatch).
+        const qv = Array.from(qvec);
+        return s._all('SELECT id, embedding FROM memory WHERE embedding IS NOT NULL AND embedding_model = ?', model)
+          .map((r) => { try { return { id: r.id, score: cosineSimilarity(qv, JSON.parse(r.embedding)) }; } catch { return { id: r.id, score: 0 }; } })
+          .sort((a, b) => b.score - a.score)
+          .slice(0, limit);
+      },
     };
+  }
+
+  /** Create the vec0 KNN table for a fixed dimensionality (cosine metric). */
+  _ensureVecTable(dims) {
+    this._db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS memory_vec USING vec0(id TEXT PRIMARY KEY, embedding float[${Number(dims)}] distance_metric=cosine)`);
   }
 
   _prep(sql) {
@@ -283,7 +350,9 @@ registerStoreBackend('sqlite', ({ dbPath }) => {
   if (!dbPath) return null;
   try {
     const { DatabaseSync } = require('node:sqlite');
-    return new SqliteBackend(new DatabaseSync(dbPath));
+    // allowExtension lets us load sqlite-vec for vector (semantic memory) search; harmless
+    // when the extension is absent (the backend falls back to in-SQL cosine).
+    return new SqliteBackend(new DatabaseSync(dbPath, { allowExtension: true }));
   } catch {
     return null;
   }

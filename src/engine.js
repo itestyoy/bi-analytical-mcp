@@ -23,7 +23,7 @@ import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -33,7 +33,7 @@ export class Engine {
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
-    this.memoryStore = new MemoryStore({ store: this.store }); // durable analyst findings, linked to catalog entities (the `memory` tool)
+    this.memoryStore = new MemoryStore({ store: this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
@@ -113,7 +113,7 @@ export class Engine {
    *   action:'search' → notes matching a word (text / alias / target)
    *   action:'forget' → delete one note by id
    */
-  memory(input = {}) {
+  async memory(input = {}) {
     this._validate('memory', input);
     const action = input.action;
 
@@ -144,8 +144,8 @@ export class Engine {
     }
 
     if (action === 'search') {
-      const notes = this.memoryStore.search(input.query, { limit: input.limit ?? 20, fuzzy: input.fuzzy !== false }).map(memoryView);
-      return { query: input.query, notes };
+      const notes = (await this.memoryStore.search(input.query, { limit: input.limit ?? 20, fuzzy: input.fuzzy !== false })).map(memoryView);
+      return { query: input.query, semantic: this.memoryStore.semantic, notes };
     }
 
     if (action === 'forget') {
@@ -420,7 +420,7 @@ export class Engine {
       const res = this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? 20 });
       // Saved findings (memory tool) matching the same word — so a fuzzy term the user once
       // used, recorded as an alias, resolves straight back to the real field it described.
-      const memHits = this.memoryStore.search(input.search, { limit: 10, fuzzy: input.fuzzy !== false }).map(memoryView);
+      const memHits = (await this.memoryStore.search(input.search, { limit: 10, fuzzy: input.fuzzy !== false })).map(memoryView);
       if (memHits.length) res.memory_matches = memHits;
       return res;
     }

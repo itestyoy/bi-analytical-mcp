@@ -15,9 +15,27 @@
 import { randomUUID } from 'node:crypto';
 import { rankFuzzy } from './fuzzy.js';
 
+// Cosine-similarity floor for a SEMANTIC hit to count (text-embedding-class models put
+// genuinely related-but-differently-worded texts well above this; noise stays below).
+const SEMANTIC_FLOOR = 0.3;
+
 export class MemoryStore {
-  constructor({ store } = {}) {
+  constructor({ store, embedder } = {}) {
     this.store = store;
+    // Optional embedder ({ model, embed(texts) }) → semantic search. None → fuzzy only.
+    this.embedder = embedder || null;
+  }
+
+  /** Whether semantic (vector) search is active. */
+  get semantic() { return !!this.embedder; }
+
+  /** The text a note is embedded as: its finding + the words/entities attached to it. */
+  _embedText(e) {
+    return [
+      e.note,
+      ...(e.aliases || []),
+      ...(e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? t.slice(i + 1) : String(t); }),
+    ].filter(Boolean).join('\n');
   }
 
   /** Persist one finding. Returns the stored entry (with its generated id + timestamp). */
@@ -47,30 +65,57 @@ export class MemoryStore {
   }
 
   /**
-   * FUZZY match over a note's TEXT, its aliases (the user's phrasings) and its target
-   * keys/terms — so a word the user used (even mistyped or paraphrased) resolves back to
-   * the finding. Powered by the shared Fuse.js subsystem (src/fuzzy.js): EXACT-substring
-   * hits rank first, then typo/approximate hits above the similarity floor. Pass
-   * fuzzy:false for exact-substring only. The note set is tiny, so a one-shot rank over
-   * all notes is cheap (no persistent vector index needed).
+   * Find notes matching `query`. Always runs the LEXICAL/FUZZY match (shared Fuse.js
+   * subsystem: exact-substring first, then typo/approximate over note text + aliases +
+   * target keys). When an embedder is configured it ALSO runs SEMANTIC search — embeds
+   * the query, KNN over the stored vectors (sqlite-vec when available, else JS cosine),
+   * and BLENDS the two (a note ranks by the better of its fuzzy / cosine score) — so
+   * "monetization issues" can surface a note about "IAP purchase failures" with no shared
+   * words. Self-healing: any note missing a current-model vector is embedded on the fly
+   * (one batch call) and persisted. fuzzy:false restricts the lexical side to exact
+   * substring (semantic still runs if configured). Async because embedding is a network op.
    */
-  search(query, { limit = 20, fuzzy = true } = {}) {
+  async search(query, { limit = 20, fuzzy = true } = {}) {
     const q = String(query ?? '').trim();
     if (!q) return [];
     const notes = this.all({ limit: 2000 });
     if (!notes.length) return [];
-    const ranked = rankFuzzy(q, notes, {
-      // Search the note text, the aliases, and the target KEYS (the "<kind>:" prefix
-      // stripped, so "ad_type_of_event_data" / "users.country" / a free phrase all match).
-      fields: (e) => [
-        e.note,
-        ...(e.aliases || []),
-        ...(e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? t.slice(i + 1) : String(t); }),
-      ].filter(Boolean),
+
+    // Lexical/fuzzy candidates (over-fetch a little so the blend has room to reorder).
+    const lexical = rankFuzzy(q, notes, {
+      fields: (e) => this._embedText(e).split('\n'),
       threshold: fuzzy ? 0.6 : 2, // > 1 -> exact-substring only (rankFuzzy turns fuzzy off)
-      limit,
+      limit: Math.max(limit, 20),
       tiebreak: (e) => e.id,
     });
-    return ranked.map((r) => r.item);
+
+    // Blend by id: start from the lexical hits, then fold in semantic hits.
+    const byId = new Map(notes.map((n) => [n.id, n]));
+    const scored = new Map(); // id -> best score
+    for (const r of lexical) scored.set(r.item.id, r.score);
+
+    if (this.embedder) {
+      try {
+        const model = this.embedder.model;
+        // Backfill: embed any note lacking a current-model vector (one batch call), persist.
+        const have = this.store.memory.vectorIds(model);
+        const need = notes.filter((n) => !have.has(n.id));
+        if (need.length) {
+          const vecs = await this.embedder.embed(need.map((n) => this._embedText(n)));
+          need.forEach((n, i) => { if (vecs[i]) this.store.memory.vectorPut(n.id, vecs[i], model); });
+        }
+        const [qvec] = await this.embedder.embed([q]);
+        for (const { id, score } of this.store.memory.vectorSearch(qvec, { limit: Math.max(limit, 20), model })) {
+          if (score < SEMANTIC_FLOOR) continue;
+          scored.set(id, Math.max(scored.get(id) ?? 0, score));
+        }
+      } catch { /* provider/store failed → lexical results only (graceful) */ }
+    }
+
+    return [...scored.entries()]
+      .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(b[0]))
+      .slice(0, limit)
+      .map(([id]) => byId.get(id))
+      .filter(Boolean);
   }
 }

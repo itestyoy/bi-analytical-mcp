@@ -13,6 +13,7 @@ import { ContextManager } from './context-manager.js';
 import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
 import { BackgroundIndexer } from './value-index.js';
+import { createEmbedder } from './embeddings.js';
 
 const TOOL_DESCRIPTIONS = {
   semantic_index: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. No args → overview (models, event names, event_semantics = which event marks install/session/purchase, group-by paths, value-index freshness, available recipe ids). Exactly one view key to drill: { model } → columns + dimension attributes with real sample values + physical columns; { event } → the properties that event carries; { property } → one column\'s full passport (spec/unit, real value distribution — pageable, NULL coverage per event distinguishing expected NULLs from data gaps, indexing history; accepts bare event properties and "users.country"-style attributes); { search } → FUZZY search over events/properties/attributes/VALUES/recipes (typo- and paraphrase-tolerant: "retenton"→retention recipe, "germny"→Germany value; exact hits first, each scored, fuzzy:false for substring-only); { recipe: id } → one ready-made recipe in full (payload + example_queries + the reusable `hack`); { guide: true } → HOW to approach a question: the analyst workflow + IF/DO routing triggers (which tool when) + per-task recipe families (pass a family name to narrow) — read it first if unsure; { status: true } → value-index sync state + background query jobs; { run } → one sync run\'s per-property breakdown.',
@@ -22,7 +23,7 @@ const TOOL_DESCRIPTIONS = {
   get_query_result: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}. Returns status (running/ready/error) and rows read from the materialized table.',
   update_semantic_model: 'Add/remove task measures, dimensions or metrics for a table SM within a context; re-parses.',
   context: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, cascade for dependent metrics).',
-  memory: 'DURABLE analyst memory — remember what you FOUND OUT so it comes back through semantic_index. After you resolve something non-obvious (a vague request tracked down to a real field, a gotcha, a useful source), record:"action" it: `note` the finding, `targets` the catalog entities it is about (a property/attribute/event/model — e.g. "ad_type_of_event_data", "users.country", "ad_finished"), `aliases` the words the user actually used ("ad format"), `links` any sources. The note then surfaces inline on the linked semantic_index views ({ model }/{ event }/{ property }) and in semantic_index({ search }) — so the next fuzzy phrasing resolves straight to the right field instead of re-investigating. action: list (all, or one { target }) | search (by word — FUZZY, typo/paraphrase-tolerant) | forget (by id).',
+  memory: 'DURABLE analyst memory — remember what you FOUND OUT so it comes back through semantic_index. After you resolve something non-obvious (a vague request tracked down to a real field, a gotcha, a useful source), record:"action" it: `note` the finding, `targets` the catalog entities it is about (a property/attribute/event/model — e.g. "ad_type_of_event_data", "users.country", "ad_finished"), `aliases` the words the user actually used ("ad format"), `links` any sources. The note then surfaces inline on the linked semantic_index views ({ model }/{ event }/{ property }) and in semantic_index({ search }) — so the next fuzzy phrasing resolves straight to the right field instead of re-investigating. action: list (all, or one { target }) | search (by word — typo-tolerant fuzzy, and SEMANTIC/meaning-based when embeddings are enabled) | forget (by id).',
   experiment: 'The A/B EXPERIMENT lifecycle in one tool (action-driven): plan → check_split → analyze. action:"plan" = power/sample-size (required users, or the MDE at a given n) BEFORE running. action:"check_split" = Sample-Ratio-Mismatch χ² guardrail; p < 0.001 means randomization/logging is broken and the result is INVALID — run it BEFORE trusting any lift. action:"analyze" = the significance test on PRE-AGGREGATED per-group stats (metric: proportion → two-proportion z-test; mean → Welch t-test; ratio → delta-method; cuped → variance reduction), returning lift (+ relative-lift CI), p-value, CI, significance, and a multiplicity-adjusted p-value per variant; sequential:true adds an always-valid p for live peeking. Compute the per-group aggregates first with a pipeline.',
   time: 'Wait for `seconds` (capped at 60), then return — a pure timer that touches no data. Use it to PACE polling: after query_semantic_model({ materialize:true }) (or a long build) returns a query_id, call time to wait, then poll get_query_result; repeat until ready.',
 };
@@ -58,7 +59,7 @@ KEY CONCEPTS
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
 const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over fixed, catalog-enumerated data sources (an events fact + a user-attributes dimension + experiment assignments) and query them by name; you never write SQL. Start with semantic_index, then create_semantic_model / build_native_model, then query_semantic_model.';
 
-const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'build_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'semantic_index', 'context', 'describe_context', 'time']);
+const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'build_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'semantic_index', 'context', 'describe_context', 'memory', 'time']);
 
 // Tools that still EXIST (schema + engine method + dispatch) but are no longer
 // advertised to the AI — superseded by / folded into a newer tool. Code is kept so the
@@ -195,7 +196,10 @@ export async function makeEngine(opts = {}) {
       for (const [k, names] of Object.entries(pruned)) console.error(`[mcp] ${new Date().toISOString()} catalog grounding: '${k}' — excluded ${names.length} declared field(s) absent from the physical table: ${names.slice(0, 12).join(', ')}${names.length > 12 ? ', …' : ''}`);
     } catch (e) { console.error(`[mcp] ${new Date().toISOString()} catalog grounding skipped: ${e?.message || e}`); }
   }
-  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb });
+  // Optional semantic memory search: an embedder is built ONLY when MEMORY_EMBEDDINGS is
+  // configured (+ a key); otherwise null and memory({ search }) stays purely fuzzy.
+  const embedder = createEmbedder();
+  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder });
 }
 
 export function createApp(engine) {

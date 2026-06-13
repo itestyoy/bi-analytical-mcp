@@ -18,13 +18,33 @@ function engine() {
 }
 
 // Advertised tool surface: the folded/rudimentary tools are gone; the merged ones present.
-test('advertised tools: folded tools removed, context present', () => {
+test('advertised tools: folded tools removed, context + experiment present', () => {
   const names = buildToolDefs(engine()).map((d) => d.name);
   assert.ok(names.includes('context'), 'unified context tool advertised');
+  assert.ok(names.includes('experiment'), 'unified experiment tool advertised');
   assert.ok(names.includes('semantic_index') && names.includes('build_native_model'));
-  for (const gone of ['update_native_model', 'list_query_jobs', 'get_recipe', 'list_recipes', 'list_contexts', 'describe_context', 'drop_context', 'delete_native_model', 'delete_semantic_model', 'register_native_model']) {
+  for (const gone of ['update_native_model', 'list_query_jobs', 'get_recipe', 'list_recipes', 'list_contexts', 'describe_context', 'drop_context', 'delete_native_model', 'delete_semantic_model', 'register_native_model', 'ab_test', 'srm_check', 'sample_size']) {
     assert.ok(!names.includes(gone), `${gone} is no longer advertised`);
   }
+  // every advertised tool has a real description (not name-as-description).
+  for (const d of buildToolDefs(engine())) assert.notEqual(d.description, d.name, `${d.name} has a description`);
+});
+
+// experiment({ action }) — the unified A/B lifecycle — dispatches + validates strictly.
+test('experiment tool: plan / check_split / analyze dispatch + strict fields', () => {
+  const e = engine();
+  const plan = e.experiment({ action: 'plan', metric: 'proportion', baseline: 0.2, mde: 0.02 });
+  assert.ok(plan.n_per_group > 0, 'plan returns a sample size');
+  const srm = e.experiment({ action: 'check_split', groups: [{ label: 'c', n: 100 }, { label: 'v', n: 100 }] });
+  assert.equal(srm.srm_detected, false, 'even split passes SRM');
+  const a = e.experiment({ action: 'analyze', metric: 'proportion', control: { n: 1000, conversions: 200 }, variants: [{ label: 'b', n: 1000, conversions: 260 }] });
+  assert.equal(a.results.length, 1);
+  assert.equal(a.results[0].significant, true);
+  // strict: analyze needs control+variants; check_split needs groups; plan rejects ratio metric.
+  assert.throws(() => e.experiment({ action: 'analyze', metric: 'proportion' }), /invalid input/);
+  assert.throws(() => e.experiment({ action: 'check_split' }), /invalid input/);
+  assert.throws(() => e.experiment({ action: 'plan', metric: 'ratio', mde: 0.1 }), /invalid input/);
+  assert.throws(() => e.experiment({ action: 'bogus' }), /invalid input/);
 });
 
 // context({ action }) — the unified lifecycle tool — dispatches + validates strictly.

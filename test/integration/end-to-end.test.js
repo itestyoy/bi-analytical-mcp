@@ -319,11 +319,11 @@ test('5a. build_native_model fed the conversion recipe stages → per-variant ag
   S.abMap = map;
 });
 
-test('5b. ab_test on the per-variant aggregates: significant drop (1.0 → 1/6)', opts, async (t) => {
+test('5b. experiment({analyze}) on the per-variant aggregates: significant drop (1.0 → 1/6)', opts, async (t) => {
   if (skip(t)) return;
   const { abMap: map, abByGroup: byGroup } = S;
   const arm = (row) => ({ label: String(row[map.group_field]), n: num(row[map.n_field]), conversions: num(row[map.conversions_field]) });
-  const res = engine.ab_test({ metric: map.metric, control: arm(byGroup.control), variants: [arm(byGroup.variant_b)] });
+  const res = engine.experiment({ action: 'analyze', metric: map.metric, control: arm(byGroup.control), variants: [arm(byGroup.variant_b)] });
   assert.equal(res.ok, true);
   const v = res.results[0];
   close(v.control_rate, 1.0);
@@ -333,17 +333,17 @@ test('5b. ab_test on the per-variant aggregates: significant drop (1.0 → 1/6)'
   assert.ok(Number.isFinite(v.p_value) && v.p_value >= 0 && v.p_value <= 1);
 });
 
-test('5c. srm_check on the warehouse-computed split: clean 6 vs 6 passes', opts, async (t) => {
+test('5c. experiment({check_split}) on the warehouse-computed split: clean 6 vs 6 passes', opts, async (t) => {
   if (skip(t)) return;
   const { abMap: map, abByGroup: byGroup } = S;
   const groups = Object.values(byGroup).map((row) => ({ label: String(row[map.group_field]), n: num(row[map.n_field]) }));
-  const res = engine.srm_check({ groups });
+  const res = engine.experiment({ action: 'check_split', groups });
   assert.equal(res.ok, true);
   close(res.chi_square, 0);          // 6 vs 6 against an even split
   assert.equal(res.srm_detected, false);
 });
 
-test('5d. sample_size planning matches the recipe tool_calls outputs (data-grounded)', opts, async (t) => {
+test('5d. experiment({plan}) matches the recipe tool_calls outputs (data-grounded)', opts, async (t) => {
   if (skip(t)) return;
   // Use the ab_test_power recipe's declared tool_calls so the asserted numbers are
   // the recipe's own ground truth (the recipes-parse suite runs these too).
@@ -353,13 +353,13 @@ test('5d. sample_size planning matches the recipe tool_calls outputs (data-groun
     assert.equal(res.ok, true, JSON.stringify(res));
   }
   // proportion baseline=0.2, mde=0.02 → required n per group, doubled = total_n.
-  const prop = engine.sample_size({ metric: 'proportion', baseline: 0.2, mde: 0.02 });
+  const prop = engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.2, mde: 0.02 });
   assert.equal(prop.ok, true);
   assert.ok(Number.isInteger(prop.n_per_group) && prop.n_per_group > 0, 'n per group is a positive integer');
   assert.equal(prop.total_n, 2 * prop.n_per_group, 'total_n is two arms');
   close(prop.relative_mde, 0.02 / 0.2);
   // given n, the MDE round-trips to a value smaller than the original mde at this n.
-  const fromN = engine.sample_size({ metric: 'proportion', baseline: 0.2, n: prop.n_per_group });
+  const fromN = engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.2, n: prop.n_per_group });
   assert.ok(fromN.mde > 0 && fromN.mde <= 0.02 + 1e-9, 'inverse direction yields a consistent MDE');
 });
 

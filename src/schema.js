@@ -272,7 +272,7 @@ export function buildSchemas(catalog) {
     type: 'object',
     additionalProperties: false,
     required: ['name', 'metrics'],
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). For a one-off derived TABLE (funnel/sessionization/window/pivot — things MetricFlow cannot express, read back with get_query_result), use build_native_model instead.',
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express, read back with get_query_result), use build_native_model instead.',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
@@ -317,7 +317,7 @@ export function buildSchemas(catalog) {
   const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
   const buildModel = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything MetricFlow cannot express; read the rows back with get_query_result. For REUSABLE named metrics you query many ways (group_by / time / filters), use create_semantic_model instead (the governed path).',
+    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; read the rows back with get_query_result. For REUSABLE named metrics you query many ways (group_by / time / filters), use create_semantic_model instead (the governed path).',
     // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
     // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
     // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
@@ -328,7 +328,7 @@ export function buildSchemas(catalog) {
       { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage']) } },
     ],
     properties: {
-      action: { enum: ['start', 'add_step', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + the source columns); add_step appends ONE stage and returns the columns available after it; preview shows the accumulated steps + generated SQL; materialize builds the draft as a dbt model (the final step after the stages); discard drops it.' },
+      action: { enum: ['start', 'add_step', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + the source columns); add_step appends ONE stage and returns the columns available after it; preview shows the accumulated steps + generated SQL; materialize builds the draft as a model (the final step after the stages); discard drops it.' },
       draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for add_step/preview/materialize/discard.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start.' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
@@ -482,6 +482,7 @@ export function buildSchemas(catalog) {
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
       },
     },
+    experiment: experimentSchema(),
     ab_test: abTestSchema(),
     srm_check: srmCheckSchema(),
     sample_size: sampleSizeSchema(),
@@ -649,5 +650,33 @@ function sampleSizeSchema() {
       branch('proportion', 'baseline', 'Conversion-rate planning: needs a baseline rate, plus exactly one of mde or n.'),
       branch('mean', 'stddev', 'Continuous-metric planning: needs a stddev, plus exactly one of mde or n.'),
     ],
+  };
+}
+
+// ── ONE experiment-lifecycle tool (action-driven), folding in plan/check_split/analyze ──
+// Composes the three stat schemas' top-level fields under an `action` discriminator; each
+// action requires its core fields here, and the engine delegates to the per-action handler
+// which re-validates the exact (per-metric) field set. So the lifecycle is one tool, but the
+// strict statistical contracts are preserved.
+function experimentSchema() {
+  const ab = abTestSchema();
+  const srm = srmCheckSchema();
+  const ss = sampleSizeSchema();
+  const properties = {
+    action: { enum: ['plan', 'check_split', 'analyze'], description: 'plan → required sample size / MDE (power planning, BEFORE running); check_split → Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run BEFORE trusting any lift); analyze → the A/B significance test on per-group aggregates.' },
+    // union of all three actions' fields (analyze/ab_test wins on shared keys like metric).
+    ...ss.properties,
+    ...srm.properties,
+    ...ab.properties,
+  };
+  return {
+    type: 'object', additionalProperties: false, required: ['action'],
+    description: 'The A/B EXPERIMENT lifecycle in ONE tool (action-driven): plan → check_split → analyze. plan = power/sample-size (how many users, or the MDE at a given n) BEFORE running; check_split = Sample-Ratio-Mismatch χ² guardrail (a bad split invalidates the experiment — run it BEFORE trusting any lift); analyze = the significance test on PRE-AGGREGATED per-group stats (metric: proportion → conversions, mean → mean+stddev, ratio → per-user sums, cuped → variance reduction), returning lift + p-value + CI + significance, multiplicity-adjusted across variants. Compute the per-group aggregates first with a pipeline.',
+    allOf: [
+      { if: { properties: { action: { const: 'plan' } }, required: ['action'] }, then: { required: ['metric'], properties: { metric: { enum: ['proportion', 'mean'] } } } },
+      { if: { properties: { action: { const: 'check_split' } }, required: ['action'] }, then: { required: ['groups'] } },
+      { if: { properties: { action: { const: 'analyze' } }, required: ['action'] }, then: { required: ['metric', 'control', 'variants'] } },
+    ],
+    properties,
   };
 }

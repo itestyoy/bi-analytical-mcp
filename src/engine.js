@@ -467,7 +467,7 @@ export class Engine {
     const recommendations = [];
     if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in semantic_index may still be filling in.`);
     else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ property }) will show no sample_values until the first sync (it runs in the background at startup).`);
-    else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the warehouse/runner.`);
+    else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
     else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ property }).`);
     if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }); semantic_index({ status }) lists them.`);
     if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
@@ -655,7 +655,7 @@ export class Engine {
     // visible, not silent — these names are excluded from the referenceable columns.
     if (phantom.length) {
       resp.not_materialized = phantom;
-      resp.recommendations.push(`${phantom.length} catalog column(s) are NOT in the physical '${this.catalog.getModel(source).dbt_model}' and were excluded (e.g. ${phantom.slice(0, 5).join(', ')}). Fix the source dbt model/schema to materialize or drop them.`);
+      resp.recommendations.push(`${phantom.length} catalog column(s) are NOT in the physical table '${this.catalog.getModel(source).dbt_model}' and were excluded (e.g. ${phantom.slice(0, 5).join(', ')}). Fix the source model/schema to materialize or drop them.`);
     }
     if (input.include_columns) resp.available_columns = cols;
     return resp;
@@ -871,7 +871,7 @@ export class Engine {
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the warehouse view may persist until the context is dropped (context({ action: 'drop' })) or the warehouse cleans ephemeral objects" };
+    return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (context({ action: 'drop' })) or the store cleans ephemeral objects" };
   }
 
   async create_semantic_model(input) {
@@ -989,6 +989,24 @@ export class Engine {
   }
 
   /**
+   * ONE A/B-experiment lifecycle tool (action-driven), folding in the three stat tools.
+   * plan → sample_size (power/MDE), check_split → srm_check (SRM guardrail), analyze →
+   * ab_test (significance). Validates the action shape, then delegates to the internal
+   * handler which re-validates the exact per-metric contract. The lifecycle order
+   * (plan → check_split → analyze) is the recommended sequence.
+   */
+  experiment(input) {
+    this._validate('experiment', input);
+    const { action, ...rest } = input;
+    switch (action) {
+      case 'plan': return this.sample_size(rest);
+      case 'check_split': return this.srm_check(rest);
+      case 'analyze': return this.ab_test(rest);
+      default: throw new ToolError(`unknown experiment action '${action}'`, { stage: 'validate', field: 'action' });
+    }
+  }
+
+  /**
    * A/B significance test over PRE-AGGREGATED group stats (computed by a pipeline
    * that joins the experiments source, windows events to the assignment period,
    * and aggregates per group). proportion → two-proportion z-test; mean → Welch
@@ -1056,7 +1074,7 @@ export class Engine {
     const recommendations = [
       `Trust significant_adjusted (multiplicity-corrected${familyExtra.length ? `, family includes ${familyExtra.length} other metric(s)` : ''}) over raw significant.`,
       ...(input.sequential ? ['p_value_sequential is valid under repeated peeking; the fixed-horizon p_value is only valid at the planned sample size.'] : ['Peeking at a RUNNING experiment with fixed-horizon p-values inflates false positives — pass sequential:true for an always-valid p.']),
-      ...(anySig ? [] : ['No significant lift: check power with sample_size({ ... }) before calling it a true null — and verify the split with srm_check if you have not.']),
+      ...(anySig ? [] : ['No significant lift: check power with experiment({ action: "plan", ... }) before calling it a true null — and verify the split with experiment({ action: "check_split", ... }) if you have not.']),
     ];
     return { ok: true, metric, confidence, alternative, correction, control: labelOf(control, -1), ...extra, results, recommendations };
   }

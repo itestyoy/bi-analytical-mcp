@@ -165,6 +165,36 @@ test('semantic memory search finds a same-meaning note with no shared words', as
   assert.ok(!f.notes.some((n) => n.note.includes('IAP purchases')), 'fuzzy-only misses the same-meaning note (proves semantic added the recall)');
 });
 
+// Regression (test report 2026-06-13 #7): a multi-word phrase lifted from the NOTE body —
+// not contiguous, not an alias — must still be found (token-coverage lexical match).
+test('search finds a multi-word phrase from the note body (interleaved words)', async () => {
+  const e = engine(); // no embedder → lexical only (the path that previously missed)
+  const rec = await e.memory({
+    action: 'record',
+    note: 'action=record требует note без target, но с targets/question/aliases; одиночный target в record невалиден.',
+    targets: ['betti_test'],
+    aliases: ['memory test'],
+  });
+  // the query words appear in the note but with "в record" interleaved — not a substring.
+  const r = await e.memory({ action: 'search', query: 'одиночный target невалиден' });
+  assert.equal(r.semantic, false, 'no embedder → semantic honestly reported false');
+  assert.ok(r.notes.some((n) => n.id === rec.id), 'token-coverage finds the phrase from the note body');
+  // a query whose words are NOT (mostly) in any note still returns nothing.
+  assert.equal((await e.memory({ action: 'search', query: 'completely unrelated zzz' })).notes.length, 0);
+});
+
+// Honest semantic flag (test report #B): a configured-but-FAILING embedder must report
+// semantic:false + a reason, NOT a misleading semantic:true — while lexical still works.
+test('a failing embedder reports semantic:false + semantic_error (not a silent true)', async () => {
+  const boom = { model: 'boom', embed: async () => { throw new Error('provider unreachable'); } };
+  const e = engineWith(boom);
+  const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2', targets: ['users.country'], aliases: ['geo'] });
+  const r = await e.memory({ action: 'search', query: 'geo' });
+  assert.equal(r.semantic, false, 'embedding failed → semantic reported false');
+  assert.ok(typeof r.semantic_error === 'string' && r.semantic_error.includes('provider unreachable'), 'the failure reason is surfaced');
+  assert.ok(r.notes.some((n) => n.id === rec.id), 'lexical search still works despite the embedder failure');
+});
+
 // Overview reports the stored count once anything is saved.
 test('semantic_index overview surfaces the memory count', async () => {
   const e = engine();

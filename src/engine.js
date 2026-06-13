@@ -146,8 +146,8 @@ export class Engine {
     }
 
     if (action === 'search') {
-      const notes = (await this.memoryStore.search(input.query, { limit: input.limit ?? 20, fuzzy: input.fuzzy !== false })).map(memoryView);
-      return { query: input.query, semantic: this.memoryStore.semantic, notes };
+      const r = await this.memoryStore.search(input.query, { limit: input.limit ?? 20, fuzzy: input.fuzzy !== false });
+      return { query: input.query, semantic: r.semantic, ...(r.semantic_error ? { semantic_error: r.semantic_error } : {}), notes: r.notes.map(memoryView) };
     }
 
     if (action === 'forget') {
@@ -422,7 +422,7 @@ export class Engine {
       const res = this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? 20 });
       // Saved findings (memory tool) matching the same word — so a fuzzy term the user once
       // used, recorded as an alias, resolves straight back to the real field it described.
-      const memHits = (await this.memoryStore.search(input.search, { limit: 10, fuzzy: input.fuzzy !== false })).map(memoryView);
+      const memHits = (await this.memoryStore.search(input.search, { limit: 10, fuzzy: input.fuzzy !== false })).notes.map(memoryView);
       if (memHits.length) res.memory_matches = memHits;
       return res;
     }

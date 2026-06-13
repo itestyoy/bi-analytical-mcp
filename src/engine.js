@@ -120,14 +120,16 @@ export class Engine {
     if (action === 'record') {
       const note = String(input.note ?? '').trim();
       if (!note) throw new ToolError('note is required and must be a non-empty finding', { stage: 'validate', field: 'note' });
+      const question = input.question ? String(input.question).trim() : null;
       const resolved = (input.targets || []).map((t) => this._resolveMemoryTarget(t));
       const aliases = [...new Set((input.aliases || []).map((a) => String(a).trim()).filter(Boolean))];
       const links = (input.links || []).map((l) => (typeof l === 'string' ? { url: l } : { url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) }));
-      const entry = this.memoryStore.record({ note, targets: resolved.map((r) => r.canon), aliases, links });
+      const entry = this.memoryStore.record({ note, question, targets: resolved.map((r) => r.canon), aliases, links });
       return {
         saved: true,
         id: entry.id,
         note: entry.note,
+        ...(question ? { question } : {}),
         linked_to: resolved.map((r) => ({ kind: r.kind, target: r.key, surfaces_in: this._memorySurfaceHint(r) })),
         ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.key) } : {}),
         aliases, links,
@@ -1609,6 +1611,7 @@ function memoryView(e) {
   return {
     id: e.id,
     note: e.note,
+    ...(e.question ? { question: e.question } : {}),
     ...(targets.length ? { about: targets } : {}),
     ...(e.aliases && e.aliases.length ? { aliases: e.aliases } : {}),
     ...(e.links && e.links.length ? { links: e.links } : {}),

@@ -134,16 +134,28 @@ test('memory list / search / forget round-trip', async () => {
   assert.equal((await e.memory({ action: 'list' })).total, 1, 'forgotten note is gone');
 });
 
+// The original business `question` is stored, echoed, surfaced — and embedded with the note.
+test('memory records the business question and surfaces it', async () => {
+  const e = engine();
+  const rec = await e.memory({ action: 'record', note: 'ad_type_of_event_data carries the ad format', question: 'which ad format drives the most rewarded revenue?', targets: ['ad_type_of_event_data'] });
+  assert.equal(rec.question, 'which ad format drives the most rewarded revenue?', 'question echoed on record');
+  // it travels onto the views + listings.
+  const prop = await e.semantic_index({ property: 'ad_type_of_event_data' });
+  assert.equal(prop.memory.find((m) => m.id === rec.id).question, 'which ad format drives the most rewarded revenue?');
+  assert.equal((await e.memory({ action: 'list' })).notes.find((n) => n.id === rec.id).question, 'which ad format drives the most rewarded revenue?');
+});
+
 // SEMANTIC search (embedder configured): a query finds a same-meaning note with NO shared
 // words — and the SAME query under fuzzy-only does NOT. Proves the embedding path adds recall.
 test('semantic memory search finds a same-meaning note with no shared words', async () => {
   const sem = engineWith(stubEmbedder());
-  const mon = await sem.memory({ action: 'record', note: 'IAP purchases are failing for some payers', aliases: ['monetization'], targets: ['price_in_usd_of_event_data'] });
+  // the business QUESTION is embedded with the note (note text alone shares no "revenue" word).
+  const mon = await sem.memory({ action: 'record', note: 'use ad_type to split the metric', question: 'which ad format makes the most money?', aliases: ['monetization'], targets: ['price_in_usd_of_event_data'] });
   const tut = await sem.memory({ action: 'record', note: 'the onboarding tutorial has 5 steps', targets: ['tutorial'] });
 
   const s = await sem.memory({ action: 'search', query: 'revenue problems' });
   assert.equal(s.semantic, true, 'embedder configured → semantic mode reported');
-  assert.ok(s.notes.some((n) => n.id === mon.id), 'semantic search surfaces the monetization note for "revenue" (no shared words)');
+  assert.ok(s.notes.some((n) => n.id === mon.id), 'semantic search surfaces the note via its embedded business question (no shared words in the note text)');
   assert.ok(!s.notes.some((n) => n.id === tut.id), 'the unrelated tutorial note is below the similarity floor');
 
   // Without an embedder, the same query (no lexical overlap) does NOT find it.

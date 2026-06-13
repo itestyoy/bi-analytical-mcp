@@ -29,9 +29,14 @@ export class MemoryStore {
   /** Whether semantic (vector) search is active. */
   get semantic() { return !!this.embedder; }
 
-  /** The text a note is embedded as: its finding + the words/entities attached to it. */
+  /**
+   * The text a note is embedded as (and lexically matched on): the original business
+   * QUESTION it answers + the finding + the words/entities attached to it. Embedding the
+   * question means a future, similarly-phrased business question retrieves this insight.
+   */
   _embedText(e) {
     return [
+      e.question,
       e.note,
       ...(e.aliases || []),
       ...(e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? t.slice(i + 1) : String(t); }),
@@ -39,9 +44,9 @@ export class MemoryStore {
   }
 
   /** Persist one finding. Returns the stored entry (with its generated id + timestamp). */
-  record({ note, targets = [], aliases = [], links = [] } = {}) {
+  record({ note, question = null, targets = [], aliases = [], links = [] } = {}) {
     const id = randomUUID().replace(/-/g, '').slice(0, 12);
-    const entry = { id, note: String(note), targets, aliases, links, created_at: Date.now() };
+    const entry = { id, note: String(note), question: question || null, targets, aliases, links, created_at: Date.now() };
     this.store.memory.add(entry);
     return entry;
   }

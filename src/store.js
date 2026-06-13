@@ -108,7 +108,7 @@ export class MemoryBackend {
     // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
     // (targets/aliases/links are arrays here — the SQLite backend JSON-encodes them).
     this.memory = {
-      add: (e) => { memory.set(e.id, { id: e.id, note: String(e.note), targets: [...(e.targets || [])], aliases: [...(e.aliases || [])], links: [...(e.links || [])], created_at: e.created_at ?? Date.now() }); return e.id; },
+      add: (e) => { memory.set(e.id, { id: e.id, note: String(e.note), question: e.question ?? null, targets: [...(e.targets || [])], aliases: [...(e.aliases || [])], links: [...(e.links || [])], created_at: e.created_at ?? Date.now() }); return e.id; },
       get: (id) => { const e = memory.get(id); return e ? { ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] } : null; },
       remove: (id) => { vectors.delete(id); return memory.delete(id); },
       all: ({ limit = 200 } = {}) => [...memory.values()].sort((a, b) => b.created_at - a.created_at || String(b.id).localeCompare(a.id)).slice(0, limit).map((e) => ({ ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] })),
@@ -167,10 +167,9 @@ export class SqliteBackend {
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
     // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
-    db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER, embedding TEXT, embedding_model TEXT)');
-    // embedding columns were added later; bring an older DB up to schema.
-    try { db.exec('ALTER TABLE memory ADD COLUMN embedding TEXT'); } catch { /* already present */ }
-    try { db.exec('ALTER TABLE memory ADD COLUMN embedding_model TEXT'); } catch { /* already present */ }
+    db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, question TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER, embedding TEXT, embedding_model TEXT)');
+    // columns added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
+    for (const col of ['question TEXT', 'embedding TEXT', 'embedding_model TEXT']) { try { db.exec(`ALTER TABLE memory ADD COLUMN ${col}`); } catch { /* already present */ } }
     // Optional sqlite-vec extension → a vec0 virtual table gives true KNN (semantic memory
     // search). Best-effort: if it cannot load, vectorSearch falls back to in-SQL cosine.
     this._vec = false;
@@ -250,12 +249,12 @@ export class SqliteBackend {
 
     // Analyst memory (curated findings). JSON columns are decoded back to arrays on read.
     const parseArr = (v) => { try { const a = JSON.parse(v || '[]'); return Array.isArray(a) ? a : []; } catch { return []; } };
-    const memRow = (r) => (r ? { id: r.id, note: r.note, targets: parseArr(r.targets), aliases: parseArr(r.aliases), links: parseArr(r.links), created_at: Number(r.created_at) } : null);
+    const memRow = (r) => (r ? { id: r.id, note: r.note, question: r.question ?? null, targets: parseArr(r.targets), aliases: parseArr(r.aliases), links: parseArr(r.links), created_at: Number(r.created_at) } : null);
     this.memory = {
-      add(e) { s._run('INSERT INTO memory (id, note, targets, aliases, links, created_at) VALUES (?, ?, ?, ?, ?, ?)', e.id, String(e.note), JSON.stringify(e.targets || []), JSON.stringify(e.aliases || []), JSON.stringify(e.links || []), e.created_at ?? Date.now()); return e.id; },
+      add(e) { s._run('INSERT INTO memory (id, note, question, targets, aliases, links, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', e.id, String(e.note), e.question ?? null, JSON.stringify(e.targets || []), JSON.stringify(e.aliases || []), JSON.stringify(e.links || []), e.created_at ?? Date.now()); return e.id; },
       get(id) { return memRow(s._get('SELECT * FROM memory WHERE id = ?', id)); },
       remove(id) { if (s._vec) try { s._run('DELETE FROM memory_vec WHERE id = ?', id); } catch { /* no vec table */ } return s._run('DELETE FROM memory WHERE id = ?', id).changes > 0; },
-      all({ limit = 200 } = {}) { return s._all('SELECT id, note, targets, aliases, links, created_at FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
+      all({ limit = 200 } = {}) { return s._all('SELECT id, note, question, targets, aliases, links, created_at FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
       counts() { return { notes: Number(s._get('SELECT COUNT(*) AS n FROM memory').n) }; },
 
       // ── semantic (vector) search ──────────────────────────────────────────────

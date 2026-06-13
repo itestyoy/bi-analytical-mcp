@@ -1186,6 +1186,17 @@ export class Engine {
     const labelOf = (g, i) => g.label || (i < 0 ? 'control' : `variant_${i + 1}`);
     const need = (g, fields) => { for (const f of fields) if (g[f] === undefined) throw new ToolError(`ab_test metric=${metric}: group '${g.label || '?'}' is missing '${f}'`, { stage: 'validate', field: f }); };
 
+    // Cross-field guard the schema cannot express: for a proportion, a group's success
+    // count cannot exceed its sample size (a rate > 100% is impossible). Reject it instead
+    // of silently returning control_rate > 1 and a meaningless lift.
+    if (metric === 'proportion') {
+      for (const g of [control, ...(input.variants || [])]) {
+        if (g && g.conversions != null && g.conversions > g.n) {
+          throw new ToolError(`metric=proportion: conversions (${g.conversions}) cannot exceed n (${g.n}) for group '${g.label || '?'}' — a rate cannot exceed 100%`, { stage: 'validate', field: 'conversions' });
+        }
+      }
+    }
+
     let results; const extra = {};
     if (metric === 'cuped') {
       const suff = ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY'];

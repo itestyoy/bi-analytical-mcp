@@ -82,6 +82,23 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
   await assert.rejects(() => e.semantic_index({ recipe: 'no_such_recipe' }), /invalid input/);
 });
 
+// The analyst procedure is served THROUGH the MCP: semantic_index({ guide }).
+test('semantic_index({ guide }) serves the workflow + routing triggers + per-task recipes', async () => {
+  const e = engine();
+  const g = await e.semantic_index({ guide: true });
+  assert.ok(Array.isArray(g.workflow) && g.workflow.length >= 4, 'workflow steps present');
+  assert.ok(Array.isArray(g.routing_triggers) && g.routing_triggers.every((t) => t.if && t.do), 'IF/DO routing triggers present');
+  assert.ok(g.tasks && Array.isArray(g.tasks.retention) && g.tasks.retention.some((r) => r.id === 'nday_retention'), 'per-task recipe families listed');
+  // narrow to one family.
+  const gt = await e.semantic_index({ guide: 'retention' });
+  assert.equal(gt.task, 'retention');
+  assert.ok(gt.recipes.some((r) => r.id === 'retention_by_segment'));
+  // overview points at the guide; guide is a mutually-exclusive view.
+  const ov = await e.semantic_index();
+  assert.ok(typeof ov.guide === 'string' && /guide/.test(ov.guide));
+  await assert.rejects(() => e.semantic_index({ guide: true, model: 'events' }), /at most ONE view/);
+});
+
 // Without recipes configured, the recipe view + overview list are simply absent.
 test('semantic_index recipe view is absent when no recipes configured', async () => {
   const catalog = loadCatalog(CATALOG, {});

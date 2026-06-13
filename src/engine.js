@@ -14,6 +14,7 @@ import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-ran
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
 import { CatalogSearch } from './search.js';
+import { buildGuide } from './guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { openStore } from './store.js';
@@ -97,6 +98,7 @@ export class Engine {
    *                  coverage per event + indexing history (one page per column)
    *   { search }   → events/properties/attributes/VALUES/recipes matching a substring
    *   { recipe }   → one ready-made recipe by id (payload + example_queries + hack)
+   *   { guide }    → the analyst procedure + IF/DO routing (how to approach a question)
    *   { status }   → operational state: value-index sync runs + background query jobs
    *   { run }      → one sync run's per-property breakdown (slowest first)
    * Pass at most one drill-down key (mutually exclusive views).
@@ -105,9 +107,9 @@ export class Engine {
     this._validate('semantic_index', input);
     // STRICT view contract (nothing is ever silently ignored): at most ONE view key,
     // and paging/ordering/recency params only on the views they apply to.
-    const views = ['run', 'status', 'model', 'event', 'property', 'search', 'recipe'].filter((k) => input[k] !== undefined && input[k] !== false);
+    const views = ['run', 'status', 'guide', 'model', 'event', 'property', 'search', 'recipe'].filter((k) => input[k] !== undefined && input[k] !== false);
     if (views.length > 1) {
-      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
+      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { guide } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
     }
     if (input.limit !== undefined && !(input.property || input.search)) throw new ToolError('limit only applies to the { property } and { search } views', { stage: 'validate', field: 'limit' });
     for (const k of ['offset', 'order_by', 'direction']) {
@@ -122,6 +124,12 @@ export class Engine {
     // ── operational views (sync state / one run) ──
     if (input.run != null) return this._indexRun(input);
     if (input.status) return this._indexStatus(input);
+
+    // ── { guide }: the analyst procedure + routing (workflow, IF/DO triggers, per-task
+    // recipes) — the generic skill knowledge served through the MCP, single-sourced. ──
+    if (input.guide !== undefined && input.guide !== false) {
+      return buildGuide(this.catalog, this.recipes, { task: typeof input.guide === 'string' ? input.guide : undefined });
+    }
 
     // ── { recipe }: one ready-made recipe by id (folded in from the old get_recipe tool) ──
     if (input.recipe) {
@@ -357,8 +365,12 @@ export class Engine {
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
       ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
-      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring; ({ recipe }) → a ready-made recipe by id.',
+      // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW
+      // to approach a question (which tool, in what order, with what guardrails).
+      guide: 'semantic_index({ guide: true }) → the analyst procedure (workflow), IF/DO routing triggers, and per-task recipes. Read it before building a query.',
+      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring; ({ recipe }) → a ready-made recipe by id; ({ guide }) → how to approach a question (workflow + routing).',
       recommendations: [
+        `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
         `Start by inspecting an event's properties: semantic_index({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
         `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
         `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,

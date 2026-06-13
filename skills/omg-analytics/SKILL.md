@@ -44,55 +44,23 @@ payload value — so start from the event taxonomy: `reference/events.md` (the e
 catalogue, envelope structure, and event gotchas). Dimensions/metrics built on top:
 `reference/data-model.md`.
 
-## Workflow (do this every time)
-1. **Clarify** the request before touching data: time window, game/project, platform/geo,
-   player segment, and the *decision* behind the question. Resolve relative time to a
-   **complete** period ("last week" = last full calendar week, not trailing 7 days), and
-   anchor freshness on the latest event time, not "today".
-2. **Discover** with `semantic_index` — call it first with no args (overview), then drill
-   down: `{ event }` for an event's properties, `{ property }` for one property's real
-   values + cardinality, `{ search }` to map a business word/value to the property and the
-   event(s) that carry it. This narrows the entity space before you commit.
-3. **Prefer governed metrics** (the semantic layer) — if the ask matches a defined metric
-   (e.g. *Game Completion Rate*, *Resource Income/Outcome*, *Cumulative Sessions*), build it
-   with `create_semantic_model` and query it with `query_semantic_model`. This is the
-   default path: same definition as the BI dashboards. Fall back to a custom
-   `build_native_model` pipeline only when no governed metric fits (custom funnels, paths,
-   bespoke aggregates).
-4. **Query**: `query_semantic_model` for metrics (group_by `metric_time`/grain or a user
-   attribute path; `where`; `time_range`). For pipelines, `build_native_model`
-   (start → add_step → materialize) then read rows with `get_query_result`.
-5. **Review** (adversarial): before trusting a number, challenge it — 0 rows? a property
-   that's NULL on most events because you didn't scope to its event? a grain mismatch
-   (per-event vs per-player)? a rate with a zero denominator? a segment that silently
-   dropped most users? Re-run with the fix.
-6. **Report with provenance**: state which **tier** the number came from
-   (governed metric › custom pipeline), the grain + filters applied, the time window, the
-   data freshness (max event time), and link the Confluence definition you relied on.
-   Separate observation ("the data shows X") from interpretation ("this likely means Y").
+## Workflow & routing — served live by the MCP (single source of truth)
+The generic analyst **procedure** (clarify → discover → prefer governed → bound/exclude →
+adversarial review → report with provenance) and the **IF/DO routing triggers** (which tool
+to use when) are served by the server itself — **call `semantic_index({ guide: true })`** and
+follow it (narrow to a family with `semantic_index({ guide: "retention" })`). This skill does
+**not** copy them, so the two never drift; it adds only the **OMG-specific** layer below.
 
-## Tool map
-| Need | Tool |
-| --- | --- |
-| Discover events / properties / values / map a term | `semantic_index` (overview → `{model\|event\|property\|search}`) |
-| Is the value index fresh / what's running | `semantic_index` (sync state, per-property timing, jobs) |
-| Define + query a governed metric | `create_semantic_model` → `query_semantic_model` |
-| Custom funnel / path / bespoke transform | `build_native_model` (start → add_step → materialize) → `get_query_result` |
-| A/B significance | `experiment({ action: analyze })`; guardrail `experiment({ action: check_split })`; planning `experiment({ action: plan })` |
-| Ready templates (with the reusable technique) | `semantic_index` overview (recipe list) + `semantic_index({ recipe: id })` |
-| Isolated workspace mgmt | `context({ action: list \| describe \| drop \| delete_model \| delete_semantic_model })` |
-
-## Routing triggers (IF … DO)
-- IF the ask is a **named KPI / rate / cumulative metric** → governed metric
-  (`create_semantic_model` + `query_semantic_model`), NOT a hand-rolled pipeline.
-- IF the ask is an **ordered multi-step funnel / path / "between steps" timing** → a
-  `build_native_model` pipeline with a `match_recognize` stage (funnels are events-only).
-- IF the ask is **"is variant B better"** → compute per-variant aggregates first (a pipeline
-  joining `experiments`), then `experiment({ action: analyze })`; ALWAYS run `experiment({ action: check_split })` before trusting any lift.
-- IF you need to **segment by a player attribute** (country/platform/ATT/…) → join/group by
-  the `users` dimension; do NOT look for it on the event payload.
-- IF a property reads mostly NULL → you probably didn't **scope to the event(s)** that carry
-  it (see gotchas) — most `event_data` properties are event-specific.
+OMG cautions on top of the generic procedure:
+- **Complete periods**: "last week" = last full calendar week; anchor freshness on the latest
+  event time, not "today".
+- **Governed first**: if the ask matches a named OMG metric (*Game Completion Rate*,
+  *Resource Income/Outcome*, *Cumulative Sessions*, …), reproduce it via `create_semantic_model`
+  — same definition as the BI dashboards. Confirm the definition in Confluence (below).
+- **Reinstalls / ATT / test users** distort cohorts, revenue and coverage — exclude/flag per
+  the gotchas in `reference/playbooks.md`.
+- **Report** with the Confluence definition you relied on, and separate observation from
+  interpretation.
 
 ## Reference (pointers — read the Confluence pages they link, don't trust copies)
 - `reference/confluence-map.md` — **start here**: which Confluence space/page holds what, the

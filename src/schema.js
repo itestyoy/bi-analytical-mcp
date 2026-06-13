@@ -496,29 +496,47 @@ export function buildSchemas(catalog) {
 // the user's phrasings, and any source links); list/search/forget manage them. Strict
 // per-action fields so a param that does not belong to the action is rejected.
 function memorySchema() {
-  const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
+  // Per-action field definitions (shared between the client-facing union `properties` and
+  // the strict per-action branches, so the two never drift).
+  const F = {
+    note: { type: 'string', minLength: 1, description: 'ONE ATOMIC finding, in plain words (e.g. "\'ad format\' = the event_data property ad_type_of_event_data, populated only on ad_started/ad_finished; values rewarded/interstitial/banner"). Keep it to a single fact — when studying a topic, make several small notes instead of one long one (atomic notes link and retrieve far better; an over-long note matches poorly and may fail to index).' },
+    question: { type: 'string', description: 'The ORIGINAL business question / analytical goal this finding answers — why you looked it up, in the stakeholder\'s terms (e.g. "which ad format drives the most rewarded-video revenue?"). Embedded together with the note, so a future similarly-phrased business question retrieves this insight by meaning. Include it whenever the finding answers a real question.' },
+    targets: { type: 'array', items: { type: 'string' }, description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is an event property (bare, "ad_type_of_event_data"), a "<model>.<column>" attribute ("users.country"), an event name ("ad_finished"), or a model key ("users"). A string that matches none is kept as a searchable free term.' },
+    aliases: { type: 'array', items: { type: 'string' }, description: 'The word(s)/phrasing the user (or a stakeholder) actually used for this — e.g. "ad format", "ad type". These make search resolve the fuzzy term back to the real field.' },
+    links: { type: 'array', description: 'Associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { oneOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
+    target: { type: 'string', description: 'Return notes linked to this ONE entity (singular — same forms as record\'s `targets`: a property/attribute/event/model name).' },
+    query: { type: 'string', description: 'A word/phrase to match against note text, the business question, aliases and linked targets. Token-aware + typo-tolerant fuzzy by default; when embeddings are enabled it ALSO matches by MEANING (a same-sense note with no shared words still surfaces).' },
+    fuzzy: { type: 'boolean', description: 'Enable typo/approximate lexical matching (default true). false = exact word/substring only (semantic matching, if enabled, still runs).' },
+    id: { type: 'string', description: 'Id of the note to delete (as returned by record / list / search).' },
+    limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Max notes to return (default 50 for list, 20 for search).' },
+  };
+
+  // One strict, self-contained branch per action: ONLY its fields, additionalProperties:false,
+  // its required set. The AI sees exactly what to pass for the chosen action — no guessing.
+  const branch = (act, props, required, desc) => ({
+    type: 'object', additionalProperties: false, required: ['action', ...required],
+    title: act, description: desc,
+    properties: { action: { const: act }, ...props },
+  });
+
   return {
-    type: 'object', additionalProperties: false, required: ['action'],
-    description: 'DURABLE analyst memory: save what you FOUND OUT — a vague request tracked down to a real field, a non-obvious gotcha, a useful source — and LINK it to the catalog entities it concerns, so it comes back THROUGH semantic_index next time. Use action:"record" AFTER you have figured something out (e.g. the user said "ad format" and you established it is the property ad_type_of_event_data on ad_started/ad_finished): pass the finding as `note`, the ORIGINAL business question it answers as `question` (in the stakeholder\'s terms — it is embedded with the note so a future similar question retrieves this insight by meaning), the entities it is about as `targets` (a property/attribute/event/model — "ad_type_of_event_data", "users.country", "ad_finished", "users"), the words the user actually used as `aliases` ("ad format"), and any sources as `links`. RECORD ONE ATOMIC FINDING PER NOTE — when studying a topic or a document, break it into several small single-fact notes (each with its own targets/aliases), NOT one big dump: atomic notes link precisely and retrieve far better, while an over-long note matches poorly and can fail to index. The note then surfaces on the linked semantic_index views ({ model }/{ event }/{ property }) and via semantic_index({ search }) — so the next fuzzy phrasing resolves straight to the right field. action:"list" (all, or one { target }) / "search" (by word) / "forget" (by id) manage them.',
-    allOf: [
-      { if: { properties: { action: { const: 'record' } }, required: ['action'] }, then: { required: ['note'], ...forbid(['query', 'id', 'target', 'fuzzy']) } },
-      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['note', 'question', 'targets', 'aliases', 'links', 'query', 'id', 'fuzzy']) },
-      { if: { properties: { action: { const: 'search' } }, required: ['action'] }, then: { required: ['query'], ...forbid(['note', 'question', 'targets', 'aliases', 'links', 'id', 'target']) } },
-      { if: { properties: { action: { const: 'forget' } }, required: ['action'] }, then: { required: ['id'], ...forbid(['note', 'question', 'targets', 'aliases', 'links', 'query', 'target', 'fuzzy']) } },
+    type: 'object',
+    required: ['action'],
+    description: 'DURABLE analyst memory: save what you FOUND OUT — a vague request tracked down to a real field, a gotcha, a useful source — LINKED to the catalog entities it concerns, so it comes back THROUGH semantic_index next time. Pick EXACTLY ONE action; each action has its OWN fixed field set (a field that does not belong to the action is rejected): record = save a finding (note [required] + question + targets[] + aliases[] + links[]); list = read notes (no args = all; { target } = notes about one entity); search = find notes by a word/phrase ({ query } [required] + fuzzy + limit); forget = delete one note ({ id } [required]). RECORD ONE ATOMIC FINDING PER NOTE — when studying a topic/document, make several small single-fact notes, not one big dump. Note: record takes the PLURAL `targets` (array); list takes the SINGULAR `target`.',
+    discriminator: { propertyName: 'action' },
+    // Union of every action\'s fields (gives MCP clients the real types); the selected
+    // oneOf branch below enforces the exact per-action field set + rejects foreign fields.
+    properties: { action: { enum: ['record', 'list', 'search', 'forget'], description: 'record → save a finding; list → read notes (all, or one { target }); search → find notes by { query }; forget → delete one note by { id }.' }, ...F },
+    oneOf: [
+      branch('record', { note: F.note, question: F.question, targets: F.targets, aliases: F.aliases, links: F.links }, ['note'],
+        'Save a finding. Required: note (one atomic fact). Optional: question (the business question it answers), targets (PLURAL array of entities it is about), aliases (the words the user used), links (sources).'),
+      branch('list', { target: F.target, limit: F.limit }, [],
+        'Read stored notes. No other field → ALL notes. Pass target (SINGULAR) to get only notes linked to that one entity.'),
+      branch('search', { query: F.query, fuzzy: F.fuzzy, limit: F.limit }, ['query'],
+        'Find notes by meaning/word. Required: query. Optional: fuzzy (default true), limit. Returns notes + a `semantic` flag (true only when vector search actually ran).'),
+      branch('forget', { id: F.id }, ['id'],
+        'Delete one note. Required: id (from record / list / search).'),
     ],
-    properties: {
-      action: { enum: ['record', 'list', 'search', 'forget'], description: 'record → save a finding; list → all notes (or those linked to one { target }); search → notes matching a word (FUZZY: typo/paraphrase-tolerant over text/alias/target); forget → delete one note by id.' },
-      note: { type: 'string', minLength: 1, description: 'record: ONE ATOMIC finding, in plain words (e.g. "\'ad format\' = the event_data property ad_type_of_event_data, populated only on ad_started/ad_finished; values rewarded/interstitial/banner"). Keep it to a single fact — when studying a topic, make several small notes instead of one long one (atomic notes link and retrieve far better; an over-long note matches poorly and may fail to index).' },
-      question: { type: 'string', description: 'record: the ORIGINAL business question / analytical goal this finding answers — why you looked it up, in the stakeholder\'s terms (e.g. "which ad format drives the most rewarded-video revenue?"). It is embedded together with the note, so a future similarly-phrased business question retrieves this insight by meaning. Always include it when the finding answers a real question.' },
-      targets: { type: 'array', items: { type: 'string' }, description: 'record: the catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is an event property (bare, "ad_type_of_event_data"), a "<model>.<column>" attribute ("users.country"), an event name ("ad_finished"), or a model key ("users"). A string that matches none is kept as a searchable free term. (The list action uses the SINGULAR `target` to filter to one entity.)' },
-      aliases: { type: 'array', items: { type: 'string' }, description: 'record: the word(s)/phrasing the user (or a stakeholder) actually used for this — e.g. "ad format", "ad type". These make semantic_index({ search }) resolve the fuzzy term back to the real field.' },
-      links: { type: 'array', description: 'record: associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { oneOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
-      target: { type: 'string', description: 'list ONLY: return notes linked to this ONE entity (singular — same forms as record\'s `targets`: a property/attribute/event/model name). On record use the plural `targets` array instead.' },
-      query: { type: 'string', description: 'search: a word/phrase to match against note text, aliases and linked targets. Typo-tolerant fuzzy by default (exact-substring hits rank first, then approximate); when embeddings are enabled it ALSO matches by MEANING (a same-sense note with no shared words still surfaces).' },
-      fuzzy: { type: 'boolean', description: 'search: enable typo/approximate lexical matching (default true). false = exact substring only (semantic matching, if enabled, still runs).' },
-      id: { type: 'string', description: 'forget: id of the note to delete (as returned by record / list / search).' },
-      limit: { type: 'integer', minimum: 1, maximum: 200, description: 'list/search: max notes to return (default 50 for list, 20 for search).' },
-    },
   };
 }
 

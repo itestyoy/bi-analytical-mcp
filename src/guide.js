@@ -30,6 +30,7 @@ export function buildGuide(catalog, recipes, { task } = {}) {
     { if: 'a property reads mostly NULL', do: 'you probably did not scope to the event(s) that carry it — most event_data properties are event-specific (see semantic_index({ property }).event_coverage).' },
     { if: 'unsure which field or value to use', do: 'semantic_index({ search }) maps a word/value to the property + the event(s) carrying it — do not guess.' },
     { if: 'you only need a QUICK directional read on large data (shape, not an exact number)', do: 'add a `sample` stage to a build_native_model pipeline (or get_query_result with sample:true) — a fast ~N% random subset. The result is flagged `approximate`; ALWAYS re-run WITHOUT the sample for any number you will act on (sampling error flips rates near 0/1, small segments, distinct counts).' },
+    { if: 'counting DISTINCT (users, sessions, payers) — especially across time/segments', do: 'PREFER HLL sketches: a build_native_model aggregate with hll_init (per bucket) → hll_merge (combine). Unlike count_distinct, HLL is MERGEABLE — one sketch re-aggregates across days/segments and composes incrementally, at high accuracy and a fraction of the cost. Use exact count_distinct only when an exact integer is required on a small set. (count_distinct is NOT additive across buckets; HLL is.)' },
   ];
 
   // Playbooks = the curated recipes, grouped by task family. Fetch one in full with

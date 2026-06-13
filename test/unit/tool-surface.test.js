@@ -110,6 +110,26 @@ test('recipes have no standalone tool; get_recipe payload is framed as a buildin
   assert.ok(r.building_block && r.hack, 'recipe is presented as a reusable building block (+ hack technique)');
 });
 
+// #3 gotcha: referencing an event-specific property without scoping its event(s) reads NULL.
+test('add_step warns when an event-specific property is used without its event scope', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'scopewarn', source: 'events' });
+  // ad_type_of_event_data is populated only on ad_started/ad_finished.
+  const a = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] } });
+  assert.ok(a.recommendations.some((r) => r.includes('ad_type_of_event_data') && r.includes('populated only on event')), JSON.stringify(a.recommendations));
+  // with an upstream where scoping event_name to those events → no NULL warning.
+  const s2 = await e.build_native_model({ action: 'start', name: 'scoped', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['ad_started', 'ad_finished'] }] } });
+  const a2 = await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] } });
+  assert.ok(!a2.recommendations.some((r) => r.includes('populated only on event')), 'scoped event → no NULL warning');
+});
+
+// HLL is promoted as the preferred distinct-count method (mergeable, high-accuracy).
+test('guide promotes HLL sketches for distinct counts', async () => {
+  const g = await engine().semantic_index({ guide: true });
+  assert.ok(g.routing_triggers.some((t) => /distinct/i.test(t.if) && /HLL/i.test(t.do) && /merge/i.test(t.do)), 'guide carries an HLL distinct-count trigger');
+});
+
 // The analyst procedure is served THROUGH the MCP: semantic_index({ guide }).
 test('semantic_index({ guide }) serves the workflow + routing triggers + per-task recipes', async () => {
   const e = engine();

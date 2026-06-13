@@ -703,10 +703,26 @@ export class Engine {
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
       columns_removed: before.filter((c) => !afterNames.has(c.name)).map((c) => c.name),
       next: 'add_step the next stage, materialize the draft, or pass include_columns:true / preview for the full column list.',
-      recommendations: this._draftStepRecommendations(stage, after),
+      recommendations: [...this._eventScopeWarnings(draft, stage), ...this._draftStepRecommendations(stage, after)],
     };
     if (includeColumns) resp.available_columns = after;
     return resp;
+  }
+
+  /** #3 gotcha: the just-added stage references an event-specific property whose event(s)
+   *  are not scoped by an upstream where on event_name → it reads NULL elsewhere. */
+  _eventScopeWarnings(draft, stage) {
+    const applies = this.catalog.eventPropertyEvents(); // prop -> [event_name]
+    const s = JSON.stringify(stage);
+    const referenced = Object.keys(applies).filter((p) => s.includes(`"${p}"`));
+    if (!referenced.length) return [];
+    const evCol = this.catalog.eventNameColumn();
+    const scoped = new Set(); let hasScope = false;
+    for (const st of draft.stages) if (st.stage === 'where') for (const c of st.conditions || []) if (c.column === evCol) { hasScope = true; (Array.isArray(c.value) ? c.value : [c.value]).forEach((v) => scoped.add(v)); }
+    const risky = referenced.filter((p) => { const evs = applies[p]; return !evs || !evs.every((e) => scoped.has(e)); });
+    if (!risky.length) return [];
+    const p = risky[0]; const evs = applies[p] || [];
+    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ property: '${p}' }).event_coverage).`];
   }
 
   /** Stage-aware next-step hints from the just-added stage + the resulting columns. */
@@ -832,8 +848,8 @@ export class Engine {
         `Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`,
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
       ],
-      warnings: (this.runner && tr && (tr.start || tr.end) && rows.length === 0)
-        ? ['time_range produced 0 rows — verify the window. A date-only `end` is treated as inclusive (the whole day, next-day-exclusive); pass a full datetime for finer bounds.']
+      warnings: (this.runner && rows.length === 0)
+        ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
         : [],
     };
   }
@@ -1294,6 +1310,26 @@ export class Engine {
 
     const pageRows = res.rows.slice(offset, offset + limit);
     const page = { limit, offset, has_more: res.rows.length > offset + limit };
+    const fresh = await this._dataFreshness(this.catalog.anchor);
+    // Situational recommendations: surface a risk ONLY when it is actually present.
+    const recs = [];
+    // #1 STALENESS/incompleteness: the window reaches past the latest data → empty/partial tail.
+    if (fresh) {
+      const freshDay = String(fresh).slice(0, 10);
+      const endDay = input.time_range?.end ? String(input.time_range.end).slice(0, 10) : null;
+      if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (latest event time)${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
+    }
+    // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
+    if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ property }).');
+    // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
+    const distinctMeasures = new Set();
+    for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
+    const usesDistinct = distinctMeasures.size && input.metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...distinctMeasures].some((dm) => metricUsesMeasure(metric, dm)); });
+    if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
+      recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_native_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
+    }
+    if (page.has_more) recs.push(`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`);
+    recs.push('Re-slice or persist: pass materialize:true to keep the result as a table readable via get_query_result; group differently or compare segments by re-querying with another group_by.');
     return {
       ok: true,
       command: res.command,
@@ -1303,12 +1339,9 @@ export class Engine {
       page,
       // Provenance so the result is self-trustable: which tier produced it, the source,
       // and how fresh the underlying data is (latest event time).
-      provenance: { tier: 'governed_metric', metrics: input.metrics, source: this.catalog.anchor, data_freshness: await this._dataFreshness(this.catalog.anchor) },
+      provenance: { tier: 'governed_metric', metrics: input.metrics, source: this.catalog.anchor, data_freshness: fresh },
       warnings: windowWarnings,
-      recommendations: [
-        ...(page.has_more ? [`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`] : []),
-        `Re-slice or persist: pass materialize:true to keep the result as a table readable via get_query_result; group differently or compare segments by re-querying with another group_by.`,
-      ],
+      recommendations: recs,
     };
   }
 

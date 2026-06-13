@@ -135,7 +135,12 @@ export class MemoryStore {
           scored.set(id, Math.max(scored.get(id) ?? 0, score));
         }
         semantic = true; // embedding + KNN actually completed
-      } catch (e) { semanticError = String(e?.message || e).slice(0, 200); } // visible, not silent
+      } catch (e) {
+        // Surface the failure EXPLICITLY (returned to the tool as semantic_error) AND log it
+        // for ops — never a silent fall-through that looks like "no semantic matches".
+        semanticError = String(e?.message || e).slice(0, 300);
+        console.error(`[mcp] ${new Date().toISOString()} memory semantic search FAILED (falling back to lexical): ${semanticError}`);
+      }
     }
 
     const ranked = [...scored.entries()]

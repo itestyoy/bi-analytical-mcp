@@ -193,6 +193,9 @@ test('a failing embedder reports semantic:false + semantic_error (not a silent t
   assert.equal(r.semantic, false, 'embedding failed → semantic reported false');
   assert.ok(typeof r.semantic_error === 'string' && r.semantic_error.includes('provider unreachable'), 'the failure reason is surfaced');
   assert.ok(r.notes.some((n) => n.id === rec.id), 'lexical search still works despite the embedder failure');
+  // the SAME failure is surfaced via the semantic_index({ search }) path too (not hidden).
+  const si = await e.semantic_index({ search: 'geo' });
+  assert.ok(typeof si.memory_semantic_error === 'string' && si.memory_semantic_error.includes('provider unreachable'), 'semantic_index surfaces the memory embedding error');
 });
 
 // Overview reports the stored count once anything is saved.

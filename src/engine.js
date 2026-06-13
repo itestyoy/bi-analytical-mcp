@@ -37,6 +37,8 @@ export class Engine {
     if (recipes) {
       this.schemas.list_recipes = { type: 'object', additionalProperties: false, properties: {} };
       this.schemas.get_recipe = { type: 'object', additionalProperties: false, required: ['id'], properties: { id: { type: 'string', enum: recipes.ids() } } };
+      // Recipes are now reached via semantic_index({ recipe: id }); constrain it to real ids.
+      if (this.schemas.semantic_index?.properties?.recipe) this.schemas.semantic_index.properties.recipe.enum = recipes.ids();
     }
     this.validators = makeValidators(this.schemas);
     this.ctxs = contextManager || new ContextManager({});
@@ -94,17 +96,18 @@ export class Engine {
    *   { property } → one property/attribute: spec + real value distribution + NULL
    *                  coverage per event + indexing history (one page per column)
    *   { search }   → events/properties/attributes/VALUES/recipes matching a substring
+   *   { recipe }   → one ready-made recipe by id (payload + example_queries + hack)
    *   { status }   → operational state: value-index sync runs + background query jobs
    *   { run }      → one sync run's per-property breakdown (slowest first)
-   * Pass at most one drill-down key (precedence run > status > model > event > property > search).
+   * Pass at most one drill-down key (mutually exclusive views).
    */
   async semantic_index(input = {}) {
     this._validate('semantic_index', input);
     // STRICT view contract (nothing is ever silently ignored): at most ONE view key,
     // and paging/ordering/recency params only on the views they apply to.
-    const views = ['run', 'status', 'model', 'event', 'property', 'search'].filter((k) => input[k] !== undefined && input[k] !== false);
+    const views = ['run', 'status', 'model', 'event', 'property', 'search', 'recipe'].filter((k) => input[k] !== undefined && input[k] !== false);
     if (views.length > 1) {
-      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
+      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
     }
     if (input.limit !== undefined && !(input.property || input.search)) throw new ToolError('limit only applies to the { property } and { search } views', { stage: 'validate', field: 'limit' });
     for (const k of ['offset', 'order_by', 'direction']) {
@@ -119,6 +122,12 @@ export class Engine {
     // ── operational views (sync state / one run) ──
     if (input.run != null) return this._indexRun(input);
     if (input.status) return this._indexStatus(input);
+
+    // ── { recipe }: one ready-made recipe by id (folded in from the old get_recipe tool) ──
+    if (input.recipe) {
+      if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
+      return this.get_recipe({ id: input.recipe });
+    }
 
     // ── { model }: one model in depth (incl. live warehouse introspection) ──
     if (input.model) {
@@ -346,7 +355,9 @@ export class Engine {
         seconds_since_last_sync: lastSync?.finished_at != null ? Math.round((Date.now() - lastSync.finished_at) / 1000) : null,
       } : null,
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
-      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring.',
+      // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
+      ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
+      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring; ({ recipe }) → a ready-made recipe by id.',
       recommendations: [
         `Start by inspecting an event's properties: semantic_index({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
         `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
@@ -458,7 +469,7 @@ export class Engine {
     else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ property }) will show no sample_values until the first sync (it runs in the background at startup).`);
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the warehouse/runner.`);
     else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ property }).`);
-    if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }) or list them with list_query_jobs.`);
+    if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }); semantic_index({ status }) lists them.`);
     if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
     if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
 
@@ -832,10 +843,21 @@ export class Engine {
     return null;
   }
 
-  /** Update a registered native model in place (re-generate + rebuild). */
-  async update_native_model(input) {
-    this._validate('update_native_model', input);
-    return this._registerPipeline(input);
+  /**
+   * ONE context-lifecycle tool (action-driven), replacing list_contexts / describe_context /
+   * drop_context / delete_native_model / delete_semantic_model. Delegates to the internal
+   * handlers (kept private so the all-at-once register path + tests reuse them).
+   */
+  async context(input) {
+    this._validate('context', input);
+    switch (input.action) {
+      case 'list': return this.list_contexts();
+      case 'describe': return this.describe_context({ context_id: input.context_id });
+      case 'drop': return this.drop_context({ context_id: input.context_id });
+      case 'delete_model': return this.delete_native_model({ context_id: input.context_id });
+      case 'delete_semantic_model': return this.delete_semantic_model({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });
+      default: throw new ToolError(`unknown context action '${input.action}'`, { stage: 'validate', field: 'action' });
+    }
   }
 
   /** Delete a registered native model: remove its files + state and re-parse. */

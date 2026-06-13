@@ -2,8 +2,8 @@
 
 Each pattern: when to use it, the tool sequence, and the gotcha to check. Always
 **clarify** (window/project/segment) and **discover** (`semantic_index`) first, and check
-`list_recipes` / `get_recipe` — a recipe often carries the ready payload + the reusable
-technique (`hack`). Report the tier (governed metric › pipeline) + freshness + Confluence link.
+its recipe list (overview) + `semantic_index({ recipe: id })` — a recipe often carries the
+ready payload + the reusable technique (`hack`). Report the tier (governed metric › pipeline) + freshness + Confluence link.
 
 ---
 ## 1. Trends (DAU/WAU/MAU, sessions, event volume)

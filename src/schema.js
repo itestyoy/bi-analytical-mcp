@@ -396,12 +396,30 @@ export function buildSchemas(catalog) {
   const del = { type: 'object', additionalProperties: false, required: ['context_id', 'semantic_model'], description: 'Remove a semantic model\'s task additions from a context.', properties: { context_id: { type: 'string', pattern: CTX, description: D.context_id }, semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s additions to remove.' }, cascade: { type: 'boolean', description: 'If true, also remove metrics that depend on the removed measures.' } } };
   const empty = { type: 'object', additionalProperties: false, properties: {} };
 
+  // ONE context-lifecycle tool (action-driven), replacing list_contexts / describe_context /
+  // drop_context / delete_native_model / delete_semantic_model. Strict per-action fields.
+  const contextTool = {
+    type: 'object', additionalProperties: false, required: ['action'],
+    description: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, with cascade for dependent metrics).',
+    allOf: [
+      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['context_id', 'semantic_model', 'cascade']) },
+      { if: { properties: { action: { enum: ['describe', 'drop', 'delete_model'] } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['semantic_model', 'cascade']) } },
+      { if: { properties: { action: { const: 'delete_semantic_model' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'] } },
+    ],
+    properties: {
+      action: { enum: ['list', 'describe', 'drop', 'delete_model', 'delete_semantic_model'], description: 'list → all active contexts; describe → one context in depth; drop → tear down the whole context; delete_model → remove the native pipeline model only; delete_semantic_model → remove one model\'s task additions.' },
+      context_id: { type: 'string', pattern: CTX, description: `${D.context_id} Required for every action except list.` },
+      semantic_model: { type: 'string', enum: modelKeys, description: 'delete_semantic_model: which model\'s task additions to remove.' },
+      cascade: { type: 'boolean', description: 'delete_semantic_model: also remove metrics that depend on the removed measures.' },
+    },
+  };
+
   return {
     create_semantic_model: create,
     register_native_model: registerModel,
     build_native_model: buildModel,
-    update_native_model: { ...registerModel, required: ['context_id', 'name'], description: 'Update a registered native model in place: regenerate it from a new sequence or pipeline spec and rebuild.' },
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
+    context: contextTool,
     query_semantic_model: query,
     get_query_result: {
       type: 'object', additionalProperties: false,
@@ -448,6 +466,7 @@ export function buildSchemas(catalog) {
         fuzzy: { type: 'boolean', description: 'For { search }: enable typo/approximate matching (default true). false = exact substring only.' },
         status: { type: 'boolean', description: 'VIEW: operational state — value-index sync runs (freshness, errors, slowest properties) + background query jobs.' },
         run: { type: 'integer', minimum: 1, description: 'VIEW: one sync run by id (from the status view\'s value_index.recent_runs[].id): per-property timing/coverage, slowest first.' },
+        recipe: { type: 'string', description: 'VIEW: get ONE ready-made recipe by id — its payload (create_semantic_model or a native-model pipeline + ab_test mapping), example_queries, notes and `hack`. The overview lists available recipe ids; { search } finds them by keyword. (enum injected when recipes are configured.)' },
         limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'For { property }/{ search }: how many indexed values to return (default 10 for property, 20 for search). Page further with offset.' },
         offset: { type: 'integer', minimum: 0, description: 'For { property }: skip this many values first — page through the value list.' },
         order_by: { enum: ['freq', 'value'], description: 'For { property }: order the returned values by frequency (default) or alphabetically by value.' },

@@ -79,8 +79,8 @@ catalogue, envelope structure, and event gotchas). Dimensions/metrics built on t
 | Define + query a governed metric | `create_semantic_model` → `query_semantic_model` |
 | Custom funnel / path / bespoke transform | `build_native_model` (start → add_step → materialize) → `get_query_result` |
 | A/B significance | `ab_test`; guardrail `srm_check`; planning `sample_size` |
-| Ready templates (with the reusable technique) | `list_recipes` / `get_recipe` |
-| Isolated workspace mgmt | `list_contexts` / `describe_context` / `drop_context` |
+| Ready templates (with the reusable technique) | `semantic_index` overview (recipe list) + `semantic_index({ recipe: id })` |
+| Isolated workspace mgmt | `context({ action: list \| describe \| drop \| delete_model \| delete_semantic_model })` |
 
 ## Routing triggers (IF … DO)
 - IF the ask is a **named KPI / rate / cumulative metric** → governed metric

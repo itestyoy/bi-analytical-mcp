@@ -10,13 +10,13 @@
 //                    committed counts equal the all-at-once register path (12/8/5/3).
 //   4. SEMANTIC    — create_semantic_model (IAP revenue) → query_semantic_model by
 //                    country → update_semantic_model adds a payers metric → re-query;
-//                    describe_context / list_query_jobs / list_contexts lifecycle.
+//                    context({describe|list}) + semantic_index({status}) lifecycle.
 //   5. A/B         — build_native_model fed the conversion recipe's stages one-at-a-
-//                    time → commit → per-variant aggregates → ab_test + srm_check +
+//                    time → materialize → per-variant aggregates → ab_test + srm_check +
 //                    sample_size, asserting the exact numbers ab-test.test.js asserts.
-//   6. RECIPES     — list_recipes / get_recipe over the engine's own recipe tools.
-//   7. TEARDOWN    — delete_semantic_model / delete_native_model / drop_context, then
-//                    list_contexts shows the dropped context gone.
+//   6. RECIPES     — semantic_index overview list + semantic_index({ recipe: id }).
+//   7. TEARDOWN    — context({delete_semantic_model|delete_model|drop}), then
+//                    context({list}) shows the dropped context gone.
 //
 // DATA-ONLY: every substantive assertion is on a returned VALUE/COUNT (grounded in
 // fixtures/SEED_DATA.md and the existing integration tests). The only non-data checks
@@ -276,17 +276,17 @@ test('4b. update_semantic_model adds a payers metric; re-query = 7 distinct paye
   assert.equal(num(r.rows[0].e2e_mon_payers), 7); // distinct payers = 7 (SEED_DATA §3)
 });
 
-test('4c. describe_context + list_query_jobs + list_contexts reflect the registered task', opts, async (t) => {
+test('4c. context({describe|list}) + semantic_index({status}) reflect the registered task', opts, async (t) => {
   if (skip(t)) return;
-  const dc = await engine.describe_context({ context_id: S.semCtx });
+  const dc = await engine.context({ action: 'describe', context_id: S.semCtx });
   assert.equal(dc.engine, 'core');
   assert.ok(dc.metrics.includes('e2e_mon_revenue') && dc.metrics.includes('e2e_mon_payers'), 'both metrics in context');
   assert.ok(dc.measures.includes('e2e_mon_revenue') && dc.measures.includes('e2e_mon_payers'), 'both measures in context');
 
-  const jobs = engine.list_query_jobs();
-  assert.ok(Array.isArray(jobs.jobs), 'jobs is a list'); // non-materialized queries above ⇒ no jobs spawned
+  const status = await engine.semantic_index({ status: true });
+  assert.ok(Array.isArray(status.query_jobs.recent), 'query jobs listed in the status view'); // non-materialized queries ⇒ none spawned
 
-  const ctxs = engine.list_contexts();
+  const ctxs = await engine.context({ action: 'list' });
   assert.ok(ctxs.contexts.some((c) => c.context_id === S.semCtx), 'semantic context listed');
   assert.ok(ctxs.contexts.some((c) => c.context_id === S.pipeCtx), 'pipeline context listed');
 });
@@ -364,38 +364,37 @@ test('5d. sample_size planning matches the recipe tool_calls outputs (data-groun
 });
 
 // ───────────────────────── 6. RECIPES ─────────────────────────
-test('6. list_recipes is non-empty with expected ids; get_recipe returns a payload + hack', opts, async (t) => {
+test('6. semantic_index overview lists recipes; { recipe: id } returns a payload + hack', opts, async (t) => {
   if (skip(t)) return;
-  const listed = engine.list_recipes();
-  assert.ok(Array.isArray(listed.recipes) && listed.recipes.length > 0, 'recipes listed');
-  const ids = listed.recipes.map((r) => r.id);
+  const overview = await engine.semantic_index();
+  assert.ok(Array.isArray(overview.recipes) && overview.recipes.length > 0, 'recipes listed in the overview');
+  const ids = overview.recipes.map((r) => r.id);
   for (const want of ['ab_test_conversion', 'monetization_metrics', 'multistep_funnel', 'ab_test_power']) {
     assert.ok(ids.includes(want), `recipe '${want}' present`);
   }
-  const conv = engine.get_recipe({ id: 'ab_test_conversion' });
+  const conv = await engine.semantic_index({ recipe: 'ab_test_conversion' });
   assert.equal(conv.id, 'ab_test_conversion');
   assert.ok(conv.register_payload && conv.register_payload.pipeline, 'A/B recipe carries a register_payload pipeline');
   assert.ok(typeof conv.hack === 'string' && conv.hack.length > 0, 'recipe carries a generalizable hack');
-  const power = engine.get_recipe({ id: 'ab_test_power' });
+  const power = await engine.semantic_index({ recipe: 'ab_test_power' });
   assert.ok(Array.isArray(power.tool_calls) && power.tool_calls.length > 0, 'tool-only recipe carries tool_calls');
 });
 
 // ───────────────────────── 7. TEARDOWN ─────────────────────────
-test('7. delete models + drop contexts; list_contexts shows them gone', opts, async (t) => {
+test('7. context: delete models + drop contexts; list shows them gone', opts, async (t) => {
   if (skip(t)) return;
-  // delete the semantic task's model additions (exercises delete_semantic_model)
-  const dsm = await engine.delete_semantic_model({ context_id: S.semCtx, semantic_model: 'events', cascade: true });
+  // delete the semantic task's model additions (context delete_semantic_model action)
+  const dsm = await engine.context({ action: 'delete_semantic_model', context_id: S.semCtx, semantic_model: 'events', cascade: true });
   assert.equal(dsm.removed, true);
-  // delete the A/B pipeline model definition (exercises delete_native_model)
-  const dnm = await engine.delete_native_model({ context_id: S.abCtx });
+  // delete the A/B pipeline model definition (context delete_model action)
+  const dnm = await engine.context({ action: 'delete_model', context_id: S.abCtx });
   assert.equal(dnm.removed, true);
 
-  const before = engine.list_contexts().contexts.length;
   for (const id of [S.semCtx, S.pipeCtx, S.abCtx]) {
-    const d = engine.drop_context({ context_id: id });
+    const d = await engine.context({ action: 'drop', context_id: id });
     assert.equal(d.removed, true, `dropped ${id}`);
   }
-  const remaining = engine.list_contexts().contexts;
+  const remaining = (await engine.context({ action: 'list' })).contexts;
   for (const id of [S.semCtx, S.pipeCtx, S.abCtx]) {
     assert.ok(!remaining.some((c) => c.context_id === id), `context ${id} gone`);
   }

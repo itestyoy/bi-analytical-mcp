@@ -15,25 +15,16 @@ import { Engine } from './engine.js';
 import { BackgroundIndexer } from './value-index.js';
 
 const TOOL_DESCRIPTIONS = {
-  semantic_index: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. No args → overview (models, event names, event_semantics = which event marks install/session/purchase, group-by paths, value-index freshness). Exactly one view key to drill: { model } → columns + dimension attributes with real sample values + physical columns; { event } → the properties that event carries; { property } → one column\'s full passport (spec/unit, real value distribution — pageable, NULL coverage per event distinguishing expected NULLs from data gaps, indexing history; accepts bare event properties and "users.country"-style attributes); { search } → FUZZY search over events/properties/attributes/VALUES/recipes (typo- and paraphrase-tolerant: "retenton"→retention recipe, "germny"→Germany value; exact hits first, each scored, fuzzy:false for substring-only); { status: true } → value-index sync state + background query jobs; { run } → one sync run\'s per-property breakdown.',
+  semantic_index: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. No args → overview (models, event names, event_semantics = which event marks install/session/purchase, group-by paths, value-index freshness, available recipe ids). Exactly one view key to drill: { model } → columns + dimension attributes with real sample values + physical columns; { event } → the properties that event carries; { property } → one column\'s full passport (spec/unit, real value distribution — pageable, NULL coverage per event distinguishing expected NULLs from data gaps, indexing history; accepts bare event properties and "users.country"-style attributes); { search } → FUZZY search over events/properties/attributes/VALUES/recipes (typo- and paraphrase-tolerant: "retenton"→retention recipe, "germny"→Germany value; exact hits first, each scored, fuzzy:false for substring-only); { recipe: id } → one ready-made recipe in full (payload + example_queries + the reusable `hack`); { status: true } → value-index sync state + background query jobs; { run } → one sync run\'s per-property breakdown.',
   create_semantic_model: 'Declaratively create/augment semantic models for a task (one SM per table) and metrics, in an isolated context. Omit context_id for a new task; pass it to extend the same context. Validated and registered in the context.',
-  register_native_model: 'Build a derived dbt model from a declarative PIPELINE (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage), materialized as a table/view. Its ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). The pipeline can join catalog sources (users/experiments) and aggregate internally, so it is self-contained; it is NOT re-exposed as a queryable semantic model with metrics/dimensions.',
   build_native_model: 'Build a derived dbt model from a PIPELINE, composed INCREMENTALLY (single `action`-driven tool): start a draft, add_step one stage at a time (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + the match_recognize funnel stage) — each add_step validates the stage and returns the exact columns then available for the NEXT stage (pure schema, NOTHING materialized until the materialize step) — optionally preview the SQL, then materialize (the final step that builds + runs the model). The materialized model\'s ROWS ARE THE RESULT — returned directly and re-readable/sliceable with get_query_result (NOT query_semantic_model). Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
-  update_native_model: 'Update a registered native model in place: regenerate it from a new pipeline spec and rebuild.',
-  delete_native_model: 'Delete the native model built in a context: remove it and re-parse. Targeted alternative to drop_context (which tears down the whole context).',
   query_semantic_model: 'Run a metric query against a context. metrics + group_by + where are validated against the context. Pass materialize:true to persist the result and read it back (resilient); slow queries return a query_id to poll.',
   get_query_result: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}. Returns status (running/ready/error) and rows read from the materialized table.',
-  list_query_jobs: 'List background query jobs and their status.',
   update_semantic_model: 'Add/remove task measures, dimensions or metrics for a table SM within a context; re-parses.',
-  delete_semantic_model: 'Remove a table SM task additions (and dependent metrics with cascade) from a context.',
-  drop_context: 'Tear down an entire isolated context (files + artifacts).',
-  list_contexts: 'List active contexts.',
-  describe_context: 'Describe a context: tasks, SMs, measures, metrics, reachable group-by paths.',
+  context: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, cascade for dependent metrics).',
   ab_test: 'Run an A/B significance test on pre-aggregated group stats (compute per-group counts/means/ratio sums with a pipeline first). proportion → two-proportion z-test; mean → Welch t-test; ratio → delta-method test (analysis unit finer than randomization unit); cuped → variance reduction via a pre-experiment covariate. Returns lift (with a relative-lift CI), p-value, CI, significance, and a multiplicity-adjusted p-value per variant vs control.',
   srm_check: 'Sample Ratio Mismatch guardrail: χ² test that the observed per-group sizes match the intended split. p < 0.001 means randomization/logging is broken and the experiment is invalid — check before trusting any lift.',
   sample_size: 'Power / sample-size planning: given a baseline (proportion) or stddev (mean) and a target effect, return the required sample size per group; or given a sample size, return the minimum detectable effect (MDE). Tells a true null apart from an underpowered test.',
-  list_recipes: 'List ready-made recipes (templates) for common analytics task types. Each carries a `hack` — the generalizable technique behind it — so you can pick the closest one and adapt its approach even to a novel task.',
-  get_recipe: 'Get a recipe by id: a ready payload (create_semantic_model, or a native-model pipeline + ab_test mapping) + example queries, plus `notes` and a `hack` (the reusable technique to extrapolate to similar cases). Feed a pipeline payload through build_native_model (add its stages, then materialize).',
 };
 
 // Server-level documentation surfaced to the AI client (serverInfo.description):
@@ -65,14 +56,22 @@ KEY CONCEPTS
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
 const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over fixed, catalog-enumerated data sources (an events fact + a user-attributes dimension + experiment assignments) and query them by name; you never write SQL. Start with semantic_index, then create_semantic_model / build_native_model, then query_semantic_model.';
 
-const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'build_native_model', 'update_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'semantic_index', 'describe_context', 'time']);
+const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'build_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'semantic_index', 'context', 'describe_context', 'time']);
 
 // Tools that still EXIST (schema + engine method + dispatch) but are no longer
-// advertised to the AI — superseded by a newer tool. The code is kept so existing
-// callers/recipes keep working and it can be re-exposed by deleting it from this set.
-// register_native_model + update_native_model are the all-at-once create/edit path,
-// superseded by the incremental build_native_model (to edit, rebuild with the same name).
-const HIDDEN_TOOLS = new Set(['register_native_model', 'update_native_model']);
+// advertised to the AI — superseded by / folded into a newer tool. Code is kept so the
+// new tool can delegate to them and existing callers/recipes/tests keep working.
+//   register_native_model        → all-at-once path behind the incremental build_native_model
+//   list_query_jobs              → folded into semantic_index({ status })
+//   list_recipes / get_recipe    → folded into semantic_index (overview list + { recipe: id })
+//   list/describe/drop_context,
+//   delete_native/semantic_model → folded into the single context({ action }) tool
+const HIDDEN_TOOLS = new Set([
+  'register_native_model',
+  'list_query_jobs',
+  'list_recipes', 'get_recipe',
+  'list_contexts', 'describe_context', 'drop_context', 'delete_native_model', 'delete_semantic_model',
+]);
 
 export function buildToolDefs(engine) {
   return Object.entries(engine.schemas)

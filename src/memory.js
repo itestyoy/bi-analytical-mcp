@@ -70,35 +70,55 @@ export class MemoryStore {
   }
 
   /**
-   * Find notes matching `query`. Always runs the LEXICAL/FUZZY match (shared Fuse.js
-   * subsystem: exact-substring first, then typo/approximate over note text + aliases +
-   * target keys). When an embedder is configured it ALSO runs SEMANTIC search — embeds
-   * the query, KNN over the stored vectors (sqlite-vec when available, else JS cosine),
-   * and BLENDS the two (a note ranks by the better of its fuzzy / cosine score) — so
-   * "monetization issues" can surface a note about "IAP purchase failures" with no shared
-   * words. Self-healing: any note missing a current-model vector is embedded on the fly
-   * (one batch call) and persisted. fuzzy:false restricts the lexical side to exact
-   * substring (semantic still runs if configured). Async because embedding is a network op.
+   * Find notes matching `query`. Returns { notes, semantic, semantic_error? }.
+   *
+   * LEXICAL (always): over each note's combined text (question + note + aliases + target
+   * keys), three signals — (1) exact phrase substring, (2) TOKEN COVERAGE: the fraction of
+   * the query's words present anywhere in the note (so a multi-word phrase lifted from the
+   * note body still matches even if words are interleaved — e.g. "одиночный target невалиден"
+   * finds "одиночный target в record невалиден"), and (3) when fuzzy is on, Fuse typo/
+   * approximate matching. fuzzy:false keeps (1)+(2) (still exact-token based), dropping (3).
+   *
+   * SEMANTIC (when an embedder is configured): embeds the query, KNN over the stored vectors
+   * (sqlite-vec when available, else JS cosine) and BLENDS it in (a note ranks by the best of
+   * its lexical / cosine score) — so a same-meaning note with no shared words still surfaces.
+   * Self-healing: notes missing a current-model vector are embedded on the fly and persisted.
+   * `semantic` in the result reports whether semantic search ACTUALLY ran (false + a short
+   * `semantic_error` if the provider failed) — never a misleading "on" when it silently fell
+   * back to lexical. Async because embedding is a network op.
    */
   async search(query, { limit = 20, fuzzy = true } = {}) {
     const q = String(query ?? '').trim();
-    if (!q) return [];
+    if (!q) return { notes: [], semantic: false };
     const notes = this.all({ limit: 2000 });
-    if (!notes.length) return [];
+    if (!notes.length) return { notes: [], semantic: false };
 
-    // Lexical/fuzzy candidates (over-fetch a little so the blend has room to reorder).
-    const lexical = rankFuzzy(q, notes, {
-      fields: (e) => this._embedText(e).split('\n'),
-      threshold: fuzzy ? 0.6 : 2, // > 1 -> exact-substring only (rankFuzzy turns fuzzy off)
-      limit: Math.max(limit, 20),
-      tiebreak: (e) => e.id,
-    });
-
-    // Blend by id: start from the lexical hits, then fold in semantic hits.
     const byId = new Map(notes.map((n) => [n.id, n]));
-    const scored = new Map(); // id -> best score
-    for (const r of lexical) scored.set(r.item.id, r.score);
+    const scored = new Map(); // id -> best score across all signals
 
+    // ── lexical: exact phrase + token coverage (bag-of-words, unicode-aware) ──
+    const ql = q.toLowerCase();
+    const qtokens = ql.split(/[^\p{L}\p{N}]+/u).filter((t) => t.length >= 3);
+    for (const n of notes) {
+      const hay = this._embedText(n).toLowerCase();
+      let lex = 0;
+      if (ql && hay.includes(ql)) lex = 1; // whole-query exact substring
+      else if (qtokens.length) {
+        const cov = qtokens.filter((t) => hay.includes(t)).length / qtokens.length;
+        if (cov >= 0.6) lex = 0.5 + 0.4 * cov; // most/all query words present
+      }
+      if (lex > 0) scored.set(n.id, lex);
+    }
+
+    // ── lexical: Fuse typo/approximate (only when fuzzy is enabled) ──
+    if (fuzzy) {
+      for (const r of rankFuzzy(q, notes, { fields: (e) => this._embedText(e).split('\n'), threshold: 0.6, limit: Math.max(limit, 20), tiebreak: (e) => e.id })) {
+        scored.set(r.item.id, Math.max(scored.get(r.item.id) ?? 0, r.score));
+      }
+    }
+
+    // ── semantic (vector) search, blended in — only when an embedder is configured ──
+    let semantic = false; let semanticError;
     if (this.embedder) {
       try {
         const model = this.embedder.model;
@@ -114,13 +134,20 @@ export class MemoryStore {
           if (score < SEMANTIC_FLOOR) continue;
           scored.set(id, Math.max(scored.get(id) ?? 0, score));
         }
-      } catch { /* provider/store failed → lexical results only (graceful) */ }
+        semantic = true; // embedding + KNN actually completed
+      } catch (e) {
+        // Surface the failure EXPLICITLY (returned to the tool as semantic_error) AND log it
+        // for ops — never a silent fall-through that looks like "no semantic matches".
+        semanticError = String(e?.message || e).slice(0, 300);
+        console.error(`[mcp] ${new Date().toISOString()} memory semantic search FAILED (falling back to lexical): ${semanticError}`);
+      }
     }
 
-    return [...scored.entries()]
+    const ranked = [...scored.entries()]
       .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(b[0]))
       .slice(0, limit)
       .map(([id]) => byId.get(id))
       .filter(Boolean);
+    return { notes: ranked, semantic, ...(semanticError ? { semantic_error: semanticError } : {}) };
   }
 }

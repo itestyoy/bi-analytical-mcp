@@ -473,7 +473,7 @@ const STAGES = {
   sample: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'percent'],
-      description: 'Keep roughly `percent`% of rows, chosen at random — a fast, approximate peek for a first estimate or where-to-dig signal on large data. Put it early. Results are a random subset, not exact.',
+      description: 'Keep roughly `percent`% of rows, chosen at random — a fast, APPROXIMATE read of the population for a first estimate / where-to-dig signal on large data (no need to scan everything just to see the direction). Put it early. The result is flagged `approximate` with safe/unsafe guidance; re-run WITHOUT this stage for any exact number you will act on (sampling error flips rates near 0/1, small segments, distinct counts).',
       properties: {
         stage: { const: 'sample' },
         percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate share of rows to keep (0 < percent <= 100).' },

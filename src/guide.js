@@ -29,6 +29,7 @@ export function buildGuide(catalog, recipes, { task } = {}) {
     { if: 'segmenting by a user attribute (country / platform / source)', do: `join/group by the '${usersModel}' model (user__<attr>) — it is NOT on the event payload.` },
     { if: 'a property reads mostly NULL', do: 'you probably did not scope to the event(s) that carry it — most event_data properties are event-specific (see semantic_index({ property }).event_coverage).' },
     { if: 'unsure which field or value to use', do: 'semantic_index({ search }) maps a word/value to the property + the event(s) carrying it — do not guess.' },
+    { if: 'you only need a QUICK directional read on large data (shape, not an exact number)', do: 'add a `sample` stage to a build_native_model pipeline (or get_query_result with sample:true) — a fast ~N% random subset. The result is flagged `approximate`; ALWAYS re-run WITHOUT the sample for any number you will act on (sampling error flips rates near 0/1, small segments, distinct counts).' },
   ];
 
   // Playbooks = the curated recipes, grouped by task family. Fetch one in full with

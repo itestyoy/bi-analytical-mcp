@@ -82,6 +82,34 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
   await assert.rejects(() => e.semantic_index({ recipe: 'no_such_recipe' }), /invalid input/);
 });
 
+// A pipeline with a sample stage produces an APPROXIMATE result, flagged loudly with
+// safe/unsafe guidance + how to get the exact number (never silently misleading).
+test('a sampled pipeline flags the result approximate with guidance', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'sampled', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'sample', percent: 10 } });
+  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
+  const out = await e.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(out.provenance.approximate, true, 'provenance marks the result approximate');
+  assert.equal(out.sampling.approximate, true);
+  assert.equal(out.sampling.sample_percent, 10);
+  assert.ok(out.sampling.not_reliable_for && out.sampling.get_exact, 'carries safe/unsafe + how-to-get-exact');
+  // a non-sampled pipeline has neither flag.
+  const s2 = await e.build_native_model({ action: 'start', name: 'exact', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
+  const out2 = await e.build_native_model({ action: 'materialize', draft_id: s2.draft_id });
+  assert.equal(out2.provenance.approximate, undefined);
+  assert.equal(out2.sampling, undefined);
+});
+
+// Recipes are building blocks reached THROUGH semantic_index, not a standalone tool.
+test('recipes have no standalone tool; get_recipe payload is framed as a building block', async () => {
+  const names = buildToolDefs(engine()).map((d) => d.name);
+  assert.ok(!names.includes('get_recipe') && !names.includes('list_recipes'), 'no standalone recipe tools');
+  const r = await engine().semantic_index({ recipe: 'nday_retention' });
+  assert.ok(r.building_block && r.hack, 'recipe is presented as a reusable building block (+ hack technique)');
+});
+
 // The analyst procedure is served THROUGH the MCP: semantic_index({ guide }).
 test('semantic_index({ guide }) serves the workflow + routing triggers + per-task recipes', async () => {
   const e = engine();

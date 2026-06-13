@@ -35,29 +35,32 @@ export class Engine {
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
-    if (recipes) {
-      this.schemas.list_recipes = { type: 'object', additionalProperties: false, properties: {} };
-      this.schemas.get_recipe = { type: 'object', additionalProperties: false, required: ['id'], properties: { id: { type: 'string', enum: recipes.ids() } } };
-      // Recipes are now reached via semantic_index({ recipe: id }); constrain it to real ids.
-      if (this.schemas.semantic_index?.properties?.recipe) this.schemas.semantic_index.properties.recipe.enum = recipes.ids();
-    }
+    // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
+    // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
+    // Constrain the recipe view to real ids when recipes are configured.
+    if (recipes && this.schemas.semantic_index?.properties?.recipe) this.schemas.semantic_index.properties.recipe.enum = recipes.ids();
     this.validators = makeValidators(this.schemas);
     this.ctxs = contextManager || new ContextManager({});
     this.runner = runner; // optional; required for non-dry_run parse/query
   }
 
+  // Internal helpers (no longer standalone tools — reached via semantic_index({ recipe })
+  // / overview / { guide }). Kept for the recipe view + the recipe-driven tests.
   list_recipes() {
     if (!this.recipes) return { recipes: [], note: 'Recipes are not configured on this server.' };
     return { recipes: this.recipes.summary() };
   }
 
   get_recipe(input) {
-    this._validate('get_recipe', input);
-    if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'id' });
+    if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
     const r = this.recipes.get(input.id);
-    // The naming rule is a hidden transform otherwise: metrics declared as `name: dau`
-    // under task `active_users` are QUERIED as `active_users_dau` (task_<metric>).
-    return { ...r, naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).' };
+    // A recipe is a reusable BUILDING BLOCK: a ready payload for a task family PLUS `hack`
+    // — the generalizable technique to adapt it to a novel question.
+    return {
+      ...r,
+      naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
+      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question; feed a pipeline payload through build_native_model, a create_payload through create_semantic_model.',
+    };
   }
 
   _validate(tool, input) {
@@ -182,6 +185,8 @@ export class Engine {
           out.pipeline_columns = out.pipeline_columns.filter((col) => physSet.has(col.name.toLowerCase()));
           if (phantom.length) out.not_materialized = phantom;
         }
+        // Data freshness: latest value of the time column (how up-to-date the data is).
+        if (m.time?.column) { const fresh = await this._dataFreshness(k); if (fresh) out.data_freshness = fresh; }
       }
       out.recommendations = k === c.anchor
         ? [
@@ -815,6 +820,11 @@ export class Engine {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
       columns, output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
       row_count: rows.length, rows, model_sql: out.sql, build,
+      // Provenance: a custom pipeline (not a governed metric), its source, and how fresh
+      // the underlying data is — so the rows are self-trustable. A sample stage makes the
+      // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
+      provenance: { tier: 'pipeline', source, data_freshness: await this._dataFreshness(source), ...(stages.some((s) => s.stage === 'sample') ? { approximate: true } : {}) },
+      ...(stages.some((s) => s.stage === 'sample') ? { sampling: samplingNote(stages.find((s) => s.stage === 'sample').percent ?? 10) } : {}),
       // A4: how to read this result again — these rows are a pipeline model, re-read
       // with get_query_result (NOT query_semantic_model, which is for metric queries).
       read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
@@ -826,6 +836,28 @@ export class Engine {
         ? ['time_range produced 0 rows — verify the window. A date-only `end` is treated as inclusive (the whole day, next-day-exclusive); pass a full datetime for finer bounds.']
         : [],
     };
+  }
+
+  /**
+   * Data FRESHNESS of a source: the latest value of its time column (MAX), i.e. how
+   * up-to-date the underlying data is — a trust signal distinct from value-index
+   * freshness. Cached per source for the engine's life (best-effort; null when there
+   * is no runner / time column / the query fails).
+   */
+  async _dataFreshness(sourceKey) {
+    const base = this.ctxs.baseProjectDir;
+    const m = this.catalog.getModel(sourceKey);
+    const tcol = m.time?.column;
+    if (!this.runner || !base || !tcol) return null;
+    this._freshCache ??= new Map();
+    if (this._freshCache.has(sourceKey)) return this._freshCache.get(sourceKey);
+    let latest = null;
+    try {
+      const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}`, 1);
+      if (r.ok && r.rows?.[0]?.latest != null) latest = String(r.rows[0].latest);
+    } catch { /* freshness is best-effort */ }
+    this._freshCache.set(sourceKey, latest);
+    return latest;
   }
 
   /**
@@ -1269,6 +1301,9 @@ export class Engine {
       rows: pageRows,
       row_count: pageRows.length,
       page,
+      // Provenance so the result is self-trustable: which tier produced it, the source,
+      // and how fresh the underlying data is (latest event time).
+      provenance: { tier: 'governed_metric', metrics: input.metrics, source: this.catalog.anchor, data_freshness: await this._dataFreshness(this.catalog.anchor) },
       warnings: windowWarnings,
       recommendations: [
         ...(page.has_more ? [`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`] : []),
@@ -1346,7 +1381,7 @@ export class Engine {
       }
       const res = await this.runner.show(dir, sql, limit);
       if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
-      return { ok: true, status: 'ready', table, ...extra, sampled: true, columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
+      return { ok: true, status: 'ready', table, ...extra, sampled: true, sampling: samplingNote(samplePercent), columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };
     }
     // Page in JS over a single read (over-fetch by 1 for has_more) rather than a
     // SQL OFFSET with no ORDER BY (which was non-deterministic across calls — H2).
@@ -1430,4 +1465,20 @@ function walkPredicates(group, fn) {
 
 function clone(x) {
   return JSON.parse(JSON.stringify(x ?? null));
+}
+
+/**
+ * The mandatory APPROXIMATE warning attached to any result computed over a random
+ * sample: what it is safe for, what it is NOT, and how to get the exact answer. So the
+ * caller is never misled into acting on a sampled number, and always has the choice.
+ */
+function samplingNote(percent) {
+  return {
+    approximate: true,
+    sample_percent: percent,
+    why: `These rows were computed over a ~${percent}% RANDOM sample of the source for a FAST directional read — NOT the full population.`,
+    safe_for: 'getting the shape/direction: top categories, rough proportions, whether a segment is non-trivial, sanity-checking a pipeline before a full run.',
+    not_reliable_for: 'exact totals/counts, rates near 0 or 1, small segments, distinct counts, or ranking values that are close — sampling error can change or flip these.',
+    get_exact: 'For a number you will act on, re-run WITHOUT sampling (omit the sample stage, or pass sample:false) to compute over ALL the data.',
+  };
 }

@@ -69,7 +69,6 @@ const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', '
 const HIDDEN_TOOLS = new Set([
   'register_native_model',
   'list_query_jobs',
-  'list_recipes', 'get_recipe',
   'list_contexts', 'describe_context', 'drop_context', 'delete_native_model', 'delete_semantic_model',
   'ab_test', 'srm_check', 'sample_size', // folded into experiment({ action: analyze | check_split | plan })
 ]);

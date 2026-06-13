@@ -604,9 +604,11 @@ function abTestSchema() {
       },
     };
   };
-  // Permissive top-level arm (all metric fields optional) — gives clients full inner types;
-  // the selected oneOf branch enforces the exact required set + rejects foreign fields.
-  const unionArm = { type: 'object', required: ['n'], description: 'A group: n plus the stat fields the chosen metric needs.', properties: { label, n, ...F } };
+  // Top-level arm: lists EVERY metric's stat field (so clients see the full inner types and
+  // any metric's group is expressible) but is still CLOSED — an unknown field is rejected.
+  // The selected ab_test oneOf branch further pins the exact per-metric required set; this
+  // closure also covers `experiment` (which composes these props WITHOUT the per-metric oneOf).
+  const unionArm = { type: 'object', additionalProperties: false, required: ['n'], description: 'A group: n plus the stat fields the chosen metric needs.', properties: { label, n, ...F } };
 
   return {
     type: 'object',

@@ -13,6 +13,7 @@
 // — so a note found by search points straight back at the right semantic_index view.
 
 import { randomUUID } from 'node:crypto';
+import { rankFuzzy } from './fuzzy.js';
 
 export class MemoryStore {
   constructor({ store } = {}) {
@@ -46,18 +47,30 @@ export class MemoryStore {
   }
 
   /**
-   * Substring match over a note's TEXT, its aliases (the user's phrasings) and its target
-   * keys/terms — so the original fuzzy word the user used resolves back to the finding.
+   * FUZZY match over a note's TEXT, its aliases (the user's phrasings) and its target
+   * keys/terms — so a word the user used (even mistyped or paraphrased) resolves back to
+   * the finding. Powered by the shared Fuse.js subsystem (src/fuzzy.js): EXACT-substring
+   * hits rank first, then typo/approximate hits above the similarity floor. Pass
+   * fuzzy:false for exact-substring only. The note set is tiny, so a one-shot rank over
+   * all notes is cheap (no persistent vector index needed).
    */
-  search(query, { limit = 20 } = {}) {
-    const q = String(query).toLowerCase().trim();
+  search(query, { limit = 20, fuzzy = true } = {}) {
+    const q = String(query ?? '').trim();
     if (!q) return [];
-    const out = [];
-    for (const e of this.all({ limit: 2000 })) {
-      const hay = [e.note, ...(e.aliases || []), ...(e.targets || [])].filter(Boolean).join('  ').toLowerCase();
-      if (hay.includes(q)) out.push(e);
-      if (out.length >= limit) break;
-    }
-    return out;
+    const notes = this.all({ limit: 2000 });
+    if (!notes.length) return [];
+    const ranked = rankFuzzy(q, notes, {
+      // Search the note text, the aliases, and the target KEYS (the "<kind>:" prefix
+      // stripped, so "ad_type_of_event_data" / "users.country" / a free phrase all match).
+      fields: (e) => [
+        e.note,
+        ...(e.aliases || []),
+        ...(e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? t.slice(i + 1) : String(t); }),
+      ].filter(Boolean),
+      threshold: fuzzy ? 0.6 : 2, // > 1 -> exact-substring only (rankFuzzy turns fuzzy off)
+      limit,
+      tiebreak: (e) => e.id,
+    });
+    return ranked.map((r) => r.item);
   }
 }

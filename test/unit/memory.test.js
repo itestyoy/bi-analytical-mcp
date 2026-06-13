@@ -106,6 +106,10 @@ test('memory list / search / forget round-trip', () => {
   assert.equal(found.notes[0].id, b.id);
   // search also matches an alias.
   assert.equal(e.memory({ action: 'search', query: 'ad format' }).notes[0].id, a.id);
+  // FUZZY: a mistyped query still finds the note (typo-tolerant via the Fuse subsystem).
+  assert.ok(e.memory({ action: 'search', query: 'cuntry' }).notes.some((n) => n.id === b.id), 'typo "cuntry" still finds the country note');
+  // fuzzy:false makes the SAME typo miss (exact-substring only).
+  assert.ok(!e.memory({ action: 'search', query: 'cuntry', fuzzy: false }).notes.some((n) => n.id === b.id), 'fuzzy:false → typo no longer matches');
 
   assert.equal(e.memory({ action: 'forget', id: a.id }).forgotten, true);
   assert.equal(e.memory({ action: 'list' }).total, 1, 'forgotten note is gone');
@@ -128,6 +132,7 @@ test('memory strict input validation', () => {
   assert.throws(() => e.memory({ action: 'search' }), /invalid input/, 'search needs a query');
   assert.throws(() => e.memory({ action: 'forget' }), /invalid input/, 'forget needs an id');
   assert.throws(() => e.memory({ action: 'list', note: 'x' }), /invalid input/, 'list forbids note');
+  assert.throws(() => e.memory({ action: 'list', fuzzy: true }), /invalid input/, 'fuzzy is search-only');
   assert.throws(() => e.memory({ action: 'bogus' }), /invalid input/, 'unknown action rejected by enum');
   assert.throws(() => e.memory({ action: 'forget', id: 'nope_missing' }), /no memory note/, 'forgetting a missing id errors');
 });

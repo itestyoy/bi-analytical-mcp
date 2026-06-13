@@ -112,7 +112,7 @@ test('build_native_model: schema rejects action-irrelevant fields', async () => 
   await assert.rejects(() => e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: mr, name: 'x' }), 'add_step + name rejected');
   // preview/commit/discard take only draft_id.
   await assert.rejects(() => e.build_native_model({ action: 'preview', draft_id: s.draft_id, stage: mr }), 'preview + stage rejected');
-  await assert.rejects(() => e.build_native_model({ action: 'commit', draft_id: s.draft_id, materialized: 'view' }), 'commit + materialized rejected');
+  await assert.rejects(() => e.build_native_model({ action: 'materialize', draft_id: s.draft_id, materialized: 'view' }), 'commit + materialized rejected');
   // start MAY carry draft_id (legitimate context reuse) — not rejected.
   const reuse = await e.build_native_model({ action: 'start', draft_id: s.draft_id, name: 'reused' });
   assert.equal(reuse.draft_id, s.draft_id);
@@ -132,4 +132,42 @@ test('build_native_model: array op on a non-array column is rejected at add_step
   await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'arr', op: 'json_parse_array', column: 'player_id_of_internal' } });
   const ok = await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'last', op: 'array_last', column: 'arr' } });
   assert.equal(ok.steps.length, 2, 'array_last on a parsed array column is accepted');
+});
+
+// Physical grounding: when a runner can introspect the relation, a catalog column the
+// PHYSICAL table lacks is excluded from the referenceable set (and surfaced as
+// not_materialized) — so referencing it is a clean "unknown column" at add_step, never a
+// raw warehouse "Unrecognized name" at commit. This is the level_number_of_state case.
+test('build_native_model grounds source columns to the physical relation', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  // Stub runner: the physical fct_analytics_events has these columns — NOTE it omits
+  // 'complete_time_of_event_data' (declared in the fixture catalog, but "not materialized").
+  const physical = ['player_id_of_internal', 'session_number', 'event_name', 'device_time', 'event_data', 'level_id_of_event_data', 'result_of_event_data', 'ad_type_of_event_data'];
+  const runner = { relationColumns: async () => ({ ok: true, columns: physical.map((name) => ({ name })) }) };
+  const e = new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/grounding', workspaceRoot: mkdtempSync(join(tmpdir(), 'gr-')) }) });
+
+  const s = await e.build_native_model({ action: 'start', name: 'grounded', source: 'events', include_columns: true });
+  const names = s.available_columns.map((c) => c.name);
+  assert.ok(names.includes('result_of_event_data'), 'a physically-present column is offered');
+  assert.ok(!names.includes('complete_time_of_event_data'), 'a phantom catalog column is NOT offered');
+  assert.ok(s.not_materialized.includes('complete_time_of_event_data'), 'the desync is surfaced in not_materialized');
+
+  // a physically-present column builds fine through add_step.
+  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'is_not_null' }] } });
+  // the phantom column is rejected as an UNKNOWN COLUMN at add_step (early + clear), not at commit.
+  await assert.rejects(
+    () => e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['complete_time_of_event_data'], measures: [{ name: 'n', fn: 'count' }] } }),
+    /unknown column 'complete_time_of_event_data'/,
+  );
+  const pv = await e.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  assert.equal(pv.steps.length, 1, 'the rejected phantom step was not persisted');
+});
+
+// No runner → grounding is skipped (physical truth unknown): declared columns are used
+// as-is, exactly as before, so offline/test behaviour is unchanged.
+test('build_native_model: grounding is skipped without a runner (declared columns as-is)', async () => {
+  const e = engine(); // no runner
+  const s = await e.build_native_model({ action: 'start', name: 'noground', source: 'events', include_columns: true });
+  assert.ok(s.available_columns.some((c) => c.name === 'complete_time_of_event_data'), 'declared column offered (cannot verify physically offline)');
+  assert.equal(s.not_materialized, undefined);
 });

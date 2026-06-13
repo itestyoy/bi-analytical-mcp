@@ -520,7 +520,7 @@ export function stageSchemas(catalog, names) {
 /** Initial columns available from a catalog source model. Every REAL physical column
  *  is exposed (incl. flattened event payload + envelope columns like main_data__app_id),
  *  so a native pipeline can filter/group/compute on them WITHOUT a users-join. */
-function sourceColumns(catalog, key) {
+function sourceColumns(catalog, key, physicalCols = null) {
   const m = catalog.getModel(key);
   const cols = new Map();
   for (const c of catalog.modelColumns(key)) cols.set(c.name, { type: c.type });
@@ -534,6 +534,11 @@ function sourceColumns(catalog, key) {
     if (typeof m.primary_entity === 'object' && m.primary_entity.column && !cols.has(m.primary_entity.column)) cols.set(m.primary_entity.column, { type: 'string' });
     for (const [name, dd] of Object.entries(m.dimensions || {})) if (!cols.has(name)) cols.set(name, { type: dd.type });
   }
+  // GROUNDING: when the caller supplies the relation's PHYSICAL column names (lowercased),
+  // drop any declared column the physical table does not have — the pipeline can only
+  // reference what truly exists, so a phantom catalog column fails as a normal "unknown
+  // column" here instead of as a raw warehouse error at commit. No set → declared as-is.
+  if (physicalCols) for (const name of [...cols.keys()]) if (!physicalCols.has(name.toLowerCase())) cols.delete(name);
   return cols;
 }
 
@@ -604,11 +609,11 @@ export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumn
  * it stays pipe; Postgres emulates it as a CTE, forcing chained-CTE assembly).
  * @returns { sql, columns } — columns is the final tracked column set (Map).
  */
-export function renderPipeline(catalog, dialectName, source, stages = []) {
+export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null } = {}) {
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
   const baseRelation = `{{ ref('${m.dbt_model}') }}`;
-  const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source), stages);
+  const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source, physicalCols), stages);
   const sql = ops.some((o) => o.requiresCte) ? assembleCteSql(d, dialectName, baseRelation, ops) : d.renderPipeline(baseRelation, ops);
   return { sql, columns: cols };
 }

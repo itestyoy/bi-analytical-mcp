@@ -2,8 +2,8 @@
 
 Each pattern: when to use it, the tool sequence, and the gotcha to check. Always
 **clarify** (window/project/segment) and **discover** (`semantic_index`) first, and check
-`list_recipes` / `get_recipe` — a recipe often carries the ready payload + the reusable
-technique (`hack`). Report the tier (governed metric › pipeline) + freshness + Confluence link.
+its recipe list (overview) + `semantic_index({ recipe: id })` — a recipe often carries the
+ready payload + the reusable technique (`hack`). Report the tier (governed metric › pipeline) + freshness + Confluence link.
 
 ---
 ## 1. Trends (DAU/WAU/MAU, sessions, event volume)
@@ -23,7 +23,7 @@ Use a pipeline with a `match_recognize` stage.
    or a tutorial chain. Add `between_steps` if repeats may occur.
 3. (optional) `add_step` a downstream `join` (users) / `aggregate` to slice conversion by a
    player attribute (country/platform).
-4. `commit`, then `get_query_result` — read `reached_*` / `completed` / `furthest_step_name`.
+4. `materialize`, then `get_query_result` — read `reached_*` / `completed` / `furthest_step_name`.
 - **Governed sibling:** *Game Completion Rate* = completed ÷ started ×100%
   ([def](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4502290434)) — prefer it for the
   headline rate; use the funnel for step-by-step drop-off.
@@ -70,16 +70,16 @@ Process + naming conventions: **Product Analytics** space
 1. **Compute per-variant aggregates first** with a pipeline: join `experiments` (variant_group),
    window events to the assignment period, aggregate per `variant_group` (n + the metric's
    stat fields).
-2. **Guardrail:** `srm_check({ groups })` — if `srm_detected` (p < 0.001), the split is
+2. **Guardrail:** `experiment({ action: check_split, groups })` — if `srm_detected` (p < 0.001), the split is
    broken → STOP, the test is invalid.
-3. **Significance:** `ab_test`:
+3. **Significance:** `experiment({ action: analyze })`:
    - conversion → `metric: "proportion"` (n + conversions);
    - revenue/ARPU → `metric: "mean"` (n + mean + stddev);
    - per-attempt ratios (e.g. wins/attempts randomized by player) → `metric: "ratio"` (the 5 sums);
    - variance reduction with a pre-period covariate → `metric: "cuped"` (the 5 sums).
    Read `lift` (with relative-lift CI), `p_value`, CI, `significant`, and the
    multiplicity-adjusted p-value across variants.
-4. **Planning / power:** `sample_size` (give `mde` → n per group, or `n` → MDE; needs
+4. **Planning / power:** `experiment({ action: plan })` (give `mde` → n per group, or `n` → MDE; needs
    `baseline` for proportion / `stddev` for mean).
 - **Gotcha:** always SRM before lift; pick the analysis unit (per-player vs per-attempt) —
   use `ratio` when the analysis unit is finer than the randomization unit; exclude the

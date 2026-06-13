@@ -56,17 +56,17 @@ test('require_time_range rejects an unbounded pipeline; a bounded one passes val
   const s = await e.build_native_model({ action: 'start', name: 'guard', source: 'events' });
   await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
   // commit without a time window → blocked by the guardrail.
-  await assert.rejects(() => e.build_native_model({ action: 'commit', draft_id: s.draft_id }), /require_time_range/);
+  await assert.rejects(() => e.build_native_model({ action: 'materialize', draft_id: s.draft_id }), /require_time_range/);
   // the same pipeline WITH a window passes validation (fails later only because no runner is wired).
   const s2 = await e.build_native_model({ action: 'start', name: 'guarded', source: 'events', time_range: { start: '2026-01-01', end: '2026-01-31' } });
   await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
-  const out = await e.build_native_model({ action: 'commit', draft_id: s2.draft_id });
+  const out = await e.build_native_model({ action: 'materialize', draft_id: s2.draft_id });
   assert.equal(out.kind, 'pipeline'); // reached registration (no time-range rejection)
   // a stage-level where on the time column ALSO satisfies the guard.
   const s3 = await e.build_native_model({ action: 'start', name: 'wherebound', source: 'events' });
   await e.build_native_model({ action: 'add_step', draft_id: s3.draft_id, stage: { stage: 'where', conditions: [{ column: 'device_time', op: 'gte', value: '2026-01-01' }] } });
   await e.build_native_model({ action: 'add_step', draft_id: s3.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
-  const out3 = await e.build_native_model({ action: 'commit', draft_id: s3.draft_id });
+  const out3 = await e.build_native_model({ action: 'materialize', draft_id: s3.draft_id });
   assert.equal(out3.kind, 'pipeline');
 });
 
@@ -78,6 +78,6 @@ test('without require_time_range an unbounded pipeline is not rejected', async (
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr0-')) }) });
   const s = await e.build_native_model({ action: 'start', name: 'free', source: 'events' });
   await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
-  const out = await e.build_native_model({ action: 'commit', draft_id: s.draft_id });
+  const out = await e.build_native_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(out.kind, 'pipeline');
 });

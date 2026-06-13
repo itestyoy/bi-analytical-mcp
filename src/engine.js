@@ -37,6 +37,8 @@ export class Engine {
     if (recipes) {
       this.schemas.list_recipes = { type: 'object', additionalProperties: false, properties: {} };
       this.schemas.get_recipe = { type: 'object', additionalProperties: false, required: ['id'], properties: { id: { type: 'string', enum: recipes.ids() } } };
+      // Recipes are now reached via semantic_index({ recipe: id }); constrain it to real ids.
+      if (this.schemas.semantic_index?.properties?.recipe) this.schemas.semantic_index.properties.recipe.enum = recipes.ids();
     }
     this.validators = makeValidators(this.schemas);
     this.ctxs = contextManager || new ContextManager({});
@@ -94,17 +96,18 @@ export class Engine {
    *   { property } → one property/attribute: spec + real value distribution + NULL
    *                  coverage per event + indexing history (one page per column)
    *   { search }   → events/properties/attributes/VALUES/recipes matching a substring
+   *   { recipe }   → one ready-made recipe by id (payload + example_queries + hack)
    *   { status }   → operational state: value-index sync runs + background query jobs
    *   { run }      → one sync run's per-property breakdown (slowest first)
-   * Pass at most one drill-down key (precedence run > status > model > event > property > search).
+   * Pass at most one drill-down key (mutually exclusive views).
    */
   async semantic_index(input = {}) {
     this._validate('semantic_index', input);
     // STRICT view contract (nothing is ever silently ignored): at most ONE view key,
     // and paging/ordering/recency params only on the views they apply to.
-    const views = ['run', 'status', 'model', 'event', 'property', 'search'].filter((k) => input[k] !== undefined && input[k] !== false);
+    const views = ['run', 'status', 'model', 'event', 'property', 'search', 'recipe'].filter((k) => input[k] !== undefined && input[k] !== false);
     if (views.length > 1) {
-      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
+      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
     }
     if (input.limit !== undefined && !(input.property || input.search)) throw new ToolError('limit only applies to the { property } and { search } views', { stage: 'validate', field: 'limit' });
     for (const k of ['offset', 'order_by', 'direction']) {
@@ -119,6 +122,12 @@ export class Engine {
     // ── operational views (sync state / one run) ──
     if (input.run != null) return this._indexRun(input);
     if (input.status) return this._indexStatus(input);
+
+    // ── { recipe }: one ready-made recipe by id (folded in from the old get_recipe tool) ──
+    if (input.recipe) {
+      if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
+      return this.get_recipe({ id: input.recipe });
+    }
 
     // ── { model }: one model in depth (incl. live warehouse introspection) ──
     if (input.model) {
@@ -156,6 +165,15 @@ export class Engine {
         const cols = await this.runner.relationColumns(base, m.dbt_model);
         out.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
         if (!cols.ok) out.physical_columns_error = 'physical columns unavailable — the underlying table is not built yet';
+        else {
+          // GROUND the referenceable columns to physical truth: a catalog column the
+          // table does not have is excluded from pipeline_columns and called out in
+          // not_materialized (fix the source dbt model/schema to align them).
+          const physSet = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
+          const phantom = out.pipeline_columns.filter((col) => !physSet.has(col.name.toLowerCase())).map((col) => col.name);
+          out.pipeline_columns = out.pipeline_columns.filter((col) => physSet.has(col.name.toLowerCase()));
+          if (phantom.length) out.not_materialized = phantom;
+        }
       }
       out.recommendations = k === c.anchor
         ? [
@@ -337,7 +355,9 @@ export class Engine {
         seconds_since_last_sync: lastSync?.finished_at != null ? Math.round((Date.now() - lastSync.finished_at) / 1000) : null,
       } : null,
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
-      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring.',
+      // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
+      ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
+      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring; ({ recipe }) → a ready-made recipe by id.',
       recommendations: [
         `Start by inspecting an event's properties: semantic_index({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
         `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
@@ -447,9 +467,9 @@ export class Engine {
     const recommendations = [];
     if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in semantic_index may still be filling in.`);
     else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ property }) will show no sample_values until the first sync (it runs in the background at startup).`);
-    else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the warehouse/runner.`);
+    else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
     else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ property }).`);
-    if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }) or list them with list_query_jobs.`);
+    if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }); semantic_index({ status }) lists them.`);
     if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
     if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
 
@@ -520,9 +540,9 @@ export class Engine {
   /**
    * Compose a native pipeline INCREMENTALLY (single tool, `action`-driven). Each
    * add_step validates the stage and returns the columns now available for the next
-   * stage — pure schema propagation via renderPipeline, NO warehouse hit until commit.
+   * stage — pure schema propagation via renderPipeline, NO warehouse hit until materialize.
    * The all-at-once register_native_model path is unchanged. Lifecycle:
-   * start → add_step* → (preview) → commit | discard.
+   * start → add_step* → (preview) → materialize | discard.
    */
   async build_native_model(input) {
     this._validate('build_native_model', input);
@@ -534,13 +554,43 @@ export class Engine {
     if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns);
     if (input.action === 'preview') return this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { draft_id: ctx.id, action: 'discard', discarded: true }; }
-    return this._draftCommit(ctx, draft); // commit
+    return this._draftMaterialize(ctx, draft); // materialize (the final build step)
   }
 
-  /** Columns available after a draft's accumulated stages (source columns when empty). */
-  _draftColumns(draft) {
-    if (!draft.stages.length) return this.catalog.modelColumns(draft.source);
-    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, draft.stages);
+  /**
+   * Physical column NAMES (lowercased Set) of a source's relation, via the same
+   * introspection semantic_index({ model }) uses — cached per source. null when it
+   * cannot be known (no runner / relation not built / introspection failed), in which
+   * case the catalog's declared columns are used as-is (grounding is skipped).
+   */
+  async _physicalCols(source) {
+    if (!this.runner || !this.ctxs.baseProjectDir) return null;
+    this._physColCache ??= new Map();
+    if (this._physColCache.has(source)) return this._physColCache.get(source);
+    let set = null;
+    try {
+      const r = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
+      if (r.ok && Array.isArray(r.columns)) set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
+    } catch { /* introspection unavailable → grounding skipped */ }
+    this._physColCache.set(source, set);
+    return set;
+  }
+
+  /** Declared source columns GROUNDED to physical truth: { cols, phantom } where phantom
+   *  lists declared-but-not-materialized names (empty when grounding is unavailable). */
+  _groundedDeclared(source, physSet) {
+    const declared = this.catalog.modelColumns(source);
+    if (!physSet) return { cols: declared, phantom: [] };
+    const cols = []; const phantom = [];
+    for (const c of declared) (physSet.has(c.name.toLowerCase()) ? cols : phantom).push(c);
+    return { cols, phantom: phantom.map((c) => c.name) };
+  }
+
+  /** Columns available after a draft's accumulated stages (source columns when empty),
+   *  grounded to the physical relation (phantom catalog columns excluded). */
+  _draftColumns(draft, physSet) {
+    if (!draft.stages.length) return this._groundedDeclared(draft.source, physSet).cols;
+    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, draft.stages, { physicalCols: physSet });
     return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   }
 
@@ -571,7 +621,7 @@ export class Engine {
     return stages.some((s) => s.stage === 'where' && (s.conditions || []).some((c) => bounds.has(c.column)));
   }
 
-  /** Accumulated stages with the draft's time_range prepended as a leading WHERE (parity with commit). */
+  /** Accumulated stages with the draft's time_range prepended as a leading WHERE (parity with materialize). */
   _draftEffectiveStages(draft) {
     const conditions = this._timeRangeConditions(draft.source, draft.time_range);
     return conditions ? [{ stage: 'where', conditions }, ...draft.stages] : draft.stages;
@@ -581,12 +631,16 @@ export class Engine {
     return draft.stages.map((s, i) => ({ index: i + 1, ...s }));
   }
 
-  _draftStart(input) {
+  async _draftStart(input) {
     const ctx = input.draft_id ? this.ctxs.get(input.draft_id) : this.ctxs.create();
     const source = input.source || this.catalog.anchor;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
-    const cols = this.catalog.modelColumns(source);
+    // Ground the referenceable columns to the physical relation: a column the catalog
+    // declares but the table does not have is excluded here (not offered, not buildable)
+    // rather than failing later as a raw warehouse "Unrecognized name" at materialize time.
+    const physSet = await this._physicalCols(source);
+    const { cols, phantom } = this._groundedDeclared(source, physSet);
     const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
       steps: [], column_count: cols.length,
@@ -594,25 +648,32 @@ export class Engine {
       recommendations: [
         `The source has ${cols.length} columns your first stage can reference; get the full list with build_native_model({ action: "start", ..., include_columns: true }) or inspect via semantic_index({ model: '${source}' }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
-        `When the steps look right, commit with build_native_model({ action: "commit", draft_id }).`,
+        `When the steps look right, materialize with build_native_model({ action: "materialize", draft_id }).`,
       ],
     };
+    // Surface the desync (catalog declares them, the physical table does not) so it is
+    // visible, not silent — these names are excluded from the referenceable columns.
+    if (phantom.length) {
+      resp.not_materialized = phantom;
+      resp.recommendations.push(`${phantom.length} catalog column(s) are NOT in the physical table '${this.catalog.getModel(source).dbt_model}' and were excluded (e.g. ${phantom.slice(0, 5).join(', ')}). Fix the source model/schema to materialize or drop them.`);
+    }
     if (input.include_columns) resp.available_columns = cols;
     return resp;
   }
 
   async _draftAddStep(ctx, draft, stage, includeColumns = false) {
-    const before = this._draftColumns(draft); // columns BEFORE this stage
+    const physSet = await this._physicalCols(draft.source);
+    const before = this._draftColumns(draft, physSet); // columns BEFORE this stage
     const trial = [...draft.stages, stage];
     try {
-      renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial); // validates refs/stage against current columns (no warehouse)
+      renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial, { physicalCols: physSet }); // validates refs/stage against PHYSICAL columns (no warehouse)
     } catch (e) {
       // Reject the step WITHOUT persisting it; the draft is left intact to retry.
       throw new ToolError(e.message, { stage: 'compile', field: 'stage' });
     }
     draft.stages = trial;
     this.ctxs.touch(ctx.id);
-    const after = this._draftColumns(draft);
+    const after = this._draftColumns(draft, physSet);
     // Default to a DIFF (what this stage added/removed) instead of dumping the whole
     // schema every step — the full list is noise after the first call. Pass
     // include_columns:true (or use preview) for the complete set.
@@ -624,7 +685,7 @@ export class Engine {
       column_count: after.length,
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
       columns_removed: before.filter((c) => !afterNames.has(c.name)).map((c) => c.name),
-      next: 'add_step the next stage, commit the draft, or pass include_columns:true / preview for the full column list.',
+      next: 'add_step the next stage, materialize the draft, or pass include_columns:true / preview for the full column list.',
       recommendations: this._draftStepRecommendations(stage, after),
     };
     if (includeColumns) resp.available_columns = after;
@@ -637,34 +698,35 @@ export class Engine {
     if (stage.stage === 'match_recognize') {
       recs.push(`The funnel columns (reached_<step>, completed, furthest_step_name, secs_<metric>) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country).`);
     } else if (stage.stage === 'aggregate') {
-      recs.push(`Aggregated: the output is now group_by keys + measures (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}); add order_by/limit or commit.`);
+      recs.push(`Aggregated: the output is now group_by keys + measures (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}); add order_by/limit or materialize.`);
     } else if (stage.stage === 'join') {
       recs.push(`Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.`);
     } else {
       recs.push(`Reference any of available_columns in the next stage (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}).`);
     }
-    recs.push(`Preview the SQL anytime with build_native_model({ action: "preview", draft_id }); commit when done.`);
+    recs.push(`Preview the SQL anytime with build_native_model({ action: "preview", draft_id }); materialize when done.`);
     return recs;
   }
 
-  _draftPreview(ctx, draft) {
+  async _draftPreview(ctx, draft) {
     const dialect = this.catalog.dialect;
+    const physSet = await this._physicalCols(draft.source);
     const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft) };
-    if (!draft.stages.length) return { ...base, available_columns: this.catalog.modelColumns(draft.source), note: 'No stages yet — add_step first.' };
+    if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No stages yet — add_step first.' };
     const stages = this._draftEffectiveStages(draft);
     // Render ONLY the active warehouse dialect, so every response is consistent with where
-    // the pipeline actually runs (bigquery → `|>`, postgres → CTEs).
-    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages);
+    // the pipeline actually runs (bigquery → `|>`, postgres → CTEs). Grounded to physical.
+    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages, { physicalCols: physSet });
     return { ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql };
   }
 
-  async _draftCommit(ctx, draft) {
-    if (!draft.stages.length) throw new ToolError('draft has no stages to commit — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
+  async _draftMaterialize(ctx, draft) {
+    if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
     const result = await this._registerPipeline({
       name: draft.name, context_id: ctx.id, materialized: draft.materialized,
       pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
     });
-    delete ctx.state.draft; // committed — clear the draft so the context holds only the built model
+    delete ctx.state.draft; // materialized — clear the draft so the context holds only the built model
     return result;
   }
 
@@ -695,8 +757,11 @@ export class Engine {
       );
     }
     // Render ONLY the active warehouse dialect — every response is in the dialect the
-    // pipeline actually runs on, never a mix.
-    const render = () => renderPipeline(this.catalog, dialect, source, stages);
+    // pipeline actually runs on, never a mix. Grounded to the physical relation so a
+    // phantom catalog column is rejected as "unknown column" here, not as a raw
+    // warehouse error after the build.
+    const physSet = await this._physicalCols(source);
+    const render = () => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet });
     if (input.dry_run) {
       const out = render();
       const resp = {
@@ -706,7 +771,7 @@ export class Engine {
         model_sql: out.sql,
       };
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
-      // (no full materialize). Lets the caller size the scan before committing.
+      // (no full materialize). Lets the caller size the scan before materializing.
       const est = await this._estimateSourceRows(source, tr);
       if (est != null) resp.estimated_source_rows = est;
       return resp;
@@ -778,10 +843,21 @@ export class Engine {
     return null;
   }
 
-  /** Update a registered native model in place (re-generate + rebuild). */
-  async update_native_model(input) {
-    this._validate('update_native_model', input);
-    return this._registerPipeline(input);
+  /**
+   * ONE context-lifecycle tool (action-driven), replacing list_contexts / describe_context /
+   * drop_context / delete_native_model / delete_semantic_model. Delegates to the internal
+   * handlers (kept private so the all-at-once register path + tests reuse them).
+   */
+  async context(input) {
+    this._validate('context', input);
+    switch (input.action) {
+      case 'list': return this.list_contexts();
+      case 'describe': return this.describe_context({ context_id: input.context_id });
+      case 'drop': return this.drop_context({ context_id: input.context_id });
+      case 'delete_model': return this.delete_native_model({ context_id: input.context_id });
+      case 'delete_semantic_model': return this.delete_semantic_model({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });
+      default: throw new ToolError(`unknown context action '${input.action}'`, { stage: 'validate', field: 'action' });
+    }
   }
 
   /** Delete a registered native model: remove its files + state and re-parse. */
@@ -795,7 +871,7 @@ export class Engine {
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: 'model definition removed; the warehouse view may persist until the context is dropped (drop_context) or the warehouse cleans ephemeral objects' };
+    return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (context({ action: 'drop' })) or the store cleans ephemeral objects" };
   }
 
   async create_semantic_model(input) {
@@ -837,7 +913,7 @@ export class Engine {
       next: `Query it: query_semantic_model({ context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end } }) — optionally group_by one of: ${groupable.slice(0, 5).join(', ')}${groupable.length > 5 ? ', …' : ''}.`,
       recommendations: [
         `Bound every query with time_range and group by a path from \`groupable\` (e.g. ${groupable.find((g) => g.includes('__')) || groupable[0] || 'metric_time'}).`,
-        `Extend this task later with update_semantic_model({ context_id: '${ctx.id}', ... }); inspect it anytime with describe_context.`,
+        `Extend this task later with update_semantic_model({ context_id: '${ctx.id}', ... }); inspect it anytime with context({ action: 'describe', context_id: '${ctx.id}' }).`,
       ],
     };
   }
@@ -913,6 +989,24 @@ export class Engine {
   }
 
   /**
+   * ONE A/B-experiment lifecycle tool (action-driven), folding in the three stat tools.
+   * plan → sample_size (power/MDE), check_split → srm_check (SRM guardrail), analyze →
+   * ab_test (significance). Validates the action shape, then delegates to the internal
+   * handler which re-validates the exact per-metric contract. The lifecycle order
+   * (plan → check_split → analyze) is the recommended sequence.
+   */
+  experiment(input) {
+    this._validate('experiment', input);
+    const { action, ...rest } = input;
+    switch (action) {
+      case 'plan': return this.sample_size(rest);
+      case 'check_split': return this.srm_check(rest);
+      case 'analyze': return this.ab_test(rest);
+      default: throw new ToolError(`unknown experiment action '${action}'`, { stage: 'validate', field: 'action' });
+    }
+  }
+
+  /**
    * A/B significance test over PRE-AGGREGATED group stats (computed by a pipeline
    * that joins the experiments source, windows events to the assignment period,
    * and aggregates per group). proportion → two-proportion z-test; mean → Welch
@@ -980,7 +1074,7 @@ export class Engine {
     const recommendations = [
       `Trust significant_adjusted (multiplicity-corrected${familyExtra.length ? `, family includes ${familyExtra.length} other metric(s)` : ''}) over raw significant.`,
       ...(input.sequential ? ['p_value_sequential is valid under repeated peeking; the fixed-horizon p_value is only valid at the planned sample size.'] : ['Peeking at a RUNNING experiment with fixed-horizon p-values inflates false positives — pass sequential:true for an always-valid p.']),
-      ...(anySig ? [] : ['No significant lift: check power with sample_size({ ... }) before calling it a true null — and verify the split with srm_check if you have not.']),
+      ...(anySig ? [] : ['No significant lift: check power with experiment({ action: "plan", ... }) before calling it a true null — and verify the split with experiment({ action: "check_split", ... }) if you have not.']),
     ];
     return { ok: true, metric, confidence, alternative, correction, control: labelOf(control, -1), ...extra, results, recommendations };
   }

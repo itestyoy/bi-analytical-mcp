@@ -272,7 +272,7 @@ export function buildSchemas(catalog) {
     type: 'object',
     additionalProperties: false,
     required: ['name', 'metrics'],
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context.',
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express, read back with get_query_result), use build_native_model instead.',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
@@ -311,27 +311,27 @@ export function buildSchemas(catalog) {
   // build_native_model: compose a pipeline INCREMENTALLY, one stage at a time. A
   // single stateful tool with an `action`; each add_step validates the stage and
   // returns the columns now available for the NEXT stage (schema only — nothing is
-  // materialized until commit). The all-at-once register_native_model still works.
+  // materialized until materialize). The all-at-once register_native_model still works.
   const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone: start/end are wall-clock in this zone, converted to UTC instants.' } } };
   // A then-clause fragment that forbids the named properties (valid only when ALL are absent).
   const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
   const buildModel = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until commit), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → commit (materializes via the same engine as register_native_model). For a pipeline you already know in full, register_native_model in one call is still fine.',
+    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; read the rows back with get_query_result. For REUSABLE named metrics you query many ways (group_by / time / filters), use create_semantic_model instead (the governed path).',
     // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
     // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
-    // preview/commit/discard take just draft_id. `forbid` rejects any field that does not
+    // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
     // belong to the action, so a stray param is an error rather than silently ignored.
     allOf: [
       { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'], ...forbid(['stage']) } },
       { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range']) } },
-      { if: { properties: { action: { enum: ['preview', 'commit', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage']) } },
+      { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage']) } },
     ],
     properties: {
-      action: { enum: ['start', 'add_step', 'preview', 'commit', 'discard'], description: 'start a new draft (returns a draft_id + the source columns); add_step appends ONE stage and returns the columns available after it; preview shows the accumulated steps + generated SQL; commit materializes the draft as a model; discard drops it.' },
-      draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for add_step/preview/commit/discard.' },
+      action: { enum: ['start', 'add_step', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + the source columns); add_step appends ONE stage and returns the columns available after it; preview shows the accumulated steps + generated SQL; materialize builds the draft as a model (the final step after the stages); discard drops it.' },
+      draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for add_step/preview/materialize/discard.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start.' },
-      materialized: { enum: ['view', 'table'], default: 'table', description: 'How the committed result is stored (start): table (default) or view.' },
+      materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
       source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table (start only; default the events fact).' },
       time_range: trProp,
       stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage to append (add_step), validated against the columns available so far.' },
@@ -396,12 +396,30 @@ export function buildSchemas(catalog) {
   const del = { type: 'object', additionalProperties: false, required: ['context_id', 'semantic_model'], description: 'Remove a semantic model\'s task additions from a context.', properties: { context_id: { type: 'string', pattern: CTX, description: D.context_id }, semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s additions to remove.' }, cascade: { type: 'boolean', description: 'If true, also remove metrics that depend on the removed measures.' } } };
   const empty = { type: 'object', additionalProperties: false, properties: {} };
 
+  // ONE context-lifecycle tool (action-driven), replacing list_contexts / describe_context /
+  // drop_context / delete_native_model / delete_semantic_model. Strict per-action fields.
+  const contextTool = {
+    type: 'object', additionalProperties: false, required: ['action'],
+    description: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, with cascade for dependent metrics).',
+    allOf: [
+      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['context_id', 'semantic_model', 'cascade']) },
+      { if: { properties: { action: { enum: ['describe', 'drop', 'delete_model'] } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['semantic_model', 'cascade']) } },
+      { if: { properties: { action: { const: 'delete_semantic_model' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'] } },
+    ],
+    properties: {
+      action: { enum: ['list', 'describe', 'drop', 'delete_model', 'delete_semantic_model'], description: 'list → all active contexts; describe → one context in depth; drop → tear down the whole context; delete_model → remove the native pipeline model only; delete_semantic_model → remove one model\'s task additions.' },
+      context_id: { type: 'string', pattern: CTX, description: `${D.context_id} Required for every action except list.` },
+      semantic_model: { type: 'string', enum: modelKeys, description: 'delete_semantic_model: which model\'s task additions to remove.' },
+      cascade: { type: 'boolean', description: 'delete_semantic_model: also remove metrics that depend on the removed measures.' },
+    },
+  };
+
   return {
     create_semantic_model: create,
     register_native_model: registerModel,
     build_native_model: buildModel,
-    update_native_model: { ...registerModel, required: ['context_id', 'name'], description: 'Update a registered native model in place: regenerate it from a new sequence or pipeline spec and rebuild.' },
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
+    context: contextTool,
     query_semantic_model: query,
     get_query_result: {
       type: 'object', additionalProperties: false,
@@ -448,6 +466,7 @@ export function buildSchemas(catalog) {
         fuzzy: { type: 'boolean', description: 'For { search }: enable typo/approximate matching (default true). false = exact substring only.' },
         status: { type: 'boolean', description: 'VIEW: operational state — value-index sync runs (freshness, errors, slowest properties) + background query jobs.' },
         run: { type: 'integer', minimum: 1, description: 'VIEW: one sync run by id (from the status view\'s value_index.recent_runs[].id): per-property timing/coverage, slowest first.' },
+        recipe: { type: 'string', description: 'VIEW: get ONE ready-made recipe by id — its payload (create_semantic_model or a native-model pipeline + ab_test mapping), example_queries, notes and `hack`. The overview lists available recipe ids; { search } finds them by keyword. (enum injected when recipes are configured.)' },
         limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'For { property }/{ search }: how many indexed values to return (default 10 for property, 20 for search). Page further with offset.' },
         offset: { type: 'integer', minimum: 0, description: 'For { property }: skip this many values first — page through the value list.' },
         order_by: { enum: ['freq', 'value'], description: 'For { property }: order the returned values by frequency (default) or alphabetically by value.' },
@@ -463,6 +482,7 @@ export function buildSchemas(catalog) {
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
       },
     },
+    experiment: experimentSchema(),
     ab_test: abTestSchema(),
     srm_check: srmCheckSchema(),
     sample_size: sampleSizeSchema(),
@@ -630,5 +650,33 @@ function sampleSizeSchema() {
       branch('proportion', 'baseline', 'Conversion-rate planning: needs a baseline rate, plus exactly one of mde or n.'),
       branch('mean', 'stddev', 'Continuous-metric planning: needs a stddev, plus exactly one of mde or n.'),
     ],
+  };
+}
+
+// ── ONE experiment-lifecycle tool (action-driven), folding in plan/check_split/analyze ──
+// Composes the three stat schemas' top-level fields under an `action` discriminator; each
+// action requires its core fields here, and the engine delegates to the per-action handler
+// which re-validates the exact (per-metric) field set. So the lifecycle is one tool, but the
+// strict statistical contracts are preserved.
+function experimentSchema() {
+  const ab = abTestSchema();
+  const srm = srmCheckSchema();
+  const ss = sampleSizeSchema();
+  const properties = {
+    action: { enum: ['plan', 'check_split', 'analyze'], description: 'plan → required sample size / MDE (power planning, BEFORE running); check_split → Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run BEFORE trusting any lift); analyze → the A/B significance test on per-group aggregates.' },
+    // union of all three actions' fields (analyze/ab_test wins on shared keys like metric).
+    ...ss.properties,
+    ...srm.properties,
+    ...ab.properties,
+  };
+  return {
+    type: 'object', additionalProperties: false, required: ['action'],
+    description: 'The A/B EXPERIMENT lifecycle in ONE tool (action-driven): plan → check_split → analyze. plan = power/sample-size (how many users, or the MDE at a given n) BEFORE running; check_split = Sample-Ratio-Mismatch χ² guardrail (a bad split invalidates the experiment — run it BEFORE trusting any lift); analyze = the significance test on PRE-AGGREGATED per-group stats (metric: proportion → conversions, mean → mean+stddev, ratio → per-user sums, cuped → variance reduction), returning lift + p-value + CI + significance, multiplicity-adjusted across variants. Compute the per-group aggregates first with a pipeline.',
+    allOf: [
+      { if: { properties: { action: { const: 'plan' } }, required: ['action'] }, then: { required: ['metric'], properties: { metric: { enum: ['proportion', 'mean'] } } } },
+      { if: { properties: { action: { const: 'check_split' } }, required: ['action'] }, then: { required: ['groups'] } },
+      { if: { properties: { action: { const: 'analyze' } }, required: ['action'] }, then: { required: ['metric', 'control', 'variants'] } },
+    ],
+    properties,
   };
 }

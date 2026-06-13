@@ -18,13 +18,12 @@ Design docs:
 
 | Tool | Purpose |
 |---|---|
-| `semantic_index` | registry: models, events, properties, reachable group-by paths, enums |
+| `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
 | `create_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table) |
+| `build_native_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result |
 | `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
 | `update_semantic_model` | add/remove task measures, dimensions, metrics in a context |
-| `delete_semantic_model` | remove a table's task additions (cascade for dependent metrics) |
-| `drop_context` | tear down an isolated context |
-| `list_contexts` / `describe_context` | inspect active contexts |
+| `context` | manage contexts: `{ action: list \| describe \| drop \| delete_model \| delete_semantic_model }` |
 
 ## Architecture
 
@@ -63,10 +62,11 @@ AI ──► query_semantic_model (enum-constrained)
 
 ## Recipes
 
-`list_recipes` / `get_recipe` return ready-to-run templates for common analytics
-task types (trends, segmentation, funnel, retention, cohort, behavioral,
-conversion, level progression, monetization, stickiness) — each a valid
-`create_semantic_model` payload + example queries. See `config/recipes.json` and
+The `semantic_index` overview lists recipe ids and `semantic_index({ recipe: id })`
+returns one in full — ready-to-run templates for common analytics task types
+(trends, segmentation, funnel, retention, cohort, behavioral, conversion, level
+progression, monetization, stickiness) — each a valid `create_semantic_model`
+payload + example queries. See `config/recipes.json` and
 `docs/analytics-task-taxonomy.md`.
 
 ## Run

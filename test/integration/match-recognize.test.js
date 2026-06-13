@@ -147,7 +147,7 @@ test('build_native_model incremental: per-step columns + commit equals all-at-on
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL');
   assert.equal(pv.steps.length, 1);
   // commit materializes; rows MATCH the all-at-once funnel exactly.
-  const c = await engine.build_native_model({ action: 'commit', draft_id: s.draft_id });
+  const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(reached(c.rows, 'launch'), 12);
   assert.equal(reached(c.rows, 'tut1'), 8);

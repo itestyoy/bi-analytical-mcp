@@ -121,7 +121,7 @@ export class CatalogSearch {
       recs.push(`Value '${top.value}' lives in ${top.model ? `attribute '${top.property}' (the '${top.model}' model)` : `property '${top.property}'`}${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ property: '${top.property}' }).`);
       if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ event: '${top.events[0]}' }).`);
     }
-    if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — get_recipe({ id: '${recipe_matches[0].id}' }) returns a ready payload + the reusable technique.`);
+    if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ recipe: '${recipe_matches[0].id}' }) returns a ready payload + the reusable technique.`);
     if (dimension_matches.length) recs.push(`Attribute '${dimension_matches[0].property}' matches — drill its values with semantic_index({ property: '${dimension_matches[0].property}' }).`);
     if (property_matches.length) recs.push(`Drill into property '${property_matches[0].property}' for its real values + cardinality: semantic_index({ property: '${property_matches[0].property}' }).`);
     if (event_names.length) recs.push(`See what event '${event_names[0].event}' carries: semantic_index({ event: '${event_names[0].event}' }).`);

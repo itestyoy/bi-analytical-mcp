@@ -17,12 +17,13 @@ import { CatalogSearch } from './search.js';
 import { buildGuide } from './guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
+import { MemoryStore } from './memory.js';
 import { openStore } from './store.js';
 import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -32,6 +33,7 @@ export class Engine {
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
+    this.memoryStore = new MemoryStore({ store: this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
@@ -66,6 +68,94 @@ export class Engine {
   _validate(tool, input) {
     const res = validateInput(this.validators[tool], input || {});
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
+  }
+
+  /**
+   * Resolve a memory TARGET string to a canonical, typed key so a saved finding links to a
+   * real semantic_index view. A '<model>.<column>' attribute or a known model/event/event-
+   * property resolves to that entity; anything else is kept as a free `term` (the user's
+   * fuzzy phrasing) so it is still searchable and can map back to whatever it describes.
+   */
+  _resolveMemoryTarget(t) {
+    const c = this.catalog;
+    const s = String(t).trim();
+    const dot = s.indexOf('.');
+    if (dot > 0) {
+      const mk = s.slice(0, dot); const col = s.slice(dot + 1);
+      if (mk !== c.anchor && c.models[mk] && (c.getModel(mk).dimensions || {})[col]) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
+    }
+    if (c.models[s]) return { kind: 'model', key: s, canon: `model:${s}` };
+    if (c.eventNames().includes(s)) return { kind: 'event', key: s, canon: `event:${s}` };
+    if (c.eventProps().includes(s)) return { kind: 'property', key: s, canon: `property:${s}` };
+    return { kind: 'term', key: s, canon: `term:${s.toLowerCase()}` };
+  }
+
+  /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
+  _memorySurfaceHint({ kind, key }) {
+    if (kind === 'property') return `semantic_index({ property: '${key}' })`;
+    if (kind === 'event') return `semantic_index({ event: '${key}' })`;
+    if (kind === 'model') return `semantic_index({ model: '${key}' })`;
+    return `semantic_index({ search: '${key}' })`; // term
+  }
+
+  /** Compact notes linked to any of `canonKeys`, for attaching to a semantic_index view. */
+  _memoryFor(canonKeys) {
+    return this.memoryStore.forTargets(canonKeys).map(memoryView);
+  }
+
+  /**
+   * THE analyst memory tool. Save a FINDING the AI made (a vague phrasing tracked down to a
+   * real field, a non-obvious gotcha, an associated source/link) and LINK it to the catalog
+   * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { model }/
+   * { event }/{ property } views and { search }) next time the same word/field comes up.
+   *   action:'record' → save a note (+ targets it is about, + aliases the user used, + links)
+   *   action:'list'   → all notes, or those linked to one { target }
+   *   action:'search' → notes matching a word (text / alias / target)
+   *   action:'forget' → delete one note by id
+   */
+  async memory(input = {}) {
+    this._validate('memory', input);
+    const action = input.action;
+
+    if (action === 'record') {
+      const note = String(input.note ?? '').trim();
+      if (!note) throw new ToolError('note is required and must be a non-empty finding', { stage: 'validate', field: 'note' });
+      const question = input.question ? String(input.question).trim() : null;
+      const resolved = (input.targets || []).map((t) => this._resolveMemoryTarget(t));
+      const aliases = [...new Set((input.aliases || []).map((a) => String(a).trim()).filter(Boolean))];
+      const links = (input.links || []).map((l) => (typeof l === 'string' ? { url: l } : { url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) }));
+      const entry = this.memoryStore.record({ note, question, targets: resolved.map((r) => r.canon), aliases, links });
+      return {
+        saved: true,
+        id: entry.id,
+        note: entry.note,
+        ...(question ? { question } : {}),
+        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.key, surfaces_in: this._memorySurfaceHint(r) })),
+        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.key) } : {}),
+        aliases, links,
+        next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
+      };
+    }
+
+    if (action === 'list') {
+      if (input.target !== undefined) {
+        const r = this._resolveMemoryTarget(input.target);
+        return { target: r.key, kind: r.kind, notes: this.memoryStore.forTargets([r.canon]).map(memoryView) };
+      }
+      return { total: this.memoryStore.counts().notes, notes: this.memoryStore.all({ limit: input.limit ?? 50 }).map(memoryView) };
+    }
+
+    if (action === 'search') {
+      const notes = (await this.memoryStore.search(input.query, { limit: input.limit ?? 20, fuzzy: input.fuzzy !== false })).map(memoryView);
+      return { query: input.query, semantic: this.memoryStore.semantic, notes };
+    }
+
+    if (action === 'forget') {
+      if (!this.memoryStore.forget(input.id)) throw new ToolError(`no memory note with id '${input.id}'`, { stage: 'validate', field: 'id' });
+      return { forgotten: true, id: input.id };
+    }
+
+    throw new ToolError(`unknown action '${action}'`, { stage: 'validate', field: 'action' });
   }
 
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
@@ -147,10 +237,10 @@ export class Engine {
       const m = c.getModel(k);
       const descs = c.columnDescriptions(k);
       const out = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description, primary_entity: c.primaryEntityName(k), entities: m.entities, time: m.time?.column, measures: Object.keys(m.measures || {}) };
-      // Columns referenceable in a native pipeline over this source (where/compute/
-      // group_by/order_by), with their types — `time` above is the default order axis
-      // for window/match_recognize stages.
-      out.pipeline_columns = c.modelColumns(k);
+      // The ONE list of columns you can work with on this source (reference in where/
+      // compute/group_by/order_by/match_recognize). `time` above is the default order axis.
+      // It is silently grounded to the physical table below — only real columns appear.
+      out.columns = c.modelColumns(k);
       if (k === c.anchor) {
         out.event_count = c.eventNames().length;
         out.property_count = c.eventProps().length;
@@ -161,7 +251,7 @@ export class Engine {
           out.partition_column = m.partition_column;
           out.cost_hint = `The physical table is partitioned by ${m.partition_column} — ALWAYS bound queries with time_range (or a where on ${m.partition_column}/${m.time?.column || 'the time column'}) to avoid a full scan.`;
         }
-        out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The columns above are referenceable in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
+        out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The `columns` above are what you can reference in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
       } else {
         // Dimension attributes WITH their real indexed values (cardinality + top 3) — the
         // index stores them under namespaced '<model>.<column>' keys (e.g. 'users.country').
@@ -174,16 +264,12 @@ export class Engine {
       const base = this.ctxs.baseProjectDir;
       if (this.runner && base) {
         const cols = await this.runner.relationColumns(base, m.dbt_model);
-        out.physical_columns = cols.ok ? cols.columns.map((col) => (descs[col.name] ? { ...col, description: descs[col.name] } : col)) : null;
-        if (!cols.ok) out.physical_columns_error = 'physical columns unavailable — the underlying table is not built yet';
-        else {
-          // GROUND the referenceable columns to physical truth: a catalog column the
-          // table does not have is excluded from pipeline_columns and called out in
-          // not_materialized (fix the source dbt model/schema to align them).
+        // Silent internal guard: keep ONLY columns that physically exist, so a name that
+        // is not really in the table never surfaces anywhere. One list, grounded to truth.
+        // Best-effort — if introspection fails (table not built yet) keep the declared set.
+        if (cols.ok) {
           const physSet = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
-          const phantom = out.pipeline_columns.filter((col) => !physSet.has(col.name.toLowerCase())).map((col) => col.name);
-          out.pipeline_columns = out.pipeline_columns.filter((col) => physSet.has(col.name.toLowerCase()));
-          if (phantom.length) out.not_materialized = phantom;
+          out.columns = out.columns.filter((col) => physSet.has(col.name.toLowerCase()));
         }
         // Data freshness: latest value of the time column (how up-to-date the data is).
         if (m.time?.column) { const fresh = await this._dataFreshness(k); if (fresh) out.data_freshness = fresh; }
@@ -198,6 +284,9 @@ export class Engine {
           `Drill into an attribute's full value/frequency distribution: semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
           `Looking for a known attribute value? semantic_index({ search: '<value>' }) tells you where it occurs.`,
         ];
+      // Saved findings about this model (memory tool) — surface them where they belong.
+      const mem = this._memoryFor([`model:${k}`]);
+      if (mem.length) out.memory = mem;
       return out;
     }
 
@@ -230,10 +319,12 @@ export class Engine {
         recommendations.push(`'${input.event}' carries no event-specific payload — its value is the occurrence itself${role ? ` (it is the ${role.replace(/_/g, ' ')})` : ''}: use it as a measure base (count / count_distinct of the user key, event_name: ['${input.event}']) for retention, conversion or funnel metrics.`);
       }
       if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ property }).`);
+      const mem = this._memoryFor([`event:${input.event}`]);
       return {
         event: input.event,
         property_count: props.length,
         properties: rows,
+        ...(mem.length ? { memory: mem } : {}),
         recommendations: recommendations.slice(0, 4),
       };
     }
@@ -265,6 +356,7 @@ export class Engine {
         recommendations.push(ent
           ? `Group/filter by it in metric queries via '${ent}__${col}', or reference '${col}' after a pipeline join with:'${mk}'.`
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
+        const mem = this._memoryFor([`property:${p}`]);
         return {
           property: p, model: mk, column: col, type: dim.type,
           ...(dim.values ? { declared_values: dim.values } : {}),
@@ -272,6 +364,7 @@ export class Engine {
           sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
           indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
           indexing: this._indexHistory(p, input.recent ?? 10),
+          ...(mem.length ? { memory: mem } : {}),
           recommendations: recommendations.slice(0, 3),
         };
       }
@@ -316,6 +409,8 @@ export class Engine {
         out.cast_hint = 'numeric';
         out.recommendations = [...out.recommendations.slice(0, 3), `Values are ${spec.unit} but physically typed string — add "cast":"numeric" (semantic measures) or a compute cast (pipelines) before sum/avg.`];
       }
+      const mem = this._memoryFor([`property:${p}`]);
+      if (mem.length) out.memory = mem;
       return out;
     }
 
@@ -324,7 +419,12 @@ export class Engine {
     // then typo/approximate matches by similarity; each carries { score, match }.
     // fuzzy:false restricts to exact substring.
     if (input.search) {
-      return this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? 20 });
+      const res = this.catalogSearch.run({ search: input.search, fuzzy: input.fuzzy !== false, limit: input.limit ?? 20 });
+      // Saved findings (memory tool) matching the same word — so a fuzzy term the user once
+      // used, recorded as an alias, resolves straight back to the real field it described.
+      const memHits = (await this.memoryStore.search(input.search, { limit: 10, fuzzy: input.fuzzy !== false })).map(memoryView);
+      if (memHits.length) res.memory_matches = memHits;
+      return res;
     }
 
     // ── default: compact OVERVIEW (no per-property dump, no warehouse calls) ──
@@ -350,11 +450,15 @@ export class Engine {
     const lastSync = sync?.last_successful_run || sync?.last_run || null;
     const userModel = c.modelKeys().find((k) => c.getModel(k).role === 'users');
     const exAttr = userModel ? Object.keys(c.getModel(userModel).dimensions || {})[0] : null;
+    const memCount = this.memoryStore.counts().notes;
     return {
       dialect: c.dialect,
       models,
       event_names: c.eventNames(),
       groupable_paths: c.reachableGroupByPaths(),
+      // Saved analyst findings (the memory tool): how many are stored + how to reach them.
+      // They also surface inline on the entity views/{ search } they were linked to.
+      ...(memCount ? { memory: { notes: memCount, note: 'Saved findings (resolved vague terms, gotchas, sources). They surface on the linked semantic_index views and via { search }; list/manage with the memory tool.' } } : {}),
       // How attributes are REACHED: entity-qualified paths in metric queries (semantic
       // layer auto-joins), or an explicit join stage in native pipelines. The fact holds
       // only per-event columns — user/experiment attributes always come via their model.
@@ -653,11 +757,11 @@ export class Engine {
     const source = input.source || this.catalog.anchor;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
-    // Ground the referenceable columns to the physical relation: a column the catalog
-    // declares but the table does not have is excluded here (not offered, not buildable)
-    // rather than failing later as a raw warehouse "Unrecognized name" at materialize time.
+    // The referenceable columns are SILENTLY grounded to the physical relation: a column
+    // the catalog declares but the table lacks simply does not appear (a clean internal
+    // guard) — never offered, never buildable, not called out. Only real columns exist.
     const physSet = await this._physicalCols(source);
-    const { cols, phantom } = this._groundedDeclared(source, physSet);
+    const { cols } = this._groundedDeclared(source, physSet);
     const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
       steps: [], column_count: cols.length,
@@ -668,12 +772,6 @@ export class Engine {
         `When the steps look right, materialize with build_native_model({ action: "materialize", draft_id }).`,
       ],
     };
-    // Surface the desync (catalog declares them, the physical table does not) so it is
-    // visible, not silent — these names are excluded from the referenceable columns.
-    if (phantom.length) {
-      resp.not_materialized = phantom;
-      resp.recommendations.push(`${phantom.length} catalog column(s) are NOT in the physical table '${this.catalog.getModel(source).dbt_model}' and were excluded (e.g. ${phantom.slice(0, 5).join(', ')}). Fix the source model/schema to materialize or drop them.`);
-    }
     if (input.include_columns) resp.available_columns = cols;
     return resp;
   }
@@ -1194,21 +1292,25 @@ export class Engine {
     this._validate('describe_context', input);
     const ctx = this.ctxs.get(input.context_id);
     // A pipeline-registered model is a normal dbt model whose rows are the result.
-    // Report its model name, the pipeline's output columns, and the REAL physical
-    // columns of the relation (adapter introspection). Read it via get_query_result.
+    // Report its model name and the output columns you can read. Read it via
+    // get_query_result. The columns are grounded to the real relation below.
     if (ctx.state.engine === 'pipeline') {
       const n = ctx.state.native || {};
-      let physical = null;
+      let columns = n.columns || [];
       if (this.runner && n.model) {
         const cols = await this.runner.relationColumns(this.ctxs.dir(ctx.id), n.model);
-        physical = cols.ok ? cols.columns : null;
+        if (cols.ok) {
+          const names = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
+          const declared = (n.columns || []).filter((col) => names.has(String(col).toLowerCase()));
+          columns = declared.length ? declared : cols.columns.map((col) => col.name);
+        }
       }
       return {
         context_id: ctx.id,
         engine: 'pipeline',
         tasks: ctx.state.tasks || [],
-        models: [{ model: n.model, materialized: n.materialized, columns: n.columns || [], physical_columns: physical }],
-        columns: n.columns || [],
+        models: [{ model: n.model, materialized: n.materialized, columns }],
+        columns,
         read_with: 'get_query_result',
         files: this.ctxs.generatedFiles(ctx.id),
       };
@@ -1498,6 +1600,23 @@ function walkPredicates(group, fn) {
 
 function clone(x) {
   return JSON.parse(JSON.stringify(x ?? null));
+}
+
+/**
+ * Presentation shape for a stored memory note: decode the canonical "<kind>:<key>" targets
+ * back into typed { kind, key } objects, expose the note/aliases/links, and stamp the time.
+ */
+function memoryView(e) {
+  const targets = (e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? { kind: t.slice(0, i), key: t.slice(i + 1) } : { kind: 'term', key: String(t) }; });
+  return {
+    id: e.id,
+    note: e.note,
+    ...(e.question ? { question: e.question } : {}),
+    ...(targets.length ? { about: targets } : {}),
+    ...(e.aliases && e.aliases.length ? { aliases: e.aliases } : {}),
+    ...(e.links && e.links.length ? { links: e.links } : {}),
+    recorded_at: e.created_at ? new Date(e.created_at).toISOString() : null,
+  };
 }
 
 /**

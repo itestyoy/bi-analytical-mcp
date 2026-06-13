@@ -484,9 +484,41 @@ export function buildSchemas(catalog) {
       },
     },
     experiment: experimentSchema(),
+    memory: memorySchema(),
     ab_test: abTestSchema(),
     srm_check: srmCheckSchema(),
     sample_size: sampleSizeSchema(),
+  };
+}
+
+// ── Analyst memory (durable findings linked to catalog entities) ───────────────
+// A single action-driven tool. `record` saves a finding (+ the entities it is about,
+// the user's phrasings, and any source links); list/search/forget manage them. Strict
+// per-action fields so a param that does not belong to the action is rejected.
+function memorySchema() {
+  const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
+  return {
+    type: 'object', additionalProperties: false, required: ['action'],
+    description: 'DURABLE analyst memory: save what you FOUND OUT — a vague request tracked down to a real field, a non-obvious gotcha, a useful source — and LINK it to the catalog entities it concerns, so it comes back THROUGH semantic_index next time. Use action:"record" AFTER you have figured something out (e.g. the user said "ad format" and you established it is the property ad_type_of_event_data on ad_started/ad_finished): pass the finding as `note`, the ORIGINAL business question it answers as `question` (in the stakeholder\'s terms — it is embedded with the note so a future similar question retrieves this insight by meaning), the entities it is about as `targets` (a property/attribute/event/model — "ad_type_of_event_data", "users.country", "ad_finished", "users"), the words the user actually used as `aliases` ("ad format"), and any sources as `links`. RECORD ONE ATOMIC FINDING PER NOTE — when studying a topic or a document, break it into several small single-fact notes (each with its own targets/aliases), NOT one big dump: atomic notes link precisely and retrieve far better, while an over-long note matches poorly and can fail to index. The note then surfaces on the linked semantic_index views ({ model }/{ event }/{ property }) and via semantic_index({ search }) — so the next fuzzy phrasing resolves straight to the right field. action:"list" (all, or one { target }) / "search" (by word) / "forget" (by id) manage them.',
+    allOf: [
+      { if: { properties: { action: { const: 'record' } }, required: ['action'] }, then: { required: ['note'], ...forbid(['query', 'id', 'target', 'fuzzy']) } },
+      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['note', 'question', 'targets', 'aliases', 'links', 'query', 'id', 'fuzzy']) },
+      { if: { properties: { action: { const: 'search' } }, required: ['action'] }, then: { required: ['query'], ...forbid(['note', 'question', 'targets', 'aliases', 'links', 'id', 'target']) } },
+      { if: { properties: { action: { const: 'forget' } }, required: ['action'] }, then: { required: ['id'], ...forbid(['note', 'question', 'targets', 'aliases', 'links', 'query', 'target', 'fuzzy']) } },
+    ],
+    properties: {
+      action: { enum: ['record', 'list', 'search', 'forget'], description: 'record → save a finding; list → all notes (or those linked to one { target }); search → notes matching a word (FUZZY: typo/paraphrase-tolerant over text/alias/target); forget → delete one note by id.' },
+      note: { type: 'string', minLength: 1, description: 'record: ONE ATOMIC finding, in plain words (e.g. "\'ad format\' = the event_data property ad_type_of_event_data, populated only on ad_started/ad_finished; values rewarded/interstitial/banner"). Keep it to a single fact — when studying a topic, make several small notes instead of one long one (atomic notes link and retrieve far better; an over-long note matches poorly and may fail to index).' },
+      question: { type: 'string', description: 'record: the ORIGINAL business question / analytical goal this finding answers — why you looked it up, in the stakeholder\'s terms (e.g. "which ad format drives the most rewarded-video revenue?"). It is embedded together with the note, so a future similarly-phrased business question retrieves this insight by meaning. Always include it when the finding answers a real question.' },
+      targets: { type: 'array', items: { type: 'string' }, description: 'record: the catalog entities this finding is ABOUT, so it surfaces on their semantic_index views. Each is an event property (bare, "ad_type_of_event_data"), a "<model>.<column>" attribute ("users.country"), an event name ("ad_finished"), or a model key ("users"). A string that matches none is kept as a searchable free term.' },
+      aliases: { type: 'array', items: { type: 'string' }, description: 'record: the word(s)/phrasing the user (or a stakeholder) actually used for this — e.g. "ad format", "ad type". These make semantic_index({ search }) resolve the fuzzy term back to the real field.' },
+      links: { type: 'array', description: 'record: associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { oneOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
+      target: { type: 'string', description: 'list: return only notes linked to this entity (same forms as `targets`: a property/attribute/event/model name).' },
+      query: { type: 'string', description: 'search: a word/phrase to match against note text, aliases and linked targets. Typo-tolerant fuzzy by default (exact-substring hits rank first, then approximate); when embeddings are enabled it ALSO matches by MEANING (a same-sense note with no shared words still surfaces).' },
+      fuzzy: { type: 'boolean', description: 'search: enable typo/approximate lexical matching (default true). false = exact substring only (semantic matching, if enabled, still runs).' },
+      id: { type: 'string', description: 'forget: id of the note to delete (as returned by record / list / search).' },
+      limit: { type: 'integer', minimum: 1, maximum: 200, description: 'list/search: max notes to return (default 50 for list, 20 for search).' },
+    },
   };
 }
 

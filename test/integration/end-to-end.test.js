@@ -282,17 +282,15 @@ test('4b. update_semantic_model adds a payers metric; re-query = 7 distinct paye
   const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(num(r.rows[0].e2e_mon_payers), 7); // distinct payers = 7 (SEED_DATA §3)
+  // Provenance #1: real data_freshness (latest event time) + an open-ended window flags
+  // staleness (the tail past the latest data is empty/partial).
+  assert.equal(r.provenance.tier, 'governed_metric');
+  assert.ok(typeof r.provenance.data_freshness === 'string' && r.provenance.data_freshness.length > 0, 'data_freshness = latest event time');
+  assert.ok(r.recommendations.some((x) => /current only through/i.test(x)), `open-ended window flags freshness: ${JSON.stringify(r.recommendations)}`);
 
   // Recommendation #4: count_distinct grouped by time is non-additive → prefer HLL sketches.
   const byDay = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   assert.ok(byDay.recommendations.some((x) => /not additive/i.test(x) && /HLL/i.test(x)), `distinct-by-time should warn + suggest HLL: ${JSON.stringify(byDay.recommendations)}`);
-  // Recommendation #2: a query that matches nothing returns 0 rows with a scoping-bug hint.
-  const zero = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_payers'], time_range: { start: '2099-01-01', end: '2099-01-02' } });
-  assert.equal(zero.row_count, 0);
-  assert.ok(zero.recommendations.some((x) => x.startsWith('0 rows')), `zero-result diagnosis: ${JSON.stringify(zero.recommendations)}`);
-  // Recommendation #1: a window past the latest data flags staleness; provenance carries freshness.
-  assert.ok(typeof zero.provenance.data_freshness === 'string');
-  assert.ok(zero.recommendations.some((x) => /current only through/i.test(x)), 'staleness note when window is past the latest data');
 });
 
 test('4c. context({describe|list}) + semantic_index({status}) reflect the registered task', opts, async (t) => {

@@ -14,6 +14,7 @@ import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-ran
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
 import { CatalogSearch } from './search.js';
+import { rankFuzzy } from './fuzzy.js';
 import { buildGuide } from './guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
@@ -23,7 +24,7 @@ import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -33,7 +34,11 @@ export class Engine {
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
-    this.memoryStore = new MemoryStore({ store: this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
+    // Memory is curated, non-re-derivable knowledge. By default it shares the store (and
+    // survives reset). Point MCP_MEMORY_DB at a PERSISTENT volume to keep findings across
+    // container restarts — then it lives in its own store, isolated from the value index.
+    this._memoryStore = memoryDbPath ? openStore({ dbPath: memoryDbPath }) : null;
+    this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
@@ -70,11 +75,26 @@ export class Engine {
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
   }
 
+  /** Every linkable catalog entity as a typed target candidate (events/props/attrs/models). */
+  _memoryTargetCandidates() {
+    const c = this.catalog;
+    const out = [];
+    for (const k of c.modelKeys()) out.push({ kind: 'model', key: k, canon: `model:${k}` });
+    for (const ev of c.eventNames()) out.push({ kind: 'event', key: ev, canon: `event:${ev}` });
+    for (const p of c.eventProps()) out.push({ kind: 'property', key: p, canon: `property:${p}` });
+    for (const k of c.modelKeys()) {
+      if (k === c.anchor) continue;
+      for (const col of Object.keys(c.getModel(k).dimensions || {})) out.push({ kind: 'property', key: `${k}.${col}`, canon: `property:${k}.${col}` });
+    }
+    return out;
+  }
+
   /**
    * Resolve a memory TARGET string to a canonical, typed key so a saved finding links to a
-   * real semantic_index view. A '<model>.<column>' attribute or a known model/event/event-
-   * property resolves to that entity; anything else is kept as a free `term` (the user's
-   * fuzzy phrasing) so it is still searchable and can map back to whatever it describes.
+   * real semantic_index view. EXACT match first ('<model>.<column>' / model / event / event-
+   * property); if none, a FUZZY match against the catalog entities catches a near-miss name
+   * (a slight typo/variant still links instead of silently degrading); only a genuinely
+   * unrecognised string is kept as a free `term` (still searchable).
    */
   _resolveMemoryTarget(t) {
     const c = this.catalog;
@@ -87,6 +107,10 @@ export class Engine {
     if (c.models[s]) return { kind: 'model', key: s, canon: `model:${s}` };
     if (c.eventNames().includes(s)) return { kind: 'event', key: s, canon: `event:${s}` };
     if (c.eventProps().includes(s)) return { kind: 'property', key: s, canon: `property:${s}` };
+    // Fuzzy fallback: a near-miss entity name links to the real entity (marked fuzzy) rather
+    // than becoming an orphan term. High threshold so only a confident match auto-links.
+    const [best] = rankFuzzy(s, this._memoryTargetCandidates(), { fields: (x) => [x.key], threshold: 0.82, limit: 1 });
+    if (best && best.item.key.toLowerCase() !== s.toLowerCase()) return { ...best.item, fuzzy: true, from: s };
     return { kind: 'term', key: s, canon: `term:${s.toLowerCase()}` };
   }
 
@@ -130,8 +154,9 @@ export class Engine {
         id: entry.id,
         note: entry.note,
         ...(question ? { question } : {}),
-        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.key, surfaces_in: this._memorySurfaceHint(r) })),
+        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.key, ...(r.fuzzy ? { fuzzy_resolved_from: r.from } : {}), surfaces_in: this._memorySurfaceHint(r) })),
         ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.key) } : {}),
+        ...(resolved.some((r) => r.fuzzy) ? { fuzzy_links_note: 'Some targets were not exact and were fuzzy-matched to the closest catalog entity (see fuzzy_resolved_from) — pass the exact name if a match is wrong.' } : {}),
         aliases, links,
         next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
       };
@@ -363,6 +388,7 @@ export class Engine {
         const recommendations = [];
         if (samples.length) recommendations.push(`${value_stats.distinct_count != null ? `${value_stats.distinct_count} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
         else recommendations.push(`No values indexed yet (the background value index may not have run).${dim.values ? ` Declared values: ${dim.values.join(', ')}.` : ''}`);
+        if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
         recommendations.push(...nullRecs);
         recommendations.push(ent
           ? `Group/filter by it in metric queries via '${ent}__${col}', or reference '${col}' after a pipeline join with:'${mk}'.`
@@ -403,6 +429,7 @@ export class Engine {
       } else {
         recommendations.push(`No values indexed yet (the background value index may not have run).${dc != null ? ` distinct_count is ${dc}.` : ''}`);
       }
+      if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${dc} distinct values are indexed — a RARE value may be absent here; do NOT treat "not found" as proof it does not exist, verify with a direct query/filter.`);
       recommendations.push(...nullRecs);
       if (evs) recommendations.push(`Carried by event(s) ${evs.join(', ')} — see everything they carry: semantic_index({ event: '${evs[0]}' }).`);
       // Unit-aware cast hint: a numeric-in-meaning value (declared unit) physically typed
@@ -485,6 +512,12 @@ export class Engine {
       // Surface a semantic-search failure here too (don't hide it just because this path
       // also returns catalog hits) — otherwise a broken embedder looks like "no memory".
       if (mem.semantic_error) res.memory_semantic_error = mem.semantic_error;
+      // Recall caveat: indexed VALUES are the top-N by frequency per property, so a search
+      // for a RARE value can miss even though the value exists. Say so when nothing matched,
+      // so "not found" is not mistaken for "does not exist".
+      if (!(res.value_matches && res.value_matches.length)) {
+        (res.recommendations ||= []).push('No indexed value matched. Indexed values are the top-N most frequent per property — a RARE value may not be indexed; confirm presence with a direct filter/query before concluding it does not exist.');
+      }
       // App/bundle ids are not indexed as property VALUES, so match them here: a query that
       // hits a known app routes the AI to its per-app coverage view.
       if (c.bundleColumn()) {
@@ -554,6 +587,18 @@ export class Engine {
       // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW
       // to approach a question (which tool, in what order, with what guardrails).
       guide: 'semantic_index({ guide: true }) → the analyst procedure (workflow), IF/DO routing triggers, and per-task recipes. Read it before building a query.',
+      // Machine-readable map of the drill-down views (key → when to use it), so the next call
+      // can be chosen without parsing prose. Exactly one view key per call (mutually exclusive).
+      views: [
+        { view: 'model', arg: 'model key', when: "one model's columns/entities/time + dimension attributes with real sample values" },
+        { view: 'event', arg: 'event name', when: 'the properties POPULATED on that event (what you can measure/group/filter)' },
+        { view: 'property', arg: 'property or "<model>.<column>"', when: "one column's full passport: real value distribution (paged), NULL coverage, per-app split, freshness" },
+        { view: 'search', arg: 'word/value', when: 'fuzzy find an event/property/attribute/VALUE/recipe/app by name or value' },
+        ...(bundleList.length ? [{ view: 'bundle', arg: 'bundle id', when: 'which event properties are populated vs EMPTY for ONE app (skip the empty ones)' }] : []),
+        ...(this.recipes ? [{ view: 'recipe', arg: 'recipe id', when: 'one ready-made task template in full (payload + example_queries + hack)' }] : []),
+        { view: 'guide', arg: 'true | task family', when: 'HOW to approach a question: workflow + IF/DO routing + per-task recipes' },
+        { view: 'status', arg: 'true', when: 'operational state: value-index sync runs + background query jobs' },
+      ],
       next: `Overview only. Drill down: semantic_index({ model }) → a model's columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring;${bundleList.length ? ' ({ bundle }) → which properties are populated vs EMPTY for one app;' : ''} ({ recipe }) → a ready-made recipe by id; ({ guide }) → how to approach a question (workflow + routing).`,
       recommendations: [
         `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
@@ -583,6 +628,11 @@ export class Engine {
     const samples = has_more ? fetched.slice(0, limit) : fetched;
     // top_value is the single most frequent value; share = its fraction of indexed rows.
     const top = this.valueIndex.sampleValues(key, 1)[0] || null;
+    // The index keeps only the top-N values by frequency. If the column has MORE distinct
+    // values than are stored, rare ones are NOT in the index — a search for them will miss,
+    // so callers must verify a "not found" with a direct query rather than trust absence.
+    const storedValues = this.valueIndex.valueCount(key);
+    const valuesCapped = !!st && dc != null && storedValues != null && dc > storedValues;
     const value_stats = {
       distinct_count: dc, total_count: total,
       top_value: top ? top.value : null, top_freq: top ? top.freq : null,
@@ -591,6 +641,7 @@ export class Engine {
       // values stored are capped (top-by-frequency); paging past them returns [].
       returned: samples.length, limit, offset, order_by: orderBy, direction: dir,
       has_more,
+      indexed_value_count: storedValues, values_capped: valuesCapped,
     };
     return { samples, value_stats };
   }
@@ -1655,6 +1706,7 @@ export class Engine {
   close() {
     // Managers share the store and don't own it; the Engine closes it once.
     try { if (this._ownsStore) this.store?.close?.(); } catch { /* noop */ }
+    try { this._memoryStore?.close?.(); } catch { /* noop */ } // separate memory store (MCP_MEMORY_DB)
     try { this.runner?.close?.(); } catch { /* noop */ }
   }
 

@@ -199,7 +199,17 @@ export async function makeEngine(opts = {}) {
   // Optional semantic memory search: an embedder is built ONLY when MEMORY_EMBEDDINGS is
   // configured (+ a key); otherwise null and memory({ search }) stays purely fuzzy.
   const embedder = createEmbedder();
-  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder });
+  // Durability for the memory tool: by default findings share the store (and survive
+  // MCP_DB_RESET), but the store lives on the container FS — point MCP_MEMORY_DB at a
+  // PERSISTENT volume to retain findings across container restarts.
+  const memoryDbPath = opts.memoryDbPath || process.env.MCP_MEMORY_DB || undefined;
+  if (memoryDbPath) {
+    try { mkdirSync(dirname(memoryDbPath), { recursive: true }); } catch { /* best effort */ }
+    console.error(`[mcp] ${new Date().toISOString()} memory: persisting findings to ${memoryDbPath} (dedicated, never reset)`);
+  } else {
+    console.error(`[mcp] ${new Date().toISOString()} memory: findings live in the shared store at ${dbPath} — set MCP_MEMORY_DB to a persistent volume to retain them across container restarts`);
+  }
+  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath });
 }
 
 export function createApp(engine) {
@@ -262,7 +272,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // an unref'd interval. VALUE_INDEX_REFRESH_MS=0 → one initial pass, no schedule.
   const intervalMs = process.env.VALUE_INDEX_REFRESH_MS !== undefined ? Number(process.env.VALUE_INDEX_REFRESH_MS) : 21600000;
   const maxValues = Number(process.env.VALUE_INDEX_MAX_VALUES) || 50;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  // Optional cost lever: bound indexing scans to the last N days on the anchor time column
+  // (0/unset → scan all history, the default). Set on a large partitioned fact to cut cost.
+  const windowDays = Number(process.env.MCP_INDEX_WINDOW_DAYS) || 0;
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.

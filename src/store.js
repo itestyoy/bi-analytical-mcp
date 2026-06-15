@@ -19,6 +19,7 @@
 //   values.search(query, limit)       -> [{property,value,freq}] (substring, freq desc)
 //   values.candidates(cap)            -> [{property,value,freq}] (top-freq pool for JS fuzzy rank)
 //   values.counts()                   -> { properties, values }
+//   values.valueCount(prop)           -> int (values STORED for prop; vs distinct_count → capped?)
 //   runs.reconcile()                  (mark running→interrupted)
 //   runs.start()                      -> id
 //   runs.finish(id, { status, propertiesIndexed, valuesWritten, errors, error })
@@ -125,6 +126,9 @@ export class MemoryBackend {
         return out.sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)).slice(0, cap);
       },
       counts: () => ({ properties: props.size, values: [...props.values()].reduce((s, e) => s + e.values.length, 0) }),
+      // How many values are actually STORED for a property (the indexer caps at top-N) —
+      // compared to distinct_count it reveals whether rare values were left out of the index.
+      valueCount: (property) => { const e = props.get(property); return e ? e.values.length : 0; },
     };
 
     // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
@@ -266,6 +270,9 @@ export class SqliteBackend {
       // the caller. Highest-frequency values first so the cap keeps the most relevant.
       candidates(cap = 5000) {
         return s._all('SELECT property, value, freq FROM prop_values ORDER BY freq DESC, value ASC LIMIT ?', cap).map((r) => ({ property: r.property, value: r.value, freq: Number(r.freq) }));
+      },
+      valueCount(property) {
+        return Number(s._get('SELECT COUNT(*) AS n FROM prop_values WHERE property = ?', property).n);
       },
       counts() {
         return { properties: Number(s._get('SELECT COUNT(*) AS n FROM prop_stats').n), values: Number(s._get('SELECT COUNT(*) AS n FROM prop_values').n) };

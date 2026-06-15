@@ -41,3 +41,19 @@ export function jsonArrayUnnest(dialect, prevAlias, column, key, alias, field, t
 export function castExpr(dialect, expr, type) {
   return getDialect(dialect).castExpr(expr, type);
 }
+
+/**
+ * SQL predicate restricting `col` to the last `days` days (for bounding the value-index
+ * scans on a partitioned fact). `days` MUST be a positive integer (caller-validated; it is
+ * interpolated). Returns null for dialects we do not have a safe expression for → no window.
+ */
+export function recentSince(dialect, col, days) {
+  const n = Math.floor(Number(days));
+  if (!col || !Number.isFinite(n) || n <= 0) return null;
+  const d = String(dialect || '').toLowerCase();
+  if (d === 'postgres' || d === 'postgresql' || d === 'redshift') return `${col} >= CURRENT_TIMESTAMP - INTERVAL '${n} days'`;
+  if (d === 'bigquery') return `${col} >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${n} DAY)`;
+  if (d === 'snowflake') return `${col} >= DATEADD(day, -${n}, CURRENT_TIMESTAMP())`;
+  if (d === 'duckdb') return `${col} >= now() - INTERVAL '${n} days'`;
+  return null; // unknown dialect → no window (best-effort, never break the scan)
+}

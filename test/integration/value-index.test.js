@@ -313,3 +313,36 @@ test('semantic_index({ search }) finds attribute values, dimensions, experiments
   assert.ok(ret.recipe_matches.some((r) => r.id === 'nday_retention'), JSON.stringify(ret.recipe_matches));
   assert.ok(ret.recommendations.some((r) => r.includes('semantic_index({ recipe')), 'search guides to the recipe view');
 });
+
+// Per-app (bundle) coverage from the REAL warehouse: the seed assigns level events to
+// 'com.omg.colorfit' and everything else (incl. ad events) to 'com.omg.wordsearch', so
+// ad_type is EMPTY for colorfit while level_id is EMPTY for wordsearch — the { bundle }
+// view must split populated vs empty per app off the actual indexed counts.
+test('semantic_index({ bundle }) splits populated vs empty event properties per app (real data)', opts, async (t) => {
+  if (skip(t)) return;
+  // overview lists both apps with their real event-row counts (131 wordsearch / 53 colorfit).
+  const ov = await engine.semantic_index();
+  const apps = Object.fromEntries((ov.bundles || []).map((b) => [b.bundle, b.event_rows]));
+  assert.equal(apps['com.omg.wordsearch'], 131, JSON.stringify(ov.bundles));
+  assert.equal(apps['com.omg.colorfit'], 53, JSON.stringify(ov.bundles));
+
+  // colorfit = only level_started/level_completed → level_id populated, ad_type EMPTY.
+  const colorfit = await engine.semantic_index({ bundle: 'com.omg.colorfit' });
+  assert.equal(colorfit.event_rows, 53);
+  assert.ok(colorfit.populated.some((p) => p.property === 'level_id_of_event_data'), 'level_id populated for colorfit');
+  assert.ok(colorfit.empty.includes('ad_type_of_event_data'), 'ad_type EMPTY for colorfit');
+  assert.ok(!colorfit.populated.some((p) => p.property === 'ad_type_of_event_data'));
+
+  // wordsearch = ad/iap/etc (no level events) → ad_type populated, level_id EMPTY.
+  const words = await engine.semantic_index({ bundle: 'com.omg.wordsearch' });
+  assert.ok(words.populated.some((p) => p.property === 'ad_type_of_event_data'), 'ad_type populated for wordsearch');
+  assert.ok(words.empty.includes('level_id_of_event_data'), 'level_id EMPTY for wordsearch');
+
+  // the { property } view carries the same per-app split: ad_type is non_null=0 for colorfit.
+  const adProp = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  const cf = (adProp.bundle_coverage || []).find((b) => b.bundle === 'com.omg.colorfit');
+  assert.equal(cf?.non_null, 0, JSON.stringify(adProp.bundle_coverage));
+
+  // unknown app → clear error listing the known apps.
+  await assert.rejects(() => engine.semantic_index({ bundle: 'com.omg.nope' }), /unknown app/);
+});

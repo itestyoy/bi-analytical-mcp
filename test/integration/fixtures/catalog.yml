@@ -64,6 +64,12 @@ models:
         meta:
           mcp:
             is_event_name: true
+      - name: bundle_id
+        data_type: string
+        description: "Store bundle id of the app the event came from. Present on every event."
+        meta:
+          mcp:
+            dimension: { bundle: true }   # the APP identifier → per-app coverage in semantic_index({ bundle })
       - name: event_data
         data_type: jsonb
         description: "Raw per-event JSON payload (kept for anchor detection + complex array properties)."

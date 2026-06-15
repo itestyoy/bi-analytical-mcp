@@ -338,6 +338,9 @@ export function dbtSchemaToCatalog(doc) {
         const values = explicit.values || cm.values;
         if (values) d.values = values;
         dimensions[col.name] = d;
+        // A dimension explicitly marked the BUNDLE/app identifier on the anchor lets the
+        // value index break coverage down per app (which properties are empty for which app).
+        if (isAnchor && explicit.bundle) m.bundle_column = col.name;
       }
     }
     if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
@@ -418,6 +421,9 @@ export class Catalog {
       }
       // Groupable dimensions (semantic-layer group-by + schema enums).
       if (m.dimensions) for (const name of Object.keys(m.dimensions)) if (!has(name)) { delete m.dimensions[name]; gone.add(name); }
+      // The designated app/bundle column: drop it if it is not physically present, so the
+      // indexer never groups by a missing column (per-app coverage is simply unavailable).
+      if (m.bundle_column && !has(m.bundle_column)) delete m.bundle_column;
       if (m.column_descriptions) for (const name of Object.keys(m.column_descriptions)) if (!has(name)) delete m.column_descriptions[name];
       if (gone.size) pruned[key] = [...gone];
     }
@@ -483,6 +489,12 @@ export class Catalog {
   /** Physical column on the anchor that carries the event type, or null. */
   eventNameColumn() {
     return this.models[this.anchor]?.event_name?.column || null;
+  }
+
+  /** Anchor column identifying the app/bundle (meta.mcp.dimension:{bundle:true}), or null.
+   *  When set, the value index breaks per-property coverage down by it (per-app emptiness). */
+  bundleColumn() {
+    return this.models[this.anchor]?.bundle_column || null;
   }
 
   /** event_name values enum. */

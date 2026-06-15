@@ -14,6 +14,7 @@ import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-ran
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
 import { CatalogSearch } from './search.js';
+import { rankFuzzy } from './fuzzy.js';
 import { buildGuide } from './guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
@@ -23,7 +24,7 @@ import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -33,7 +34,11 @@ export class Engine {
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
-    this.memoryStore = new MemoryStore({ store: this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
+    // Memory is curated, non-re-derivable knowledge. By default it shares the store (and
+    // survives reset). Point MCP_MEMORY_DB at a PERSISTENT volume to keep findings across
+    // container restarts — then it lives in its own store, isolated from the value index.
+    this._memoryStore = memoryDbPath ? openStore({ dbPath: memoryDbPath }) : null;
+    this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
     this.schemas = buildSchemas(catalog);
@@ -70,11 +75,26 @@ export class Engine {
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
   }
 
+  /** Every linkable catalog entity as a typed target candidate (events/props/attrs/models). */
+  _memoryTargetCandidates() {
+    const c = this.catalog;
+    const out = [];
+    for (const k of c.modelKeys()) out.push({ kind: 'model', key: k, canon: `model:${k}` });
+    for (const ev of c.eventNames()) out.push({ kind: 'event', key: ev, canon: `event:${ev}` });
+    for (const p of c.eventProps()) out.push({ kind: 'property', key: p, canon: `property:${p}` });
+    for (const k of c.modelKeys()) {
+      if (k === c.anchor) continue;
+      for (const col of Object.keys(c.getModel(k).dimensions || {})) out.push({ kind: 'property', key: `${k}.${col}`, canon: `property:${k}.${col}` });
+    }
+    return out;
+  }
+
   /**
    * Resolve a memory TARGET string to a canonical, typed key so a saved finding links to a
-   * real semantic_index view. A '<model>.<column>' attribute or a known model/event/event-
-   * property resolves to that entity; anything else is kept as a free `term` (the user's
-   * fuzzy phrasing) so it is still searchable and can map back to whatever it describes.
+   * real semantic_index view. EXACT match first ('<model>.<column>' / model / event / event-
+   * property); if none, a FUZZY match against the catalog entities catches a near-miss name
+   * (a slight typo/variant still links instead of silently degrading); only a genuinely
+   * unrecognised string is kept as a free `term` (still searchable).
    */
   _resolveMemoryTarget(t) {
     const c = this.catalog;
@@ -87,6 +107,10 @@ export class Engine {
     if (c.models[s]) return { kind: 'model', key: s, canon: `model:${s}` };
     if (c.eventNames().includes(s)) return { kind: 'event', key: s, canon: `event:${s}` };
     if (c.eventProps().includes(s)) return { kind: 'property', key: s, canon: `property:${s}` };
+    // Fuzzy fallback: a near-miss entity name links to the real entity (marked fuzzy) rather
+    // than becoming an orphan term. High threshold so only a confident match auto-links.
+    const [best] = rankFuzzy(s, this._memoryTargetCandidates(), { fields: (x) => [x.key], threshold: 0.82, limit: 1 });
+    if (best && best.item.key.toLowerCase() !== s.toLowerCase()) return { ...best.item, fuzzy: true, from: s };
     return { kind: 'term', key: s, canon: `term:${s.toLowerCase()}` };
   }
 
@@ -130,8 +154,9 @@ export class Engine {
         id: entry.id,
         note: entry.note,
         ...(question ? { question } : {}),
-        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.key, surfaces_in: this._memorySurfaceHint(r) })),
+        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.key, ...(r.fuzzy ? { fuzzy_resolved_from: r.from } : {}), surfaces_in: this._memorySurfaceHint(r) })),
         ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.key) } : {}),
+        ...(resolved.some((r) => r.fuzzy) ? { fuzzy_links_note: 'Some targets were not exact and were fuzzy-matched to the closest catalog entity (see fuzzy_resolved_from) — pass the exact name if a match is wrong.' } : {}),
         aliases, links,
         next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
       };
@@ -194,15 +219,17 @@ export class Engine {
    *   { guide }    → the analyst procedure + IF/DO routing (how to approach a question)
    *   { status }   → operational state: value-index sync runs + background query jobs
    *   { run }      → one sync run's per-property breakdown (slowest first)
+   *   { bundle }   → for one app (bundle id): which event properties are populated vs EMPTY
+   *                  (skip the empty ones for that app)
    * Pass at most one drill-down key (mutually exclusive views).
    */
   async semantic_index(input = {}) {
     this._validate('semantic_index', input);
     // STRICT view contract (nothing is ever silently ignored): at most ONE view key,
     // and paging/ordering/recency params only on the views they apply to.
-    const views = ['run', 'status', 'guide', 'model', 'event', 'property', 'search', 'recipe'].filter((k) => input[k] !== undefined && input[k] !== false);
+    const views = ['run', 'status', 'guide', 'model', 'event', 'property', 'search', 'recipe', 'bundle'].filter((k) => input[k] !== undefined && input[k] !== false);
     if (views.length > 1) {
-      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { guide } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
+      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { guide } | { bundle } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
     }
     if (input.limit !== undefined && !(input.property || input.search)) throw new ToolError('limit only applies to the { property } and { search } views', { stage: 'validate', field: 'limit' });
     for (const k of ['offset', 'order_by', 'direction']) {
@@ -251,6 +278,12 @@ export class Engine {
           out.partition_column = m.partition_column;
           out.cost_hint = `The physical table is partitioned by ${m.partition_column} — ALWAYS bound queries with time_range (or a where on ${m.partition_column}/${m.time?.column || 'the time column'}) to avoid a full scan.`;
         }
+        // The app/bundle dimension: groupable per event AND the axis for per-app coverage.
+        if (c.bundleColumn()) {
+          const apps = this.valueIndex.bundles();
+          out.bundle_column = c.bundleColumn();
+          out.bundle_note = `'${c.bundleColumn()}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ bundle: '${apps[0].bundle}' }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
+        }
         out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The `columns` above are what you can reference in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
       } else {
         // Dimension attributes WITH their real indexed values (cardinality + top 3) — the
@@ -278,11 +311,23 @@ export class Engine {
         ? [
           `Drill into an event to see the properties it carries: semantic_index({ event: '${c.eventNames()[0] || '<event_name>'}' }).`,
           `Then inspect a property's real values + frequency distribution: semantic_index({ property: '<name>' }).`,
+          ...(c.bundleColumn() && this.valueIndex.bundles().length ? [`Scoping to one app? semantic_index({ bundle: '${this.valueIndex.bundles()[0].bundle}' }) lists which properties carry data for it vs are EMPTY.`] : []),
           `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ search: '<value>' }).`,
         ]
         : [
           `Drill into an attribute's full value/frequency distribution: semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
           `Looking for a known attribute value? semantic_index({ search: '<value>' }) tells you where it occurs.`,
+        ];
+      // Concrete next calls (structured) for this model.
+      out.next_actions = k === c.anchor
+        ? [
+          { call: `semantic_index({ event: '${c.eventNames()[0] || '<event_name>'}' })`, why: 'see the properties an event carries (what you can measure/group/filter)' },
+          ...(c.bundleColumn() && this.valueIndex.bundles().length ? [{ call: `semantic_index({ bundle: '${this.valueIndex.bundles()[0].bundle}' })`, why: 'for one app — which properties carry data vs are EMPTY' }] : []),
+          { call: "semantic_index({ search: '<value>' })", why: 'trace a value to the property/event that carries it' },
+        ]
+        : [
+          { call: `semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' })`, why: "drill an attribute's full value/frequency distribution" },
+          { call: "semantic_index({ search: '<value>' })", why: 'find where a known attribute value occurs' },
         ];
       // Saved findings about this model (memory tool) — surface them where they belong.
       const mem = this._memoryFor([`model:${k}`]);
@@ -319,12 +364,20 @@ export class Engine {
         recommendations.push(`'${input.event}' carries no event-specific payload — its value is the occurrence itself${role ? ` (it is the ${role.replace(/_/g, ' ')})` : ''}: use it as a measure base (count / count_distinct of the user key, event_name: ['${input.event}']) for retention, conversion or funnel metrics.`);
       }
       if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ property }).`);
+      // Per-app helper: these properties may be empty for some apps — point at the bundle view.
+      if (c.bundleColumn() && this.valueIndex.bundles().length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ bundle: '<app>' }) shows the populated-vs-empty split per app.`);
       const mem = this._memoryFor([`event:${input.event}`]);
+      const nextActions = [
+        ...(pick.length ? [{ call: `semantic_index({ property: '${pick[0].name}' })`, why: "drill this property's real value distribution + completeness" }] : []),
+        { call: "semantic_index({ search: '<value>' })", why: 'trace a value seen above to every property/event carrying it' },
+        ...(c.bundleColumn() && this.valueIndex.bundles().length > 1 ? [{ call: "semantic_index({ bundle: '<app>' })", why: 'a property here may be EMPTY for some apps — see the per-app split' }] : []),
+      ];
       return {
         event: input.event,
         property_count: props.length,
         properties: rows,
         ...(mem.length ? { memory: mem } : {}),
+        next_actions: nextActions,
         recommendations: recommendations.slice(0, 4),
       };
     }
@@ -352,6 +405,7 @@ export class Engine {
         const recommendations = [];
         if (samples.length) recommendations.push(`${value_stats.distinct_count != null ? `${value_stats.distinct_count} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
         else recommendations.push(`No values indexed yet (the background value index may not have run).${dim.values ? ` Declared values: ${dim.values.join(', ')}.` : ''}`);
+        if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
         recommendations.push(...nullRecs);
         recommendations.push(ent
           ? `Group/filter by it in metric queries via '${ent}__${col}', or reference '${col}' after a pipeline join with:'${mk}'.`
@@ -392,6 +446,7 @@ export class Engine {
       } else {
         recommendations.push(`No values indexed yet (the background value index may not have run).${dc != null ? ` distinct_count is ${dc}.` : ''}`);
       }
+      if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${dc} distinct values are indexed — a RARE value may be absent here; do NOT treat "not found" as proof it does not exist, verify with a direct query/filter.`);
       recommendations.push(...nullRecs);
       if (evs) recommendations.push(`Carried by event(s) ${evs.join(', ')} — see everything they carry: semantic_index({ event: '${evs[0]}' }).`);
       // Unit-aware cast hint: a numeric-in-meaning value (declared unit) physically typed
@@ -403,15 +458,70 @@ export class Engine {
         sample_values: samples, distinct_count: dc, total_count: value_stats.total_count,
         indexed: value_stats.indexed, value_stats, event_coverage: coverage,
         indexing: this._indexHistory(p, input.recent ?? 10),
+        next_actions: [
+          ...(evs ? [{ call: `semantic_index({ event: '${evs[0]}' })`, why: 'see everything the carrying event(s) provide alongside this property' }] : []),
+          { call: "semantic_index({ search: '<value>' })", why: 'trace one of these values across the catalog' },
+          ...(value_stats.has_more ? [{ call: `semantic_index({ property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} })`, why: 'page further through the value distribution' }] : []),
+        ],
         recommendations: recommendations.slice(0, 4),
       };
       if (spec.unit && spec.type === 'string') {
         out.cast_hint = 'numeric';
         out.recommendations = [...out.recommendations.slice(0, 3), `Values are ${spec.unit} but physically typed string — add "cast":"numeric" (semantic measures) or a compute cast (pipelines) before sum/avg.`];
       }
+      // Per-app split: which apps populate this property vs leave it empty (non_null=0).
+      // Surfaced so the AI sees a property is app-specific before using it cross-app.
+      if (c.bundleColumn()) {
+        const bcov = this.valueIndex.bundleCoverage(p);
+        if (bcov.length) {
+          out.bundle_coverage = bcov.map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count }));
+          const emptyApps = bcov.filter((b) => b.non_null === 0).map((b) => b.bundle);
+          if (emptyApps.length && emptyApps.length < bcov.length) out.recommendations = [...out.recommendations.slice(0, 3), `EMPTY (always NULL) for app(s): ${emptyApps.join(', ')} — populated for the rest. See semantic_index({ bundle }) for an app's full populated/empty split.`];
+        }
+      }
       const mem = this._memoryFor([`property:${p}`]);
       if (mem.length) out.memory = mem;
       return out;
+    }
+
+    // ── { bundle }: per-app coverage — which event properties are POPULATED vs EMPTY for
+    // one app (bundle id). Lets the AI skip properties that carry no data for the chosen app
+    // instead of querying them blindly. Requires the anchor to designate a bundle column
+    // (meta.mcp.dimension:{bundle:true}) AND the value index to have run. ──
+    if (input.bundle !== undefined && input.bundle !== false) {
+      if (!c.bundleColumn()) throw new ToolError('this catalog has no app/bundle dimension — mark the app column on the events fact with meta.mcp.dimension:{ bundle: true } to enable per-app coverage', { stage: 'validate', field: 'bundle' });
+      const bundleId = String(input.bundle);
+      const known = this.valueIndex.bundles();
+      if (!known.length) {
+        return { bundle: bundleId, note: 'No per-app coverage indexed yet (the background value index may not have run).', bundles: [] };
+      }
+      const hit = known.find((b) => b.bundle === bundleId);
+      if (!hit) throw new ToolError(`unknown app '${bundleId}'. Indexed apps: ${known.map((b) => b.bundle).join(', ')}`, { stage: 'validate', field: 'bundle' });
+      const cov = this.valueIndex.bundlePropertyCoverage(bundleId);
+      const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ property: r.property, non_null: r.non_null }));
+      const empty = cov.filter((r) => r.non_null === 0).map((r) => r.property);
+      return {
+        bundle: bundleId,
+        event_rows: hit.row_count,
+        property_count: cov.length,
+        populated_count: populated.length,
+        empty_count: empty.length,
+        // The properties that carry data for THIS app (use these); each with its non-null count.
+        populated,
+        // Properties that are ALWAYS NULL for this app — do NOT query them here (other apps may populate them).
+        empty,
+        next_actions: [
+          ...(populated.length ? [{ call: `semantic_index({ property: '${populated[0].property}' })`, why: 'drill a property that carries data for this app (per-app split under bundle_coverage)' }] : []),
+          ...(known.length > 1 ? [{ call: `semantic_index({ bundle: '${known.find((b) => b.bundle !== bundleId).bundle}' })`, why: 'compare another app — a property empty here may be populated there' }] : []),
+        ],
+        recommendations: [
+          empty.length
+            ? `${empty.length} of ${cov.length} properties are EMPTY for '${bundleId}' (always NULL) — do not use them for this app: ${empty.slice(0, 8).join(', ')}${empty.length > 8 ? ', …' : ''}.`
+            : `Every indexed property carries data for '${bundleId}'.`,
+          `Use the ${populated.length} populated properties; drill one with semantic_index({ property: '${(populated[0] || {}).property || '<name>'}' }) (its per-app split is under bundle_coverage).`,
+          known.length > 1 ? `Other apps: ${known.filter((b) => b.bundle !== bundleId).map((b) => b.bundle).slice(0, 6).join(', ')} — a property empty here may be populated there.` : `Only one app is indexed.`,
+        ],
+      };
     }
 
     // ── { search }: fuzzy discovery across events/properties/attributes/values/recipes ──
@@ -428,6 +538,22 @@ export class Engine {
       // Surface a semantic-search failure here too (don't hide it just because this path
       // also returns catalog hits) — otherwise a broken embedder looks like "no memory".
       if (mem.semantic_error) res.memory_semantic_error = mem.semantic_error;
+      // Recall caveat: indexed VALUES are the top-N by frequency per property, so a search
+      // for a RARE value can miss even though the value exists. Say so when nothing matched,
+      // so "not found" is not mistaken for "does not exist".
+      if (!(res.value_matches && res.value_matches.length)) {
+        (res.recommendations ||= []).push('No indexed value matched. Indexed values are the top-N most frequent per property — a RARE value may not be indexed; confirm presence with a direct filter/query before concluding it does not exist.');
+      }
+      // App/bundle ids are not indexed as property VALUES, so match them here: a query that
+      // hits a known app routes the AI to its per-app coverage view.
+      if (c.bundleColumn()) {
+        const q = String(input.search).toLowerCase();
+        const bundleHits = this.valueIndex.bundles().filter((b) => b.bundle.toLowerCase().includes(q));
+        if (bundleHits.length) {
+          res.bundle_matches = bundleHits.map((b) => ({ bundle: b.bundle, event_rows: b.row_count, view: `semantic_index({ bundle: '${b.bundle}' })` }));
+          (res.recommendations ||= []).push(`'${input.search}' matches app(s) ${bundleHits.map((b) => b.bundle).join(', ')} — semantic_index({ bundle }) shows which properties are populated vs EMPTY for an app.`);
+        }
+      }
       return res;
     }
 
@@ -455,6 +581,9 @@ export class Engine {
     const userModel = c.modelKeys().find((k) => c.getModel(k).role === 'users');
     const exAttr = userModel ? Object.keys(c.getModel(userModel).dimensions || {})[0] : null;
     const memCount = this.memoryStore.counts().notes;
+    // Apps (bundle ids) seen during indexing — drill one with { bundle } to see which
+    // properties are populated vs empty for it (skip the empties for that app).
+    const bundleList = c.bundleColumn() ? this.valueIndex.bundles() : [];
     return {
       dialect: c.dialect,
       models,
@@ -475,17 +604,41 @@ export class Engine {
         running: sync.running,
         seconds_since_last_sync: lastSync?.finished_at != null ? Math.round((Date.now() - lastSync.finished_at) / 1000) : null,
       } : null,
+      // Apps in the data (by bundle id). Different apps populate different properties, so
+      // drill one with semantic_index({ bundle }) to see what carries data for that app.
+      ...(bundleList.length ? { bundles: bundleList.map((b) => ({ bundle: b.bundle, event_rows: b.row_count })) } : {}),
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
       ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
       // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW
       // to approach a question (which tool, in what order, with what guardrails).
       guide: 'semantic_index({ guide: true }) → the analyst procedure (workflow), IF/DO routing triggers, and per-task recipes. Read it before building a query.',
-      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring; ({ recipe }) → a ready-made recipe by id; ({ guide }) → how to approach a question (workflow + routing).',
+      // Machine-readable map of the drill-down views (key → when to use it), so the next call
+      // can be chosen without parsing prose. Exactly one view key per call (mutually exclusive).
+      views: [
+        { view: 'model', arg: 'model key', when: "one model's columns/entities/time + dimension attributes with real sample values" },
+        { view: 'event', arg: 'event name', when: 'the properties POPULATED on that event (what you can measure/group/filter)' },
+        { view: 'property', arg: 'property or "<model>.<column>"', when: "one column's full passport: real value distribution (paged), NULL coverage, per-app split, freshness" },
+        { view: 'search', arg: 'word/value', when: 'fuzzy find an event/property/attribute/VALUE/recipe/app by name or value' },
+        ...(bundleList.length ? [{ view: 'bundle', arg: 'bundle id', when: 'which event properties are populated vs EMPTY for ONE app (skip the empty ones)' }] : []),
+        ...(this.recipes ? [{ view: 'recipe', arg: 'recipe id', when: 'one ready-made task template in full (payload + example_queries + hack)' }] : []),
+        { view: 'guide', arg: 'true | task family', when: 'HOW to approach a question: workflow + IF/DO routing + per-task recipes' },
+        { view: 'status', arg: 'true', when: 'operational state: value-index sync runs + background query jobs' },
+      ],
+      // Concrete, ready-to-run next calls (structured: { call, why }) — pick one. Replaces a
+      // prose paragraph so the model can execute the next step without parsing English.
+      next_actions: [
+        { call: 'semantic_index({ guide: true })', why: 'unsure how to approach the question — get the workflow + IF/DO routing first' },
+        { call: `semantic_index({ event: '${exEvent || '<event_name>'}' })`, why: "see an event's properties with real sample values + cardinality" },
+        { call: `semantic_index({ model: '${userModel || 'users'}' })`, why: 'list segmentation attributes (country/platform/…) with real values' },
+        ...(bundleList.length ? [{ call: `semantic_index({ bundle: '${bundleList[0].bundle}' })`, why: 'scope to one app — which properties carry data vs are EMPTY for it' }] : []),
+        { call: "semantic_index({ search: '<word or value>' })", why: 'find an event/property/attribute/value/recipe by name or value' },
+      ],
       recommendations: [
         `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
         `Start by inspecting an event's properties: semantic_index({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
         `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
+        ...(bundleList.length ? [`Working with ONE app? semantic_index({ bundle: '${bundleList[0].bundle}' }) lists which event properties carry data for it vs are EMPTY (skip the empty ones); ${bundleList.length} app(s) are in the data.`] : []),
         `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,
       ],
     };
@@ -509,6 +662,11 @@ export class Engine {
     const samples = has_more ? fetched.slice(0, limit) : fetched;
     // top_value is the single most frequent value; share = its fraction of indexed rows.
     const top = this.valueIndex.sampleValues(key, 1)[0] || null;
+    // The index keeps only the top-N values by frequency. If the column has MORE distinct
+    // values than are stored, rare ones are NOT in the index — a search for them will miss,
+    // so callers must verify a "not found" with a direct query rather than trust absence.
+    const storedValues = this.valueIndex.valueCount(key);
+    const valuesCapped = !!st && dc != null && storedValues != null && dc > storedValues;
     const value_stats = {
       distinct_count: dc, total_count: total,
       top_value: top ? top.value : null, top_freq: top ? top.freq : null,
@@ -517,6 +675,7 @@ export class Engine {
       // values stored are capped (top-by-frequency); paging past them returns [].
       returned: samples.length, limit, offset, order_by: orderBy, direction: dir,
       has_more,
+      indexed_value_count: storedValues, values_capped: valuesCapped,
     };
     return { samples, value_stats };
   }
@@ -1581,6 +1740,7 @@ export class Engine {
   close() {
     // Managers share the store and don't own it; the Engine closes it once.
     try { if (this._ownsStore) this.store?.close?.(); } catch { /* noop */ }
+    try { this._memoryStore?.close?.(); } catch { /* noop */ } // separate memory store (MCP_MEMORY_DB)
     try { this.runner?.close?.(); } catch { /* noop */ }
   }
 

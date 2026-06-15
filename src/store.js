@@ -13,9 +13,13 @@
 //   values.page(prop, { limit, offset, col:'freq'|'value', direction:'asc'|'desc' })
 //   values.stats(prop)                -> { distinctCount, totalCount, nullCount, indexedAt } | null
 //   values.coverage(prop)             -> [{event_name, row_count, non_null, null_count}] (row_count desc)
+//   values.bundleCoverage(prop)       -> [{bundle, row_count, non_null, null_count}] (row_count desc)
+//   values.bundles()                  -> [{bundle, row_count}] (distinct apps; max events per app)
+//   values.bundlePropertyCoverage(b)  -> [{property, row_count, non_null, null_count}] (non_null desc)
 //   values.search(query, limit)       -> [{property,value,freq}] (substring, freq desc)
 //   values.candidates(cap)            -> [{property,value,freq}] (top-freq pool for JS fuzzy rank)
 //   values.counts()                   -> { properties, values }
+//   values.valueCount(prop)           -> int (values STORED for prop; vs distinct_count → capped?)
 //   runs.reconcile()                  (mark running→interrupted)
 //   runs.start()                      -> id
 //   runs.finish(id, { status, propertiesIndexed, valuesWritten, errors, error })
@@ -55,7 +59,7 @@ export class MemoryBackend {
     };
 
     this.values = {
-      replaceProperty: (property, { distinctCount, totalCount, nullCount, values = [], coverage = [] } = {}) => {
+      replaceProperty: (property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [] } = {}) => {
         props.set(property, {
           distinctCount: distinctCount ?? null,
           totalCount: totalCount ?? null,
@@ -64,6 +68,8 @@ export class MemoryBackend {
           values: values.map((v) => ({ value: String(v.value), freq: Number(v.freq) || 0 })).sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)),
           coverage: coverage.map((e) => ({ event_name: String(e.event), row_count: Number(e.rowCount) || 0, non_null: Number(e.nonNull) || 0 }))
             .sort((a, b) => b.row_count - a.row_count || a.event_name.localeCompare(b.event_name)),
+          bundleCoverage: bundleCoverage.map((e) => ({ bundle: String(e.bundle), row_count: Number(e.rowCount) || 0, non_null: Number(e.nonNull) || 0 }))
+            .sort((a, b) => b.row_count - a.row_count || a.bundle.localeCompare(b.bundle)),
         });
       },
       top: (property, limit) => {
@@ -89,6 +95,23 @@ export class MemoryBackend {
         const e = props.get(property);
         return e ? e.coverage.map((c) => ({ event_name: c.event_name, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null })) : [];
       },
+      // ── per-bundle (app) coverage of a property: which apps populate it vs leave it empty ──
+      bundleCoverage: (property) => {
+        const e = props.get(property);
+        return e ? (e.bundleCoverage || []).map((c) => ({ bundle: c.bundle, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null })) : [];
+      },
+      // Distinct apps seen (max events per app across properties) — the catalogue of bundles.
+      bundles: () => {
+        const agg = new Map();
+        for (const e of props.values()) for (const c of e.bundleCoverage || []) agg.set(c.bundle, Math.max(agg.get(c.bundle) ?? 0, c.row_count));
+        return [...agg.entries()].map(([bundle, row_count]) => ({ bundle, row_count })).sort((a, b) => b.row_count - a.row_count || a.bundle.localeCompare(b.bundle));
+      },
+      // For one app: each property's coverage (non_null=0 → empty for this app).
+      bundlePropertyCoverage: (bundle) => {
+        const out = [];
+        for (const [property, e] of props) for (const c of e.bundleCoverage || []) if (c.bundle === bundle) out.push({ property, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null });
+        return out.sort((a, b) => b.non_null - a.non_null || a.property.localeCompare(b.property));
+      },
       search: (query, limit) => {
         const q = String(query).toLowerCase();
         const out = [];
@@ -103,6 +126,9 @@ export class MemoryBackend {
         return out.sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)).slice(0, cap);
       },
       counts: () => ({ properties: props.size, values: [...props.values()].reduce((s, e) => s + e.values.length, 0) }),
+      // How many values are actually STORED for a property (the indexer caps at top-N) —
+      // compared to distinct_count it reveals whether rare values were left out of the index.
+      valueCount: (property) => { const e = props.get(property); return e ? e.values.length : 0; },
     };
 
     // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
@@ -163,6 +189,9 @@ export class SqliteBackend {
     // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
     // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
     db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(property, event_name))');
+    // Per-property × bundle (app) coverage: row_count vs non_null per app, so a property that
+    // is empty for one app but populated for another is visible (the { bundle } index view).
+    db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_coverage (property TEXT, bundle TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(property, bundle))');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
@@ -190,12 +219,14 @@ export class SqliteBackend {
     };
 
     this.values = {
-      replaceProperty(property, { distinctCount, totalCount, nullCount, values = [], coverage = [] } = {}) {
+      replaceProperty(property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [] } = {}) {
         s._tx(() => {
           s._run('DELETE FROM prop_values WHERE property = ?', property);
           for (const v of values) s._run('INSERT INTO prop_values (property, value, freq) VALUES (?, ?, ?)', property, String(v.value), Number(v.freq) || 0);
           s._run('DELETE FROM prop_coverage WHERE property = ?', property);
           for (const e of coverage) s._run('INSERT INTO prop_coverage (property, event_name, row_count, non_null) VALUES (?, ?, ?, ?)', property, String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
+          s._run('DELETE FROM prop_bundle_coverage WHERE property = ?', property);
+          for (const e of bundleCoverage) s._run('INSERT INTO prop_bundle_coverage (property, bundle, row_count, non_null) VALUES (?, ?, ?, ?)', property, String(e.bundle), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
           s._run('INSERT INTO prop_stats (property, distinct_count, total_count, null_count, indexed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, null_count=excluded.null_count, indexed_at=excluded.indexed_at', property, distinctCount ?? null, totalCount ?? null, nullCount ?? null, Date.now());
         });
       },
@@ -218,6 +249,19 @@ export class SqliteBackend {
         return s._all('SELECT event_name, row_count, non_null FROM prop_coverage WHERE property = ? ORDER BY row_count DESC, event_name ASC', property)
           .map((r) => ({ event_name: r.event_name, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
       },
+      // ── per-bundle (app) coverage: which apps populate a property vs leave it empty ──
+      bundleCoverage(property) {
+        return s._all('SELECT bundle, row_count, non_null FROM prop_bundle_coverage WHERE property = ? ORDER BY row_count DESC, bundle ASC', property)
+          .map((r) => ({ bundle: r.bundle, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+      },
+      bundles() {
+        return s._all('SELECT bundle, MAX(row_count) AS row_count FROM prop_bundle_coverage GROUP BY bundle ORDER BY row_count DESC, bundle ASC')
+          .map((r) => ({ bundle: r.bundle, row_count: Number(r.row_count) }));
+      },
+      bundlePropertyCoverage(bundle) {
+        return s._all('SELECT property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? ORDER BY non_null DESC, property ASC', bundle)
+          .map((r) => ({ property: r.property, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+      },
       search(query, limit) {
         const q = String(query).toLowerCase();
         return s._all('SELECT property, value, freq FROM prop_values WHERE instr(lower(value), ?) > 0 ORDER BY freq DESC, value ASC LIMIT ?', q, limit).map((r) => ({ property: r.property, value: r.value, freq: Number(r.freq) }));
@@ -226,6 +270,9 @@ export class SqliteBackend {
       // the caller. Highest-frequency values first so the cap keeps the most relevant.
       candidates(cap = 5000) {
         return s._all('SELECT property, value, freq FROM prop_values ORDER BY freq DESC, value ASC LIMIT ?', cap).map((r) => ({ property: r.property, value: r.value, freq: Number(r.freq) }));
+      },
+      valueCount(property) {
+        return Number(s._get('SELECT COUNT(*) AS n FROM prop_values WHERE property = ?', property).n);
       },
       counts() {
         return { properties: Number(s._get('SELECT COUNT(*) AS n FROM prop_stats').n), values: Number(s._get('SELECT COUNT(*) AS n FROM prop_values').n) };
@@ -321,7 +368,7 @@ export class SqliteBackend {
    */
   reset() {
     this._tx(() => {
-      for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'index_runs', 'index_run_props']) this._run(`DELETE FROM ${t}`);
+      for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'index_runs', 'index_run_props']) this._run(`DELETE FROM ${t}`);
     });
   }
 

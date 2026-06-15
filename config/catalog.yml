@@ -183,7 +183,7 @@ models:
         description: "Resolved store bundle id of the app the event came from. Present on every event."
         meta:
           mcp:
-            dimension: {}   # groupable on every event → segment by app without a users-join
+            dimension: { bundle: true }   # the APP identifier: groupable on every event (segment by app without a users-join) AND drives per-app coverage in semantic_index({ bundle })
       - name: app_id_of_main_data
         data_type: string
         description: >

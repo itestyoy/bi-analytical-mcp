@@ -7,6 +7,7 @@ select
     appsflyer_id                                           as player_id_of_internal,
     session_number,
     event_name,
+    bundle_id,
     device_time,
     event_data,
     (event_data->>'level_id')::int                         as level_id_of_event_data,

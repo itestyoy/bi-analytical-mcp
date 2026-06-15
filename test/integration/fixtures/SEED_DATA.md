@@ -51,6 +51,17 @@ separate campaigns table.
 
 Total event rows: **184**
 
+### `bundle_id` (app) split
+
+Every event carries a `bundle_id` (the app), marked `meta.mcp.dimension: { bundle: true }`
+on the events fact — it drives `semantic_index({ bundle })` per-app coverage. The split is
+by event family (row-count neutral — no rows added):
+
+- `com.omg.colorfit` = **53** rows — ONLY `level_started` + `level_completed` (so `level_id_of_event_data`
+  is populated, `ad_type_of_event_data` is EMPTY for this app).
+- `com.omg.wordsearch` = **131** rows — everything else incl. ad/iap events (so `ad_type_of_event_data`
+  is populated, `level_id_of_event_data` is EMPTY for this app).
+
 ### Row counts per `event_name`
 
 | event_name             | count |

@@ -194,15 +194,17 @@ export class Engine {
    *   { guide }    → the analyst procedure + IF/DO routing (how to approach a question)
    *   { status }   → operational state: value-index sync runs + background query jobs
    *   { run }      → one sync run's per-property breakdown (slowest first)
+   *   { bundle }   → for one app (bundle id): which event properties are populated vs EMPTY
+   *                  (skip the empty ones for that app)
    * Pass at most one drill-down key (mutually exclusive views).
    */
   async semantic_index(input = {}) {
     this._validate('semantic_index', input);
     // STRICT view contract (nothing is ever silently ignored): at most ONE view key,
     // and paging/ordering/recency params only on the views they apply to.
-    const views = ['run', 'status', 'guide', 'model', 'event', 'property', 'search', 'recipe'].filter((k) => input[k] !== undefined && input[k] !== false);
+    const views = ['run', 'status', 'guide', 'model', 'event', 'property', 'search', 'recipe', 'bundle'].filter((k) => input[k] !== undefined && input[k] !== false);
     if (views.length > 1) {
-      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { guide } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
+      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { guide } | { bundle } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
     }
     if (input.limit !== undefined && !(input.property || input.search)) throw new ToolError('limit only applies to the { property } and { search } views', { stage: 'validate', field: 'limit' });
     for (const k of ['offset', 'order_by', 'direction']) {
@@ -409,9 +411,55 @@ export class Engine {
         out.cast_hint = 'numeric';
         out.recommendations = [...out.recommendations.slice(0, 3), `Values are ${spec.unit} but physically typed string — add "cast":"numeric" (semantic measures) or a compute cast (pipelines) before sum/avg.`];
       }
+      // Per-app split: which apps populate this property vs leave it empty (non_null=0).
+      // Surfaced so the AI sees a property is app-specific before using it cross-app.
+      if (c.bundleColumn()) {
+        const bcov = this.valueIndex.bundleCoverage(p);
+        if (bcov.length) {
+          out.bundle_coverage = bcov.map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count }));
+          const emptyApps = bcov.filter((b) => b.non_null === 0).map((b) => b.bundle);
+          if (emptyApps.length && emptyApps.length < bcov.length) out.recommendations = [...out.recommendations.slice(0, 3), `EMPTY (always NULL) for app(s): ${emptyApps.join(', ')} — populated for the rest. See semantic_index({ bundle }) for an app's full populated/empty split.`];
+        }
+      }
       const mem = this._memoryFor([`property:${p}`]);
       if (mem.length) out.memory = mem;
       return out;
+    }
+
+    // ── { bundle }: per-app coverage — which event properties are POPULATED vs EMPTY for
+    // one app (bundle id). Lets the AI skip properties that carry no data for the chosen app
+    // instead of querying them blindly. Requires the anchor to designate a bundle column
+    // (meta.mcp.dimension:{bundle:true}) AND the value index to have run. ──
+    if (input.bundle !== undefined && input.bundle !== false) {
+      if (!c.bundleColumn()) throw new ToolError('this catalog has no app/bundle dimension — mark the app column on the events fact with meta.mcp.dimension:{ bundle: true } to enable per-app coverage', { stage: 'validate', field: 'bundle' });
+      const bundleId = String(input.bundle);
+      const known = this.valueIndex.bundles();
+      if (!known.length) {
+        return { bundle: bundleId, note: 'No per-app coverage indexed yet (the background value index may not have run).', bundles: [] };
+      }
+      const hit = known.find((b) => b.bundle === bundleId);
+      if (!hit) throw new ToolError(`unknown app '${bundleId}'. Indexed apps: ${known.map((b) => b.bundle).join(', ')}`, { stage: 'validate', field: 'bundle' });
+      const cov = this.valueIndex.bundlePropertyCoverage(bundleId);
+      const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ property: r.property, non_null: r.non_null }));
+      const empty = cov.filter((r) => r.non_null === 0).map((r) => r.property);
+      return {
+        bundle: bundleId,
+        event_rows: hit.row_count,
+        property_count: cov.length,
+        populated_count: populated.length,
+        empty_count: empty.length,
+        // The properties that carry data for THIS app (use these); each with its non-null count.
+        populated,
+        // Properties that are ALWAYS NULL for this app — do NOT query them here (other apps may populate them).
+        empty,
+        recommendations: [
+          empty.length
+            ? `${empty.length} of ${cov.length} properties are EMPTY for '${bundleId}' (always NULL) — do not use them for this app: ${empty.slice(0, 8).join(', ')}${empty.length > 8 ? ', …' : ''}.`
+            : `Every indexed property carries data for '${bundleId}'.`,
+          `Use the ${populated.length} populated properties; drill one with semantic_index({ property: '${(populated[0] || {}).property || '<name>'}' }) (its per-app split is under bundle_coverage).`,
+          known.length > 1 ? `Other apps: ${known.filter((b) => b.bundle !== bundleId).map((b) => b.bundle).slice(0, 6).join(', ')} — a property empty here may be populated there.` : `Only one app is indexed.`,
+        ],
+      };
     }
 
     // ── { search }: fuzzy discovery across events/properties/attributes/values/recipes ──
@@ -455,6 +503,9 @@ export class Engine {
     const userModel = c.modelKeys().find((k) => c.getModel(k).role === 'users');
     const exAttr = userModel ? Object.keys(c.getModel(userModel).dimensions || {})[0] : null;
     const memCount = this.memoryStore.counts().notes;
+    // Apps (bundle ids) seen during indexing — drill one with { bundle } to see which
+    // properties are populated vs empty for it (skip the empties for that app).
+    const bundleList = c.bundleColumn() ? this.valueIndex.bundles() : [];
     return {
       dialect: c.dialect,
       models,
@@ -475,6 +526,9 @@ export class Engine {
         running: sync.running,
         seconds_since_last_sync: lastSync?.finished_at != null ? Math.round((Date.now() - lastSync.finished_at) / 1000) : null,
       } : null,
+      // Apps in the data (by bundle id). Different apps populate different properties, so
+      // drill one with semantic_index({ bundle }) to see what carries data for that app.
+      ...(bundleList.length ? { bundles: bundleList.map((b) => ({ bundle: b.bundle, event_rows: b.row_count })) } : {}),
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
       ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),

@@ -253,6 +253,12 @@ export class Engine {
           out.partition_column = m.partition_column;
           out.cost_hint = `The physical table is partitioned by ${m.partition_column} — ALWAYS bound queries with time_range (or a where on ${m.partition_column}/${m.time?.column || 'the time column'}) to avoid a full scan.`;
         }
+        // The app/bundle dimension: groupable per event AND the axis for per-app coverage.
+        if (c.bundleColumn()) {
+          const apps = this.valueIndex.bundles();
+          out.bundle_column = c.bundleColumn();
+          out.bundle_note = `'${c.bundleColumn()}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ bundle: '${apps[0].bundle}' }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
+        }
         out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The `columns` above are what you can reference in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
       } else {
         // Dimension attributes WITH their real indexed values (cardinality + top 3) — the
@@ -280,6 +286,7 @@ export class Engine {
         ? [
           `Drill into an event to see the properties it carries: semantic_index({ event: '${c.eventNames()[0] || '<event_name>'}' }).`,
           `Then inspect a property's real values + frequency distribution: semantic_index({ property: '<name>' }).`,
+          ...(c.bundleColumn() && this.valueIndex.bundles().length ? [`Scoping to one app? semantic_index({ bundle: '${this.valueIndex.bundles()[0].bundle}' }) lists which properties carry data for it vs are EMPTY.`] : []),
           `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ search: '<value>' }).`,
         ]
         : [
@@ -321,6 +328,8 @@ export class Engine {
         recommendations.push(`'${input.event}' carries no event-specific payload — its value is the occurrence itself${role ? ` (it is the ${role.replace(/_/g, ' ')})` : ''}: use it as a measure base (count / count_distinct of the user key, event_name: ['${input.event}']) for retention, conversion or funnel metrics.`);
       }
       if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ property }).`);
+      // Per-app helper: these properties may be empty for some apps — point at the bundle view.
+      if (c.bundleColumn() && this.valueIndex.bundles().length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ bundle: '<app>' }) shows the populated-vs-empty split per app.`);
       const mem = this._memoryFor([`event:${input.event}`]);
       return {
         event: input.event,
@@ -476,6 +485,16 @@ export class Engine {
       // Surface a semantic-search failure here too (don't hide it just because this path
       // also returns catalog hits) — otherwise a broken embedder looks like "no memory".
       if (mem.semantic_error) res.memory_semantic_error = mem.semantic_error;
+      // App/bundle ids are not indexed as property VALUES, so match them here: a query that
+      // hits a known app routes the AI to its per-app coverage view.
+      if (c.bundleColumn()) {
+        const q = String(input.search).toLowerCase();
+        const bundleHits = this.valueIndex.bundles().filter((b) => b.bundle.toLowerCase().includes(q));
+        if (bundleHits.length) {
+          res.bundle_matches = bundleHits.map((b) => ({ bundle: b.bundle, event_rows: b.row_count, view: `semantic_index({ bundle: '${b.bundle}' })` }));
+          (res.recommendations ||= []).push(`'${input.search}' matches app(s) ${bundleHits.map((b) => b.bundle).join(', ')} — semantic_index({ bundle }) shows which properties are populated vs EMPTY for an app.`);
+        }
+      }
       return res;
     }
 
@@ -535,11 +554,12 @@ export class Engine {
       // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW
       // to approach a question (which tool, in what order, with what guardrails).
       guide: 'semantic_index({ guide: true }) → the analyst procedure (workflow), IF/DO routing triggers, and per-task recipes. Read it before building a query.',
-      next: 'Overview only. Drill down: semantic_index({ model }) → a model\'s columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring; ({ recipe }) → a ready-made recipe by id; ({ guide }) → how to approach a question (workflow + routing).',
+      next: `Overview only. Drill down: semantic_index({ model }) → a model's columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring;${bundleList.length ? ' ({ bundle }) → which properties are populated vs EMPTY for one app;' : ''} ({ recipe }) → a ready-made recipe by id; ({ guide }) → how to approach a question (workflow + routing).`,
       recommendations: [
         `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
         `Start by inspecting an event's properties: semantic_index({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
         `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
+        ...(bundleList.length ? [`Working with ONE app? semantic_index({ bundle: '${bundleList[0].bundle}' }) lists which event properties carry data for it vs are EMPTY (skip the empty ones); ${bundleList.length} app(s) are in the data.`] : []),
         `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,
       ],
     };

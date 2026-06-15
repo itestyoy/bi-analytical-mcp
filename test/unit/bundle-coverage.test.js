@@ -74,6 +74,42 @@ test('semantic_index({ property }) surfaces per-app bundle_coverage', async () =
   assert.ok(prop.recommendations.some((r) => /EMPTY .*com\.omg\.relax/i.test(r)), 'flags the app it is empty for');
 });
 
+// bundle is a HELPER across the other views (discoverability), not just its own view.
+test('bundle is integrated as a helper across the index views', async () => {
+  const e = engine();
+  e.valueIndex.upsertProperty('ad_type_of_event_data', {
+    distinctCount: 3, totalCount: 40, nullCount: 1460, values: [{ value: 'rewarded', freq: 30 }],
+    bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 40 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 0 }],
+  });
+  e.valueIndex.upsertProperty('level_id_of_event_data', {
+    distinctCount: 10, totalCount: 900, nullCount: 600, values: [{ value: '1', freq: 100 }],
+    bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 600 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 300 }],
+  });
+
+  // overview: points at the { bundle } view in next + recommendations.
+  const ov = await e.semantic_index();
+  assert.match(ov.next, /\{ bundle \}/);
+  assert.ok(ov.recommendations.some((r) => /semantic_index\(\{ bundle:/.test(r)), 'overview recommends the bundle view');
+
+  // { model } (events): surfaces the app/bundle column + a pointer.
+  const ev = await e.semantic_index({ model: 'events' });
+  assert.equal(ev.bundle_column, 'bundle_id');
+  assert.ok(/bundle/i.test(ev.bundle_note));
+  assert.ok(ev.recommendations.some((r) => /\{ bundle:/.test(r)), 'events model view points at the bundle view');
+
+  // { event }: with >1 app, flags that a property may be empty for some apps.
+  const evt = await e.semantic_index({ event: 'ad_finished' });
+  assert.ok(evt.recommendations.some((r) => /\{ bundle:/.test(r) || /populated-vs-empty/.test(r)), JSON.stringify(evt.recommendations));
+
+  // { search }: a query matching an app routes to its bundle view.
+  const s = await e.semantic_index({ search: 'relax' });
+  assert.ok(s.bundle_matches?.some((b) => b.bundle === 'com.omg.relax'), JSON.stringify(s.bundle_matches));
+
+  // { guide }: carries an IF/DO routing trigger for per-app emptiness.
+  const g = await e.semantic_index({ guide: true });
+  assert.ok(g.routing_triggers.some((t) => /\{ bundle:/.test(t.do) && /EMPTY/.test(t.do)), 'guide has a bundle routing trigger');
+});
+
 // { bundle } is a mutually-exclusive view + a guard when no app dimension is configured.
 test('semantic_index({ bundle }) view contract', async () => {
   const e = engine();

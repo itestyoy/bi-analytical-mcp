@@ -275,9 +275,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // Optional cost lever: bound indexing scans to the last N days on the anchor time column
   // (0/unset → scan all history, the default). Set on a large partitioned fact to cut cost.
   const windowDays = Number(process.env.MCP_INDEX_WINDOW_DAYS) || 0;
-  // Opt-in: approximate (HLL) distinct counts during indexing — cheaper on a large fact
-  // (dialect-gated; falls back to exact where unsupported). Default off = exact counts.
-  const approxDistinct = /^(1|true|yes|on)$/i.test(String(process.env.MCP_INDEX_APPROX_DISTINCT ?? '').trim());
+  // Approximate (HLL) distinct counts during indexing — cheaper on a large fact, and the
+  // project's preferred distinct-count method. DEFAULT ON; dialect-gated (bigquery/snowflake/
+  // duckdb/redshift use APPROX_COUNT_DISTINCT, postgres & unknown fall back to EXACT). Disable
+  // with MCP_INDEX_APPROX_DISTINCT=false/0/no/off to force exact everywhere.
+  const approxDistinct = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_APPROX_DISTINCT ?? 'true').trim());
   const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 

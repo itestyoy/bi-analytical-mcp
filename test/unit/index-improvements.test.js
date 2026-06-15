@@ -76,3 +76,15 @@ test('overview exposes a machine-readable views manifest', async () => {
   for (const k of ['model', 'event', 'property', 'search', 'guide', 'status']) assert.ok(keys.has(k), `views includes ${k}`);
   assert.ok(ov.views.every((v) => v.view && v.when), 'each view entry has view + when');
 });
+
+// п.3 NEXT_ACTIONS: structured { call, why } concrete next steps replace the prose `next`.
+test('views carry structured next_actions (call + why), not just prose', async () => {
+  const e = engine();
+  const ov = await e.semantic_index();
+  assert.equal(ov.next, undefined, 'the prose `next` paragraph is gone');
+  assert.ok(Array.isArray(ov.next_actions) && ov.next_actions.length, 'overview has next_actions');
+  assert.ok(ov.next_actions.every((a) => typeof a.call === 'string' && /semantic_index\(/.test(a.call) && a.why), 'each next_action is a runnable call + why');
+  // a drill view carries them too, with the entity name filled in.
+  const ev = await e.semantic_index({ event: 'ad_finished' });
+  assert.ok(ev.next_actions.some((a) => /\{ property:/.test(a.call)), JSON.stringify(ev.next_actions));
+});

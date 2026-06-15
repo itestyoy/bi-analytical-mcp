@@ -318,6 +318,17 @@ export class Engine {
           `Drill into an attribute's full value/frequency distribution: semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
           `Looking for a known attribute value? semantic_index({ search: '<value>' }) tells you where it occurs.`,
         ];
+      // Concrete next calls (structured) for this model.
+      out.next_actions = k === c.anchor
+        ? [
+          { call: `semantic_index({ event: '${c.eventNames()[0] || '<event_name>'}' })`, why: 'see the properties an event carries (what you can measure/group/filter)' },
+          ...(c.bundleColumn() && this.valueIndex.bundles().length ? [{ call: `semantic_index({ bundle: '${this.valueIndex.bundles()[0].bundle}' })`, why: 'for one app — which properties carry data vs are EMPTY' }] : []),
+          { call: "semantic_index({ search: '<value>' })", why: 'trace a value to the property/event that carries it' },
+        ]
+        : [
+          { call: `semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' })`, why: "drill an attribute's full value/frequency distribution" },
+          { call: "semantic_index({ search: '<value>' })", why: 'find where a known attribute value occurs' },
+        ];
       // Saved findings about this model (memory tool) — surface them where they belong.
       const mem = this._memoryFor([`model:${k}`]);
       if (mem.length) out.memory = mem;
@@ -356,11 +367,17 @@ export class Engine {
       // Per-app helper: these properties may be empty for some apps — point at the bundle view.
       if (c.bundleColumn() && this.valueIndex.bundles().length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ bundle: '<app>' }) shows the populated-vs-empty split per app.`);
       const mem = this._memoryFor([`event:${input.event}`]);
+      const nextActions = [
+        ...(pick.length ? [{ call: `semantic_index({ property: '${pick[0].name}' })`, why: "drill this property's real value distribution + completeness" }] : []),
+        { call: "semantic_index({ search: '<value>' })", why: 'trace a value seen above to every property/event carrying it' },
+        ...(c.bundleColumn() && this.valueIndex.bundles().length > 1 ? [{ call: "semantic_index({ bundle: '<app>' })", why: 'a property here may be EMPTY for some apps — see the per-app split' }] : []),
+      ];
       return {
         event: input.event,
         property_count: props.length,
         properties: rows,
         ...(mem.length ? { memory: mem } : {}),
+        next_actions: nextActions,
         recommendations: recommendations.slice(0, 4),
       };
     }
@@ -441,6 +458,11 @@ export class Engine {
         sample_values: samples, distinct_count: dc, total_count: value_stats.total_count,
         indexed: value_stats.indexed, value_stats, event_coverage: coverage,
         indexing: this._indexHistory(p, input.recent ?? 10),
+        next_actions: [
+          ...(evs ? [{ call: `semantic_index({ event: '${evs[0]}' })`, why: 'see everything the carrying event(s) provide alongside this property' }] : []),
+          { call: "semantic_index({ search: '<value>' })", why: 'trace one of these values across the catalog' },
+          ...(value_stats.has_more ? [{ call: `semantic_index({ property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} })`, why: 'page further through the value distribution' }] : []),
+        ],
         recommendations: recommendations.slice(0, 4),
       };
       if (spec.unit && spec.type === 'string') {
@@ -488,6 +510,10 @@ export class Engine {
         populated,
         // Properties that are ALWAYS NULL for this app — do NOT query them here (other apps may populate them).
         empty,
+        next_actions: [
+          ...(populated.length ? [{ call: `semantic_index({ property: '${populated[0].property}' })`, why: 'drill a property that carries data for this app (per-app split under bundle_coverage)' }] : []),
+          ...(known.length > 1 ? [{ call: `semantic_index({ bundle: '${known.find((b) => b.bundle !== bundleId).bundle}' })`, why: 'compare another app — a property empty here may be populated there' }] : []),
+        ],
         recommendations: [
           empty.length
             ? `${empty.length} of ${cov.length} properties are EMPTY for '${bundleId}' (always NULL) — do not use them for this app: ${empty.slice(0, 8).join(', ')}${empty.length > 8 ? ', …' : ''}.`
@@ -599,7 +625,15 @@ export class Engine {
         { view: 'guide', arg: 'true | task family', when: 'HOW to approach a question: workflow + IF/DO routing + per-task recipes' },
         { view: 'status', arg: 'true', when: 'operational state: value-index sync runs + background query jobs' },
       ],
-      next: `Overview only. Drill down: semantic_index({ model }) → a model's columns, dimension attributes (with real sample values) + physical columns; ({ event }) → the properties an event carries; ({ property }) → one property/attribute with its real value distribution (also "users.country"-style attributes); ({ search }) → events, properties, attributes, VALUES and recipes by substring;${bundleList.length ? ' ({ bundle }) → which properties are populated vs EMPTY for one app;' : ''} ({ recipe }) → a ready-made recipe by id; ({ guide }) → how to approach a question (workflow + routing).`,
+      // Concrete, ready-to-run next calls (structured: { call, why }) — pick one. Replaces a
+      // prose paragraph so the model can execute the next step without parsing English.
+      next_actions: [
+        { call: 'semantic_index({ guide: true })', why: 'unsure how to approach the question — get the workflow + IF/DO routing first' },
+        { call: `semantic_index({ event: '${exEvent || '<event_name>'}' })`, why: "see an event's properties with real sample values + cardinality" },
+        { call: `semantic_index({ model: '${userModel || 'users'}' })`, why: 'list segmentation attributes (country/platform/…) with real values' },
+        ...(bundleList.length ? [{ call: `semantic_index({ bundle: '${bundleList[0].bundle}' })`, why: 'scope to one app — which properties carry data vs are EMPTY for it' }] : []),
+        { call: "semantic_index({ search: '<word or value>' })", why: 'find an event/property/attribute/value/recipe by name or value' },
+      ],
       recommendations: [
         `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
         `Start by inspecting an event's properties: semantic_index({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,

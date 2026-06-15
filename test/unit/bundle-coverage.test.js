@@ -86,9 +86,9 @@ test('bundle is integrated as a helper across the index views', async () => {
     bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 600 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 300 }],
   });
 
-  // overview: points at the { bundle } view in next + recommendations.
+  // overview: points at the { bundle } view in next_actions + recommendations.
   const ov = await e.semantic_index();
-  assert.match(ov.next, /\{ bundle \}/);
+  assert.ok(ov.next_actions.some((a) => /\{ bundle:/.test(a.call)), 'overview next_actions includes the bundle view');
   assert.ok(ov.recommendations.some((r) => /semantic_index\(\{ bundle:/.test(r)), 'overview recommends the bundle view');
 
   // { model } (events): surfaces the app/bundle column + a pointer.

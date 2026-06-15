@@ -57,3 +57,15 @@ export function recentSince(dialect, col, days) {
   if (d === 'duckdb') return `${col} >= now() - INTERVAL '${n} days'`;
   return null; // unknown dialect → no window (best-effort, never break the scan)
 }
+
+/**
+ * APPROXIMATE distinct-count expression (HLL-class) for `expr`, or null when the dialect has
+ * no built-in (→ caller falls back to exact COUNT(DISTINCT)). A cheaper cardinality scan on
+ * a large fact; the count becomes approximate, so it is OPT-IN at the indexer.
+ */
+export function approxCountDistinct(dialect, expr) {
+  const d = String(dialect || '').toLowerCase();
+  if (d === 'bigquery' || d === 'snowflake' || d === 'duckdb') return `APPROX_COUNT_DISTINCT(${expr})`;
+  if (d === 'redshift') return `APPROXIMATE COUNT(DISTINCT ${expr})`;
+  return null; // postgres & unknown → no native approx; use exact COUNT(DISTINCT)
+}

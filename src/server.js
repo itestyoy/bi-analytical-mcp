@@ -275,7 +275,10 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // Optional cost lever: bound indexing scans to the last N days on the anchor time column
   // (0/unset → scan all history, the default). Set on a large partitioned fact to cut cost.
   const windowDays = Number(process.env.MCP_INDEX_WINDOW_DAYS) || 0;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  // Opt-in: approximate (HLL) distinct counts during indexing — cheaper on a large fact
+  // (dialect-gated; falls back to exact where unsupported). Default off = exact counts.
+  const approxDistinct = /^(1|true|yes|on)$/i.test(String(process.env.MCP_INDEX_APPROX_DISTINCT ?? '').trim());
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.

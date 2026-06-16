@@ -36,6 +36,10 @@ version: 2
 #   is_time:       true (+ granularity, default day) -> the event time axis
 #   is_event_name: true                             -> the event_name column
 #   dimension:     {}                               -> mark an events-fact column groupable
+#   dimension:     { bundle: true }                 -> the app/bundle identifier column: groupable
+#                                                      AND the axis for per-app coverage
+#                                                      (semantic_index({ bundle }): which payload
+#                                                      fields are populated vs empty per app)
 #   array:         { items|fields, encoding }       -> an array column (encoding: native|json) — unnestable
 #   values:        [..]                             -> categorical value hints (optional)
 #   events:        [..]                             -> event_name(s) a payload field applies to
@@ -172,7 +176,7 @@ models:
         description: "Resolved store bundle id of the app the event came from. Present on every event."
         meta:
           mcp:
-            dimension: {}   # groupable on every event → segment by app without a users-join
+            dimension: { bundle: true }   # the APP identifier: groupable on every event (segment by app without a users-join) AND drives per-app coverage in semantic_index({ bundle }) — which properties are populated vs empty for each app
       - name: app_id_of_main_data
         data_type: string
         description: >

@@ -949,6 +949,15 @@ export class Engine {
       // Reject the step WITHOUT persisting it; the draft is left intact to retry.
       throw new ToolError(e.message, { stage: 'compile', field: 'stage' });
     }
+    // Verify filter literals against the SOURCE's real values BEFORE persisting — a wrong-
+    // cased/non-existent value ('organic' vs 'Organic') is rejected with the correct value,
+    // not silently filtered to nothing. Scoped to draft.source so casing is per-source.
+    let filterWarnings = [];
+    if (stage && stage.stage === 'where' && Array.isArray(stage.conditions)) {
+      filterWarnings = this._guardFilterValues(stage.conditions
+        .filter((cd) => cd && cd.column != null && Object.prototype.hasOwnProperty.call(cd, 'value'))
+        .map((cd) => ({ key: this._valueKeyForColumn(draft.source, cd.column), op: cd.op, value: cd.value, where: `where ${cd.column}` })));
+    }
     draft.stages = trial;
     this.ctxs.touch(ctx.id);
     const after = this._draftColumns(draft, physSet);
@@ -964,10 +973,94 @@ export class Engine {
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
       columns_removed: before.filter((c) => !afterNames.has(c.name)).map((c) => c.name),
       next: 'add_step the next stage, materialize the draft, or pass include_columns:true / preview for the full column list.',
-      recommendations: [...this._eventScopeWarnings(draft, stage), ...this._draftStepRecommendations(stage, after)],
+      recommendations: [...filterWarnings, ...this._eventScopeWarnings(draft, stage), ...this._draftStepRecommendations(stage, after)],
     };
     if (includeColumns) resp.available_columns = after;
     return resp;
+  }
+
+  /**
+   * Verify ONE filter literal against the REAL indexed values of `key` (source-scoped). The
+   * guard against silently filtering on a wrong-cased / non-existent value (user wrote
+   * 'organic' but the column holds 'Organic'). Returns null when OK or unverifiable (cold
+   * index, numeric/bool value), else { kind, value, suggest?, note? }:
+   *   case     — same value, different CASING → HARD (suggest the real casing)
+   *   typo     — a close fuzzy match exists → HARD (suggest it)
+   *   absent   — value not present AND the full value set is indexed (not capped) → HARD
+   *   unverifiable — value not found but only the top-N is indexed → WARN, do not block
+   */
+  _checkFilterValue(key, value) {
+    if (value == null || typeof value === 'number' || typeof value === 'boolean') return null; // only string literals are case/value-checked
+    if (!key) return null;
+    const st = this.valueIndex.stats(key);
+    if (!st) return null; // not indexed → cannot verify (do not block)
+    const stored = this.valueIndex.sampleValues(key, 1000); // all stored values (≤ indexer cap)
+    if (!stored.length) return null;
+    const sval = String(value);
+    if (stored.some((v) => String(v.value) === sval)) return null; // exact, real value → OK
+    const ci = stored.find((v) => String(v.value).toLowerCase() === sval.toLowerCase());
+    if (ci) return { kind: 'case', value: sval, suggest: [ci.value] };
+    const [best] = rankFuzzy(sval, stored, { fields: (v) => [String(v.value)], threshold: 0.8, limit: 1 });
+    if (best) return { kind: 'typo', value: sval, suggest: [best.item.value] };
+    const capped = (this.valueIndex.valueCount(key) ?? 0) < (st.distinctCount ?? Infinity);
+    if (capped) return { kind: 'unverifiable', value: sval, note: 'value is not among the indexed top-N values for this column — verify it exists with a direct query before relying on this filter' };
+    return { kind: 'absent', value: sval, suggest: stored.slice(0, 10).map((v) => String(v.value)) };
+  }
+
+  /** Value-index key for a column filtered on `sourceKey` (pipeline source), or null. */
+  _valueKeyForColumn(sourceKey, column) {
+    const c = this.catalog;
+    if (!column) return null;
+    if (sourceKey === c.anchor) {
+      if (c.eventProps().includes(column)) return column; // event payload prop → bare key
+      if ((c.getModel(c.anchor).dimensions || {})[column]) return `${c.anchor}.${column}`; // envelope/app dim
+      return null;
+    }
+    return (c.getModel(sourceKey)?.dimensions || {})[column] ? `${sourceKey}.${column}` : null;
+  }
+
+  /** Value-index key for a query_semantic_model dimension PATH (e.g. user__country), or null. */
+  _valueKeyForPath(path) {
+    const c = this.catalog;
+    const i = String(path).indexOf('__');
+    if (i > 0) {
+      const entity = path.slice(0, i); const col = path.slice(i + 2);
+      const mk = c.modelKeys().find((k) => c.primaryEntityName(k) === entity || (c.getModel(k).entities || {})[entity]);
+      if (mk && (c.getModel(mk).dimensions || {})[col]) return `${mk}.${col}`;
+      return null;
+    }
+    if (c.eventProps().includes(path)) return path;
+    if ((c.getModel(c.anchor).dimensions || {})[path]) return `${c.anchor}.${path}`;
+    return null;
+  }
+
+  /**
+   * HARD guard: given resolved filter specs [{ key, op, value, where }] (op ∈ equality ops,
+   * value scalar or array), reject any literal that is a case/typo/absent mismatch of the
+   * column's REAL values, with the correct value(s) suggested. Unverifiable misses become
+   * warnings (returned), never a block. Throws a single ToolError listing all hard mismatches.
+   */
+  _guardFilterValues(specs) {
+    const EQ = new Set(['eq', 'neq', 'in', 'not_in']);
+    const errors = []; const warnings = [];
+    for (const { key, op, value, where } of specs) {
+      if (!EQ.has(op)) continue;
+      for (const v of Array.isArray(value) ? value : [value]) {
+        const r = this._checkFilterValue(key, v);
+        if (!r) continue;
+        if (r.kind === 'unverifiable') { warnings.push(`${where}: ${r.note}`); continue; }
+        const fix = r.suggest && r.suggest.length ? ` Did you mean: ${r.suggest.map((s) => `'${s}'`).join(', ')}?` : '';
+        errors.push(r.kind === 'case'
+          ? `${where}: value '${r.value}' is not a real value — the column holds it with different casing.${fix}`
+          : r.kind === 'typo'
+            ? `${where}: value '${r.value}' was not found; a close value exists.${fix}`
+            : `${where}: value '${r.value}' does not occur in this column (all real values are indexed).${fix || ` Known values: ${(r.suggest || []).map((s) => `'${s}'`).join(', ')}.`}`);
+      }
+    }
+    if (errors.length) {
+      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ property }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
+    }
+    return warnings;
   }
 
   /** #3 gotcha: the just-added stage references an event-specific property whose event(s)
@@ -1528,15 +1621,21 @@ export class Engine {
       }
     }
     let where = [];
+    let filterWarnings = [];
     if (input.where) {
       const translated = clone(input.where);
+      const specs = [];
       walkPredicates(translated, (p) => {
         if (p.field?.kind === 'dimension') {
           if (!allowed.has(p.field.path)) throw new ToolError(`where path not reachable in context: ${p.field.path}`, { stage: 'validate', field: p.field.path });
           p.field.path = this._resolvePath(ctx, p.field.path); // bare task dim -> entity-qualified
           this._checkPathLoaded(ctx, p.field.path);
+          // Verify the filter literal against the column's REAL values (source-scoped):
+          // reject a wrong-cased/non-existent value instead of filtering to nothing.
+          specs.push({ key: this._valueKeyForPath(p.field.path), op: p.op, value: p.value, where: `where ${p.field.path}` });
         }
       });
+      filterWarnings = this._guardFilterValues(specs); // throws on a case/typo/absent mismatch
       where = renderWhereClauses(translated);
     }
     // order_by keys must be a requested metric or group-by token. `metric_time` is a
@@ -1581,6 +1680,7 @@ export class Engine {
       const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: [...orderable] };
       if (input.dry_run) out.dry_run = true;
       if (input.explain) { out.explain = true; out.plan = res.plan; }
+      if (filterWarnings.length) out.warnings = filterWarnings;
       return out;
     }
 
@@ -1616,7 +1716,7 @@ export class Engine {
       // Provenance so the result is self-trustable: which tier produced it, the source,
       // and how fresh the underlying data is (latest event time).
       provenance: { tier: 'governed_metric', metrics: input.metrics, source: this.catalog.anchor, data_freshness: fresh },
-      warnings: windowWarnings,
+      warnings: [...windowWarnings, ...filterWarnings],
       recommendations: recs,
     };
   }

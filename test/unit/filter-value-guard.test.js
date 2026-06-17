@@ -65,7 +65,30 @@ test('a capped (top-N) column warns instead of blocking an unindexed value', asy
   const s = await e.build_native_model({ action: 'start', name: 'capped', source: 'events' });
   const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'eq', 'some_rare_status');
   assert.equal(r.action, 'add_step', 'not blocked');
-  assert.ok(r.recommendations.some((x) => /indexed top-N/.test(x)), JSON.stringify(r.recommendations));
+  assert.ok(r.recommendations.some((x) => /not in the index|more values than are indexed/i.test(x)), JSON.stringify(r.recommendations));
+});
+
+// HIGH-CARDINALITY guard (the user's concern): a column whose stored values reach the cap
+// (≥50) is treated as incomplete even if distinct_count looks satisfied — an unknown value
+// is WARNED, never hard-rejected (it may well exist beyond the indexed top-N).
+test('a many-valued column (at the cap) never hard-rejects an unindexed value', async () => {
+  const e = engine();
+  const many = Array.from({ length: 50 }, (_, i) => ({ value: `v${i}`, freq: 50 - i }));
+  e.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 50, totalCount: 9999, values: many });
+  const s = await e.build_native_model({ action: 'start', name: 'manyvals', source: 'events' });
+  const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'eq', 'v999_not_indexed');
+  assert.equal(r.action, 'add_step', 'a value beyond the cap is not blocked');
+  assert.ok(r.recommendations.some((x) => /not in the index|more values than are indexed/i.test(x)));
+});
+
+// A fuzzy NEAR-match is a WARNING, not a block — a distinct sibling value (level_1 vs level_3)
+// must never be rejected just because it resembles an indexed one.
+test('a fuzzy near-match warns but does not block', async () => {
+  const e = engine();
+  e.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'level_1', freq: 10 }, { value: 'level_2', freq: 5 }] });
+  const s = await e.build_native_model({ action: 'start', name: 'fuzzyok', source: 'events' });
+  const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'eq', 'level_3');
+  assert.equal(r.action, 'add_step', 'a similar-but-distinct value is not blocked');
 });
 
 // An UNINDEXED column (cold index) cannot be verified → no block, no false rejection.

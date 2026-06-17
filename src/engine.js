@@ -1001,9 +1001,15 @@ export class Engine {
     const ci = stored.find((v) => String(v.value).toLowerCase() === sval.toLowerCase());
     if (ci) return { kind: 'case', value: sval, suggest: [ci.value] };
     const [best] = rankFuzzy(sval, stored, { fields: (v) => [String(v.value)], threshold: 0.8, limit: 1 });
-    if (best) return { kind: 'typo', value: sval, suggest: [best.item.value] };
-    const capped = (this.valueIndex.valueCount(key) ?? 0) < (st.distinctCount ?? Infinity);
-    if (capped) return { kind: 'unverifiable', value: sval, note: 'value is not among the indexed top-N values for this column — verify it exists with a direct query before relying on this filter' };
+    if (best) return { kind: 'typo', value: sval, suggest: [best.item.value] }; // SOFT (a similar value exists, but could be a distinct sibling like level_1/level_3)
+    // Is the FULL value set indexed? Only then is "absent" a reliable hard signal. A column
+    // with many values is capped at the indexer's top-N (default 50) — a value can exist
+    // without being indexed — so we must NOT hard-reject it. We also treat a near-cap count
+    // as capped, because distinct_count can be HLL-approximate and under-count near the cap.
+    const VALUE_CAP = 50; // mirrors the value indexer's default maxValues
+    const storedCount = this.valueIndex.valueCount(key) ?? stored.length;
+    const capped = storedCount < (st.distinctCount ?? Infinity) || storedCount >= VALUE_CAP;
+    if (capped) return { kind: 'unverifiable', value: sval, note: 'this column has more values than are indexed (top-N only) — the value may well exist but is not in the index; verify with a direct query before relying on this filter' };
     return { kind: 'absent', value: sval, suggest: stored.slice(0, 10).map((v) => String(v.value)) };
   }
 
@@ -1048,13 +1054,15 @@ export class Engine {
       for (const v of Array.isArray(value) ? value : [value]) {
         const r = this._checkFilterValue(key, v);
         if (!r) continue;
-        if (r.kind === 'unverifiable') { warnings.push(`${where}: ${r.note}`); continue; }
         const fix = r.suggest && r.suggest.length ? ` Did you mean: ${r.suggest.map((s) => `'${s}'`).join(', ')}?` : '';
-        errors.push(r.kind === 'case'
-          ? `${where}: value '${r.value}' is not a real value — the column holds it with different casing.${fix}`
-          : r.kind === 'typo'
-            ? `${where}: value '${r.value}' was not found; a close value exists.${fix}`
-            : `${where}: value '${r.value}' does not occur in this column (all real values are indexed).${fix || ` Known values: ${(r.suggest || []).map((s) => `'${s}'`).join(', ')}.`}`);
+        // HARD-reject ONLY the certain cases: an exact case-mismatch (the value provably
+        // exists with different casing) and a value absent from a FULLY-indexed small set.
+        // A fuzzy near-match or any incompletely-indexed (top-N) column → WARN, never block —
+        // a real value may simply not be in the index, so we must not reject it.
+        if (r.kind === 'case') errors.push(`${where}: value '${r.value}' is not a real value — the column holds it with different casing.${fix}`);
+        else if (r.kind === 'absent') errors.push(`${where}: value '${r.value}' does not occur in this column (its full value set is indexed).${fix || ` Known values: ${(r.suggest || []).map((s) => `'${s}'`).join(', ')}.`}`);
+        else if (r.kind === 'typo') warnings.push(`${where}: value '${r.value}' was not found among indexed values; a similar value exists.${fix} Verify the exact value before relying on this filter.`);
+        else if (r.kind === 'unverifiable') warnings.push(`${where}: ${r.note}`);
       }
     }
     if (errors.length) {

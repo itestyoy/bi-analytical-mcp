@@ -198,6 +198,16 @@ test('a failing embedder reports semantic:false + semantic_error (not a silent t
   assert.ok(typeof si.memory_semantic_error === 'string' && si.memory_semantic_error.includes('provider unreachable'), 'semantic_index surfaces the memory embedding error');
 });
 
+// Cross-language via bilingual aliases: a Russian query finds an English note (and vice
+// versa) on the pure LEXICAL path (no embedder) — because the RU phrasing is in `aliases`.
+// (The semantic path additionally bridges languages via a multilingual embedder.)
+test('bilingual aliases bridge languages on the lexical path', async () => {
+  const e = engine(); // no embedder → lexical only
+  const rec = await e.memory({ action: 'record', note: 'media_source=organic means non-paid installs', aliases: ['organic traffic', 'органический трафик', 'органика'] });
+  assert.ok((await e.memory({ action: 'search', query: 'органика' })).notes.some((n) => n.id === rec.id), 'RU query finds the EN note via its RU alias');
+  assert.ok((await e.memory({ action: 'search', query: 'organic traffic' })).notes.some((n) => n.id === rec.id), 'EN query still finds it');
+});
+
 // Overview reports the stored count once anything is saved.
 test('semantic_index overview surfaces the memory count', async () => {
   const e = engine();

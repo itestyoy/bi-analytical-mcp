@@ -7,6 +7,14 @@
 //   MEMORY_EMBEDDINGS=openai  +  OPENAI_API_KEY
 //   (optional OPENAI_EMBEDDING_MODEL, default text-embedding-3-small; OPENAI_BASE_URL for
 //    an Azure/proxy/compatible endpoint).
+// CROSS-LANGUAGE (e.g. RU + EN): this is the EMBEDDING MODEL's job, not a storage trick —
+// a multilingual model maps both languages into ONE shared vector space, so a Russian query
+// finds an English note and vice versa with the SAME single embedding per note (no per-
+// language vectors needed). The default text-embedding-3-small/large ARE multilingual; for
+// stronger cross-lingual recall set OPENAI_EMBEDDING_MODEL=text-embedding-3-large, or point
+// OPENAI_BASE_URL at any OpenAI-compatible multilingual endpoint (e.g. Voyage voyage-3,
+// Cohere embed-multilingual-v3, or a local bge-m3 / multilingual-e5 gateway). The LEXICAL
+// fallback cannot bridge scripts, so also record bilingual `aliases` (see the memory tool).
 // NOTE: with this on, the TEXT of each saved finding is sent to the provider to be embedded
 // — a deliberate egress to a third party; leave it off if findings must not leave the boundary.
 

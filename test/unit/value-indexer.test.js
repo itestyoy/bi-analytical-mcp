@@ -66,3 +66,38 @@ test('BackgroundIndexer records a failed sync (errors logged, status error/parti
   assert.equal(s.indexed_properties, 0);
   index.close();
 });
+
+// Triple-cell collection: when the combined coverage query returns (event × app) rows, the
+// indexer persists each cell so cellCoverage(prop, {bundle, event}) reflects the seeded fill
+// (powers the native-model "field empty for this app+event" warning). Stub runner, no warehouse.
+test('BackgroundIndexer stores per (bundle × event) triple cells', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  let call = 0;
+  const runner = { show: async () => {
+    const k = (call += 1) % 3;
+    if (k === 1) return { ok: true, rows: [{ v: 'x', n: 3 }] };
+    if (k === 2) return { ok: true, rows: [{ d: 2, t: 10, rows_total: 18 }] };
+    // combined GROUP BY event_name, bundle → per-cell rows (ev + app)
+    return { ok: true, rows: [
+      { ev: 'ad_finished', app: 'com.omg.words', row_count: 10, non_null: 10 },
+      { ev: 'level_started', app: 'com.omg.relax', row_count: 8, non_null: 0 },
+    ] };
+  } };
+  const index = new ValueIndex();
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} });
+  await bi.refresh();
+
+  const prop = catalog.scalarEventProps()[0];
+  // populated cell
+  const filled = index.cellCoverage(prop, { bundle: 'com.omg.words', event: 'ad_finished' });
+  assert.equal(filled.non_null, 10);
+  // empty cell (field NULL for this app+event)
+  const empty = index.cellCoverage(prop, { bundle: 'com.omg.relax', event: 'level_started' });
+  assert.equal(empty.non_null, 0);
+  assert.equal(empty.row_count, 8);
+  // a combo that was never seen → no cell
+  assert.equal(index.cellCoverage(prop, { bundle: 'com.omg.words', event: 'level_started' }), null);
+  // the marginals still derive correctly from the same cells
+  assert.ok(index.bundleCoverage(prop).some((b) => b.bundle === 'com.omg.words' && b.non_null === 10));
+  index.close();
+});

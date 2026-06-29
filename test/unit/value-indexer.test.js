@@ -142,3 +142,27 @@ test('parseApproxTopK normalises dialect array shapes', async () => {
   assert.deepEqual(parseApproxTopK(JSON.stringify([{ value: 'a', count: 5 }])), [{ value: 'a', freq: 5 }]); // JSON-string encoded
   assert.deepEqual(parseApproxTopK('not json'), []); // unparseable → empty (caller falls back)
 });
+
+// Observability: when the COMBINED batch scan fails but per-property succeeds, the fallback
+// is not silent — the reason is logged (and indexing still completes via per-property).
+test('a failed combined batch logs the reason and falls back to per-property', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const runner = { show: async (_dir, sql) => {
+    if (/ AS d0/.test(sql)) return { ok: false, stdout: '', stderr: 'column limit exceeded' }; // combined cardinality → batch fails
+    if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };            // per-property top
+    if (/AS rows_total/.test(sql)) return { ok: true, rows: [{ d: 1, t: 3, rows_total: 5 }] };  // per-property cardinality
+    if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [{ ev: 'first_launch', row_count: 5, non_null: 3 }] };
+    return { ok: true, rows: [] };
+  } };
+  const logs = [];
+  const index = new ValueIndex();
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: (m) => logs.push(m) });
+  await bi.refresh();
+
+  assert.ok(logs.some((l) => /combined scan FAILED, falling back to per-property/.test(l)), `expected a batch-failure log; got: ${logs.filter((l) => /FAILED/.test(l)).slice(0, 2).join(' | ')}`);
+  // indexing still completed via the per-property fallback.
+  const s = index.syncStatus();
+  assert.equal(s.last_run.status, 'ok');
+  assert.equal(index.stats(catalog.scalarEventProps()[0]).totalCount, 3);
+  index.close();
+});

@@ -346,3 +346,17 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
   // unknown app → clear error listing the known apps.
   await assert.rejects(() => engine.semantic_index({ bundle: 'com.omg.nope' }), /unknown app/);
 });
+
+// Triple (property × bundle × event) coverage from the REAL warehouse: the seed puts level
+// events on com.omg.colorfit, so ad_type is NULL there while result IS present — the exact
+// per-cell fill that powers the native-model "field is empty for this app+event" warning.
+test('triple coverage: per (bundle × event) cell fill matches the seeded data', opts, async (t) => {
+  if (skip(t)) return;
+  // ad_type_of_event_data is NULL on colorfit's level_started rows (it only carries on ad_*).
+  const adCell = index.cellCoverage('ad_type_of_event_data', { bundle: 'com.omg.colorfit', event: 'level_started' });
+  assert.ok(adCell, 'cell exists (colorfit emits level_started)');
+  assert.equal(adCell.non_null, 0, 'ad_type is empty for colorfit+level_started');
+  // result_of_event_data IS populated on level_completed (which colorfit emits).
+  const resCell = index.cellCoverage('result_of_event_data', { bundle: 'com.omg.colorfit', event: 'level_completed' });
+  assert.ok(resCell && resCell.non_null > 0, JSON.stringify(resCell));
+});

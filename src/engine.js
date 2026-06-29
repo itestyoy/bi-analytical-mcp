@@ -973,7 +973,7 @@ export class Engine {
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
       columns_removed: before.filter((c) => !afterNames.has(c.name)).map((c) => c.name),
       next: 'add_step the next stage, materialize the draft, or pass include_columns:true / preview for the full column list.',
-      recommendations: [...filterWarnings, ...this._eventScopeWarnings(draft, stage), ...this._draftStepRecommendations(stage, after)],
+      recommendations: [...filterWarnings, ...this._eventScopeWarnings(draft, stage), ...this._emptyCombinationWarnings(draft, stage), ...this._draftStepRecommendations(stage, after)],
     };
     if (includeColumns) resp.available_columns = after;
     return resp;
@@ -1085,6 +1085,58 @@ export class Engine {
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
     return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ property: '${p}' }).event_coverage).`];
+  }
+
+  /**
+   * After a step, warn when a USED event-property is empty for the pipeline's SCOPED app
+   * (bundle_id) and/or event_name — i.e. it is the wrong field FOR THIS APP, so the step
+   * will likely produce no values. Uses the precise (property × bundle × event) TRIPLE when
+   * both are scoped, else the per-bundle / per-event marginal. Soft warning only (the index
+   * can be incomplete/stale); silent when nothing concrete is scoped or the field is fine.
+   */
+  _emptyCombinationWarnings(draft, stage) {
+    const c = this.catalog;
+    const bundleCol = c.bundleColumn();
+    const evCol = c.eventNameColumn();
+    const props = c.scalarEventProps();
+    const s = JSON.stringify(stage);
+    const used = props.filter((p) => s.includes(`"${p}"`)); // event-properties referenced by THIS step
+    if (!used.length) return [];
+    // Concrete scope from all where-stages so far (eq / in only).
+    const scopedEvents = new Set(); const scopedBundles = new Set();
+    for (const st of draft.stages) if (st.stage === 'where') for (const cd of st.conditions || []) {
+      if (!cd || cd.column == null || !(cd.op === 'eq' || cd.op === 'in')) continue;
+      const vals = Array.isArray(cd.value) ? cd.value : [cd.value];
+      if (cd.column === evCol) vals.forEach((v) => scopedEvents.add(String(v)));
+      else if (bundleCol && cd.column === bundleCol) vals.forEach((v) => scopedBundles.add(String(v)));
+    }
+    if (!scopedBundles.size && !scopedEvents.size) return []; // nothing concrete scoped → _eventScopeWarnings covers it
+    const fmt = (arr) => arr.slice(0, 4).join(', ') + (arr.length > 4 ? ', …' : '');
+    const warns = [];
+    for (const p of used) {
+      if (scopedBundles.size && scopedEvents.size) {
+        // Precise triple: every scoped app×event pair where the field carries no value.
+        const empty = [];
+        for (const b of scopedBundles) for (const ev of scopedEvents) {
+          const cell = this.valueIndex.cellCoverage(p, { bundle: b, event: ev });
+          if (!cell || cell.non_null === 0) empty.push(`${b} + ${ev}`); // missing cell = no rows for that combo
+        }
+        const total = scopedBundles.size * scopedEvents.size;
+        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ bundle: '${[...scopedBundles][0]}' }) or semantic_index({ property: '${p}' }).bundle_coverage / event_coverage.`);
+        else if (empty.length) warns.push(`'${p}' is empty for app+event ${fmt(empty)} (present for the other scoped pairs) — those rows contribute no '${p}'.`);
+      } else if (scopedBundles.size) {
+        const byB = new Map(this.valueIndex.bundleCoverage(p).map((x) => [x.bundle, x]));
+        const empty = [...scopedBundles].filter((b) => byB.get(b) && byB.get(b).non_null === 0);
+        if (empty.length === scopedBundles.size) warns.push(`'${p}' is NULL for app(s) ${fmt(empty)} — this step likely yields no '${p}' values for ${empty.length > 1 ? 'them' : 'this app'} (semantic_index({ bundle: '${empty[0]}' })).`);
+        else if (empty.length) warns.push(`'${p}' is empty for app(s) ${fmt(empty)} (populated for the other scoped app(s)).`);
+      } else {
+        const byE = new Map(this.valueIndex.coverage(p).map((x) => [x.event_name, x]));
+        const empty = [...scopedEvents].filter((ev) => byE.get(ev) && byE.get(ev).non_null === 0);
+        if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ property: '${p}' }).event_coverage).`);
+        else if (empty.length) warns.push(`'${p}' is empty on event(s) ${fmt(empty)} (populated on the other scoped event(s)).`);
+      }
+    }
+    return warns.slice(0, 3);
   }
 
   /** Stage-aware next-step hints from the just-added stage + the resulting columns. */

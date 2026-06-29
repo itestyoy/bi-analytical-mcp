@@ -11,20 +11,9 @@ import { join } from 'node:path';
 function run(bin, args, { cwd, env, timeout = 120000 } = {}) {
   return new Promise((resolve) => {
     execFile(bin, args, { cwd, env: { ...process.env, ...env }, timeout, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-      // Build an EXPLICIT process-level reason. A timeout (Node kills the child after
-      // `timeout`ms) is the common silent failure: the child dies mid-query so stdout holds
-      // only dbt's startup banner and the real warehouse error never prints. Spell that out
-      // (killed/signal/exit-code) so the cause is concrete, not "log just stops after startup".
-      let error = err?.message;
-      if (err) {
-        const parts = [];
-        if (err.killed || err.signal === 'SIGTERM') parts.push(`process KILLED after ~${timeout}ms — almost certainly a TIMEOUT (the query exceeded the runner timeout; raise DbtRunner timeout or narrow the scan)`);
-        if (err.signal) parts.push(`signal ${err.signal}`);
-        if (err.code != null && err.code !== 0) parts.push(`exit code ${err.code}`);
-        if (err.message) parts.push(err.message);
-        error = parts.join('; ') || err.message;
-      }
-      resolve({ ok: !err, code: err?.code ?? 0, killed: !!err?.killed, signal: err?.signal ?? null, stdout: stdout || '', stderr: stderr || '', error });
+      // Record exactly what JS gives us — the thrown error verbatim (stack incl. message), no
+      // reformatting, no guessing. Node also exposes killed/signal/code on the error object.
+      resolve({ ok: !err, code: err?.code ?? 0, killed: !!err?.killed, signal: err?.signal ?? null, stdout: stdout || '', stderr: stderr || '', error: err ? (err.stack || err.message) : undefined });
     });
   });
 }

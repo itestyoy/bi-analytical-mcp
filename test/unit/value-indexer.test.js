@@ -179,8 +179,8 @@ test('semantic_index({ status })/({ run }) surface the full batch fallback reaso
   const catalog = loadCatalog(CATALOG, {});
   const engine = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rn-')) }) });
   const runner = { show: async (_d, sql) => {
-    // combined cardinality fails with a process-level reason (e.g. timeout) + warehouse stderr.
-    if (/ AS d0/.test(sql)) return { ok: false, error: 'process KILLED after ~180000ms — almost certainly a TIMEOUT', stderr: 'permission denied on column foo' };
+    // combined cardinality fails — show() hands back exactly what JS produced: error + stderr.
+    if (/ AS d0/.test(sql)) return { ok: false, error: 'Error: Command failed: dbt show ...\n    at ChildProcess.exithandler', stderr: 'permission denied on column foo' };
     if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
     if (/AS rows_total/.test(sql)) return { ok: true, rows: [{ d: 1, t: 3, rows_total: 5 }] };
     if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [{ ev: 'first_launch', row_count: 5, non_null: 3 }] };
@@ -190,10 +190,10 @@ test('semantic_index({ status })/({ run }) surface the full batch fallback reaso
 
   const runId = engine.valueIndex.syncStatus().last_run.id;
   const run = await engine.semantic_index({ run: runId });
-  // both the process-level reason (timeout) AND the warehouse stderr are present — full, untruncated.
-  assert.ok((run.fallbacks || []).some((n) => /TIMEOUT/.test(n) && /permission denied on column foo/.test(n)), `{ run }.fallbacks: ${JSON.stringify(run.fallbacks)}`);
+  // the literal JS error AND the warehouse stderr are present verbatim — full, untruncated.
+  assert.ok((run.fallbacks || []).some((n) => /Command failed: dbt show/.test(n) && /permission denied on column foo/.test(n)), `{ run }.fallbacks: ${JSON.stringify(run.fallbacks)}`);
   const st = await engine.semantic_index({ status: true });
-  assert.ok((st.value_index.last_run_fallbacks || []).some((n) => /TIMEOUT/.test(n) && /permission denied/.test(n)), `{ status } fallbacks: ${JSON.stringify(st.value_index.last_run_fallbacks)}`);
+  assert.ok((st.value_index.last_run_fallbacks || []).some((n) => /Command failed: dbt show/.test(n) && /permission denied/.test(n)), `{ status } fallbacks: ${JSON.stringify(st.value_index.last_run_fallbacks)}`);
   engine.close();
 });
 

@@ -80,8 +80,12 @@ export function approxCountDistinct(dialect, expr) {
 export function approxTopK(dialect, expr, k = 50) {
   const d = String(dialect || '').toLowerCase();
   const n = Math.max(1, Math.floor(Number(k) || 50));
-  if (d === 'bigquery') return `APPROX_TOP_COUNT(${expr}, ${n})`; // ARRAY<STRUCT<value, count>>
-  if (d === 'snowflake') return `APPROX_TOP_K(${expr}, ${n})`;    // ARRAY of [value, count]
+  // Wrap the array result in a JSON STRING: APPROX_TOP_COUNT/APPROX_TOP_K return a nested
+  // ARRAY<STRUCT> that `dbt show --output json` CANNOT serialize (the query runs fine in the
+  // warehouse, but the show step then errors). A plain JSON string serializes cleanly and
+  // parseApproxTopK() parses it back.
+  if (d === 'bigquery') return `TO_JSON_STRING(APPROX_TOP_COUNT(${expr}, ${n}))`; // → "[{\"value\":..,\"count\":..}]"
+  if (d === 'snowflake') return `TO_JSON(APPROX_TOP_K(${expr}, ${n}))`;            // → "[[value,count],..]"
   return null;
 }
 

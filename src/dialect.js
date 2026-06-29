@@ -69,3 +69,41 @@ export function approxCountDistinct(dialect, expr) {
   if (d === 'redshift') return `APPROXIMATE COUNT(DISTINCT ${expr})`;
   return null; // postgres & unknown → no native approx; use exact COUNT(DISTINCT)
 }
+
+/**
+ * APPROXIMATE top-K expression returning the K most frequent values WITH their counts in a
+ * single aggregate — lets the indexer collect top-values for MANY properties in ONE scan.
+ * null when the dialect has no count-bearing top-k (→ caller does a per-property GROUP BY,
+ * the most efficient option that DB has). Note: DuckDB's approx_top_k returns values WITHOUT
+ * counts, so it is intentionally excluded (we need frequencies).
+ */
+export function approxTopK(dialect, expr, k = 50) {
+  const d = String(dialect || '').toLowerCase();
+  const n = Math.max(1, Math.floor(Number(k) || 50));
+  if (d === 'bigquery') return `APPROX_TOP_COUNT(${expr}, ${n})`; // ARRAY<STRUCT<value, count>>
+  if (d === 'snowflake') return `APPROX_TOP_K(${expr}, ${n})`;    // ARRAY of [value, count]
+  return null;
+}
+
+/**
+ * Normalise an approx-top-k cell (from `dbt show --output json`) to [{ value, freq }],
+ * tolerating both the BigQuery [{value,count}] and Snowflake [[value,count]] shapes and a
+ * JSON-string-encoded value. Returns [] if it cannot be parsed (caller then falls back).
+ */
+export function parseApproxTopK(raw) {
+  let arr = raw;
+  if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch { return []; } }
+  if (!Array.isArray(arr)) return [];
+  const out = [];
+  for (const e of arr) {
+    if (e == null) continue;
+    if (Array.isArray(e)) { // [value, count]
+      if (e[0] != null) out.push({ value: e[0], freq: Number(e[1]) || 0 });
+    } else if (typeof e === 'object') { // { value, count } (case-insensitive keys)
+      const lower = Object.fromEntries(Object.entries(e).map(([k, v]) => [k.toLowerCase(), v]));
+      const v = lower.value ?? lower.val ?? lower.element;
+      if (v != null) out.push({ value: v, freq: Number(lower.count ?? lower.cnt ?? lower.frequency) || 0 });
+    }
+  }
+  return out;
+}

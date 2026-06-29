@@ -171,35 +171,29 @@ test('a failed combined batch logs the reason and falls back to per-property', a
   index.close();
 });
 
-// The fallback reason is logged to stderr but NOT surfaced through the tools:
-// semantic_index({ status })/({ run }) must NOT carry the error text.
-test('the batch fallback reason is logged only, never surfaced through the tools', async () => {
+// The FULL fallback reason is surfaced THROUGH the tools: semantic_index({ status }) + ({ run }).
+test('semantic_index({ status })/({ run }) surface the full batch fallback reason', async () => {
   const { ContextManager } = await import('../../src/context-manager.js');
   const { Engine } = await import('../../src/engine.js');
   const { mkdtempSync } = await import('node:fs'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
   const catalog = loadCatalog(CATALOG, {});
   const engine = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rn-')) }) });
   const runner = { show: async (_d, sql) => {
-    if (/ AS d0/.test(sql)) return { ok: false, stderr: 'permission denied on column foo' }; // combined cardinality fails
+    // combined cardinality fails with a process-level reason (e.g. timeout) + warehouse stderr.
+    if (/ AS d0/.test(sql)) return { ok: false, error: 'process KILLED after ~180000ms — almost certainly a TIMEOUT', stderr: 'permission denied on column foo' };
     if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
     if (/AS rows_total/.test(sql)) return { ok: true, rows: [{ d: 1, t: 3, rows_total: 5 }] };
     if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [{ ev: 'first_launch', row_count: 5, non_null: 3 }] };
     return { ok: true, rows: [] };
   } };
-  const logs = [];
-  await new BackgroundIndexer({ catalog, runner, index: engine.valueIndex, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: (m) => logs.push(m) }).refresh();
+  await new BackgroundIndexer({ catalog, runner, index: engine.valueIndex, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} }).refresh();
 
-  // The REAL reason is in the LOG.
-  assert.ok(logs.some((l) => /permission denied on column foo/.test(l)), `expected the reason in the log; got: ${logs.filter((l) => /FAILED/.test(l)).slice(0, 2).join(' | ')}`);
-
-  // …but it is NOT exposed by either tool view, and there is no fallbacks field at all.
   const runId = engine.valueIndex.syncStatus().last_run.id;
   const run = await engine.semantic_index({ run: runId });
-  assert.equal(run.fallbacks, undefined, 'semantic_index({ run }) must not carry a fallbacks field');
-  assert.ok(!JSON.stringify(run).includes('permission denied'), 'the error text must not leak into { run }');
+  // both the process-level reason (timeout) AND the warehouse stderr are present — full, untruncated.
+  assert.ok((run.fallbacks || []).some((n) => /TIMEOUT/.test(n) && /permission denied on column foo/.test(n)), `{ run }.fallbacks: ${JSON.stringify(run.fallbacks)}`);
   const st = await engine.semantic_index({ status: true });
-  assert.equal(st.value_index.last_run_fallbacks, undefined, 'semantic_index({ status }) must not carry last_run_fallbacks');
-  assert.ok(!JSON.stringify(st).includes('permission denied'), 'the error text must not leak into { status }');
+  assert.ok((st.value_index.last_run_fallbacks || []).some((n) => /TIMEOUT/.test(n) && /permission denied/.test(n)), `{ status } fallbacks: ${JSON.stringify(st.value_index.last_run_fallbacks)}`);
   engine.close();
 });
 

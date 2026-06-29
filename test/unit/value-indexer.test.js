@@ -194,3 +194,32 @@ test('semantic_index({ status })/({ run }) surface the batch fallback reason', a
   assert.ok((st.value_index.last_run_fallbacks || []).some((n) => /permission denied/.test(n)), `{ status } fallbacks: ${JSON.stringify(st.value_index.last_run_fallbacks)}`);
   engine.close();
 });
+
+// Resilience: a failing combined TOP-K must NOT discard the batch — cardinality+coverage stay
+// combined, only top-values degrade to per-property, and the real reason is recorded.
+test('a failed combined top-k degrades ONLY top-values, keeping cardinality+coverage combined', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.dialect = 'bigquery'; // combined top-k path
+  let perPropTop = 0; let combinedCardCalls = 0; let combinedCovCalls = 0;
+  const runner = { show: async (_d, sql) => {
+    if (/APPROX_TOP_COUNT/.test(sql)) return { ok: false, stdout: 'Running with dbt=1.11\nRegistered adapter: bigquery\nDatabase Error\n  Resources exceeded during query execution', stderr: '' };
+    if (/ORDER BY n DESC/.test(sql)) { perPropTop += 1; return { ok: true, rows: [{ v: 'x', n: 3 }] }; } // per-property top fallback
+    if (/ AS d0/.test(sql)) { combinedCardCalls += 1; return { ok: true, rows: [aliasRow({ rows_total: 5 }, 3)] }; } // combined cardinality (kept)
+    if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) { combinedCovCalls += 1; return { ok: true, rows: [aliasRow({ ev: 'first_launch', app: null, row_count: 5 }, 3)] }; } // combined coverage (kept)
+    return { ok: true, rows: [] };
+  } };
+  const index = new ValueIndex();
+  await new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, batchSize: 40, logger: () => {} }).refresh();
+
+  // top-k failed → per-property top ran; but cardinality+coverage stayed COMBINED (one each per batch).
+  assert.ok(perPropTop > 0, 'top-values fell back to per-property');
+  assert.ok(combinedCardCalls > 0 && combinedCovCalls > 0, 'cardinality+coverage stayed combined (not full fallback)');
+  // the real reason is recorded in the run, with the dbt banner stripped.
+  const s = index.syncStatus();
+  const notes = index.runNotes(s.last_run.id).map((n) => n.note);
+  // FULL raw output is kept verbatim (banner AND the real error line) — nothing stripped/truncated.
+  assert.ok(notes.some((n) => /top-k .* FAILED/.test(n) && /Resources exceeded during query execution/.test(n) && /Running with dbt/.test(n)), JSON.stringify(notes));
+  // stats + values still landed.
+  assert.equal(index.stats(catalog.scalarEventProps()[0]).totalCount, 3);
+  index.close();
+});

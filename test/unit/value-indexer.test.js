@@ -171,15 +171,16 @@ test('a failed combined batch logs the reason and falls back to per-property', a
   index.close();
 });
 
-// The fallback reason is visible THROUGH the tools: semantic_index({ status }) + ({ run }).
-test('semantic_index({ status })/({ run }) surface the batch fallback reason', async () => {
+// The FULL fallback reason is surfaced THROUGH the tools: semantic_index({ status }) + ({ run }).
+test('semantic_index({ status })/({ run }) surface the full batch fallback reason', async () => {
   const { ContextManager } = await import('../../src/context-manager.js');
   const { Engine } = await import('../../src/engine.js');
   const { mkdtempSync } = await import('node:fs'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
   const catalog = loadCatalog(CATALOG, {});
   const engine = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rn-')) }) });
   const runner = { show: async (_d, sql) => {
-    if (/ AS d0/.test(sql)) return { ok: false, stderr: 'permission denied on column foo' }; // combined cardinality fails
+    // combined cardinality fails — show() hands back exactly what JS produced: error + stderr.
+    if (/ AS d0/.test(sql)) return { ok: false, error: 'Error: Command failed: dbt show ...\n    at ChildProcess.exithandler', stderr: 'permission denied on column foo' };
     if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
     if (/AS rows_total/.test(sql)) return { ok: true, rows: [{ d: 1, t: 3, rows_total: 5 }] };
     if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [{ ev: 'first_launch', row_count: 5, non_null: 3 }] };
@@ -189,9 +190,10 @@ test('semantic_index({ status })/({ run }) surface the batch fallback reason', a
 
   const runId = engine.valueIndex.syncStatus().last_run.id;
   const run = await engine.semantic_index({ run: runId });
-  assert.ok((run.fallbacks || []).some((n) => /permission denied on column foo/.test(n)), `{ run }.fallbacks: ${JSON.stringify(run.fallbacks)}`);
+  // the literal JS error AND the warehouse stderr are present verbatim — full, untruncated.
+  assert.ok((run.fallbacks || []).some((n) => /Command failed: dbt show/.test(n) && /permission denied on column foo/.test(n)), `{ run }.fallbacks: ${JSON.stringify(run.fallbacks)}`);
   const st = await engine.semantic_index({ status: true });
-  assert.ok((st.value_index.last_run_fallbacks || []).some((n) => /permission denied/.test(n)), `{ status } fallbacks: ${JSON.stringify(st.value_index.last_run_fallbacks)}`);
+  assert.ok((st.value_index.last_run_fallbacks || []).some((n) => /Command failed: dbt show/.test(n) && /permission denied/.test(n)), `{ status } fallbacks: ${JSON.stringify(st.value_index.last_run_fallbacks)}`);
   engine.close();
 });
 

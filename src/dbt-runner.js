@@ -11,7 +11,9 @@ import { join } from 'node:path';
 function run(bin, args, { cwd, env, timeout = 120000 } = {}) {
   return new Promise((resolve) => {
     execFile(bin, args, { cwd, env: { ...process.env, ...env }, timeout, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, code: err?.code ?? 0, stdout: stdout || '', stderr: stderr || '', error: err?.message });
+      // Record exactly what JS gives us — the thrown error verbatim (stack incl. message), no
+      // reformatting, no guessing. Node also exposes killed/signal/code on the error object.
+      resolve({ ok: !err, code: err?.code ?? 0, killed: !!err?.killed, signal: err?.signal ?? null, stdout: stdout || '', stderr: stderr || '', error: err ? (err.stack || err.message) : undefined });
     });
   });
 }
@@ -57,7 +59,9 @@ export class DbtRunner {
   async show(projectDir, sql, limit = 1000) {
     const args = ['show', '--inline', sql, '--output', 'json', '--limit', String(limit)];
     const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
-    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, rows: [], columns: [] };
+    // Preserve r.error (the process-level message from execFile: timeout, ENOENT, spawn
+    // failure) so callers can log the REAL reason from ANY level — not just dbt's own stderr.
+    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, rows: [], columns: [] };
     const rows = parseShowJson(r.stdout);
     return { ok: true, rows, columns: rows[0] ? Object.keys(rows[0]).map((name) => ({ name })) : [] };
   }

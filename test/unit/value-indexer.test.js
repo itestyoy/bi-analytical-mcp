@@ -171,8 +171,9 @@ test('a failed combined batch logs the reason and falls back to per-property', a
   index.close();
 });
 
-// The fallback reason is visible THROUGH the tools: semantic_index({ status }) + ({ run }).
-test('semantic_index({ status })/({ run }) surface the batch fallback reason', async () => {
+// The fallback reason is logged to stderr but NOT surfaced through the tools:
+// semantic_index({ status })/({ run }) must NOT carry the error text.
+test('the batch fallback reason is logged only, never surfaced through the tools', async () => {
   const { ContextManager } = await import('../../src/context-manager.js');
   const { Engine } = await import('../../src/engine.js');
   const { mkdtempSync } = await import('node:fs'); const { tmpdir } = await import('node:os'); const { join } = await import('node:path');
@@ -185,13 +186,20 @@ test('semantic_index({ status })/({ run }) surface the batch fallback reason', a
     if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [{ ev: 'first_launch', row_count: 5, non_null: 3 }] };
     return { ok: true, rows: [] };
   } };
-  await new BackgroundIndexer({ catalog, runner, index: engine.valueIndex, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} }).refresh();
+  const logs = [];
+  await new BackgroundIndexer({ catalog, runner, index: engine.valueIndex, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: (m) => logs.push(m) }).refresh();
 
+  // The REAL reason is in the LOG.
+  assert.ok(logs.some((l) => /permission denied on column foo/.test(l)), `expected the reason in the log; got: ${logs.filter((l) => /FAILED/.test(l)).slice(0, 2).join(' | ')}`);
+
+  // …but it is NOT exposed by either tool view, and there is no fallbacks field at all.
   const runId = engine.valueIndex.syncStatus().last_run.id;
   const run = await engine.semantic_index({ run: runId });
-  assert.ok((run.fallbacks || []).some((n) => /permission denied on column foo/.test(n)), `{ run }.fallbacks: ${JSON.stringify(run.fallbacks)}`);
+  assert.equal(run.fallbacks, undefined, 'semantic_index({ run }) must not carry a fallbacks field');
+  assert.ok(!JSON.stringify(run).includes('permission denied'), 'the error text must not leak into { run }');
   const st = await engine.semantic_index({ status: true });
-  assert.ok((st.value_index.last_run_fallbacks || []).some((n) => /permission denied/.test(n)), `{ status } fallbacks: ${JSON.stringify(st.value_index.last_run_fallbacks)}`);
+  assert.equal(st.value_index.last_run_fallbacks, undefined, 'semantic_index({ status }) must not carry last_run_fallbacks');
+  assert.ok(!JSON.stringify(st).includes('permission denied'), 'the error text must not leak into { status }');
   engine.close();
 });
 

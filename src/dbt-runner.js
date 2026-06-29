@@ -57,7 +57,9 @@ export class DbtRunner {
   async show(projectDir, sql, limit = 1000) {
     const args = ['show', '--inline', sql, '--output', 'json', '--limit', String(limit)];
     const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
-    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, rows: [], columns: [] };
+    // Preserve r.error (the process-level message from execFile: timeout, ENOENT, spawn
+    // failure) so callers can log the REAL reason from ANY level — not just dbt's own stderr.
+    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, rows: [], columns: [] };
     const rows = parseShowJson(r.stdout);
     return { ok: true, rows, columns: rows[0] ? Object.keys(rows[0]).map((name) => ({ name })) : [] };
   }

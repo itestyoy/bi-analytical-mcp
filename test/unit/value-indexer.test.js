@@ -179,8 +179,8 @@ test('semantic_index({ status })/({ run }) surface the full batch fallback reaso
   const catalog = loadCatalog(CATALOG, {});
   const engine = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rn-')) }) });
   const runner = { show: async (_d, sql) => {
-    // combined cardinality fails — show() hands back exactly what JS produced: error + stderr.
-    if (/ AS d0/.test(sql)) return { ok: false, error: 'Error: Command failed: dbt show ...\n    at ChildProcess.exithandler', stderr: 'permission denied on column foo' };
+    // combined cardinality fails with the REAL dbt error on stderr (no node "Command failed" wrapper).
+    if (/ AS d0/.test(sql)) return { ok: false, error: 'dbt exited with code 1', stderr: 'Database Error\n  permission denied on column foo' };
     if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
     if (/AS rows_total/.test(sql)) return { ok: true, rows: [{ d: 1, t: 3, rows_total: 5 }] };
     if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [{ ev: 'first_launch', row_count: 5, non_null: 3 }] };
@@ -190,10 +190,11 @@ test('semantic_index({ status })/({ run }) surface the full batch fallback reaso
 
   const runId = engine.valueIndex.syncStatus().last_run.id;
   const run = await engine.semantic_index({ run: runId });
-  // the literal JS error AND the warehouse stderr are present verbatim — full, untruncated.
-  assert.ok((run.fallbacks || []).some((n) => /Command failed: dbt show/.test(n) && /permission denied on column foo/.test(n)), `{ run }.fallbacks: ${JSON.stringify(run.fallbacks)}`);
+  // the REAL dbt/warehouse error is surfaced verbatim; no node "Command failed: …" stack wrapper.
+  assert.ok((run.fallbacks || []).some((n) => /permission denied on column foo/.test(n)), `{ run }.fallbacks: ${JSON.stringify(run.fallbacks)}`);
+  assert.ok(!(run.fallbacks || []).some((n) => /Command failed|ChildProcess|genericNodeError/.test(n)), `no node wrapper noise: ${JSON.stringify(run.fallbacks)}`);
   const st = await engine.semantic_index({ status: true });
-  assert.ok((st.value_index.last_run_fallbacks || []).some((n) => /Command failed: dbt show/.test(n) && /permission denied/.test(n)), `{ status } fallbacks: ${JSON.stringify(st.value_index.last_run_fallbacks)}`);
+  assert.ok((st.value_index.last_run_fallbacks || []).some((n) => /permission denied/.test(n)), `{ status } fallbacks: ${JSON.stringify(st.value_index.last_run_fallbacks)}`);
   engine.close();
 });
 

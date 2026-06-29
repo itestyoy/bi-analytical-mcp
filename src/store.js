@@ -50,6 +50,7 @@ export class MemoryBackend {
     const props = new Map(); // property -> { distinctCount, totalCount, nullCount, indexedAt, values:[{value,freq}], coverage:[{event_name,row_count,non_null}] }
     const runs = [];
     const runProps = []; // { run_id, property, ms, values_written, distinct_count, total_count, status, error, started_at }
+    const runNotes = []; // { run_id, note, at } — run-level events (e.g. a batch fell back to per-property)
     const memory = new Map(); // id -> { id, note, targets:[], aliases:[], links:[], created_at }
     const vectors = new Map(); // id -> { vec:number[], model } (semantic memory search)
     let runSeq = 0;
@@ -161,7 +162,7 @@ export class MemoryBackend {
     // Wipe state (used by MCP_DB_RESET on startup). Memory is curated knowledge that is
     // NOT re-derivable (unlike the value index, which the background indexer repopulates),
     // so a routine clean-slate reset deliberately PRESERVES it.
-    this.reset = () => { props.clear(); runs.length = 0; runProps.length = 0; runSeq = 0; };
+    this.reset = () => { props.clear(); runs.length = 0; runProps.length = 0; runNotes.length = 0; runSeq = 0; };
 
     this.runs = {
       reconcile: () => {},
@@ -176,6 +177,8 @@ export class MemoryBackend {
       },
       properties: (runId, { limit = 1000 } = {}) => runProps.filter((x) => x.run_id === runId).sort((a, b) => (b.ms ?? -1) - (a.ms ?? -1) || String(a.property).localeCompare(b.property)).slice(0, limit),
       propertyHistory: (property, { limit = 20 } = {}) => runProps.filter((x) => x.property === property).sort((a, b) => b.run_id - a.run_id).slice(0, limit),
+      addNote: (runId, note) => { runNotes.push({ run_id: runId, note: String(note), at: Date.now() }); },
+      notes: (runId) => runNotes.filter((x) => x.run_id === runId).map((x) => ({ note: x.note, at: x.at })),
     };
   }
 
@@ -208,6 +211,9 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
+    // Run-level events surfaced in semantic_index({ status })/({ run }), e.g. "a batch fell
+    // back to per-property because the combined scan failed: <reason>".
+    db.exec('CREATE TABLE IF NOT EXISTS index_run_notes (run_id INTEGER, note TEXT, at INTEGER)');
     // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.
     db.exec('CREATE TABLE IF NOT EXISTS memory (id TEXT PRIMARY KEY, note TEXT, question TEXT, targets TEXT, aliases TEXT, links TEXT, created_at INTEGER, embedding TEXT, embedding_model TEXT)');
     // columns added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
@@ -312,6 +318,8 @@ export class SqliteBackend {
       },
       properties(runId, { limit = 1000 } = {}) { return s._all('SELECT * FROM index_run_props WHERE run_id = ? ORDER BY ms DESC, property ASC LIMIT ?', runId, limit); },
       propertyHistory(property, { limit = 20 } = {}) { return s._all('SELECT p.*, r.started_at FROM index_run_props p JOIN index_runs r ON r.id = p.run_id WHERE p.property = ? ORDER BY p.run_id DESC LIMIT ?', property, limit); },
+      addNote(runId, note) { s._run('INSERT INTO index_run_notes (run_id, note, at) VALUES (?, ?, ?)', runId, String(note), Date.now()); },
+      notes(runId) { return s._all('SELECT note, at FROM index_run_notes WHERE run_id = ? ORDER BY at ASC', runId).map((r) => ({ note: r.note, at: Number(r.at) })); },
     };
 
     // Analyst memory (curated findings). JSON columns are decoded back to arrays on read.
@@ -388,7 +396,7 @@ export class SqliteBackend {
    */
   reset() {
     this._tx(() => {
-      for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_runs', 'index_run_props']) this._run(`DELETE FROM ${t}`);
+      for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_runs', 'index_run_props', 'index_run_notes']) this._run(`DELETE FROM ${t}`);
     });
   }
 

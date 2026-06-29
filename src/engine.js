@@ -721,11 +721,19 @@ export class Engine {
     const run = this.valueIndex.runById(input.run);
     if (!run) throw new ToolError(`unknown index run '${input.run}'. See semantic_index({ status: true }).value_index.recent_runs[].id`, { stage: 'validate', field: 'run' });
     const props = this.valueIndex.runProperties(input.run).map((r) => this._indexPropRow(r));
+    const fallbacks = (this.valueIndex.runNotes ? this.valueIndex.runNotes(run.id) : []).map((n) => n.note);
     return {
       run: { id: run.id, started_at: run.started_at, finished_at: run.finished_at, status: run.status, properties_indexed: run.properties_indexed, values_written: run.values_written, errors: run.errors, duration_ms: (run.finished_at != null && run.started_at != null) ? run.finished_at - run.started_at : null },
       property_count: props.length,
       properties: props,
-      recommendations: [props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`],
+      // Run-level events: a batch whose combined scan failed (with the REAL reason) and fell
+      // back to per-property. Empty when every batch combined cleanly. NB: per-property `ms`
+      // is only meaningful for properties scanned individually (batched ones are ~0).
+      ...(fallbacks.length ? { fallbacks } : {}),
+      recommendations: [
+        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`,
+        ...(fallbacks.length ? [`${fallbacks.length} batch(es) fell back to per-property (slower) — reason: ${fallbacks[0]}`] : []),
+      ],
     };
   }
 
@@ -743,6 +751,8 @@ export class Engine {
     const secsSince = last?.finished_at != null ? Math.round((Date.now() - last.finished_at) / 1000) : null;
     // Preview the slowest properties of the last run; full per-property timing via drill-down.
     const slowest = last?.id != null ? this.valueIndex.runProperties(last.id, { limit: 5 }).map(propRow) : [];
+    // Batch-fallback events of the last run (combined scan failed → per-property, with reason).
+    const fallbacks = (last?.id != null && this.valueIndex.runNotes) ? this.valueIndex.runNotes(last.id).map((n) => n.note) : [];
 
     const jobs = this.jobs.list(); // [{ query_id, status, table, context_id, age_ms }]
     const running = jobs.filter((j) => j.status === 'running');
@@ -755,6 +765,7 @@ export class Engine {
     else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ property }).`);
     if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }); semantic_index({ status }) lists them.`);
     if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
+    if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property (slower, one scan per property) — combined scan failed: ${fallbacks[0]}. See semantic_index({ run: ${last.id} }).fallbacks.`);
     if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
 
     return {
@@ -768,6 +779,7 @@ export class Engine {
         last_run: sync.last_run,
         last_successful_run: sync.last_successful_run,
         slowest_properties: slowest,
+        ...(fallbacks.length ? { last_run_fallbacks: fallbacks } : {}),
         recent_runs: sync.recent_runs,
       },
       query_jobs: {

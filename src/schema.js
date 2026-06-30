@@ -323,19 +323,25 @@ export function buildSchemas(catalog) {
     // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
     // belong to the action, so a stray param is an error rather than silently ignored.
     allOf: [
-      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'], ...forbid(['stage']) } },
-      { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range']) } },
-      { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage']) } },
+      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'], ...forbid(['stage', 'index', 'after']) } },
+      { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after']) } },
+      { if: { properties: { action: { enum: ['edit_step', 'insert_step'] } }, required: ['action'] }, then: { required: ['draft_id', 'index', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'after']) } },
+      { if: { properties: { action: { const: 'delete_step' } }, required: ['action'] }, then: { required: ['draft_id', 'index'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'after']) } },
+      { if: { properties: { action: { const: 'truncate' } }, required: ['action'] }, then: { required: ['draft_id', 'after'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'index']) } },
+      { if: { properties: { action: { const: 'fork' } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['source', 'materialized', 'time_range', 'stage', 'index']) } },
+      { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'index', 'after']) } },
     ],
     properties: {
-      action: { enum: ['start', 'add_step', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + the source columns); add_step appends ONE stage and returns the columns available after it; preview shows the accumulated steps + generated SQL; materialize builds the draft as a model (the final step after the stages); discard drops it.' },
-      draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for add_step/preview/materialize/discard.' },
-      name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start.' },
+      action: { enum: ['start', 'add_step', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + source columns); add_step appends ONE stage and returns the columns available after it; edit_step replaces step `index`; insert_step inserts a stage BEFORE `index`; delete_step removes step `index`; truncate keeps only steps 1..`after` (cheap "go back to step N"); fork branches a NEW draft from steps 1..`after` of this draft (or an already-materialized pipeline) WITHOUT touching the original — iterate variants without re-typing the shared prefix; preview shows steps + generated SQL; materialize builds the model; discard drops the draft. Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one.' },
+      draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for everything except start. For fork it may also be a context whose pipeline was already materialized.' },
+      name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
       source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table (start only; default the events fact).' },
       time_range: trProp,
-      stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage to append (add_step), validated against the columns available so far.' },
-      include_columns: { type: 'boolean', description: 'start/add_step: also return the FULL available_columns list. Off by default — add_step returns only the per-step diff (columns_added/columns_removed + column_count) to avoid re-dumping the whole schema each step; use preview for the full list too.' },
+      stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
+      index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index) for edit_step / insert_step / delete_step. insert_step places the stage BEFORE this position (count+1 appends).' },
+      after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — for truncate (drop the rest) and fork (copy that prefix into the new draft). 0 = none; omit on fork to copy all steps.' },
+      include_columns: { type: 'boolean', description: 'start/add_step/edit ops: also return the FULL available_columns list. Off by default — the per-step response returns only the diff (columns_added + columns_removed_count, with the removed names only when short) to avoid re-dumping the whole schema each step; use preview for the full list too.' },
     },
   };
 
@@ -613,7 +619,7 @@ function abTestSchema() {
 
   return {
     type: 'object',
-    description: 'Run an A/B significance test on PRE-AGGREGATED group stats (compute them first with a pipeline: join the experiments source, window events to the assignment period, then aggregate per group). The required group fields DEPEND ON metric (discriminated union): proportion → conversions (two-proportion z-test); mean → mean+stddev (Welch t-test); ratio → the five per-user sums sumNum/sumDen/sumNum2/sumDen2/sumNumDen (delta-method test for ratio metrics whose analysis unit is finer than the randomization unit, e.g. completed/started or clicks/impressions randomized by user); cuped → the five per-user sufficient sums sumY/sumY2/sumX/sumX2/sumXY (CUPED variance reduction via a pre-experiment covariate, then Welch). Returns each variant vs control: lift (absolute+relative, with a relative-lift CI), test statistic, p-value, confidence interval, significance, and a multiplicity-adjusted p-value across the variant family.',
+    description: 'Two-sample (or multi-group) STATISTICAL SIGNIFICANCE test on PRE-AGGREGATED group stats — use it for ANY comparison of two groups, NOT only randomized A/B experiments. "control" and "variants" are just group A vs group B(…): e.g. mean time at first occurrence vs last occurrence, conversion of cohort X vs Y, before vs after. Don\'t hand-roll a t-test/z-test — compute per-group aggregates with a pipeline, then call this. The required group fields DEPEND ON metric (discriminated union): proportion → conversions+n (two-proportion z-test); mean → mean+stddev+n (Welch t-test); ratio → the five per-user sums sumNum/sumDen/sumNum2/sumDen2/sumNumDen (delta-method for ratio metrics whose analysis unit is finer than the randomization unit, e.g. completed/started or clicks/impressions per user); cuped → sumY/sumY2/sumX/sumX2/sumXY (CUPED variance reduction via a pre-period covariate, then Welch). Returns each variant vs control: lift (absolute+relative, with a relative-lift CI), test statistic, p-value, confidence interval, significance, and a multiplicity-adjusted p-value across the family.',
     required: ['metric', 'control', 'variants'],
     properties: {
       metric: { enum: ['proportion', 'mean', 'ratio', 'cuped'], description: 'Which test to run and which group fields are required: proportion→conversions; mean→mean,stddev; ratio→sumNum,sumDen,sumNum2,sumDen2,sumNumDen; cuped→sumY,sumY2,sumX,sumX2,sumXY.' },

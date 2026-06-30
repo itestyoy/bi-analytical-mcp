@@ -63,11 +63,16 @@ test('build_native_model: add_step returns a column diff by default', async () =
   assert.ok(typeof a1.column_count === 'number' && a1.column_count > 0);
   const added = a1.columns_added.map((c) => c.name);
   assert.ok(added.includes('reached_a') && added.includes('completed'), 'diff shows the funnel columns this stage added');
-  assert.ok(!a1.columns_removed.includes('player_id_of_internal'), 'the carried partition key is not reported as removed');
+  // Compact diff: a step that drops many columns reports a COUNT, not ~200 names.
+  assert.ok(typeof a1.columns_removed_count === 'number' && a1.columns_removed_count > 0);
+  assert.equal(a1.columns_removed, undefined, 'long removed list omitted by default (count only)');
+  // the carried partition key persists (NOT dropped) — verify via the full list.
+  const full = await e.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  assert.ok(full.available_columns.some((c) => c.name === 'player_id_of_internal'), 'partition key carried through, not removed');
   // aggregate then collapses to group keys + measures: prior event columns show as removed.
   const a2 = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', fn: 'count' }] } });
   assert.deepEqual(a2.columns_added.map((c) => c.name), ['n']); // group key 'completed' persisted; 'n' is new
-  assert.ok(a2.columns_removed.includes('reached_a'), 'aggregated-away columns reported as removed');
+  assert.ok((a2.columns_removed || []).includes('reached_a'), 'aggregated-away columns reported as removed (short list shown)');
   assert.equal(a2.column_count, 2);
 });
 
@@ -171,4 +176,94 @@ test('build_native_model: grounding is skipped without a runner (declared column
   const s = await e.build_native_model({ action: 'start', name: 'noground', source: 'events', include_columns: true });
   assert.ok(s.available_columns.some((c) => c.name === 'complete_time_of_event_data'), 'declared column offered (cannot verify physically offline)');
   assert.equal(s.not_materialized, undefined);
+});
+
+// ── P1: pointwise editing — edit/insert/delete/truncate mutate in place + revalidate ──
+test('build_native_model: edit_step / insert_step / delete_step / truncate mutate in place', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'edit', source: 'events' });
+  const d = s.draft_id;
+  await e.build_native_model({ action: 'add_step', draft_id: d, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
+  await e.build_native_model({ action: 'add_step', draft_id: d, stage: mr });
+  // edit step 1 in place (replace the where literal) — count unchanged.
+  const ed = await e.build_native_model({ action: 'edit_step', draft_id: d, index: 1, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'tutorial' }] } });
+  assert.equal(ed.action, 'edit_step');
+  assert.equal(ed.steps[0].conditions[0].value, 'tutorial', 'step 1 replaced in place');
+  assert.equal(ed.steps.length, 2, 'edit does not change the step count');
+  // insert a new step BEFORE position 1.
+  const ins = await e.build_native_model({ action: 'insert_step', draft_id: d, index: 1, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['tutorial', 'first_launch'] }] } });
+  assert.equal(ins.steps.length, 3);
+  assert.equal(ins.steps[0].conditions[0].op, 'in', 'inserted at the front');
+  // delete step 2.
+  const del = await e.build_native_model({ action: 'delete_step', draft_id: d, index: 2 });
+  assert.equal(del.steps.length, 2);
+  // truncate back to a single step (the cheap "go back to step N").
+  const tr = await e.build_native_model({ action: 'truncate', draft_id: d, after: 1 });
+  assert.equal(tr.steps.length, 1);
+  // out-of-range index/after are rejected.
+  await assert.rejects(() => e.build_native_model({ action: 'edit_step', draft_id: d, index: 9, stage: mr }), /out of range/);
+  await assert.rejects(() => e.build_native_model({ action: 'truncate', draft_id: d, after: 9 }), /out of range/);
+});
+
+// An edit that breaks a LATER step is rejected with that step's index; the draft is intact.
+test('build_native_model: an edit breaking a downstream step reports the step index, draft intact', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'brk', source: 'events' });
+  const d = s.draft_id;
+  await e.build_native_model({ action: 'add_step', draft_id: d, stage: mr }); // step 1: funnel exposes reached_a/completed
+  await e.build_native_model({ action: 'add_step', draft_id: d, stage: { stage: 'where', conditions: [{ column: 'completed', op: 'eq', value: true }] } }); // step 2 uses 'completed'
+  // replacing step 1 with a plain where removes 'completed' → step 2 can no longer reference it.
+  await assert.rejects(
+    () => e.build_native_model({ action: 'edit_step', draft_id: d, index: 1, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } }),
+    /step 2/,
+  );
+  const pv = await e.build_native_model({ action: 'preview', draft_id: d });
+  assert.equal(pv.steps.length, 2, 'draft left intact after a rejected edit');
+  assert.equal(pv.steps[0].stage, 'match_recognize', 'step 1 unchanged');
+});
+
+// fork branches a NEW draft from a prefix WITHOUT touching the original.
+test('build_native_model: fork branches a new draft from step N; original untouched', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'orig', source: 'events' });
+  const d = s.draft_id;
+  await e.build_native_model({ action: 'add_step', draft_id: d, stage: mr });
+  await e.build_native_model({ action: 'add_step', draft_id: d, stage: { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', fn: 'count' }] } });
+  const fk = await e.build_native_model({ action: 'fork', draft_id: d, after: 1 });
+  assert.notEqual(fk.draft_id, d, 'fork is a NEW draft');
+  assert.equal(fk.copied_steps, 1);
+  assert.equal(fk.steps.length, 1, 'only the kept prefix copied');
+  // the fork diverges independently; the source draft is never mutated.
+  const f2 = await e.build_native_model({ action: 'add_step', draft_id: fk.draft_id, stage: { stage: 'aggregate', group_by: ['reached_a'], measures: [{ name: 'm', fn: 'count' }] } });
+  assert.equal(f2.steps.length, 2);
+  const orig = await e.build_native_model({ action: 'preview', draft_id: d });
+  assert.equal(orig.steps.length, 2, 'source draft untouched by the fork or its edits');
+  assert.equal(orig.steps[1].stage, 'aggregate');
+});
+
+// P3: a one_per_match funnel warns to filter completed=true (counts all starts otherwise).
+test('build_native_model: one_per_match funnel warns to filter completed', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'opm', source: 'events' });
+  const a = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { ...mr, rows: 'one_per_match' } });
+  assert.ok(a.recommendations.some((r) => /one_per_match/.test(r) && /completed/.test(r)), 'warns that one_per_match counts all starts unless completed is filtered');
+  // one_per_partition (default) does NOT raise the completed warning.
+  const s2 = await e.build_native_model({ action: 'start', name: 'opp', source: 'events' });
+  const a2 = await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: mr });
+  assert.ok(!a2.recommendations.some((r) => /one_per_match/.test(r)), 'no one_per_match warning for one_per_partition');
+});
+
+// P4: limit + transform.limit both cap rows — together they'd emit two LIMITs (SQL error).
+// The guard rejects the ambiguity; either source alone reads fine.
+test('get_query_result: limit + transform.limit conflict rejected; one alone works', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const runner = { show: async () => ({ ok: true, rows: [{ a: 1 }], columns: [{ name: 'a' }] }) };
+  const e = new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/gqr', workspaceRoot: mkdtempSync(join(tmpdir(), 'gqr-')) }) });
+  const ctx = e.ctxs.create();
+  await assert.rejects(
+    () => e.get_query_result({ context_id: ctx.id, table: 'qr_abc12345', limit: 5, transform: { limit: 3 } }),
+    /once|both/,
+  );
+  const ok = await e.get_query_result({ context_id: ctx.id, table: 'qr_abc12345', transform: { limit: 3 } });
+  assert.equal(ok.status, 'ready', 'transform.limit alone reads without a double-LIMIT error');
 });

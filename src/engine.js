@@ -844,11 +844,16 @@ export class Engine {
   async build_native_model(input) {
     this._validate('build_native_model', input);
     if (input.action === 'start') return this._draftStart(input);
+    if (input.action === 'fork') return this._draftFork(input); // branches a NEW draft (no live draft required)
     const ctx = this.ctxs.get(input.draft_id);
     const draft = ctx.state.draft;
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
     if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns);
+    if (input.action === 'edit_step') return this._draftEditStep(ctx, draft, input.index, input.stage, input.include_columns);
+    if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.stage, input.include_columns);
+    if (input.action === 'delete_step') return this._draftDeleteStep(ctx, draft, input.index, input.include_columns);
+    if (input.action === 'truncate') return this._draftTruncate(ctx, draft, input.after, input.include_columns);
     if (input.action === 'preview') return this._draftPreview(ctx, draft);
     if (input.action === 'discard') { delete ctx.state.draft; return { draft_id: ctx.id, action: 'discard', discarded: true }; }
     return this._draftMaterialize(ctx, draft); // materialize (the final build step)
@@ -953,43 +958,148 @@ export class Engine {
   }
 
   async _draftAddStep(ctx, draft, stage, includeColumns = false) {
-    const physSet = await this._physicalCols(draft.source);
-    const before = this._draftColumns(draft, physSet); // columns BEFORE this stage
-    const trial = [...draft.stages, stage];
-    try {
-      renderPipeline(this.catalog, this.catalog.dialect, draft.source, trial, { physicalCols: physSet }); // validates refs/stage against PHYSICAL columns (no warehouse)
-    } catch (e) {
-      // Reject the step WITHOUT persisting it; the draft is left intact to retry.
-      throw new ToolError(e.message, { stage: 'compile', field: 'stage' });
+    return this._draftCommit(ctx, draft, [...draft.stages, stage], { changedStage: stage, includeColumns, action: 'add_step' });
+  }
+
+  /** Validate `index` (1-based) against the current stage count for an edit op. */
+  _stepIndex(draft, index, action) {
+    if (!Number.isInteger(index) || index < 1 || index > draft.stages.length) {
+      throw new ToolError(`${action} index=${index} out of range — the draft has ${draft.stages.length} step(s); use 1..${draft.stages.length} (see steps[].index)`, { stage: 'validate', field: 'index' });
     }
-    // Verify filter literals against the SOURCE's real values BEFORE persisting — a wrong-
-    // cased/non-existent value ('organic' vs 'Organic') is rejected with the correct value,
-    // not silently filtered to nothing. Scoped to draft.source so casing is per-source.
+    return index;
+  }
+
+  /** Replace step N in place (then revalidate the whole pipeline end-to-end). */
+  async _draftEditStep(ctx, draft, index, stage, includeColumns = false) {
+    const i = this._stepIndex(draft, index, 'edit_step');
+    const next = draft.stages.slice(); next[i - 1] = stage;
+    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, action: 'edit_step', stepIndex: i });
+  }
+
+  /** Insert a step BEFORE position N (1-based; N = count+1 appends). */
+  async _draftInsertStep(ctx, draft, index, stage, includeColumns = false) {
+    if (!Number.isInteger(index) || index < 1 || index > draft.stages.length + 1) {
+      throw new ToolError(`insert_step index=${index} out of range — use 1..${draft.stages.length + 1} (insert before that step; ${draft.stages.length + 1} appends)`, { stage: 'validate', field: 'index' });
+    }
+    const next = draft.stages.slice(); next.splice(index - 1, 0, stage);
+    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, action: 'insert_step', stepIndex: index });
+  }
+
+  /** Delete step N (then revalidate the remaining downstream steps). */
+  async _draftDeleteStep(ctx, draft, index, includeColumns = false) {
+    const i = this._stepIndex(draft, index, 'delete_step');
+    const next = draft.stages.slice(); next.splice(i - 1, 1);
+    return this._draftCommit(ctx, draft, next, { changedStage: null, includeColumns, action: 'delete_step', stepIndex: Math.min(i, next.length) });
+  }
+
+  /** Drop every step after position N — the cheap "go back to step N" (after=0 empties the draft). */
+  async _draftTruncate(ctx, draft, after, includeColumns = false) {
+    if (!Number.isInteger(after) || after < 0 || after > draft.stages.length) {
+      throw new ToolError(`truncate after=${after} out of range — the draft has ${draft.stages.length} step(s); use 0..${draft.stages.length}`, { stage: 'validate', field: 'after' });
+    }
+    return this._draftCommit(ctx, draft, draft.stages.slice(0, after), { changedStage: null, includeColumns, action: 'truncate', stepIndex: after });
+  }
+
+  /**
+   * Branch a NEW draft from an existing draft (or an already-materialized pipeline) keeping
+   * steps 1..after — so you iterate on a variant WITHOUT re-typing the shared prefix and
+   * WITHOUT touching the original. after omitted → copy every step.
+   */
+  async _draftFork(input) {
+    const src = this.ctxs.get(input.draft_id);
+    const origin = src.state.draft || src.state.pipeline_origin; // live draft, or the snapshot a materialize left behind
+    if (!origin) throw new ToolError(`context '${input.draft_id}' has no draft or built pipeline to fork — start one, or fork a context whose pipeline was materialized`, { stage: 'validate', field: 'draft_id' });
+    const total = origin.stages.length;
+    const after = input.after == null ? total : input.after;
+    if (!Number.isInteger(after) || after < 0 || after > total) throw new ToolError(`fork after=${input.after} out of range — the source has ${total} step(s); use 0..${total}`, { stage: 'validate', field: 'after' });
+    const ctx = this.ctxs.create();
+    const name = input.name || origin.name;
+    // Deep-copy the kept stages so editing the fork can never mutate the source's stages.
+    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))) };
+    this.ctxs.touch(ctx.id);
+    const physSet = await this._physicalCols(ctx.state.draft.source);
+    const cols = this._draftColumns(ctx.state.draft, physSet);
+    const resp = {
+      draft_id: ctx.id, action: 'fork', forked_from: input.draft_id, name, source: ctx.state.draft.source,
+      materialized: ctx.state.draft.materialized, copied_steps: after, step_index: after,
+      steps: this._draftSteps(ctx.state.draft), column_count: cols.length,
+      next: 'Continue editing this NEW draft (add_step / edit_step / insert_step / delete_step / truncate); the original is untouched. Materialize when done.',
+      recommendations: [
+        `Forked ${after} of ${total} step(s) into a new draft ${ctx.id}; the source ${input.draft_id} is unchanged — branch variants freely.`,
+        `Materialize with build_native_model({ action: "materialize", draft_id: "${ctx.id}" }).`,
+      ],
+    };
+    if (input.include_columns) resp.available_columns = cols;
+    return resp;
+  }
+
+  /** Index (1-based) of the first step in `stages` that fails to render — for a pinpointed error. */
+  _failingStepIndex(source, stages, physSet) {
+    for (let i = 1; i <= stages.length; i += 1) {
+      try { renderPipeline(this.catalog, this.catalog.dialect, source, stages.slice(0, i), { physicalCols: physSet }); }
+      catch { return i; }
+    }
+    return null;
+  }
+
+  /**
+   * Validate `newStages` as a whole and, on success, replace the draft's stages — returning
+   * the per-step diff (columns added/removed). Powers add_step AND the edit ops (edit/insert/
+   * delete/truncate): every edit revalidates the ENTIRE downstream, so a change that breaks a
+   * later step is reported with that step's index and the draft is left intact to fix. The
+   * `changedStage` (the added/edited stage; null for delete/truncate) drives the filter/scope/
+   * funnel warnings.
+   */
+  async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, action = 'add_step', stepIndex = null } = {}) {
+    const physSet = await this._physicalCols(draft.source);
+    const before = this._draftColumns(draft, physSet); // columns BEFORE the change
+    try {
+      if (newStages.length) renderPipeline(this.catalog, this.catalog.dialect, draft.source, newStages, { physicalCols: physSet });
+    } catch (e) {
+      // Reject WITHOUT persisting; pinpoint which step broke so an edit in the middle is actionable.
+      const at = this._failingStepIndex(draft.source, newStages, physSet);
+      throw new ToolError(at ? `step ${at}: ${e.message}` : e.message, { stage: 'compile', field: 'stage' });
+    }
+    // Verify filter literals on the changed stage against the SOURCE's real values BEFORE persisting
+    // — a wrong-cased/non-existent value ('organic' vs 'Organic') is flagged with the correct value.
     let filterWarnings = [];
-    if (stage && stage.stage === 'where' && Array.isArray(stage.conditions)) {
-      filterWarnings = this._guardFilterValues(stage.conditions
+    if (changedStage && changedStage.stage === 'where' && Array.isArray(changedStage.conditions)) {
+      filterWarnings = this._guardFilterValues(changedStage.conditions
         .filter((cd) => cd && cd.column != null && Object.prototype.hasOwnProperty.call(cd, 'value'))
         .map((cd) => ({ key: this._valueKeyForColumn(draft.source, cd.column), op: cd.op, value: cd.value, where: `where ${cd.column}` })));
     }
-    draft.stages = trial;
+    draft.stages = newStages;
     this.ctxs.touch(ctx.id);
     const after = this._draftColumns(draft, physSet);
-    // Default to a DIFF (what this stage added/removed) instead of dumping the whole
-    // schema every step — the full list is noise after the first call. Pass
-    // include_columns:true (or use preview) for the complete set.
     const beforeNames = new Set(before.map((c) => c.name));
     const afterNames = new Set(after.map((c) => c.name));
+    const removed = before.filter((c) => !afterNames.has(c.name)).map((c) => c.name);
     const resp = {
-      draft_id: ctx.id, action: 'add_step', step_index: draft.stages.length,
+      draft_id: ctx.id, action, step_index: stepIndex ?? draft.stages.length,
       steps: this._draftSteps(draft),
       column_count: after.length,
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
-      columns_removed: before.filter((c) => !afterNames.has(c.name)).map((c) => c.name),
-      next: 'add_step the next stage, materialize the draft, or pass include_columns:true / preview for the full column list.',
-      recommendations: [...filterWarnings, ...this._eventScopeWarnings(draft, stage), ...this._emptyCombinationWarnings(draft, stage), ...this._draftStepRecommendations(stage, after)],
+      // Compact by default: a step that drops 200 columns must not reprint 200 names every call.
+      // Always give the count; include the full list only when it is short or include_columns is set.
+      columns_removed_count: removed.length,
+      ...((includeColumns || removed.length <= 10) ? { columns_removed: removed } : {}),
+      next: action === 'add_step'
+        ? 'add_step the next stage; or fix a prior step with edit_step/insert_step/delete_step/truncate; or materialize. Pass include_columns:true / preview for the full column list.'
+        : 'Pipeline revalidated end-to-end after the edit. Continue editing, preview, or materialize (include_columns:true for the full list).',
+      recommendations: [
+        ...filterWarnings,
+        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._draftStepRecommendations(changedStage, after)] : []),
+      ],
     };
     if (includeColumns) resp.available_columns = after;
     return resp;
+  }
+
+  /** one_per_match counts EVERY start (incl. partial chains). Nudge to filter completed=true
+   *  downstream when the intent is "completed situations" — the common foot-gun. */
+  _funnelCompletionWarnings(stage) {
+    if (!stage || stage.stage !== 'match_recognize' || (stage.rows || 'one_per_partition') !== 'one_per_match') return [];
+    return [`rows:'one_per_match' counts EVERY occurrence of the start step — including partial/abandoned chains, not only completed funnels. To count only COMPLETED situations, add a downstream where on completed = true (the funnel exposes a 'completed' boolean). Keep it unfiltered only if you really want all starts.`];
   }
 
   /**
@@ -1159,6 +1269,9 @@ export class Engine {
       recs.push(`The funnel columns (reached_<step>, completed, furthest_step_name, secs_<metric>) plus the carried partition key(s) are now available — join 'users' or aggregate to slice conversion (e.g. by country).`);
     } else if (stage.stage === 'aggregate') {
       recs.push(`Aggregated: the output is now group_by keys + measures (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}); add order_by/limit or materialize.`);
+      // Comparing two groups? The stats live in a tool — don't hand-roll a t-test. ab_test is a
+      // GENERAL two-sample significance test (not only randomized experiments).
+      recs.push(`Comparing two groups (A vs B, before/after, first vs last)? Don't compute significance by hand — feed the per-group aggregates to ab_test({ action or metric: 'mean' → mean+stddev+n (Welch t-test), 'proportion' → conversions+n (z-test) }) for p-value + CI.`);
     } else if (stage.stage === 'join') {
       recs.push(`Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.`);
     } else {
@@ -1186,6 +1299,15 @@ export class Engine {
       name: draft.name, context_id: ctx.id, materialized: draft.materialized,
       pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
     });
+    if (result && result.ok === false) return result; // build/run FAILED — keep the draft so it can be fixed & retried (no rebuild from scratch)
+    // Funnel-completeness nudge: a one_per_match funnel with NO downstream completed filter
+    // counts all starts (incl. partials), not completed situations — surface it on the result.
+    const mrIdx = draft.stages.findIndex((s) => s.stage === 'match_recognize' && (s.rows || 'one_per_partition') === 'one_per_match');
+    if (mrIdx >= 0 && !draft.stages.slice(mrIdx + 1).some((s) => s.stage === 'where' && (s.conditions || []).some((c) => c.column === 'completed')) && result && typeof result === 'object') {
+      (result.warnings ||= []).push(`This funnel used rows:'one_per_match' with NO downstream filter on completed — the row count includes partial/abandoned chains (all starts), not only completed situations. Add a 'where completed = true' step before materialize if you meant completed funnels.`);
+    }
+    // Snapshot the built pipeline so it can still be forked after the draft is cleared.
+    ctx.state.pipeline_origin = { name: draft.name, source: draft.source, materialized: draft.materialized, time_range: draft.time_range || null, stages: draft.stages.map((s) => JSON.parse(JSON.stringify(s))) };
     delete ctx.state.draft; // materialized — clear the draft so the context holds only the built model
     return result;
   }
@@ -1882,7 +2004,16 @@ export class Engine {
   async get_query_result(input) {
     this._validate('get_query_result', input);
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
-    const limit = input.limit ?? 1000;
+    // The top-level `limit` and `transform.limit` BOTH cap rows; applied together they emit
+    // two LIMITs (… LIMIT a … LIMIT b → SQL syntax error). Accept exactly one source of truth,
+    // and when it lives in transform, strip it so buildProjection doesn't also emit a LIMIT —
+    // the read applies it via `limit`. (Input-validation guard; no string-matching of SQL.)
+    const tLimit = (input.transform && typeof input.transform.limit === 'number') ? input.transform.limit : undefined;
+    if (tLimit != null && input.limit != null) {
+      throw new ToolError('specify the row cap ONCE: pass `limit` at the top level OR `transform.limit`, not both.', { stage: 'validate', field: 'transform.limit' });
+    }
+    const limit = input.limit ?? tLimit ?? 1000;
+    const transform = (input.transform && tLimit != null) ? { ...input.transform, limit: undefined } : input.transform;
     const offset = input.offset ?? 0;
     const sample = !!input.sample;
     const samplePercent = input.sample_percent ?? 10;
@@ -1891,13 +2022,13 @@ export class Engine {
     if (input.table) {
       this.ctxs.get(input.context_id); // validate the context exists (throws otherwise)
       if (!/^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$/.test(input.table)) throw new ToolError(`invalid result table name: ${input.table}`, { stage: 'validate', field: 'table' });
-      return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, input.transform, {}, offset, sample, samplePercent);
+      return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, transform, {}, offset, sample, samplePercent);
     }
     const job = this.jobs.get(input.query_id);
     if (!job) throw new ToolError(`unknown query_id: ${input.query_id} (pass {context_id, table} to fetch a known table directly)`, { stage: 'validate', field: 'query_id' });
     if (job.status === 'running') return { ok: true, status: 'running', query_id: job.id, table: job.table };
     if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, table: job.table, error: { stage: 'materialize', message: job.error } };
-    return this._fetchResult(job.id, limit, input.transform, offset, sample, samplePercent);
+    return this._fetchResult(job.id, limit, transform, offset, sample, samplePercent);
   }
 
   list_query_jobs() {

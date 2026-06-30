@@ -15,7 +15,7 @@ import { DbtRunner } from '../dbt-runner.js';
 const SIDECAR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'python', 'mf_sidecar.py');
 
 export class MfEngineBackend {
-  constructor({ pythonBin = 'python', dbtBin = 'dbt', profilesDir, timeout = 180000 } = {}) {
+  constructor({ pythonBin = 'python', dbtBin = 'dbt', profilesDir, timeout = 600000 } = {}) {
     this.pythonBin = pythonBin;
     this.profilesDir = profilesDir;
     this.timeout = timeout;

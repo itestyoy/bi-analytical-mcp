@@ -173,7 +173,7 @@ export async function makeEngine(opts = {}) {
   const runner = opts.runner !== undefined
     ? opts.runner
     : baseProjectDir
-      ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir })
+      ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
       : null;
   const queryTimeoutMs = (Number(process.env.QUERY_TIMEOUT_SECONDS) || 60) * 1000;
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
@@ -283,7 +283,12 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // Properties indexed per combined scan (cardinality + coverage in one query each); a failed
   // batch degrades to per-property. Tune down on very wide facts / strict column limits.
   const batchSize = Number(process.env.MCP_INDEX_BATCH) || 40;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  // Dedicated timeout (seconds) for the heavy index scans — a combined top-k over the full
+  // fact can exceed the runner's default 180s and get SIGTERM-killed. Generous default (600s)
+  // so indexing finishes; ordinary user queries keep the smaller runner timeout. Tune via
+  // MCP_INDEX_TIMEOUT_SECONDS (or pair with MCP_INDEX_WINDOW_DAYS to bound the scan instead).
+  const scanTimeout = (Number(process.env.MCP_INDEX_TIMEOUT_SECONDS) || 600) * 1000;
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.

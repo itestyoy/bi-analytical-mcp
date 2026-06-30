@@ -8,7 +8,7 @@ import { existsSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-function run(bin, args, { cwd, env, timeout = 120000 } = {}) {
+function run(bin, args, { cwd, env, timeout = 600000 } = {}) {
   return new Promise((resolve) => {
     execFile(bin, args, { cwd, env: { ...process.env, ...env }, timeout, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
       // The useful failure fact JS gives us is killed/signal/code — NOT err.message/err.stack,
@@ -27,7 +27,7 @@ function run(bin, args, { cwd, env, timeout = 120000 } = {}) {
 }
 
 export class DbtRunner {
-  constructor({ dbtBin = 'dbt', mfBin = 'mf', profilesDir, timeout = 180000 } = {}) {
+  constructor({ dbtBin = 'dbt', mfBin = 'mf', profilesDir, timeout = 600000 } = {}) {
     this.dbtBin = dbtBin;
     this.mfBin = mfBin;
     this.profilesDir = profilesDir;

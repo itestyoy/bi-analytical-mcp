@@ -2854,6 +2854,40 @@
       },
       "notes": "Compare volumes and per-event user counts against expectation/history; a vanished or collapsed event usually means broken tracking, not changed behavior. Drill NULL coverage of a suspicious property with semantic_index({ property }) — it separates expected NULLs (property not applicable to the event) from real gaps. Add a time_range to audit a specific release window, or group_by a user attribute (join 'users') to localize a client-side break.",
       "hack": "Anomaly triage order: (1) event volumes, (2) property NULL coverage, (3) only then the metric itself. Most 'metric drops' are tracking changes."
+    },
+    {
+      "id": "two_sample_significance",
+      "task_type": "ab_test",
+      "title": "Two-sample significance for ANY two groups (no experiment needed)",
+      "when_to_use": "You have TWO groups from the SAME pipeline and want to know if a difference is statistically real — NOT a randomized experiment. E.g. mean time-to-first vs time-to-last occurrence, conversion of cohort A vs B, a metric before vs after a date, organic vs paid. There is NO experiments-assignment table involved.",
+      "required_events": [],
+      "required_properties": [],
+      "required_user_attrs": [],
+      "required_roles": [],
+      "metric_types": [
+        "mean",
+        "proportion"
+      ],
+      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_native_model pipeline, then feed them to ab_test — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (avg) + stddev, then ab_test({ metric: 'mean' }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then ab_test({ metric: 'proportion' }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a CASE/derive column, two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final ab_test step on example per-group aggregates.",
+      "hack": "Compare two groups → aggregate each to its sufficient stats (mean: n+mean+stddev; proportion: conversions+n) in one pipeline, then ONE ab_test call returns lift + p-value + CI + significance. Reuse for first-vs-last, before-vs-after, cohort-vs-cohort — anywhere you'd otherwise eyeball two numbers.",
+      "tool_calls": [
+        {
+          "tool": "ab_test",
+          "args": {
+            "metric": "mean",
+            "control": { "label": "group_a", "n": 1200, "mean": 42.5, "stddev": 18.3 },
+            "variants": [{ "label": "group_b", "n": 1180, "mean": 39.1, "stddev": 17.9 }]
+          }
+        },
+        {
+          "tool": "ab_test",
+          "args": {
+            "metric": "proportion",
+            "control": { "label": "group_a", "n": 4000, "conversions": 820 },
+            "variants": [{ "label": "group_b", "n": 4100, "conversions": 905 }]
+          }
+        }
+      ]
     }
   ]
 }

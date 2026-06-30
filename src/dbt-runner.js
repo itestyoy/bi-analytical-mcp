@@ -63,10 +63,14 @@ export class DbtRunner {
     try { return { ok: true, columns: JSON.parse(m[1]) }; } catch { return { ok: false, stdout: r.stdout }; }
   }
 
-  /** Run a simple SQL against the warehouse and return rows (dbt show --output json). */
-  async show(projectDir, sql, limit = 1000) {
+  /**
+   * Run a simple SQL against the warehouse and return rows (dbt show --output json).
+   * `timeout` overrides the runner default for THIS call — heavy value-index scans pass a
+   * larger one so a full-table aggregate isn't killed mid-flight (the SIGTERM-timeout case).
+   */
+  async show(projectDir, sql, limit = 1000, timeout = this.timeout) {
     const args = ['show', '--inline', sql, '--output', 'json', '--limit', String(limit)];
-    const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
+    const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout });
     // Preserve r.error (the process-level message from execFile: timeout, ENOENT, spawn
     // failure) so callers can log the REAL reason from ANY level — not just dbt's own stderr.
     if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, rows: [], columns: [] };

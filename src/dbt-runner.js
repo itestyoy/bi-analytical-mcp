@@ -11,9 +11,17 @@ import { join } from 'node:path';
 function run(bin, args, { cwd, env, timeout = 120000 } = {}) {
   return new Promise((resolve) => {
     execFile(bin, args, { cwd, env: { ...process.env, ...env }, timeout, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
-      // Record exactly what JS gives us — the thrown error verbatim (stack incl. message), no
-      // reformatting, no guessing. Node also exposes killed/signal/code on the error object.
-      resolve({ ok: !err, code: err?.code ?? 0, killed: !!err?.killed, signal: err?.signal ?? null, stdout: stdout || '', stderr: stderr || '', error: err ? (err.stack || err.message) : undefined });
+      // The useful failure fact JS gives us is killed/signal/code — NOT err.message/err.stack,
+      // which is just the "Command failed: <whole command>" + node-internal-stack wrapper.
+      // A killed/SIGTERM exit means the runner timeout fired (the query never finished); a
+      // non-zero exit means dbt itself failed and printed the real reason to stdout/stderr.
+      let error;
+      if (err) {
+        error = (err.killed || err.signal)
+          ? `dbt killed by ${err.signal || 'signal'} — hit the ${timeout}ms runner timeout (query did not finish)`
+          : `dbt exited with code ${err.code}`;
+      }
+      resolve({ ok: !err, code: err?.code ?? 0, killed: !!err?.killed, signal: err?.signal ?? null, stdout: stdout || '', stderr: stderr || '', error });
     });
   });
 }

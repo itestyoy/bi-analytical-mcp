@@ -118,11 +118,11 @@ test('high-cardinality fields are flagged and skipped on the next sync', async (
   const catalog = loadCatalog(CATALOG, {});
   const index = new ValueIndex();
   const prop = catalog.scalarEventProps()[0];
-  // distinct is 3 in the stub; threshold 2 → every field is flagged near-unique.
-  const bi = new BackgroundIndexer({ catalog, runner: shapeStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, highCardMax: 2, logger: () => {} });
+  // stub: distinct 3 of non-null 3 → 100% unique; threshold 90% → every field flagged near-unique.
+  const bi = new BackgroundIndexer({ catalog, runner: shapeStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, highCardPct: 90, logger: () => {} });
 
   await bi.refresh();
-  assert.equal(index.stats(prop).highCardinality, true, 'distinct 3 ≥ 2 → flagged high-cardinality');
+  assert.equal(index.stats(prop).highCardinality, true, 'distinct/total = 100% ≥ 90% → flagged high-cardinality');
   const at1 = index.stats(prop).indexedAt;
   assert.ok(index.syncStatus().last_run.properties_indexed > 0, 'first run indexes the fields');
 

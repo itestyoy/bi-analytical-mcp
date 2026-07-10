@@ -59,6 +59,22 @@ export function recentSince(dialect, col, days) {
 }
 
 /**
+ * Predicate keeping rows STRICTLY NEWER than an epoch-ms watermark on time column `col` — the
+ * incremental-merge delta scan ("only rows since the last index"). Returns null for a dialect we
+ * have no safe expression for (→ caller falls back to a full re-scan rather than risk a bad bound).
+ */
+export function sinceTimestampMs(dialect, col, ms) {
+  const n = Math.floor(Number(ms));
+  if (!col || !Number.isFinite(n)) return null;
+  const d = String(dialect || '').toLowerCase();
+  if (d === 'postgres' || d === 'postgresql' || d === 'redshift') return `${col} > to_timestamp(${n} / 1000.0)`;
+  if (d === 'bigquery') return `${col} > TIMESTAMP_MILLIS(${n})`;
+  if (d === 'snowflake') return `${col} > TO_TIMESTAMP_LTZ(${n}, 3)`;
+  if (d === 'duckdb') return `${col} > epoch_ms(${n})`;
+  return null;
+}
+
+/**
  * APPROXIMATE distinct-count expression (HLL-class) for `expr`, or null when the dialect has
  * no built-in (→ caller falls back to exact COUNT(DISTINCT)). A cheaper cardinality scan on
  * a large fact; the count becomes approximate, so it is OPT-IN at the indexer.

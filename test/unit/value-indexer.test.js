@@ -57,6 +57,53 @@ test('BackgroundIndexer logs sync start → steps → results, records the run +
   index.close();
 });
 
+// Merge mode: an already-indexed anchor property is re-scanned only for rows since its
+// watermark, and the delta counts are ADDED to what is stored (freq/coverage/total accumulate).
+function mergeStub(wm = 1000) {
+  return { show: async (_dir, sql) => {
+    if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
+    if (/AS rows_total/.test(sql)) return { ok: true, rows: [aliasRow({ rows_total: 5, wm }, 3)] }; // d/t=3, rows_total=5, max-time=wm
+    if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [aliasRow({ ev: 'first_launch', app: null, row_count: 5 }, 3)] };
+    return { ok: true, rows: [] };
+  } };
+}
+
+test('merge mode accumulates counts across syncs (delta since the watermark)', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  assert.ok(['postgres', 'postgresql'].includes(catalog.dialect), 'fixture is a dialect with a since-clause');
+  const index = new ValueIndex();
+  const prop = catalog.scalarEventProps()[0];
+  const bi = new BackgroundIndexer({ catalog, runner: mergeStub(1000), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, merge: true, logger: () => {} });
+
+  await bi.refresh(); // first: full scan, records the watermark
+  assert.deepEqual(index.sampleValues(prop, 5), [{ value: 'x', freq: 3 }], 'full scan stores freq 3');
+  assert.equal(index.stats(prop).totalCount, 3);
+  assert.equal(index.stats(prop).dataWatermark, 1000, 'watermark recorded');
+
+  await bi.refresh(); // second: delta since the watermark → MERGE (add) into what is stored
+  assert.deepEqual(index.sampleValues(prop, 5), [{ value: 'x', freq: 6 }], 'delta merged: 3 + 3 = 6');
+  assert.equal(index.stats(prop).totalCount, 6, 'non-null total accumulated');
+  index.close();
+});
+
+test('high-cardinality fields are flagged and skipped on the next sync', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  const prop = catalog.scalarEventProps()[0];
+  // stub: distinct 3 of non-null 3 → 100% unique; threshold 90% → every field flagged near-unique.
+  const bi = new BackgroundIndexer({ catalog, runner: shapeStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, highCardPct: 90, logger: () => {} });
+
+  await bi.refresh();
+  assert.equal(index.stats(prop).highCardinality, true, 'distinct/total = 100% ≥ 90% → flagged high-cardinality');
+  const at1 = index.stats(prop).indexedAt;
+  assert.ok(index.syncStatus().last_run.properties_indexed > 0, 'first run indexes the fields');
+
+  await bi.refresh(); // flagged fields are now skipped
+  assert.equal(index.syncStatus().last_run.properties_indexed, 0, 'all high-cardinality fields skipped next sync');
+  assert.equal(index.stats(prop).indexedAt, at1, 'the flagged field was not re-scanned');
+  index.close();
+});
+
 test('BackgroundIndexer records a failed sync (errors logged, status error/partial)', async () => {
   const catalog = loadCatalog(CATALOG, {});
   const runner = { show: async () => { throw new Error('warehouse down'); } };

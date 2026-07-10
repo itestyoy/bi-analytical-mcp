@@ -57,34 +57,6 @@ test('BackgroundIndexer logs sync start → steps → results, records the run +
   index.close();
 });
 
-// Incremental: a budget-bounded run indexes only a SLICE, and stalest-first ordering lets the
-// NEXT run resume with what is still missing — the index fills over several short runs instead
-// of one giant pass (the fix for "all columns at once needs a 2h timeout").
-test('BackgroundIndexer indexes incrementally across runs (budget-bounded, stalest-first, resumable)', async () => {
-  const catalog = loadCatalog(CATALOG, {});
-  const index = new ValueIndex();
-  const total = new BackgroundIndexer({ catalog, runner: shapeStub(), baseProjectDir: '/tmp/none' })._targets().length;
-  assert.ok(total >= 4, `fixture should expose several targets; got ${total}`);
-  // batchSize 1 + maxPropsPerRun 2 → each run indexes exactly 2 properties, then stops.
-  const bi = new BackgroundIndexer({ catalog, runner: shapeStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, batchSize: 1, maxPropsPerRun: 2, logger: () => {} });
-
-  await bi.refresh();
-  const after1 = index.syncStatus().indexed_properties;
-  assert.equal(after1, 2, `first bounded run indexes maxPropsPerRun properties; got ${after1}`);
-  const notes1 = index.runNotes(index.syncStatus().last_run.id);
-  assert.ok(notes1.some((n) => /run budget reached/.test(n.note)), 'early-stop reason recorded on the run');
-
-  await bi.refresh();
-  const after2 = index.syncStatus().indexed_properties;
-  assert.ok(after2 > after1, `the second run resumes with NEW (stalest) properties: ${after1} → ${after2}`);
-
-  // keep going: the whole set fills over several bounded runs.
-  let guard = 0;
-  while (index.syncStatus().indexed_properties < total && guard++ < 200) await bi.refresh();
-  assert.equal(index.syncStatus().indexed_properties, total, 'index fills completely over several bounded runs');
-  index.close();
-});
-
 // Merge mode: an already-indexed anchor property is re-scanned only for rows since its
 // watermark, and the delta counts are ADDED to what is stored (freq/coverage/total accumulate).
 function mergeStub(wm = 1000) {

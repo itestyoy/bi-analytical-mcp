@@ -302,13 +302,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // dbt runner timeout (which stays short so ordinary user queries never hang). Pair with the
   // incremental knobs below to shorten individual runs.
   const scanTimeout = (Number(process.env.MCP_INDEX_TIMEOUT_SECONDS) || 7200) * 1000;
-  // Incremental indexing: bound EACH run so a large fact never needs one multi-hour pass.
-  // A run stops after MCP_INDEX_RUN_BUDGET_MINUTES wall-clock and/or MCP_INDEX_MAX_PROPS_PER_RUN
-  // properties; ordering is stalest-first, so the next scheduled run resumes with what is left.
-  // Pair a budget with a shorter VALUE_INDEX_REFRESH_MS so the index fills over several runs.
-  // 0/unset → unbounded (one pass over everything, the previous behaviour).
-  const runBudgetMs = (Number(process.env.MCP_INDEX_RUN_BUDGET_MINUTES) || 0) * 60 * 1000;
-  const maxPropsPerRun = Number(process.env.MCP_INDEX_MAX_PROPS_PER_RUN) || 0;
   // Incremental MERGE (default ON): re-scan an already-indexed anchor property only for rows
   // NEWER than its watermark and ADD the counts to what is stored — each cycle scans a small
   // delta, not the whole history. Disable with MCP_INDEX_MERGE=false. It is mutually exclusive
@@ -321,7 +314,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // (non-null) rows → its top-N is noise, so it is not re-scanned on later syncs. Relative to the
   // field's own size (adapts to any table). Default 90%; set MCP_INDEX_HIGH_CARD_PCT=0 to disable.
   const highCardPct = process.env.MCP_INDEX_HIGH_CARD_PCT !== undefined ? Number(process.env.MCP_INDEX_HIGH_CARD_PCT) : 90;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, runBudgetMs, maxPropsPerRun, merge, highCardPct, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.

@@ -34,7 +34,7 @@ services:
       MCP_MEMORY_DB: "${MCP_MEMORY_DB:-/workspace/memory.sqlite}"
       MCP_DB_RESET: "${MCP_DB_RESET:-false}"
       # Heavy value-index scan timeout (seconds) — default 2h; see .env.bigquery.example for the
-      # incremental knobs (MCP_INDEX_RUN_BUDGET_MINUTES / MCP_INDEX_MERGE / MCP_INDEX_HIGH_CARD_MAX).
+      # index knobs (MCP_INDEX_MERGE / MCP_INDEX_HIGH_CARD_PCT / MCP_INDEX_WINDOW_DAYS).
       MCP_INDEX_TIMEOUT_SECONDS: "${MCP_INDEX_TIMEOUT_SECONDS:-7200}"
       # BigQuery connection — referenced by your profiles.yml via env_var().
       GOOGLE_APPLICATION_CREDENTIALS: "/secrets/bq-key.json"

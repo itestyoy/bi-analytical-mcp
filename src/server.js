@@ -295,7 +295,15 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // 0/unset → unbounded (one pass over everything, the previous behaviour).
   const runBudgetMs = (Number(process.env.MCP_INDEX_RUN_BUDGET_MINUTES) || 0) * 60 * 1000;
   const maxPropsPerRun = Number(process.env.MCP_INDEX_MAX_PROPS_PER_RUN) || 0;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, runBudgetMs, maxPropsPerRun, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  // Incremental MERGE (opt-in): re-scan an already-indexed anchor property only for rows NEWER
+  // than its watermark and ADD the counts to what is stored — each cycle scans a small delta,
+  // not the whole history. Off → full-window replace per property. (Mutually exclusive with a
+  // rolling MCP_INDEX_WINDOW_DAYS: merge accumulates all-time, the window ages data out.)
+  const merge = /^(1|true|yes|on)$/i.test(String(process.env.MCP_INDEX_MERGE ?? '').trim());
+  // Auto-skip near-unique (ID-like) fields after they're indexed once: distinct ≥ this → its
+  // top-N is noise, so it is not re-scanned on later syncs. 0/unset → never auto-skip.
+  const highCardMax = Number(process.env.MCP_INDEX_HIGH_CARD_MAX) || 0;
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, runBudgetMs, maxPropsPerRun, merge, highCardMax, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.

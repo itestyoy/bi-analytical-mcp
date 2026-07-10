@@ -61,12 +61,14 @@ export class MemoryBackend {
     };
 
     this.values = {
-      replaceProperty: (property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [] } = {}) => {
+      replaceProperty: (property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [], highCardinality = false, dataWatermark = null } = {}) => {
         props.set(property, {
           distinctCount: distinctCount ?? null,
           totalCount: totalCount ?? null,
           nullCount: nullCount ?? null,
           indexedAt: Date.now(),
+          highCardinality: !!highCardinality,
+          dataWatermark: dataWatermark ?? null,
           values: values.map((v) => ({ value: String(v.value), freq: Number(v.freq) || 0 })).sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)),
           coverage: coverage.map((e) => ({ event_name: String(e.event), row_count: Number(e.rowCount) || 0, non_null: Number(e.nonNull) || 0 }))
             .sort((a, b) => b.row_count - a.row_count || a.event_name.localeCompare(b.event_name)),
@@ -93,7 +95,12 @@ export class MemoryBackend {
       },
       stats: (property) => {
         const e = props.get(property);
-        return e ? { distinctCount: e.distinctCount, totalCount: e.totalCount, nullCount: e.nullCount, indexedAt: e.indexedAt } : null;
+        return e ? { distinctCount: e.distinctCount, totalCount: e.totalCount, nullCount: e.nullCount, indexedAt: e.indexedAt, highCardinality: !!e.highCardinality, dataWatermark: e.dataWatermark ?? null } : null;
+      },
+      // All triple (bundle × event) cells for a property — used to MERGE a delta into what is stored.
+      allCells: (property) => {
+        const e = props.get(property);
+        return e && e.cellCoverage ? [...e.cellCoverage.values()].map((c) => ({ bundle: c.bundle, event: c.event_name, rowCount: c.row_count, nonNull: c.non_null })) : [];
       },
       coverage: (property) => {
         const e = props.get(property);
@@ -196,8 +203,13 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
     db.exec('CREATE TABLE IF NOT EXISTS prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
     db.exec('CREATE TABLE IF NOT EXISTS prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER)');
-    // null_count was added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
-    try { db.exec('ALTER TABLE prop_stats ADD COLUMN null_count INTEGER'); } catch { /* column already present */ }
+    // columns added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
+    //  null_count       — nulls per property.
+    //  high_cardinality — 1 when the field is near-unique (distinct ≥ threshold): its top-N is noise,
+    //                     so subsequent syncs SKIP it (indexed once, then left alone).
+    //  data_watermark   — max event-time (epoch ms) indexed so far; the incremental-merge path scans
+    //                     only rows newer than this and ADDS the new counts to what is stored.
+    for (const col of ['null_count INTEGER', 'high_cardinality INTEGER', 'data_watermark INTEGER']) { try { db.exec(`ALTER TABLE prop_stats ADD COLUMN ${col}`); } catch { /* already present */ } }
     // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
     // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
     db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(property, event_name))');
@@ -238,7 +250,7 @@ export class SqliteBackend {
     };
 
     this.values = {
-      replaceProperty(property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [] } = {}) {
+      replaceProperty(property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [], highCardinality = false, dataWatermark = null } = {}) {
         s._tx(() => {
           s._run('DELETE FROM prop_values WHERE property = ?', property);
           for (const v of values) s._run('INSERT INTO prop_values (property, value, freq) VALUES (?, ?, ?)', property, String(v.value), Number(v.freq) || 0);
@@ -248,7 +260,7 @@ export class SqliteBackend {
           for (const e of bundleCoverage) s._run('INSERT INTO prop_bundle_coverage (property, bundle, row_count, non_null) VALUES (?, ?, ?, ?)', property, String(e.bundle), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
           s._run('DELETE FROM prop_bundle_event_coverage WHERE property = ?', property);
           for (const e of cellCoverage) s._run('INSERT INTO prop_bundle_event_coverage (property, bundle, event_name, row_count, non_null) VALUES (?, ?, ?, ?, ?)', property, String(e.bundle), String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
-          s._run('INSERT INTO prop_stats (property, distinct_count, total_count, null_count, indexed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, null_count=excluded.null_count, indexed_at=excluded.indexed_at', property, distinctCount ?? null, totalCount ?? null, nullCount ?? null, Date.now());
+          s._run('INSERT INTO prop_stats (property, distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, null_count=excluded.null_count, indexed_at=excluded.indexed_at, high_cardinality=excluded.high_cardinality, data_watermark=excluded.data_watermark', property, distinctCount ?? null, totalCount ?? null, nullCount ?? null, Date.now(), highCardinality ? 1 : 0, dataWatermark ?? null);
         });
       },
       // value ASC tiebreak → deterministic on ties (value is unique per property via the PK).
@@ -263,8 +275,13 @@ export class SqliteBackend {
         return s._all(`SELECT value, freq FROM prop_values WHERE property = ? ORDER BY ${c} ${d}, value ASC LIMIT ? OFFSET ?`, property, limit, offset).map((r) => ({ value: r.value, freq: Number(r.freq) }));
       },
       stats(property) {
-        const r = s._get('SELECT distinct_count, total_count, null_count, indexed_at FROM prop_stats WHERE property = ?', property);
-        return r ? { distinctCount: r.distinct_count, totalCount: r.total_count, nullCount: r.null_count, indexedAt: r.indexed_at } : null;
+        const r = s._get('SELECT distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark FROM prop_stats WHERE property = ?', property);
+        return r ? { distinctCount: r.distinct_count, totalCount: r.total_count, nullCount: r.null_count, indexedAt: r.indexed_at, highCardinality: !!r.high_cardinality, dataWatermark: r.data_watermark ?? null } : null;
+      },
+      // All triple (bundle × event) cells for a property — used to MERGE a delta into what is stored.
+      allCells(property) {
+        return s._all('SELECT bundle, event_name, row_count, non_null FROM prop_bundle_event_coverage WHERE property = ?', property)
+          .map((r) => ({ bundle: r.bundle, event: r.event_name, rowCount: Number(r.row_count), nonNull: Number(r.non_null) }));
       },
       coverage(property) {
         return s._all('SELECT event_name, row_count, non_null FROM prop_coverage WHERE property = ? ORDER BY row_count DESC, event_name ASC', property)

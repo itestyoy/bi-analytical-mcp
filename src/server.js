@@ -288,7 +288,14 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // so indexing finishes; ordinary user queries keep the smaller runner timeout. Tune via
   // MCP_INDEX_TIMEOUT_SECONDS (or pair with MCP_INDEX_WINDOW_DAYS to bound the scan instead).
   const scanTimeout = (Number(process.env.MCP_INDEX_TIMEOUT_SECONDS) || 600) * 1000;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  // Incremental indexing: bound EACH run so a large fact never needs one multi-hour pass.
+  // A run stops after MCP_INDEX_RUN_BUDGET_MINUTES wall-clock and/or MCP_INDEX_MAX_PROPS_PER_RUN
+  // properties; ordering is stalest-first, so the next scheduled run resumes with what is left.
+  // Pair a budget with a shorter VALUE_INDEX_REFRESH_MS so the index fills over several runs.
+  // 0/unset → unbounded (one pass over everything, the previous behaviour).
+  const runBudgetMs = (Number(process.env.MCP_INDEX_RUN_BUDGET_MINUTES) || 0) * 60 * 1000;
+  const maxPropsPerRun = Number(process.env.MCP_INDEX_MAX_PROPS_PER_RUN) || 0;
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, runBudgetMs, maxPropsPerRun, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.

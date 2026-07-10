@@ -27,6 +27,15 @@ services:
       MCP_WORKSPACE: "/workspace"
       QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-120}"
       CONTEXT_TTL_MS: "${CONTEXT_TTL_MS:-0}"
+      # PERSISTENCE — keep the value index / job history / memory across restarts. The DBs live
+      # on the named `mcp_workspace` volume (below), so they survive `docker compose restart/up`.
+      # Reset is OFF so nothing is wiped on startup; MCP_DB / MCP_MEMORY_DB pin the files.
+      MCP_DB: "${MCP_DB:-/workspace/mcp.sqlite}"
+      MCP_MEMORY_DB: "${MCP_MEMORY_DB:-/workspace/memory.sqlite}"
+      MCP_DB_RESET: "${MCP_DB_RESET:-false}"
+      # Heavy value-index scan timeout (seconds) — default 2h; see .env.bigquery.example for the
+      # incremental knobs (MCP_INDEX_RUN_BUDGET_MINUTES / MCP_INDEX_MERGE / MCP_INDEX_HIGH_CARD_MAX).
+      MCP_INDEX_TIMEOUT_SECONDS: "${MCP_INDEX_TIMEOUT_SECONDS:-7200}"
       # BigQuery connection — referenced by your profiles.yml via env_var().
       GOOGLE_APPLICATION_CREDENTIALS: "/secrets/bq-key.json"
       BQ_PROJECT: "${BQ_PROJECT:?set BQ_PROJECT in .env}"

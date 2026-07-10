@@ -1,5 +1,8 @@
 # MCP server (Node) + the dbt/MetricFlow CLIs it shells out to (Python).
-FROM node:20-slim
+# Node 22: the value index / job registry / memory persist via the built-in `node:sqlite`
+# (DatabaseSync), available only on Node >= 22.5 — on older Node the store silently falls back
+# to IN-MEMORY (nothing survives a restart; semantic_index reports persisted:false).
+FROM node:22-slim
 
 # Python + build basics for dbt/metricflow.
 RUN apt-get update \

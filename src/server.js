@@ -182,10 +182,11 @@ export async function makeEngine(opts = {}) {
   // Ensure the parent dir exists so a custom path persists (a missing dir would make the
   // open fail and silently fall back to an in-memory store).
   try { mkdirSync(dirname(dbPath), { recursive: true }); } catch { /* best effort */ }
-  // MCP_DB_RESET wipes the store (jobs + value index) on startup — a clean slate each run.
-  // DEFAULT ON: reset unless explicitly disabled (MCP_DB_RESET=false/0/no/off).
-  const resetDb = !/^(0|false|no|off)$/i.test(String(process.env.MCP_DB_RESET ?? 'true').trim());
-  if (resetDb) console.error(`[mcp] ${new Date().toISOString()} MCP_DB_RESET on (default) — clearing the store on startup; set MCP_DB_RESET=false to keep it`);
+  // MCP_DB_RESET wipes the store (jobs + value index) on startup. DEFAULT OFF so state
+  // (the value index, job history) SURVIVES a restart — opt IN to a clean slate with
+  // MCP_DB_RESET=1/true. (Persistence still needs the DB on a durable volume + Node >= 22.5.)
+  const resetDb = /^(1|true|yes|on)$/i.test(String(process.env.MCP_DB_RESET ?? 'false').trim());
+  if (resetDb) console.error(`[mcp] ${new Date().toISOString()} MCP_DB_RESET on — clearing the store on startup (state will NOT survive this restart)`);
   // GROUND the catalog to the physical warehouse BEFORE building the engine (its tool
   // schemas + value index derive from the catalog): a column the dbt schema declares but
   // the physical table lacks is pruned, so it never appears in any tool. Best-effort and
@@ -209,7 +210,16 @@ export async function makeEngine(opts = {}) {
   } else {
     console.error(`[mcp] ${new Date().toISOString()} memory: findings live in the shared store at ${dbPath} — set MCP_MEMORY_DB to a persistent volume to retain them across container restarts`);
   }
-  return new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath });
+  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath });
+  // Persistence surfaces as semantic_index({ status }).value_index.persisted. If a DB path was
+  // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
+  // loudly, because otherwise the index silently rebuilds from scratch on every restart.
+  if (dbPath && !engine.valueIndex.persistent) {
+    console.error(`[mcp] ${new Date().toISOString()} WARNING: store is IN-MEMORY (persisted:false) despite MCP_DB=${dbPath} — node:sqlite is unavailable (needs Node >= 22.5). Nothing survives a restart. Upgrade Node (the image is node:22-slim) or set MCP_DB_BACKEND to a persistent backend.`);
+  } else if (dbPath) {
+    console.error(`[mcp] ${new Date().toISOString()} store persisted at ${dbPath} (survives restart when the path is on a durable volume; MCP_DB_RESET is ${resetDb ? 'ON — wiped this start' : 'off'})`);
+  }
+  return engine;
 }
 
 export function createApp(engine) {
@@ -287,7 +297,11 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // fact can exceed the runner's default 180s and get SIGTERM-killed. Generous default (600s)
   // so indexing finishes; ordinary user queries keep the smaller runner timeout. Tune via
   // MCP_INDEX_TIMEOUT_SECONDS (or pair with MCP_INDEX_WINDOW_DAYS to bound the scan instead).
-  const scanTimeout = (Number(process.env.MCP_INDEX_TIMEOUT_SECONDS) || 600) * 1000;
+  // Dedicated timeout for the heavy value-index scans — default 2 HOURS (7200s): a combined
+  // scan over a large full events fact genuinely needs it, and it is separate from the general
+  // dbt runner timeout (which stays short so ordinary user queries never hang). Pair with the
+  // incremental knobs below to shorten individual runs.
+  const scanTimeout = (Number(process.env.MCP_INDEX_TIMEOUT_SECONDS) || 7200) * 1000;
   // Incremental indexing: bound EACH run so a large fact never needs one multi-hour pass.
   // A run stops after MCP_INDEX_RUN_BUDGET_MINUTES wall-clock and/or MCP_INDEX_MAX_PROPS_PER_RUN
   // properties; ordering is stalest-first, so the next scheduled run resumes with what is left.

@@ -59,30 +59,37 @@ test('BackgroundIndexer logs sync start → steps → results, records the run +
 
 // Merge mode: an already-indexed anchor property is re-scanned only for rows since its
 // watermark, and the delta counts are ADDED to what is stored (freq/coverage/total accumulate).
-function mergeStub(wm = 1000) {
-  return { show: async (_dir, sql) => {
-    if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
-    if (/AS rows_total/.test(sql)) return { ok: true, rows: [aliasRow({ rows_total: 5, wm }, 3)] }; // d/t=3, rows_total=5, max-time=wm
-    if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [aliasRow({ ev: 'first_launch', app: null, row_count: 5 }, 3)] };
-    return { ok: true, rows: [] };
-  } };
-}
-
-test('merge mode accumulates counts across syncs (delta since the watermark)', async () => {
+test('merge mode accumulates counts across syncs (delta), scanned as ONE combined batch query', async () => {
   const catalog = loadCatalog(CATALOG, {});
   assert.ok(['postgres', 'postgresql'].includes(catalog.dialect), 'fixture is a dialect with a since-clause');
   const index = new ValueIndex();
   const prop = catalog.scalarEventProps()[0];
-  const bi = new BackgroundIndexer({ catalog, runner: mergeStub(1000), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, merge: true, logger: () => {} });
+  const nEvent = catalog.scalarEventProps().length;
+  assert.ok(nEvent >= 3, 'fixture has several event properties in one batch');
+  // Batched = ONE combined cardinality scan (per-property d0 alias) PER SOURCE, not one per
+  // property — so the count is the number of source groups, far fewer than the property count.
+  const groupCount = new Set(new BackgroundIndexer({ catalog, runner: { show: async () => ({ ok: true, rows: [] }) }, baseProjectDir: '/tmp/none' })._targets().map((t) => t.ref)).size;
+  let combinedCard = 0;
+  const runner = { show: async (_d, sql) => {
+    if (/ AS d0/.test(sql)) combinedCard += 1;
+    if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
+    if (/AS rows_total/.test(sql)) return { ok: true, rows: [aliasRow({ rows_total: 5, wm: 1000 }, 3)] };
+    if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [aliasRow({ ev: 'first_launch', app: null, row_count: 5 }, 3)] };
+    return { ok: true, rows: [] };
+  } };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, merge: true, logger: () => {} });
 
-  await bi.refresh(); // first: full scan, records the watermark
+  await bi.refresh(); // first: full bootstrap scan (one combined query per source), records the watermark
   assert.deepEqual(index.sampleValues(prop, 5), [{ value: 'x', freq: 3 }], 'full scan stores freq 3');
   assert.equal(index.stats(prop).totalCount, 3);
   assert.equal(index.stats(prop).dataWatermark, 1000, 'watermark recorded');
+  assert.equal(combinedCard, groupCount, 'event props indexed by ONE combined scan per source (batched), not one-per-property');
+  assert.ok(combinedCard < nEvent, 'far fewer scans than properties');
 
-  await bi.refresh(); // second: delta since the watermark → MERGE (add) into what is stored
+  await bi.refresh(); // second: delta since the watermark → still ONE combined query per source → MERGE
   assert.deepEqual(index.sampleValues(prop, 5), [{ value: 'x', freq: 6 }], 'delta merged: 3 + 3 = 6');
   assert.equal(index.stats(prop).totalCount, 6, 'non-null total accumulated');
+  assert.equal(combinedCard, groupCount * 2, 'the delta pass is also batched (one combined query per source, not hundreds)');
   index.close();
 });
 

@@ -1456,9 +1456,9 @@ export class Engine {
    *   SELECT MAX(<time column>) FROM <the source's model>
    * It is a DATA aggregate (the newest event actually present), NOT a dbt-run/deploy timestamp,
    * partition metadata, or an orchestration mark — and it is scoped to THIS model's relation.
-   * Cached with a short TTL (_freshTtlMs) so a long-lived server does not report a stale value as
-   * new data lands; recomputed once the TTL lapses. Best-effort: null with no runner/time column,
-   * or if the query fails.
+   * Recomputed ONCE PER INDEX SCAN: the cache is keyed on the value-index sync generation, so a
+   * completed background scan invalidates it and the next read re-queries MAX(time) — tied to the
+   * scan, not a wall-clock timer. Best-effort: null with no runner/time column, or if it fails.
    */
   async _dataFreshness(sourceKey) {
     const base = this.ctxs.baseProjectDir;
@@ -1466,15 +1466,15 @@ export class Engine {
     const tcol = m.time?.column;
     if (!this.runner || !base || !tcol) return null;
     this._freshCache ??= new Map();
-    this._freshTtlMs ??= 600000; // 10 min — bound the staleness of the cached MAX(time)
+    const gen = this.valueIndex?.syncGeneration ? this.valueIndex.syncGeneration() : 0;
     const hit = this._freshCache.get(sourceKey);
-    if (hit && (Date.now() - hit.at) < this._freshTtlMs) return hit.value;
+    if (hit && hit.gen === gen) return hit.value; // re-query only after the next index scan completes
     let latest = null;
     try {
       const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}`, 1);
       if (r.ok && r.rows?.[0]?.latest != null) latest = String(r.rows[0].latest);
     } catch { /* freshness is best-effort */ }
-    this._freshCache.set(sourceKey, { value: latest, at: Date.now() });
+    this._freshCache.set(sourceKey, { value: latest, gen });
     return latest;
   }
 

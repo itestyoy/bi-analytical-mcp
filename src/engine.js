@@ -850,6 +850,7 @@ export class Engine {
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
     if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns);
+    if (input.action === 'add_steps') return this._draftAddSteps(ctx, draft, input.stages, input.include_columns);
     if (input.action === 'edit_step') return this._draftEditStep(ctx, draft, input.index, input.stage, input.include_columns);
     if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.stage, input.include_columns);
     if (input.action === 'delete_step') return this._draftDeleteStep(ctx, draft, input.index, input.include_columns);
@@ -959,6 +960,53 @@ export class Engine {
 
   async _draftAddStep(ctx, draft, stage, includeColumns = false) {
     return this._draftCommit(ctx, draft, [...draft.stages, stage], { changedStage: stage, includeColumns, action: 'add_step' });
+  }
+
+  /**
+   * Append SEVERAL stages in one call, applied SEQUENTIALLY. The response folds the per-step
+   * effects together — for each stage, how it changed the columns (added / removed count) and any
+   * warnings — so you see the same "how each application affected the data" detail as adding them
+   * one at a time, in a single reply. ATOMIC: if any stage fails validation the whole batch is
+   * rolled back (nothing applied) and the failing step is named. NB: adding many steps blind is
+   * discouraged — the response says so.
+   */
+  async _draftAddSteps(ctx, draft, stages, includeColumns = false) {
+    if (!Array.isArray(stages) || !stages.length) throw new ToolError('add_steps needs a non-empty `stages` array', { stage: 'validate', field: 'stages' });
+    const snapshot = draft.stages.slice(); // atomic: restore on any failure so the draft is never half-applied
+    const effects = [];
+    try {
+      for (const stage of stages) {
+        const r = await this._draftCommit(ctx, draft, [...draft.stages, stage], { changedStage: stage, includeColumns: false, action: 'add_step' });
+        effects.push({
+          step_index: r.step_index,
+          stage: stage.stage,
+          column_count: r.column_count,
+          columns_added: r.columns_added,
+          columns_removed_count: r.columns_removed_count,
+          ...(r.columns_removed ? { columns_removed: r.columns_removed } : {}),
+          notes: r.recommendations, // per-step warnings/nudges (filter guard, empty-combination, funnel, etc.)
+        });
+      }
+    } catch (e) {
+      draft.stages = snapshot; this.ctxs.touch(ctx.id);
+      throw new ToolError(`${e.message} — NO steps applied (add_steps is atomic; fix that stage and retry, ideally in a smaller chunk)`, { stage: 'compile', field: 'stages' });
+    }
+    const physSet = await this._physicalCols(draft.source);
+    const after = this._draftColumns(draft, physSet);
+    const resp = {
+      draft_id: ctx.id, action: 'add_steps', added: effects.length,
+      steps: this._draftSteps(draft),
+      // The sequential effect of EACH stage, in order — the combined view of what would have been
+      // N separate add_step replies. Read it top-to-bottom to see how the data narrowed/expanded.
+      step_effects: effects,
+      column_count: after.length,
+      next: 'Review step_effects (each stage\'s column delta + notes), then add the NEXT logical chunk or materialize.',
+      recommendations: [
+        'STRONGLY recommended: add stages in small LOGICAL chunks (e.g. scope+derive, THEN the funnel, THEN aggregate) rather than the whole pipeline at once — you see how each chunk changes the data and catch a mistake before it compounds across later steps.',
+      ],
+    };
+    if (includeColumns) resp.available_columns = after;
+    return resp;
   }
 
   /** Validate `index` (1-based) against the current stage count for an edit op. */
@@ -1404,10 +1452,13 @@ export class Engine {
   }
 
   /**
-   * Data FRESHNESS of a source: the latest value of its time column (MAX), i.e. how
-   * up-to-date the underlying data is — a trust signal distinct from value-index
-   * freshness. Cached per source for the engine's life (best-effort; null when there
-   * is no runner / time column / the query fails).
+   * Data FRESHNESS of a source: the LATEST value of its time column, live —
+   *   SELECT MAX(<time column>) FROM <the source's model>
+   * It is a DATA aggregate (the newest event actually present), NOT a dbt-run/deploy timestamp,
+   * partition metadata, or an orchestration mark — and it is scoped to THIS model's relation.
+   * Recomputed ONCE PER INDEX SCAN: the cache is keyed on the value-index sync generation, so a
+   * completed background scan invalidates it and the next read re-queries MAX(time) — tied to the
+   * scan, not a wall-clock timer. Best-effort: null with no runner/time column, or if it fails.
    */
   async _dataFreshness(sourceKey) {
     const base = this.ctxs.baseProjectDir;
@@ -1415,13 +1466,15 @@ export class Engine {
     const tcol = m.time?.column;
     if (!this.runner || !base || !tcol) return null;
     this._freshCache ??= new Map();
-    if (this._freshCache.has(sourceKey)) return this._freshCache.get(sourceKey);
+    const gen = this.valueIndex?.syncGeneration ? this.valueIndex.syncGeneration() : 0;
+    const hit = this._freshCache.get(sourceKey);
+    if (hit && hit.gen === gen) return hit.value; // re-query only after the next index scan completes
     let latest = null;
     try {
       const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}`, 1);
       if (r.ok && r.rows?.[0]?.latest != null) latest = String(r.rows[0].latest);
     } catch { /* freshness is best-effort */ }
-    this._freshCache.set(sourceKey, latest);
+    this._freshCache.set(sourceKey, { value: latest, gen });
     return latest;
   }
 

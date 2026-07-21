@@ -100,7 +100,8 @@ export class BigQueryDialect extends Dialect {
 
   roundExpr(expr, places = 0) { return `ROUND(${expr}, ${Number(places)})`; }
 
-  castExpr(expr, type) { return `CAST(${expr} AS ${this.castType(type) || 'STRING'})`; }
+  // SAFE cast only: a bad value yields NULL instead of failing the whole query (no unsafe CAST).
+  castExpr(expr, type) { return `SAFE_CAST(${expr} AS ${this.castType(type) || 'STRING'})`; }
 
   substringExpr(expr, start, len) { return `SUBSTR(${expr}, ${Number(start)}${len != null ? `, ${Number(len)}` : ''})`; }
 

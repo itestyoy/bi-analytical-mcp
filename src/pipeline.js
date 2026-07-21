@@ -252,7 +252,7 @@ const STAGES = {
         part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'date_part to extract.' },
         places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places for round (default 0).' },
         default: { description: 'Fallback literal for coalesce, or default for window lag/lead.' },
-        type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Target type for cast / CASE result type.' },
+        type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Target type for cast / CASE result type. cast is SAFE — a value that will not convert becomes NULL rather than failing the query.' },
         // op=case
         cases: { type: 'array', minItems: 1, description: 'CASE branches (first matching wins); each `when` is a list of ANDed conditions, `then` an operand.', items: { type: 'object', additionalProperties: false, required: ['when', 'then'], properties: { when: { type: 'array', minItems: 1, items: CONDITION }, then: OPERAND } } },
         else: OPERAND,

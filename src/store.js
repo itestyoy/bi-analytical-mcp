@@ -146,6 +146,10 @@ export class MemoryBackend {
       // How many values are actually STORED for a property (the indexer caps at top-N) —
       // compared to distinct_count it reveals whether rare values were left out of the index.
       valueCount: (property) => { const e = props.get(property); return e ? e.values.length : 0; },
+      // All indexed property keys — used to reconcile the index against the live schema.
+      properties: () => [...props.keys()],
+      // Drop everything stored for one property (a column gone from the table) — no full reindex.
+      removeProperty: (property) => props.delete(property),
     };
 
     // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
@@ -319,6 +323,18 @@ export class SqliteBackend {
       },
       counts() {
         return { properties: Number(s._get('SELECT COUNT(*) AS n FROM prop_stats').n), values: Number(s._get('SELECT COUNT(*) AS n FROM prop_values').n) };
+      },
+      // All indexed property keys — used to reconcile the index against the live schema.
+      properties() {
+        return s._all('SELECT property FROM prop_stats').map((r) => r.property);
+      },
+      // Drop EVERYTHING stored for one property (a column gone from the table) — no full reindex.
+      removeProperty(property) {
+        s._tx(() => {
+          for (const tbl of ['prop_values', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'prop_stats']) {
+            s._run(`DELETE FROM ${tbl} WHERE property = ?`, property);
+          }
+        });
       },
     };
 

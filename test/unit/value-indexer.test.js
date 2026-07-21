@@ -111,6 +111,52 @@ test('high-cardinality fields are flagged and skipped on the next sync', async (
   index.close();
 });
 
+// Schema sync: a field no longer in the table (not a target) is pruned from the index.
+test('a field gone from the schema is pruned from the index on the next sync', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  const bi = new BackgroundIndexer({ catalog, runner: shapeStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} });
+  // seed a stale entry for a column that no longer exists (not produced by _targets()).
+  index.upsertProperty('events.ghost_col', { distinctCount: 1, totalCount: 1, nullCount: 0, values: [{ value: 'g', freq: 1 }] });
+  assert.ok(index.properties().includes('events.ghost_col'));
+
+  await bi.refresh();
+
+  assert.ok(!index.properties().includes('events.ghost_col'), 'orphan field pruned');
+  assert.equal(index.stats('events.ghost_col'), null);
+  assert.ok(index.stats(catalog.scalarEventProps()[0]) != null, 'valid fields stay indexed');
+  index.close();
+});
+
+// A newly added field is indexed on its OWN (full scan); the already-indexed ones only get a
+// cheap delta — not a full re-run of everything.
+test('a newly added field is indexed individually; existing fields stay delta-scanned', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  assert.ok(['postgres', 'postgresql'].includes(catalog.dialect), 'fixture dialect has a since-clause');
+  const index = new ValueIndex();
+  let deltaScans = 0; // combined cardinality scans bounded to "device_time > watermark"
+  const runner = { show: async (_d, sql) => {
+    if (/ AS d0/.test(sql) && /device_time >/.test(sql)) deltaScans += 1;
+    if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
+    if (/AS rows_total/.test(sql)) return { ok: true, rows: [aliasRow({ rows_total: 5, wm: 1000 }, 3)] };
+    if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [aliasRow({ ev: 'first_launch', app: null, row_count: 5 }, 3)] };
+    return { ok: true, rows: [] };
+  } };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, merge: true, logger: () => {} });
+
+  await bi.refresh(); // bootstrap — all full, no delta
+  assert.equal(deltaScans, 0, 'first pass is a full bootstrap');
+  const newbie = catalog.scalarEventProps()[0];
+  index.removeProperty(newbie); // simulate a freshly ADDED column: nothing stored for it yet
+  deltaScans = 0;
+
+  await bi.refresh();
+
+  assert.equal(deltaScans, 1, 'existing anchor fields delta-scanned in ONE combined query — not full re-run');
+  assert.ok(index.stats(newbie) != null, 'the new field was indexed on its own (full scan)');
+  index.close();
+});
+
 test('BackgroundIndexer records a failed sync (errors logged, status error/partial)', async () => {
   const catalog = loadCatalog(CATALOG, {});
   const runner = { show: async () => { throw new Error('warehouse down'); } };

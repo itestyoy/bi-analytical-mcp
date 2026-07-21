@@ -100,7 +100,14 @@ export class PostgresDialect extends Dialect {
 
   roundExpr(expr, places = 0) { return `round((${expr})::numeric, ${Number(places)})`; }
 
-  castExpr(expr, type) { return `(${expr})::${this.castType(type) || 'text'}`; }
+  // SAFE cast only (Postgres has no TRY_CAST): text is always safe; a numeric target returns NULL
+  // for non-numeric input (guard with a numeric-literal regex, then route through numeric so e.g.
+  // '1.5'→int does not error). Never fails the query on a bad value.
+  castExpr(expr, type) {
+    const ct = this.castType(type);
+    if (!ct || ct === 'text') return `(${expr})::text`;
+    return `(CASE WHEN (${expr})::text ~ '^\\s*-?[0-9]+(\\.[0-9]+)?\\s*$' THEN (${expr})::numeric${ct === 'numeric' ? '' : `::${ct}`} END)`;
+  }
 
   substringExpr(expr, start, len) { return `substring(${expr} from ${Number(start)}${len != null ? ` for ${Number(len)}` : ''})`; }
 

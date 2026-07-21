@@ -178,6 +178,52 @@ test('build_native_model: grounding is skipped without a runner (declared column
   assert.equal(s.not_materialized, undefined);
 });
 
+// add_steps: several stages at once, with the per-step effect of each folded into one reply.
+test('build_native_model: add_steps applies several stages at once with a per-step breakdown', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'multi', source: 'events' });
+  const r = await e.build_native_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] },
+    mr,
+    { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'n', fn: 'count' }] },
+  ] });
+  assert.equal(r.action, 'add_steps');
+  assert.equal(r.added, 3);
+  assert.equal(r.step_effects.length, 3, 'one effect entry per applied stage, in order');
+  assert.deepEqual(r.step_effects.map((x) => x.stage), ['where', 'match_recognize', 'aggregate']);
+  assert.ok(r.step_effects.every((x) => typeof x.column_count === 'number' && Array.isArray(x.columns_added)), 'each effect reports the column delta');
+  assert.equal(r.steps.length, 3);
+  assert.ok(r.recommendations.some((x) => /logical chunk/i.test(x)), 'nudges to split into logical chunks');
+});
+
+test('build_native_model: add_steps is atomic — a bad stage rolls back the whole batch', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'atomic', source: 'events' });
+  await assert.rejects(
+    () => e.build_native_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+      { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] },
+      { stage: 'aggregate', group_by: ['no_such_col'], measures: [{ name: 'n', fn: 'count' }] }, // breaks
+    ] }),
+    /NO steps applied/,
+  );
+  const pv = await e.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  assert.equal(pv.steps.length, 0, 'atomic: nothing applied, draft untouched');
+});
+
+// data_freshness = live MAX(time) with a TTL, not a value frozen for the process lifetime.
+test('data_freshness re-queries after its TTL (reflects new data, not a stale cached MAX)', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  let maxTime = '2026-07-10T00:00:00Z';
+  const runner = { show: async (_d, sql) => (/MAX\(/.test(sql) ? { ok: true, rows: [{ latest: maxTime }] } : { ok: true, rows: [] }) };
+  const e = new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/fresh', workspaceRoot: mkdtempSync(join(tmpdir(), 'fr-')) }) });
+  assert.equal(await e._dataFreshness('events'), '2026-07-10T00:00:00Z', 'first read = MAX(device_time)');
+  maxTime = '2026-07-21T00:00:00Z'; // new data lands
+  assert.equal(await e._dataFreshness('events'), '2026-07-10T00:00:00Z', 'within TTL: still the cached value');
+  e._freshTtlMs = 0; // expire the cache
+  assert.equal(await e._dataFreshness('events'), '2026-07-21T00:00:00Z', 'after TTL: re-queried, reflects the newer MAX');
+  e.close();
+});
+
 // ── P1: pointwise editing — edit/insert/delete/truncate mutate in place + revalidate ──
 test('build_native_model: edit_step / insert_step / delete_step / truncate mutate in place', async () => {
   const e = engine();

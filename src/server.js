@@ -28,6 +28,21 @@ const TOOL_DESCRIPTIONS = {
   time: 'Wait for `seconds` (capped at 60), then return — a pure timer that touches no data. Use it to PACE polling: after query_semantic_model({ materialize:true }) (or a long build) returns a query_id, call time to wait, then poll get_query_result; repeat until ready.',
 };
 
+// Human-readable display names for the tools (MCP `title` / annotations.title). The `name` stays
+// the stable programmatic id; the title is what a client shows in its UI/picker.
+const TOOL_TITLES = {
+  semantic_index: 'Explore the Data Catalog',
+  create_semantic_model: 'Create Metrics (Governed)',
+  build_native_model: 'Build a Pipeline / Funnel',
+  query_semantic_model: 'Query Metrics',
+  get_query_result: 'Fetch Query Result',
+  update_semantic_model: 'Update a Semantic Model',
+  context: 'Manage Contexts',
+  memory: 'Analyst Memory',
+  experiment: 'A/B Experiment Toolkit',
+  time: 'Wait (Timer)',
+};
+
 // Server-level documentation surfaced to the AI client (serverInfo.description):
 // what this MCP is for and how to use it end-to-end.
 const SERVER_DESCRIPTION = `Declarative semantic layer for product analytics.
@@ -76,14 +91,20 @@ const HIDDEN_TOOLS = new Set([
   'ab_test', 'srm_check', 'sample_size', // folded into experiment({ action: analyze | check_split | plan })
 ]);
 
+// Fallback title from a snake_case name: "get_query_result" → "Get Query Result".
+function titleFromName(name) {
+  return String(name).split('_').map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ');
+}
+
 export function buildToolDefs(engine) {
   return Object.entries(engine.schemas)
     .filter(([name]) => !HIDDEN_TOOLS.has(name))
-    .map(([name, inputSchema]) => ({
-      name,
-      description: TOOL_DESCRIPTIONS[name] || name,
-      inputSchema,
-    }));
+    .map(([name, inputSchema]) => {
+      const title = TOOL_TITLES[name] || titleFromName(name);
+      // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
+      // read the older annotations location. `name` remains the stable programmatic identifier.
+      return { name, title, description: TOOL_DESCRIPTIONS[name] || name, inputSchema, annotations: { title } };
+    });
 }
 
 export function makeMcpServer(engine) {

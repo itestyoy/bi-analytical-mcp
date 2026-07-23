@@ -36,7 +36,7 @@ const TOOL_TITLES = {
   build_native_model: 'Build a Pipeline',
   query_semantic_model: 'Query Semantic Model',
   get_query_result: 'Fetch Query Result',
-  update_semantic_model: 'Update a Semantic Model',
+  update_semantic_model: 'Update Semantic Model',
   context: 'Manage Contexts',
   memory: 'Use Memory',
   experiment: 'A/B Experiment Toolkit',

@@ -28,6 +28,12 @@ test('advertised tools: folded tools removed, context + experiment present', () 
   }
   // every advertised tool has a real description (not name-as-description).
   for (const d of buildToolDefs(engine())) assert.notEqual(d.description, d.name, `${d.name} has a description`);
+  // every advertised tool has a human-readable title (top-level + annotations), distinct from name.
+  for (const d of buildToolDefs(engine())) {
+    assert.ok(typeof d.title === 'string' && d.title.length > 0, `${d.name} has a title`);
+    assert.equal(d.annotations?.title, d.title, `${d.name} mirrors title into annotations`);
+    assert.notEqual(d.title, d.name, `${d.name} title is not the raw name`);
+  }
 });
 
 // experiment({ action }) — the unified A/B lifecycle — dispatches + validates strictly.

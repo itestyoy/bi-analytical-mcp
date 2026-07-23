@@ -31,16 +31,16 @@ const TOOL_DESCRIPTIONS = {
 // Human-readable display names for the tools (MCP `title` / annotations.title). The `name` stays
 // the stable programmatic id; the title is what a client shows in its UI/picker.
 const TOOL_TITLES = {
-  semantic_index: 'Explore the Data Catalog',
-  create_semantic_model: 'Create Metrics (Governed)',
-  build_native_model: 'Build a Pipeline / Funnel',
-  query_semantic_model: 'Query Metrics',
+  semantic_index: 'Explore Semantic Index',
+  create_semantic_model: 'Create Semantic Model',
+  build_native_model: 'Build a Pipeline',
+  query_semantic_model: 'Query Semantic Model',
   get_query_result: 'Fetch Query Result',
   update_semantic_model: 'Update a Semantic Model',
   context: 'Manage Contexts',
-  memory: 'Analyst Memory',
+  memory: 'Use Memory',
   experiment: 'A/B Experiment Toolkit',
-  time: 'Wait (Timer)',
+  time: 'Timer',
 };
 
 // Server-level documentation surfaced to the AI client (serverInfo.description):

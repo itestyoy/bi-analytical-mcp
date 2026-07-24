@@ -111,6 +111,55 @@ test('high-cardinality fields are flagged and skipped on the next sync', async (
   index.close();
 });
 
+// Rebuild-then-index: with runModels on, the sync `dbt run`s the source models BEFORE scanning.
+test('runModels rebuilds the source models (dbt run) before indexing', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  const order = [];
+  const runner = {
+    run: async () => { order.push('run'); return { ok: true, stdout: '', stderr: '' }; },
+    show: async (_d, sql) => {
+      order.push('show');
+      if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
+      if (/AS rows_total/.test(sql)) return { ok: true, rows: [aliasRow({ rows_total: 5 }, 3)] };
+      if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [aliasRow({ ev: 'first_launch', app: null, row_count: 5 }, 3)] };
+      return { ok: true, rows: [] };
+    },
+  };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, runModels: true, logger: () => {} });
+
+  await bi.refresh();
+
+  assert.equal(order[0], 'run', 'dbt run happens FIRST');
+  assert.ok(order.includes('show'), 'then the index scans');
+  assert.ok(order.indexOf('run') < order.indexOf('show'), 'models rebuilt before scanning');
+  assert.ok(index.stats(catalog.scalarEventProps()[0]) != null, 'index populated after the rebuild');
+  index.close();
+});
+
+// A failed dbt run does not stop indexing — it logs + notes and indexes existing data.
+test('runModels: a failed dbt run still indexes existing data (best-effort)', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  const runner = {
+    run: async () => ({ ok: false, stderr: 'model build failed' }),
+    show: async (_d, sql) => {
+      if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
+      if (/AS rows_total/.test(sql)) return { ok: true, rows: [aliasRow({ rows_total: 5 }, 3)] };
+      if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [aliasRow({ ev: 'first_launch', app: null, row_count: 5 }, 3)] };
+      return { ok: true, rows: [] };
+    },
+  };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, runModels: true, logger: () => {} });
+
+  await bi.refresh();
+
+  assert.ok(index.stats(catalog.scalarEventProps()[0]) != null, 'still indexed despite the failed build');
+  const notes = index.runNotes(index.syncStatus().last_run.id);
+  assert.ok(notes.some((n) => /dbt run of source models failed/.test(n.note)), 'the build failure is recorded on the run');
+  index.close();
+});
+
 // Schema sync: a field no longer in the table (not a target) is pruned from the index.
 test('a field gone from the schema is pruned from the index on the next sync', async () => {
   const catalog = loadCatalog(CATALOG, {});

@@ -335,7 +335,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // (non-null) rows → its top-N is noise, so it is not re-scanned on later syncs. Relative to the
   // field's own size (adapts to any table). Default 90%; set MCP_INDEX_HIGH_CARD_PCT=0 to disable.
   const highCardPct = process.env.MCP_INDEX_HIGH_CARD_PCT !== undefined ? Number(process.env.MCP_INDEX_HIGH_CARD_PCT) : 90;
-  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
+  // Rebuild-then-index: MCP_INDEX_DBT_RUN=1 makes each sync `dbt run` the catalog's source models
+  // BEFORE indexing, so the index + data_freshness reflect a freshly computed table (not the last
+  // externally-built one). MCP_INDEX_DBT_RUN_SELECT overrides the dbt selector. Off by default —
+  // leave it off if an external scheduler (Airflow/dbt Cloud) already builds the models.
+  const runModels = /^(1|true|yes|on)$/i.test(String(process.env.MCP_INDEX_DBT_RUN ?? '').trim());
+  const runModelsSelect = process.env.MCP_INDEX_DBT_RUN_SELECT || null;
+  const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();
 
   // Graceful shutdown: stop accepting, close the warm sidecar + SQLite handle.

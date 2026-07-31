@@ -332,9 +332,14 @@ export function dbtSchemaToCatalog(doc) {
       // and categorical `values` hints. `meta.mcp.dimension` is still honored.
       if (cm.dimension || !isAnchor) {
         const explicit = cm.dimension || {};
-        const type = explicit.type || dimTypeFromDataType(col.data_type);
+        // A validity-window bound (meta.mcp.dimension.validity: start|end) marks the SCD-2 pair
+        // MetricFlow uses for a point-in-time join — force it to a TIME dimension regardless of
+        // the guessed type, and flag the model as slowly-changing.
+        const validity = explicit.validity === 'start' || explicit.validity === 'end' ? explicit.validity : null;
+        const type = validity ? 'time' : (explicit.type || dimTypeFromDataType(col.data_type));
         const d = { type };
         if (type === 'time') d.granularity = explicit.granularity || cm.granularity || 'day';
+        if (validity) { d.validity = validity; m.scd = true; }
         const values = explicit.values || cm.values;
         if (values) d.values = values;
         dimensions[col.name] = d;

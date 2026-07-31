@@ -2115,6 +2115,9 @@ export class Engine {
     if (!this.runner?.run) return;
     const ctx = this.ctxs.get(ctxId);
     if (ctx.state._timeSpineBuilt) return;
+    // Self-heal: make sure the spine files exist even for a reused/persisted context that never
+    // went through create()'s ensureTimeSpine — then build the table we generated.
+    try { this.ctxs.ensureTimeSpine?.(ctxId); } catch { /* best effort */ }
     if (!this.ctxs.generatedTimeSpine?.(ctxId)) { ctx.state._timeSpineBuilt = true; return; }
     const r = await this.runner.run(this.ctxs.dir(ctxId), 'metricflow_time_spine');
     if (r.ok) { ctx.state._timeSpineBuilt = true; this.ctxs.touch(ctxId); }
@@ -2122,6 +2125,11 @@ export class Engine {
 
   async _parse(ctxId) {
     if (!this.runner) return { ok: true, executed: false, reason: 'no runner configured — not parsed (unit mode)' };
+    // Guarantee a time spine is CONFIGURED before parsing. The semantic manifest is invalid
+    // without one ("At least one time spine must be configured"), and a REUSED context (passed
+    // context_id) or one PERSISTED from before spine generation existed would otherwise fail
+    // parse. ensureTimeSpine is idempotent — a no-op once a `time_spine:` config is present.
+    try { this.ctxs.ensureTimeSpine?.(ctxId); } catch { /* best effort — parse will surface a real miss */ }
     const r = await this.runner.parse(this.ctxs.dir(ctxId));
     if (!r.ok) return { ok: false, error: { stage: 'parse', message: formatDbtError(r.stdout, r.stderr) } };
     return { ok: true, manifest: r.manifest };

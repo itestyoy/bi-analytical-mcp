@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ContextManager } from '../../src/context-manager.js';
@@ -30,6 +30,26 @@ test('name-only metricflow_time_spine.sql (no config) → add ONLY the config, d
   const { files, generatedSpine } = overlay((m) => writeFileSync(join(m, 'metricflow_time_spine.sql'), 'select 1 as date_day\n'));
   assert.ok(files.includes('_mcp_time_spine.yml') && !files.includes('metricflow_time_spine.sql'), 'config only, no duplicate model');
   assert.equal(generatedSpine, false, 'base provides the model → base built its table');
+});
+
+test('self-heal: a context missing its spine (stale/reused) re-generates it idempotently', () => {
+  const base = mkdtempSync(join(tmpdir(), 'ts-base-'));
+  mkdirSync(join(base, 'models'), { recursive: true });
+  writeFileSync(join(base, 'dbt_project.yml'), 'name: b\nprofile: b\nversion: "1"\nconfig-version: 2\nmodel-paths: ["models"]\n');
+  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'postgres' });
+  const ctx = cm.create();
+  const gen = cm.generatedDir(ctx.id);
+  // Simulate a context persisted from BEFORE spine generation existed: strip the spine files.
+  rmSync(join(gen, '_mcp_time_spine.yml'), { force: true });
+  rmSync(join(gen, 'metricflow_time_spine.sql'), { force: true });
+  assert.equal(cm.hasTimeSpine(ctx.id), false, 'precondition: spine is gone');
+  // The engine calls ensureTimeSpine before parse/query — it must bring the spine back.
+  cm.ensureTimeSpine(ctx.id);
+  const files = readdirSync(gen);
+  assert.ok(files.includes('_mcp_time_spine.yml') && files.includes('metricflow_time_spine.sql'), 're-generated');
+  assert.equal(cm.hasTimeSpine(ctx.id), true, 'configured again');
+  // Idempotent: a second call changes nothing (returns false = nothing to do).
+  assert.equal(cm.ensureTimeSpine(ctx.id), false, 'second call is a no-op');
 });
 
 test('a properly CONFIGURED time spine in base → overlay adds nothing', () => {

@@ -155,13 +155,20 @@ export class ContextManager {
     const dir = this.dir(id);
     mkdirSync(dir, { recursive: true });
     if (this.baseProjectDir && existsSync(this.baseProjectDir)) {
-      // Copy the reference project ENTIRELY AS-IS, including target/ (parse
-      // artifacts). Exclude only runtime logs/ and the .mcp workspace dir — the
-      // latter must be skipped to avoid recursively copying other contexts when
-      // the workspace lives inside the project tree.
+      // Copy the reference project. Exclude logs/ and the .mcp workspace dir (the latter to avoid
+      // recursively copying other contexts when the workspace lives inside the project tree).
+      //
+      // ALSO exclude the base's partial-parse cache and its compiled semantic_manifest.json. We
+      // INJECT new files (context.yml + the time spine) into the overlay after copying; parsing
+      // incrementally from a base cache that predates those files is fragile (dbt itself warns
+      // "run with --no-partial-parse as some deprecations are only encountered during parsing").
+      // Worse, a parse that FAILS validation does not rewrite semantic_manifest.json, so a copied
+      // stale one (semantic_models: []) is what MetricFlow then reads → "no time spine". Dropping
+      // both forces the first parse to be a clean FULL parse that builds the manifest from the
+      // overlay's ACTUAL files; dbt rebuilds its own cache for subsequent (fast) re-parses.
       cpSync(this.baseProjectDir, dir, {
         recursive: true,
-        filter: (src) => !/(\/logs(\/|$)|\/\.mcp(\/|$))/.test(src),
+        filter: (src) => !/(\/logs(\/|$)|\/\.mcp(\/|$)|\/target\/partial_parse\.msgpack$|\/target\/semantic_manifest\.json$)/.test(src),
       });
     }
     mkdirSync(this.generatedDir(id), { recursive: true });

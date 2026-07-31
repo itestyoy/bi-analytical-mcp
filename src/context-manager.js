@@ -150,31 +150,45 @@ export class ContextManager {
     return ctx;
   }
 
-  /** Guarantee a metricflow_time_spine model exists in the overlay (predefined). */
+  /**
+   * Guarantee a time spine is CONFIGURED in the overlay (MetricFlow needs one for metric_time,
+   * grains, cumulative/conversion metrics AND SCD validity_params joins). What matters is the
+   * modern `time_spine:` CONFIG, not merely a model file named metricflow_time_spine — dbt >= 1.9
+   * rejects a name-only model as "no time spine configured". So:
+   *   - a `time_spine:` config already present anywhere → nothing to do;
+   *   - a metricflow_time_spine.sql present but NOT configured → write ONLY the config yml (it
+   *     attaches to that existing model; writing a second .sql would duplicate the model name);
+   *   - neither → write both the model and the config.
+   */
   ensureTimeSpine(id) {
-    if (this.hasTimeSpine(id)) return false;
+    const { hasConfig, hasModelFile } = this._timeSpinePresence(id);
+    if (hasConfig) return false;
     const dir = this.generatedDir(id);
     mkdirSync(dir, { recursive: true });
-    writeFileSync(join(dir, 'metricflow_time_spine.sql'), timeSpineSql(this.timeSpineDialect, this.timeSpineStart, this.timeSpineEnd));
+    if (!hasModelFile) writeFileSync(join(dir, 'metricflow_time_spine.sql'), timeSpineSql(this.timeSpineDialect, this.timeSpineStart, this.timeSpineEnd));
     writeFileSync(join(dir, '_mcp_time_spine.yml'), TIME_SPINE_YML);
     return true;
   }
 
-  /** Does the overlay already define a time spine (base project or generated)? */
-  hasTimeSpine(id) {
+  /** Back-compat: a time spine is present only when actually CONFIGURED (not just a name match). */
+  hasTimeSpine(id) { return this._timeSpinePresence(id).hasConfig; }
+
+  /** Scan the overlay's models/ for a `time_spine:` config and for a metricflow_time_spine.sql. */
+  _timeSpinePresence(id) {
     const modelsDir = join(this.dir(id), 'models');
-    if (!existsSync(modelsDir)) return false;
+    let hasConfig = false; let hasModelFile = false;
+    if (!existsSync(modelsDir)) return { hasConfig, hasModelFile };
     const walk = (d) => {
       for (const name of readdirSync(d)) {
         const p = join(d, name);
         const st = statSync(p);
-        if (st.isDirectory()) { if (walk(p)) return true; continue; }
-        if (name === 'metricflow_time_spine.sql') return true;
-        if (/\.ya?ml$/.test(name) && readFileSync(p, 'utf8').includes('time_spine:')) return true;
+        if (st.isDirectory()) { walk(p); continue; }
+        if (name === 'metricflow_time_spine.sql') hasModelFile = true;
+        if (/\.ya?ml$/.test(name)) { try { if (readFileSync(p, 'utf8').includes('time_spine:')) hasConfig = true; } catch { /* unreadable → ignore */ } }
       }
-      return false;
     };
-    return walk(modelsDir);
+    walk(modelsDir);
+    return { hasConfig, hasModelFile };
   }
 
   /** Write the generated YAML for a context into its overlay. */

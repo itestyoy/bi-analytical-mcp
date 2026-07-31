@@ -1927,7 +1927,11 @@ export class Engine {
     const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
     this.ctxs.touch(ctx.id);
 
-    if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
+    if (!res.ok) {
+      const error = { stage: 'query', message: formatDbtError(res.stdout, res.stderr) };
+      await this._attachSpineDiagnostics(ctx.id, error);
+      return { ok: false, command: res.command, error };
+    }
     if (explain) {
       const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: [...orderable] };
       if (input.dry_run) out.dry_run = true;
@@ -1984,7 +1988,11 @@ export class Engine {
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     const dir = this.ctxs.dir(ctx.id);
     const explain = await this.runner.query(dir, { ...qopts, explain: true });
-    if (!explain.ok) return { ok: false, error: { stage: 'query', message: formatDbtError(explain.stdout, explain.stderr) } };
+    if (!explain.ok) {
+      const error = { stage: 'query', message: formatDbtError(explain.stdout, explain.stderr) };
+      await this._attachSpineDiagnostics(ctx.id, error);
+      return { ok: false, error };
+    }
 
     const id = this.jobs.create({ contextId: ctx.id });
     const table = `qr_${id}`;
@@ -2132,31 +2140,35 @@ export class Engine {
     try { this.ctxs.ensureTimeSpine?.(ctxId); } catch { /* best effort — parse will surface a real miss */ }
     const r = await this.runner.parse(this.ctxs.dir(ctxId));
     if (!r.ok) {
-      const message = formatDbtError(r.stdout, r.stderr);
-      const error = { stage: 'parse', message };
-      // Self-diagnose the recurring "At least one time spine must be configured" failure: attach
-      // the overlay's ground truth so the cause (missing overlay vs too-old runtime) is visible in
-      // the tool response itself — no shell access to the container required.
-      if (/time spine/i.test(message)) {
-        try {
-          const diag = this.ctxs.timeSpineDiagnostics?.(ctxId) || {};
-          const rt = await this.runner.version?.();
-          if (rt) {
-            diag.runtime = rt;
-            // The modern `time_spine:` model property only registers on dbt-core >= 1.9. If the
-            // config IS in the overlay but dbt still reports none, an older runtime is the cause —
-            // typically a stale pip layer: fresh JS code (spine files written) but dbt not upgraded.
-            const ver = /(\d+)\.(\d+)\.(\d+)/.exec(rt.dbt || '');
-            if (diag.time_spine_configured && ver && (Number(ver[1]) < 1 || (Number(ver[1]) === 1 && Number(ver[2]) < 9))) {
-              diag.hint = `The overlay HAS a \`time_spine:\` config, but the runtime dbt-core is ${ver[0]} — the modern time_spine property needs dbt-core >= 1.9, so this version silently drops it. Rebuild the image reinstalling Python deps (pip --no-cache-dir against requirements) so dbt-core matches; the JS code updated but the pip layer is stale.`;
-            }
-          }
-          error.diagnostics = diag;
-        } catch { /* best effort */ }
-      }
+      const error = { stage: 'parse', message: formatDbtError(r.stdout, r.stderr) };
+      await this._attachSpineDiagnostics(ctxId, error);
       return { ok: false, error };
     }
     return { ok: true, manifest: r.manifest };
+  }
+
+  /**
+   * Attach time-spine ground truth to a FAILED parse/query error so the cause is visible in the
+   * tool response itself — no container shell needed. Fires on BOTH the parse error ("Semantic
+   * Manifest validation failed" at create) AND the mf-query error ("At least one time spine must
+   * be configured"), which are two different stages of the same underlying miss. Reports the
+   * overlay files, the COMPILED manifest's registered time_spines (the exact list MetricFlow
+   * reads), and the runtime dbt/mf versions. Best-effort; never throws.
+   */
+  async _attachSpineDiagnostics(ctxId, error) {
+    const msg = error?.message || '';
+    if (!/time spine|semantic manifest|validation failed/i.test(msg)) return error;
+    try {
+      const diag = this.ctxs.timeSpineDiagnostics?.(ctxId) || {};
+      try { const rt = await this.runner?.version?.(); if (rt) diag.runtime = rt; } catch { /* version best-effort */ }
+      const ver = /(\d+)\.(\d+)\.(\d+)/.exec(diag.runtime?.dbt || '');
+      const tooOld = ver && (Number(ver[1]) < 1 || (Number(ver[1]) === 1 && Number(ver[2]) < 9));
+      if (diag.time_spine_configured && tooOld) {
+        diag.hint = `The overlay HAS a \`time_spine:\` config but the runtime dbt-core is ${ver[0]} — the modern time_spine property needs dbt-core >= 1.9, so this version silently drops it. Reinstall Python deps (pip --no-cache-dir against requirements) so dbt-core matches.`;
+      }
+      error.diagnostics = diag;
+    } catch { /* best effort */ }
+    return error;
   }
 
   _assumptions(ctx) {

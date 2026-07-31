@@ -31,6 +31,9 @@ test('SCD-2 by default → natural entity + validity_params nested under type_pa
   try {
     const sm = renderBaseModel(scdCatalog, 'users');
     assert.equal(sm.entities[0].type, 'natural', 'SCD key is natural (not primary — it is not unique)');
+    // dbt requires a model-level primary_entity when the model has dimensions (verified via
+    // dbt parse + mf query: this is what makes the point-in-time join validate and run).
+    assert.equal(sm.primary_entity, 'user', 'SCD model also declares a model-level primary_entity');
     const vf = sm.dimensions.find((d) => d.name === 'install_time_valid_from');
     const vt = sm.dimensions.find((d) => d.name === 'install_time_valid_until');
     // validity_params must live INSIDE type_params (not a top-level sibling — dbt rejects that).
@@ -50,6 +53,7 @@ test('SCD-2 with MCP_SCD_VALIDITY_PARAMS=false → plain primary entity, no vali
   try {
     const sm = renderBaseModel(scdCatalog, 'users');
     assert.equal(sm.entities[0].type, 'primary', 'disabled → primary entity (parses on any MetricFlow)');
+    assert.equal(sm.primary_entity, undefined, 'no extra model-level primary_entity when disabled');
     assert.ok(sm.dimensions.every((d) => !d.type_params?.validity_params && !d.validity_params), 'no validity_params when disabled');
   } finally { if (prev === undefined) delete process.env.MCP_SCD_VALIDITY_PARAMS; else process.env.MCP_SCD_VALIDITY_PARAMS = prev; }
 });

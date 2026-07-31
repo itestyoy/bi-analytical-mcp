@@ -35,6 +35,10 @@ export function renderBaseModel(catalog, key) {
   const pe = m.primary_entity;
   const peName = typeof pe === 'string' ? pe : pe.name;
   const peCol = typeof pe === 'string' ? undefined : pe.column;
+  // For SCD the join key is a `natural` entity (not unique per row). dbt still requires the model
+  // to declare a PRIMARY entity when it has dimensions, so also set the model-level primary_entity
+  // (verified via `dbt parse` + `mf query`: this yields the point-in-time join, no fan-out).
+  if (scd) sm.primary_entity = peName;
   sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peCol ? { expr: peCol } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: e.column });

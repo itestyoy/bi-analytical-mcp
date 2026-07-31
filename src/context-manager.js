@@ -196,6 +196,39 @@ export class ContextManager {
     return { hasConfig, hasModelFile };
   }
 
+  /**
+   * Ground-truth report of the time-spine state in a context's overlay — attached to a parse
+   * error so a "no time spine configured" failure is self-diagnosing (which files actually exist,
+   * whether a `time_spine:` config is present, and where). Turns an opaque backend failure into
+   * evidence: if the config is present here but dbt still rejects it, the runtime dbt/DSI is too
+   * old for the modern `time_spine:` form; if it is absent, the overlay was never generated.
+   */
+  timeSpineDiagnostics(id) {
+    const { hasConfig, hasModelFile } = this._timeSpinePresence(id);
+    const modelsDir = join(this.dir(id), 'models');
+    const configFiles = [];
+    if (existsSync(modelsDir)) {
+      const walk = (d) => {
+        for (const name of readdirSync(d)) {
+          const p = join(d, name);
+          if (statSync(p).isDirectory()) { walk(p); continue; }
+          if (/\.ya?ml$/.test(name)) { try { if (readFileSync(p, 'utf8').includes('time_spine:')) configFiles.push(p.slice(this.dir(id).length + 1)); } catch { /* ignore */ } }
+        }
+      };
+      walk(modelsDir);
+    }
+    return {
+      overlay_dir: this.dir(id),
+      generated_files: this.generatedFiles(id),
+      time_spine_configured: hasConfig,
+      time_spine_model_present: hasModelFile,
+      time_spine_config_files: configFiles,
+      hint: hasConfig
+        ? 'A `time_spine:` config IS present in this overlay — if dbt still reports "no time spine configured", the runtime dbt/dbt-semantic-interfaces is older than the modern time_spine format (needs dbt >= 1.9). Check `dbt --version` inside the container against requirements.'
+        : 'No `time_spine:` config found in this overlay — the spine was not generated for this context. Confirm the running image includes ensureTimeSpine (commits 2356133/9427a02/225f72c) and that models/generated is under model-paths.',
+    };
+  }
+
   /** Write the generated YAML for a context into its overlay. */
   writeYaml(id, yamlText) {
     const file = join(this.generatedDir(id), 'context.yml');

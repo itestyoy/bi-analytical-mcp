@@ -52,6 +52,24 @@ test('self-heal: a context missing its spine (stale/reused) re-generates it idem
   assert.equal(cm.ensureTimeSpine(ctx.id), false, 'second call is a no-op');
 });
 
+test('timeSpineDiagnostics reports overlay ground truth (configured vs missing)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'ts-base-'));
+  mkdirSync(join(base, 'models'), { recursive: true });
+  writeFileSync(join(base, 'dbt_project.yml'), 'name: b\nprofile: b\nversion: "1"\nconfig-version: 2\nmodel-paths: ["models"]\n');
+  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'postgres' });
+  const ctx = cm.create();
+  const ok = cm.timeSpineDiagnostics(ctx.id);
+  assert.equal(ok.time_spine_configured, true, 'freshly created context reports configured');
+  assert.ok(ok.time_spine_config_files.some((f) => f.endsWith('_mcp_time_spine.yml')), 'names the config file');
+  assert.match(ok.hint, /config IS present/);
+  // strip the config → diagnostics must flip and point at the missing overlay
+  rmSync(join(cm.generatedDir(ctx.id), '_mcp_time_spine.yml'), { force: true });
+  rmSync(join(cm.generatedDir(ctx.id), 'metricflow_time_spine.sql'), { force: true });
+  const gone = cm.timeSpineDiagnostics(ctx.id);
+  assert.equal(gone.time_spine_configured, false, 'reports not configured after strip');
+  assert.match(gone.hint, /was not generated/);
+});
+
 test('a properly CONFIGURED time spine in base → overlay adds nothing', () => {
   const { files, generatedSpine } = overlay((m) => {
     writeFileSync(join(m, 'ts.sql'), 'select 1 as date_day\n');

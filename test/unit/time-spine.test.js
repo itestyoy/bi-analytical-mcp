@@ -85,7 +85,23 @@ test('timeSpineDiagnostics: config present but compiled manifest has ZERO spines
   assert.equal(d.time_spine_configured, true, 'config file IS present in overlay');
   assert.equal(d.compiled_manifest.present, true);
   assert.equal(d.compiled_manifest.time_spines_count, 0, 'but the manifest registered none');
-  assert.match(d.hint, /DECISIVE/, 'hint pins the runtime-too-old cause');
+  assert.match(d.hint, /dbt version|dbt-core >= 1\.9/, 'models compiled but no spine → points at runtime dbt version');
+});
+
+test('custom model-paths: generated dir lands under the FIRST base model-path (dbt scans it)', () => {
+  const base = mkdtempSync(join(tmpdir(), 'ts-base-'));
+  mkdirSync(join(base, 'marts'), { recursive: true });
+  // base uses a CUSTOM model-paths that does NOT include the default "models"
+  writeFileSync(join(base, 'dbt_project.yml'), 'name: b\nprofile: b\nversion: "1"\nconfig-version: 2\nmodel-paths: ["marts"]\n');
+  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'postgres' });
+  assert.deepEqual(cm.modelPaths, ['marts'], 'reads custom model-paths from the base');
+  const ctx = cm.create();
+  const gen = cm.generatedDir(ctx.id);
+  assert.ok(gen.endsWith(join('marts', 'generated')), `generated dir under the scanned path, got ${gen}`);
+  assert.ok(readdirSync(gen).includes('_mcp_time_spine.yml'), 'spine config written into the scanned path');
+  const d = cm.timeSpineDiagnostics(ctx.id);
+  assert.equal(d.generated_dir_scanned, true, 'diagnostics confirm the generated dir is under a scanned model-path');
+  assert.deepEqual(d.base_model_paths, ['marts']);
 });
 
 test('a properly CONFIGURED time spine in base → overlay adds nothing', () => {

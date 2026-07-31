@@ -217,15 +217,44 @@ export class ContextManager {
       };
       walk(modelsDir);
     }
+    // Read the COMPILED semantic manifest dbt/MetricFlow actually consume. This is the smoking
+    // gun: `time_spines` here is the exact list MetricFlow checks — populated means dbt registered
+    // our config (so a still-failing mf points elsewhere); empty despite the config file present
+    // means the runtime dbt-core silently dropped the modern `time_spine:` property (too old).
+    let manifest = { present: false };
+    try {
+      const mf = join(this.dir(id), 'target', 'semantic_manifest.json');
+      if (existsSync(mf)) {
+        const doc = JSON.parse(readFileSync(mf, 'utf8'));
+        const pc = doc.project_configuration || {};
+        const spines = pc.time_spines || [];
+        const legacy = pc.time_spine_table_configurations || [];
+        manifest = {
+          present: true,
+          mtime: statSync(mf).mtimeMs,
+          time_spines_count: spines.length,
+          time_spine_relations: spines.map((s) => s.node_relation?.relation_name || s.node_relation?.alias).filter(Boolean),
+          legacy_time_spine_count: legacy.length,
+          semantic_models: (doc.semantic_models || []).map((s) => s.name),
+        };
+      }
+    } catch { manifest = { present: false, unreadable: true }; }
+
+    // The manifest is the authority: if it has NO time spine but the config file IS present, the
+    // runtime dbt did not register it (version too old) — that beats any file-level heuristic.
+    const manifestMissesSpine = manifest.present && hasConfig && manifest.time_spines_count === 0 && manifest.legacy_time_spine_count === 0;
     return {
       overlay_dir: this.dir(id),
       generated_files: this.generatedFiles(id),
       time_spine_configured: hasConfig,
       time_spine_model_present: hasModelFile,
       time_spine_config_files: configFiles,
-      hint: hasConfig
-        ? 'A `time_spine:` config IS present in this overlay — if dbt still reports "no time spine configured", the runtime dbt/dbt-semantic-interfaces is older than the modern time_spine format (needs dbt >= 1.9). Check `dbt --version` inside the container against requirements.'
-        : 'No `time_spine:` config found in this overlay — the spine was not generated for this context. Confirm the running image includes ensureTimeSpine (commits 2356133/9427a02/225f72c) and that models/generated is under model-paths.',
+      compiled_manifest: manifest,
+      hint: manifestMissesSpine
+        ? 'DECISIVE: the config file is in the overlay but the COMPILED semantic_manifest.json has ZERO time spines — the runtime dbt-core did NOT register the modern `time_spine:` property. That property needs dbt-core >= 1.9; an older dbt drops it silently. Check the `runtime` version below and reinstall Python deps (pip --no-cache-dir) so dbt-core matches requirements.'
+        : hasConfig
+          ? 'A `time_spine:` config IS present in this overlay. If the compiled manifest below shows time_spines populated yet MetricFlow still errors, mf is reading a different/stale manifest; otherwise the runtime dbt is too old to register it (needs dbt >= 1.9).'
+          : 'No `time_spine:` config found in this overlay — the spine was not generated for this context. Confirm the running image includes ensureTimeSpine (commits 2356133/9427a02/225f72c) and that models/generated is under model-paths.',
     };
   }
 

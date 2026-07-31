@@ -61,6 +61,7 @@ test('timeSpineDiagnostics reports overlay ground truth (configured vs missing)'
   const ok = cm.timeSpineDiagnostics(ctx.id);
   assert.equal(ok.time_spine_configured, true, 'freshly created context reports configured');
   assert.ok(ok.time_spine_config_files.some((f) => f.endsWith('_mcp_time_spine.yml')), 'names the config file');
+  assert.equal(ok.compiled_manifest.present, false, 'no compiled manifest in this bare overlay (not parsed)');
   assert.match(ok.hint, /config IS present/);
   // strip the config → diagnostics must flip and point at the missing overlay
   rmSync(join(cm.generatedDir(ctx.id), '_mcp_time_spine.yml'), { force: true });
@@ -68,6 +69,23 @@ test('timeSpineDiagnostics reports overlay ground truth (configured vs missing)'
   const gone = cm.timeSpineDiagnostics(ctx.id);
   assert.equal(gone.time_spine_configured, false, 'reports not configured after strip');
   assert.match(gone.hint, /was not generated/);
+});
+
+test('timeSpineDiagnostics: config present but compiled manifest has ZERO spines → decisive version hint', () => {
+  const base = mkdtempSync(join(tmpdir(), 'ts-base-'));
+  mkdirSync(join(base, 'models'), { recursive: true });
+  writeFileSync(join(base, 'dbt_project.yml'), 'name: b\nprofile: b\nversion: "1"\nconfig-version: 2\nmodel-paths: ["models"]\n');
+  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'postgres' });
+  const ctx = cm.create(); // writes the time_spine: config into the overlay
+  // Simulate what an OLD dbt-core (<1.9) produces: a compiled manifest that DROPPED the spine.
+  mkdirSync(join(cm.dir(ctx.id), 'target'), { recursive: true });
+  writeFileSync(join(cm.dir(ctx.id), 'target', 'semantic_manifest.json'),
+    JSON.stringify({ semantic_models: [{ name: 'events' }], project_configuration: { time_spines: [], time_spine_table_configurations: [] } }));
+  const d = cm.timeSpineDiagnostics(ctx.id);
+  assert.equal(d.time_spine_configured, true, 'config file IS present in overlay');
+  assert.equal(d.compiled_manifest.present, true);
+  assert.equal(d.compiled_manifest.time_spines_count, 0, 'but the manifest registered none');
+  assert.match(d.hint, /DECISIVE/, 'hint pins the runtime-too-old cause');
 });
 
 test('a properly CONFIGURED time spine in base → overlay adds nothing', () => {

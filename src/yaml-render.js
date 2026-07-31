@@ -23,14 +23,23 @@ export function renderBaseModel(catalog, key) {
   }
 
   // dimension/fact model with a natural primary key. When the model is SLOWLY-CHANGING (SCD-2:
-  // several validity-windowed rows per key), the join entity is declared `natural` (not `primary`,
-  // since the key is not unique) and the two validity-bound time dimensions carry validity_params —
-  // MetricFlow then performs a POINT-IN-TIME join (the fact's agg_time between the window), instead
-  // of a plain key equality that would fan out and double-count.
+  // several validity-windowed rows per key) AND MetricFlow's SCD support is enabled, the join
+  // entity is declared `natural` (not `primary`, since the key is not unique) and the two
+  // validity-bound time dimensions carry validity_params — MetricFlow then does a POINT-IN-TIME
+  // join (fact agg_time within the window) instead of a fan-out equality.
+  // DEFAULT ON when the catalog marks validity columns (verified against dbt-semantic-interfaces
+  // 0.9.0 via dbt parse: validity_params nested under type_params parses cleanly). An ESCAPE HATCH
+  // MCP_SCD_VALIDITY_PARAMS=false disables it for anyone on an OLDER DSI that rejects the field —
+  // then the model emits a plain primary-key form (use a pipeline join.between for point-in-time).
+  const scd = m.scd && !/^(0|false|no|off)$/i.test(String(process.env.MCP_SCD_VALIDITY_PARAMS ?? '').trim());
   const pe = m.primary_entity;
   const peName = typeof pe === 'string' ? pe : pe.name;
   const peCol = typeof pe === 'string' ? undefined : pe.column;
-  sm.entities = [{ name: peName, type: m.scd ? 'natural' : 'primary', ...(peCol ? { expr: peCol } : {}) }];
+  // For SCD the join key is a `natural` entity (not unique per row). dbt still requires the model
+  // to declare a PRIMARY entity when it has dimensions, so also set the model-level primary_entity
+  // (verified via `dbt parse` + `mf query`: this yields the point-in-time join, no fan-out).
+  if (scd) sm.primary_entity = peName;
+  sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peCol ? { expr: peCol } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: e.column });
   }
@@ -39,9 +48,11 @@ export function renderBaseModel(catalog, key) {
   for (const [name, d] of Object.entries(m.dimensions || {})) {
     if (d.type === 'time') {
       const dim = { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } };
-      if (d.validity) { dim.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = name; }
+      // validity_params is nested UNDER type_params (dbt-semantic-interfaces schema) — NOT a
+      // sibling of it; the top-level placement is what dbt rejected as an unexpected property.
+      if (scd && d.validity) { dim.type_params.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = name; }
       sm.dimensions.push(dim);
-      if (!d.validity) timeDim ||= name; // a validity bound is not the model's agg_time dimension
+      if (!(scd && d.validity)) timeDim ||= name; // a validity bound is not the model's agg_time dimension
     } else {
       sm.dimensions.push({ name, type: 'categorical' });
     }

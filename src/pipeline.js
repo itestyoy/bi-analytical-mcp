@@ -241,6 +241,9 @@ const STAGES = {
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
         from: OPERAND, to: OPERAND, // date_diff / elapsed_days (each may be { column } / { value } / { now: true })
+        // For retention with elapsed_days, anchor `from` on the TRUE install/cohort timestamp
+        // (e.g. install_date) — NOT an SCD validity bound like install_time_valid_from, whose
+        // open side is a sentinel (e.g. 1970-01-01), which makes retention_day nonsensically huge.
         clamp_zero: { type: 'boolean', description: 'op=elapsed_days: fold negative (pre-`from`) and NULL (e.g. missing install_date) results to 0, so it is a clean day 0+. Default true; set false for the raw signed/NULL-able value.' },
         column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/upper/lower/length/substring/trim/replace/date_trunc/date_part, and for window lag/lead/sum/avg/min/max.' },
         columns: { type: 'array', items: { type: 'string' }, description: 'Inputs for coalesce/least/greatest.' },

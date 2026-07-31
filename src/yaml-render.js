@@ -135,7 +135,7 @@ export function renderContext(catalog, state) {
   const body = yaml.dump(doc, { lineWidth: 120, noRefs: true, quotingType: '"' });
   const warnings = [];
   if (droppedMeasures.size) {
-    warnings.push(`SCD dimension model is join-only: MetricFlow forbids measures on a validity_params model, so measure(s) [${[...droppedMeasures].join(', ')}] were not emitted${droppedMetrics.length ? ` (and metric(s) [${droppedMetrics.join(', ')}] that depended on them were dropped)` : ''}. Define such measures on the events fact instead.`);
+    warnings.push(`SCD dimension model is join-only: MetricFlow forbids measures on a validity_params model, so measure(s) [${[...droppedMeasures].join(', ')}] were not emitted${droppedMetrics.length ? ` (and metric(s) [${droppedMetrics.join(', ')}] that depended on them were dropped)` : ''}. Source of such a measure is the catalog's meta.mcp.measures on this model OR a prior task on a reused context_id (it stays in ctx.state.additions) — not auto-generated. Define user counts on the events fact (count_distinct of the user key) instead.`);
   }
   return {
     yaml: unquoteRefs(body),

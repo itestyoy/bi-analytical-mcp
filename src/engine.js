@@ -2138,7 +2138,21 @@ export class Engine {
       // the overlay's ground truth so the cause (missing overlay vs too-old runtime) is visible in
       // the tool response itself — no shell access to the container required.
       if (/time spine/i.test(message)) {
-        try { error.diagnostics = this.ctxs.timeSpineDiagnostics?.(ctxId); } catch { /* best effort */ }
+        try {
+          const diag = this.ctxs.timeSpineDiagnostics?.(ctxId) || {};
+          const rt = await this.runner.version?.();
+          if (rt) {
+            diag.runtime = rt;
+            // The modern `time_spine:` model property only registers on dbt-core >= 1.9. If the
+            // config IS in the overlay but dbt still reports none, an older runtime is the cause —
+            // typically a stale pip layer: fresh JS code (spine files written) but dbt not upgraded.
+            const ver = /(\d+)\.(\d+)\.(\d+)/.exec(rt.dbt || '');
+            if (diag.time_spine_configured && ver && (Number(ver[1]) < 1 || (Number(ver[1]) === 1 && Number(ver[2]) < 9))) {
+              diag.hint = `The overlay HAS a \`time_spine:\` config, but the runtime dbt-core is ${ver[0]} — the modern time_spine property needs dbt-core >= 1.9, so this version silently drops it. Rebuild the image reinstalling Python deps (pip --no-cache-dir against requirements) so dbt-core matches; the JS code updated but the pip layer is stale.`;
+            }
+          }
+          error.diagnostics = diag;
+        } catch { /* best effort */ }
       }
       return { ok: false, error };
     }

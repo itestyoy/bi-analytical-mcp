@@ -1,5 +1,14 @@
 # BigQuery build: dbt CLI + BigQuery adapter + MetricFlow `mf`.
 # Used by docker-compose.bigquery.yml (build arg DBT_REQUIREMENTS).
-dbt-core==1.11.11
-dbt-bigquery>=1.10,<1.13
+#
+# Versions are already at the CURRENT SCD-capable stack:
+#   * dbt-metricflow 0.13.0 is the latest release; it pins metricflow==0.211.0 and
+#     caps dbt-core<1.12, so the 1.11.x line is the correct ceiling.
+#   * This stack ships the dbt-semantic-interfaces that supports SCD Type II
+#     `validity_params` (governed point-in-time joins — see MCP_SCD_VALIDITY_PARAMS).
+# If a running image still rejects `validity_params` ("Additional properties are not
+# allowed"), it was built from OLDER pins — rebuild the image WITHOUT cache:
+#   docker compose -f docker-compose.bigquery.yml build --no-cache
+dbt-core>=1.11.11,<1.12
+dbt-bigquery>=1.11,<1.13
 dbt-metricflow==0.13.0

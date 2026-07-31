@@ -382,12 +382,21 @@ const STAGES = {
   join: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'with', 'on'],
-      description: 'Bring in attributes from a related model on a shared entity key, exposing its columns. Enriches events with user attributes (e.g. country / platform / install_date) for segmentation or date math.',
+      description: 'Bring in attributes from a related model on a shared entity key, exposing its columns. Enriches events with user attributes (e.g. country / platform / install_date) for segmentation or date math. Optional `between` adds a point-in-time / SCD-2 condition (a temporal validity window) alongside the key equality.',
       properties: {
         stage: { const: 'join' },
         with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join.' },
         on: { type: 'string', description: 'Shared entity key column (present on both sides).' },
         attrs: { type: 'array', items: { type: 'string' }, description: 'Columns of the joined model to expose (default: all its dimensions).' },
+        between: {
+          type: 'object', additionalProperties: false, required: ['value', 'from', 'to'],
+          description: 'Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the event time. Ensure the joined windows do not overlap, or a row can match several versions.',
+          properties: {
+            value: { type: 'string', description: 'A column on THIS (left) side compared against the window — e.g. the event time.' },
+            from: { type: 'string', description: 'Window LOWER-bound column on the joined model (inclusive), e.g. valid_from.' },
+            to: { type: 'string', description: 'Window UPPER-bound column on the joined model (inclusive), e.g. valid_until.' },
+          },
+        },
         kind: { enum: ['left', 'inner'], default: 'left' },
       },
     }),
@@ -397,7 +406,21 @@ const STAGES = {
       const relation = `{{ ref('${m.dbt_model}') }}`;
       let out = cols;
       for (const a of attrs) out = addCol(out, a, 'string');
-      return { op: { op: 'join', relation, alias: 'j', on: [p.on], attrs, kind: (p.kind || 'left').toUpperCase() }, cols: out };
+      let between;
+      if (p.between) {
+        // `value` is a column on THIS side (validated against the live column set); `from`/`to`
+        // are columns of the JOINED model (validated against its declared columns when known).
+        requireCol(cols, p.between.value);
+        const joinedCols = new Set([...catalog.modelColumns(p.with).map((c) => c.name), ...Object.keys(m.dimensions || {})]);
+        for (const side of ['from', 'to']) {
+          const c = p.between[side];
+          if (joinedCols.size && !joinedCols.has(c)) throw new Error(`join between.${side}: '${c}' is not a column of '${p.with}' (available: ${[...joinedCols].join(', ')})`);
+        }
+        between = { value: p.between.value, from: p.between.from, to: p.between.to };
+      }
+      // A `between` predicate cannot be expressed with the BigQuery pipe `USING (...)` form, so it
+      // forces the chained-CTE `ON ...` assembly (both dialects render the same ON clause there).
+      return { op: { op: 'join', relation, alias: 'j', on: [p.on], attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
     },
   },
 

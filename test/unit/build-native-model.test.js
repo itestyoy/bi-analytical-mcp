@@ -123,6 +123,30 @@ test('build_native_model: schema rejects action-irrelevant fields', async () => 
   assert.equal(reuse.draft_id, s.draft_id);
 });
 
+// join with a `between` (point-in-time / SCD-2) window: accepted, validated, exposes attrs.
+test('build_native_model: join between (temporal window) validates and exposes joined columns', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'pit', source: 'events' });
+  // value is a base (events) column; from/to are columns of the joined model.
+  const ok = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: {
+    stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'],
+    between: { value: 'device_time', from: 'install_date', to: 'install_date' },
+  }, include_columns: true });
+  assert.ok(ok.available_columns.some((c) => c.name === 'country'), 'joined attr exposed');
+  // it renders end-to-end (forces the ON-clause CTE form so the BETWEEN can be expressed).
+  const pv = await e.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'pipeline renders with the between join');
+  // a window bound that is not a column of the joined model is rejected at add_step.
+  const s2 = await e.build_native_model({ action: 'start', name: 'pit2', source: 'events' });
+  await assert.rejects(
+    () => e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: {
+      stage: 'join', with: 'users', on: 'player_id_of_internal',
+      between: { value: 'device_time', from: 'no_such_col', to: 'install_date' },
+    } }),
+    /not a column of/,
+  );
+});
+
 // compute op=elapsed_days: the retention-day primitive is wired + input-validated at add_step.
 test('build_native_model: compute elapsed_days adds an int column and requires from+to', async () => {
   const e = engine();

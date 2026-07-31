@@ -181,6 +181,30 @@ test('pipeline statistical aggregates: median=10, stddev≈6.2317, p90=20, p25=5
   assert.equal(num(row.p25), 5);
 });
 
+// compute elapsed_days: whole 24-HOUR buckets between two timestamps (retention-day), NOT
+// calendar days. Deterministic via LITERAL endpoints so it does not depend on seed offsets:
+// 25h→1, 47h59m→1, 48h→2, and a negative (pre-`from`) span clamped to 0.
+test('pipeline elapsed_days: 24h buckets (25h=1, 47h59m=1, 48h=2, negative→0)', opts, async (t) => {
+  if (skip(t)) return;
+  const ed = (name, from, to, extra = {}) => ({ stage: 'compute', name, op: 'elapsed_days', from: { value: from }, to: { value: to }, ...extra });
+  const r = await run([
+    ed('d25h', '2026-01-01 23:00:00', '2026-01-03 00:00:00'),   // 25h → 1
+    ed('d47h', '2026-01-01 00:00:00', '2026-01-02 23:59:00'),   // 47h59m → 1 (calendar would be 2)
+    ed('d48h', '2026-01-01 00:00:00', '2026-01-03 00:00:00'),   // 48h → 2
+    ed('dneg', '2026-01-03 00:00:00', '2026-01-01 00:00:00'),   // −48h → clamped to 0
+    ed('draw', '2026-01-03 00:00:00', '2026-01-01 00:00:00', { clamp_zero: false }), // raw signed → −2
+    { stage: 'limit', n: 1 },
+    { stage: 'project', columns: ['d25h', 'd47h', 'd48h', 'dneg', 'draw'] },
+  ]);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  const row = r.rows[0];
+  assert.equal(num(row.d25h), 1);
+  assert.equal(num(row.d47h), 1);
+  assert.equal(num(row.d48h), 2);
+  assert.equal(num(row.dneg), 0);
+  assert.equal(num(row.draw), -2);
+});
+
 // compute: scalar arithmetic over a derived column
 test('pipeline compute arithmetic: sum(price*2) = 170 (= 2 × total revenue 85)', opts, async (t) => {
   if (skip(t)) return;

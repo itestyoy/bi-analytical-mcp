@@ -123,6 +123,19 @@ test('build_native_model: schema rejects action-irrelevant fields', async () => 
   assert.equal(reuse.draft_id, s.draft_id);
 });
 
+// compute op=elapsed_days: the retention-day primitive is wired + input-validated at add_step.
+test('build_native_model: compute elapsed_days adds an int column and requires from+to', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'ret', source: 'events' });
+  // from an event timestamp to now → a whole-24h-day column (retention day).
+  const ok = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'ret_day', op: 'elapsed_days', from: { column: 'device_time' }, to: { now: true } }, include_columns: true });
+  const col = ok.available_columns.find((c) => c.name === 'ret_day');
+  assert.ok(col && col.type === 'int', 'elapsed_days adds an int column');
+  // missing an endpoint is rejected by schema (from+to both required).
+  const s2 = await e.build_native_model({ action: 'start', name: 'ret2', source: 'events' });
+  await assert.rejects(() => e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'bad', op: 'elapsed_days', from: { column: 'device_time' } } }), 'elapsed_days needs from AND to');
+});
+
 // #2: array ops are type-checked at add_step (not only at commit/runtime).
 test('build_native_model: array op on a non-array column is rejected at add_step', async () => {
   const e = engine();

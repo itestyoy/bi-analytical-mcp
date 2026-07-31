@@ -59,6 +59,9 @@ export class Dialect {
   // ── Abstract time / scalar / statistical primitives (per-dialect) ──────────
   /** Difference toExpr - fromExpr expressed in `unit` (day|hour|minute|second). */
   dateDiff(_unit, _fromExpr, _toExpr) { throw new Error('abstract dateDiff'); }
+  /** Whole 24-HOUR days between two timestamps (retention-day: floor of the span in 24h buckets,
+   *  NOT calendar days). Signed; the caller clamps negatives / coalesces NULLs. */
+  fullDaysBetween(_fromExpr, _toExpr) { throw new Error('abstract fullDaysBetween'); }
   /** Truncate a timestamp/date to a granularity (day|week|month|quarter|year). */
   dateTrunc(_granularity, _expr) { throw new Error('abstract dateTrunc'); }
   /** Extract a calendar part (dow|hour|day|week|month|quarter|year|doy) as a number. */

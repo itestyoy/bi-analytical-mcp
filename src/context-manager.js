@@ -173,6 +173,11 @@ export class ContextManager {
   /** Back-compat: a time spine is present only when actually CONFIGURED (not just a name match). */
   hasTimeSpine(id) { return this._timeSpinePresence(id).hasConfig; }
 
+  /** True when WE generated the time-spine MODEL in this overlay (so its table is NOT yet built
+   *  in the warehouse and needs a `dbt run --select metricflow_time_spine`). A base-provided
+   *  spine model is already materialized by the base project, so this returns false for it. */
+  generatedTimeSpine(id) { return existsSync(join(this.generatedDir(id), 'metricflow_time_spine.sql')); }
+
   /** Scan the overlay's models/ for a `time_spine:` config and for a metricflow_time_spine.sql. */
   _timeSpinePresence(id) {
     const modelsDir = join(this.dir(id), 'models');

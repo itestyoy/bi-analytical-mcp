@@ -88,6 +88,27 @@ test('timeSpineDiagnostics: config present but compiled manifest has ZERO spines
   assert.match(d.hint, /dbt version|dbt-core >= 1\.9/, 'models compiled but no spine → points at runtime dbt version');
 });
 
+test('stale manifest from a failed parse: dir scanned + zero models → parse_log_tail names the rule', () => {
+  const base = mkdtempSync(join(tmpdir(), 'ts-base-'));
+  mkdirSync(join(base, 'models'), { recursive: true });
+  writeFileSync(join(base, 'dbt_project.yml'), 'name: b\nprofile: b\nversion: "1"\nconfig-version: 2\nmodel-paths: ["models"]\n');
+  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'postgres' });
+  const ctx = cm.create(); // generated dir IS under the scanned "models" path
+  // The last dbt parse FAILED validation → stale EMPTY manifest left behind.
+  mkdirSync(join(cm.dir(ctx.id), 'target'), { recursive: true });
+  writeFileSync(join(cm.dir(ctx.id), 'target', 'semantic_manifest.json'),
+    JSON.stringify({ semantic_models: [], project_configuration: { time_spines: [], time_spine_table_configurations: [] } }));
+  mkdirSync(join(cm.dir(ctx.id), 'logs'), { recursive: true });
+  writeFileSync(join(cm.dir(ctx.id), 'logs', 'dbt.log'),
+    '12:00:00.1 [debug] [MainThread]: Partial parsing enabled\n12:00:00.2 [error] [MainThread]: Encountered an error:\nSemantic Manifest validation failed.\n  The semantic model users is invalid\n12:00:00.3 [debug] [MainThread]: Resource report: {...}\n');
+  const d = cm.timeSpineDiagnostics(ctx.id);
+  assert.equal(d.generated_dir_scanned, true, 'dir IS scanned');
+  assert.equal(d.compiled_manifest.semantic_models.length, 0, 'but manifest compiled zero models');
+  assert.match(d.hint, /DECISIVE.*failed validation|stale/i, 'hint pins the failed-parse cause');
+  assert.ok(d.parse_log_tail?.includes('Semantic Manifest validation failed'), 'surfaces the dbt log error tail');
+  assert.ok(!d.parse_log_tail.includes('Resource report'), 'strips debug noise');
+});
+
 test('custom model-paths: generated dir lands under the FIRST base model-path (dbt scans it)', () => {
   const base = mkdtempSync(join(tmpdir(), 'ts-base-'));
   mkdirSync(join(base, 'marts'), { recursive: true });

@@ -266,30 +266,63 @@ export class ContextManager {
 
     // The manifest is the authority: if it has NO time spine but the config file IS present, the
     // runtime dbt did not register it (version too old) — that beats any file-level heuristic.
-    const manifestMissesSpine = manifest.present && hasConfig && manifest.time_spines_count === 0 && manifest.legacy_time_spine_count === 0;
-    // If the manifest also has ZERO semantic models, dbt didn't compile our generated files AT ALL
-    // — the generated dir is not under the base model-paths, so dbt never scanned it. That, not the
-    // dbt version, is the true root of "none were found" (the compiled manifest is empty).
-    const dirNotScanned = manifest.present && manifest.semantic_models?.length === 0 && hasConfig;
     const genRel = this.generatedDir(id).slice(this.dir(id).length + 1);
+    const genScanned = this.modelPaths.some((mp) => genRel === mp || genRel.startsWith(`${mp}/`) || genRel.startsWith(`${mp}\\`));
+    const noModels = manifest.present && (manifest.semantic_models?.length ?? 0) === 0 && hasConfig;
+    // ZERO semantic models compiled has two distinct roots — tell them apart:
+    //   - the generated dir is NOT under a scanned model-path → dbt never saw the files; OR
+    //   - the dir IS scanned but the LAST `dbt parse` failed validation, so it never rewrote the
+    //     manifest and the STALE (empty) base copy remains. The real reason is in logs/dbt.log.
+    const dirNotScanned = noModels && !genScanned;
+    const staleFromFailedParse = noModels && genScanned;
+    // Surface the tail of the dbt log so a failed-parse reason (the specific DSI validation rule)
+    // is visible without container access — dbt writes the detail there even when the returned
+    // error string is just "Semantic Manifest validation failed".
+    const parseLogTail = staleFromFailedParse ? this._dbtLogErrorTail(id) : undefined;
+    const manifestMissesSpine = manifest.present && !noModels && hasConfig && manifest.time_spines_count === 0 && manifest.legacy_time_spine_count === 0;
     return {
       overlay_dir: this.dir(id),
       base_model_paths: this.modelPaths,
       generated_dir: genRel,
-      generated_dir_scanned: this.modelPaths.some((mp) => genRel === mp || genRel.startsWith(`${mp}/`) || genRel.startsWith(`${mp}\\`)),
+      generated_dir_scanned: genScanned,
       generated_files: this.generatedFiles(id),
       time_spine_configured: hasConfig,
       time_spine_model_present: hasModelFile,
       time_spine_config_files: configFiles,
       compiled_manifest: manifest,
+      ...(parseLogTail ? { parse_log_tail: parseLogTail } : {}),
       hint: dirNotScanned
-        ? `DECISIVE: the compiled semantic_manifest has ZERO semantic models AND zero time spines — dbt did not compile the generated files. The generated dir "${genRel}" is not under the base model-paths ${JSON.stringify(this.modelPaths)}, so dbt never scanned it. Fixed by writing generated files under the first base model-path; confirm the running image includes that fix.`
-        : manifestMissesSpine
-          ? 'The config file is in the overlay and semantic models compiled, but the manifest has ZERO time spines. Check the `runtime` dbt version (modern time_spine needs dbt-core >= 1.9).'
-          : hasConfig
-            ? 'A `time_spine:` config IS present. If the compiled manifest shows time_spines populated yet MetricFlow still errors, mf is reading a different/stale manifest.'
-            : 'No `time_spine:` config found in this overlay — the spine was not generated for this context.',
+        ? `The generated dir "${genRel}" is NOT under the base model-paths ${JSON.stringify(this.modelPaths)}, so dbt never scanned it → the compiled manifest is empty. Write generated files under a scanned model-path.`
+        : staleFromFailedParse
+          ? 'DECISIVE: the generated dir IS scanned, yet the compiled manifest has ZERO semantic models — the last `dbt parse` FAILED validation and left the stale (empty) base manifest, so MetricFlow reads no time spine. The real cause is the parse failure; see `parse_log_tail` for the exact dbt/DSI rule that failed.'
+          : manifestMissesSpine
+            ? 'Semantic models compiled but the manifest has ZERO time spines. Check the `runtime` dbt version (modern time_spine needs dbt-core >= 1.9).'
+            : hasConfig
+              ? 'A `time_spine:` config IS present and models compiled. If time_spines is populated yet MetricFlow still errors, mf is reading a different/stale manifest.'
+              : 'No `time_spine:` config found in this overlay — the spine was not generated for this context.',
     };
+  }
+
+  /** Extract the error section from the overlay's logs/dbt.log (the DSI validation detail dbt
+   *  writes even when the returned error string is generic). Best-effort; returns undefined if
+   *  no log or no error section. */
+  _dbtLogErrorTail(id) {
+    try {
+      const log = join(this.dir(id), 'logs', 'dbt.log');
+      if (!existsSync(log)) return undefined;
+      const lines = readFileSync(log, 'utf8').replace(/\x1b\[[0-9;]*m/g, '').split('\n');
+      // find the LAST "Encountered an error" / validation marker and return from there
+      let start = -1;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (/Encountered an error|Semantic Manifest validation|Validation Error|Parsing Error/i.test(lines[i])) { start = i; break; }
+      }
+      if (start < 0) return undefined;
+      const tail = lines.slice(start)
+        .filter((l) => !/\[debug\]|Resource report|Sending event|Flushing usage|snowplow/i.test(l))
+        .map((l) => l.replace(/^\d{2}:\d{2}:\d{2}(\.\d+)?\s+/, '').replace(/\[(error|info|warn)\]\s*\[[^\]]*\]:\s*/i, ''))
+        .join('\n').trim();
+      return tail.slice(0, 4000) || undefined;
+    } catch { return undefined; }
   }
 
   /** Write the generated YAML for a context into its overlay. */

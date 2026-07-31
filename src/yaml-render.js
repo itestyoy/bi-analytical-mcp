@@ -22,11 +22,15 @@ export function renderBaseModel(catalog, key) {
     return sm;
   }
 
-  // dimension/fact model with a natural primary key
+  // dimension/fact model with a natural primary key. When the model is SLOWLY-CHANGING (SCD-2:
+  // several validity-windowed rows per key), the join entity is declared `natural` (not `primary`,
+  // since the key is not unique) and the two validity-bound time dimensions carry validity_params —
+  // MetricFlow then performs a POINT-IN-TIME join (the fact's agg_time between the window), instead
+  // of a plain key equality that would fan out and double-count.
   const pe = m.primary_entity;
   const peName = typeof pe === 'string' ? pe : pe.name;
   const peCol = typeof pe === 'string' ? undefined : pe.column;
-  sm.entities = [{ name: peName, type: 'primary', ...(peCol ? { expr: peCol } : {}) }];
+  sm.entities = [{ name: peName, type: m.scd ? 'natural' : 'primary', ...(peCol ? { expr: peCol } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: e.column });
   }
@@ -34,8 +38,10 @@ export function renderBaseModel(catalog, key) {
   let timeDim;
   for (const [name, d] of Object.entries(m.dimensions || {})) {
     if (d.type === 'time') {
-      sm.dimensions.push({ name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } });
-      timeDim ||= name;
+      const dim = { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } };
+      if (d.validity) { dim.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = name; }
+      sm.dimensions.push(dim);
+      if (!d.validity) timeDim ||= name; // a validity bound is not the model's agg_time dimension
     } else {
       sm.dimensions.push({ name, type: 'categorical' });
     }

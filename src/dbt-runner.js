@@ -45,20 +45,6 @@ export class DbtRunner {
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, 'target', 'semantic_manifest.json')) };
   }
 
-  /**
-   * Report the installed dbt-core + MetricFlow versions (cached). Used to diagnose the
-   * "no time spine configured" failure: the modern `time_spine:` model property only registers
-   * on dbt-core >= 1.9, so an older runtime silently drops the config even when the files exist.
-   */
-  async version() {
-    if (this._version) return this._version;
-    const clean = (s) => (s || '').replace(/\x1b\[[0-9;]*m/g, '');
-    let dbt = null; let mf = null;
-    try { const r = await run(this.dbtBin, ['--version'], { timeout: 30000 }); dbt = clean(r.stdout || r.stderr).trim() || null; } catch { /* ignore */ }
-    try { const r = await run(this.mfBin, ['--version'], { timeout: 30000 }); mf = clean(r.stdout || r.stderr).trim() || null; } catch { /* ignore */ }
-    return (this._version = { dbt, mf });
-  }
-
   /** Build a model (e.g. a generated MATCH_RECOGNIZE view) via `dbt run --select`. */
   async run(projectDir, select) {
     const args = ['run'];

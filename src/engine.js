@@ -1548,7 +1548,7 @@ export class Engine {
       }
       mergeCompiled(draft, compiled);
       const render = renderContext(this.catalog, draft);
-      return { context_id: input.context_id || null, task: compiled.task, dry_run: true, yaml: render.yaml, semantic_models: render.semanticModels, metrics: render.metricNames };
+      return { context_id: input.context_id || null, task: compiled.task, dry_run: true, yaml: render.yaml, semantic_models: render.semanticModels, metrics: render.metricNames, warnings: render.warnings || [] };
     }
 
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
@@ -1570,7 +1570,7 @@ export class Engine {
       groupable,
       parse,
       assumptions: this._assumptions(ctx),
-      warnings: [],
+      warnings: render.warnings || [],
       // Never a dead end: name the exact next call with real metric/path names.
       next: `Query it: query_semantic_model({ context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end } }) — optionally group_by one of: ${groupable.slice(0, 5).join(', ')}${groupable.length > 5 ? ', …' : ''}.`,
       recommendations: [
@@ -1609,14 +1609,14 @@ export class Engine {
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state);
     if (input.dry_run) {
-      return { context_id: ctx.id, semantic_model: modelKey, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: [] };
+      return { context_id: ctx.id, semantic_model: modelKey, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
     }
     const file = this.ctxs.writeYaml(ctx.id, render.yaml);
     this.ctxs.touch(ctx.id);
     const parse = await this._parse(ctx.id);
     return {
       context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
-      metrics: render.metricNames, groupable: [...this._allowedPaths(ctx)], parse, warnings: [],
+      metrics: render.metricNames, groupable: [...this._allowedPaths(ctx)], parse, warnings: render.warnings || [],
       next: `Query the updated task: query_semantic_model({ context_id: '${ctx.id}', metrics: [...] }) — \`metrics\` above is the current full list.`,
     };
   }

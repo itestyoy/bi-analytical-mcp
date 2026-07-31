@@ -304,9 +304,11 @@ export class ContextManager {
           ? 'DECISIVE: the generated dir IS scanned, yet the compiled manifest has ZERO semantic models — the last `dbt parse` FAILED validation and left the stale (empty) base manifest, so MetricFlow reads no time spine. The real cause is the parse failure; see `parse_log_tail` for the exact dbt/DSI rule that failed.'
           : manifestMissesSpine
             ? 'Semantic models compiled but the manifest has ZERO time spines. Check the `runtime` dbt version (modern time_spine needs dbt-core >= 1.9).'
-            : hasConfig
-              ? 'A `time_spine:` config IS present and models compiled. If time_spines is populated yet MetricFlow still errors, mf is reading a different/stale manifest.'
-              : 'No `time_spine:` config found in this overlay — the spine was not generated for this context.',
+            : !hasConfig
+              ? 'No `time_spine:` config found in this overlay — the spine was not generated for this context.'
+              : !manifest.present
+                ? 'A `time_spine:` config IS present, but NO compiled semantic_manifest.json exists yet — the parse either did not run or failed before writing it; see the error message / `parse_log_tail`.'
+                : 'A `time_spine:` config IS present and models compiled. If time_spines is populated yet MetricFlow still errors, mf is reading a different/stale manifest.',
     };
   }
 

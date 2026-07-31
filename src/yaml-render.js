@@ -6,6 +6,24 @@ import yaml from 'js-yaml';
 
 const EVENT_TIME_DIM = 'event_time';
 
+/** A model is treated as SCD-2 (validity_params emitted) when the catalog marked validity columns
+ *  AND the escape hatch MCP_SCD_VALIDITY_PARAMS is not disabling it. SCD models are join-only. */
+function isScdModel(m) {
+  return !!m.scd && !/^(0|false|no|off)$/i.test(String(process.env.MCP_SCD_VALIDITY_PARAMS ?? '').trim());
+}
+
+/** True when a metric's type_params reference any measure name in `names` (simple/ratio/derived). */
+function metricRefsMeasure(metric, names) {
+  const tp = metric.type_params || {};
+  const refs = [];
+  const push = (v) => { if (typeof v === 'string') refs.push(v); else if (v?.name) refs.push(v.name); };
+  push(tp.measure);
+  for (const m of tp.measures || []) push(m);
+  push(tp.numerator); push(tp.denominator);
+  for (const m of tp.input_measures || []) push(m);
+  return refs.some((r) => names.has(r));
+}
+
 /** Build the base semantic model object for a model key from the catalog. */
 export function renderBaseModel(catalog, key) {
   const m = catalog.getModel(key);
@@ -31,7 +49,7 @@ export function renderBaseModel(catalog, key) {
   // 0.9.0 via dbt parse: validity_params nested under type_params parses cleanly). An ESCAPE HATCH
   // MCP_SCD_VALIDITY_PARAMS=false disables it for anyone on an OLDER DSI that rejects the field —
   // then the model emits a plain primary-key form (use a pipeline join.between for point-in-time).
-  const scd = m.scd && !/^(0|false|no|off)$/i.test(String(process.env.MCP_SCD_VALIDITY_PARAMS ?? '').trim());
+  const scd = isScdModel(m);
   const pe = m.primary_entity;
   const peName = typeof pe === 'string' ? pe : pe.name;
   const peCol = typeof pe === 'string' ? undefined : pe.column;
@@ -57,10 +75,17 @@ export function renderBaseModel(catalog, key) {
       sm.dimensions.push({ name, type: 'categorical' });
     }
   }
-  const measures = Object.entries(m.measures || {}).map(([name, mm]) => ({ name, agg: mm.agg, expr: mm.expr }));
-  if (measures.length) {
-    sm.measures = measures;
-    if (timeDim) sm.defaults = { agg_time_dimension: timeDim };
+  // MetricFlow HARD CONSTRAINT: a semantic model with validity_params (SCD-2) may NOT also define
+  // measures ("Semantic model X has both measures and validity param dimensions defined. This is
+  // not currently supported!"). An SCD dimension is join-only (point-in-time), so we emit it
+  // dimension-only and drop any catalog measures — measures belong on the events fact, not on a
+  // slowly-changing dimension.
+  if (!scd) {
+    const measures = Object.entries(m.measures || {}).map(([name, mm]) => ({ name, agg: mm.agg, expr: mm.expr }));
+    if (measures.length) {
+      sm.measures = measures;
+      if (timeDim) sm.defaults = { agg_time_dimension: timeDim };
+    }
   }
   return sm;
 }
@@ -76,12 +101,17 @@ export function renderContext(catalog, state) {
   for (const k of Object.keys(state.additions || {})) modelsToRender.add(k);
 
   const semanticModels = [];
+  const droppedMeasures = new Set(); // measures removed because their model is SCD (join-only)
   for (const key of modelsToRender) {
     const sm = renderBaseModel(catalog, key);
+    const scd = isScdModel(catalog.getModel(key));
     const add = state.additions?.[key];
     if (add) {
       for (const d of add.dimensions || []) sm.dimensions.push(d);
       for (const me of add.measures || []) {
+        // MetricFlow forbids measures on an SCD (validity_params) model — drop them so the manifest
+        // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.
+        if (scd) { droppedMeasures.add(me.name); continue; }
         const mm = { ...me };
         if (key === catalog.anchor && !mm.agg_time_dimension) mm.agg_time_dimension = EVENT_TIME_DIM;
         (sm.measures ||= []).push(mm);
@@ -90,15 +120,28 @@ export function renderContext(catalog, state) {
     semanticModels.push(sm);
   }
 
+  // Drop metrics that reference a measure we removed from an SCD model — otherwise dbt fails parse
+  // with "a semantic model having a measure `X` does not exist but was referenced".
+  const droppedMetrics = [];
+  const metrics = (state.metrics || []).filter((mt) => {
+    if (droppedMeasures.size && metricRefsMeasure(mt, droppedMeasures)) { droppedMetrics.push(mt.name); return false; }
+    return true;
+  });
+
   const doc = { semantic_models: semanticModels };
-  if (state.metrics?.length) doc.metrics = state.metrics;
+  if (metrics.length) doc.metrics = metrics;
 
   // js-yaml quotes ref('...') fine as a plain scalar; force flow-off for readability
   const body = yaml.dump(doc, { lineWidth: 120, noRefs: true, quotingType: '"' });
+  const warnings = [];
+  if (droppedMeasures.size) {
+    warnings.push(`SCD dimension model is join-only: MetricFlow forbids measures on a validity_params model, so measure(s) [${[...droppedMeasures].join(', ')}] were not emitted${droppedMetrics.length ? ` (and metric(s) [${droppedMetrics.join(', ')}] that depended on them were dropped)` : ''}. Define such measures on the events fact instead.`);
+  }
   return {
     yaml: unquoteRefs(body),
     semanticModels: semanticModels.map((s) => s.name),
-    metricNames: (state.metrics || []).map((m) => m.name),
+    metricNames: metrics.map((m) => m.name),
+    warnings,
   };
 }
 

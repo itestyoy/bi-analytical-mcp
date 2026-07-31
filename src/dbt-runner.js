@@ -144,12 +144,29 @@ export function formatDbtError(stdout = '', stderr = '') {
     .replace(/\[[0-9;]*m/g, '') // ANSI color codes
     .split('\n')
     .map((l) => l.replace(/^\s*\d{2}:\d{2}:\d{2}(\.\d+)?\s+/, '').replace(/\s+$/, '')) // dbt log timestamps
-    .filter((l) => l.trim() !== '')
-    .join('\n')
-    .trim();
+    .filter((l) => l.trim() !== '');
+  const lines = cleaned;
+  // dbt boilerplate we never want in the surfaced message.
+  const noise = /^(Running with dbt|Registered adapter|Unable to do partial parsing|Starting full parse|Performance info|Found \d|Concurrency:|Sending event|Flushing usage|Update available|Your version of dbt|You can find instructions|Core:|Plugins:|- installed:|- latest:|Installed:)/i;
   const markers = /(Database Error|Parsing Error|Compilation Error|Runtime Error|Validation Error|Encountered an error|ERROR:)/;
-  const m = cleaned.search(markers);
-  const msg = m >= 0 ? cleaned.slice(m) : cleaned;
+  const mi = lines.findIndex((l) => markers.test(l));
+  let start = 0;
+  if (mi >= 0) {
+    // CRUCIAL: dbt prints the SPECIFIC rule (e.g. "The semantic model `users` ... is invalid") on
+    // the line(s) just BEFORE "Encountered an error" / "Semantic Manifest validation failed".
+    // Slicing only from the marker throws that detail away — walk back over the detail lines,
+    // stopping at the first boilerplate line, and keep them.
+    start = mi;
+    while (start > 0 && !noise.test(lines[start - 1])) start--;
+  } else {
+    while (start < lines.length && noise.test(lines[start])) start++; // no marker → drop leading boilerplate
+  }
+  // Trim the trailing deprecation summary that otherwise buries the real message (the live case had
+  // "PropertyMovedToConfigDeprecation: 184 occurrences" appended after the validation failure).
+  let end = lines.length;
+  const di = lines.findIndex((l, i) => i >= start && /\[WARNING\]\[DeprecationsSummary\]|Summary of encountered deprecations/i.test(l));
+  if (di > start) end = di;
+  const msg = lines.slice(start, end).join('\n').trim();
   return msg.slice(0, 8000) || 'unknown dbt error';
 }
 

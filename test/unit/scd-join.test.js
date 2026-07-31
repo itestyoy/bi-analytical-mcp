@@ -23,32 +23,35 @@ const scdCatalog = {
   }),
 };
 
-test('SCD-2 with MCP_SCD_VALIDITY_PARAMS on → natural entity + validity_params (opt-in)', () => {
+// DEFAULT (markers present, flag unset): natural entity + validity_params NESTED UNDER type_params
+// — the exact shape dbt-semantic-interfaces expects (verified via `dbt parse`, exit 0).
+test('SCD-2 by default → natural entity + validity_params nested under type_params', () => {
   const prev = process.env.MCP_SCD_VALIDITY_PARAMS;
-  process.env.MCP_SCD_VALIDITY_PARAMS = '1';
+  delete process.env.MCP_SCD_VALIDITY_PARAMS;
   try {
     const sm = renderBaseModel(scdCatalog, 'users');
     assert.equal(sm.entities[0].type, 'natural', 'SCD key is natural (not primary — it is not unique)');
     const vf = sm.dimensions.find((d) => d.name === 'install_time_valid_from');
     const vt = sm.dimensions.find((d) => d.name === 'install_time_valid_until');
-    assert.deepEqual(vf.validity_params, { is_start: true }, 'window start marked is_start');
-    assert.deepEqual(vt.validity_params, { is_end: true }, 'window end marked is_end');
+    // validity_params must live INSIDE type_params (not a top-level sibling — dbt rejects that).
+    assert.deepEqual(vf.type_params.validity_params, { is_start: true }, 'is_start nested in type_params');
+    assert.deepEqual(vt.type_params.validity_params, { is_end: true }, 'is_end nested in type_params');
+    assert.ok(!('validity_params' in vf) && !('validity_params' in vt), 'NOT emitted at the dimension top level');
     assert.equal(vf.type, 'time'); assert.equal(vt.type, 'time');
     assert.equal(sm.dimensions.find((d) => d.name === 'country').type, 'categorical');
-  } finally { if (prev === undefined) delete process.env.MCP_SCD_VALIDITY_PARAMS; else process.env.MCP_SCD_VALIDITY_PARAMS = prev; }
+  } finally { if (prev !== undefined) process.env.MCP_SCD_VALIDITY_PARAMS = prev; }
 });
 
-// DEFAULT (flag off): emit a plain primary-key model that older MetricFlow parsers accept —
-// NO validity_params (which they reject), NO natural entity. Marking validity columns must not
-// break the governed path by itself.
-test('SCD-2 with the flag OFF (default) → plain primary entity, no validity_params', () => {
+// ESCAPE HATCH MCP_SCD_VALIDITY_PARAMS=false → plain primary-key model (for older DSI that rejects
+// validity_params). No natural entity, no validity_params anywhere.
+test('SCD-2 with MCP_SCD_VALIDITY_PARAMS=false → plain primary entity, no validity_params', () => {
   const prev = process.env.MCP_SCD_VALIDITY_PARAMS;
-  delete process.env.MCP_SCD_VALIDITY_PARAMS;
+  process.env.MCP_SCD_VALIDITY_PARAMS = 'false';
   try {
     const sm = renderBaseModel(scdCatalog, 'users');
-    assert.equal(sm.entities[0].type, 'primary', 'default emits a primary entity (parses on any MetricFlow)');
-    assert.ok(sm.dimensions.every((d) => !d.validity_params), 'no validity_params emitted by default');
-  } finally { if (prev !== undefined) process.env.MCP_SCD_VALIDITY_PARAMS = prev; }
+    assert.equal(sm.entities[0].type, 'primary', 'disabled → primary entity (parses on any MetricFlow)');
+    assert.ok(sm.dimensions.every((d) => !d.type_params?.validity_params && !d.validity_params), 'no validity_params when disabled');
+  } finally { if (prev === undefined) delete process.env.MCP_SCD_VALIDITY_PARAMS; else process.env.MCP_SCD_VALIDITY_PARAMS = prev; }
 });
 
 test('a non-SCD dimension model keeps a primary entity and no validity_params', () => {

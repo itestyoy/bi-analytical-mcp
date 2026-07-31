@@ -27,11 +27,11 @@ export function renderBaseModel(catalog, key) {
   // entity is declared `natural` (not `primary`, since the key is not unique) and the two
   // validity-bound time dimensions carry validity_params — MetricFlow then does a POINT-IN-TIME
   // join (fact agg_time within the window) instead of a fan-out equality.
-  // OPT-IN (MCP_SCD_VALIDITY_PARAMS): older MetricFlow/schema versions reject `validity_params`
-  // ("Additional properties are not allowed"), which would break the whole context — so it is OFF
-  // by default (emit a plain primary-key model that always parses; use a pipeline join.between for
-  // point-in-time correctness there). Enable only when your MetricFlow version supports SCD-2.
-  const scd = m.scd && /^(1|true|yes|on)$/i.test(String(process.env.MCP_SCD_VALIDITY_PARAMS ?? '').trim());
+  // DEFAULT ON when the catalog marks validity columns (verified against dbt-semantic-interfaces
+  // 0.9.0 via dbt parse: validity_params nested under type_params parses cleanly). An ESCAPE HATCH
+  // MCP_SCD_VALIDITY_PARAMS=false disables it for anyone on an OLDER DSI that rejects the field —
+  // then the model emits a plain primary-key form (use a pipeline join.between for point-in-time).
+  const scd = m.scd && !/^(0|false|no|off)$/i.test(String(process.env.MCP_SCD_VALIDITY_PARAMS ?? '').trim());
   const pe = m.primary_entity;
   const peName = typeof pe === 'string' ? pe : pe.name;
   const peCol = typeof pe === 'string' ? undefined : pe.column;
@@ -44,7 +44,9 @@ export function renderBaseModel(catalog, key) {
   for (const [name, d] of Object.entries(m.dimensions || {})) {
     if (d.type === 'time') {
       const dim = { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } };
-      if (scd && d.validity) { dim.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = name; }
+      // validity_params is nested UNDER type_params (dbt-semantic-interfaces schema) — NOT a
+      // sibling of it; the top-level placement is what dbt rejected as an unexpected property.
+      if (scd && d.validity) { dim.type_params.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = name; }
       sm.dimensions.push(dim);
       if (!(scd && d.validity)) timeDim ||= name; // a validity bound is not the model's agg_time dimension
     } else {

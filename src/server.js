@@ -33,7 +33,7 @@ const TOOL_DESCRIPTIONS = {
 const TOOL_TITLES = {
   semantic_index: 'Explore Semantic Index',
   create_semantic_model: 'Create Semantic Model',
-  build_native_model: 'Build a Pipeline',
+  build_native_model: 'Build Pipeline',
   query_semantic_model: 'Query Semantic Model',
   get_query_result: 'Fetch Query Result',
   update_semantic_model: 'Update Semantic Model',

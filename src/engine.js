@@ -1899,6 +1899,10 @@ export class Engine {
 
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
 
+    // Build the time-spine table before a REAL query (not needed for dry_run/explain, which only
+    // generate SQL). MetricFlow requires the spine materialized for metric_time / SCD joins.
+    if (!(input.dry_run || input.explain)) await this._ensureTimeSpineBuilt(ctx.id);
+
     // Cost guardrail (catalog require_time_range): block unbounded scans over the fact.
     if (this.catalog.requireTimeRange && !input.time_range?.start) {
       throw new ToolError('this catalog requires a bounded time window (require_time_range): pass time_range { start, end } to prune partitions', { stage: 'validate', field: 'time_range' });
@@ -2099,6 +2103,21 @@ export class Engine {
     try { if (this._ownsStore) this.store?.close?.(); } catch { /* noop */ }
     try { this._memoryStore?.close?.(); } catch { /* noop */ } // separate memory store (MCP_MEMORY_DB)
     try { this.runner?.close?.(); } catch { /* noop */ }
+  }
+
+  /**
+   * Materialize the time-spine TABLE the first time a context is queried. MetricFlow needs the
+   * spine BUILT (not just configured) for metric_time / cumulative / SCD validity_params joins.
+   * Only builds the spine WE generated (a base-provided spine is already built by the base
+   * project). Idempotent per context; best-effort (a failure is left to surface on the query).
+   */
+  async _ensureTimeSpineBuilt(ctxId) {
+    if (!this.runner?.run) return;
+    const ctx = this.ctxs.get(ctxId);
+    if (ctx.state._timeSpineBuilt) return;
+    if (!this.ctxs.generatedTimeSpine?.(ctxId)) { ctx.state._timeSpineBuilt = true; return; }
+    const r = await this.runner.run(this.ctxs.dir(ctxId), 'metricflow_time_spine');
+    if (r.ok) { ctx.state._timeSpineBuilt = true; this.ctxs.touch(ctxId); }
   }
 
   async _parse(ctxId) {

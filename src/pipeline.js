@@ -24,7 +24,9 @@
 //                            const (literal number/string/bool), arithmetic (+ - * /),
 //                            round/floor/ceil/abs, coalesce/least/greatest, cast,
 //                            STRING fns (concat/upper/lower/length/substring/trim/replace),
-//                            date_diff / date_trunc / date_part, CASE (bucketing), and
+//                            date_diff / date_trunc / date_part, elapsed_days (whole 24h days
+//                            between two timestamps — the RETENTION-DAY primitive, not calendar
+//                            days; handles cast/negatives/NULLs for you), CASE (bucketing), and
 //                            WINDOW functions (row_number / rank / lag / lead / running &
 //                            ROLLING sum via a ROWS/RANGE frame), and unix_date (day number
 //                            for value-based RANGE windows). Solves: constant tags/labels,
@@ -219,6 +221,7 @@ const STAGES = {
         { if: { properties: { op: { const: 'replace' } }, required: ['op'] }, then: { required: ['search', 'replacement'] } },
         { if: { properties: { op: { const: 'substring' } }, required: ['op'] }, then: { required: ['start'] } },
         { if: { properties: { op: { const: 'date_diff' } }, required: ['op'] }, then: { required: ['from', 'to', 'unit'] } },
+        { if: { properties: { op: { const: 'elapsed_days' } }, required: ['op'] }, then: { required: ['from', 'to'] } },
         { if: { properties: { op: { const: 'date_trunc' } }, required: ['op'] }, then: { required: ['granularity'] } },
         { if: { properties: { op: { const: 'date_part' } }, required: ['op'] }, then: { required: ['part'] } },
         { if: { properties: { op: { const: 'json_field' } }, required: ['op'] }, then: { required: ['column', 'field'] } },
@@ -229,15 +232,16 @@ const STAGES = {
         { if: { properties: { op: { const: 'case' } }, required: ['op'] }, then: { required: ['cases'] } },
         { if: { properties: { op: { const: 'window' } }, required: ['op'] }, then: { required: ['fn'] } },
       ],
-      description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, string fns, date functions (date_diff/date_trunc/date_part/unix_date), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running & rolling aggregates). Each op enforces its required params at the schema level.',
+      description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, string fns, date functions (date_diff/date_trunc/date_part/unix_date/elapsed_days), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running & rolling aggregates). Each op enforces its required params at the schema level.',
       properties: {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
-        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'json_parse_array', 'element_at', 'array_last', 'raw', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'case', 'window'] },
+        op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'json_parse_array', 'element_at', 'array_last', 'raw', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'elapsed_days', 'case', 'window'] },
         field: { type: 'string', description: 'Struct field name for op=json_field (extract from a JSON column, e.g. an unnested array-of-struct element).' },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
-        from: OPERAND, to: OPERAND, // date_diff (to may be { now: true })
+        from: OPERAND, to: OPERAND, // date_diff / elapsed_days (each may be { column } / { value } / { now: true })
+        clamp_zero: { type: 'boolean', description: 'op=elapsed_days: fold negative (pre-`from`) and NULL (e.g. missing install_date) results to 0, so it is a clean day 0+. Default true; set false for the raw signed/NULL-able value.' },
         column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/upper/lower/length/substring/trim/replace/date_trunc/date_part, and for window lag/lead/sum/avg/min/max.' },
         columns: { type: 'array', items: { type: 'string' }, description: 'Inputs for coalesce/least/greatest.' },
         parts: { type: 'array', items: OPERAND, minItems: 1, description: 'Operands (columns/literals) to concatenate for op=concat.' },
@@ -303,6 +307,14 @@ const STAGES = {
       else if (p.op === 'greatest') expr = `greatest(${list().join(', ')})`;
       else if (p.op === 'cast') { expr = d.castExpr(col(), p.type || 'string'); type = p.type || 'string'; }
       else if (p.op === 'date_diff') { expr = d.dateDiff(p.unit, operand(p.from, 'from'), operand(p.to, 'to')); type = p.unit === 'day' ? 'int' : 'numeric'; }
+      else if (p.op === 'elapsed_days') {
+        // Whole 24-HOUR days between `from` and `to` (retention-day) — floor of the span in 24h
+        // buckets, NOT calendar days. Default clamp_zero folds negatives (pre-`from` events) AND
+        // NULLs (e.g. a missing install_date on a left join) to 0, so the result is a clean day 0+.
+        const inner = d.fullDaysBetween(operand(p.from, 'from'), operand(p.to, 'to'));
+        expr = (p.clamp_zero === false) ? inner : `COALESCE(GREATEST(${inner}, 0), 0)`;
+        type = 'int';
+      }
       else if (p.op === 'date_trunc') { expr = d.dateTrunc(p.granularity, col()); type = 'time'; }
       else if (p.op === 'date_part') { expr = d.datePart(p.part, col()); type = 'int'; }
       else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }

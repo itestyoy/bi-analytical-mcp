@@ -84,6 +84,14 @@ export class BigQueryDialect extends Dialect {
     return `TIMESTAMP_DIFF(${to}, ${from}, ${u})`;
   }
 
+  // Whole 24-HOUR days between two timestamps (retention-day style) — the DAY component of the
+  // datetime interval equals div(total_hours, 24), i.e. genuine 24h buckets with NO month
+  // normalization and NOT calendar-day boundaries. Signed (negative before `from`); the caller
+  // clamps/coalesces.
+  fullDaysBetween(from, to) {
+    return `EXTRACT(DAY FROM (CAST(${to} AS DATETIME) - CAST(${from} AS DATETIME)))`;
+  }
+
   dateTrunc(granularity, expr) {
     const g = { day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
     if (!g) throw new Error(`dateTrunc: bad granularity ${granularity}`);

@@ -86,6 +86,14 @@ export class PostgresDialect extends Dialect {
     }
   }
 
+  // Whole 24-HOUR days between two timestamps (retention-day style): floor of the elapsed span
+  // in 24h buckets — matches BigQuery's EXTRACT(DAY FROM datetime interval), NOT calendar days
+  // (dateDiff 'day' above is calendar). floor() handles the negative (pre-install) case; the
+  // caller clamps/coalesces.
+  fullDaysBetween(from, to) {
+    return `FLOOR(EXTRACT(EPOCH FROM ((${to})::timestamp - (${from})::timestamp)) / 86400.0)::int`;
+  }
+
   dateTrunc(granularity, expr) {
     if (!['day', 'week', 'month', 'quarter', 'year'].includes(granularity)) throw new Error(`dateTrunc: bad granularity ${granularity}`);
     return `date_trunc('${granularity}', ${expr})`;

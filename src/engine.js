@@ -2131,7 +2131,17 @@ export class Engine {
     // parse. ensureTimeSpine is idempotent — a no-op once a `time_spine:` config is present.
     try { this.ctxs.ensureTimeSpine?.(ctxId); } catch { /* best effort — parse will surface a real miss */ }
     const r = await this.runner.parse(this.ctxs.dir(ctxId));
-    if (!r.ok) return { ok: false, error: { stage: 'parse', message: formatDbtError(r.stdout, r.stderr) } };
+    if (!r.ok) {
+      const message = formatDbtError(r.stdout, r.stderr);
+      const error = { stage: 'parse', message };
+      // Self-diagnose the recurring "At least one time spine must be configured" failure: attach
+      // the overlay's ground truth so the cause (missing overlay vs too-old runtime) is visible in
+      // the tool response itself — no shell access to the container required.
+      if (/time spine/i.test(message)) {
+        try { error.diagnostics = this.ctxs.timeSpineDiagnostics?.(ctxId); } catch { /* best effort */ }
+      }
+      return { ok: false, error };
+    }
     return { ok: true, manifest: r.manifest };
   }
 

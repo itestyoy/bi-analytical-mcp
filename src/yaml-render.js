@@ -23,14 +23,19 @@ export function renderBaseModel(catalog, key) {
   }
 
   // dimension/fact model with a natural primary key. When the model is SLOWLY-CHANGING (SCD-2:
-  // several validity-windowed rows per key), the join entity is declared `natural` (not `primary`,
-  // since the key is not unique) and the two validity-bound time dimensions carry validity_params —
-  // MetricFlow then performs a POINT-IN-TIME join (the fact's agg_time between the window), instead
-  // of a plain key equality that would fan out and double-count.
+  // several validity-windowed rows per key) AND MetricFlow's SCD support is enabled, the join
+  // entity is declared `natural` (not `primary`, since the key is not unique) and the two
+  // validity-bound time dimensions carry validity_params — MetricFlow then does a POINT-IN-TIME
+  // join (fact agg_time within the window) instead of a fan-out equality.
+  // OPT-IN (MCP_SCD_VALIDITY_PARAMS): older MetricFlow/schema versions reject `validity_params`
+  // ("Additional properties are not allowed"), which would break the whole context — so it is OFF
+  // by default (emit a plain primary-key model that always parses; use a pipeline join.between for
+  // point-in-time correctness there). Enable only when your MetricFlow version supports SCD-2.
+  const scd = m.scd && /^(1|true|yes|on)$/i.test(String(process.env.MCP_SCD_VALIDITY_PARAMS ?? '').trim());
   const pe = m.primary_entity;
   const peName = typeof pe === 'string' ? pe : pe.name;
   const peCol = typeof pe === 'string' ? undefined : pe.column;
-  sm.entities = [{ name: peName, type: m.scd ? 'natural' : 'primary', ...(peCol ? { expr: peCol } : {}) }];
+  sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peCol ? { expr: peCol } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: e.column });
   }
@@ -39,9 +44,9 @@ export function renderBaseModel(catalog, key) {
   for (const [name, d] of Object.entries(m.dimensions || {})) {
     if (d.type === 'time') {
       const dim = { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } };
-      if (d.validity) { dim.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = name; }
+      if (scd && d.validity) { dim.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = name; }
       sm.dimensions.push(dim);
-      if (!d.validity) timeDim ||= name; // a validity bound is not the model's agg_time dimension
+      if (!(scd && d.validity)) timeDim ||= name; // a validity bound is not the model's agg_time dimension
     } else {
       sm.dimensions.push({ name, type: 'categorical' });
     }

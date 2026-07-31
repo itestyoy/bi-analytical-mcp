@@ -9,6 +9,7 @@
 import { randomBytes } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import yaml from 'js-yaml';
 import { sqlConfigHeader } from './sql-header.js';
 
 // A daily time spine is REQUIRED by MetricFlow for metric_time, grains,
@@ -70,10 +71,28 @@ export class ContextManager {
     this.timeSpineDialect = timeSpineDialect;
     this.timeSpineStart = timeSpineStart;
     this.timeSpineEnd = timeSpineEnd;
+    // The base project's model-paths decide which directories dbt actually scans. We MUST write
+    // generated models/YAML under a scanned path — otherwise dbt never sees them and the compiled
+    // semantic_manifest has zero semantic models + zero time spines ("none were found"). A project
+    // with a custom model-paths (e.g. ["marts"]) does NOT include the default "models".
+    this.modelPaths = this._readModelPaths();
     this.contexts = new Map(); // id -> { id, createdAt, lastUsedAt, state }
     this.leases = new Map(); // id -> count of in-flight ops
     mkdirSync(this.workspaceRoot, { recursive: true });
     this._load();
+  }
+
+  /** Read model-paths from the base dbt_project.yml (dbt default is ["models"]). */
+  _readModelPaths() {
+    try {
+      const f = this.baseProjectDir && join(this.baseProjectDir, 'dbt_project.yml');
+      if (f && existsSync(f)) {
+        const doc = yaml.load(readFileSync(f, 'utf8')) || {};
+        const mp = doc['model-paths'] || doc.model_paths || doc.source_paths; // source-paths: pre-1.0 alias
+        if (Array.isArray(mp) && mp.length) return mp.map(String);
+      }
+    } catch { /* fall through to default */ }
+    return ['models'];
   }
 
   _load() {
@@ -102,8 +121,11 @@ export class ContextManager {
     return join('target', 'ctx', id);
   }
 
+  // Generated files go under the FIRST base model-path (a directory dbt is guaranteed to scan),
+  // in a `generated/` subdir. For a default project this is models/generated (unchanged); for a
+  // custom model-paths like ["marts"] it becomes marts/generated — visible to `dbt parse`.
   generatedDir(id) {
-    return join(this.dir(id), 'models', 'generated');
+    return join(this.dir(id), this.modelPaths[0] || 'models', 'generated');
   }
 
   has(id) {
@@ -178,12 +200,16 @@ export class ContextManager {
    *  spine model is already materialized by the base project, so this returns false for it. */
   generatedTimeSpine(id) { return existsSync(join(this.generatedDir(id), 'metricflow_time_spine.sql')); }
 
-  /** Scan the overlay's models/ for a `time_spine:` config and for a metricflow_time_spine.sql. */
+  /** Directories dbt scans for this context (the base model-paths, resolved under the overlay). */
+  _modelDirs(id) {
+    return this.modelPaths.map((mp) => join(this.dir(id), mp));
+  }
+
+  /** Scan every scanned model-path for a `time_spine:` config and for a metricflow_time_spine.sql. */
   _timeSpinePresence(id) {
-    const modelsDir = join(this.dir(id), 'models');
     let hasConfig = false; let hasModelFile = false;
-    if (!existsSync(modelsDir)) return { hasConfig, hasModelFile };
     const walk = (d) => {
+      if (!existsSync(d)) return;
       for (const name of readdirSync(d)) {
         const p = join(d, name);
         const st = statSync(p);
@@ -192,7 +218,7 @@ export class ContextManager {
         if (/\.ya?ml$/.test(name)) { try { if (readFileSync(p, 'utf8').includes('time_spine:')) hasConfig = true; } catch { /* unreadable → ignore */ } }
       }
     };
-    walk(modelsDir);
+    for (const d of this._modelDirs(id)) walk(d);
     return { hasConfig, hasModelFile };
   }
 
@@ -205,18 +231,16 @@ export class ContextManager {
    */
   timeSpineDiagnostics(id) {
     const { hasConfig, hasModelFile } = this._timeSpinePresence(id);
-    const modelsDir = join(this.dir(id), 'models');
     const configFiles = [];
-    if (existsSync(modelsDir)) {
-      const walk = (d) => {
-        for (const name of readdirSync(d)) {
-          const p = join(d, name);
-          if (statSync(p).isDirectory()) { walk(p); continue; }
-          if (/\.ya?ml$/.test(name)) { try { if (readFileSync(p, 'utf8').includes('time_spine:')) configFiles.push(p.slice(this.dir(id).length + 1)); } catch { /* ignore */ } }
-        }
-      };
-      walk(modelsDir);
-    }
+    const walk = (d) => {
+      if (!existsSync(d)) return;
+      for (const name of readdirSync(d)) {
+        const p = join(d, name);
+        if (statSync(p).isDirectory()) { walk(p); continue; }
+        if (/\.ya?ml$/.test(name)) { try { if (readFileSync(p, 'utf8').includes('time_spine:')) configFiles.push(p.slice(this.dir(id).length + 1)); } catch { /* ignore */ } }
+      }
+    };
+    for (const d of this._modelDirs(id)) walk(d);
     // Read the COMPILED semantic manifest dbt/MetricFlow actually consume. This is the smoking
     // gun: `time_spines` here is the exact list MetricFlow checks — populated means dbt registered
     // our config (so a still-failing mf points elsewhere); empty despite the config file present
@@ -242,20 +266,63 @@ export class ContextManager {
 
     // The manifest is the authority: if it has NO time spine but the config file IS present, the
     // runtime dbt did not register it (version too old) — that beats any file-level heuristic.
-    const manifestMissesSpine = manifest.present && hasConfig && manifest.time_spines_count === 0 && manifest.legacy_time_spine_count === 0;
+    const genRel = this.generatedDir(id).slice(this.dir(id).length + 1);
+    const genScanned = this.modelPaths.some((mp) => genRel === mp || genRel.startsWith(`${mp}/`) || genRel.startsWith(`${mp}\\`));
+    const noModels = manifest.present && (manifest.semantic_models?.length ?? 0) === 0 && hasConfig;
+    // ZERO semantic models compiled has two distinct roots — tell them apart:
+    //   - the generated dir is NOT under a scanned model-path → dbt never saw the files; OR
+    //   - the dir IS scanned but the LAST `dbt parse` failed validation, so it never rewrote the
+    //     manifest and the STALE (empty) base copy remains. The real reason is in logs/dbt.log.
+    const dirNotScanned = noModels && !genScanned;
+    const staleFromFailedParse = noModels && genScanned;
+    // Surface the tail of the dbt log so a failed-parse reason (the specific DSI validation rule)
+    // is visible without container access — dbt writes the detail there even when the returned
+    // error string is just "Semantic Manifest validation failed".
+    const parseLogTail = staleFromFailedParse ? this._dbtLogErrorTail(id) : undefined;
+    const manifestMissesSpine = manifest.present && !noModels && hasConfig && manifest.time_spines_count === 0 && manifest.legacy_time_spine_count === 0;
     return {
       overlay_dir: this.dir(id),
+      base_model_paths: this.modelPaths,
+      generated_dir: genRel,
+      generated_dir_scanned: genScanned,
       generated_files: this.generatedFiles(id),
       time_spine_configured: hasConfig,
       time_spine_model_present: hasModelFile,
       time_spine_config_files: configFiles,
       compiled_manifest: manifest,
-      hint: manifestMissesSpine
-        ? 'DECISIVE: the config file is in the overlay but the COMPILED semantic_manifest.json has ZERO time spines — the runtime dbt-core did NOT register the modern `time_spine:` property. That property needs dbt-core >= 1.9; an older dbt drops it silently. Check the `runtime` version below and reinstall Python deps (pip --no-cache-dir) so dbt-core matches requirements.'
-        : hasConfig
-          ? 'A `time_spine:` config IS present in this overlay. If the compiled manifest below shows time_spines populated yet MetricFlow still errors, mf is reading a different/stale manifest; otherwise the runtime dbt is too old to register it (needs dbt >= 1.9).'
-          : 'No `time_spine:` config found in this overlay — the spine was not generated for this context. Confirm the running image includes ensureTimeSpine (commits 2356133/9427a02/225f72c) and that models/generated is under model-paths.',
+      ...(parseLogTail ? { parse_log_tail: parseLogTail } : {}),
+      hint: dirNotScanned
+        ? `The generated dir "${genRel}" is NOT under the base model-paths ${JSON.stringify(this.modelPaths)}, so dbt never scanned it → the compiled manifest is empty. Write generated files under a scanned model-path.`
+        : staleFromFailedParse
+          ? 'DECISIVE: the generated dir IS scanned, yet the compiled manifest has ZERO semantic models — the last `dbt parse` FAILED validation and left the stale (empty) base manifest, so MetricFlow reads no time spine. The real cause is the parse failure; see `parse_log_tail` for the exact dbt/DSI rule that failed.'
+          : manifestMissesSpine
+            ? 'Semantic models compiled but the manifest has ZERO time spines. Check the `runtime` dbt version (modern time_spine needs dbt-core >= 1.9).'
+            : hasConfig
+              ? 'A `time_spine:` config IS present and models compiled. If time_spines is populated yet MetricFlow still errors, mf is reading a different/stale manifest.'
+              : 'No `time_spine:` config found in this overlay — the spine was not generated for this context.',
     };
+  }
+
+  /** Extract the error section from the overlay's logs/dbt.log (the DSI validation detail dbt
+   *  writes even when the returned error string is generic). Best-effort; returns undefined if
+   *  no log or no error section. */
+  _dbtLogErrorTail(id) {
+    try {
+      const log = join(this.dir(id), 'logs', 'dbt.log');
+      if (!existsSync(log)) return undefined;
+      const lines = readFileSync(log, 'utf8').replace(/\x1b\[[0-9;]*m/g, '').split('\n');
+      // find the LAST "Encountered an error" / validation marker and return from there
+      let start = -1;
+      for (let i = lines.length - 1; i >= 0; i--) {
+        if (/Encountered an error|Semantic Manifest validation|Validation Error|Parsing Error/i.test(lines[i])) { start = i; break; }
+      }
+      if (start < 0) return undefined;
+      const tail = lines.slice(start)
+        .filter((l) => !/\[debug\]|Resource report|Sending event|Flushing usage|snowplow/i.test(l))
+        .map((l) => l.replace(/^\d{2}:\d{2}:\d{2}(\.\d+)?\s+/, '').replace(/\[(error|info|warn)\]\s*\[[^\]]*\]:\s*/i, ''))
+        .join('\n').trim();
+      return tail.slice(0, 4000) || undefined;
+    } catch { return undefined; }
   }
 
   /** Write the generated YAML for a context into its overlay. */
@@ -328,6 +395,7 @@ export class ContextManager {
   /** List generated YAML files in a context overlay (debug/inspection). */
   generatedFiles(id) {
     const d = this.generatedDir(id);
-    return existsSync(d) ? readdirSync(d).map((f) => join('models', 'generated', f)) : [];
+    const rel = d.slice(this.dir(id).length + 1);
+    return existsSync(d) ? readdirSync(d).map((f) => join(rel, f)) : [];
   }
 }

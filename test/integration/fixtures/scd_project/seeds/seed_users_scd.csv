@@ -1,0 +1,5 @@
+internal_player_id,country,platform,install_time_valid_from,install_time_valid_until
+u1,US,ios,2026-01-01,2026-01-14
+u1,GB,ios,2026-01-15,2035-12-31
+u2,DE,android,2026-01-01,2035-12-31
+u3,US,ios,2026-01-01,2035-12-31

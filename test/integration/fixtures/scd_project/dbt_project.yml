@@ -1,0 +1,21 @@
+name: "scd_project"
+version: "1.0.0"
+config-version: 2
+profile: "scd_project"
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+models:
+  scd_project:
+    +materialized: table
+seeds:
+  scd_project:
+    seed_events_scd:
+      +column_types:
+        device_time: timestamp
+        event_data: jsonb
+    seed_users_scd:
+      +column_types:
+        install_time_valid_from: date
+        install_time_valid_until: date

@@ -1,0 +1,8 @@
+event_id,internal_player_id,event_name,device_time,event_data
+p1,u1,iap_purchase_completed,2026-01-05 10:00:00,"{""price_in_usd"":10,""product_id"":""a""}"
+p2,u1,iap_purchase_completed,2026-01-20 10:00:00,"{""price_in_usd"":20,""product_id"":""b""}"
+p3,u2,iap_purchase_completed,2026-01-10 10:00:00,"{""price_in_usd"":30,""product_id"":""a""}"
+p4,u3,iap_purchase_completed,2026-01-12 10:00:00,"{""price_in_usd"":40,""product_id"":""b""}"
+l1,u1,first_launch,2026-01-01 08:00:00,{}
+l2,u2,first_launch,2026-01-01 08:00:00,{}
+l3,u3,first_launch,2026-01-01 08:00:00,{}

@@ -29,7 +29,10 @@ function predicate(c) {
 
 function aggSql(a) {
   if (!AGGS.has(a.fn)) throw new Error(`unsupported agg: ${a.fn}`);
-  if (a.fn === 'count') return 'count(*)';
+  // count(*) counts rows; count(<column>) counts NON-NULL values of that column. Honour the
+  // column when given (a `column:'*'` or no column means row count) — otherwise a NULL check via
+  // { fn:'count', column } silently returns COUNT(*) and reports zero NULLs.
+  if (a.fn === 'count') return (a.column && a.column !== '*') ? `count(${ident(a.column)})` : 'count(*)';
   if (a.fn === 'count_distinct') return `count(distinct ${ident(a.column)})`;
   return `${a.fn}(${ident(a.column)})`;
 }

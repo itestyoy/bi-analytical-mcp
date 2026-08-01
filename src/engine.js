@@ -1136,7 +1136,7 @@ export class Engine {
         : 'Pipeline revalidated end-to-end after the edit. Continue editing, preview, or materialize (include_columns:true for the full list).',
       recommendations: [
         ...filterWarnings,
-        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._draftStepRecommendations(changedStage, after)] : []),
+        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;
@@ -1148,6 +1148,25 @@ export class Engine {
   _funnelCompletionWarnings(stage) {
     if (!stage || stage.stage !== 'match_recognize' || (stage.rows || 'one_per_partition') !== 'one_per_match') return [];
     return [`rows:'one_per_match' counts EVERY occurrence of the start step — including partial/abandoned chains, not only completed funnels. To count only COMPLETED situations, add a downstream where on completed = true (the funnel exposes a 'completed' boolean). Keep it unfiltered only if you really want all starts.`];
+  }
+
+  /**
+   * An events↔dimension join is INCOMPLETE when it joins a slowly-changing (SCD-2) dimension on the
+   * key alone: without a point-in-time `between` window it fans out to EVERY historical version of
+   * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
+   * add the window (and fix it) instead of trusting a silently wrong join.
+   */
+  _joinCompletenessWarnings(stage) {
+    if (!stage || stage.stage !== 'join' || stage.between) return [];
+    let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
+    if (!m?.scd) return [];
+    const from = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'start')?.[0];
+    const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
+    const eventTime = this.catalog.getModel(this.catalog.anchor)?.time?.column;
+    const fix = (from && to && eventTime)
+      ? ` Add between: { value: '${eventTime}', from: '${from}', to: '${to}' } to keep only the version valid at the event time.`
+      : ' Add a `between` window (value = the event time column; from/to = the validity-window columns) to keep only the version valid at the event time.';
+    return [`INCOMPLETE JOIN: '${stage.with}' is a slowly-changing (SCD-2) dimension, but this join matches only on key '${stage.on}' with no point-in-time window — it fans out to EVERY historical version of each key, so per-event rows multiply and counts inflate.${fix}`];
   }
 
   /**

@@ -125,6 +125,29 @@ test('transform: compress/re-slice the materialized result table (where/group_by
   assert.ok(big.rows.reduce((s, r) => s + num(r.rev), 0) <= 85);
 });
 
+// A transform count with a `column` must count NON-NULL values (COUNT(column)), NOT rows
+// (COUNT(*)). Proven on DATA: a native pipeline derives `price` (populated only on
+// iap_purchase_completed, NULL on every other event), so count(price) < count(*), and
+// count(price) + (rows where price IS NULL) == count(*). A regression to COUNT(*) makes
+// count(price) == total and the first assertion fails.
+test('transform count(column) counts NON-NULL only, not COUNT(*)', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_native_model({ action: 'start', name: 'nullcount', source: 'events' });
+  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' } });
+  const mat = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
+  const ctx = mat.context_id; const table = mat.model;
+
+  const totalR = await engine.get_query_result({ context_id: ctx, table, transform: { aggregations: [{ fn: 'count', column: '*', as: 'total' }] } });
+  const nnR = await engine.get_query_result({ context_id: ctx, table, transform: { aggregations: [{ fn: 'count', column: 'price', as: 'nn' }] } });
+  const nullR = await engine.get_query_result({ context_id: ctx, table, transform: { where: [{ column: 'price', op: 'is_null' }], aggregations: [{ fn: 'count', column: '*', as: 'nulls' }] } });
+  assert.equal(totalR.ok && nnR.ok && nullR.ok, true, JSON.stringify({ totalR: totalR.error, nnR: nnR.error, nullR: nullR.error }));
+  const total = num(totalR.rows[0].total); const nonNull = num(nnR.rows[0].nn); const nulls = num(nullR.rows[0].nulls);
+  assert.ok(nulls > 0, `fixture must have NULL price rows, got ${nulls}`);
+  assert.ok(nonNull < total, `count(price)=${nonNull} must exclude NULLs (< total ${total}) — a COUNT(*) regression makes them equal`);
+  assert.equal(nonNull + nulls, total, `count(column) + null_count must equal count(*): ${nonNull} + ${nulls} != ${total}`);
+});
+
 test('sample: a random subset (not first-by-order) of the materialized result', opts, async (t) => {
   if (skip(t)) return;
   const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: ['user__country'], materialize: true });

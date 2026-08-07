@@ -79,7 +79,9 @@ export class CatalogSearch {
     const query = String(search);
     const { events, properties, dimensions, recipes } = this._build();
     const opts = { threshold: fuzzy ? 0.6 : 1.01, fuzzy };
-    const applies = c.eventPropertyEvents(); // property -> [event_name]; absent ⇒ all events
+    // DATA-DERIVED applicability from the value index (which events actually carry each property),
+    // not the declared meta.mcp.events. Absent/unknown ⇒ treated as "all events" downstream.
+    const applies = this.valueIndex.appliesMap(c.eventProps()); // property -> observed [event_name]
 
     const event_names = events.search(query, opts).map(({ item: e, score, match }) => ({
       event: e,

@@ -110,6 +110,21 @@ test('semantic_index({ property }) returns sample_values + counts matching the i
   assert.equal(out.value_stats.top_share, Math.round((10 / 24) * 1000) / 1000); // ~0.417
 });
 
+// Applicability (which events carry a property) is DATA-DERIVED from the scan's per-event coverage,
+// NOT the declared meta.mcp.events — prove the reported `events` == the observed non-null carriers.
+test('semantic_index({ property }).events is derived from per-event coverage (not a declared list)', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  const cov = index.coverage('ad_type_of_event_data');
+  const observed = cov.filter((e) => e.non_null > 0).map((e) => e.event_name).sort();
+  assert.ok(observed.length > 0, 'the scan observed at least one carrier');
+  assert.deepEqual([...out.events].sort(), observed, 'reported events == observed non-null carriers');
+  // an event on which the field is ALWAYS null is not reported as a carrier
+  for (const ev of cov.filter((e) => e.non_null === 0).map((e) => e.event_name)) {
+    assert.ok(!out.events.includes(ev), `${ev} (all-NULL for this field) is not a reported carrier`);
+  }
+});
+
 // semantic_index({ property }) value listing is pageable + orderable (limit/offset/order_by/direction).
 test('semantic_index({ property }) pages + orders the indexed values', opts, async (t) => {
   if (skip(t)) return;

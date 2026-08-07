@@ -135,6 +135,13 @@ test('recipes have no standalone tool; get_recipe payload is framed as a buildin
 // #3 gotcha: referencing an event-specific property without scoping its event(s) reads NULL.
 test('add_step warns when an event-specific property is used without its event scope', async () => {
   const e = engine();
+  // Applicability is DATA-DERIVED from the value index: seed coverage showing ad_type is populated
+  // only on ad_started/ad_finished (NULL on first_launch) — the nudge reads this, not a declared list.
+  e.valueIndex.upsertProperty('ad_type_of_event_data', { coverage: [
+    { event: 'ad_started', rowCount: 10, nonNull: 10 },
+    { event: 'ad_finished', rowCount: 10, nonNull: 10 },
+    { event: 'first_launch', rowCount: 5, nonNull: 0 },
+  ] });
   const s = await e.build_native_model({ action: 'start', name: 'scopewarn', source: 'events' });
   // ad_type_of_event_data is populated only on ad_started/ad_finished.
   const a = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] } });

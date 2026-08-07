@@ -339,7 +339,10 @@ export class Engine {
     if (input.event) {
       if (!c.eventNames().includes(input.event)) throw new ToolError(`unknown event '${input.event}'. See semantic_index().event_names`, { stage: 'validate', field: 'event' });
       const numeric = new Set(c.eventNumericProps());
-      const applies = c.eventPropertyEvents();
+      // DATA-DERIVED applicability: which properties are actually populated on this event (from the
+      // value index), not the declared meta.mcp.events. A property with no coverage yet (unknown)
+      // is kept — a cold index must not hide fields.
+      const applies = this.valueIndex.appliesMap(c.eventProps());
       const descs = c.eventPropertyDescriptions();
       const props = c.eventProps().filter((p) => { const evs = applies[p]; return !evs || evs.includes(input.event); });
       const rows = props.map((p) => {
@@ -399,7 +402,7 @@ export class Engine {
         // column: meaning, values, completeness, and how recently it was profiled.
         // (event_coverage is [] here — attributes live on the dimension model, not on
         // events — but the SHAPE matches the event-property page exactly.)
-        const { nulls, coverage: attrCoverage, recs: nullRecs } = this._nullCoverage(p, null);
+        const { nulls, coverage: attrCoverage, recs: nullRecs } = this._nullCoverage(p);
         Object.assign(value_stats, nulls);
         const ent = c.primaryEntityName(mk);
         const recommendations = [];
@@ -426,12 +429,14 @@ export class Engine {
       if (!spec) throw new ToolError(`unknown event property '${p}'. Discover properties via semantic_index({ event }) or ({ search }); user/experiment attributes are namespaced ('users.country')`, { stage: 'validate', field: 'property' });
       const numeric = c.eventNumericProps().includes(p);
       const complex = c.isComplexEventProp(p);
-      const evs = (spec.events && spec.events.length) ? spec.events : null;
+      // Applicability is DATA-DERIVED from the value index (which events actually carry this
+      // property), NOT the declared meta.mcp.events. null = not indexed yet ⇒ unknown.
+      const evs = this.valueIndex.appliesEvents(p);
       // Pageable/orderable view of the real indexed VALUES (limit/offset/order_by/direction)
       // + NULL coverage per event + indexing freshness: ONE page = the full truth about the
       // column (meaning, values, completeness, profiling recency).
       const { samples, value_stats } = this._valueListing(p, input);
-      const { nulls, coverage, recs: nullRecs } = this._nullCoverage(p, evs);
+      const { nulls, coverage, recs: nullRecs } = this._nullCoverage(p, { eventScoped: true });
       Object.assign(value_stats, nulls);
       const dc = value_stats.distinct_count;
       // Drill-down guidance: keep exploring the VALUES — trace them across the catalog,
@@ -454,7 +459,7 @@ export class Engine {
       // or averages a string.
       const out = {
         property: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric, complex,
-        events: spec.events || null, description: spec.description,
+        events: evs, description: spec.description,
         sample_values: samples, distinct_count: dc, total_count: value_stats.total_count,
         indexed: value_stats.indexed, value_stats, event_coverage: coverage,
         indexing: this._indexHistory(p, input.recent ?? 10),
@@ -691,21 +696,22 @@ export class Engine {
    * each event is annotated with `applies` (from meta.mcp.events) so EXPECTED nulls
    * are distinguishable from real data gaps. Returns null fields when not indexed.
    */
-  _nullCoverage(key, declared) {
+  _nullCoverage(key, { eventScoped = false } = {}) {
     const st = this.valueIndex.stats(key);
     const rowCount = (st && st.totalCount != null && st.nullCount != null) ? st.totalCount + st.nullCount : null;
     const frac = (n, d) => (d ? Number((n / d).toFixed(4)) : null);
     const nulls = { non_null_count: st?.totalCount ?? null, null_count: st?.nullCount ?? null, row_count: rowCount, null_fraction: (st?.nullCount != null && rowCount) ? frac(st.nullCount, rowCount) : null };
-    const declaredSet = declared ? new Set(declared) : null;
+    // Applicability is DATA-DERIVED: for an event property an event "carries" the field when it is
+    // non-null on >= 1 of that event's rows (observed, not a declared meta.mcp.events list). For a
+    // non-event key (a dimension attribute) applicability is not event-scoped, so `applies` is true.
     const coverage = this.valueIndex.coverage(key).map((e) => ({
       event_name: e.event_name, row_count: e.row_count, non_null: e.non_null, null_count: e.null_count,
-      null_fraction: frac(e.null_count, e.row_count), applies: declaredSet ? declaredSet.has(e.event_name) : true,
+      null_fraction: frac(e.null_count, e.row_count), applies: eventScoped ? (e.non_null || 0) > 0 : true,
     }));
-    const gaps = coverage.filter((e) => e.applies && e.null_count > 0);
+    const carries = eventScoped ? coverage.filter((e) => e.applies).map((e) => e.event_name) : [];
     const recs = [];
-    if (nulls.null_count != null && nulls.row_count) recs.push(`${nulls.null_count} of ${nulls.row_count} rows are NULL (${nulls.null_fraction != null ? Math.round(nulls.null_fraction * 100) : '?'}%)${declared ? `; the property applies to events: ${declared.join(', ')}` : ''}.`);
-    if (gaps.length) recs.push(`Possible data gaps: ${gaps.slice(0, 5).map((g) => `${g.event_name} (${g.null_count}/${g.row_count} NULL)`).join(', ')} — these events SHOULD carry '${key}' but have NULLs.`);
-    else if (declaredSet && coverage.length) recs.push(`NULLs outside the applicable events are expected (the property is only populated on ${declared.join(', ')}).`);
+    if (nulls.null_count != null && nulls.row_count) recs.push(`${nulls.null_count} of ${nulls.row_count} rows are NULL (${nulls.null_fraction != null ? Math.round(nulls.null_fraction * 100) : '?'}%)${carries.length ? `; observed to carry data on event(s): ${carries.join(', ')}` : ''}.`);
+    if (eventScoped && carries.length && carries.length < coverage.length) recs.push(`NULLs on the other events are expected — '${key}' is populated only on ${carries.join(', ')} (derived from the indexed data, not a declared list).`);
     return { nulls, coverage, recs };
   }
 
@@ -1264,14 +1270,17 @@ export class Engine {
   /** #3 gotcha: the just-added stage references an event-specific property whose event(s)
    *  are not scoped by an upstream where on event_name → it reads NULL elsewhere. */
   _eventScopeWarnings(draft, stage) {
-    const applies = this.catalog.eventPropertyEvents(); // prop -> [event_name]
+    // Identify event properties from the catalog (always known); derive WHICH events actually carry
+    // each one from the value index (data, not the declared meta.mcp.events). Unknown coverage
+    // (cold index) can't be assessed, so such a property is not flagged.
+    const applies = this.valueIndex.appliesMap(this.catalog.eventProps()); // prop -> observed [event_name]
     const s = JSON.stringify(stage);
-    const referenced = Object.keys(applies).filter((p) => s.includes(`"${p}"`));
+    const referenced = this.catalog.eventProps().filter((p) => s.includes(`"${p}"`));
     if (!referenced.length) return [];
     const evCol = this.catalog.eventNameColumn();
     const scoped = new Set(); let hasScope = false;
     for (const st of draft.stages) if (st.stage === 'where') for (const c of st.conditions || []) if (c.column === evCol) { hasScope = true; (Array.isArray(c.value) ? c.value : [c.value]).forEach((v) => scoped.add(v)); }
-    const risky = referenced.filter((p) => { const evs = applies[p]; return !evs || !evs.every((e) => scoped.has(e)); });
+    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !evs.every((e) => scoped.has(e)); });
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
     return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ property: '${p}' }).event_coverage).`];

@@ -43,6 +43,7 @@ export class Dialect {
   castType(_type) { throw new Error('abstract castType'); }
   jsonExtract(_column, _key, _type) { throw new Error('abstract jsonExtract'); }
   jsonArrayLength(_column, _key) { throw new Error('abstract jsonArrayLength'); }
+  arrayLength(_column) { throw new Error('abstract arrayLength'); }
   jsonArrayContains(_column, _key, _value) { throw new Error('abstract jsonArrayContains'); }
   jsonStructField(_column, _key, _field, _type) { throw new Error('abstract jsonStructField'); }
   /** { join, element }: a FROM-join that explodes an array property + the element expr.

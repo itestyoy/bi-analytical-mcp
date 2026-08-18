@@ -125,6 +125,26 @@ test('semantic_index({ property }).events is derived from per-event coverage (no
   }
 });
 
+// COMPLEX (array/struct) properties get per-event coverage too, so their applicability is
+// data-derived — they no longer leak onto EVERY event. words_selected_of_event_data is a JSON
+// array carried only on level_completed in the seed.
+test('complex array property gets DATA-DERIVED per-event coverage (no leak onto unrelated events)', opts, async (t) => {
+  if (skip(t)) return;
+  const prop = 'words_selected_of_event_data';
+  assert.ok(engine.catalog.complexEventProps().includes(prop), 'precondition: it is a complex property');
+  const cov = index.coverage(prop);
+  assert.ok(cov.length > 0, 'complex prop has per-event coverage after the refresh');
+  const carriers = cov.filter((e) => e.non_null > 0).map((e) => e.event_name).sort();
+  assert.deepEqual(carriers, ['level_completed'], `carried only on level_completed (got ${JSON.stringify(carriers)})`);
+  assert.deepEqual([...index.appliesEvents(prop)].sort(), carriers, 'appliesEvents == observed carriers');
+  // the leak we fixed: an unrelated event must NOT list this complex prop
+  const fl = await engine.semantic_index({ event: 'first_launch' });
+  assert.ok(!fl.properties.some((p) => p.name === prop), 'complex prop does NOT leak onto first_launch');
+  // its real carrier DOES list it
+  const lc = await engine.semantic_index({ event: 'level_completed' });
+  assert.ok(lc.properties.some((p) => p.name === prop), 'complex prop shown on its real carrier (level_completed)');
+});
+
 // semantic_index({ property }) value listing is pageable + orderable (limit/offset/order_by/direction).
 test('semantic_index({ property }) pages + orders the indexed values', opts, async (t) => {
   if (skip(t)) return;

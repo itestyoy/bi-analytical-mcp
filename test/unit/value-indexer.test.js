@@ -105,8 +105,9 @@ test('high-cardinality fields are flagged and skipped on the next sync', async (
   const at1 = index.stats(prop).indexedAt;
   assert.ok(index.syncStatus().last_run.properties_indexed > 0, 'first run indexes the fields');
 
-  await bi.refresh(); // flagged fields are now skipped
-  assert.equal(index.syncStatus().last_run.properties_indexed, 0, 'all high-cardinality fields skipped next sync');
+  await bi.refresh(); // flagged SCALAR fields are now skipped; complex props still get coverage-only
+  const complexN = catalog.complexEventProps().length;
+  assert.equal(index.syncStatus().last_run.properties_indexed, complexN, 'all high-cardinality SCALARS skipped; only complex-coverage refreshes');
   assert.equal(index.stats(prop).indexedAt, at1, 'the flagged field was not re-scanned');
   index.close();
 });

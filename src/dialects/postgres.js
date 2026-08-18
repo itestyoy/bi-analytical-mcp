@@ -21,6 +21,9 @@ export class PostgresDialect extends Dialect {
     return `jsonb_array_length(${column}->'${key}')`;
   }
 
+  // Element count of a native array column (array_length returns NULL for an empty array → 0).
+  arrayLength(column) { return `COALESCE(array_length(${column}, 1), 0)`; }
+
   jsonArrayContains(column, key, value) {
     this.ident(key);
     return `(${column}->'${key}') @> ${this.sqlLiteral(JSON.stringify([value]))}::jsonb`;

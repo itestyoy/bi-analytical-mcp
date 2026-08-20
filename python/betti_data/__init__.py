@@ -18,10 +18,9 @@ Typical use (memory-bounded — push work down, materialise last):
         lf.group_by("country").agg(total=betti.pl.col("revenue").sum())
     )
 
-    ds.sql("SELECT country, sum(revenue) total FROM data GROUP BY 1 ORDER BY 2 DESC")  # SQL, out-of-core
-
-Everything is lazy/streaming so a large export is never pulled into memory at once — aggregate or
-filter in the LazyFrame / SQL, then materialise the small result.
+All analysis is expressed with native polars on the LazyFrame (there is no SQL method — use polars
+ops). Everything is lazy/streaming, so a large export is never pulled into memory at once —
+aggregate or filter in the LazyFrame, then materialise the small result.
 """
 from __future__ import annotations
 
@@ -64,12 +63,6 @@ class _DatasetHandle:
     def head(self, n: int = 10):
         """First n rows as a polars DataFrame, without reading the whole result."""
         return _reader.head(self._ds, n=n)
-
-    def sql(self, query: str, row_cap: int | None = 5_000_000):
-        """Read-only SQL over this result (polars SQL, table name `data`) — streaming/out-of-core,
-        collected under `row_cap`. SQL sees only this dataset (no file access), returns a polars
-        DataFrame. Aggregate/filter in the query; the RESULT must be small."""
-        return _reader.sql(self._ds, query, row_cap=row_cap)
 
     def arrow_batches(self, batch_rows: int = 100_000):
         """Stream Arrow RecordBatches for a custom out-of-core loop."""

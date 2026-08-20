@@ -16,10 +16,10 @@ is deliberately no API that takes a raw path, which is what keeps the sandbox sa
 ## Why not Spark
 
 A single-process sandbox reading an already-aggregated result set does not want a JVM or a cluster.
-`betti_data` uses **polars' lazy engine** — `scan` + streaming `collect`, plus polars' own SQL
-for `sql()` — which gives column/predicate pushdown and bounded memory with no JVM/cluster. (One
-engine, one isolation story; DuckDB would only add value for larger-than-RAM join/sort spill, which
-pre-aggregated result sets don't need.)
+`betti_data` uses **polars' lazy engine** — `scan` + streaming `collect` — which gives
+column/predicate pushdown and bounded memory with no JVM/cluster. All analysis is native polars
+(there is no SQL method); one engine, one isolation story. (DuckDB would only add value for
+larger-than-RAM join/sort spill, which pre-aggregated result sets don't need.)
 
 ## API
 
@@ -37,9 +37,6 @@ result = betti.collect(
     lf.group_by("country").agg(total=betti.pl.col("revenue").sum())
 )                                     # STREAMING collect, memory-bounded
 
-# or SQL (out-of-core, sandboxed to this dataset; table name is `data`):
-ds.sql("SELECT country, sum(revenue) AS total FROM data GROUP BY 1 ORDER BY 2 DESC")
-
 # or a custom out-of-core loop over Arrow batches:
 for batch in ds.arrow_batches(batch_rows=100_000):
     ...
@@ -52,8 +49,6 @@ Nothing here loads a whole dataset into memory:
 - `scan()` is a polars **LazyFrame** — zero rows read until you `collect()`.
 - `betti.collect()` runs the **streaming** engine (bounded memory) and caps the FINAL result
   (`row_cap`), raising with guidance instead of OOMing if you try to pull an unaggregated firehose.
-- `sql()` runs polars' SQL over the **lazy scan** — streams with projection/predicate pushdown and
-  does **not** materialise the dataset; only your (aggregated) result is returned, under `row_cap`.
 - `arrow_batches()` yields fixed-size Arrow batches for a manual out-of-core loop.
 
 The one thing that CAN blow memory is asking for a huge **result** (e.g. `SELECT *` / no
@@ -63,7 +58,7 @@ filter, or `head()` first — never materialise raw big data.
 ## Rules for writing sandbox code
 
 1. Reach data only via `betti.dataset(id)` / `betti.datasets()` — never a path or URL.
-2. Aggregate/filter/select in the `LazyFrame` (or SQL) **before** materialising — the sandbox is
+2. Aggregate/filter/select in the `LazyFrame` **before** materialising — the sandbox is
    memory-bounded. `betti.collect()` streams and refuses an over-large result (`row_cap`).
 3. Use `betti.pl` for polars expressions (`betti.pl.col(...)`), so you don't need your own import.
 4. Do not attempt network, filesystem, or credential access — it isn't available and isn't needed.
@@ -71,6 +66,6 @@ filter, or `head()` first — never materialise raw big data.
 ## Status
 
 The safe core (manifest resolution + guards) is tested with stdlib only. The engine readers
-(`scan`/`sql`/`arrow_batches`) require `polars`/`pyarrow` (the `[engines]` extra),
+(`scan`/`collect`/`arrow_batches`) require `polars`/`pyarrow` (the `[engines]` extra),
 preinstalled in the sandbox image; they are imported lazily so importing the library needs no engine.
 GCS reads and the host export are validated against real BigQuery/GCS, not the local test stack.

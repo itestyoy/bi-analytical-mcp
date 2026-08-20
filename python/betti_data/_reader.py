@@ -2,8 +2,8 @@
 stays importable without it.
 
 Why not Spark: a single-process sandbox reading an already-aggregated Parquet result set does not
-want a JVM/cluster. Polars' lazy engine (`scan_parquet` + streaming collect, plus its own SQL)
-gives proper column/predicate pushdown and bounded memory with no JVM.
+want a JVM/cluster. Polars' lazy engine (`scan_parquet` + streaming collect) gives proper
+column/predicate pushdown and bounded memory with no JVM; all analysis is native polars.
 """
 from __future__ import annotations
 
@@ -67,18 +67,3 @@ def arrow_batches(ds: Dataset, batch_rows: int = 100_000) -> Iterator:
     dset = pads.dataset(ds.uri.replace("file://", ""), format="parquet")
     for batch in dset.to_batches(batch_size=batch_rows):
         yield batch
-
-
-def sql(ds: Dataset, query: str, row_cap: int | None = 5_000_000):
-    """Run a read-only SQL query over the dataset with POLARS' own SQL engine, STREAMING /
-    out-of-core. The dataset is bound to the table name `data` — write `... FROM data`. This runs
-    over the LAZY scan, so the Parquet is read lazily (projection/predicate pushdown) and the
-    dataset is never fully loaded; the query compiles to a LazyFrame and is collected with the
-    streaming engine under the same `row_cap` as collect(). SQL sees ONLY the registered `data`
-    frame — there is no read_parquet/file access from inside the SQL, so it can't escape the
-    dataset. Aggregate/filter so the RESULT is small (a `SELECT *` over a huge dataset still
-    materialises the RESULT — that's on you)."""
-    pl = _polars()
-    ctx = pl.SQLContext(frames={"data": scan(ds)}, eager=False)
-    lf = ctx.execute(query)  # -> LazyFrame (eager=False)
-    return collect(lf, row_cap=row_cap)

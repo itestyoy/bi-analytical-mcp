@@ -2,7 +2,7 @@
 
 When you write Python in the Betti sandbox, use **this library and nothing else** to reach data.
 Do **not** open files, build `gs://` / `s3://` paths, configure credentials, or call
-`polars` / `duckdb` / `pyarrow` readers directly. The host has already run the SQL, exported the
+`polars` / `pyarrow` readers directly. The host has already run the SQL, exported the
 results to Parquet, and told this library where they live. You name a result by its **id** — there
 is deliberately no API that takes a raw path, which is what keeps the sandbox safe.
 
@@ -16,8 +16,10 @@ is deliberately no API that takes a raw path, which is what keeps the sandbox sa
 ## Why not Spark
 
 A single-process sandbox reading an already-aggregated result set does not want a JVM or a cluster.
-`betti_data` uses **polars' lazy engine** (`scan` + streaming `collect`) and **DuckDB** (SQL over
-Parquet), which give column/predicate pushdown and bounded memory with no Spark overhead.
+`betti_data` uses **polars' lazy engine** — `scan` + streaming `collect`, plus polars' own SQL
+for `sql()` — which gives column/predicate pushdown and bounded memory with no JVM/cluster. (One
+engine, one isolation story; DuckDB would only add value for larger-than-RAM join/sort spill, which
+pre-aggregated result sets don't need.)
 
 ## API
 
@@ -50,8 +52,8 @@ Nothing here loads a whole dataset into memory:
 - `scan()` is a polars **LazyFrame** — zero rows read until you `collect()`.
 - `betti.collect()` runs the **streaming** engine (bounded memory) and caps the FINAL result
   (`row_cap`), raising with guidance instead of OOMing if you try to pull an unaggregated firehose.
-- `sql()` is a **VIEW** over `read_parquet` — DuckDB streams with projection/predicate pushdown and
-  does **not** materialise the dataset; only your (aggregated) result is returned.
+- `sql()` runs polars' SQL over the **lazy scan** — streams with projection/predicate pushdown and
+  does **not** materialise the dataset; only your (aggregated) result is returned, under `row_cap`.
 - `arrow_batches()` yields fixed-size Arrow batches for a manual out-of-core loop.
 
 The one thing that CAN blow memory is asking for a huge **result** (e.g. `SELECT *` / no
@@ -69,6 +71,6 @@ filter, or `head()` first — never materialise raw big data.
 ## Status
 
 The safe core (manifest resolution + guards) is tested with stdlib only. The engine readers
-(`scan`/`sql`/`arrow_batches`) require `polars`/`duckdb`/`pyarrow` (the `[engines]` extra),
+(`scan`/`sql`/`arrow_batches`) require `polars`/`pyarrow` (the `[engines]` extra),
 preinstalled in the sandbox image; they are imported lazily so importing the library needs no engine.
 GCS reads and the host export are validated against real BigQuery/GCS, not the local test stack.

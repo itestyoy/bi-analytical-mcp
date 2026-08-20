@@ -1,7 +1,7 @@
 """betti_data — the ONLY data-access interface inside the Betti Python sandbox.
 
 Write analysis code against THIS library exclusively. Do not open files, construct GCS/S3 paths,
-set up credentials, or call polars/duckdb/pyarrow readers directly — the host has already exported
+set up credentials, or call polars/pyarrow readers directly — the host has already exported
 the query results to Parquet and told this library where they are. You reference a result by its
 `id` (from `datasets()`); there is no way to name a raw path, which is what keeps the sandbox safe.
 
@@ -65,10 +65,11 @@ class _DatasetHandle:
         """First n rows as a polars DataFrame, without reading the whole result."""
         return _reader.head(self._ds, n=n)
 
-    def sql(self, query: str):
-        """Read-only DuckDB SQL over this result (table name `data`), out-of-core and sandboxed to
-        this dataset only. Returns a polars DataFrame."""
-        return _reader.sql(self._ds, query)
+    def sql(self, query: str, row_cap: int | None = 5_000_000):
+        """Read-only SQL over this result (polars SQL, table name `data`) — streaming/out-of-core,
+        collected under `row_cap`. SQL sees only this dataset (no file access), returns a polars
+        DataFrame. Aggregate/filter in the query; the RESULT must be small."""
+        return _reader.sql(self._ds, query, row_cap=row_cap)
 
     def arrow_batches(self, batch_rows: int = 100_000):
         """Stream Arrow RecordBatches for a custom out-of-core loop."""

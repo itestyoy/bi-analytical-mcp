@@ -43,6 +43,21 @@ for batch in ds.arrow_batches(batch_rows=100_000):
     ...
 ```
 
+## Memory guarantee (critical for big data)
+
+Nothing here loads a whole dataset into memory:
+
+- `scan()` is a polars **LazyFrame** — zero rows read until you `collect()`.
+- `betti.collect()` runs the **streaming** engine (bounded memory) and caps the FINAL result
+  (`row_cap`), raising with guidance instead of OOMing if you try to pull an unaggregated firehose.
+- `sql()` is a **VIEW** over `read_parquet` — DuckDB streams with projection/predicate pushdown and
+  does **not** materialise the dataset; only your (aggregated) result is returned.
+- `arrow_batches()` yields fixed-size Arrow batches for a manual out-of-core loop.
+
+The one thing that CAN blow memory is asking for a huge **result** (e.g. `SELECT *` / no
+aggregation): the scan still streams, but the returned frame is what you asked for. So aggregate,
+filter, or `head()` first — never materialise raw big data.
+
 ## Rules for writing sandbox code
 
 1. Reach data only via `betti.dataset(id)` / `betti.datasets()` — never a path or URL.

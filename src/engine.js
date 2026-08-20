@@ -24,9 +24,13 @@ import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, gcsExport = null }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
+    // Data-side scaffold for the future Python-executor: export a materialised result to Parquet
+    // in GCS + a read-only prefix-scoped grant. Config-gated (inert unless MCP_EXPORT_BUCKET on
+    // BigQuery); the credential minter must be injected before any grant is issued. See gcs-export.js.
+    this.gcsExport = gcsExport;
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
     // ONE shared store (single db file) for the job registry + value index. resetDb wipes
     // it on open (MCP_DB_RESET) before the managers read it.

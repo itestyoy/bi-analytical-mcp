@@ -12,6 +12,7 @@ import { loadRecipes } from './recipes.js';
 import { ContextManager } from './context-manager.js';
 import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
+import { GcsExport } from './gcs-export.js';
 import { BackgroundIndexer } from './value-index.js';
 import { createEmbedder } from './embeddings.js';
 
@@ -231,7 +232,24 @@ export async function makeEngine(opts = {}) {
   } else {
     console.error(`[mcp] ${new Date().toISOString()} memory: findings live in the shared store at ${dbPath} — set MCP_MEMORY_DB to a persistent volume to retain them across container restarts`);
   }
-  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath });
+  // Data-side scaffold for the future Python-executor: EXPORT a materialised result to Parquet in
+  // GCS + a read-only, prefix-scoped grant. Inert unless MCP_EXPORT_BUCKET is set on a BigQuery
+  // warehouse; the credential minter is intentionally NOT wired here (a wrong scope is a security
+  // bug), so any grant request fails safe until a reviewed minter is injected. See gcs-export.js.
+  const gcsExport = process.env.MCP_EXPORT_BUCKET
+    ? new GcsExport({
+      bucket: process.env.MCP_EXPORT_BUCKET,
+      prefix: process.env.MCP_EXPORT_PREFIX || 'betti-exports',
+      location: process.env.MCP_EXPORT_LOCATION || process.env.BQ_LOCATION || null,
+      ttlSeconds: Number(process.env.MCP_EXPORT_TTL_SECONDS) || 900,
+      dialect: catalog.dialect,
+      runner,
+      baseProjectDir,
+      tokenMinter: null, // inject a reviewed downscoped-STS / signed-URL issuer when the Python side lands
+    })
+    : null;
+  if (gcsExport) console.error(`[mcp] ${new Date().toISOString()} gcs-export: staged to gs://${process.env.MCP_EXPORT_BUCKET}/${process.env.MCP_EXPORT_PREFIX || 'betti-exports'} (parquet); grant minter NOT wired yet — read grants will fail until injected`);
+  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, gcsExport });
   // Persistence surfaces as semantic_index({ status }).value_index.persisted. If a DB path was
   // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
   // loudly, because otherwise the index silently rebuilds from scratch on every restart.

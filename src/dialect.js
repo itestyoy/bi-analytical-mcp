@@ -25,6 +25,11 @@ export function jsonArrayLength(dialect, column, key) {
   return getDialect(dialect).jsonArrayLength(column, key);
 }
 
+/** Element count of a NATIVE array COLUMN (a REPEATED/ARRAY column, not a JSON blob key). */
+export function arrayLength(dialect, column) {
+  return getDialect(dialect).arrayLength(column);
+}
+
 export function jsonArrayContains(dialect, column, key, value) {
   return getDialect(dialect).jsonArrayContains(column, key, value);
 }

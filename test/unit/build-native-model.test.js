@@ -54,6 +54,28 @@ test('build_native_model: add_step propagates columns; bad step is rejected with
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL (schema-only)');
 });
 
+// add_step is append-only, so it echoes ONLY the applied step (+ steps_count), not the growing
+// steps array — the O(n²) token saver. include_steps:true restores the full list on demand.
+test('build_native_model: add_step returns only the applied step by default; include_steps:true gives the full list', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'lean', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] } });
+  const a2 = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['currency_of_event_data'], measures: [{ name: 'n', fn: 'count' }] } });
+  // lean by default: the applied step + a count, NOT the whole steps array.
+  assert.equal(a2.steps, undefined, 'the growing steps array is not re-echoed on add_step');
+  assert.equal(a2.steps_count, 2, 'steps_count reports the pipeline length');
+  assert.equal(a2.step.stage, 'aggregate', 'the applied step is returned');
+  assert.equal(a2.step.index, 2);
+  assert.ok(a2.recommendations.some((r) => /include_steps:true|preview/.test(r)), 'recommendation points to the full-list drill');
+  // opt back in to the full list.
+  const a3 = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'order_by', keys: [{ key: 'n', direction: 'desc' }] }, include_steps: true });
+  assert.ok(Array.isArray(a3.steps) && a3.steps.length === 3, 'include_steps:true returns the full steps array');
+  assert.equal(a3.steps_count, undefined, 'full list mode does not also send the count');
+  // edit_step still returns the full list (the sequence changed).
+  const ed = await e.build_native_model({ action: 'edit_step', draft_id: s.draft_id, index: 1, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_failed' }] } });
+  assert.ok(Array.isArray(ed.steps) && ed.steps.length === 3, 'edit_step returns the full reshuffled sequence');
+});
+
 // #1: by default add_step returns a DIFF (what this stage changed), not the whole schema.
 test('build_native_model: add_step returns a column diff by default', async () => {
   const e = engine();
@@ -173,7 +195,7 @@ test('build_native_model: array op on a non-array column is rejected at add_step
   const s2 = await e.build_native_model({ action: 'start', name: 'arr2', source: 'events' });
   await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'arr', op: 'json_parse_array', column: 'player_id_of_internal' } });
   const ok = await e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'compute', name: 'last', op: 'array_last', column: 'arr' } });
-  assert.equal(ok.steps.length, 2, 'array_last on a parsed array column is accepted');
+  assert.equal(ok.steps_count, 2, 'array_last on a parsed array column is accepted');
 });
 
 // Physical grounding: when a runner can introspect the relation, a catalog column the
@@ -319,7 +341,7 @@ test('build_native_model: fork branches a new draft from step N; original untouc
   assert.equal(fk.steps.length, 1, 'only the kept prefix copied');
   // the fork diverges independently; the source draft is never mutated.
   const f2 = await e.build_native_model({ action: 'add_step', draft_id: fk.draft_id, stage: { stage: 'aggregate', group_by: ['reached_a'], measures: [{ name: 'm', fn: 'count' }] } });
-  assert.equal(f2.steps.length, 2);
+  assert.equal(f2.steps_count, 2);
   const orig = await e.build_native_model({ action: 'preview', draft_id: d });
   assert.equal(orig.steps.length, 2, 'source draft untouched by the fork or its edits');
   assert.equal(orig.steps[1].stage, 'aggregate');

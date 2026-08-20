@@ -125,6 +125,35 @@ test('semantic_index({ property }).events is derived from per-event coverage (no
   }
 });
 
+// COMPLEX (array/struct) properties get per-event coverage too, so their applicability is
+// data-derived — they no longer leak onto EVERY event. words_selected_of_event_data is a JSON
+// array carried only on level_completed in the seed.
+test('complex array property gets DATA-DERIVED per-event coverage (no leak onto unrelated events)', opts, async (t) => {
+  if (skip(t)) return;
+  const prop = 'words_selected_of_event_data';
+  assert.ok(engine.catalog.complexEventProps().includes(prop), 'precondition: it is a complex property');
+  const cov = index.coverage(prop);
+  assert.ok(cov.length > 0, 'complex prop has per-event coverage after the refresh');
+  const carriers = cov.filter((e) => e.non_null > 0).map((e) => e.event_name).sort();
+  assert.deepEqual(carriers, ['level_completed'], `carried only on level_completed (got ${JSON.stringify(carriers)})`);
+  assert.deepEqual([...index.appliesEvents(prop)].sort(), carriers, 'appliesEvents == observed carriers');
+  // the leak we fixed: an unrelated event must NOT list this complex prop
+  const fl = await engine.semantic_index({ event: 'first_launch' });
+  assert.ok(!fl.properties.some((p) => p.name === prop), 'complex prop does NOT leak onto first_launch');
+  // its real carrier DOES list it
+  const lc = await engine.semantic_index({ event: 'level_completed' });
+  assert.ok(lc.properties.some((p) => p.name === prop), 'complex prop shown on its real carrier (level_completed)');
+  // A) declared STRUCTURE + B) raw EXAMPLES are surfaced on the property view.
+  const out = await engine.semantic_index({ property: prop });
+  assert.equal(out.complex, true);
+  assert.ok(out.fields || out.items, 'A: the array/struct shape is surfaced (fields/items) from the catalog');
+  assert.equal(out.encoding, 'json', 'A: encoding surfaced');
+  assert.equal(out.distinct_count, null, 'no distinct for a complex value');
+  assert.ok(Array.isArray(out.sample_values) && out.sample_values.length > 0, 'B: raw example values are indexed');
+  assert.ok(out.sample_values.every((s) => typeof s.value === 'string' && s.value.length <= 300), 'examples are length-capped strings');
+  assert.ok(/example|shape/i.test(out.sample_note || ''), 'B: examples are labelled as shape, not frequency');
+});
+
 // semantic_index({ property }) value listing is pageable + orderable (limit/offset/order_by/direction).
 test('semantic_index({ property }) pages + orders the indexed values', opts, async (t) => {
   if (skip(t)) return;
@@ -227,7 +256,9 @@ test('semantic_index reports the value-index sync state + jobs', opts, async (t)
 // are distinguishable from real gaps (there are none here — both ad events are 100% filled).
 test('semantic_index({ property }) reports null_count + per-event coverage from the seed', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  // include_coverage:true → the FULL per-event table (incl. always-NULL events), needed to assert
+  // the whole-fact partition below. (Default is carriers-only; covered by property-view-lean.test.js.)
+  const out = await engine.semantic_index({ property: 'ad_type_of_event_data', include_coverage: true });
   // overall: 24 non-null of 184 rows → 160 NULL.
   assert.equal(out.value_stats.non_null_count, 24);
   assert.equal(out.value_stats.row_count, 184);
@@ -353,8 +384,11 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
   assert.ok(words.populated.some((p) => p.property === 'ad_type_of_event_data'), 'ad_type populated for wordsearch');
   assert.ok(words.empty.includes('level_id_of_event_data'), 'level_id EMPTY for wordsearch');
 
-  // the { property } view carries the same per-app split: ad_type is non_null=0 for colorfit.
-  const adProp = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  // the { property } view carries the same per-app split: by default a summary (empty_apps count),
+  // and the full per-app list under include_coverage:true — ad_type is non_null=0 for colorfit.
+  const adSummary = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  assert.ok(adSummary.bundle_coverage_summary.empty_apps >= 1, 'summary flags the empty app(s) by default');
+  const adProp = await engine.semantic_index({ property: 'ad_type_of_event_data', include_coverage: true });
   const cf = (adProp.bundle_coverage || []).find((b) => b.bundle === 'com.omg.colorfit');
   assert.equal(cf?.non_null, 0, JSON.stringify(adProp.bundle_coverage));
 

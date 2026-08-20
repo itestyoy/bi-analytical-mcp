@@ -67,11 +67,17 @@ test('semantic_index({ property }) surfaces per-app bundle_coverage', async () =
     distinctCount: 3, totalCount: 40, nullCount: 1460, values: [{ value: 'rewarded', freq: 30 }],
     bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 40 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 0 }],
   });
+  // DEFAULT (token-lean): ALL populated apps listed + an empty-app tally, not the full per-app list.
   const prop = await e.semantic_index({ property: 'ad_type_of_event_data' });
-  assert.ok(Array.isArray(prop.bundle_coverage), 'property view carries bundle_coverage');
-  const relax = prop.bundle_coverage.find((b) => b.bundle === 'com.omg.relax');
-  assert.equal(relax.non_null, 0, 'empty for relax');
-  assert.ok(prop.recommendations.some((r) => /EMPTY .*com\.omg\.relax/i.test(r)), 'flags the app it is empty for');
+  assert.equal(prop.bundle_coverage, undefined, 'full per-app list (incl. empties) is NOT dumped by default');
+  assert.equal(prop.bundle_coverage_summary.populated_apps, 1);
+  assert.equal(prop.bundle_coverage_summary.empty_apps, 1);
+  assert.ok(prop.bundle_coverage_summary.populated.some((b) => b.bundle === 'com.omg.words'), 'lists every populated app');
+  assert.ok(prop.recommendations.some((r) => /Always NULL for 1 of 2 app/i.test(r)), 'flags the empty count + how to drill');
+  // include_coverage:true returns the FULL per-app split (nothing lost, just on demand).
+  const full = await e.semantic_index({ property: 'ad_type_of_event_data', include_coverage: true });
+  assert.ok(Array.isArray(full.bundle_coverage), 'include_coverage returns the full per-app array');
+  assert.equal(full.bundle_coverage.find((b) => b.bundle === 'com.omg.relax').non_null, 0, 'empty for relax');
 });
 
 // bundle is a HELPER across the other views (discoverability), not just its own view.

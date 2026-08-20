@@ -23,6 +23,9 @@ export class BigQueryDialect extends Dialect {
     return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$.${key}'))`;
   }
 
+  // Element count of a native REPEATED column (0 for empty; a REPEATED column is never NULL).
+  arrayLength(column) { return `ARRAY_LENGTH(${column})`; }
+
   jsonArrayContains(column, key, value) {
     this.ident(key);
     return `${this.sqlLiteral(value)} IN UNNEST(JSON_VALUE_ARRAY(${column}, '$.${key}'))`;

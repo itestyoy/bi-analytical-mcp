@@ -105,8 +105,9 @@ test('high-cardinality fields are flagged and skipped on the next sync', async (
   const at1 = index.stats(prop).indexedAt;
   assert.ok(index.syncStatus().last_run.properties_indexed > 0, 'first run indexes the fields');
 
-  await bi.refresh(); // flagged fields are now skipped
-  assert.equal(index.syncStatus().last_run.properties_indexed, 0, 'all high-cardinality fields skipped next sync');
+  await bi.refresh(); // flagged SCALAR fields are now skipped; complex props still get coverage-only
+  const complexN = catalog.complexEventProps().length;
+  assert.equal(index.syncStatus().last_run.properties_indexed, complexN, 'all high-cardinality SCALARS skipped; only complex-coverage refreshes');
   assert.equal(index.stats(prop).indexedAt, at1, 'the flagged field was not re-scanned');
   index.close();
 });
@@ -373,5 +374,44 @@ test('a failed combined top-k degrades ONLY top-values, keeping cardinality+cove
   assert.ok(notes.some((n) => /top-k .* FAILED/.test(n) && /Resources exceeded during query execution/.test(n) && /Running with dbt/.test(n)), JSON.stringify(notes));
   // stats + values still landed.
   assert.equal(index.stats(catalog.scalarEventProps()[0]).totalCount, 3);
+  index.close();
+});
+
+// Complex (array/struct) coverage is INCREMENTAL like scalars: with merge on and a stored
+// watermark, only rows newer than it are scanned and the counts are ADDED to what is stored
+// (not a full re-scan). Driven directly with a mock runner (no warehouse).
+test('complex-coverage merges a delta into stored coverage (incremental, not full re-scan)', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  const prop = 'words_selected_of_event_data';
+  assert.ok(catalog.complexEventProps().includes(prop), 'fixture has a complex prop');
+  const covQueries = [];
+  const runner = {
+    show: async (_d, sql) => {
+      if (/AS v\b/.test(sql) && !/GROUP BY/.test(sql)) return { ok: true, rows: [{ v: '[{"word_name":"cat"}]' }] }; // examples (row cap via show limit, no inline LIMIT)
+      if (/GROUP BY/.test(sql) && /AS ev\b/.test(sql)) {
+        const isDelta = /\bWHERE\b/.test(sql); // full scan has no WHERE (windowDays 0); delta has the since-clause
+        covQueries.push(isDelta ? 'delta' : 'full');
+        return isDelta
+          ? { ok: true, rows: [{ ev: 'level_completed', row_count: 3, nn: 3, wm: 2000 }] }
+          : { ok: true, rows: [{ ev: 'level_completed', row_count: 5, nn: 5, wm: 1000 }] };
+      }
+      return { ok: true, rows: [] };
+    },
+  };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, merge: true, logger: () => {} });
+  const bundleCol = catalog.bundleColumn();
+
+  await bi._indexComplexCoverage(1, bundleCol); // first pass: no watermark → FULL scan
+  assert.equal(index.coverage(prop).find((e) => e.event_name === 'level_completed').non_null, 5, 'full scan stored 5');
+  assert.equal(index.stats(prop).dataWatermark, 1000, 'watermark advanced to the full scan max');
+  assert.ok(index.sampleValues(prop).length > 0, 'examples stored');
+
+  await bi._indexComplexCoverage(2, bundleCol); // second pass: watermark set → DELTA, counts ADD
+  assert.equal(index.coverage(prop).find((e) => e.event_name === 'level_completed').non_null, 8, 'delta ADDED (5 + 3), not replaced');
+  assert.equal(index.stats(prop).dataWatermark, 2000, 'watermark advanced to the delta max');
+  const complexN = catalog.complexEventProps().length;
+  assert.ok(covQueries.slice(0, complexN).every((x) => x === 'full'), 'first pass = full scan per complex prop');
+  assert.ok(covQueries.slice(complexN).length > 0 && covQueries.slice(complexN).every((x) => x === 'delta'), 'second pass = since-watermark delta per complex prop (no full re-scan)');
   index.close();
 });

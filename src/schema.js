@@ -344,6 +344,7 @@ export function buildSchemas(catalog) {
       index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index) for edit_step / insert_step / delete_step. insert_step places the stage BEFORE this position (count+1 appends).' },
       after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — for truncate (drop the rest) and fork (copy that prefix into the new draft). 0 = none; omit on fork to copy all steps.' },
       include_columns: { type: 'boolean', description: 'start/add_step/edit ops: also return the FULL available_columns list. Off by default — the per-step response returns only the diff (columns_added + columns_removed_count, with the removed names only when short) to avoid re-dumping the whole schema each step; use preview for the full list too.' },
+      include_steps: { type: 'boolean', description: 'add_step only: also return the FULL steps array. Off by default — add_step is append-only, so it echoes just the applied `step` + `steps_count` (you already have the earlier steps); pass true, or use preview, when you need the whole pipeline back.' },
     },
   };
 
@@ -481,7 +482,8 @@ export function buildSchemas(catalog) {
         offset: { type: 'integer', minimum: 0, description: 'For { property }: skip this many values first — page through the value list.' },
         order_by: { enum: ['freq', 'value'], description: 'For { property }: order the returned values by frequency (default) or alphabetically by value.' },
         direction: { enum: ['asc', 'desc'], description: 'For { property }: sort direction (default desc for freq → most common first; asc for value → A→Z).' },
-        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'For { status }/{ run }/{ property }: how many recent runs / jobs / history rows to include (default 10).' },
+        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'For { status }/{ run }/{ property }: how many recent runs / jobs / history rows to include (default 3 for { property }).' },
+        include_coverage: { type: 'boolean', description: 'For { property }: return the FULL per-event and per-app coverage — every event and app, INCLUDING the ones where the property is always NULL. Default false: only the carriers (events/apps that actually populate it) are returned, with a count of the omitted ones. Set true when you need the complete NULL breakdown.' },
       },
     },
     time: {

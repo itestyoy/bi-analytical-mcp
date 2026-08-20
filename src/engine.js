@@ -465,12 +465,15 @@ export class Engine {
       // Drill-down guidance: keep exploring the VALUES — trace them across the catalog,
       // and pivot to the event(s) that carry this property (≤4 concrete next moves).
       const recommendations = [];
-      if (samples.length) {
+      if (complex) {
+        // Complex values are ~unique arrays/structs — sample_values are EXAMPLES of the shape,
+        // not a frequency ranking; distinct/top-N do not apply.
+        if (samples.length) recommendations.push(`${samples.length} example value(s) showing the array/struct SHAPE (not top-N by frequency; complex values are ~unique). Read them into an unnest/struct_field pipeline to work with the contents.`);
+        else recommendations.push(`Complex (${spec.type}) property — no examples indexed yet (the value index may not have run); its structure is in \`items\`/\`fields\` above.`);
+      } else if (samples.length) {
         recommendations.push(`${dc != null ? `${dc} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
         if (value_stats.has_more) recommendations.push(`More values exist — page with semantic_index({ property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} }), or re-order with order_by:'value'.`);
         recommendations.push(`Trace any of these values across the catalog (which other properties/events carry it): semantic_index({ search: '<value>' }).`);
-      } else if (complex) {
-        recommendations.push(`Complex (${spec.type}) property — its values are nested; explore the carrying event(s) for context.`);
       } else {
         recommendations.push(`No values indexed yet (the background value index may not have run).${dc != null ? ` distinct_count is ${dc}.` : ''}`);
       }
@@ -489,7 +492,14 @@ export class Engine {
       const historyN = input.recent ?? 3;
       const out = {
         property: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric, complex,
+        // A) declared STRUCTURE of a complex value (element type / struct fields / how it is encoded),
+        // so the caller knows the shape even before any example is indexed.
+        ...(complex && spec.items ? { items: spec.items } : {}),
+        ...(complex && spec.fields ? { fields: spec.fields } : {}),
+        ...(complex && spec.encoding ? { encoding: spec.encoding } : {}),
         events: evs, description: spec.description,
+        // B) for a complex property these are raw EXAMPLE values (shape), not a frequency ranking.
+        ...(complex && samples.length ? { sample_note: 'examples of the value SHAPE (LIMIT sample, not top-N by frequency; complex values are ~unique)' } : {}),
         sample_values: samples, distinct_count: dc, total_count: value_stats.total_count,
         indexed: value_stats.indexed, value_stats,
         event_coverage: showFullCoverage ? coverage : carriers,

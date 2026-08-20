@@ -143,6 +143,15 @@ test('complex array property gets DATA-DERIVED per-event coverage (no leak onto 
   // its real carrier DOES list it
   const lc = await engine.semantic_index({ event: 'level_completed' });
   assert.ok(lc.properties.some((p) => p.name === prop), 'complex prop shown on its real carrier (level_completed)');
+  // A) declared STRUCTURE + B) raw EXAMPLES are surfaced on the property view.
+  const out = await engine.semantic_index({ property: prop });
+  assert.equal(out.complex, true);
+  assert.ok(out.fields || out.items, 'A: the array/struct shape is surfaced (fields/items) from the catalog');
+  assert.equal(out.encoding, 'json', 'A: encoding surfaced');
+  assert.equal(out.distinct_count, null, 'no distinct for a complex value');
+  assert.ok(Array.isArray(out.sample_values) && out.sample_values.length > 0, 'B: raw example values are indexed');
+  assert.ok(out.sample_values.every((s) => typeof s.value === 'string' && s.value.length <= 300), 'examples are length-capped strings');
+  assert.ok(/example|shape/i.test(out.sample_note || ''), 'B: examples are labelled as shape, not frequency');
 });
 
 // semantic_index({ property }) value listing is pageable + orderable (limit/offset/order_by/direction).

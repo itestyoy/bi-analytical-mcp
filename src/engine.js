@@ -608,14 +608,11 @@ export class Engine {
     // ── default: compact OVERVIEW (no per-property dump, no warehouse calls) ──
     const models = c.modelKeys().map((k) => {
       const m = c.getModel(k);
-      // Overview stays light: only the FIRST line of each model's (often multi-paragraph)
-      // description; the full prose is one drill away via semantic_index({ model }).
-      const full = String(m.description || '');
-      const brief = firstLine(full);
-      const head = {
-        key: k, role: m.role, dbt_model: m.dbt_model, description: brief,
-        ...(brief.length < full.trim().length ? { description_full: `semantic_index({ model: '${k}' })` } : {}),
-      };
+      // The model description is NOT drill-able data — it carries behavioural DIRECTIVES the AI
+      // must see up front (data-scope window, event-flow rules, time-metric definitions, the SCD
+      // join.between rule, lowercase-name rules, …). Truncating it risks the AI never fetching the
+      // rest because it "already knows enough", so the FULL prose stays in the overview verbatim.
+      const head = { key: k, role: m.role, dbt_model: m.dbt_model, description: String(m.description || '') };
       if (k === c.anchor) {
         return {
           ...head, kind: 'events_fact', entities: Object.keys(m.entities || {}), time: m.time?.column,
@@ -661,7 +658,7 @@ export class Engine {
       } : null,
       // Apps in the data (by bundle id). Different apps populate different properties, so
       // drill one with semantic_index({ bundle }) to see what carries data for that app.
-      ...(bundleList.length ? { bundles: bundleList.slice(0, 8).map((b) => ({ bundle: b.bundle, event_rows: b.row_count })), ...(bundleList.length > 8 ? { bundles_more: bundleList.length - 8, bundles_note: `${bundleList.length} apps total; showing the 8 largest by event volume. A property's per-app split is in semantic_index({ property }) / ({ bundle }).` } : {}) } : {}),
+      ...(bundleList.length ? { bundles: bundleList.map((b) => ({ bundle: b.bundle, event_rows: b.row_count })) } : {}),
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
       ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
@@ -2246,13 +2243,6 @@ function clone(x) {
 // Compact form of a saved finding for ATTACHING to a semantic_index view: id + a truncated note +
 // the date. The full text + question + about[] + aliases[] + links[] are fetched on demand via
 // memory({ action: 'list', target }) — so the view stays light without losing the finding.
-// First meaningful line of a (possibly multi-paragraph) description, capped — the overview shows
-// this; the full prose is one drill away via semantic_index({ model }).
-function firstLine(desc, maxLen = 240) {
-  const line = String(desc || '').split('\n').map((l) => l.trim()).find((l) => l.length) || '';
-  return line.length > maxLen ? `${line.slice(0, maxLen)}…` : line;
-}
-
 function memoryCompact(e, maxLen = 220) {
   const note = String(e.note || '');
   const truncated = note.length > maxLen;

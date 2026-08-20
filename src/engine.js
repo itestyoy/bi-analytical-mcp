@@ -128,6 +128,30 @@ export class Engine {
   }
 
   /**
+   * Attach saved findings to a semantic_index view COMPACTLY (token-lean): the `cap` most recent,
+   * each note truncated. Always leaves an explicit drill so nothing is lost — memory({ action:
+   * 'list', target }) returns EVERY linked finding in full. `drillTarget` is the singular target
+   * string that view is about (a property/attribute/event/model key).
+   */
+  _attachMemory(out, canonKeys, drillTarget, { cap = 3 } = {}) {
+    const all = this.memoryStore.forTargets(canonKeys);
+    if (!all.length) return;
+    const shown = all.slice(0, cap).map((e) => memoryCompact(e));
+    out.memory = shown.map((s) => s.view);
+    const truncatedAny = shown.some((s) => s.truncated);
+    const hiddenCount = all.length - shown.length;
+    if (hiddenCount > 0) out.memory_more = hiddenCount;
+    if (hiddenCount > 0 || truncatedAny) {
+      (out.next_actions ||= []).push({
+        call: `memory({ action: 'list', target: '${drillTarget}' })`,
+        why: hiddenCount > 0
+          ? `read all ${all.length} saved findings linked here IN FULL (only the ${shown.length} most recent are shown, truncated)`
+          : `read the ${all.length} finding(s) above IN FULL (note text is truncated here)`,
+      });
+    }
+  }
+
+  /**
    * THE analyst memory tool. Save a FINDING the AI made (a vague phrasing tracked down to a
    * real field, a non-obvious gotcha, an associated source/link) and LINK it to the catalog
    * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { model }/
@@ -329,9 +353,8 @@ export class Engine {
           { call: `semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' })`, why: "drill an attribute's full value/frequency distribution" },
           { call: "semantic_index({ search: '<value>' })", why: 'find where a known attribute value occurs' },
         ];
-      // Saved findings about this model (memory tool) — surface them where they belong.
-      const mem = this._memoryFor([`model:${k}`]);
-      if (mem.length) out.memory = mem;
+      // Saved findings about this model (memory tool) — surface them where they belong (compact).
+      this._attachMemory(out, [`model:${k}`], k);
       return out;
     }
 
@@ -369,20 +392,20 @@ export class Engine {
       if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ property }).`);
       // Per-app helper: these properties may be empty for some apps — point at the bundle view.
       if (c.bundleColumn() && this.valueIndex.bundles().length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ bundle: '<app>' }) shows the populated-vs-empty split per app.`);
-      const mem = this._memoryFor([`event:${input.event}`]);
       const nextActions = [
         ...(pick.length ? [{ call: `semantic_index({ property: '${pick[0].name}' })`, why: "drill this property's real value distribution + completeness" }] : []),
         { call: "semantic_index({ search: '<value>' })", why: 'trace a value seen above to every property/event carrying it' },
         ...(c.bundleColumn() && this.valueIndex.bundles().length > 1 ? [{ call: "semantic_index({ bundle: '<app>' })", why: 'a property here may be EMPTY for some apps — see the per-app split' }] : []),
       ];
-      return {
+      const eventOut = {
         event: input.event,
         property_count: props.length,
         properties: rows,
-        ...(mem.length ? { memory: mem } : {}),
         next_actions: nextActions,
         recommendations: recommendations.slice(0, 4),
       };
+      this._attachMemory(eventOut, [`event:${input.event}`], input.event);
+      return eventOut;
     }
 
     // ── { property }: one property's full spec ──
@@ -413,17 +436,17 @@ export class Engine {
         recommendations.push(ent
           ? `Group/filter by it in metric queries via '${ent}__${col}', or reference '${col}' after a pipeline join with:'${mk}'.`
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
-        const mem = this._memoryFor([`property:${p}`]);
-        return {
+        const attrOut = {
           property: p, model: mk, column: col, type: dim.type,
           ...(dim.values ? { declared_values: dim.values } : {}),
           description: dDescs[col],
           sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
           indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
-          indexing: this._indexHistory(p, input.recent ?? 10),
-          ...(mem.length ? { memory: mem } : {}),
+          indexing: this._indexHistory(p, input.recent ?? 3),
           recommendations: recommendations.slice(0, 3),
         };
+        this._attachMemory(attrOut, [`property:${p}`], p);
+        return attrOut;
       }
       const spec = c.eventPropertySpec(p);
       if (!spec) throw new ToolError(`unknown event property '${p}'. Discover properties via semantic_index({ event }) or ({ search }); user/experiment attributes are namespaced ('users.country')`, { stage: 'validate', field: 'property' });
@@ -457,16 +480,26 @@ export class Engine {
       // Unit-aware cast hint: a numeric-in-meaning value (declared unit) physically typed
       // string must be cast before aggregation — say so HERE, before a query mixes units
       // or averages a string.
+      // Token-lean by default: show only the events that CARRY the property (applies:true) — the
+      // full per-event table incl. always-NULL events is fetched with include_coverage:true. The
+      // omitted count + the drill call are always present so the AI knows the rest exists.
+      const carriers = coverage.filter((e) => e.applies);
+      const coverageOmitted = coverage.length - carriers.length;
+      const showFullCoverage = !!input.include_coverage;
+      const historyN = input.recent ?? 3;
       const out = {
         property: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric, complex,
         events: evs, description: spec.description,
         sample_values: samples, distinct_count: dc, total_count: value_stats.total_count,
-        indexed: value_stats.indexed, value_stats, event_coverage: coverage,
-        indexing: this._indexHistory(p, input.recent ?? 10),
+        indexed: value_stats.indexed, value_stats,
+        event_coverage: showFullCoverage ? coverage : carriers,
+        ...(showFullCoverage || coverageOmitted <= 0 ? {} : { event_coverage_omitted: coverageOmitted }),
+        indexing: this._indexHistory(p, historyN),
         next_actions: [
           ...(evs ? [{ call: `semantic_index({ event: '${evs[0]}' })`, why: 'see everything the carrying event(s) provide alongside this property' }] : []),
           { call: "semantic_index({ search: '<value>' })", why: 'trace one of these values across the catalog' },
           ...(value_stats.has_more ? [{ call: `semantic_index({ property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} })`, why: 'page further through the value distribution' }] : []),
+          ...(!showFullCoverage && coverageOmitted > 0 ? [{ call: `semantic_index({ property: '${p}', include_coverage: true })`, why: `full per-event + per-app coverage, incl. the ${coverageOmitted} event(s) where '${p}' is always NULL (hidden by default)` }] : []),
         ],
         recommendations: recommendations.slice(0, 4),
       };
@@ -479,13 +512,23 @@ export class Engine {
       if (c.bundleColumn()) {
         const bcov = this.valueIndex.bundleCoverage(p);
         if (bcov.length) {
-          out.bundle_coverage = bcov.map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count }));
-          const emptyApps = bcov.filter((b) => b.non_null === 0).map((b) => b.bundle);
-          if (emptyApps.length && emptyApps.length < bcov.length) out.recommendations = [...out.recommendations.slice(0, 3), `EMPTY (always NULL) for app(s): ${emptyApps.join(', ')} — populated for the rest. See semantic_index({ bundle }) for an app's full populated/empty split.`];
+          const populated = bcov.filter((b) => b.non_null > 0);
+          const empty = bcov.filter((b) => b.non_null === 0);
+          if (showFullCoverage) {
+            out.bundle_coverage = bcov.map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count }));
+          } else {
+            // Compact: a populated/empty tally + the top populated apps. Full per-app split is
+            // behind include_coverage:true (the drill next_action added above) and semantic_index({ bundle }).
+            out.bundle_coverage_summary = {
+              populated_apps: populated.length,
+              empty_apps: empty.length,
+              top_populated: populated.slice(0, 3).map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count })),
+            };
+          }
+          if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ bundle: '<app>' }) or include_coverage:true.`];
         }
       }
-      const mem = this._memoryFor([`property:${p}`]);
-      if (mem.length) out.memory = mem;
+      this._attachMemory(out, [`property:${p}`], p);
       return out;
     }
 
@@ -565,7 +608,14 @@ export class Engine {
     // ── default: compact OVERVIEW (no per-property dump, no warehouse calls) ──
     const models = c.modelKeys().map((k) => {
       const m = c.getModel(k);
-      const head = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description };
+      // Overview stays light: only the FIRST line of each model's (often multi-paragraph)
+      // description; the full prose is one drill away via semantic_index({ model }).
+      const full = String(m.description || '');
+      const brief = firstLine(full);
+      const head = {
+        key: k, role: m.role, dbt_model: m.dbt_model, description: brief,
+        ...(brief.length < full.trim().length ? { description_full: `semantic_index({ model: '${k}' })` } : {}),
+      };
       if (k === c.anchor) {
         return {
           ...head, kind: 'events_fact', entities: Object.keys(m.entities || {}), time: m.time?.column,
@@ -611,7 +661,7 @@ export class Engine {
       } : null,
       // Apps in the data (by bundle id). Different apps populate different properties, so
       // drill one with semantic_index({ bundle }) to see what carries data for that app.
-      ...(bundleList.length ? { bundles: bundleList.map((b) => ({ bundle: b.bundle, event_rows: b.row_count })) } : {}),
+      ...(bundleList.length ? { bundles: bundleList.slice(0, 8).map((b) => ({ bundle: b.bundle, event_rows: b.row_count })), ...(bundleList.length > 8 ? { bundles_more: bundleList.length - 8, bundles_note: `${bundleList.length} apps total; showing the 8 largest by event volume. A property's per-app split is in semantic_index({ property }) / ({ bundle }).` } : {}) } : {}),
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
       ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
@@ -2193,6 +2243,35 @@ function clone(x) {
  * Presentation shape for a stored memory note: decode the canonical "<kind>:<key>" targets
  * back into typed { kind, key } objects, expose the note/aliases/links, and stamp the time.
  */
+// Compact form of a saved finding for ATTACHING to a semantic_index view: id + a truncated note +
+// the date. The full text + question + about[] + aliases[] + links[] are fetched on demand via
+// memory({ action: 'list', target }) — so the view stays light without losing the finding.
+// First meaningful line of a (possibly multi-paragraph) description, capped — the overview shows
+// this; the full prose is one drill away via semantic_index({ model }).
+function firstLine(desc, maxLen = 240) {
+  const line = String(desc || '').split('\n').map((l) => l.trim()).find((l) => l.length) || '';
+  return line.length > maxLen ? `${line.slice(0, maxLen)}…` : line;
+}
+
+function memoryCompact(e, maxLen = 220) {
+  const note = String(e.note || '');
+  const truncated = note.length > maxLen;
+  // Keep the semantically useful, usually-short parts inline (note/question/about); drop the long
+  // search-metadata (aliases/links). The full untruncated note + aliases/links is one drill away
+  // via memory({ action: 'list', target }).
+  const targets = (e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? { kind: t.slice(0, i), key: t.slice(i + 1) } : { kind: 'term', key: String(t) }; });
+  return {
+    view: {
+      id: e.id,
+      note: truncated ? `${note.slice(0, maxLen)}…` : note,
+      ...(e.question ? { question: e.question } : {}),
+      ...(targets.length ? { about: targets } : {}),
+      ...(e.created_at ? { recorded_at: new Date(e.created_at).toISOString().slice(0, 10) } : {}),
+    },
+    truncated,
+  };
+}
+
 function memoryView(e) {
   const targets = (e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? { kind: t.slice(0, i), key: t.slice(i + 1) } : { kind: 'term', key: String(t) }; });
   return {

@@ -247,7 +247,9 @@ test('semantic_index reports the value-index sync state + jobs', opts, async (t)
 // are distinguishable from real gaps (there are none here — both ad events are 100% filled).
 test('semantic_index({ property }) reports null_count + per-event coverage from the seed', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  // include_coverage:true → the FULL per-event table (incl. always-NULL events), needed to assert
+  // the whole-fact partition below. (Default is carriers-only; covered by property-view-lean.test.js.)
+  const out = await engine.semantic_index({ property: 'ad_type_of_event_data', include_coverage: true });
   // overall: 24 non-null of 184 rows → 160 NULL.
   assert.equal(out.value_stats.non_null_count, 24);
   assert.equal(out.value_stats.row_count, 184);
@@ -373,8 +375,11 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
   assert.ok(words.populated.some((p) => p.property === 'ad_type_of_event_data'), 'ad_type populated for wordsearch');
   assert.ok(words.empty.includes('level_id_of_event_data'), 'level_id EMPTY for wordsearch');
 
-  // the { property } view carries the same per-app split: ad_type is non_null=0 for colorfit.
-  const adProp = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  // the { property } view carries the same per-app split: by default a summary (empty_apps count),
+  // and the full per-app list under include_coverage:true — ad_type is non_null=0 for colorfit.
+  const adSummary = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  assert.ok(adSummary.bundle_coverage_summary.empty_apps >= 1, 'summary flags the empty app(s) by default');
+  const adProp = await engine.semantic_index({ property: 'ad_type_of_event_data', include_coverage: true });
   const cf = (adProp.bundle_coverage || []).find((b) => b.bundle === 'com.omg.colorfit');
   assert.equal(cf?.non_null, 0, JSON.stringify(adProp.bundle_coverage));
 

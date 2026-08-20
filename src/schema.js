@@ -481,7 +481,8 @@ export function buildSchemas(catalog) {
         offset: { type: 'integer', minimum: 0, description: 'For { property }: skip this many values first — page through the value list.' },
         order_by: { enum: ['freq', 'value'], description: 'For { property }: order the returned values by frequency (default) or alphabetically by value.' },
         direction: { enum: ['asc', 'desc'], description: 'For { property }: sort direction (default desc for freq → most common first; asc for value → A→Z).' },
-        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'For { status }/{ run }/{ property }: how many recent runs / jobs / history rows to include (default 10).' },
+        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'For { status }/{ run }/{ property }: how many recent runs / jobs / history rows to include (default 3 for { property }).' },
+        include_coverage: { type: 'boolean', description: 'For { property }: return the FULL per-event and per-app coverage — every event and app, INCLUDING the ones where the property is always NULL. Default false: only the carriers (events/apps that actually populate it) are returned, with a count of the omitted ones. Set true when you need the complete NULL breakdown.' },
       },
     },
     time: {

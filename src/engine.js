@@ -903,7 +903,7 @@ export class Engine {
     const draft = ctx.state.draft;
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
-    if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns);
+    if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns, input.include_steps);
     if (input.action === 'add_steps') return this._draftAddSteps(ctx, draft, input.stages, input.include_columns);
     if (input.action === 'edit_step') return this._draftEditStep(ctx, draft, input.index, input.stage, input.include_columns);
     if (input.action === 'insert_step') return this._draftInsertStep(ctx, draft, input.index, input.stage, input.include_columns);
@@ -1012,8 +1012,8 @@ export class Engine {
     return resp;
   }
 
-  async _draftAddStep(ctx, draft, stage, includeColumns = false) {
-    return this._draftCommit(ctx, draft, [...draft.stages, stage], { changedStage: stage, includeColumns, action: 'add_step' });
+  async _draftAddStep(ctx, draft, stage, includeColumns = false, includeSteps = false) {
+    return this._draftCommit(ctx, draft, [...draft.stages, stage], { changedStage: stage, includeColumns, includeSteps, action: 'add_step' });
   }
 
   /**
@@ -1030,7 +1030,7 @@ export class Engine {
     const effects = [];
     try {
       for (const stage of stages) {
-        const r = await this._draftCommit(ctx, draft, [...draft.stages, stage], { changedStage: stage, includeColumns: false, action: 'add_step' });
+        const r = await this._draftCommit(ctx, draft, [...draft.stages, stage], { changedStage: stage, includeColumns: false, includeSteps: true, action: 'add_step' });
         effects.push({
           step_index: r.step_index,
           stage: stage.stage,
@@ -1152,7 +1152,7 @@ export class Engine {
    * `changedStage` (the added/edited stage; null for delete/truncate) drives the filter/scope/
    * funnel warnings.
    */
-  async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, action = 'add_step', stepIndex = null } = {}) {
+  async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, includeSteps = false, action = 'add_step', stepIndex = null } = {}) {
     const physSet = await this._physicalCols(draft.source);
     const before = this._draftColumns(draft, physSet); // columns BEFORE the change
     try {
@@ -1176,9 +1176,17 @@ export class Engine {
     const beforeNames = new Set(before.map((c) => c.name));
     const afterNames = new Set(after.map((c) => c.name));
     const removed = before.filter((c) => !afterNames.has(c.name)).map((c) => c.name);
+    const allSteps = this._draftSteps(draft);
+    // add_step is APPEND-ONLY: the AI already saw every prior step in earlier responses, so echoing
+    // the whole (growing) steps list each call is O(n²) waste across a build. Return only the applied
+    // step + a count by default; the full list is available via include_steps:true or preview.
+    // edit/insert/delete/truncate DO reshuffle the sequence, so they always return the full list.
+    const leanSteps = action === 'add_step' && !includeSteps;
     const resp = {
       draft_id: ctx.id, action, step_index: stepIndex ?? draft.stages.length,
-      steps: this._draftSteps(draft),
+      ...(leanSteps
+        ? { step: allSteps.find((s) => s.index === (stepIndex ?? draft.stages.length)) || allSteps[allSteps.length - 1], steps_count: allSteps.length }
+        : { steps: allSteps }),
       column_count: after.length,
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
       // Compact by default: a step that drops 200 columns must not reprint 200 names every call.
@@ -1190,6 +1198,7 @@ export class Engine {
         : 'Pipeline revalidated end-to-end after the edit. Continue editing, preview, or materialize (include_columns:true for the full list).',
       recommendations: [
         ...filterWarnings,
+        ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
         ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };

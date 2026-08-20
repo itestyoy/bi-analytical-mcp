@@ -517,12 +517,13 @@ export class Engine {
           if (showFullCoverage) {
             out.bundle_coverage = bcov.map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count }));
           } else {
-            // Compact: a populated/empty tally + the top populated apps. Full per-app split is
-            // behind include_coverage:true (the drill next_action added above) and semantic_index({ bundle }).
+            // Compact: list EVERY populated app (non_null > 0) — apps that carry the property are
+            // signal — and only tally the empty (always-NULL) ones, which are the noise. The full
+            // per-app split incl. the empties is behind include_coverage:true / semantic_index({ bundle }).
             out.bundle_coverage_summary = {
               populated_apps: populated.length,
               empty_apps: empty.length,
-              top_populated: populated.slice(0, 3).map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count })),
+              populated: populated.map((b) => ({ bundle: b.bundle, non_null: b.non_null, row_count: b.row_count })),
             };
           }
           if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ bundle: '<app>' }) or include_coverage:true.`];

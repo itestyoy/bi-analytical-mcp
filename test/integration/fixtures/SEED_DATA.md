@@ -426,59 +426,107 @@ prevents.
 
 ---
 
-## 12. Declared join keys (`tracking_id`) — the relationships the schema sanctions
+## 12. Declared join keys — the relationships the schema sanctions
 
-Two relationships are declared in `fixtures/catalog.yml` under `meta.mcp.entities`, and both
-paths — metric queries and pipeline joins — use them without ever restating a column.
+Two relationships are declared in `fixtures/catalog.yml` under `meta.mcp.entities`. Both paths
+— metric queries and pipeline joins — use them without ever restating a column.
 
-| relationship | key | owner (the join target) | declared foreign on |
+| relationship | key | owner | declared on |
 |---|---|---|---|
-| `player_day` | player + the DAY of that source's time column | `fct_player_acquisition` (one row per pair) | the two events sources, `dim_users` (on its install day) |
-| `tracked_install` | `tracking_id` + player | `dim_users` (one install record per pair) | the two events sources |
+| `user` | `player_id_of_internal` | `dim_users` (**SCD-2**, see §13) | every other source |
+| `ad_funnel_{rewarded,interstitial,banner}` | `<format>_tracking_id` + player ↔ `tracking_id` + player | **nobody** | `fct_crashlytics_events` (three variants) ↔ `fct_analytics_events` (one plain key) |
 
-### `tracking_id` in the seeds
+### The ad funnel (`tracking_id`)
 
-Every player's install record carries one canonical track: `u<N>` -> `t<N>`. Two places carry a
-**stale** track (`t_stale`) that is on no install record — a re-attributed / mis-reported track:
+`tracking_id` identifies an **ad funnel**: the events of one funnel share it. In this seed each
+funnel is one `ad_started` + one `ad_finished` — 12 funnels over 24 ad events; the other 160
+events carry no funnel (NULL).
 
-- all **7** events of `u12` in `seed_events.csv` (whose install record has `t12`);
-- crash **k13** (player `u7`) in `seed_crashlytics.csv`.
+| funnel | player | format | day | events |
+|---|---|---|---|---|
+| `fnl_01` | u1 | rewarded | 01-01 | e129, e130 |
+| `fnl_02` | u1 | interstitial | 01-02 | e131, e132 |
+| `fnl_dup` | u2 | banner | 01-01 | e133, e134 |
+| `fnl_04` | u3 | rewarded | 01-02 | e135, e136 |
+| `fnl_05` | u4 | interstitial | 01-02 | e137, e138 |
+| `fnl_06` | u5 | rewarded | 01-03 | e139, e140 |
+| `fnl_07` | u6 | banner | 01-03 | e141, e142 |
+| `fnl_08` | u7 | rewarded | 01-04 | e143, e144 |
+| `fnl_09` | u8 | interstitial | 01-04 | e145, e146 |
+| `fnl_10` | u9 | rewarded | 01-04 | e147, e148 |
+| `fnl_dup` | u10 | banner | 01-05 | e149, e150 |
+| `fnl_12` | u11 | interstitial | 01-05 | e151, e152 |
 
-That is what makes a composite-key join provably different from a join on the player alone.
+`fnl_dup` is **deliberately reused** by u2 and u10: a join that forgot the player would pull
+u10's events into u2's crash. Nothing else shares an id.
 
-### Key VARIANTS: one tracking column per ad format on the crash source
+`fct_crashlytics_events` keeps one column per ad format, holding the **last funnel of that
+format before the crash** (empty when there was none):
 
-`fct_crashlytics_events` also carries `rewarded_tracking_id`, `interstitial_tracking_id` and
-`banner_tracking_id`; only the one for the format in play is populated, and it holds the same
-value as that row's `tracking_id`. They are declared as `variants` of one relationship
-`tracked_ad`, which expands to `tracked_ad_rewarded` / `_interstitial` / `_banner` — the caller
-picks. `dim_users` OWNS the key and declares its single `tracking_id` column once, for all three.
+| crash | player | time | rewarded | interstitial | banner |
+|---|---|---|---|---|---|
+| k1 | u1 | 01-05 10:00 | `fnl_01` | `fnl_02` | — |
+| k2 | u1 | 01-05 11:00 | `fnl_01` | `fnl_02` | — |
+| k3 | u1 | 01-06 10:00 | `fnl_01` | `fnl_02` | — |
+| k4 | u2 | 01-05 12:00 | — | — | `fnl_dup` |
+| k5 | u2 | 01-07 09:00 | — | — | `fnl_dup` |
+| k6 | u3 | 01-06 15:00 | `fnl_04` | — | — |
+| k7 | u4 | 01-05 09:00 | — | `fnl_05` | — |
+| k8 | u4 | 01-06 09:00 | — | `fnl_05` | — |
+| k9 | u5 | 01-06 12:00 | `fnl_06` | — | — |
+| k10 | u1 | 01-07 08:00 | `fnl_01` | `fnl_02` | — |
+| k11 | u6 | 01-05 14:00 | — | — | `fnl_07` |
+| k12 | u6 | 01-08 14:00 | — | — | `fnl_07` |
+| k13 | u7 | 01-08 16:00 | `fnl_08` | — | — |
 
-| rows | variant | crashes matched to an install record |
+Crash → its funnel's events, inner join (each funnel is 2 events):
+
+| variant | crashes carrying it | rows |
 |---|---|---|
-| k1..k5 | `tracked_ad_rewarded` | **5** (u1 x3 US, u2 x2 US) |
-| k6..k9 | `tracked_ad_interstitial` | **4** (u3 GB, u4 x2 DE, u5 BR) |
-| k10..k13 | `tracked_ad_banner` | **3** (u1 US, u6 x2 US) — k13's track is stale |
+| `ad_funnel_rewarded` | k1, k2, k3, k10, k6, k9, k13 (**7**) | **14** |
+| `ad_funnel_interstitial` | k1, k2, k3, k10, k7, k8 (**6**) | **12** |
+| `ad_funnel_banner` | k4, k5, k11, k12 (**4**) | **8** |
 
-### Numbers these produce
+A LEFT join on `ad_funnel_banner` gives **17** rows over all **13** crashes (4 matched × 2
+funnel events + 9 unmatched × 1).
 
-| join | on the declared key | on the player alone |
+---
+
+## 13. `dim_users` is SLOWLY-CHANGING (SCD-2)
+
+`seed_users.csv` holds one row per player **per validity window**
+(`install_time_valid_from` / `install_time_valid_until`, both TIMESTAMP so a mid-day event is
+not cut off at midnight). 13 rows for 12 players:
+
+- **u1 has two versions** — `US` in `2026-01-01 00:00:00 .. 2026-01-02 23:59:59`, then `GB`
+  from `2026-01-03`. Its 36 events split **30 US / 6 GB**, and its two spend rows split
+  **01-01 → US / 01-03 → GB**.
+- the other 11 players have one version each, from their install day to `2035-12-31`.
+
+Every join to installs is therefore **point-in-time** — the player key AND a time inside the
+window. MetricFlow does it itself; a pipeline states it in `between`.
+
+| grouped by `country`, point-in-time | US | GB | DE | BR | total |
+|---|---|---|---|---|---|
+| events | **67** | **57** | **31** | **29** | 184 |
+| spend | **6.75** | **5.00** | **4.00** | **1.75** | 17.50 |
+| fatal crashes | **2** | **4** | — | — | 6 |
+| install versions (value index) | 4 | 4 | 3 | 2 | 13 |
+
+Revenue by country is **unchanged** (US 35 / GB 25 / BR 25): u1's two purchases are on 01-01
+and 01-02, both inside its US window.
+
+Joining installs on the player key **without** the window duplicates u1's rows:
+
+| join | with window | without |
 |---|---|---|
-| crash reports x analytics events (`tracked_install`, inner) | **266** | **282** (k13 pulls in all 16 of u7's events) |
-| analytics events x installs (`tracked_install`, inner) | **177** | **184** (u12's 7 events) |
-| analytics events x acquisition (`player_day`, inner) | **150** | **220** (u1's events x both spend days) |
-| crash reports x acquisition (`player_day`, inner) | **0** — no crash is on a spend day | **17** |
-| installs x acquisition (`player_day`, inner) | **12** — one spend row per install | — |
-| acquisition x installs (`user`, inner) | **13** — every spend row has a player | — |
+| events → installs | **184** | **220** (u1's 36 events × 2 versions) |
+| crash reports → installs | **13** | **17** |
+| acquisition → installs | **13** | **15** |
 
-In the semantic layer the same keys give:
-
-- events counted by `player_day__media_source`: meta **47**, organic **50**, applovin **30**,
-  google **23**, NULL **34** (a day with no spend row) — **184** in total, no fan-out.
-- crash reports by `tracked_install__country`: US **8**, DE **2**, GB **1**, BR **1**, NULL **1**
-  (k13's stale track); by `user__country` the same 13 reports give GB **2** and no NULL.
-- installs by `player_day__media_source`: meta **3**, organic **4**, google **2**, applovin **3**
-  — **12**, one spend row each.
+Acquisition ↔ events is a plain player join with no window (events is not slowly-changing):
+**220** pairs, covering all 184 events and all 13 spend rows. Summing `cost` over that pairing
+inflates it to **267.75** — it is a many-to-many pairing, not a spend metric.
 
 ---
 

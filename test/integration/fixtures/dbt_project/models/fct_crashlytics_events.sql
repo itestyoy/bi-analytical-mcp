@@ -3,8 +3,8 @@
 -- event vocabulary (fatal_crash / non_fatal / anr) and its own event-scoped payload, with
 -- the same flattened `*_of_event_data` shape. Joined to dim_users by player_id_of_internal.
 select
+    crash_id,
     appsflyer_id  as player_id_of_internal,
-    tracking_id,
     rewarded_tracking_id,
     interstitial_tracking_id,
     banner_tracking_id,

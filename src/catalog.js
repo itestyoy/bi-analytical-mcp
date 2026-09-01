@@ -60,17 +60,11 @@ function normalizeAggregatable(name, decl, { model, column, type } = {}) {
 // that entity; `foreign` points at whichever model owns it; `natural` is the SCD-2 form.
 export const ENTITY_TYPES = new Set(['primary', 'unique', 'foreign', 'natural']);
 
-/**
- * Normalise the PARTS of one key: a column name, or a list of them for a composite key. A part
- * may be { column, granularity } to name a coarser grain for a time column — that is how a
- * per-event source lines up with a per-day one.
- */
+/** Normalise the PARTS of one key: a column name, or a list of them for a composite key. */
 function normalizeKeyParts(raw, { where, columns }) {
-  const parts = (Array.isArray(raw) ? raw : [raw]).map((p) => (typeof p === 'string'
-    ? { column: p }
-    : { column: p?.column, ...(p?.granularity ? { granularity: p.granularity } : {}) }));
+  const parts = (Array.isArray(raw) ? raw : [raw]).map((p) => (typeof p === 'string' ? { column: p } : { column: p?.column }));
   if (!parts.length || parts.some((p) => !p.column)) {
-    throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key (a part may be { column, granularity } to line a time column up at a coarser grain)`);
+    throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key`);
   }
   if (columns?.size) {
     for (const p of parts) if (!columns.has(p.column)) throw new Error(`${where}: '${p.column}' is not a column of the model`);
@@ -99,12 +93,11 @@ function normalizeEntityKey(name, decl, { model, columns }) {
   }
   const raw = decl.key !== undefined ? decl.key : decl.column;
   if (raw === undefined) {
-    if (!Object.keys(variants).length) throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key (a part may be { column, granularity } to line a time column up at a coarser grain)`);
+    if (!Object.keys(variants).length) throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key`);
     return { type, variants }; // variants only: this side has no single canonical key
   }
   const parts = normalizeKeyParts(raw, { where, columns });
-  const single = parts.length === 1 && !parts[0].granularity;
-  return { type, key: parts, ...(single ? { column: parts[0].column } : {}), ...(Object.keys(variants).length ? { variants } : {}) };
+  return { type, key: parts, ...(parts.length === 1 ? { column: parts[0].column } : {}), ...(Object.keys(variants).length ? { variants } : {}) };
 }
 
 // Native dbt `data_type`s that map to a MetricFlow time dimension.
@@ -575,8 +568,7 @@ export function dbtSchemaToCatalog(doc) {
           if (m.entities[name]) continue; // an explicit declaration wins over the expansion
           const parts = e.variants?.[v] || e.key;
           if (!parts) continue; // this side carries neither that variant nor a plain key
-          const single = parts.length === 1 && !parts[0].granularity;
-          m.entities[name] = { type: e.type, key: parts, ...(single ? { column: parts[0].column } : {}) };
+          m.entities[name] = { type: e.type, key: parts, ...(parts.length === 1 ? { column: parts[0].column } : {}) };
         }
         // A side declared ONLY as variants has no canonical key of its own.
         if (!e.key) delete m.entities[rel];
@@ -615,6 +607,19 @@ export function dbtSchemaToCatalog(doc) {
         throw new Error(`entity '${name}' is declared with ${prev.n} key part(s) on '${prev.model}' but ${parts.length} on '${key}'. Both sides of a join must be built from the same number of parts, in the same order.`);
       }
       if (!prev) arityOf.set(name, { n: parts.length, model: key });
+    }
+  }
+
+  // A SLOWLY-CHANGING model (validity window) may expose only ONE join key, and only as its
+  // natural key: MetricFlow rejects a manifest where a model with validity params also carries a
+  // `primary` or `unique` entity ("we do not currently process joins against these key types for
+  // semantic models with validity windows"). Catch it here, where we can say what to do, instead
+  // of letting `dbt parse` fail with that sentence and no context.
+  for (const [key, m] of Object.entries(out.models)) {
+    if (!m.scd) continue;
+    const extra = Object.entries(m.entities || {}).filter(([, e]) => e.type === 'primary' || e.type === 'unique').map(([n]) => n);
+    if (extra.length) {
+      throw new Error(`model '${key}' declares a validity window (meta.mcp.dimension.validity) and also owns join key(s) ${extra.map((n) => `'${n}'`).join(', ')} as primary/unique. A slowly-changing model can only be joined on its natural key, so MetricFlow rejects the others — declare them 'foreign' (they stay usable as a pipeline join) or drop them.`);
     }
   }
 

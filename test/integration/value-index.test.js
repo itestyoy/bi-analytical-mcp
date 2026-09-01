@@ -285,19 +285,20 @@ test('semantic_index({ property }) reports null_count + per-event coverage from 
 
 // ── Non-anchor attribute indexing (users / experiments) — DATA from the seed ──
 
-// users.country is indexed under its namespaced key with the SEED distribution:
-// US=4, GB=3, DE=3, BR=2 (12 users), no NULLs.
-test('users.country is indexed with the real seed distribution (US4/GB3/DE3/BR2)', opts, async (t) => {
+// users.country is indexed under its namespaced key with the SEED distribution. dim_users is
+// SCD-2, so the index counts VERSIONS, not players: 13 rows for 12 players, because u1 has a US
+// version and a GB one. US=4, GB=4, DE=3, BR=2, no NULLs.
+test('users.country is indexed with the real seed distribution (US4/GB4/DE3/BR2 over 13 versions)', opts, async (t) => {
   if (skip(t)) return;
   const vals = index.sampleValues('users', 'country');
   assert.deepEqual(new Set(vals.map((v) => v.value)), new Set(['US', 'GB', 'DE', 'BR']));
   assert.equal(valOf(vals, 'US').freq, 4);
-  assert.equal(valOf(vals, 'GB').freq, 3);
+  assert.equal(valOf(vals, 'GB').freq, 4);
   assert.equal(valOf(vals, 'DE').freq, 3);
   assert.equal(valOf(vals, 'BR').freq, 2);
   const st = index.stats('users', 'country');
   assert.equal(st.distinctCount, 4);
-  assert.equal(st.totalCount, 12);  // one row per user, none NULL
+  assert.equal(st.totalCount, 13);  // one row per player VERSION, none NULL
   assert.equal(st.nullCount, 0);
 });
 

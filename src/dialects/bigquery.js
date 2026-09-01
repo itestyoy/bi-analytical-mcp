@@ -95,8 +95,6 @@ export class BigQueryDialect extends Dialect {
     return `EXTRACT(DAY FROM (CAST(${to} AS DATETIME) - CAST(${from} AS DATETIME)))`;
   }
 
-  timestampExpr(expr) { return `CAST(${expr} AS TIMESTAMP)`; }
-
   dateTrunc(granularity, expr) {
     const g = { day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
     if (!g) throw new Error(`dateTrunc: bad granularity ${granularity}`);

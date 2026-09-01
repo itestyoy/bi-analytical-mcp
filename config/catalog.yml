@@ -1346,8 +1346,9 @@ models:
     meta:
       mcp:
         role: users            # logical name (the dbt model can be named anything)
-        measures:
-          users_count: { agg: count, expr: "1" }
+        # NO measures here: MetricFlow forbids them on a model with a validity window, so any
+        # declared measure would be dropped with a warning at render time. Count players on an
+        # events source instead — count_distinct of the player key.
     columns:
       - name: player_id_of_internal
         data_type: integer
@@ -1358,6 +1359,17 @@ models:
       # Non-entity columns of this dimension model are groupable dimensions; their
       # type is inferred from the native `data_type` (date/timestamp -> time, else
       # categorical). Only value hints / non-day granularity live in meta.
+      # ── VALIDITY WINDOW: this table is SLOWLY-CHANGING (one row per player per window) ──
+      # Every join to it is point-in-time — see the note above the models list. Delete these two
+      # columns if your install record really is one flat row per player.
+      - name: install_time_valid_from
+        data_type: timestamp
+        description: "Start of this version's validity window (inclusive)."
+        meta: { mcp: { dimension: { validity: start } } }
+      - name: install_time_valid_until
+        data_type: timestamp
+        description: "End of this version's validity window (inclusive)."
+        meta: { mcp: { dimension: { validity: end } } }
       - name: install_date
         data_type: timestamp
         description: "When the player installed the app — the cohort/acquisition time dimension."
@@ -1519,7 +1531,7 @@ models:
 
   # ── DECLARED JOIN KEYS (meta.mcp.entities) ────────────────────────────────────────────
   # A relationship between two models is declared ONCE, in the schema, and both paths use it:
-  # a metric query groups by <entity>__<attribute>, a pipeline joins with `via: <entity>`.
+  # a metric query groups by <relationship>__<attribute>, a pipeline joins with `via: <name>`.
   # Neither ever restates a column.
   #
   #   meta.mcp.entities:
@@ -1527,48 +1539,49 @@ models:
   #       type: primary | unique | foreign | natural
   #       key:  [<column>, ...]        # ONE column, or SEVERAL for a composite key
   #
-  # A key part may be { column: <time column>, granularity: day } to line a per-event source up
-  # with a per-day one — that is what stops a daily table from fanning out across a player's
-  # events. The two sides may name their columns differently; only the relationship name and the
-  # number of key parts have to agree (both are checked at catalog load).
+  # The two sides may name their columns differently; only the relationship name and the number
+  # of key parts have to agree (both checked at catalog load).
   #
-  # `primary`/`unique` make the model the join TARGET for that relationship — exactly one model
-  # may own it, and it must be unique per row there. `foreign` points at whichever model owns it.
-  # A relationship neither side owns is still a valid PIPELINE join (a many-to-many match, e.g.
-  # two events sources on tracking_id + player); the semantic layer needs an owner.
+  # `primary`/`unique` make the model the join TARGET — exactly one model may own a relationship,
+  # and it must be unique per row there. `foreign` points at whichever model owns it. A
+  # relationship NOBODY owns is still a perfectly good PIPELINE join (a many-to-many match); it
+  # simply has no governed path, because MetricFlow can only join onto a unique key.
   #
-  # VARIANTS — the same relationship carried by SEVERAL alternative key columns on one side
-  # (a crash source reporting one tracking id per ad format, only the one in play populated):
+  # ── JOINING A SLOWLY-CHANGING MODEL (the install record) ──────────────────────────────
+  # dim_users below carries a VALIDITY WINDOW (install_time_valid_from / _until), so it holds
+  # several versions per player and every join to it must be POINT-IN-TIME: the player key AND a
+  # time inside the window. Joining on the key alone matches every historical version and
+  # inflates every count.
+  #   · governed path — MetricFlow applies the window itself; just group by user__<attribute>;
+  #   · pipeline — state it in the join stage, explicitly:
+  #       { stage: "join", with: "users", via: "user",
+  #         between: { value: "<this source's time column>",
+  #                    from: "install_time_valid_from", to: "install_time_valid_until" } }
+  # MetricFlow allows a model with a validity window exactly ONE join key, as its natural key —
+  # a second `primary`/`unique` key there is rejected at catalog load. Such a key can still be
+  # declared `foreign` and joined in a pipeline.
+  #
+  # ── VARIANTS: one relationship carried by SEVERAL columns ─────────────────────────────
+  # A crash source records the last ad-funnel id it saw PER AD FORMAT, one column each, only the
+  # format in play populated. They are variants of one relationship, and the caller picks:
   #
   #   entities:
-  #     tracked_ad:
+  #     ad_funnel:
   #       type: foreign
   #       variants:
   #         rewarded:     { key: [rewarded_tracking_id, player_id_of_internal] }
   #         interstitial: { key: [interstitial_tracking_id, player_id_of_internal] }
   #         banner:       { key: [banner_tracking_id, player_id_of_internal] }
   #
-  # Each becomes its own relationship — tracked_ad_rewarded, tracked_ad_interstitial,
-  # tracked_ad_banner — and the caller picks the one the question is about (`via:` in a
-  # pipeline, <relationship>__<attribute> in a metric query). The side that OWNS the key
-  # declares it once, plainly: its single column answers for every variant.
+  # Each becomes its own relationship — ad_funnel_rewarded / _interstitial / _banner — and the
+  # side that has ONE such column declares it plainly once; it answers every variant:
   #
-  # Worked examples for this catalog (uncomment alongside the sources they refer to):
-  #
-  # on fct_analytics_events / a crash source — reach the acquisition table and the install record:
+  #   # on the analytics events source
   #   entities:
-  #     player_day:      { type: foreign, key: [player_id_of_internal, { column: device_time, granularity: day }] }
-  #     tracked_install: { type: foreign, key: [tracking_id, player_id_of_internal] }
+  #     ad_funnel: { type: foreign, key: [tracking_id, player_id_of_internal] }
   #
-  # on dim_users — OWNS the install key, and reaches acquisition on the install day:
-  #   entities:
-  #     tracked_install: { type: unique,  key: [tracking_id, player_id_of_internal] }
-  #     player_day:      { type: foreign, key: [player_id_of_internal, { column: install_date, granularity: day }] }
-  #
-  # on the acquisition source — OWNS (player, day), one row per pair:
-  #   entities:
-  #     player_day:      { type: unique,  key: [player_id_of_internal, { column: spend_date, granularity: day }] }
-
+  # Joining them reconstructs the ad funnel that was running when the app died. Several events
+  # share one funnel id, so neither side is unique on it: this one is pipeline-only, by nature.
   # ── ACQUISITION SPEND (TEMPLATE, not active) ──────────────────────────────────────────
   # A NON-events source: no event_name, so it is not an events fact — but it has its own time
   # axis and its own AMOUNTS, and both are declared HERE, in the schema. The schema says only

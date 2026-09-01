@@ -8,15 +8,14 @@ import { getDialect } from './dialects/index.js';
 const EVENT_TIME_DIM = 'event_time';
 
 /**
- * The `expr` MetricFlow joins a declared entity on. A single plain column is emitted as the
- * column itself (what MetricFlow has always seen); a COMPOSITE key — several columns, or a time
- * column lined up at a coarser grain — becomes one concatenated expression, so the two sides of
- * the join compare the same value even when their columns are named differently.
+ * The `expr` MetricFlow joins a declared entity on. A single column is emitted as the column
+ * itself (what MetricFlow has always seen); a COMPOSITE key becomes one concatenated
+ * expression, so the two sides compare the same value even when their columns differ in name.
  */
 function entityExpr(catalog, ent) {
   const parts = ent.key || (ent.column ? [{ column: ent.column }] : []);
   if (!parts.length) return undefined;
-  if (parts.length === 1 && !parts[0].granularity) return parts[0].column;
+  if (parts.length === 1) return parts[0].column;
   return getDialect(catalog.dialect).compositeKeyExpr(parts);
 }
 

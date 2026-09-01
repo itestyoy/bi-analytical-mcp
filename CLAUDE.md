@@ -60,10 +60,22 @@
   query, `join { with, via }` in a pipeline. A side may declare `variants` when the
   same relationship is carried by SEVERAL alternative key columns (one tracking id
   per ad format): each expands to `<relationship>_<variant>` and the CALLER picks
-  which to use, while the owning side declares its single key once. Do NOT hardcode
-  a pair of column names in `src/` for a particular join, and do NOT add a per-role
-  join path: a new relationship is a schema key, not code. `on:` in a pipeline join
-  stays only as the ad-hoc fallback for a column both sides name identically.
+  which to use, while the side with one such column declares it plainly once. Do NOT
+  hardcode a pair of column names in `src/` for a particular join, and do NOT add a
+  per-role join path: a new relationship is a schema key, not code. `on:` in a
+  pipeline join stays only as the ad-hoc fallback for a column both sides name
+  identically.
+- A relationship NOBODY owns is a legitimate PIPELINE join (a many-to-many match —
+  an ad funnel spans several events, so neither side is unique on it). It has no
+  governed path, and that is correct: MetricFlow only joins onto a unique key.
+- JOINING A SLOWLY-CHANGING MODEL IS POINT-IN-TIME. A model with a validity window
+  (`meta.mcp.dimension.validity: start|end`) holds several versions per key, so the
+  key ALONE matches every historical version and inflates counts. The governed path
+  applies the window itself; a pipeline states it EXPLICITLY in the join stage's
+  `between` — deliberately, so the time being asked about is visible at the call
+  site. MetricFlow allows such a model exactly one join key, as its natural key: a
+  second `primary`/`unique` key there is rejected at catalog load, and measures on it
+  are dropped with a warning (count on an events source instead).
 - A/B significance is computed in JS via the `ab_test` tool over per-group
   aggregates (proportion → z-test; mean → Welch t-test).
 

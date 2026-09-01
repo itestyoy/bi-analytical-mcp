@@ -1,8 +1,8 @@
 // Input-validation guards on the join keys declared in the schema (allowed as a non-data test:
 // bad input is rejected at catalog load, before anything can query a silently-broken join).
 //
-// The behaviour of a working key — what it actually joins and what it returns — is asserted on
-// real query results in test/integration/declared-joins.test.js.
+// What a working key actually JOINS, and the numbers it returns, is asserted on real query
+// results in test/integration/declared-joins.test.js.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,6 +18,7 @@ function load(models) {
   return loadCatalog(file, {});
 }
 
+// An events source carrying the ad-funnel key: several rows share one funnel id.
 const EVENTS = `  - name: fct_events
     meta:
       mcp:
@@ -25,77 +26,23 @@ const EVENTS = `  - name: fct_events
         primary_entity: event
         known_events: [login]
         entities:
-          player_day: { type: foreign, key: [user_id, { column: ts, granularity: day }] }
+          ad_funnel: { type: foreign, key: [tracking_id, user_id] }
     columns:
       - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: tracking_id, data_type: string }
       - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
       - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
 `;
 
-const SPEND = (extra = '') => `  - name: fct_spend
-    meta:
-      mcp:
-        role: acquisition
-        primary_entity: spend
-        entities:
-          player_day: { type: unique, key: [user_id, { column: day, granularity: day }] }
-${extra}    columns:
-      - { name: spend_id, data_type: string, meta: { mcp: { entity: { name: spend, type: primary } } } }
-      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: day, data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: cost, data_type: numeric, meta: { mcp: { measure: { agg: sum } } } }
-`;
-
-test('a composite key is parsed with its parts, its grain and its owner', () => {
-  const c = load(EVENTS + SPEND());
-  assert.deepEqual(c.entityKey('events', 'player_day'), [{ column: 'user_id' }, { column: 'ts', granularity: 'day' }]);
-  assert.deepEqual(c.entityKey('acquisition', 'player_day'), [{ column: 'user_id' }, { column: 'day', granularity: 'day' }]);
-  // the UNIQUE side is the join target, even though the model's identity is its own surrogate key
-  assert.equal(c.joinTargetFor('player_day'), 'acquisition');
-  assert.equal(c.joinTargetFor('spend'), 'acquisition');
-  // both models declare it, so it is a relationship a `via` join can name
-  assert.deepEqual(c.sharedEntities('events', 'acquisition').map((x) => x.entity).sort(), ['player_day', 'user']);
-  assert.ok(c.joinEntityNames().includes('player_day'));
-  // …and the target's attributes become reachable group-by paths through it
-  assert.ok(c.reachableGroupByPaths().includes('player_day__day'));
-});
-
-test('a key naming a column the model does not have is rejected', () => {
-  assert.throws(() => load(EVENTS.replace('key: [user_id, { column: ts, granularity: day }]', 'key: [user_id, nope]')),
-    /is not a column of the model/);
-});
-
-test('a key with no columns is rejected', () => {
-  assert.throws(() => load(EVENTS.replace('key: [user_id, { column: ts, granularity: day }]', 'key: []')),
-    /needs a column name, or a list of them/);
-});
-
-test('an unknown entity type is rejected with the allowed set', () => {
-  assert.throws(() => load(EVENTS.replace('{ type: foreign, key:', '{ type: sideways, key:')),
-    /unknown entity type 'sideways'.*primary, unique, foreign, natural/s);
-});
-
-test('two models owning the same entity is rejected — a join has one target', () => {
-  // make the events side claim the key as unique too
-  const both = EVENTS.replace('player_day: { type: foreign,', 'player_day: { type: unique,');
-  assert.throws(() => load(both + SPEND()), /both OWN entity 'player_day'/);
-});
-
-test('the two sides of a key must be built from the same number of parts', () => {
-  // drop the day part on the spend side: a one-part key would never equal a two-part one
-  const lopsided = SPEND().replace('key: [user_id, { column: day, granularity: day }]', 'key: [user_id]');
-  assert.throws(() => load(EVENTS + lopsided), /1 key part\(s\).*but 2|2 key part\(s\).*but 1/s);
-});
-
-test('key VARIANTS expand into one relationship per variant, mirrored on the owning side', () => {
-  const crash = `  - name: fct_crash
+// The crash source records one funnel id PER AD FORMAT — the variants of one relationship.
+const CRASH = `  - name: fct_crash
     meta:
       mcp:
         role: crashlytics
         primary_entity: crash
         known_events: [boom]
         entities:
-          tracked_ad:
+          ad_funnel:
             type: foreign
             variants:
               rewarded: { key: [rewarded_track, user_id] }
@@ -107,45 +54,106 @@ test('key VARIANTS expand into one relationship per variant, mirrored on the own
       - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
       - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
 `;
-  const users = `  - name: dim_users
+
+/** A plain (non-SCD) install record. `extra` injects further entity declarations. */
+const USERS = (extra = '') => `  - name: dim_users
     meta:
       mcp:
         role: users
-        entities:
-          tracked_ad: { type: unique, key: [track, user_id] }
-    columns:
+${extra}    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: country, data_type: string }
+`;
+
+/** A SLOWLY-CHANGING install record: one row per player per validity window. */
+const USERS_SCD = (extra = '') => `  - name: dim_users
+    meta:
+      mcp:
+        role: users
+${extra}    columns:
       - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
       - { name: track, data_type: string }
       - { name: country, data_type: string }
+      - { name: valid_from, data_type: timestamp, meta: { mcp: { dimension: { validity: start } } } }
+      - { name: valid_until, data_type: timestamp, meta: { mcp: { dimension: { validity: end } } } }
 `;
-  const c = load(EVENTS + crash + users);
-  // one relationship per variant, on the declaring side…
-  assert.deepEqual(c.entityKey('crashlytics', 'tracked_ad_rewarded'), [{ column: 'rewarded_track' }, { column: 'user_id' }]);
-  assert.deepEqual(c.entityKey('crashlytics', 'tracked_ad_banner'), [{ column: 'banner_track' }, { column: 'user_id' }]);
-  // …and the OWNING side's single key answers for every one of them, declared once
-  assert.deepEqual(c.entityKey('users', 'tracked_ad_rewarded'), [{ column: 'track' }, { column: 'user_id' }]);
-  assert.deepEqual(c.entityKey('users', 'tracked_ad_banner'), [{ column: 'track' }, { column: 'user_id' }]);
-  assert.equal(c.joinTargetFor('tracked_ad_rewarded'), 'users');
+
+test('a composite key is parsed, shared by both sides, and offered to the caller', () => {
+  const c = load(EVENTS + CRASH + USERS());
+  assert.deepEqual(c.entityKey('events', 'ad_funnel_rewarded'), [{ column: 'tracking_id' }, { column: 'user_id' }]);
+  assert.deepEqual(c.entityKey('crashlytics', 'ad_funnel_rewarded'), [{ column: 'rewarded_track' }, { column: 'user_id' }]);
+  assert.deepEqual(c.sharedEntities('crashlytics', 'events').map((x) => x.entity).sort(),
+    ['ad_funnel_banner', 'ad_funnel_rewarded', 'user']);
+  assert.ok(c.joinEntityNames().includes('ad_funnel_rewarded'));
+});
+
+// One funnel id spans SEVERAL events, so neither side is unique on it: there is no join target,
+// and the relationship must NOT show up as a governed group-by path.
+test('a relationship nobody owns is pipeline-only: no target, no group-by path', () => {
+  const c = load(EVENTS + CRASH + USERS());
+  assert.equal(c.joinTargetFor('ad_funnel_rewarded'), undefined);
+  assert.ok(!c.reachableGroupByPaths().some((p) => p.startsWith('ad_funnel')));
+  // …while the player key IS owned, so its paths are there
+  assert.equal(c.joinTargetFor('user'), 'users');
+  assert.ok(c.reachableGroupByPaths().includes('user__country'));
+});
+
+test('key VARIANTS expand into one relationship per variant; the plain side answers each', () => {
+  const c = load(EVENTS + CRASH + USERS());
+  assert.deepEqual(c.entityKey('crashlytics', 'ad_funnel_banner'), [{ column: 'banner_track' }, { column: 'user_id' }]);
+  // the side with ONE column answers every variant with it, declared once
+  assert.deepEqual(c.entityKey('events', 'ad_funnel_banner'), [{ column: 'tracking_id' }, { column: 'user_id' }]);
   // a variants-only side keeps no base relationship, so it cannot be joined ambiguously
-  assert.equal(c.entityKey('crashlytics', 'tracked_ad'), undefined);
-  // both variants are offered to the caller; the base is not (only one model carries it)
-  assert.ok(c.joinEntityNames().includes('tracked_ad_rewarded'));
-  assert.ok(c.joinEntityNames().includes('tracked_ad_banner'));
-  assert.ok(!c.joinEntityNames().includes('tracked_ad'));
-  // …and each variant reaches the owner's attributes as its own group-by path
-  assert.ok(c.reachableGroupByPaths().includes('tracked_ad_rewarded__country'));
-  assert.ok(c.reachableGroupByPaths().includes('tracked_ad_banner__country'));
+  assert.equal(c.entityKey('crashlytics', 'ad_funnel'), undefined);
+  // the base is carried by one model only, so it is not offered as a join
+  assert.ok(!c.joinEntityNames().includes('ad_funnel'));
+});
+
+test('a key naming a column the model does not have is rejected', () => {
+  assert.throws(() => load(EVENTS.replace('key: [tracking_id, user_id]', 'key: [nope, user_id]') + USERS()),
+    /is not a column of the model/);
+});
+
+test('a key with no columns is rejected', () => {
+  assert.throws(() => load(EVENTS.replace('key: [tracking_id, user_id]', 'key: []') + USERS()),
+    /needs a column name, or a list of them/);
+});
+
+test('an unknown entity type is rejected with the allowed set', () => {
+  assert.throws(() => load(EVENTS.replace('{ type: foreign, key:', '{ type: sideways, key:') + USERS()),
+    /unknown entity type 'sideways'.*primary, unique, foreign, natural/s);
+});
+
+test('two models owning the same entity is rejected — a join has one target', () => {
+  const claims = USERS('        entities:\n          event: { type: unique, key: [user_id] }\n');
+  assert.throws(() => load(EVENTS + claims), /both OWN entity 'event'|both declare primary entity 'event'/);
+});
+
+test('the two sides of a key must be built from the same number of parts', () => {
+  const lopsided = CRASH.replace('rewarded: { key: [rewarded_track, user_id] }', 'rewarded: { key: [rewarded_track] }');
+  assert.throws(() => load(EVENTS + lopsided + USERS()), /1 key part\(s\).*but 2|2 key part\(s\).*but 1/s);
 });
 
 test('a primary entity may not be split into variants', () => {
-  const withAlt = SPEND('        entities2_placeholder\n').replace(
-    '        entities2_placeholder\n',
-    '          alt: { type: primary, variants: { a: { key: [user_id] } } }\n',
-  );
-  assert.throws(() => load(EVENTS + withAlt), /primary entity is the model's single identity and cannot have variants/);
+  const bad = USERS('        entities:\n          alt: { type: primary, variants: { a: { key: [user_id] } } }\n');
+  assert.throws(() => load(EVENTS + bad), /primary entity is the model's single identity and cannot have variants/);
 });
 
 test('a model may not declare two primary entities', () => {
-  const two = SPEND().replace('          player_day: { type: unique,', '          other: { type: primary, key: [user_id] }\n          player_day: { type: unique,');
+  const two = USERS('        entities:\n          other: { type: primary, key: [country] }\n');
   assert.throws(() => load(EVENTS + two), /declares two primary entities/);
+});
+
+// MetricFlow refuses a manifest where a model with validity params also has a primary/unique
+// entity, so catch it at load — where we can say what to do instead.
+test('a slowly-changing model may not own a second join key', () => {
+  const bad = USERS_SCD('        entities:\n          tracked: { type: unique, key: [track, user_id] }\n');
+  assert.throws(() => load(EVENTS + bad),
+    /declares a validity window .* and also owns join key\(s\) 'tracked' as primary\/unique/s);
+});
+
+test('a slowly-changing model with only its natural key loads fine', () => {
+  const c = load(EVENTS + USERS_SCD());
+  assert.equal(c.getModel('users').scd, true);
+  assert.deepEqual(Object.keys(c.entitiesOf('users')), ['user']);
 });

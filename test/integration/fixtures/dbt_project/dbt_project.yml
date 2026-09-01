@@ -18,6 +18,10 @@ seeds:
     seed_users:
       +column_types:
         install_date: date
+        # Границы окна — TIMESTAMP, а не date: событие в середине дня должно попадать в
+        # окно, закрывающееся в конце этого дня, иначе BETWEEN отрежет его по полуночи.
+        install_time_valid_from: timestamp
+        install_time_valid_until: timestamp
     seed_experiments:
       +column_types:
         assigned_at: timestamp

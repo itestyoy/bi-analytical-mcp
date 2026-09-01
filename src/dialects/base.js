@@ -36,17 +36,9 @@ export class Dialect {
     return name;
   }
 
-  /**
-   * SQL for one part of a join key: the column, truncated to `granularity` first when the
-   * declaration lines a time column up at a coarser grain (an event timestamp against a day).
-   */
+  /** SQL for one part of a join key: the column, qualified for the side it belongs to. */
   keyPartExpr(part, qualify = (c) => c) {
-    const col = qualify(this.ident(part.column));
-    // A time part is normalised to a canonical TIMESTAMP before truncation. Without it the two
-    // sides can truncate to different types — Postgres resolves date_trunc on a `date` column
-    // through timestamptz, so its text form carries a zone suffix a `timestamp` column's does
-    // not, and the keys never compare equal.
-    return part.granularity ? this.dateTrunc(part.granularity, this.timestampExpr(col)) : col;
+    return qualify(this.ident(part.column));
   }
 
   /**
@@ -63,8 +55,6 @@ export class Dialect {
 
   // ── Abstract primitives (per-dialect) ──────────────────────────────────────
   castType(_type) { throw new Error('abstract castType'); }
-  /** Cast a date/timestamp column to the dialect's canonical timestamp type. */
-  timestampExpr(_expr) { throw new Error('abstract timestampExpr'); }
   jsonExtract(_column, _key, _type) { throw new Error('abstract jsonExtract'); }
   jsonArrayLength(_column, _key) { throw new Error('abstract jsonArrayLength'); }
   arrayLength(_column) { throw new Error('abstract arrayLength'); }

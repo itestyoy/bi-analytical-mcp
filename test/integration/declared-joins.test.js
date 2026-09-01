@@ -1,21 +1,23 @@
-// RELATIONSHIPS DECLARED IN THE SCHEMA, used by both paths.
+// JOINS: the key comes from the SCHEMA, the validity window from the CALL.
 //
-// A model declares its join keys once (meta.mcp.entities). A key may span SEVERAL columns and
-// may line a time column up at a coarser grain, and the two sides may name their columns
-// differently. Nothing here restates a column: a metric query groups by <entity>__<attribute>,
-// a pipeline joins with `via: <entity>`.
+// A model declares its join keys once (meta.mcp.entities); a caller names the relationship
+// (`via`) and never restates a column. When the target is SLOWLY-CHANGING the key alone is not
+// enough — the row must also fall inside a validity window, and in a pipeline that window is
+// stated explicitly in `between` (MetricFlow applies it by itself in the governed path).
 //
-// The fixture declares two such keys (see test/integration/fixtures/SEED_DATA.md §12):
-//   player_day      = (player, day)          OWNED by the acquisition source (one row per pair);
-//                     the events sources and the install record point at it with their own
-//                     time column truncated to the day.
-//   tracked_install = (tracking_id, player)  OWNED by dim_users (the install record);
-//                     both events sources point at it.
+// The fixture (see test/integration/fixtures/SEED_DATA.md §12-13):
+//   user                 the player key. dim_users OWNS it and is SCD-2, so every join to
+//                        installs is point-in-time. u1 moved US -> GB on 2026-01-03.
+//   ad_funnel_{rewarded,interstitial,banner}
+//                        the AD FUNNEL: events sharing one tracking_id are one funnel; a crash
+//                        row records the last funnel id per ad format before the app died, so
+//                        joining reconstructs the funnel that was running. NOBODY owns this key
+//                        (one funnel spans several events), so it is a pipeline join only.
 //
-// Every assertion is a NUMBER from running the model against the warehouse. The seed carries a
-// deliberate STALE track (u12's 7 events and crash k13 report a tracking_id that is on no
-// install record), so a composite-key join returns provably different counts from a join on the
-// player alone — which is what proves the declared key is really being applied.
+// Every assertion is a NUMBER (or a set of ids) from running against the warehouse — per the
+// project rule the generated SQL is never matched as text. Each case is built so a wrong ON
+// clause, a dropped window or the wrong column moves the number. Where a join can multiply
+// rows there is an explicit no-duplicates invariant: count(*) == count(distinct <base key>).
 //
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
@@ -40,12 +42,16 @@ const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 
 const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
 const opts = { timeout: 300000 };
 
-let pg; let engine; let backend; let seq = 0;
+let pg; let engine; let backend; let acqCtx; let evCtx; let seq = 0;
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
+const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
 const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [String(r[keyCol]), num(r[valCol])]));
 const groupCol = (res, metric) => res.columns.map((c) => c.name).find((n) => n !== metric);
 const sumCol = (rows, col) => rows.reduce((s, r) => s + num(r[col]), 0);
+
+/** The validity window of the install record, stated per the source's own time column. */
+const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_time_valid_until' });
 
 before(async () => {
   if (!HAS_DBT) return;
@@ -59,267 +65,306 @@ before(async () => {
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-join-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
+
+  // Governed contexts: MetricFlow reaches the SCD install record by itself, point-in-time.
+  const acq = await engine.create_semantic_model({
+    name: 'jacq',
+    use_base_models: ['users'],
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
+    metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
+  });
+  assert.equal(acq.parse.ok, true, JSON.stringify(acq.parse));
+  acqCtx = acq.context_id;
+
+  const ev = await engine.create_semantic_model({
+    name: 'jev',
+    use_base_models: ['users'],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+  });
+  assert.equal(ev.parse.ok, true, JSON.stringify(ev.parse));
+  evCtx = ev.context_id;
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-/** Build a pipeline: source -> the given stages -> COUNT(*), and return the row count. */
-async function joinedRows(source, ...stages) {
+/** Run a pipeline of stages and return its materialized rows. */
+async function pipeRows(source, ...stages) {
   const s = await engine.build_native_model({ action: 'start', name: `jn_${seq++}`, source });
-  for (const stage of [...stages, { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] }]) {
+  for (const stage of stages) {
     const r = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage });
     assert.ok(!r.error, `add_step ${stage.stage}: ${JSON.stringify(r.error)}`);
   }
   const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
-  return num(c.rows[0].n);
+  return c.rows;
 }
 
-// ───────────────── 1. TWO EVENTS SOURCES joined on (tracking_id, player) ─────────────────
+/**
+ * Join `source` to another model and report BOTH the row count and how many distinct base rows
+ * they came from. Equal ⇒ the join added no duplicates; n > distinct ⇒ it fanned out.
+ */
+async function joinStats(source, joinStage, idColumn) {
+  const rows = await pipeRows(source, joinStage, {
+    stage: 'aggregate',
+    measures: [{ name: 'n', fn: 'count' }, { name: 'distinct_base', fn: 'count_distinct', column: idColumn }],
+  });
+  return { n: num(rows[0].n), distinct: num(rows[0].distinct_base) };
+}
 
-// The join the schema sanctions between the two events sources. Neither owns the key — a crash
-// row and an analytics row match many-to-many — which is exactly why this belongs in a pipeline.
-// SEED_DATA §12: matching pairs are 266 via the declared key; crash k13 carries the stale track,
-// so joining on the player alone instead pulls in u7's 16 analytics events and gives 282.
-test('two events sources join on the declared (tracking_id, player) key: 266 pairs, not 282', opts, async (t) => {
+/** The add_step response for a join — used to read its warnings. */
+async function joinStep(source, joinStage) {
+  const s = await engine.build_native_model({ action: 'start', name: `jw_${seq++}`, source });
+  return engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: joinStage });
+}
+
+const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...input });
+
+// ═══════════ A. acquisition → installs: the validity window ═══════════
+
+// 1. Each spend row matches exactly ONE install version — the one valid on the spend day.
+test('1. acquisition joins installs point-in-time: 13 rows, one version each', opts, async (t) => {
   if (skip(t)) return;
-  const viaKey = await joinedRows('crashlytics', { stage: 'join', with: 'events', via: 'tracked_install', kind: 'inner', attrs: [] });
-  const onPlayer = await joinedRows('crashlytics', { stage: 'join', with: 'events', on: ['player_id_of_internal'], kind: 'inner', attrs: [] });
-  assert.equal(viaKey, 266, 'the composite key drops the crash whose track is on no install record');
-  assert.equal(onPlayer, 282, 'the player alone matches that crash against all 16 of u7\'s events');
-  assert.equal(onPlayer - viaKey, 16);
+  const r = await joinStats('acquisition',
+    { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: ['country'] },
+    'acquisition_id');
+  assert.equal(r.n, 13);
+  assert.equal(r.distinct, 13, 'no spend row matched two versions');
 });
 
-// The same relationship read from the OTHER side: analytics events joined to crash reports.
-// Symmetric — the key is declared once and neither side is privileged.
-test('the same relationship works in the other direction: events -> crash reports = 266', opts, async (t) => {
+// 2. Drop the window and u1's two spend rows match BOTH of its versions.
+test('2. without the window the same join duplicates: 15 rows from 13 spend rows', opts, async (t) => {
   if (skip(t)) return;
-  assert.equal(await joinedRows('events', { stage: 'join', with: 'crashlytics', via: 'tracked_install', kind: 'inner', attrs: [] }), 266);
+  const r = await joinStats('acquisition',
+    { stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: ['country'] },
+    'acquisition_id');
+  assert.equal(r.n, 15, 'u1 has 2 spend rows x 2 install versions');
+  assert.equal(r.distinct, 13, 'still only 13 real spend rows — the extra 2 are duplicates');
+  const warned = await joinStep('acquisition', { stage: 'join', with: 'users', via: 'user', attrs: ['country'] });
+  assert.match(JSON.stringify(warned.recommendations || []), /INCOMPLETE JOIN/);
+  assert.match(JSON.stringify(warned.recommendations || []), /install_time_valid_from/, 'the nudge names the real window columns');
 });
 
-// ───────────────── 2. ACQUISITION <-> EVENTS ─────────────────
-
-// Acquisition reaches the events sources exactly as the install record does. On the (player, day)
-// key each event matches AT MOST ONE spend row: 150 event rows fall on a day the player has
-// spend. Joining on the player alone fans out to 220, because u1 has spend on two days.
-test('acquisition joins to an events source on (player, day): 150 rows, no fan-out', opts, async (t) => {
+// 3. Money is the thing duplicates corrupt: with the window the total is untouched.
+test('3. the windowed join leaves the total spend at 17.50', opts, async (t) => {
   if (skip(t)) return;
-  const viaKey = await joinedRows('events', { stage: 'join', with: 'acquisition', via: 'player_day', kind: 'inner', attrs: ['media_source'] });
-  const onPlayer = await joinedRows('events', { stage: 'join', with: 'acquisition', on: ['player_id_of_internal'], kind: 'inner', attrs: ['media_source'] });
-  assert.equal(viaKey, 150);
-  assert.equal(onPlayer, 220, 'the player alone multiplies u1\'s events across both of its spend days');
+  const rows = await pipeRows('acquisition',
+    { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: ['country'] },
+    { stage: 'aggregate', measures: [{ name: 'total', fn: 'sum', column: 'cost' }] });
+  assert.ok(near(num(rows[0].total), 17.5), `total=${rows[0].total}`);
 });
 
-// …and from the acquisition side into the events source: the same relationship, same pairs.
-test('an acquisition pipeline joins the events source on the same declared key = 150', opts, async (t) => {
+// 4. …and the attribution follows the window: u1's 0.50 on 01-03 is GB, its 1.50 on 01-01 is US.
+test('4. spend by country is attributed to the version valid on the spend day', opts, async (t) => {
   if (skip(t)) return;
-  assert.equal(await joinedRows('acquisition', { stage: 'join', with: 'events', via: 'player_day', kind: 'inner', attrs: [] }), 150);
+  const rows = await pipeRows('acquisition',
+    { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: ['country'] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', fn: 'sum', column: 'cost' }] });
+  const by = mapCol(rows, 'country', 'total');
+  assert.ok(near(by.US, 6.75), `US=${by.US}`);
+  assert.ok(near(by.GB, 5.0), `GB=${by.GB}`);
+  assert.ok(near(by.DE, 4.0), `DE=${by.DE}`);
+  assert.ok(near(by.BR, 1.75), `BR=${by.BR}`);
 });
 
-// The crash source reaches acquisition through the same declared key — nothing about it is
-// specific to the analytics source. Here the DAY part of the key does all the work: every crash
-// is on 2026-01-05..08 while all spend is on 01-01..05, and no player crashed on one of their
-// own spend days — so the declared key matches nothing, while the player alone matches 17 pairs.
-test('the crash source reaches acquisition on the same (player, day) key', opts, async (t) => {
+// 5. The governed path does the same point-in-time join on its own — same numbers, no `between`.
+test('5. governed = pipeline: the metric by user__country matches scenario 4', opts, async (t) => {
   if (skip(t)) return;
-  const viaKey = await joinedRows('crashlytics', { stage: 'join', with: 'acquisition', via: 'player_day', kind: 'inner', attrs: ['media_source'] });
-  const onPlayer = await joinedRows('crashlytics', { stage: 'join', with: 'acquisition', on: ['player_id_of_internal'], kind: 'inner', attrs: ['media_source'] });
-  assert.equal(viaKey, 0, 'no crash falls on a day that player had spend');
-  assert.equal(onPlayer, 17, 'dropping the day part matches every crash against every spend row of its player');
-  // …and a LEFT join keeps all 13 crash rows, with the spend attribute simply NULL.
-  assert.equal(await joinedRows('crashlytics', { stage: 'join', with: 'acquisition', via: 'player_day', attrs: ['media_source'] }), 13);
+  const r = await q(acqCtx, { metrics: ['jacq_cost'], group_by: ['user__country'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const by = mapCol(r.rows, groupCol(r, 'jacq_cost'), 'jacq_cost');
+  assert.ok(near(by.US, 6.75), `US=${by.US}`);
+  assert.ok(near(by.GB, 5.0), `GB=${by.GB}`);
+  assert.ok(near(by.DE, 4.0), `DE=${by.DE}`);
+  assert.ok(near(by.BR, 1.75), `BR=${by.BR}`);
+  assert.ok(near(sumCol(r.rows, 'jacq_cost'), 17.5), 'no fan-out in the governed path either');
 });
 
-// ───────────────── 3. INSTALLS <-> ACQUISITION ─────────────────
+// ═══════════ B. acquisition ↔ events: the plain player key ═══════════
 
-// The install record joins to acquisition on the install DAY: every one of the 12 installs finds
-// exactly one spend row, so the count is 12 and not the 13 acquisition rows (u1's second spend
-// day is not an install day).
-test('installs join to acquisition on the install day: 12 installs, one spend row each', opts, async (t) => {
+// 6. No window here: events is not slowly-changing, so the player key is the whole join.
+test('6. acquisition joins an events source on the player key: 220 pairs', opts, async (t) => {
   if (skip(t)) return;
-  assert.equal(await joinedRows('users', { stage: 'join', with: 'acquisition', via: 'player_day', kind: 'inner', attrs: ['media_source'] }), 12);
+  const r = await joinStats('events',
+    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['media_source'] },
+    'event_id');
+  assert.equal(r.n, 220, 'u1 has two spend rows, so its 36 events pair twice');
+  // 7. …and no event was dropped: every one of the 184 is represented.
+  assert.equal(r.distinct, 184);
 });
 
-// …and back: every acquisition row finds its player in the install record.
-test('acquisition joins back to installs on the player: all 13 spend rows match', opts, async (t) => {
+// 8. The relationship is symmetric — declared once, usable from either side.
+test('8. the same relationship from the acquisition side gives the same 220 pairs', opts, async (t) => {
   if (skip(t)) return;
-  assert.equal(await joinedRows('acquisition', { stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: ['country'] }), 13);
+  const r = await joinStats('acquisition',
+    { stage: 'join', with: 'events', via: 'user', kind: 'inner', attrs: ['event_id'] },
+    'acquisition_id');
+  assert.equal(r.n, 220);
+  assert.equal(r.distinct, 13, 'all 13 spend rows participated');
 });
 
-// ───────────────── 4. EVENTS <-> INSTALLS on the composite install key ─────────────────
-
-// The stricter install key vs the player key, on the same two tables: u12's 7 events report a
-// track that is on no install record, so they match on the player but not on the install key.
-test('the install key is stricter than the player key: 177 events match, not 184', opts, async (t) => {
+// 9. That pairing is many-to-many BY DESIGN, so money summed over it is meaningless — pin the
+//    inflated number down so nobody mistakes this join for a spend metric.
+test('9. summing cost over the event pairing inflates it to 267.75, not 17.50', opts, async (t) => {
   if (skip(t)) return;
-  assert.equal(await joinedRows('events', { stage: 'join', with: 'users', via: 'tracked_install', kind: 'inner', attrs: ['country'] }), 177);
-  assert.equal(await joinedRows('events', { stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: ['country'] }), 184);
+  const rows = await pipeRows('events',
+    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['cost'] },
+    { stage: 'aggregate', measures: [{ name: 'total', fn: 'sum', column: 'cost' }] });
+  assert.ok(near(num(rows[0].total), 267.75), `total=${rows[0].total}`);
 });
 
-// ───────────────── 5. KEY VARIANTS: the caller picks which tracking column ─────────────────
-
-// The crash source reports a SEPARATE tracking id per ad format, and only the one for the format
-// in play is populated. Each is a VARIANT of one declared relationship, so the caller picks which
-// to join on. SEED_DATA §12: rewarded k1..k5, interstitial k6..k9, banner k10..k13 (k13 stale).
-test('each ad-format tracking column is its own variant of the same relationship', opts, async (t) => {
+// 10. The SCD join also works in a FILTER, not just a group-by: GB spend is 5.00.
+test('10. filtering a metric by a point-in-time attribute: GB spend = 5.00', opts, async (t) => {
   if (skip(t)) return;
-  const matched = (variant) => joinedRows('crashlytics', { stage: 'join', with: 'users', via: `tracked_ad_${variant}`, kind: 'inner', attrs: ['country'] });
-  assert.equal(await matched('rewarded'), 5);
-  assert.equal(await matched('interstitial'), 4);
-  assert.equal(await matched('banner'), 3, 'k13 reports a track no install record has');
-  // together they account for every crash but the stale one — the variants partition the rows
-  assert.equal(5 + 4 + 3, 12);
+  const r = await q(acqCtx, { metrics: ['jacq_cost'], where: [{ field: { kind: 'dimension', path: 'user__country' }, op: 'eq', value: 'GB' }] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.ok(near(num(r.rows[0].jacq_cost), 5.0), `GB=${r.rows[0].jacq_cost}`);
 });
 
-// The owning side declares its key ONCE; its single tracking column answers for every variant.
-test('the owning side needs no per-variant declaration', opts, async (t) => {
+// ═══════════ C. installs is SCD for every source, not just acquisition ═══════════
+
+// 11. Events, with the window: one install version per event.
+test('11. events join installs point-in-time: 184 rows, no duplicates', opts, async (t) => {
   if (skip(t)) return;
-  const users = await engine.semantic_index({ model: 'users' });
-  const byName = Object.fromEntries(users.relationships.map((r) => [r.entity, r]));
-  for (const v of ['rewarded', 'interstitial', 'banner']) {
-    assert.deepEqual(byName[`tracked_ad_${v}`].key, ['tracking_id', 'player_id_of_internal'], `users answers ${v} with its one column`);
-    assert.equal(byName[`tracked_ad_${v}`].owned_here, true);
-  }
+  const r = await joinStats('events',
+    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), kind: 'inner', attrs: ['country'] },
+    'event_id');
+  assert.equal(r.n, 184);
+  assert.equal(r.distinct, 184);
+});
+
+// 12. …and without it, u1's 36 events double.
+test('12. events without the window: 220 rows from 184 events, with the nudge', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await joinStats('events',
+    { stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: ['country'] },
+    'event_id');
+  assert.equal(r.n, 220);
+  assert.equal(r.distinct, 184);
+  const warned = await joinStep('events', { stage: 'join', with: 'users', via: 'user', attrs: ['country'] });
+  assert.match(JSON.stringify(warned.recommendations || []), /INCOMPLETE JOIN/);
+});
+
+// 13. Attribution moves with the window: 30 of u1's events are US, 6 are GB.
+test('13. events by country are attributed point-in-time: US 67 / GB 57 / DE 31 / BR 29', opts, async (t) => {
+  if (skip(t)) return;
+  const rows = await pipeRows('events',
+    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), kind: 'inner', attrs: ['country'] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'n', fn: 'count' }] });
+  const by = mapCol(rows, 'country', 'n');
+  assert.equal(by.US, 67);
+  assert.equal(by.GB, 57);
+  assert.equal(by.DE, 31);
+  assert.equal(by.BR, 29);
+  assert.equal(sumCol(rows, 'n'), 184);
+});
+
+// 14. The governed path agrees, without anyone writing a window.
+test('14. governed = pipeline for events too', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await q(evCtx, { metrics: ['jev_evts'], group_by: ['user__country'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const by = mapCol(r.rows, groupCol(r, 'jev_evts'), 'jev_evts');
+  assert.equal(by.US, 67);
+  assert.equal(by.GB, 57);
+  assert.equal(by.DE, 31);
+  assert.equal(by.BR, 29);
+  assert.equal(sumCol(r.rows, 'jev_evts'), 184);
+});
+
+// 15. The crash source reaches installs the same way — nothing is specific to one source.
+test('15. crash reports join installs point-in-time: 13 rows, no duplicates', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await joinStats('crashlytics',
+    { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: ['country'] },
+    'crash_id');
+  assert.equal(r.n, 13);
+  assert.equal(r.distinct, 13);
+});
+
+// ═══════════ D. the ad funnel: which ad was running when the app died ═══════════
+
+// 16. A crash points at the last rewarded funnel before it; the join returns that funnel's
+//     events. 7 crashes carry a rewarded funnel, each funnel is 2 events → 14 rows.
+test('16. a crash finds the events of its rewarded funnel: 14 rows from 7 crashes', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await joinStats('crashlytics',
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id'] },
+    'crash_id');
+  assert.equal(r.n, 14);
+  assert.equal(r.distinct, 7, 'k1..k3 and k10 (u1), k6, k9, k13');
+});
+
+// 17. Each ad format is its own key: three variants, three different answers. If the caller's
+//     choice were ignored and one column always used, these would not differ.
+test('17. the three ad formats give three different results: 14 / 12 / 8', opts, async (t) => {
+  if (skip(t)) return;
+  const n = async (variant) => (await joinStats('crashlytics',
+    { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: ['event_id'] }, 'crash_id')).n;
+  assert.equal(await n('rewarded'), 14);
+  assert.equal(await n('interstitial'), 12);
+  assert.equal(await n('banner'), 8);
+});
+
+// 18. The key is (funnel, PLAYER), not the funnel alone. u2 and u10 share the funnel id
+//     'fnl_dup', so a player-blind join would pull u10's ad events into u2's crash. It does not.
+test('18. the player is part of the key: a shared funnel id does not leak across players', opts, async (t) => {
+  if (skip(t)) return;
+  const rows = await pipeRows('crashlytics',
+    { stage: 'where', conditions: [{ column: 'crash_id', op: 'eq', value: 'k4' }] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_banner', kind: 'inner', attrs: ['event_id'] },
+    { stage: 'project', columns: ['event_id'] });
+  assert.deepEqual(new Set(rows.map((r) => String(r.event_id))), new Set(['e133', 'e134']),
+    "only u2's own banner events — e149/e150 are u10's, same funnel id");
+});
+
+// 19. A crash with no ad of that format has an empty column, and NULL matches nothing.
+test('19. an empty format column matches nothing; a left join still keeps the crash', opts, async (t) => {
+  if (skip(t)) return;
+  const inner = await joinStats('crashlytics',
+    { stage: 'join', with: 'events', via: 'ad_funnel_banner', kind: 'inner', attrs: ['event_id'] }, 'crash_id');
+  assert.equal(inner.distinct, 4, 'only k4, k5, k11, k12 recorded a banner funnel');
+  const left = await joinStats('crashlytics',
+    { stage: 'join', with: 'events', via: 'ad_funnel_banner', attrs: ['event_id'] }, 'crash_id');
+  assert.equal(left.distinct, 13, 'a left join keeps every crash report');
+  assert.equal(left.n, 17, '4 matched crashes x 2 funnel events + 9 unmatched crashes');
+});
+
+// 20. The join returns THAT funnel, not everything the player did. u1 crashed having seen both
+//     a rewarded and an interstitial funnel; each variant returns its own two events.
+test('20. the funnel is isolated: u1 gets its rewarded pair or its interstitial pair, not both', opts, async (t) => {
+  if (skip(t)) return;
+  const ids = async (variant) => {
+    const rows = await pipeRows('crashlytics',
+      { stage: 'where', conditions: [{ column: 'crash_id', op: 'eq', value: 'k1' }] },
+      { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: ['event_id'] },
+      { stage: 'project', columns: ['event_id'] });
+    return new Set(rows.map((r) => String(r.event_id)));
+  };
+  assert.deepEqual(await ids('rewarded'), new Set(['e129', 'e130']));
+  assert.deepEqual(await ids('interstitial'), new Set(['e131', 'e132']));
+  assert.deepEqual(await ids('banner'), new Set(), 'u1 saw no banner before the crash');
+});
+
+// ═══════════ discovery + guards (input validation) ═══════════
+
+test('relationships are discoverable, with their key columns and what they point at', opts, async (t) => {
+  if (skip(t)) return;
   const crash = Object.fromEntries((await engine.semantic_index({ model: 'crashlytics' })).relationships.map((r) => [r.entity, r]));
-  assert.deepEqual(crash.tracked_ad_rewarded.key, ['rewarded_tracking_id', 'player_id_of_internal']);
-  assert.deepEqual(crash.tracked_ad_banner.key, ['banner_tracking_id', 'player_id_of_internal']);
-  assert.equal(crash.tracked_ad, undefined, 'a variants-only side has no base relationship of its own');
-});
-
-// …and the variants work in the semantic layer too: the SAME crash measure, attributed through a
-// different tracking column each time.
-test('a metric query picks the variant: crashes by country per ad format', opts, async (t) => {
-  if (skip(t)) return;
-  const out = await engine.create_semantic_model({
-    name: 'adfmt',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'crashes', type: 'simple', measure: { name: 'crashes' } }],
-  });
-  assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const attributed = async (variant) => {
-    const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['adfmt_crashes'], group_by: [`tracked_ad_${variant}__country`] });
-    assert.equal(r.ok, true, JSON.stringify(r.error));
-    const by = mapCol(r.rows, groupCol(r, 'adfmt_crashes'), 'adfmt_crashes');
-    return { attributed: sumCol(r.rows.filter((x) => x[groupCol(r, 'adfmt_crashes')] != null), 'adfmt_crashes'), by };
-  };
-  // rewarded: k1..k3 (u1, US) and k4..k5 (u2, US) -> 5 attributed, all US
-  const rew = await attributed('rewarded');
-  assert.equal(rew.attributed, 5);
-  assert.equal(rew.by.US, 5);
-  // interstitial: k6 (u3, GB), k7..k8 (u4, DE), k9 (u5, BR)
-  const inter = await attributed('interstitial');
-  assert.equal(inter.attributed, 4);
-  assert.equal(inter.by.GB, 1);
-  assert.equal(inter.by.DE, 2);
-  assert.equal(inter.by.BR, 1);
-  // banner: k10 (u1, US), k11..k12 (u6, US) -> 3 attributed; k13's stale track is not
-  const ban = await attributed('banner');
-  assert.equal(ban.attributed, 3);
-  assert.equal(ban.by.US, 3);
-});
-
-// ───────────────── 6. THE SAME KEYS IN THE SEMANTIC LAYER ─────────────────
-
-// A declared relationship is not a pipeline feature: MetricFlow joins on the very same key, so
-// events measures are sliced by the ACQUISITION source's own attributes with no join stage at
-// all. 184 events in total; the 34 that fall on a day with no spend land in the NULL bucket.
-test('events measures group by an acquisition attribute over the declared (player, day) key', opts, async (t) => {
-  if (skip(t)) return;
-  const out = await engine.create_semantic_model({
-    name: 'evspend',
-    use_base_models: ['acquisition'],
-    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
-  });
-  assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['evspend_evts'], group_by: ['player_day__media_source'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'evspend_evts'), 'evspend_evts');
-  assert.equal(by.meta, 47);
-  assert.equal(by.organic, 50);
-  assert.equal(by.applovin, 30);
-  assert.equal(by.google, 23);
-  assert.equal(by.null, 34, 'events on a day the player had no spend row');
-  assert.equal(sumCol(r.rows, 'evspend_evts'), 184, 'every event is accounted for exactly once — the join did not fan out');
-});
-
-// The composite install key in the semantic layer, against the player key on the SAME measure:
-// u7's crash reports a track that is on no install record, so it is unattributed (NULL) under
-// the install key while the player key still files it under GB. Same data, two declared keys.
-test('crash measures by the install key vs the player key: the stale track is unattributed', opts, async (t) => {
-  if (skip(t)) return;
-  const out = await engine.create_semantic_model({
-    name: 'crgeo',
-    use_base_models: ['users'],
-    semantic_models: [{ from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'crashes', type: 'simple', measure: { name: 'crashes' } }],
-  });
-  assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const run = async (path) => {
-    const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['crgeo_crashes'], group_by: [path] });
-    assert.equal(r.ok, true, JSON.stringify(r.error));
-    return mapCol(r.rows, groupCol(r, 'crgeo_crashes'), 'crgeo_crashes');
-  };
-  const byInstall = await run('tracked_install__country');
-  const byPlayer = await run('user__country');
-  assert.equal(byInstall.US, 8);
-  assert.equal(byInstall.GB, 1, 'u7\'s crash carries a track no install record has');
-  assert.equal(byInstall.null, 1, '…so it is unattributed under the install key');
-  assert.equal(byPlayer.GB, 2, 'the player key still attributes it');
-  assert.equal(byPlayer.null, undefined, 'nothing is unattributed by player');
-  assert.equal(sumCol(Object.entries(byInstall).map(([, v]) => ({ v })), 'v'), 13);
-});
-
-// The install record's OWN measures sliced by acquisition attributes — installs reaching the
-// acquisition source in the semantic layer, on the install day. 12 installs, 3 paid channels
-// plus organic.
-test('install measures group by an acquisition attribute over the install-day key', opts, async (t) => {
-  if (skip(t)) return;
-  const out = await engine.create_semantic_model({
-    name: 'insp',
-    use_base_models: ['users', 'acquisition'],
-    semantic_models: [{ from: 'users', measures: [{ name: 'installs', agg: 'count', field: '*' }] }],
-    metrics: [{ name: 'installs', type: 'simple', measure: { name: 'installs' } }],
-  });
-  assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['insp_installs'], group_by: ['player_day__media_source'] });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, groupCol(r, 'insp_installs'), 'insp_installs');
-  assert.equal(by.meta, 3, JSON.stringify(by));
-  assert.equal(by.organic, 4);
-  assert.equal(by.google, 2);
-  assert.equal(by.applovin, 3);
-  assert.equal(sumCol(r.rows, 'insp_installs'), 12, 'each install matched exactly one spend row');
-});
-
-// ───────────────── 7. DISCOVERY + GUARDS (input validation) ─────────────────
-
-// The relationships are discoverable, so a caller names one instead of guessing columns.
-test('semantic_index({ model }) lists the declared relationships and their key columns', opts, async (t) => {
-  if (skip(t)) return;
-  const ev = await engine.semantic_index({ model: 'events' });
-  const rels = Object.fromEntries(ev.relationships.map((r) => [r.entity, r]));
-  assert.deepEqual(rels.player_day.key, ['player_id_of_internal', 'device_time (by day)']);
-  assert.equal(rels.player_day.joins, 'acquisition');
-  assert.deepEqual(rels.tracked_install.key, ['tracking_id', 'player_id_of_internal']);
-  assert.equal(rels.tracked_install.joins, 'users');
-  const acq = await engine.semantic_index({ model: 'acquisition' });
-  const owned = acq.relationships.find((r) => r.entity === 'player_day');
-  assert.equal(owned.owned_here, true, 'the acquisition source OWNS the (player, day) key');
-  assert.deepEqual(owned.key, ['player_id_of_internal', 'spend_date (by day)']);
+  assert.deepEqual(crash.ad_funnel_rewarded.key, ['rewarded_tracking_id', 'player_id_of_internal']);
+  assert.deepEqual(crash.ad_funnel_banner.key, ['banner_tracking_id', 'player_id_of_internal']);
+  assert.equal(crash.ad_funnel_rewarded.joins, undefined, 'nobody owns the funnel key — pipeline only');
+  assert.equal(crash.user.joins, 'users');
+  const ev = Object.fromEntries((await engine.semantic_index({ model: 'events' })).relationships.map((r) => [r.entity, r]));
+  assert.deepEqual(ev.ad_funnel_rewarded.key, ['tracking_id', 'player_id_of_internal'],
+    'the single-column side answers every variant');
 });
 
 test('join guards: an undeclared relationship, a self-join and via+on are all rejected', opts, async (t) => {
   if (skip(t)) return;
-  const step = async (source, stage) => {
-    const s = await engine.build_native_model({ action: 'start', name: `gd_${seq++}`, source });
-    return engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage });
-  };
-  // an entity one side does not declare — the error names what the two DO share
-  await assert.rejects(() => step('events', { stage: 'join', with: 'experiments', via: 'player_day' }),
+  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' }),
     /declares no such relationship.*share: user/s);
-  await assert.rejects(() => step('events', { stage: 'join', with: 'events', via: 'user' }), /own source/);
-  await assert.rejects(() => step('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'] }), /not both/);
+  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'events', via: 'user' }), /own source/);
+  await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'] }), /not both/);
 });

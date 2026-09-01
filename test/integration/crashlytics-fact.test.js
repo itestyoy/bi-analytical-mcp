@@ -117,16 +117,18 @@ test('fatal crashes grouped by an event-scoped payload property = NullPointer 4 
   assert.equal(sumCol(r.rows, 'stab_fatal'), 6);
 });
 
-// SEED_DATA §10: the crash fact joins to dim_users on player_id_of_internal, so the SAME
-// user attributes segment it -> u1,u2 are US (5 crashes), u3 is GB (1).
-test('fatal crashes by user__country (join to dim_users) = US 5 / GB 1', opts, async (t) => {
+// SEED_DATA §10 + §13: the crash source reaches dim_users by the player key, and dim_users is
+// SLOWLY-CHANGING, so the attribution is POINT-IN-TIME — the version valid when the crash was
+// reported. u1 moved US -> GB on 2026-01-03 and all three of its fatal crashes are later, so
+// they count as GB; u2 stays US (2), u3 is GB (1).
+test('fatal crashes by user__country are attributed point-in-time = US 2 / GB 4', opts, async (t) => {
   if (skip(t)) return;
   const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: ['user__country'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'stab_fatal'), 'stab_fatal');
-  assert.equal(by.US, 5);
-  assert.equal(by.GB, 1);
-  assert.equal(sumCol(r.rows, 'stab_fatal'), 6);
+  assert.equal(by.US, 2, 'u2 only — u1 had already moved to GB');
+  assert.equal(by.GB, 4, 'u1 x3 (after the move) + u3');
+  assert.equal(sumCol(r.rows, 'stab_fatal'), 6, 'still 6 crashes: no version fan-out');
 });
 
 // SEED_DATA §10: anr_duration_of_event_data exists ONLY on `anr` (3 rows, 5.5+8.0+12.5 = 26).

@@ -60,6 +60,11 @@ before(async () => {
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
+// dim_users is SLOWLY-CHANGING, so a join to it is point-in-time. After match_recognize the
+// per-event time is gone — `first_seen_at` (the funnel's first event) survives and is the right
+// instant to attribute a funnel to: the user as they were when the funnel started.
+const AT_FUNNEL = { value: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' };
+
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 // #9: a pipeline-level time_range bounds the window (applied before the stages).
@@ -230,7 +235,7 @@ test('funnel sliced by a user attribute: join dim_users → reached_tut1 by coun
   if (skip(t)) return;
   // The funnel is sliced by joining dim_users AFTER match_recognize — all within
   // the pipeline (no separate semantic layer).
-  const out = await pipe([matchActivation(), { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country', 'platform'] }]);
+  const out = await pipe([matchActivation(), { stage: 'join', with: 'users', via: 'user', between: AT_FUNNEL, attrs: ['country', 'platform'] }]);
   assert.ok(out.rows.every((r) => 'country' in r && 'platform' in r), 'attrs joined onto each row');
   assert.equal(reached(out.rows, 'tut1'), 8);
   const byCountry = {};
@@ -259,7 +264,7 @@ test('funnel filtered to a user segment via join+where (country=US): only the 4 
   // user-attribute filtering is now a pipeline concern: join dim_users, where on
   // the attribute, THEN match_recognize — no special user_segment property.
   const out = await pipe([
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT_FUNNEL, attrs: ['country'] },
     { stage: 'where', conditions: [{ column: 'country', op: 'eq', value: 'US' }] },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps.slice(0, 2) },
   ]);
@@ -305,7 +310,7 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT_FUNNEL, attrs: ['country'] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] },
   ]);
   const by = Object.fromEntries(out.rows.map((r) => [String(r.country), num(r.revenue)]));
@@ -317,7 +322,7 @@ test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t)
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT_FUNNEL, attrs: ['country'] },
     { stage: 'pivot', group_by: [], on: 'country', fn: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
   ]);
   assert.equal(out.rows.length, 1);

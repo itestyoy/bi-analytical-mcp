@@ -1386,7 +1386,12 @@ export class Engine {
     const fix = (from && to && eventTime)
       ? ` Add between: { value: '${eventTime}', from: '${from}', to: '${to}' } to keep only the version valid at the event time.`
       : ' Add a `between` window (value = the event time column; from/to = the validity-window columns) to keep only the version valid at the event time.';
-    return [`INCOMPLETE JOIN: '${stage.with}' is a slowly-changing (SCD-2) dimension, but this join matches only on key '${stage.on}' with no point-in-time window — it fans out to EVERY historical version of each key, so per-event rows multiply and counts inflate.${fix}`];
+    // The key may be named by the relationship (`via`) or restated inline (`on`) — say whichever
+    // the caller actually used, or the message reads "key 'undefined'".
+    const named = stage.via
+      ? `the declared relationship '${stage.via}'`
+      : `key '${Array.isArray(stage.on) ? stage.on.join(' + ') : stage.on}'`;
+    return [`INCOMPLETE JOIN: '${stage.with}' is a slowly-changing (SCD-2) dimension, but this join matches only on ${named} with no point-in-time window — it fans out to EVERY historical version of each key, so per-event rows multiply and counts inflate.${fix}`];
   }
 
   /**

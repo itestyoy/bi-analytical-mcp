@@ -140,17 +140,20 @@ test('grouped by an attribute of the same source: cost by media_source', opts, a
   assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5));
 });
 
-// The source carries the user entity, so the SAME user attributes segment it.
-// SEED_DATA §11: US 7.25 / GB 4.50 / DE 4.00 / BR 1.75.
-test('cost by user__country (join to dim_users from a non-events source)', opts, async (t) => {
+// The source carries the user entity, and dim_users is SLOWLY-CHANGING, so spend is attributed
+// POINT-IN-TIME — to the install version valid on the SPEND DAY. u1 spent 1.50 on 01-01 (still
+// US) and 0.50 on 01-03 (already GB), so that 0.50 lands in GB, not US.
+// SEED_DATA §11 + §13: US 6.75 / GB 5.00 / DE 4.00 / BR 1.75, total still 17.50.
+test('cost by user__country is attributed to the install version valid on the spend day', opts, async (t) => {
   if (skip(t)) return;
   const r = await q({ metrics: ['uacq_cost'], group_by: ['user__country'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'uacq_cost'), 'uacq_cost');
-  assert.ok(near(by.US, 7.25), `US=${by.US}`);
-  assert.ok(near(by.GB, 4.5), `GB=${by.GB}`);
+  assert.ok(near(by.US, 6.75), `US=${by.US}`);
+  assert.ok(near(by.GB, 5.0), `GB=${by.GB}`);
   assert.ok(near(by.DE, 4.0), `DE=${by.DE}`);
   assert.ok(near(by.BR, 1.75), `BR=${by.BR}`);
+  assert.ok(near(sumCol(r.rows, 'uacq_cost'), 17.5), 'no version fan-out: the total is unchanged');
 });
 
 // meta.mcp.is_time gives a NON-events source its own time axis, so metric_time works on it.

@@ -97,8 +97,6 @@ export class PostgresDialect extends Dialect {
     return `FLOOR(EXTRACT(EPOCH FROM ((${to})::timestamp - (${from})::timestamp)) / 86400.0)::int`;
   }
 
-  timestampExpr(expr) { return `(${expr})::timestamp`; }
-
   dateTrunc(granularity, expr) {
     if (!['day', 'week', 'month', 'quarter', 'year'].includes(granularity)) throw new Error(`dateTrunc: bad granularity ${granularity}`);
     return `date_trunc('${granularity}', ${expr})`;

@@ -261,3 +261,94 @@ models:
       - name: ended_at
         data_type: timestamp
         description: "When the player's assignment ended."
+
+  # A SECOND events fact. Same shape as fct_analytics_events (event_name + time axis +
+  # flattened, event-scoped `*_of_event_data` payload) but a SEPARATE vocabulary: nothing is
+  # shared with the analytics fact, and its events/properties are addressed 'crashlytics.<name>'
+  # outside a pipeline / semantic model built FROM it. `primary_entity` MUST differ from the
+  # analytics fact's (MetricFlow rejects two semantic models sharing a primary entity).
+  - name: fct_crashlytics_events
+    description: >
+      Crash-reporting events fact — one row per crash / non-fatal error / ANR reported from
+      the player's device. Its payload is event-scoped exactly like the analytics fact:
+      anr_duration_of_event_data exists only on anr, crash_message_of_event_data only on
+      fatal_crash — scope by event_name first or they read NULL. Joins to dim_users on
+      player_id_of_internal.
+    meta:
+      mcp:
+        role: crashlytics
+        primary_entity: crash
+        event_semantics:
+          crash_event: fatal_crash
+        known_events:
+          - fatal_crash
+          - non_fatal
+          - anr
+    columns:
+      - name: player_id_of_internal
+        data_type: string
+        description: "Player identifier; joins crash reports to dim_users."
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }
+      - name: event_time
+        data_type: timestamp
+        description: "When the crash was reported (the metric time axis of this fact)."
+        meta:
+          mcp:
+            is_time: true
+      - name: event_name
+        data_type: string
+        description: "Crash event type (fatal_crash / non_fatal / anr)."
+        meta:
+          mcp:
+            is_event_name: true
+      - name: app_version
+        data_type: string
+        description: "App version the crash was reported from. Present on every crash row."
+        meta:
+          mcp:
+            dimension: {}
+      - name: device_model
+        data_type: string
+        description: "Device model the crash was reported from. Present on every crash row."
+        meta:
+          mcp:
+            dimension: {}
+      - name: issue_title_of_event_data
+        data_type: string
+        description: "Crashlytics issue title (the grouping key of a crash). Events: fatal_crash, non_fatal, anr."
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal, anr]
+      - name: is_fatal_of_event_data
+        data_type: boolean
+        description: "Whether the report crashed the app. Events: fatal_crash, non_fatal (NULL on anr)."
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal]
+      - name: anr_duration_of_event_data
+        data_type: numeric
+        description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
+        meta:
+          mcp:
+            unit: seconds
+            events: [anr]
+      - name: crash_message_of_event_data
+        data_type: string
+        description: "Exception message of the crash. Events: fatal_crash ONLY."
+        meta:
+          mcp:
+            events: [fatal_crash]
+      # A COMPLEX (array) payload property — the crash fact carries the same kind of
+      # nested payload the analytics fact does, so the unnest pipeline + the complex
+      # coverage/example pass of the value index must work here too.
+      - name: breadcrumbs_of_event_data
+        data_type: string
+        description: >
+          Breadcrumb trail leading up to the report — a JSON array of strings, in order.
+          Explode it with an unnest stage for per-step frequency. Events: all crash events.
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal, anr]
+            array: { items: string, encoding: json }

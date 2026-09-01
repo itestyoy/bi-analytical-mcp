@@ -5,9 +5,12 @@ under `dbt_project/seeds/`. The numbers below are derived directly from the CSV
 files and are intended to be asserted verbatim by integration tests. If you edit
 any seed CSV, regenerate this document.
 
-Seed files (EXACTLY TWO data sources, per the project rules):
-- `dbt_project/seeds/seed_users.csv` -> `dim_users`
-- `dbt_project/seeds/seed_events.csv` -> `fct_analytics_events`
+Seed files:
+- `dbt_project/seeds/seed_users.csv` -> `dim_users` (role: users)
+- `dbt_project/seeds/seed_events.csv` -> `fct_analytics_events` (role: events — the PRIMARY fact)
+- `dbt_project/seeds/seed_experiments.csv` -> `fct_experiment_assignments` (role: experiments)
+- `dbt_project/seeds/seed_crashlytics.csv` -> `fct_crashlytics_events` (role: crashlytics — a
+  SECOND events fact; see §10)
 
 Vocabulary is restricted to `config/catalog.yml` (events, event_data property
 keys, and user attributes). All monetary values are integers. `campaign_id` is a
@@ -284,6 +287,76 @@ distinct users with any event on that day in this dataset).
 - **MAU (Jan 2026) = 12** (all users have at least one event in January 2026)
 - Stickiness reference: mean DAU over the 7 active days = (2+3+3+4+6+2+1)/7 = 21/7 = 3;
   DAU/MAU on peak day (2026-01-05) = 6/12 = 0.50.
+
+---
+
+## 10. Crash reports (`seed_crashlytics.csv`) — the SECOND events fact
+
+`dbt_project/seeds/seed_crashlytics.csv` -> `fct_crashlytics_events` (`role: crashlytics`).
+A separate events fact with its OWN event vocabulary (`fatal_crash` / `non_fatal` / `anr`)
+and its OWN event-scoped payload — nothing is shared with `fct_analytics_events`. Joined to
+`dim_users` on `player_id_of_internal`, so the same user attributes segment it.
+
+| id | player | event_name | event_time | issue_title | is_fatal | anr_duration | crash_message | app_version | device_model |
+|----|--------|------------|------------|-------------|----------|--------------|---------------|-------------|--------------|
+| k1  | u1 | fatal_crash | 2026-01-05 10:00 | NullPointer       | true  |      | npe at level | 1.0.0 | iphone |
+| k2  | u1 | fatal_crash | 2026-01-05 11:00 | NullPointer       | true  |      | npe at level | 1.0.0 | iphone |
+| k3  | u1 | fatal_crash | 2026-01-06 10:00 | OutOfMemory       | true  |      | oom          | 1.0.0 | iphone |
+| k4  | u2 | fatal_crash | 2026-01-05 12:00 | NullPointer       | true  |      | npe at shop  | 1.0.0 | pixel  |
+| k5  | u2 | fatal_crash | 2026-01-07 09:00 | NullPointer       | true  |      | npe at shop  | 1.1.0 | pixel  |
+| k6  | u3 | fatal_crash | 2026-01-06 15:00 | OutOfMemory       | true  |      | oom          | 1.1.0 | iphone |
+| k7  | u4 | non_fatal   | 2026-01-05 09:00 | NetworkTimeout    | false |      |              | 1.0.0 | galaxy |
+| k8  | u4 | non_fatal   | 2026-01-06 09:00 | NetworkTimeout    | false |      |              | 1.0.0 | galaxy |
+| k9  | u5 | non_fatal   | 2026-01-06 12:00 | NetworkTimeout    | false |      |              | 1.1.0 | iphone |
+| k10 | u1 | non_fatal   | 2026-01-07 08:00 | DecodeError       | false |      |              | 1.1.0 | iphone |
+| k11 | u6 | anr         | 2026-01-05 14:00 | MainThreadBlocked |       | 5.5  |              | 1.0.0 | pixel  |
+| k12 | u6 | anr         | 2026-01-08 14:00 | MainThreadBlocked |       | 8.0  |              | 1.1.0 | pixel  |
+| k13 | u7 | anr         | 2026-01-08 16:00 | MainThreadBlocked |       | 12.5 |              | 1.1.0 | iphone |
+
+Total crash rows: **13**
+
+### Row counts per `event_name`
+
+| event_name  | count |
+|-------------|-------|
+| fatal_crash | 6     |
+| non_fatal   | 4     |
+| anr         | 3     |
+| **TOTAL**   | **13** |
+
+### Event-scoped payload (the reason this fact needs the full events machinery)
+
+Each payload column carries a value ONLY on the events in its `meta.mcp.events` list and is
+NULL elsewhere — exactly like the analytics fact:
+
+- `issue_title_of_event_data` — all 3 events, non-null on **13** rows.
+  Distribution: NullPointer 4, OutOfMemory 2, NetworkTimeout 3, DecodeError 1, MainThreadBlocked 3.
+- `is_fatal_of_event_data` — `fatal_crash` + `non_fatal` only: non-null on **10** rows, NULL on the 3 `anr` rows.
+- `anr_duration_of_event_data` — `anr` ONLY: non-null on **3** rows, NULL on the other 10.
+  Sum = **26.0** seconds (5.5 + 8.0 + 12.5), mean = 26/3 ≈ 8.6667.
+- `crash_message_of_event_data` — `fatal_crash` ONLY: non-null on **6** rows.
+- `breadcrumbs_of_event_data` — a COMPLEX (JSON array of strings) property, all 3 events.
+  **20** elements across the 13 rows; exploded with an `unnest` stage they count:
+  level_start 4, net_retry 4, ui_freeze 3, gc_pause 3, ad_shown 2, shop_open 2,
+  iap_start 1, decode 1. Per row: k1 [level_start, ad_shown], k2 [level_start],
+  k3 [shop_open, iap_start], k4 [level_start, ad_shown], k5 [shop_open], k6 [level_start],
+  k7 [net_retry], k8 [net_retry, net_retry], k9 [net_retry], k10 [decode],
+  k11 [ui_freeze, gc_pause], k12 [ui_freeze], k13 [gc_pause, ui_freeze, gc_pause].
+
+### Aggregates asserted by the tests
+
+- `fatal_crash` = **6** rows from **3** distinct players (u1×3, u2×2, u3×1).
+- Fatal crashes by `issue_title`: NullPointer = **4**, OutOfMemory = **2**.
+- Fatal crashes by `user__country` (join to `dim_users`; u1,u2 = US, u3 = GB): US = **5**, GB = **1**.
+- All 13 rows by `app_version`: `1.0.0` = **7**, `1.1.0` = **6**.
+- All 13 rows by `device_model`: iphone = **7**, pixel = **4**, galaxy = **2**.
+- Repeated-crash funnel (`fatal_crash` -> `fatal_crash`, partitioned by player):
+  **3** players crashed at all, **2** of them (u1, u2) reached a second crash.
+- Cross-fact, one query: `first_launch` on the analytics fact = **12** (§2) alongside
+  `fatal_crash` on this fact = **6**.
+
+`app_version` is written as a three-part version string (`1.0.0`, not `1.0`) so the seed
+loader keeps it TEXT — a two-part value is coerced to a number and comes back as `1`.
 
 ---
 

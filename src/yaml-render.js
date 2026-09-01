@@ -29,7 +29,10 @@ export function renderBaseModel(catalog, key) {
   const m = catalog.getModel(key);
   const sm = { name: key, model: `ref('${m.dbt_model}')` };
 
-  if (key === catalog.anchor) {
+  // Every FACT renders the same way — its own event-time dimension, its own primary
+  // entity, its own measures. `EVENT_TIME_DIM` is scoped to the semantic model, so two
+  // facts each get their own agg_time_dimension without colliding.
+  if (catalog.isFact(key)) {
     sm.defaults = { agg_time_dimension: EVENT_TIME_DIM };
     sm.primary_entity = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity.name;
     sm.entities = Object.entries(m.entities || {}).map(([name, e]) => ({ name, type: e.type, expr: e.column }));
@@ -51,6 +54,9 @@ export function renderBaseModel(catalog, key) {
   // then the model emits a plain primary-key form (use a pipeline join.between for point-in-time).
   const scd = isScdModel(m);
   const pe = m.primary_entity;
+  if (!pe) {
+    throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one can only be reached through a pipeline join stage, not use_base_models.`);
+  }
   const peName = typeof pe === 'string' ? pe : pe.name;
   const peCol = typeof pe === 'string' ? undefined : pe.column;
   // For SCD the join key is a `natural` entity (not unique per row). dbt still requires the model
@@ -113,7 +119,7 @@ export function renderContext(catalog, state) {
         // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.
         if (scd) { droppedMeasures.add(me.name); continue; }
         const mm = { ...me };
-        if (key === catalog.anchor && !mm.agg_time_dimension) mm.agg_time_dimension = EVENT_TIME_DIM;
+        if (catalog.isFact(key) && !mm.agg_time_dimension) mm.agg_time_dimension = EVENT_TIME_DIM;
         (sm.measures ||= []).push(mm);
       }
     }

@@ -1,10 +1,14 @@
 version: 2
 
-# MCP catalog expressed as dbt model-schema YAML. The three data sources are
-# described as ordinary dbt models with `columns`; everything MCP-specific lives
-# under `meta.mcp` (model-level and column-level). The loader (src/catalog.js)
-# transforms this into the internal registry. There are EXACTLY THREE models, and
-# each one is a thin view over a finished bi-dbt prod table declared in sources.yml.
+# MCP catalog expressed as dbt model-schema YAML. Each data source is described as an
+# ordinary dbt model with `columns`; everything MCP-specific lives under `meta.mcp`
+# (model-level and column-level). The loader (src/catalog.js) transforms this into the
+# internal registry. Every model here is a thin view over a finished bi-dbt prod table
+# declared in sources.yml. Exactly one model per ROLE; several models may be events
+# FACTS (each with its own known_events + event-scoped payload + primary_entity). The
+# fact carrying `meta.mcp.anchor: true` — or the first declared one — is PRIMARY: its
+# events/properties are named bare, another fact's are '<role>.<name>' (bare inside a
+# pipeline or semantic model built FROM that fact).
 # The parsing/attribution already happened upstream — we DO NOT re-parse anything;
 # we take the ready, flattened columns as-is and only re-shape (rename role columns).
 #
@@ -40,11 +44,11 @@ version: 2
 #   values:        [..]                             -> categorical value hints (optional)
 #   events:        [..]                             -> event_name(s) a payload field applies to
 #
-# The grain / join key across all three models is `player_id_of_internal` (an INT64
+# The grain / join key across the models is `player_id_of_internal` (an INT64
 # surrogate id present on the prod events fact, installs and experiments tables).
 # The events payload is ALREADY flattened upstream into real typed columns
 # (*_of_event_data), referenced directly — there is no raw JSON payload column. The
-# anchor (events fact) is detected from its is_event_name + is_time columns.
+# facts are detected from their is_event_name + is_time columns.
 #
 # The warehouse dialect is NOT stored here — it is runtime config, resolved from
 # the WAREHOUSE_DIALECT env var or the dbt profile's output `type`.
@@ -1444,3 +1448,69 @@ models:
       - name: ended_at
         data_type: timestamp
         description: "When the experiment ended — the window end for analysis."
+
+  # ── SECOND EVENTS FACT — Firebase Crashlytics (TEMPLATE, not active) ──────────────────
+  # Uncomment and fill in the REAL column / event names of the prod crash table, then the
+  # whole events machinery applies to it as-is: its own semantic_index({ model: 'crashlytics' })
+  # and ({ event: 'crashlytics.<event>' }) views, event_scope in create_semantic_model,
+  # match_recognize funnels over source: 'crashlytics', value-index sample values, and a join
+  # to dim_users by the user entity. Nothing else in the server needs to change.
+  #
+  # RULES that matter here (enforced at catalog load):
+  #   · primary_entity MUST differ from the analytics fact's `event` (a primary entity has
+  #     exactly one owner — it is the join target for that entity).
+  #   · a fact MUST declare is_event_name + is_time.
+  #   · do NOT set `anchor: true` — fct_analytics_events stays the PRIMARY fact, so its names
+  #     remain bare and this fact's are addressed 'crashlytics.<event>' / 'crashlytics.<prop>'
+  #     (bare inside a pipeline or semantic model built FROM this fact).
+  #   · column names use the `_of_` form, never `__` (MetricFlow reserves `__`).
+  #   · a payload column carries `events: [...]` — the event(s) it is populated on; it reads
+  #     NULL on every other event, so scope by event_name before using it.
+  #
+  # - name: fct_crashlytics_events            # TODO: the real dbt model / view name
+  #   description: >
+  #     Crash-reporting events fact: one row per crash / non-fatal error / ANR reported from
+  #     the player's device. A SEPARATE stream from fct_analytics_events — its own events and
+  #     its own payload. Join to dim_users / the analytics fact by player_id_of_internal.
+  #   meta:
+  #     mcp:
+  #       role: crashlytics
+  #       primary_entity: crash               # MUST NOT be `event`
+  #       partition_column: event_date        # TODO: the real partition column (cost hint)
+  #       event_semantics:
+  #         crash_event: fatal_crash          # TODO: which event marks a hard crash
+  #       known_events:                       # TODO: the real event_name values
+  #         - fatal_crash
+  #         - non_fatal
+  #         - anr
+  #   columns:
+  #     - name: player_id_of_internal
+  #       data_type: integer
+  #       description: "Player identifier — joins crash reports to dim_users and the analytics fact."
+  #       meta: { mcp: { entity: { name: user, type: foreign } } }
+  #     - name: event_timestamp               # TODO: the real crash-time column
+  #       data_type: timestamp
+  #       description: "When the crash was reported — the metric time axis of THIS fact."
+  #       meta: { mcp: { is_time: true } }
+  #     - name: event_name
+  #       data_type: string
+  #       description: "Crash event type; always one of known_events."
+  #       meta: { mcp: { is_event_name: true } }
+  #     # Envelope columns — present on EVERY crash row → plain groupable dimensions.
+  #     - name: app_version
+  #       data_type: string
+  #       description: "App version the crash was reported from. Present on every row."
+  #       meta: { mcp: { dimension: {} } }
+  #     - name: bundle_id
+  #       data_type: string
+  #       description: "The app the crash came from. Present on every row."
+  #       meta: { mcp: { dimension: { bundle: true } } }   # per-app coverage for THIS fact
+  #     # Event-scoped PAYLOAD columns — populated only on the listed events, NULL elsewhere.
+  #     - name: issue_title_of_event_data
+  #       data_type: string
+  #       description: "Crashlytics issue title (the grouping key of a crash). Events: all."
+  #       meta: { mcp: { events: [fatal_crash, non_fatal, anr] } }
+  #     - name: anr_duration_of_event_data
+  #       data_type: numeric
+  #       description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
+  #       meta: { mcp: { unit: seconds, events: [anr] } }

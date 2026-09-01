@@ -28,24 +28,31 @@ export class CatalogSearch {
   _build() {
     if (this._indexes) return this._indexes;
     const c = this.catalog;
-    const descs = c.eventPropertyDescriptions();
+    // EVERY fact's vocabulary is searchable, under the same names the tools accept (bare on
+    // the primary fact, '<fact>.<name>' elsewhere) — so a hit is directly usable as an argument
+    // and the fact it belongs to is visible in the name itself.
+    const descs = {};
+    for (const fact of c.facts) {
+      const d = c.eventPropertyDescriptions(fact);
+      for (const [prop, text] of Object.entries(d)) descs[c.qualify(fact, prop)] = text;
+    }
 
-    const events = new FuzzyIndex(c.eventNames(), {
+    const events = new FuzzyIndex(c.allEventNames(), {
       keys: [{ name: 'name', get: (e) => e }],
       tiebreak: (e) => e,
     });
-    const properties = new FuzzyIndex(c.eventProps(), {
+    const properties = new FuzzyIndex(c.allEventProps(), {
       keys: [
         { name: 'name', weight: NAME_WEIGHT, get: (p) => p },
         { name: 'desc', weight: DESC_WEIGHT, get: (p) => descs[p] || '' },
       ],
       tiebreak: (p) => p,
     });
-    // Dimension attributes of the non-anchor models (users/experiments), keyed as
+    // Dimension attributes of the non-fact models (users/experiments), keyed as
     // '<model>.<column>' — CONSISTENT with the { property } drill-down that accepts it.
     const dimItems = [];
     for (const mk of c.modelKeys()) {
-      if (mk === c.anchor) continue;
+      if (c.isFact(mk)) continue;
       const dDescs = c.columnDescriptions(mk);
       for (const [col, dspec] of Object.entries(c.getModel(mk).dimensions || {})) {
         dimItems.push({ property: `${mk}.${col}`, model: mk, column: col, type: dspec.type, description: dDescs[col] || '' });
@@ -81,16 +88,29 @@ export class CatalogSearch {
     const opts = { threshold: fuzzy ? 0.6 : 1.01, fuzzy };
     // DATA-DERIVED applicability from the value index (which events actually carry each property),
     // not the declared meta.mcp.events. Absent/unknown ⇒ treated as "all events" downstream.
-    const applies = this.valueIndex.appliesMap(c.eventProps()); // property -> observed [event_name]
+    const applies = this.valueIndex.appliesMap(c.allEventProps()); // index key -> observed [event_name]
 
-    const event_names = events.search(query, opts).map(({ item: e, score, match }) => ({
-      event: e,
-      property_count: c.eventProps().filter((p) => { const evs = applies[p]; return !evs || evs.includes(e); }).length,
-      score: round3(score), match,
-    }));
-    const property_matches = properties.search(query, opts).map(({ item: p, score, match }) => ({
-      property: p, type: c.eventPropertySpec(p)?.type ?? null, events: applies[p] || null, score: round3(score), match,
-    }));
+    const event_names = events.search(query, opts).map(({ item: e, score, match }) => {
+      // `e` is the tool-facing name; count the properties OF ITS OWN fact that carry it.
+      const ref = c.resolveEvent(e);
+      const props = ref ? c.eventProps(ref.fact) : [];
+      return {
+        event: e,
+        ...(ref && ref.fact !== c.anchor ? { source: ref.fact } : {}),
+        property_count: props.filter((p) => { const evs = applies[c.qualify(ref.fact, p)]; return !evs || evs.includes(ref.name); }).length,
+        score: round3(score), match,
+      };
+    });
+    const property_matches = properties.search(query, opts).map(({ item: p, score, match }) => {
+      const ref = c.resolveProperty(p);
+      return {
+        property: p,
+        ...(ref && ref.fact !== c.anchor ? { source: ref.fact } : {}),
+        type: (ref && c.eventPropertySpec(ref.name, ref.fact)?.type) ?? null,
+        events: applies[p] || null,
+        score: round3(score), match,
+      };
+    });
     const dimension_matches = dimensions.search(query, opts).map(({ item: d, score, match }) => ({
       property: d.property, model: d.model, type: d.type, description: d.description || undefined, score: round3(score), match,
     }));
@@ -103,13 +123,24 @@ export class CatalogSearch {
     // properties with the event(s) carrying them — so "rewarded" resolves to its
     // property, and a mistyped "germny" still surfaces 'Germany'.
     const value_matches = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
-      const dot = v.property.indexOf('.');
       const base = { value: v.value, freq: v.freq, property: v.property, score: round3(v.score ?? 1), match: v.match || 'exact' };
+      // An event PROPERTY first (bare on the primary fact, '<fact>.<prop>' on a secondary one),
+      // then a '<model>.<column>' dimension attribute.
+      const ref = c.resolveProperty(v.property);
+      if (ref) {
+        return {
+          ...base,
+          ...(ref.fact !== c.anchor ? { source: ref.fact } : {}),
+          type: c.eventPropertySpec(ref.name, ref.fact)?.type ?? null,
+          events: applies[v.property] || null,
+        };
+      }
+      const dot = v.property.indexOf('.');
       if (dot > 0) {
         const mk = v.property.slice(0, dot); const col = v.property.slice(dot + 1);
         return { ...base, type: c.models[mk]?.dimensions?.[col]?.type ?? null, model: mk, events: null };
       }
-      return { ...base, type: c.eventPropertySpec(v.property)?.type ?? null, events: applies[v.property] || null };
+      return { ...base, type: null, events: applies[v.property] || null };
     });
 
     return { query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches, recommendations: this._recommend({ query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches }) };

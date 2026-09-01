@@ -106,7 +106,8 @@ test('high-cardinality fields are flagged and skipped on the next sync', async (
   assert.ok(index.syncStatus().last_run.properties_indexed > 0, 'first run indexes the fields');
 
   await bi.refresh(); // flagged SCALAR fields are now skipped; complex props still get coverage-only
-  const complexN = catalog.complexEventProps().length;
+  // refresh() runs the complex-coverage pass per FACT, so count every fact's complex properties
+  const complexN = catalog.facts.reduce((n, f) => n + catalog.complexEventProps(f).length, 0);
   assert.equal(index.syncStatus().last_run.properties_indexed, complexN, 'all high-cardinality SCALARS skipped; only complex-coverage refreshes');
   assert.equal(index.stats(prop).indexedAt, at1, 'the flagged field was not re-scanned');
   index.close();
@@ -400,14 +401,14 @@ test('complex-coverage merges a delta into stored coverage (incremental, not ful
     },
   };
   const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, merge: true, logger: () => {} });
-  const bundleCol = catalog.bundleColumn();
 
-  await bi._indexComplexCoverage(1, bundleCol); // first pass: no watermark → FULL scan
+  // 2nd arg is the FACT to scan (the app column is derived from it); default = primary fact.
+  await bi._indexComplexCoverage(1); // first pass: no watermark → FULL scan
   assert.equal(index.coverage(prop).find((e) => e.event_name === 'level_completed').non_null, 5, 'full scan stored 5');
   assert.equal(index.stats(prop).dataWatermark, 1000, 'watermark advanced to the full scan max');
   assert.ok(index.sampleValues(prop).length > 0, 'examples stored');
 
-  await bi._indexComplexCoverage(2, bundleCol); // second pass: watermark set → DELTA, counts ADD
+  await bi._indexComplexCoverage(2); // second pass: watermark set → DELTA, counts ADD
   assert.equal(index.coverage(prop).find((e) => e.event_name === 'level_completed').non_null, 8, 'delta ADDED (5 + 3), not replaced');
   assert.equal(index.stats(prop).dataWatermark, 2000, 'watermark advanced to the delta max');
   const complexN = catalog.complexEventProps().length;

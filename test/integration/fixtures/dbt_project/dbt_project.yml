@@ -22,3 +22,10 @@ seeds:
       +column_types:
         assigned_at: timestamp
         ended_at: timestamp
+    seed_crashlytics:
+      +column_types:
+        event_time: timestamp
+        is_fatal: boolean
+        anr_duration: numeric
+        app_version: varchar(16)
+        breadcrumbs: varchar(200)

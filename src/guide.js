@@ -12,6 +12,9 @@ export function buildGuide(catalog, recipes, { task } = {}) {
   const usersModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'users') || 'users';
   const experimentsModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'experiments') || 'experiments';
   const sem = catalog.getModel(catalog.anchor).event_semantics || {};
+  // A catalog may carry SEVERAL events facts (e.g. analytics events + crash reports). They are
+  // never mixed: each has its own events/properties, and a question is answered from ONE of them.
+  const secondaryFacts = catalog.secondaryFacts();
 
   const workflow = [
     'CLARIFY the ask before querying: time window (resolve "last week" to the last COMPLETE period), segment, and the decision behind it.',
@@ -28,6 +31,11 @@ export function buildGuide(catalog, recipes, { task } = {}) {
     { if: 'an A/B question ("is variant B better")', do: `compute per-variant aggregates first (a pipeline joining '${experimentsModel}'), then experiment({ action: 'analyze' }); run experiment({ action: 'check_split' }) BEFORE trusting any lift.` },
     { if: 'comparing TWO groups for significance that are NOT an experiment (first vs last, before vs after, cohort A vs B, organic vs paid)', do: 'do NOT hand-roll a t-test. Aggregate per group in one pipeline (mean: n+mean+stddev; rate: conversions+n), then ab_test({ metric: "mean" | "proportion" }) — "control"/"variants" are just group A vs B; no experiments table needed. See semantic_index({ recipe: "two_sample_significance" }).' },
     { if: 'segmenting by a user attribute (country / platform / source)', do: `join/group by the '${usersModel}' model (user__<attr>) — it is NOT on the event payload.` },
+    ...(secondaryFacts.length ? [
+      { if: `the question is about what a SECONDARY events fact records (${secondaryFacts.join(', ')})`, do: `build from THAT fact — build_native_model({ source: '${secondaryFacts[0]}' }) or create_semantic_model with semantic_models: [{ from: '${secondaryFacts[0]}', … }]. Its events/properties are written '${secondaryFacts[0]}.<name>' outside such a model and bare inside it; discover them with semantic_index({ model: '${secondaryFacts[0]}' }).` },
+      { if: 'a funnel/sequence that would span TWO facts (e.g. something in one fact then something in the other)', do: `not expressible: a row-pattern match runs over ONE table. Compute per-user outcomes from each fact separately (a pipeline each), then compare the two groups with ab_test, or join the aggregates on the user key.` },
+      { if: 'comparing volumes from different facts (e.g. one fact\'s events against another\'s)', do: `one create_semantic_model with a semantic model per fact, then query both metrics grouped by metric_time — MetricFlow aligns them on the shared time axis. Do NOT try to put measures from two facts in one semantic model.` },
+    ] : []),
     { if: 'a property reads mostly NULL', do: 'you probably did not scope to the event(s) that carry it — most event_data properties are event-specific (see semantic_index({ property }).event_coverage).' },
     ...(catalog.bundleColumn() ? [{ if: 'the question is about ONE app (a bundle id), or a property looks empty for an app', do: 'semantic_index({ bundle: "<bundle id>" }) lists which event properties are POPULATED vs EMPTY for that app — skip the empty ones rather than querying them. The overview lists apps under `bundles`; a property empty for one app may be populated for another (see { property }.bundle_coverage). Group/filter by the app column to segment per app.' }] : []),
     { if: 'unsure which field or value to use', do: 'semantic_index({ search }) maps a word/value to the property + the event(s) carrying it — do not guess. Search also returns saved findings (memory) — a fuzzy term someone used before may already resolve to the real field.' },
@@ -51,6 +59,7 @@ export function buildGuide(catalog, recipes, { task } = {}) {
   }
 
   return {
+    ...(secondaryFacts.length ? { facts: { primary: catalog.anchor, secondary: secondaryFacts, note: `Separate events facts, each with its OWN events and payload properties. Names are bare on '${catalog.anchor}' and '<fact>.<name>' on the others. Pick ONE fact per pipeline/funnel; metrics from different facts can still be compared over metric_time.` } } : {}),
     note: 'The analyst procedure + routing for this server. Follow `workflow`; use `routing_triggers` (IF…DO) to pick the right tool; `tasks` lists ready-made recipes per family — fetch one with semantic_index({ recipe: id }). Narrow to one family with semantic_index({ guide: "<task_type>" }).',
     workflow,
     routing_triggers,

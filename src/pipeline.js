@@ -84,6 +84,12 @@ const OPSYM = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 // open string — there is nothing valid to pick anyway.
 const propEnum = (values, description) => (values.length ? { type: 'string', enum: values, description } : { type: 'string', description });
 
+/** An event property as seen from the pipeline's SOURCE fact (Catalog.propertyFor owns the
+ *  bare-vs-qualified rules); a property of another fact is rejected with the fix. */
+const sourceProp = (catalog, source, name) => (source
+  ? catalog.propertyFor(source, name, { hint: `start the pipeline from '${source === catalog.anchor ? 'that fact' : source}' that owns it` })
+  : null);
+
 // SQL for one operand: a column reference, a literal constant, or `now`.
 function operandSql(d, cols, o, label = 'operand') {
   if (o === null || typeof o !== 'object') throw new Error(`${label}: must be { column } | { value } | { now: true }`);
@@ -186,23 +192,25 @@ const STAGES = {
         stage: { const: 'derive' },
         name: { type: 'string', pattern: NAME },
         op: { enum: ['extract', 'array_length', 'contains', 'struct_field'] },
-        source: propEnum(catalog.eventProps(), 'event_data property the value derives from.'),
+        source: propEnum(catalog.eventPropEnum(), 'event_data property the value derives from (a property of a SECONDARY events fact is qualified, e.g. "crashlytics.<property>"; on the pipeline\'s own source the bare name works).'),
         value: { description: 'Membership value for op=contains.' },
         field: { type: 'string', description: 'Struct field for op=struct_field.' },
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Result/extract type (default string).' },
       },
     }),
-    build: ({ d, catalog, cols }, p) => {
-      const json = catalog.eventDataColumn();
-      const spec = catalog.eventPropertySpec(p.source);
+    build: ({ d, catalog, cols, source }, p) => {
+      const json = catalog.eventDataColumn(source);
+      const found = sourceProp(catalog, source, p.source);
+      const spec = found?.spec;
+      const key = found?.name || p.source; // the PHYSICAL payload key (qualifier stripped)
       let expr; let type;
       // Flattened payload (spec.column) is a real column → reference it directly;
       // legacy JSON-blob payload is extracted from the event_data column.
       if (p.op === 'extract' && spec?.column) { expr = spec.column; type = p.type || spec.type || 'string'; }
-      else if (p.op === 'extract') { expr = d.jsonExtract(json, p.source, p.type || 'string'); type = p.type || 'string'; }
-      else if (p.op === 'array_length') { expr = d.jsonArrayLength(json, p.source); type = 'int'; }
-      else if (p.op === 'contains') { expr = d.jsonArrayContains(json, p.source, p.value); type = 'boolean'; }
-      else if (p.op === 'struct_field') { expr = d.jsonStructField(json, p.source, p.field, p.type); type = p.type || 'string'; }
+      else if (p.op === 'extract') { expr = d.jsonExtract(json, key, p.type || 'string'); type = p.type || 'string'; }
+      else if (p.op === 'array_length') { expr = d.jsonArrayLength(json, key); type = 'int'; }
+      else if (p.op === 'contains') { expr = d.jsonArrayContains(json, key, p.value); type = 'boolean'; }
+      else if (p.op === 'struct_field') { expr = d.jsonStructField(json, key, p.field, p.type); type = p.type || 'string'; }
       else throw new Error(`derive: bad op ${p.op}`);
       return { op: { op: 'extend', cols: [{ name: p.name, expr }] }, cols: addCol(cols, p.name, type) };
     },
@@ -365,17 +373,18 @@ const STAGES = {
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'] },
       },
     }),
-    build: ({ catalog, cols }, p) => {
-      const spec = catalog.eventPropertySpec(p.source);
+    build: ({ catalog, cols, source }, p) => {
+      const found = sourceProp(catalog, source, p.source);
+      const spec = found?.spec;
       let column; let key; let encoding; let isStruct = false;
       if (spec) {
         isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
         if (spec.column) { column = spec.column; key = null; encoding = spec.encoding || 'native'; } // flattened array column
-        else { column = catalog.eventDataColumn(); key = p.source; encoding = 'blob'; } // legacy JSON-blob property
+        else { column = catalog.eventDataColumn(source); key = found.name; encoding = 'blob'; } // legacy JSON-blob property
       } else if (cols.has(p.source) && cols.get(p.source).type === 'array') {
         column = p.source; key = null; encoding = 'native'; // a pipeline-derived array (e.g. from json_parse_array)
       } else {
-        throw new Error(`unnest: '${p.source}' is not an array event property or an array column at this stage`);
+        throw new Error(`unnest: '${p.source}' is not an array event property of '${source}' nor an array column at this stage`);
       }
       const type = p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string'));
       return { op: { op: 'unnest', column, key, as: p.as, field: p.field, type, encoding }, cols: addCol(cols, p.as, type) };
@@ -563,7 +572,7 @@ function sourceColumns(catalog, key, physicalCols = null) {
   const cols = new Map();
   for (const c of catalog.modelColumns(key)) cols.set(c.name, { type: c.type });
   // Fallbacks for catalogs that predate column capture (keep entity/time/event_name/dims).
-  if (key === catalog.anchor) {
+  if (catalog.isFact(key)) {
     if (m.event_name?.column && !cols.has(m.event_name.column)) cols.set(m.event_name.column, { type: 'string' });
     if (m.time?.column && !cols.has(m.time.column)) cols.set(m.time.column, { type: 'time' });
     if (m.event_data_column && !cols.has(m.event_data_column)) cols.set(m.event_data_column, { type: 'json' });
@@ -584,13 +593,13 @@ function sourceColumns(catalog, key, physicalCols = null) {
 export function anchorColumns(catalog) { return sourceColumns(catalog, catalog.anchor); }
 
 /** The scalar columns a `prepare` stage list adds (name -> { type }) — threads prep columns. */
-export function prepareColumns(catalog, dialectName, stages = []) {
+export function prepareColumns(catalog, dialectName, stages = [], source = catalog.anchor) {
   const d = getDialect(dialectName);
   let cols = new Map();
   for (const st of stages) {
     const def = STAGES[st.stage];
     if (!def) throw new Error(`unknown prepare stage: ${st.stage}`);
-    cols = def.build({ d, catalog, cols }, st).cols;
+    cols = def.build({ d, catalog, cols, source }, st).cols;
   }
   return cols;
 }
@@ -601,14 +610,17 @@ export function pipelineStageSchema(catalog) {
   return { discriminator: { propertyName: 'stage' }, oneOf: Object.values(STAGES).map((s) => s.schema(catalog)) };
 }
 
-// Fold stages -> { ops, cols } (validating column references along the way).
-function buildOps(catalog, d, baseColumns, stages) {
+// Fold stages -> { ops, cols } (validating column references along the way). `source`
+// is the catalog model the pipeline reads FROM: stages that name an event or an
+// event_data property resolve it against THAT fact, so a multi-fact catalog cannot
+// silently mix one fact's payload into another fact's pipeline.
+function buildOps(catalog, d, baseColumns, stages, source = catalog.anchor) {
   let cols = new Map(baseColumns);
   const ops = [];
   for (const st of stages) {
     const def = STAGES[st.stage];
     if (!def) throw new Error(`unknown pipeline stage: ${st.stage}`);
-    const res = def.build({ d, catalog, cols }, st);
+    const res = def.build({ d, catalog, cols, source }, st);
     ops.push(res.op);
     cols = res.cols;
   }
@@ -635,9 +647,9 @@ function assembleCteSql(d, dialectName, baseRelation, ops) {
  * Lower a pipeline over an explicit base relation to one SQL text (chained-CTE
  * form). Used by the funnel: [...prepare, match_recognize].
  */
-export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages) {
+export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages, source = catalog.anchor) {
   const d = getDialect(dialectName);
-  const { ops } = buildOps(catalog, d, baseColumns, stages);
+  const { ops } = buildOps(catalog, d, baseColumns, stages, source);
   return assembleCteSql(d, dialectName, baseRelation, ops);
 }
 
@@ -653,7 +665,7 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
   const baseRelation = `{{ ref('${m.dbt_model}') }}`;
-  const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source, physicalCols), stages);
+  const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source, physicalCols), stages, source);
   const sql = ops.some((o) => o.requiresCte) ? assembleCteSql(d, dialectName, baseRelation, ops) : d.renderPipeline(baseRelation, ops);
   return { sql, columns: cols };
 }

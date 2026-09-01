@@ -46,12 +46,18 @@ function comparePred(lhs, op, value) {
   }
 }
 
-export function stepPredicate(catalog, step, dialect, col, prepCols = new Map()) {
-  const m = catalog.getModel(catalog.anchor);
-  const modelCols = new Set(catalog.modelColumns(catalog.anchor).map((x) => x.name));
+/** Step/prefilter event names, normalized to the SOURCE fact's physical values. A
+ *  row-pattern match scans ONE table, so an event of another fact cannot participate. */
+const factEventNames = (catalog, source, names) => (names || []).map((n) => catalog.eventNameFor(source, n, {
+  hint: 'a funnel runs over ONE fact, so start the pipeline from the fact that owns the event',
+}));
+
+export function stepPredicate(catalog, step, dialect, col, prepCols = new Map(), source = catalog.anchor) {
+  const m = catalog.getModel(source);
+  const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
   const evCol = col ? `${col}.${m.event_name.column}` : m.event_name.column;
-  const dataCol = col ? `${col}.${catalog.eventDataColumn()}` : catalog.eventDataColumn();
-  const names = step.event_name;
+  const dataCol = col ? `${col}.${catalog.eventDataColumn(source)}` : catalog.eventDataColumn(source);
+  const names = factEventNames(catalog, source, step.event_name);
   const ev = names.length === 1 ? `${evCol} = ${sqlLiteral(names[0])}` : `${evCol} IN (${names.map(sqlLiteral).join(', ')})`;
   const props = (step.where || []).map((c) => {
     // a prepare-derived column is referenced directly (it's a real column now)
@@ -65,7 +71,7 @@ export function stepPredicate(catalog, step, dialect, col, prepCols = new Map())
       if (modelCols.has(c.property)) return comparePred(col ? `${col}.${c.property}` : c.property, c.op, c.value);
       throw new Error(`unknown event property or column in step: ${c.property}`);
     }
-    if (catalog.isComplexEventProp(c.property)) {
+    if (catalog.isComplexEventProp(c.property, source)) {
       throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (derive/unnest), not directly`);
     }
     // flattened payload (p.column) is a real column → reference it; else extract from JSON
@@ -82,19 +88,19 @@ export function stepPredicate(catalog, step, dialect, col, prepCols = new Map())
  * event_name allowlist, event_data property conditions. To filter by USER
  * attributes, add a `join` (users) + `where` stage before match_recognize.
  */
-export function buildPrefilter(catalog, spec, dialect, col) {
+export function buildPrefilter(catalog, spec, dialect, col, source = catalog.anchor) {
   const f = spec.filter;
   if (!f) return '';
-  const m = catalog.getModel(catalog.anchor);
+  const m = catalog.getModel(source);
   const q = (c) => (col ? `${col}.${c}` : c);
   const evNameCol = q(m.event_name.column);
   const timeCol = q(m.time.column);
-  const dataCol = q(catalog.eventDataColumn());
+  const dataCol = q(catalog.eventDataColumn(source));
   const clauses = [];
   if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
   if (f.time_range?.end) { const ex = dateEndExclusive(f.time_range.end); clauses.push(ex ? `${timeCol} < ${sqlLiteral(ex)}` : `${timeCol} <= ${sqlLiteral(f.time_range.end)}`); }
-  if (f.event_name?.length) clauses.push(`${evNameCol} IN (${f.event_name.map(sqlLiteral).join(', ')})`);
-  const modelCols = new Set(catalog.modelColumns(catalog.anchor).map((x) => x.name));
+  if (f.event_name?.length) clauses.push(`${evNameCol} IN (${factEventNames(catalog, source, f.event_name).map(sqlLiteral).join(', ')})`);
+  const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
   for (const c of f.where || []) {
     const p = (m.properties || {})[c.property];
     if (!p) {
@@ -107,11 +113,14 @@ export function buildPrefilter(catalog, spec, dialect, col) {
   return clauses.join(' AND ');
 }
 
-function resolve(catalog, spec, dialect, availableCols = null) {
+function resolve(catalog, spec, dialect, availableCols = null, source = catalog.anchor) {
   if (!spec || !Array.isArray(spec.steps) || spec.steps.length < 2) {
     throw new Error('sequence requires at least 2 ordered steps');
   }
-  const m = catalog.getModel(catalog.anchor);
+  if (!catalog.isFact(source)) {
+    throw new Error(`match_recognize needs an events fact as the pipeline source; '${source}' is not one (facts: ${catalog.facts.join(', ')})`);
+  }
+  const m = catalog.getModel(source);
   // Partition key is FLEXIBLE: the caller chooses any column(s) available at this
   // point in the pipeline (event columns, or columns added by upstream derive/
   // compute/join stages). Convenience aliases 'user'/'session' resolve to the
@@ -148,7 +157,7 @@ function resolve(catalog, spec, dialect, availableCols = null) {
   // Real columns referenceable in step `where` / agg_at_step (vs event_data
   // properties). In a pipeline these are the columns produced by earlier stages
   // (passed in as availableCols); standalone, they come from spec.prepare.
-  const prepCols = availableCols || prepareColumns(catalog, dialect, spec.prepare || []);
+  const prepCols = availableCols || prepareColumns(catalog, dialect, spec.prepare || [], source);
 
   // resolve metrics + collect which property values must be captured per step
   const propCaptures = []; // { id, idx, property, type, isColumn }
@@ -165,7 +174,7 @@ function resolve(catalog, spec, dialect, availableCols = null) {
       else {
         const p = (m.properties || {})[mt.property];
         if (!p) throw new Error(`agg_at_step: unknown property '${mt.property}'`);
-        if (catalog.isComplexEventProp(mt.property)) throw new Error(`agg_at_step: '${mt.property}' is array/struct; derive a scalar via a prepare stage first`);
+        if (catalog.isComplexEventProp(mt.property, source)) throw new Error(`agg_at_step: '${mt.property}' is array/struct; derive a scalar via a prepare stage first`);
         type = p.type;
       }
       out.capId = `pv_${mt.name}`;
@@ -174,9 +183,9 @@ function resolve(catalog, spec, dialect, availableCols = null) {
     return out;
   });
 
-  const stepPreds = (d, col) => spec.steps.map((s) => stepPredicate(catalog, s, d, col, prepCols));
+  const stepPreds = (d, col) => spec.steps.map((s) => stepPredicate(catalog, s, d, col, prepCols, source));
   const rows = spec.rows || 'one_per_partition';
-  return { m, partCols, timeCol, mode, betweenSteps, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
+  return { m, fact: source, partCols, timeCol, mode, betweenSteps, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
 }
 
 // gapMode: false (strict, no filler), 'single' (one GAP = "not any step" between every
@@ -215,7 +224,7 @@ export function matchStepPostgres(r, fromRel, catalog) {
   const preds = r.stepPreds('postgres', null);
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
-  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : jsonExtract('postgres', catalog.eventDataColumn(), c.property, c.type)}) AS ${c.id}`);
+  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : jsonExtract('postgres', catalog.eventDataColumn(r.fact), c.property, c.type)}) AS ${c.id}`);
   const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
   const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
   const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
@@ -276,7 +285,7 @@ export function matchStepBigQuery(r, fromRel, catalog) {
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
+    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn(r.fact)}`, c.property, c.type)}) AS ${c.id}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
   const gapMode = gapModeFor(r);
@@ -313,7 +322,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn()}`, c.property, c.type)}) AS ${c.id}`),
+    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn(r.fact)}`, c.property, c.type)}) AS ${c.id}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
   const gapMode = gapModeFor(r);
@@ -334,7 +343,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `secs_${m.name}`),
     ...r.propCaptures.map((c) => c.id),
   ];
-  const pre = buildPrefilter(catalog, spec, 'bigquery', null);
+  const pre = buildPrefilter(catalog, spec, 'bigquery', null, r.fact);
   const lines = [];
   if (pre) lines.push(`|> WHERE ${pre}`);
   lines.push(`|> MATCH_RECOGNIZE (
@@ -370,7 +379,7 @@ function matchOutputColumns(r) {
 function matchRecognizeSchema(catalog) {
   const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
   const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: CMP }, value: {} } };
-  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Event(s) that satisfy this step.' }, where: { type: 'array', items: stepWhere, description: 'Extra conditions narrowing the step.' } } };
+  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNameEnum() }, description: 'Event(s) that satisfy this step. They must belong to the pipeline SOURCE fact — on that fact the bare name works; an event of another fact is rejected (a funnel runs over ONE fact).' }, where: { type: 'array', items: stepWhere, description: 'Extra conditions narrowing the step.' } } };
   const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'avg', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
@@ -389,7 +398,7 @@ function matchRecognizeSchema(catalog) {
         type: 'object', additionalProperties: false, description: 'Optional event-level pre-filter applied BEFORE matching (speed; narrows the population only). To filter by USER attributes, add a join (users) + where stage before this one instead.',
         properties: {
           time_range: { type: 'object', additionalProperties: false, properties: { start: { type: 'string' }, end: { type: 'string' } }, description: 'Event-time window (ISO).' },
-          event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Only scan these events.' },
+          event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNameEnum() }, description: 'Only scan these events (of the pipeline source fact).' },
           where: { type: 'array', items: stepWhere, description: 'event_data/column conditions ANDed across the scan.' },
         },
       },
@@ -401,9 +410,9 @@ function matchRecognizeSchema(catalog) {
 
 registerStage('match_recognize', {
   schema: (catalog) => matchRecognizeSchema(catalog),
-  build: ({ d, catalog, cols }, p) => {
+  build: ({ d, catalog, cols, source }, p) => {
     const spec = p._resolved ? p.spec : p; // accept a stage object OR a preresolved wrapper
-    const r = p._resolved || resolve(catalog, spec, d.name, cols);
+    const r = p._resolved || resolve(catalog, spec, d.name, cols, source || catalog.anchor);
     return {
       op: {
         op: 'match_recognize',
@@ -413,7 +422,7 @@ registerStage('match_recognize', {
         requiresCte: d.name !== 'bigquery',
         bqPipe: d.name === 'bigquery' ? matchStepBigQueryPipe(r, spec, catalog) : null,
         render: (prev, dn) => {
-          const pre = buildPrefilter(catalog, spec, dn, null);
+          const pre = buildPrefilter(catalog, spec, dn, null, r.fact);
           const fromRel = pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev;
           return dn === 'bigquery' ? matchStepBigQuery(r, fromRel, catalog) : matchStepPostgres(r, fromRel, catalog);
         },

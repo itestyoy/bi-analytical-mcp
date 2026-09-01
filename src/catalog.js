@@ -254,19 +254,27 @@ export function dbtSchemaToCatalog(doc) {
     // (no time window) are rejected instead of full-scanning the warehouse.
     if (mcp.require_time_range != null) m.require_time_range = !!mcp.require_time_range;
 
-    // The anchor (events fact) is DETECTED structurally: the model that declares
-    // the event_name / event_data / time columns. `anchor: true` is an optional
-    // override. Exactly one model may be the fact.
-    const isAnchor = mcp.anchor === true
+    // A FACT (events source) is DETECTED structurally: a model declaring the
+    // event_name / event_data / time columns. SEVERAL facts may coexist — e.g. the
+    // analytics events fact and a Crashlytics events fact — each with its OWN event
+    // vocabulary (known_events + event-scoped properties). `anchor: true` marks the
+    // PRIMARY fact: the default pipeline source, and the one whose event/property
+    // names stay UNQUALIFIED (secondary facts are addressed as '<fact>.<name>',
+    // the same convention as the 'users.country' dimension attributes). Without an
+    // explicit marker the FIRST declared fact is the primary one.
+    const isFact = mcp.anchor === true
       || (model.columns || []).some((c) => { const cm = c.meta?.mcp || {}; return cm.is_event_name || cm.is_event_data || cm.is_time; });
-    if (isAnchor) {
-      if (out.anchor_model && out.anchor_model !== key) throw new Error(`multiple anchor (fact) models: '${out.anchor_model}' and '${key}'. Exactly one model may declare event_name/event_data/time columns.`);
-      out.anchor_model = key;
+    if (isFact) {
+      (out.facts ||= []).push(key);
+      if (mcp.anchor === true) {
+        if (out.anchor_model && out.anchor_model !== key) throw new Error(`multiple PRIMARY facts: '${out.anchor_model}' and '${key}' both declare meta.mcp.anchor: true. Exactly one fact may be primary; the others are addressed as '<role>.<event>'.`);
+        out.anchor_model = key;
+      }
     }
 
     const entities = {};
     const dimensions = {};
-    const flatProps = {}; // anchor-only: flattened event_data__* payload columns
+    const flatProps = {}; // fact-only: flattened event_data__* payload columns
     const columnDescriptions = {};
     const allColumns = []; // EVERY physical column (name + pipeline type) — referenceable in native pipelines
     for (const col of model.columns || []) {
@@ -287,11 +295,11 @@ export function dbtSchemaToCatalog(doc) {
         if (cm.properties) m.properties = cm.properties;
         continue;
       }
-      // Flattened event payload: on the anchor, an event_data__* column (or any
+      // Flattened event payload: on a FACT, an event_data__* column (or any
       // column scoped to specific events via meta.mcp.events) is a per-event
       // PROPERTY. Unlike the legacy JSON-blob form, these are REAL physical columns
       // — recorded with `column` so SQL references them directly (no JSON extract).
-      if (isAnchor && !cm.dimension && cm.array) {
+      if (isFact && !cm.dimension && cm.array) {
         // A flattened ARRAY/array<struct> payload column. `meta.mcp.array` declares how
         // to read it: encoding 'native' (a real ARRAY/REPEATED column) or 'json' (a STRING
         // holding a JSON array → parse before unnest). items = scalar element type;
@@ -309,7 +317,7 @@ export function dbtSchemaToCatalog(doc) {
         };
         continue;
       }
-      if (isAnchor && !cm.dimension && cm.events) {
+      if (isFact && !cm.dimension && cm.events) {
         // A flattened event-payload property: a real column populated only on the
         // events in meta.mcp.events. The column is named directly (no `__`, which
         // MetricFlow reserves), so it is used as-is for both the key and the expr.
@@ -325,12 +333,12 @@ export function dbtSchemaToCatalog(doc) {
         };
         continue;
       }
-      // Dimensions: on a non-anchor (dimension) model, every remaining column is
+      // Dimensions: on a non-fact (dimension) model, every remaining column is
       // a groupable dimension. Its TYPE comes from the native dbt `data_type`
       // (date/timestamp -> time, else categorical) — not from meta. Only the bits
       // dbt has no native field for stay in meta: time `granularity` (non-day)
       // and categorical `values` hints. `meta.mcp.dimension` is still honored.
-      if (cm.dimension || !isAnchor) {
+      if (cm.dimension || !isFact) {
         const explicit = cm.dimension || {};
         // A validity-window bound (meta.mcp.dimension.validity: start|end) marks the SCD-2 pair
         // MetricFlow uses for a point-in-time join — force it to a TIME dimension regardless of
@@ -345,7 +353,7 @@ export function dbtSchemaToCatalog(doc) {
         dimensions[col.name] = d;
         // A dimension explicitly marked the BUNDLE/app identifier on the anchor lets the
         // value index break coverage down per app (which properties are empty for which app).
-        if (isAnchor && explicit.bundle) m.bundle_column = col.name;
+        if (isFact && explicit.bundle) m.bundle_column = col.name;
       }
     }
     if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
@@ -355,8 +363,32 @@ export function dbtSchemaToCatalog(doc) {
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
     out.models[key] = m;
   }
-  out.anchor_model = out.anchor_model || doc.anchor_model;
-  if (!out.anchor_model) throw new Error('no anchor (events fact) model: exactly one model must declare an event_name / event_data / time column');
+  // Primary fact: the explicit `anchor: true`, a legacy top-level anchor_model, else
+  // the first declared fact. Secondary facts keep their own event vocabulary.
+  out.anchor_model = out.anchor_model || doc.anchor_model || (out.facts || [])[0];
+  if (!out.anchor_model) throw new Error('no events fact model: at least one model must declare an event_name / event_data / time column');
+  if (out.facts && !out.facts.includes(out.anchor_model)) out.facts.unshift(out.anchor_model);
+
+  // Every fact needs the two columns the event machinery is built on.
+  for (const key of out.facts || []) {
+    const m = out.models[key];
+    if (!m.event_name) throw new Error(`fact model '${key}' declares no event_name column: add meta.mcp.is_event_name to the column carrying the event type.`);
+    if (!m.time) throw new Error(`fact model '${key}' declares no time column: add meta.mcp.is_time to the column carrying the event time.`);
+  }
+
+  // A PRIMARY entity must be owned by exactly ONE model: it is both the MetricFlow
+  // identity of the semantic model and the join TARGET for that entity, so a second
+  // claimant would silently hijack the join (e.g. a new fact stealing `user` from the
+  // users dimension) and MetricFlow would reject the duplicate identity anyway.
+  const primaryEntityOwner = new Map();
+  for (const [key, m] of Object.entries(out.models)) {
+    const pe = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+    if (!pe) continue;
+    if (primaryEntityOwner.has(pe)) {
+      throw new Error(`models '${primaryEntityOwner.get(pe)}' and '${key}' both declare primary entity '${pe}'. A primary entity has exactly one owner (it is the join target for that entity) — give each model its own meta.mcp.primary_entity, e.g. 'event' for the analytics fact and 'crash' for a crash fact.`);
+    }
+    primaryEntityOwner.set(pe, key);
+  }
   // Schema validation: names that become MetricFlow identifiers (event-property keys
   // and dimension columns) MUST NOT contain '__' — MetricFlow reserves it as the
   // entity/dimension separator. Fail loudly at load so the dbt schema is corrected at
@@ -383,10 +415,15 @@ export class Catalog {
     this.raw = raw;
     this.dialect = raw.warehouse_dialect;
     this.models = raw.models;
+    // `anchor` = the PRIMARY fact: the default pipeline source and the fact whose
+    // event/property names are used UNQUALIFIED. `facts` = every events source; a
+    // secondary fact's events/properties are addressed as '<fact>.<name>'.
     this.anchor = raw.anchor_model || 'events';
     if (!this.models?.[this.anchor]) {
       throw new Error(`anchor_model '${this.anchor}' not found in catalog.models`);
     }
+    this.facts = (Array.isArray(raw.facts) && raw.facts.length ? raw.facts : [this.anchor]).filter((k) => this.models[k]);
+    if (!this.facts.includes(this.anchor)) this.facts.unshift(this.anchor);
     // Cost guardrail: reject unbounded (no time window) queries when the anchor model
     // (or a loadCatalog override) demands a bounded window. See engine guards.
     this.requireTimeRange = !!(raw.require_time_range ?? this.models[this.anchor]?.require_time_range);
@@ -460,14 +497,113 @@ export class Catalog {
     return this.models[this.anchor]?.entities?.[entity]?.column;
   }
 
+  /** True when `key` is an events fact (has its own event vocabulary). */
+  isFact(key) {
+    return this.facts.includes(key);
+  }
+
+  /** Facts other than the primary one (their names are qualified '<fact>.<name>'). */
+  secondaryFacts() {
+    return this.facts.filter((k) => k !== this.anchor);
+  }
+
+  /** The name the tools use for a fact-scoped event/property: bare on the PRIMARY
+   *  fact, '<fact>.<name>' on any other (the 'users.country' convention). */
+  qualify(fact, name) {
+    return fact === this.anchor ? name : `${fact}.${name}`;
+  }
+
+  /** Split a possibly-qualified name into { fact, name }; null when the prefix is
+   *  not a fact (so '<model>.<column>' dimension attributes fall through). */
+  _splitQualified(name) {
+    const s = String(name);
+    const dot = s.indexOf('.');
+    if (dot <= 0) return { fact: this.anchor, name: s };
+    const fact = s.slice(0, dot);
+    return this.isFact(fact) ? { fact, name: s.slice(dot + 1) } : null;
+  }
+
+  /** Resolve an event name (bare = primary fact, '<fact>.<event>' = that fact) to
+   *  { fact, name }, or null when no fact declares it. */
+  resolveEvent(name) {
+    const q = this._splitQualified(name);
+    return q && this.eventNames(q.fact).includes(q.name) ? q : null;
+  }
+
+  /** Resolve an event PROPERTY the same way. Returns { fact, name } or null. */
+  resolveProperty(name) {
+    const q = this._splitQualified(name);
+    return q && this.eventPropertySpec(q.name, q.fact) ? q : null;
+  }
+
+  /**
+   * The PHYSICAL event name for `name` as seen from `fact`. Accepts the bare name (the
+   * natural form once a fact is fixed) and the tool-facing qualified '<fact>.<event>'.
+   * THROWS when the name belongs to a different fact or to none — a cross-fact mistake must
+   * not degrade into a filter that silently matches nothing. `hint` appends the caller's fix.
+   */
+  eventNameFor(fact, name, { hint } = {}) {
+    if (this.eventNames(fact).includes(name)) return name; // bare name of THIS fact
+    const q = this.resolveEvent(name);
+    if (q && q.fact === fact) return q.name; // qualified name of THIS fact
+    if (q) throw new Error(`event '${name}' belongs to the '${q.fact}' fact, not '${fact}'${hint ? ` — ${hint}` : ''}`);
+    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ model: '${fact}' })`);
+  }
+
+  /**
+   * One event PROPERTY as seen from `fact`: { name (PHYSICAL), spec }, or null when this fact
+   * simply has no such property. Accepts bare + qualified names and THROWS when the property
+   * belongs to a different fact (reading another fact's payload is never what was meant).
+   */
+  propertyFor(fact, name, { hint } = {}) {
+    const props = this.models[fact]?.properties || {};
+    if (props[name]) return { name, spec: props[name] };
+    const q = this.resolveProperty(name);
+    if (!q) return null;
+    if (q.fact !== fact) throw new Error(`'${name}' is a property of the '${q.fact}' fact, not of '${fact}'${hint ? ` — ${hint}` : ''}`);
+    return props[q.name] ? { name: q.name, spec: props[q.name] } : null;
+  }
+
+  /** Every event across ALL facts, under the names the tools accept. */
+  allEventNames() {
+    return this.facts.flatMap((f) => this.eventNames(f).map((e) => this.qualify(f, e)));
+  }
+
+  /** Every event property across ALL facts, under the names the tools accept. */
+  allEventProps() {
+    return this.facts.flatMap((f) => this.eventProps(f).map((p) => this.qualify(f, p)));
+  }
+
+  /** Every SCALAR event property across ALL facts (tool-facing names). */
+  allScalarEventProps() {
+    return this.facts.flatMap((f) => this.scalarEventProps(f).map((p) => this.qualify(f, p)));
+  }
+
+  /**
+   * Enum of event names for a schema whose FACT is not fixed at schema-build time — the
+   * pipeline stages, where the source is chosen per draft. It carries every fact's BARE name
+   * (the natural form once a source is picked) plus the qualified form of the secondary facts
+   * (so a cross-fact mistake is caught by the stage with a fix, not by a bare enum rejection).
+   * Callers MUST still resolve the name against the actual source; `allEventNames()` stays the
+   * canonical, unambiguous list for discovery surfaces.
+   */
+  eventNameEnum() {
+    return [...new Set([...this.facts.flatMap((f) => this.eventNames(f)), ...this.allEventNames()])];
+  }
+
+  /** The same widened enum for event PROPERTIES (bare on every fact + qualified secondaries). */
+  eventPropEnum() {
+    return [...new Set([...this.facts.flatMap((f) => this.eventProps(f)), ...this.allEventProps()])];
+  }
+
   /** dbt column descriptions for a model: { columnName: description }. */
   columnDescriptions(key) {
     return this.getModel(key).column_descriptions || {};
   }
 
   /** event_data property descriptions (if declared): { property: description }. */
-  eventPropertyDescriptions() {
-    const props = this.models[this.anchor]?.properties || {};
+  eventPropertyDescriptions(fact = this.anchor) {
+    const props = this.models[fact]?.properties || {};
     const out = {};
     for (const [k, v] of Object.entries(props)) if (v && v.description) out[k] = v.description;
     return out;
@@ -479,63 +615,63 @@ export class Catalog {
    * it MUST be scoped (event_name / event_scope) to those events. Only properties that
    * declare an applicability list are included.
    */
-  eventPropertyEvents() {
-    const props = this.models[this.anchor]?.properties || {};
+  eventPropertyEvents(fact = this.anchor) {
+    const props = this.models[fact]?.properties || {};
     const out = {};
     for (const [k, v] of Object.entries(props)) if (v && Array.isArray(v.events) && v.events.length) out[k] = v.events;
     return out;
   }
 
   /** Physical JSON column holding event-specific properties on the events model. */
-  eventDataColumn() {
-    return this.models[this.anchor]?.event_data_column || 'event_properties';
+  eventDataColumn(fact = this.anchor) {
+    return this.models[fact]?.event_data_column || 'event_properties';
   }
 
   /** Physical column on the anchor that carries the event type, or null. */
-  eventNameColumn() {
-    return this.models[this.anchor]?.event_name?.column || null;
+  eventNameColumn(fact = this.anchor) {
+    return this.models[fact]?.event_name?.column || null;
   }
 
   /** Anchor column identifying the app/bundle (meta.mcp.dimension:{bundle:true}), or null.
    *  When set, the value index breaks per-property coverage down by it (per-app emptiness). */
-  bundleColumn() {
-    return this.models[this.anchor]?.bundle_column || null;
+  bundleColumn(fact = this.anchor) {
+    return this.models[fact]?.bundle_column || null;
   }
 
   /** event_name values enum. */
-  eventNames() {
-    return this.models[this.anchor]?.known_events || [];
+  eventNames(fact = this.anchor) {
+    return this.models[fact]?.known_events || [];
   }
 
   /** event_properties keys (all, including complex array/struct ones). */
-  eventProps() {
-    return Object.keys(this.models[this.anchor]?.properties || {});
+  eventProps(fact = this.anchor) {
+    return Object.keys(this.models[fact]?.properties || {});
   }
 
   /** Full spec for one event_data property ({ type, items?, fields?, values?, description? }). */
-  eventPropertySpec(name) {
-    return (this.models[this.anchor]?.properties || {})[name];
+  eventPropertySpec(name, fact = this.anchor) {
+    return (this.models[fact]?.properties || {})[name];
   }
 
   /** True if a property is a complex (array / struct / array-of-struct) type. */
-  isComplexEventProp(name) {
-    const t = String(this.eventPropertySpec(name)?.type || '').toLowerCase();
+  isComplexEventProp(name, fact = this.anchor) {
+    const t = String(this.eventPropertySpec(name, fact)?.type || '').toLowerCase();
     return t === 'array' || t === 'struct' || t === 'array<struct>';
   }
 
   /** SCALAR event_property keys — usable directly as categorical dims / scalar filters. */
-  scalarEventProps() {
-    return this.eventProps().filter((k) => !this.isComplexEventProp(k));
+  scalarEventProps(fact = this.anchor) {
+    return this.eventProps(fact).filter((k) => !this.isComplexEventProp(k, fact));
   }
 
   /** COMPLEX (array/struct) event_property keys — only usable via prepare stages. */
-  complexEventProps() {
-    return this.eventProps().filter((k) => this.isComplexEventProp(k));
+  complexEventProps(fact = this.anchor) {
+    return this.eventProps(fact).filter((k) => this.isComplexEventProp(k, fact));
   }
 
   /** Numeric event_properties keys (valid for sum/avg/median/percentile). */
-  eventNumericProps() {
-    const props = this.models[this.anchor]?.properties || {};
+  eventNumericProps(fact = this.anchor) {
+    const props = this.models[fact]?.properties || {};
     return Object.keys(props).filter((k) => isNumericType(props[k].type));
   }
 
@@ -547,7 +683,7 @@ export class Catalog {
   /** Plain (non-JSON) physical columns of a model usable as categorical dims. */
   modelDimensionColumns(key) {
     const m = this.getModel(key);
-    if (key === this.anchor) {
+    if (this.isFact(key)) {
       // events: event_name + the real session key column, plus any column explicitly
       // marked meta.mcp.dimension (e.g. bundle_id — present on every event, so it
       // can segment by app without a users-join).
@@ -579,7 +715,6 @@ export class Catalog {
    */
   reachableGroupByPaths(maxHops = 2) {
     const out = new Set(['metric_time']);
-    const anchor = this.models[this.anchor];
 
     // local categorical columns on the anchor are added per-task; here we expose
     // only join-reachable dimensions + metric_time (task dims added at runtime).
@@ -598,7 +733,7 @@ export class Catalog {
         visit(targetKey, newPrefix, hop + 1);
       }
     };
-    visit(this.anchor, '', 1);
+    for (const fact of this.facts) visit(fact, '', 1);
     return [...out];
   }
 
@@ -611,7 +746,7 @@ export class Catalog {
     return refs;
   }
 
-  /** Models that may be referenced in `use_base_models` (everything but anchor). */
+  /** Models that may be referenced in `use_base_models` (everything but the primary fact). */
   joinableModelKeys() {
     return this.modelKeys().filter((k) => k !== this.anchor);
   }

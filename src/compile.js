@@ -12,12 +12,23 @@ const NS = (task, name) => `${task}_${name}`;
  *  surfaces it as ToolError.field so the caller knows exactly what to fix. */
 function fail(msg, field) { const e = new Error(msg); e.field = field; throw e; }
 
-/** SQL predicate for a list of event names on the events model, or null. */
+// The catalog owns the bare-vs-qualified name rules (Catalog.eventNameFor / .propertyFor);
+// these two wrappers only re-throw with the input `field` the engine reports back.
+const HINT = 'declare it on a semantic model built from that fact';
+function factName(catalog, modelKey, name, field) {
+  try { return catalog.eventNameFor(modelKey, name, { hint: HINT }); } catch (e) { return fail(e.message, field); }
+}
+function factProp(catalog, modelKey, name, field) {
+  try { return catalog.propertyFor(modelKey, name, { hint: HINT }); } catch (e) { return fail(e.message, field); }
+}
+
+/** SQL predicate for a list of event names on an events FACT, or null. */
 export function namesToScope(catalog, modelKey, names) {
-  if (modelKey !== catalog.anchor || !names?.length) return null;
+  if (!catalog.isFact(modelKey) || !names?.length) return null;
   const col = catalog.getModel(modelKey).event_name.column;
-  if (names.length === 1) return `${col} = ${sqlLiteral(names[0])}`;
-  return `${col} in (${names.map(sqlLiteral).join(', ')})`;
+  const vals = names.map((n) => factName(catalog, modelKey, n, 'event_name'));
+  if (vals.length === 1) return `${col} = ${sqlLiteral(vals[0])}`;
+  return `${col} in (${vals.map(sqlLiteral).join(', ')})`;
 }
 
 /** Build the SQL scope predicate from a semantic_models event_scope or null. */
@@ -29,16 +40,15 @@ export function scopeExpr(catalog, modelKey, eventScope) {
  * SQL expression for an event property: a REAL column reference when the payload
  * is flattened upstream (spec.column set), else extraction from the JSON blob.
  */
-function propExpr(catalog, name, spec) {
-  return spec.column ? spec.column : jsonExtract(catalog.dialect, catalog.eventDataColumn(), name, spec.type);
+function propExpr(catalog, modelKey, name, spec) {
+  return spec.column ? spec.column : jsonExtract(catalog.dialect, catalog.eventDataColumn(modelKey), name, spec.type);
 }
 
 /** SQL for a single event_data property condition (used for funnel-step scoping). */
 function propCond(catalog, modelKey, cond) {
-  const props = catalog.getModel(catalog.anchor).properties || {};
-  const p = props[cond.property];
-  if (!p) fail(`unknown event property in where: '${cond.property}'. Discover properties via semantic_index({ event })`, 'where.property');
-  const lhs = propExpr(catalog, cond.property, p);
+  const found = factProp(catalog, modelKey, cond.property, 'where.property');
+  if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ event })`, 'where.property');
+  const lhs = propExpr(catalog, modelKey, found.name, found.spec);
   switch (cond.op) {
     case 'eq': return `${lhs} = ${sqlLiteral(cond.value)}`;
     case 'neq': return `${lhs} != ${sqlLiteral(cond.value)}`;
@@ -75,7 +85,6 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
   // a per-measure event_name (+ optional property `where`) overrides the SM-level
   // scope — this is how a funnel step is defined as "event + property value".
   const scope = measureScope(catalog, modelKey, decl, smScope);
-  const props = catalog.getModel(catalog.anchor).properties || {};
 
   // sum_boolean: sum a boolean per row (e.g. "did event X") — the scope IS the boolean.
   if (decl.agg === 'sum_boolean') {
@@ -92,14 +101,15 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     }
     agg = 'sum'; // count(*) rendered as sum(1) so scope folds cleanly
     valueExpr = '1';
-  } else if (modelKey === catalog.anchor && props[field]) {
+  } else if (catalog.isFact(modelKey) && factProp(catalog, modelKey, field, 'measures.field')) {
     // an event property; numeric aggregations need a numeric type OR an explicit cast
     // (e.g. complete_time arrives as STRING upstream → add "cast": "numeric").
+    const { name: propName, spec } = factProp(catalog, modelKey, field, 'measures.field');
     const numericAgg = ['sum', 'average', 'median', 'min', 'max', 'percentile'].includes(decl.agg);
-    if (numericAgg && !isNumericType(props[field].type) && !decl.cast) {
-      fail(`measure '${decl.name}': property '${field}' is type '${props[field].type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
+    if (numericAgg && !isNumericType(spec.type) && !decl.cast) {
+      fail(`measure '${decl.name}': property '${field}' is type '${spec.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
     }
-    valueExpr = propExpr(catalog, field, props[field]);
+    valueExpr = propExpr(catalog, modelKey, propName, spec);
   } else {
     // a physical column (entity key like user_id/session_id, or model column)
     valueExpr = field;
@@ -118,12 +128,11 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
 /** Resolve a dimension declaration to a dbt dimension object. */
 function compileDimension(catalog, task, modelKey, decl) {
   if (decl.source === 'event_property') {
-    if (modelKey !== catalog.anchor) fail('event_property dimensions only valid on the events model', 'dimensions.source');
-    const props = catalog.getModel(catalog.anchor).properties || {};
-    const p = props[decl.property];
-    if (!p) fail(`unknown event property: '${decl.property}'. Discover properties via semantic_index({ event })`, 'dimensions.property');
+    if (!catalog.isFact(modelKey)) fail(`event_property dimensions are only valid on an events fact (${catalog.facts.join(', ')}), not on '${modelKey}'`, 'dimensions.source');
+    const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
+    if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ event })`, 'dimensions.property');
     if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
-    return { name: NS(task, decl.property), type: 'categorical', expr: propExpr(catalog, decl.property, p) };
+    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name, found.spec) };
   }
   if (decl.source === 'model_column') {
     const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column };
@@ -152,14 +161,12 @@ export function compileDeclaration(catalog, decl) {
     usedModels.add(k);
   }
 
-  // event scope is taken from the events semantic_models entry (if any)
-  let eventScope = null;
   for (const sm of decl.semantic_models || []) {
     const modelKey = sm.from;
     if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}`, 'semantic_models.from');
     usedModels.add(modelKey);
+    // Each fact scopes its OWN measures: the scope is baked into every measure expr below.
     const scope = scopeExpr(catalog, modelKey, sm.event_scope);
-    if (modelKey === catalog.anchor && scope) eventScope = scope;
     for (const d of sm.dimensions || []) ensure(modelKey).dimensions.push(compileDimension(catalog, task, modelKey, d));
     for (const m of sm.measures || []) {
       const cm = compileMeasure(catalog, task, modelKey, m, scope);

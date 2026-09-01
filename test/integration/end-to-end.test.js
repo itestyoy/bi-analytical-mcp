@@ -148,13 +148,16 @@ test('2. semantic_index({ status }) reports a clean value-index sync with EXACT 
   assert.equal(vi.running, false);
   assert.equal(vi.last_successful_run.status, 'ok');
   assert.equal(vi.last_successful_run.errors, 0);
-  // EXACT coverage: every scalar event property PLUS every categorical dimension
-  // attribute of the non-anchor models (users/experiments) was indexed — no silent gaps…
-  const dimTargets = engine.catalog.modelKeys()
-    .filter((k) => k !== engine.catalog.anchor)
-    .flatMap((k) => Object.entries(engine.catalog.getModel(k).dimensions || {})
-      .filter(([, s]) => String(s?.type || '').toLowerCase() !== 'time'));
-  assert.equal(vi.indexed_properties, engine.catalog.scalarEventProps().length + dimTargets.length, 'one prop_stats row per indexable property/attribute');
+  // EXACT coverage — one prop_stats row per indexable key, over EVERY events fact:
+  //   · that fact's event properties (scalar top-values AND complex coverage-only), plus
+  //   · its categorical dimensions except the event_name column,
+  // and the categorical dimensions of every non-fact model (users/experiments). No gaps.
+  const c = engine.catalog;
+  const catDims = (k, skip) => Object.keys(c.getModel(k).dimensions || {})
+    .filter((d) => d !== skip && String(c.getModel(k).dimensions[d]?.type || '').toLowerCase() !== 'time');
+  const expected = c.facts.reduce((n, f) => n + c.eventProps(f).length + catDims(f, c.eventNameColumn(f)).length, 0)
+    + c.modelKeys().filter((k) => !c.isFact(k)).reduce((n, k) => n + catDims(k).length, 0);
+  assert.equal(vi.indexed_properties, expected, 'one prop_stats row per indexable property/attribute');
   // …and the persisted counts equal what the run itself reported (DB COUNT == run counters).
   assert.equal(vi.indexed_properties, vi.last_successful_run.properties_indexed);
   assert.equal(vi.total_values, vi.last_successful_run.values_written);

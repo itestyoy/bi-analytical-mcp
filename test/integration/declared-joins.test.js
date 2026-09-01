@@ -25,7 +25,9 @@
 //   F   (26-33) the GENERATED join code, proven by executing it and comparing its rows to a
 //               reference query written by hand here — still no text matching;
 //   G   (34)    the same join driven through a real MCP client: tools/list, tools/call, JSON in
-//               and the answer read out of the MCP content block.
+//               and the answer read out of the MCP content block;
+//   H   (35-40) all FOUR sources in one chain — three declared relationships at once, walked
+//               from both ends, plus the governed path over two facts at the same time.
 //
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
@@ -784,4 +786,159 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
     await client.close();
     await server.close();
   }
+});
+
+// ═══════════ H. ALL FOUR SOURCES IN ONE CHAIN ═══════════
+//
+// The cases above join two models at a time. Real questions do not: "which ad funnel was
+// running when the app died, for a player from which country, bought through which channel"
+// touches the crash source, the events source, the install record and the spend table in one
+// pipeline. Every join stage here goes through a relationship DECLARED IN THE SCHEMA — three
+// different ones, two of them composite, one of them point-in-time — and the pipeline is
+// materialized and read back like any other.
+//
+// The chain is built from BOTH ends: from the crash side and from the event side, in a
+// different order. The set of (crash, event, spend) triples must come out identical — same
+// relation, whichever way you walk it. What must NOT come out identical is the country: each
+// chain attributes the player to the install version valid at ITS OWN instant, and a crash on
+// 05 Jan is not the same moment as the ad event that preceded it.
+
+/** Materialize a pipeline once per key and memoize — the chains are reused across cases. */
+const chainCache = new Map();
+async function chain(key, source, stages) {
+  if (!chainCache.has(key)) chainCache.set(key, await pipeRows(source, ...stages));
+  return chainCache.get(key);
+}
+
+// crash → the funnel's events → the install version valid AT THE CRASH → that player's spend.
+const CHAIN_FROM_CRASH = [
+  { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id'] },
+  { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: ['country'] },
+  { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['acquisition_id', 'cost'] },
+  { stage: 'project', columns: ['crash_id', 'event_id', 'acquisition_id', 'country', 'cost'] },
+];
+
+// the same four models from the other end: event → its install version AT THE EVENT → that
+// player's spend → the crash reports whose rewarded funnel is this event's funnel.
+const CHAIN_FROM_EVENT = [
+  { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), kind: 'inner', attrs: ['country'] },
+  { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['acquisition_id', 'cost'] },
+  { stage: 'join', with: 'crashlytics', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['crash_id'] },
+  { stage: 'project', columns: ['crash_id', 'event_id', 'acquisition_id', 'country', 'cost'] },
+];
+
+const triples = (rows) => new Set(rows.map((r) => `${r.crash_id}|${r.event_id}|${r.acquisition_id}`));
+const countBy = (rows, col) => rows.reduce((m, r) => ({ ...m, [String(r[col])]: (m[String(r[col])] || 0) + 1 }), {});
+
+// 35. Three declared relationships in one pipeline — a variant key, a point-in-time key and a
+//     plain key — over four sources. 7 crashes carry a rewarded funnel, each funnel is 2 events
+//     (14 rows), and u1 has two spend rows, so its 8 rows pair twice: 22.
+test('35. four sources in one pipeline from the crash side: 22 rows, 7 crashes, 8 events', opts, async (t) => {
+  if (skip(t)) return;
+  const rows = await chain('crash', 'crashlytics', CHAIN_FROM_CRASH);
+  assert.equal(rows.length, 22);
+  assert.equal(new Set(rows.map((r) => String(r.crash_id))).size, 7, 'k1..k3, k10 (u1), k6, k9, k13');
+  assert.equal(new Set(rows.map((r) => String(r.event_id))).size, 8, 'four u1 crashes point at the same funnel pair');
+  assert.equal(new Set(rows.map((r) => String(r.acquisition_id))).size, 5, 'a1 + a7 (u1), a3, a5, a8');
+});
+
+// 36. The identical relation reached in a different order, from a different source, through a
+//     different sequence of the same declared keys.
+test('36. the same four sources from the event side give the identical 22 triples', opts, async (t) => {
+  if (skip(t)) return;
+  const fromCrash = await chain('crash', 'crashlytics', CHAIN_FROM_CRASH);
+  const fromEvent = await chain('event', 'events', CHAIN_FROM_EVENT);
+  assert.equal(fromEvent.length, 22);
+  assert.deepEqual(triples(fromEvent), triples(fromCrash));
+});
+
+// 37. …but the two chains do NOT agree on the country, and that is the point of a point-in-time
+//     join: u1 saw its rewarded funnel while still US and crashed after moving to GB.
+test('37. each chain attributes the player at ITS OWN instant: GB 20 / BR 2 vs US 16 / GB 4 / BR 2', opts, async (t) => {
+  if (skip(t)) return;
+  const fromCrash = await chain('crash', 'crashlytics', CHAIN_FROM_CRASH);
+  const fromEvent = await chain('event', 'events', CHAIN_FROM_EVENT);
+  assert.deepEqual(countBy(fromCrash, 'country'), { GB: 20, BR: 2 }, 'attributed at the crash time');
+  assert.deepEqual(countBy(fromEvent, 'country'), { US: 16, GB: 4, BR: 2 }, 'attributed at the ad-event time');
+  // the money carried along is the same either way — only the label on it moved.
+  assert.ok(near(sumCol(fromCrash, 'cost'), 25.0), `crash side=${sumCol(fromCrash, 'cost')}`);
+  assert.ok(near(sumCol(fromEvent, 'cost'), 25.0), `event side=${sumCol(fromEvent, 'cost')}`);
+});
+
+// 38. And the CODE the four-way chain generates is the four-way join a human would write —
+//     executed on the warehouse and compared row for row (section F, extended to a chain).
+test('38. the generated four-way join matches a hand-written one', opts, async (t) => {
+  if (skip(t)) return;
+  const gen = await generatedSql('crashlytics', ...CHAIN_FROM_CRASH.slice(0, 3));
+  const cols = ['crash_id', 'event_id', 'acquisition_id', 'country'];
+  // Every `via` resolves its LEFT key from the pipeline's SOURCE, so all three ON clauses hang
+  // off the crash row — that is what the reference has to mirror.
+  const want = await ordered(`
+    SELECT c.crash_id, e.event_id, a.acquisition_id, u.country
+      FROM {{ ref('fct_crashlytics_events') }} c
+      JOIN {{ ref('fct_analytics_events') }} e
+        ON c.rewarded_tracking_id = e.tracking_id
+       AND c.player_id_of_internal = e.player_id_of_internal
+      JOIN {{ ref('dim_users') }} u
+        ON c.player_id_of_internal = u.player_id_of_internal
+       AND c.event_time BETWEEN u.install_time_valid_from AND u.install_time_valid_until
+      JOIN {{ ref('fct_player_acquisition') }} a
+        ON c.player_id_of_internal = a.player_id_of_internal`, cols);
+  assert.equal(want.length, 22);
+  assert.deepEqual(await ordered(gen, cols), want);
+});
+
+// 39. The same four sources aggregated in the chain: spend per crash-carrying funnel event, by
+//     the channel it was bought through. The money is inflated by the pairing (that is what a
+//     many-to-many join does) — pin the number so nobody reads it as a spend report.
+test('39. aggregating the chain: 25.00 across 3 channels, u1 dominating', opts, async (t) => {
+  if (skip(t)) return;
+  const rows = await pipeRows('crashlytics',
+    ...CHAIN_FROM_CRASH.slice(0, 2),
+    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['media_source', 'cost'] },
+    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'spend', fn: 'sum', column: 'cost' }, { name: 'n', fn: 'count' }] });
+  const spend = mapCol(rows, 'media_source', 'spend');
+  const n = mapCol(rows, 'media_source', 'n');
+  assert.ok(near(spend.meta, 20.0), `meta=${spend.meta}`);      // u1 8x1.50 + 8x0.50, u3 2x2.00
+  assert.ok(near(spend.applovin, 5.0), `applovin=${spend.applovin}`); // u7 2x2.50
+  assert.ok(near(spend.organic, 0.0), `organic=${spend.organic}`);    // u5 2x0.00
+  assert.equal(n.meta + n.applovin + n.organic, 22);
+  assert.ok(near(sumCol(rows, 'spend'), 25.0));
+});
+
+// 40. The GOVERNED path over two facts at once: a spend measure and an event measure in one
+//     task, both reaching the SAME slowly-changing install record by the declared player key,
+//     plus a ratio that spans them. MetricFlow applies each source's point-in-time join itself.
+test('40. governed: spend and events from two sources, sliced by the same install attribute', opts, async (t) => {
+  if (skip(t)) return;
+  const task = await engine.create_semantic_model({
+    name: 'jmix',
+    use_base_models: ['users'],
+    semantic_models: [
+      { from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] },
+      { from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] },
+    ],
+    metrics: [
+      { name: 'cost', type: 'simple', measure: { name: 'cost' } },
+      { name: 'evts', type: 'simple', measure: { name: 'evts' } },
+      { name: 'cost_per_event', type: 'ratio', numerator: { name: 'cost' }, denominator: { name: 'evts' } },
+    ],
+  });
+  assert.equal(task.parse.ok, true, JSON.stringify(task.parse));
+  const r = await engine.query_semantic_model({
+    context_id: task.context_id,
+    metrics: ['jmix_cost', 'jmix_evts', 'jmix_cost_per_event'],
+    group_by: ['user__country'],
+  });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const key = r.columns.map((c) => c.name).find((n) => n.includes('country'));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x[key]), x]));
+  for (const [country, cost, evts] of [['US', 6.75, 67], ['GB', 5.0, 57], ['DE', 4.0, 31], ['BR', 1.75, 29]]) {
+    assert.ok(near(num(by[country].jmix_cost), cost), `${country} cost=${by[country].jmix_cost}`);
+    assert.equal(num(by[country].jmix_evts), evts, `${country} evts`);
+    assert.ok(near(num(by[country].jmix_cost_per_event), cost / evts, 1e-6), `${country} cpe=${by[country].jmix_cost_per_event}`);
+  }
+  // neither source fanned the other out: the totals are still the honest per-source totals.
+  assert.ok(near(sumCol(r.rows, 'jmix_cost'), 17.5));
+  assert.equal(sumCol(r.rows, 'jmix_evts'), 184);
 });

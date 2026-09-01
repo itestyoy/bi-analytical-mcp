@@ -19,6 +19,14 @@
 // clause, a dropped window or the wrong column moves the number. Where a join can multiply
 // rows there is an explicit no-duplicates invariant: count(*) == count(distinct <base key>).
 //
+// Sections:
+//   A-D (1-20)  the join behaviour, every case built and run as a real pipeline / metric query;
+//   E   (21-25) grounding: a declaration the built tables do not back;
+//   F   (26-33) the GENERATED join code, proven by executing it and comparing its rows to a
+//               reference query written by hand here — still no text matching;
+//   G   (34)    the same join driven through a real MCP client: tools/list, tools/call, JSON in
+//               and the answer read out of the MCP content block.
+//
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
 import { test, before, after } from 'node:test';
@@ -33,6 +41,9 @@ import { loadCatalog, groundCatalogToPhysical } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
+import { makeMcpServer } from '../../src/server.js';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { startPglite } from './pglite-harness.js';
 
 const execFileP = promisify(execFile);
@@ -422,6 +433,19 @@ test('22. a half-built window also drops the slowly-changing flag', opts, async 
   assert.ok(!dims.ghost_valid_end, 'the end column was never built and was pruned');
   assert.ok(!phantom.getModel('users').scd, 'one bound alone cannot make a validity window');
   assert.match(String(phantomPruned.users || ''), /no longer treated as slowly-changing/);
+  // …and the degradation is not just a flag on an object: the manifest PARSES (dbt rejects a
+  // `natural` entity that has no window) and the join now behaves as a plain dimension —
+  // u1's 36 events reach BOTH of its install rows, so the grouped total is 220, not 184.
+  const sm = await phantomEngine.create_semantic_model({
+    name: 'jphev',
+    use_base_models: ['users'],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+  });
+  assert.equal(sm.parse.ok, true, JSON.stringify(sm.parse));
+  const res = await phantomEngine.query_semantic_model({ context_id: sm.context_id, metrics: ['jphev_evts'], group_by: ['user__country'] });
+  assert.equal(res.ok, true, JSON.stringify(res.error));
+  assert.equal(sumCol(res.rows, 'jphev_evts'), 220, 'with no window left every event meets both of u1\'s versions');
 });
 
 // 23. A relationship whose key column is missing stops being offered — and cannot be called.
@@ -472,9 +496,22 @@ test('25. pruning an owning key clears the join target', opts, async (t) => {
   assert.ok(!phantom.reachableGroupByPaths().some((p) => p.startsWith('ghost_pair__')), 'and it offers no group-by path');
   // the events side still declares it, but with no owner it is not offered as a join
   assert.ok(!phantom.joinEntityNames().includes('ghost_pair'));
-  // the owner's other, real relationship is untouched
+  // the owner's other, real relationship is untouched — and still joins, on the warehouse:
+  // one assignment per player, so every one of the 184 events pairs exactly once.
   assert.deepEqual(phantom.entityKey('experiments', 'user'), [{ column: 'player_id_of_internal' }]);
   assert.equal(phantom.joinTargetFor('user'), 'users');
+  const st = await phantomEngine.build_native_model({ action: 'start', name: `ph_${seq++}`, source: 'events' });
+  for (const stage of [
+    { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: ['variant_group'] },
+    { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'distinct_base', fn: 'count_distinct', column: 'event_id' }] },
+  ]) {
+    const r = await phantomEngine.build_native_model({ action: 'add_step', draft_id: st.draft_id, stage });
+    assert.ok(!r.error, JSON.stringify(r.error));
+  }
+  const c = await phantomEngine.build_native_model({ action: 'materialize', draft_id: st.draft_id });
+  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+  assert.equal(num(c.rows[0].n), 184);
+  assert.equal(num(c.rows[0].distinct_base), 184, 'and it did not fan out');
 });
 
 // ═══════════ discovery + guards (input validation) ═══════════
@@ -509,4 +546,240 @@ test('join guards: an undeclared relationship, a self-join and via+on are all re
     /declares no such relationship.*share: user/s);
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'events', via: 'user' }), /own source/);
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'users', via: 'user', on: ['player_id_of_internal'] }), /not both/);
+});
+
+// ═══════════ F. THE GENERATED JOIN CODE, PROVEN BY RUNNING IT ═══════════
+//
+// The rule still holds: nothing below matches SQL as text. What these cases do instead is take
+// the code the tool ACTUALLY GENERATED for a join, hand it to the same warehouse, and compare
+// the rows it returns against a reference query WRITTEN BY HAND in the test — the join as it
+// was meant to come out. Identical result sets are the proof: a wrong ON column, a lost
+// validity predicate, the wrong variant or the wrong join kind all move the rows apart, and
+// the reference cannot drift along with the generator because nothing generates it.
+//
+// The only text operation here is resolving dbt's `ref()` so the snippet can be executed at
+// all — plumbing, not an assertion.
+
+const REF = /\{\{\s*ref\(\s*'([^']+)'\s*\)\s*\}\}/g;
+
+/** Execute SQL on the very warehouse the tools ran against (same PGlite instance). */
+async function runSql(sql) {
+  const { rows } = await pg.db.query(sql.replace(REF, (_, m) => `public.${m}`).trim().replace(/;\s*$/, ''));
+  return rows;
+}
+
+/** Project a query to `cols` in a fixed order, so two queries are comparable row by row. */
+function ordered(sql, cols) {
+  const by = cols.map((_, i) => `${i + 1} NULLS LAST`).join(', ');
+  return runSql(`SELECT ${cols.join(', ')} FROM (${sql.trim().replace(/;\s*$/, '')}) x ORDER BY ${by}`);
+}
+
+/** The SQL the tool generates for these stages — read from `preview`, nothing built. */
+async function generatedSql(source, ...stages) {
+  const s = await engine.build_native_model({ action: 'start', name: `gen_${seq++}`, source });
+  for (const stage of stages) {
+    const r = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage });
+    assert.ok(!r.error, `add_step ${stage.stage}: ${JSON.stringify(r.error)}`);
+  }
+  const p = await engine.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  assert.ok(p.model_sql, 'preview returns the generated model SQL');
+  return p.model_sql;
+}
+
+const ACQ_TO_USERS_PIT = `
+  SELECT a.acquisition_id, u.country
+    FROM {{ ref('fct_player_acquisition') }} a
+    JOIN {{ ref('dim_users') }} u
+      ON a.player_id_of_internal = u.player_id_of_internal
+     AND a.spend_date BETWEEN u.install_time_valid_from AND u.install_time_valid_until`;
+
+// 26. The declared key + the stated window must generate exactly the join a human would write.
+test('26. the generated point-in-time join returns what a hand-written one returns', opts, async (t) => {
+  if (skip(t)) return;
+  const gen = await generatedSql('acquisition',
+    { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: ['country'] });
+  const want = await ordered(ACQ_TO_USERS_PIT, ['acquisition_id', 'country']);
+  assert.equal(want.length, 13, 'the reference join is itself the 13-row point-in-time answer');
+  assert.deepEqual(await ordered(gen, ['acquisition_id', 'country']), want);
+});
+
+// 27. Take the window away and the generated code must lose the BETWEEN — and nothing else.
+test('27. without `between` the generated code is the same join minus the window', opts, async (t) => {
+  if (skip(t)) return;
+  const gen = await generatedSql('acquisition',
+    { stage: 'join', with: 'users', via: 'user', kind: 'inner', attrs: ['country'] });
+  const got = await ordered(gen, ['acquisition_id', 'country']);
+  const want = await ordered(`
+    SELECT a.acquisition_id, u.country
+      FROM {{ ref('fct_player_acquisition') }} a
+      JOIN {{ ref('dim_users') }} u
+        ON a.player_id_of_internal = u.player_id_of_internal`, ['acquisition_id', 'country']);
+  assert.equal(want.length, 15, 'the key alone matches both of u1\'s install versions');
+  assert.deepEqual(got, want);
+  assert.notDeepEqual(got, await ordered(ACQ_TO_USERS_PIT, ['acquisition_id', 'country']),
+    'and it is NOT the windowed join — `between` is what puts the window in the code');
+});
+
+// 28. Each variant must generate a join on ITS OWN tracking column. Three references, three
+//     answers: if the generator ignored the caller's variant they could not all match.
+test('28. each ad-format variant generates the join on its own tracking column', opts, async (t) => {
+  if (skip(t)) return;
+  const refFor = (col) => `
+    SELECT c.crash_id, e.event_id
+      FROM {{ ref('fct_crashlytics_events') }} c
+      JOIN {{ ref('fct_analytics_events') }} e
+        ON c.${col} = e.tracking_id
+       AND c.player_id_of_internal = e.player_id_of_internal`;
+  for (const [variant, col, n] of [['rewarded', 'rewarded_tracking_id', 14], ['interstitial', 'interstitial_tracking_id', 12], ['banner', 'banner_tracking_id', 8]]) {
+    const gen = await generatedSql('crashlytics',
+      { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: ['event_id'] });
+    const want = await ordered(refFor(col), ['crash_id', 'event_id']);
+    assert.equal(want.length, n, `${variant}: the reference itself`);
+    assert.deepEqual(await ordered(gen, ['crash_id', 'event_id']), want, variant);
+  }
+});
+
+// 29. BOTH parts of the composite key must reach the generated code. Drop the player half by
+//     hand and the shared funnel id 'fnl_dup' leaks u10's events into u2's crashes — 12 rows
+//     instead of 8. The generated code must be the 8.
+test('29. the composite key generates BOTH equalities, not just the funnel id', opts, async (t) => {
+  if (skip(t)) return;
+  const gen = await generatedSql('crashlytics',
+    { stage: 'join', with: 'events', via: 'ad_funnel_banner', kind: 'inner', attrs: ['event_id'] });
+  const got = await ordered(gen, ['crash_id', 'event_id']);
+  const funnelOnly = await ordered(`
+    SELECT c.crash_id, e.event_id
+      FROM {{ ref('fct_crashlytics_events') }} c
+      JOIN {{ ref('fct_analytics_events') }} e ON c.banner_tracking_id = e.tracking_id`, ['crash_id', 'event_id']);
+  assert.equal(funnelOnly.length, 12, 'the funnel id ALONE pulls u10 into k4/k5');
+  assert.equal(got.length, 8);
+  assert.notDeepEqual(got, funnelOnly);
+});
+
+// 30. `kind` must generate the join type it names: the same stage left-joined keeps every
+//     crash, with a NULL where nothing matched.
+test('30. kind:left generates a LEFT JOIN — 17 rows, 9 of them unmatched', opts, async (t) => {
+  if (skip(t)) return;
+  const gen = await generatedSql('crashlytics',
+    { stage: 'join', with: 'events', via: 'ad_funnel_banner', attrs: ['event_id'] });
+  const got = await ordered(gen, ['crash_id', 'event_id']);
+  const want = await ordered(`
+    SELECT c.crash_id, e.event_id
+      FROM {{ ref('fct_crashlytics_events') }} c
+      LEFT JOIN {{ ref('fct_analytics_events') }} e
+        ON c.banner_tracking_id = e.tracking_id
+       AND c.player_id_of_internal = e.player_id_of_internal`, ['crash_id', 'event_id']);
+  assert.equal(want.length, 17);
+  assert.equal(want.filter((r) => r.event_id == null).length, 9, 'the crashes with no banner funnel');
+  assert.deepEqual(got, want);
+});
+
+// 31. A single-column declared key must generate a single equality — no invented second part.
+test('31. a one-column relationship generates one equality: the 220 event x spend pairs', opts, async (t) => {
+  if (skip(t)) return;
+  const gen = await generatedSql('events',
+    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['acquisition_id'] });
+  const want = await ordered(`
+    SELECT e.event_id, a.acquisition_id
+      FROM {{ ref('fct_analytics_events') }} e
+      JOIN {{ ref('fct_player_acquisition') }} a
+        ON e.player_id_of_internal = a.player_id_of_internal`, ['event_id', 'acquisition_id']);
+  assert.equal(want.length, 220);
+  assert.deepEqual(await ordered(gen, ['event_id', 'acquisition_id']), want);
+});
+
+// 32. The code shown in `preview` must be the code `materialize` actually builds — otherwise
+//     everything proven above is proven about SQL nobody runs.
+test('32. what preview shows is what materialize builds', opts, async (t) => {
+  if (skip(t)) return;
+  const stages = [
+    { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: ['country'] },
+    { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', fn: 'sum', column: 'cost' }] },
+  ];
+  const direct = mapCol(await runSql(await generatedSql('acquisition', ...stages)), 'country', 'total');
+  const built = mapCol(await pipeRows('acquisition', ...stages), 'country', 'total');
+  assert.deepEqual(Object.keys(built).sort(), Object.keys(direct).sort());
+  for (const k of Object.keys(direct)) assert.ok(near(built[k], direct[k]), `${k}: built=${built[k]} previewed=${direct[k]}`);
+  assert.ok(near(direct.US, 6.75) && near(direct.GB, 5.0) && near(direct.DE, 4.0) && near(direct.BR, 1.75));
+});
+
+// 33. The GOVERNED path generates its own join, from the entity the semantic model declares.
+//     Run that SQL too: the semantic layer's point-in-time join must land on the same numbers
+//     as the hand-written one, or the generated YAML describes the wrong key.
+test('33. the semantic layer generates the point-in-time join correctly', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await q(acqCtx, { metrics: ['jacq_cost'], group_by: ['user__country'], dry_run: true });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.ok(r.sql, 'dry_run returns the SQL the semantic layer generated');
+  const rows = await runSql(r.sql);
+  assert.ok(rows.length, 'the generated query returned rows');
+  const cKey = Object.keys(rows[0]).find((k) => k.includes('country'));
+  const mKey = Object.keys(rows[0]).find((k) => k !== cKey && k.includes('cost'));
+  const by = mapCol(rows, cKey, mKey);
+  const want = await runSql(`
+    SELECT u.country, SUM(a.cost) AS total
+      FROM {{ ref('fct_player_acquisition') }} a
+      JOIN {{ ref('dim_users') }} u
+        ON a.player_id_of_internal = u.player_id_of_internal
+       AND a.spend_date BETWEEN u.install_time_valid_from AND u.install_time_valid_until
+     GROUP BY 1`);
+  const ref = mapCol(want, 'country', 'total');
+  assert.deepEqual(Object.keys(by).sort(), Object.keys(ref).sort());
+  for (const k of Object.keys(ref)) assert.ok(near(by[k], ref[k]), `${k}: generated=${by[k]} reference=${ref[k]}`);
+  assert.ok(near(ref.US, 6.75) && near(ref.GB, 5.0) && near(ref.DE, 4.0) && near(ref.BR, 1.75));
+});
+
+// ═══════════ G. THE SAME JOIN THROUGH A REAL MCP CALL ═══════════
+//
+// Everything above calls the engine directly. This one goes the whole way an assistant does:
+// an MCP client over a transport, tools/list, tools/call with JSON arguments, and the answer
+// read back out of the MCP content block. Same warehouse, same numbers — so the join is
+// reachable through the actual protocol surface, not only through the JS method.
+
+test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4.00 / 1.75', opts, async (t) => {
+  if (skip(t)) return;
+  const server = makeMcpServer(engine);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'declared-joins-test', version: '0.0.0' });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    const tools = (await client.listTools()).tools.map((x) => x.name);
+    assert.ok(tools.includes('build_native_model'), 'the pipeline tool is advertised');
+    const call = async (name, args) => {
+      const res = await client.callTool({ name, arguments: args });
+      assert.ok(!res.isError, `${name}: ${res.content?.[0]?.text}`);
+      return JSON.parse(res.content[0].text);
+    };
+
+    const s = await call('build_native_model', { action: 'start', name: `mcp_${seq++}`, source: 'acquisition' });
+    await call('build_native_model', {
+      action: 'add_step',
+      draft_id: s.draft_id,
+      stage: { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: ['country'] },
+    });
+    await call('build_native_model', {
+      action: 'add_step',
+      draft_id: s.draft_id,
+      stage: { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', fn: 'sum', column: 'cost' }] },
+    });
+    const built = await call('build_native_model', { action: 'materialize', draft_id: s.draft_id });
+    assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
+    const by = mapCol(built.rows, 'country', 'total');
+    assert.ok(near(by.US, 6.75), `US=${by.US}`);
+    assert.ok(near(by.GB, 5.0), `GB=${by.GB}`);
+    assert.ok(near(by.DE, 4.0), `DE=${by.DE}`);
+    assert.ok(near(by.BR, 1.75), `BR=${by.BR}`);
+
+    // A relationship the two models do not share comes back as an MCP tool ERROR, not an answer.
+    const s2 = await call('build_native_model', { action: 'start', name: `mcp_${seq++}`, source: 'events' });
+    const bad = await client.callTool({
+      name: 'build_native_model',
+      arguments: { action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' } },
+    });
+    assert.equal(bad.isError, true);
+    assert.match(JSON.parse(bad.content[0].text).error.message, /declares no such relationship/);
+  } finally {
+    await client.close();
+    await server.close();
+  }
 });

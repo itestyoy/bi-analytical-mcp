@@ -409,3 +409,76 @@ test('triple coverage: per (bundle × event) cell fill matches the seeded data',
   const resCell = index.cellCoverage('result_of_event_data', { bundle: 'com.omg.colorfit', event: 'level_completed' });
   assert.ok(resCell && resCell.non_null > 0, JSON.stringify(resCell));
 });
+
+// ─────────── SECOND EVENTS FACT: the SAME mechanism, namespaced keys ───────────
+// The crash fact goes through the same worklist → batch scan → store path as the analytics
+// fact, but against ITS table, ITS event_name column and ITS time column. Everything below
+// is read back from the SAME SQLite store the primary fact writes to. SEED_DATA §10.
+
+test('crash-fact property values land in the index with the seed frequencies', opts, async (t) => {
+  if (skip(t)) return;
+  const vals = index.sampleValues('crashlytics.issue_title_of_event_data');
+  assert.deepEqual(new Set(vals.map((v) => v.value)),
+    new Set(['NullPointer', 'OutOfMemory', 'NetworkTimeout', 'DecodeError', 'MainThreadBlocked']));
+  assert.equal(valOf(vals, 'NullPointer').freq, 4);
+  assert.equal(valOf(vals, 'OutOfMemory').freq, 2);
+  assert.equal(valOf(vals, 'NetworkTimeout').freq, 3);
+  assert.equal(valOf(vals, 'DecodeError').freq, 1);
+  assert.equal(valOf(vals, 'MainThreadBlocked').freq, 3);
+  const st = index.stats('crashlytics.issue_title_of_event_data');
+  assert.equal(st.distinctCount, 5);
+  assert.equal(st.totalCount, 13); // every crash row carries an issue title
+  // the key is NAMESPACED — it does not occupy the primary fact's bare namespace
+  assert.ok(!index.stats('issue_title_of_event_data'), 'no bare key was written for the crash fact');
+});
+
+test('per-event coverage on the crash fact is keyed by ITS event names', opts, async (t) => {
+  if (skip(t)) return;
+  // anr_duration exists ONLY on anr (3 rows); crash_message ONLY on fatal_crash (6 rows)
+  const anr = index.coverage('crashlytics.anr_duration_of_event_data').filter((e) => e.non_null > 0);
+  assert.deepEqual(anr.map((e) => e.event_name), ['anr']);
+  assert.equal(anr[0].non_null, 3);
+  const msg = index.coverage('crashlytics.crash_message_of_event_data').filter((e) => e.non_null > 0);
+  assert.deepEqual(msg.map((e) => e.event_name), ['fatal_crash']);
+  assert.equal(msg[0].non_null, 6);
+});
+
+test('semantic_index({ event }) on the crash fact lists only what THAT event carries', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.semantic_index({ event: 'crashlytics.anr' });
+  assert.equal(out.source, 'crashlytics');
+  const names = out.properties.map((p) => p.name);
+  assert.ok(names.includes('crashlytics.anr_duration_of_event_data'), 'anr carries its duration');
+  assert.ok(!names.includes('crashlytics.crash_message_of_event_data'), 'a fatal-only property is not listed on anr');
+});
+
+test('semantic_index({ property }) resolves a qualified crash property', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.semantic_index({ property: 'crashlytics.issue_title_of_event_data' });
+  assert.equal(out.source, 'crashlytics');
+  assert.equal(out.indexed, true);
+  assert.equal(out.distinct_count, 5);
+  assert.equal(out.total_count, 13);
+  assert.deepEqual([...out.events].sort(), ['anr', 'fatal_crash', 'non_fatal']);
+  assert.equal(out.value_stats.top_value, 'NullPointer');
+  assert.equal(out.value_stats.top_freq, 4);
+});
+
+test('a DIMENSION of the crash fact is indexed under its own namespaced key', opts, async (t) => {
+  if (skip(t)) return;
+  const vals = index.sampleValues('crashlytics.app_version');
+  assert.equal(valOf(vals, '1.0.0').freq, 7);
+  assert.equal(valOf(vals, '1.1.0').freq, 6);
+  assert.equal(index.stats('crashlytics.app_version').totalCount, 13);
+});
+
+test('the crash fact ARRAY property gets complex coverage + example values', opts, async (t) => {
+  if (skip(t)) return;
+  const cov = index.coverage('crashlytics.breadcrumbs_of_event_data').filter((e) => e.non_null > 0);
+  assert.deepEqual(cov.map((e) => e.event_name).sort(), ['anr', 'fatal_crash', 'non_fatal']);
+  const by = Object.fromEntries(cov.map((e) => [e.event_name, e.non_null]));
+  assert.equal(by.fatal_crash, 6);
+  assert.equal(by.non_fatal, 4);
+  assert.equal(by.anr, 3);
+  assert.ok(index.sampleValues('crashlytics.breadcrumbs_of_event_data').length > 0, 'shape examples stored');
+});

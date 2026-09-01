@@ -560,7 +560,7 @@ export class Engine {
     // instead of querying them blindly. Requires the anchor to designate a bundle column
     // (meta.mcp.dimension:{bundle:true}) AND the value index to have run. ──
     if (input.bundle !== undefined && input.bundle !== false) {
-      if (!c.bundleColumn()) throw new ToolError('this catalog has no app/bundle dimension — mark the app column on the events fact with meta.mcp.dimension:{ bundle: true } to enable per-app coverage', { stage: 'validate', field: 'bundle' });
+      if (!c.facts.some((f) => c.bundleColumn(f))) throw new ToolError('this catalog has no app/bundle dimension — mark the app column on an events fact with meta.mcp.dimension:{ bundle: true } to enable per-app coverage', { stage: 'validate', field: 'bundle' });
       const bundleId = String(input.bundle);
       const known = this.valueIndex.bundles();
       if (!known.length) {

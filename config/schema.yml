@@ -1543,19 +1543,76 @@ models:
   #       description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
   #       meta: { mcp: { unit: seconds, events: [anr] } }
 
+  # ── DECLARED JOIN KEYS (meta.mcp.entities) ────────────────────────────────────────────
+  # A relationship between two models is declared ONCE, in the schema, and both paths use it:
+  # a metric query groups by <entity>__<attribute>, a pipeline joins with `via: <entity>`.
+  # Neither ever restates a column.
+  #
+  #   meta.mcp.entities:
+  #     <relationship name>:
+  #       type: primary | unique | foreign | natural
+  #       key:  [<column>, ...]        # ONE column, or SEVERAL for a composite key
+  #
+  # A key part may be { column: <time column>, granularity: day } to line a per-event source up
+  # with a per-day one — that is what stops a daily table from fanning out across a player's
+  # events. The two sides may name their columns differently; only the relationship name and the
+  # number of key parts have to agree (both are checked at catalog load).
+  #
+  # `primary`/`unique` make the model the join TARGET for that relationship — exactly one model
+  # may own it, and it must be unique per row there. `foreign` points at whichever model owns it.
+  # A relationship neither side owns is still a valid PIPELINE join (a many-to-many match, e.g.
+  # two events sources on tracking_id + player); the semantic layer needs an owner.
+  #
+  # VARIANTS — the same relationship carried by SEVERAL alternative key columns on one side
+  # (a crash source reporting one tracking id per ad format, only the one in play populated):
+  #
+  #   entities:
+  #     tracked_ad:
+  #       type: foreign
+  #       variants:
+  #         rewarded:     { key: [rewarded_tracking_id, player_id_of_internal] }
+  #         interstitial: { key: [interstitial_tracking_id, player_id_of_internal] }
+  #         banner:       { key: [banner_tracking_id, player_id_of_internal] }
+  #
+  # Each becomes its own relationship — tracked_ad_rewarded, tracked_ad_interstitial,
+  # tracked_ad_banner — and the caller picks the one the question is about (`via:` in a
+  # pipeline, <relationship>__<attribute> in a metric query). The side that OWNS the key
+  # declares it once, plainly: its single column answers for every variant.
+  #
+  # Worked examples for this catalog (uncomment alongside the sources they refer to):
+  #
+  # on fct_analytics_events / a crash source — reach the acquisition table and the install record:
+  #   entities:
+  #     player_day:      { type: foreign, key: [player_id_of_internal, { column: device_time, granularity: day }] }
+  #     tracked_install: { type: foreign, key: [tracking_id, player_id_of_internal] }
+  #
+  # on dim_users — OWNS the install key, and reaches acquisition on the install day:
+  #   entities:
+  #     tracked_install: { type: unique,  key: [tracking_id, player_id_of_internal] }
+  #     player_day:      { type: foreign, key: [player_id_of_internal, { column: install_date, granularity: day }] }
+  #
+  # on the acquisition source — OWNS (player, day), one row per pair:
+  #   entities:
+  #     player_day:      { type: unique,  key: [player_id_of_internal, { column: spend_date, granularity: day }] }
+
   # ── ACQUISITION SPEND (TEMPLATE, not active) ──────────────────────────────────────────
   # A NON-events source: no event_name, so it is not an events fact — but it has its own time
-  # axis and its own MEASURES, and both are declared HERE, in the schema. Nothing about a
-  # measure is known to the code: any column, any aggregation from
+  # axis and its own AMOUNTS, and both are declared HERE, in the schema. The schema says only
+  # WHICH fields may be aggregated; WHICH FUNCTION to apply is decided per question by the
+  # caller, from
   #   sum | average | min | max | count | count_distinct | sum_boolean | median | percentile
   # (a bad one fails at catalog load, naming the allowed set).
   #
-  #   meta.mcp.measure  on a COLUMN   -> a base measure over that column. An amount is not an
-  #                                     attribute, so the column is neither groupable nor value-
-  #                                     indexed. Options: name (default: the column), label,
-  #                                     description, unit, percentile (for agg: percentile).
-  #   meta.mcp.measures on the MODEL  -> a measure whose `expr` is any SQL over the model's
-  #                                     columns (a max, a percentile, a ratio numerator, ...).
+  #   meta.mcp.measure  on a COLUMN   -> MARKS the column an AMOUNT: aggregatable with any of
+  #                                     the functions above, chosen by the caller per question.
+  #                                     An amount is not an attribute, so the column is neither
+  #                                     groupable nor value-indexed. `measure: true`, or an
+  #                                     object with unit / label / description to say what it
+  #                                     means. Add `agg` (+ `name`) ONLY to ALSO publish a
+  #                                     governed measure whose function is fixed for everyone —
+  #                                     the free choice over the raw column remains either way.
+  #   meta.mcp.measures on the MODEL  -> the same, for an aggregatable EXPRESSION: any SQL over
+  #                                     the model's columns, again with no function attached.
   #   meta.mcp.dimension: false       -> a real column that is NOT an attribute (a batch id).
   #   meta.mcp.index: false           -> groupable, but not profiled by the value index (an id).
   #   meta.mcp.is_time                -> the source's time axis, so metric_time and time_range
@@ -1574,8 +1631,10 @@ models:
   #       role: acquisition
   #       primary_entity: acquisition        # MUST differ from every other model's
   #       partition_column: spend_date       # TODO: the real partition column (cost hint)
+  #       # A model-level entry is an aggregatable EXPRESSION over the model's columns. Like a
+  #       # marked column it fixes NO aggregation — the caller picks one per question.
   #       measures:
-  #         max_daily_cost: { agg: max, expr: cost, unit: usd }
+  #         cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd }
   #   columns:
   #     - name: acquisition_id               # TODO: a surrogate key for the (player, day) grain
   #       data_type: string
@@ -1590,7 +1649,7 @@ models:
   #     - name: cost
   #       data_type: numeric
   #       description: "Acquisition cost attributed to the player that day."
-  #       meta: { mcp: { unit: usd, measure: { agg: sum, name: ua_cost, label: "UA cost" } } }
+  #       meta: { mcp: { measure: { unit: usd, label: "UA cost" } } }
   #     - name: impressions
   #       data_type: integer
   #       meta: { mcp: { measure: { agg: sum } } }

@@ -26,15 +26,20 @@
      (`on: [<user column>, <day column>]`) so the daily rows do not fan out.
 - Do NOT invent other tables/fixtures (no orders/customers/Jaffle, no "step"
   tables). Only the roles above.
-- MEASURES ARE DECLARED IN THE SCHEMA, NEVER IN CODE. Any column of any source
-  may carry `meta.mcp.measure: { agg, name?, expr?, label?, description?, unit?,
-  percentile? }`, and any model may carry `meta.mcp.measures` for an expression
-  measure; `agg` is one of sum | average | min | max | count | count_distinct |
-  sum_boolean | median | percentile, validated at catalog load. Do NOT special-case
-  a measure, a column name or a role in `src/` — if a new source needs something,
-  it becomes a schema key that every source can use. Two opt-outs go with it:
-  `meta.mcp.dimension: false` (a real column that is not a groupable attribute)
-  and `meta.mcp.index: false` (groupable, but not profiled by the value index).
+- THE SCHEMA MARKS WHAT MAY BE AGGREGATED; THE CALLER PICKS THE FUNCTION. Any
+  column of any source may carry `meta.mcp.measure: true` (or an object with
+  `unit`/`label`/`description`) to mark it an AMOUNT, and any model may carry
+  `meta.mcp.measures: { <name>: { expr, ... } }` for an aggregatable expression.
+  NEITHER fixes an aggregation: a task names the field in a measure's `field` and
+  chooses `agg` per question (sum | average | min | max | count | count_distinct |
+  sum_boolean | median | percentile, validated at catalog load) — the same column is
+  summed for one question and read at a p90 for the next. Adding `agg` to a
+  declaration is the OPT-IN exception: it additionally publishes a governed measure
+  whose function is fixed for everyone; the free choice over the raw field remains.
+  Do NOT special-case a measure, a column name or a role in `src/` — if a new source
+  needs something, it becomes a schema key that every source can use. Two opt-outs
+  go with it: `meta.mcp.dimension: false` (a real column that is not a groupable
+  attribute) and `meta.mcp.index: false` (groupable, not profiled by the value index).
 - An events source is EXTENDED, never duplicated: a new source reuses the same
   machinery — the catalog accessors (`eventNames/eventProps/eventNameFor/propertyFor`),
   the indexer worklist and the value-index API all take the source as an argument.
@@ -46,6 +51,19 @@
 - Segmentation/joins use user attributes on `dim_users` and experiment assignments
   on the experiments source, joined to events by the user entity — from ANY events
   source that carries the user entity.
+- JOIN KEYS ARE DECLARED IN THE SCHEMA, NEVER PASSED IN AT THE CALL SITE. A model
+  declares `meta.mcp.entities: { <relationship>: { type, key: [...] } }`; a key may
+  span SEVERAL columns and a part may be `{ column, granularity }` to line a time
+  column up at a coarser grain. `primary`/`unique` makes the model the join TARGET
+  (exactly one owner, unique per row there); `foreign` points at the owner. Both
+  paths consume the SAME declaration — `<relationship>__<attribute>` in a metric
+  query, `join { with, via }` in a pipeline. A side may declare `variants` when the
+  same relationship is carried by SEVERAL alternative key columns (one tracking id
+  per ad format): each expands to `<relationship>_<variant>` and the CALLER picks
+  which to use, while the owning side declares its single key once. Do NOT hardcode
+  a pair of column names in `src/` for a particular join, and do NOT add a per-role
+  join path: a new relationship is a schema key, not code. `on:` in a pipeline join
+  stays only as the ad-hoc fallback for a column both sides name identically.
 - A/B significance is computed in JS via the `ab_test` tool over per-group
   aggregates (proportion → z-test; mean → Welch t-test).
 

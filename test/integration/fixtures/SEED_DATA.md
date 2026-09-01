@@ -388,17 +388,23 @@ to `dim_users` / the events sources on `player_id_of_internal`.
 Total rows: **13**. **u1 appears twice** (2026-01-01 and 2026-01-03) — that is what makes the
 grain (player, day) rather than player, and what a single-key join fans out on.
 
-### Measures (declared in the catalog, not in code)
+### Amounts (MARKED in the catalog; the aggregation is the caller's choice)
 
-| measure | declared as | value over all 13 rows |
+The schema marks `cost`, `impressions` and `clicks` aggregatable, plus the model-level
+expression `cost_per_click = cost / nullif(clicks, 0)`. No aggregation is fixed anywhere —
+these are the values a task gets by asking for one:
+
+| field | agg the task chose | value over all 13 rows |
 |---|---|---|
-| `ua_cost` | column `cost`, `agg: sum` | **17.50** |
-| `impressions` | column `impressions`, `agg: sum` | **1280** |
-| `clicks` | column `clicks`, `agg: sum` | **64** |
-| `max_daily_cost` | model-level, `agg: max, expr: cost` | **3.00** |
-| `p90_daily_cost` | model-level, `agg: percentile, percentile: 0.9` | **2.70** (percentile_cont interpolates 2.50→2.75) |
+| `cost` | `sum` | **17.50** |
+| `impressions` | `sum` | **1280** |
+| `clicks` | `sum` | **64** |
+| `cost` | `max` | **3.00** |
+| `cost` | `average` | **17.50 / 13** |
+| `cost` | `percentile 0.9` | **2.70** (percentile_cont interpolates 2.50→2.75) |
+| `cost_per_click` | `average` | mean over the **9** rows that have clicks (4 organic rows are NULL) |
 
-- CPC (`ua_cost / clicks`) = 17.50 / 64 = **0.2734375**
+- CPC as a ratio metric (`sum(cost) / sum(clicks)`) = 17.50 / 64 = **0.2734375**
 - cost by `media_source`: meta **5.75**, applovin **8.25**, google **3.50**, organic **0**
 - cost by `user__country` (join to `dim_users`): US **7.25**, GB **4.50**, DE **4.00**, BR **1.75**
 - cost by day (`metric_time`): 01-01 **1.50**, 01-02 **3.25**, 01-03 **3.50**, 01-04 **4.25**, 01-05 **5.00**
@@ -417,6 +423,62 @@ Joining the 12 `first_launch` events to this table on `player_id_of_internal` **
 yields **12** rows (one cost row per event); joining on the player alone yields **13**, because
 u1's event matches both of u1's spend days. That difference is the fan-out a composite key
 prevents.
+
+---
+
+## 12. Declared join keys (`tracking_id`) — the relationships the schema sanctions
+
+Two relationships are declared in `fixtures/catalog.yml` under `meta.mcp.entities`, and both
+paths — metric queries and pipeline joins — use them without ever restating a column.
+
+| relationship | key | owner (the join target) | declared foreign on |
+|---|---|---|---|
+| `player_day` | player + the DAY of that source's time column | `fct_player_acquisition` (one row per pair) | the two events sources, `dim_users` (on its install day) |
+| `tracked_install` | `tracking_id` + player | `dim_users` (one install record per pair) | the two events sources |
+
+### `tracking_id` in the seeds
+
+Every player's install record carries one canonical track: `u<N>` -> `t<N>`. Two places carry a
+**stale** track (`t_stale`) that is on no install record — a re-attributed / mis-reported track:
+
+- all **7** events of `u12` in `seed_events.csv` (whose install record has `t12`);
+- crash **k13** (player `u7`) in `seed_crashlytics.csv`.
+
+That is what makes a composite-key join provably different from a join on the player alone.
+
+### Key VARIANTS: one tracking column per ad format on the crash source
+
+`fct_crashlytics_events` also carries `rewarded_tracking_id`, `interstitial_tracking_id` and
+`banner_tracking_id`; only the one for the format in play is populated, and it holds the same
+value as that row's `tracking_id`. They are declared as `variants` of one relationship
+`tracked_ad`, which expands to `tracked_ad_rewarded` / `_interstitial` / `_banner` — the caller
+picks. `dim_users` OWNS the key and declares its single `tracking_id` column once, for all three.
+
+| rows | variant | crashes matched to an install record |
+|---|---|---|
+| k1..k5 | `tracked_ad_rewarded` | **5** (u1 x3 US, u2 x2 US) |
+| k6..k9 | `tracked_ad_interstitial` | **4** (u3 GB, u4 x2 DE, u5 BR) |
+| k10..k13 | `tracked_ad_banner` | **3** (u1 US, u6 x2 US) — k13's track is stale |
+
+### Numbers these produce
+
+| join | on the declared key | on the player alone |
+|---|---|---|
+| crash reports x analytics events (`tracked_install`, inner) | **266** | **282** (k13 pulls in all 16 of u7's events) |
+| analytics events x installs (`tracked_install`, inner) | **177** | **184** (u12's 7 events) |
+| analytics events x acquisition (`player_day`, inner) | **150** | **220** (u1's events x both spend days) |
+| crash reports x acquisition (`player_day`, inner) | **0** — no crash is on a spend day | **17** |
+| installs x acquisition (`player_day`, inner) | **12** — one spend row per install | — |
+| acquisition x installs (`user`, inner) | **13** — every spend row has a player | — |
+
+In the semantic layer the same keys give:
+
+- events counted by `player_day__media_source`: meta **47**, organic **50**, applovin **30**,
+  google **23**, NULL **34** (a day with no spend row) — **184** in total, no fan-out.
+- crash reports by `tracked_install__country`: US **8**, DE **2**, GB **1**, BR **1**, NULL **1**
+  (k13's stale track); by `user__country` the same 13 reports give GB **2** and no NULL.
+- installs by `player_day__media_source`: meta **3**, organic **4**, google **2**, applovin **3**
+  — **12**, one spend row each.
 
 ---
 

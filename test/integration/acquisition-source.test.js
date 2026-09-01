@@ -48,19 +48,33 @@ before(async () => {
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
 
-  // Metrics over the CATALOG-DECLARED measures only: this task declares no measures of its
-  // own, it just names the ones the schema already exposes on the acquisition source.
+  // The schema only MARKS which fields are amounts (cost / impressions / clicks, and the
+  // cost_per_click expression). It fixes no aggregation, so the task picks one per question —
+  // the same `cost` field is summed here, maxed there, and read at a percentile below.
   const out = await engine.create_semantic_model({
     name: 'uacq',
-    use_base_models: ['acquisition', 'users'],
+    use_base_models: ['users'],
+    semantic_models: [{
+      from: 'acquisition',
+      measures: [
+        { name: 'cost', agg: 'sum', field: 'cost' },
+        { name: 'impressions', agg: 'sum', field: 'impressions' },
+        { name: 'clicks', agg: 'sum', field: 'clicks' },
+        { name: 'max_daily_cost', agg: 'max', field: 'cost' },
+        { name: 'avg_daily_cost', agg: 'average', field: 'cost' },
+        { name: 'p90_daily_cost', agg: 'percentile', field: 'cost', percentile: 0.9 },
+        { name: 'avg_cost_per_click', agg: 'average', field: 'cost_per_click' },
+      ],
+    }],
     metrics: [
-      // the measure NAMES are the catalog's; the metric names get the task prefix (uacq_*)
-      { name: 'cost', type: 'simple', measure: { name: 'ua_cost' } },
+      { name: 'cost', type: 'simple', measure: { name: 'cost' } },
       { name: 'impressions', type: 'simple', measure: { name: 'impressions' } },
       { name: 'clicks', type: 'simple', measure: { name: 'clicks' } },
       { name: 'max_daily_cost', type: 'simple', measure: { name: 'max_daily_cost' } },
+      { name: 'avg_daily_cost', type: 'simple', measure: { name: 'avg_daily_cost' } },
       { name: 'p90_daily_cost', type: 'simple', measure: { name: 'p90_daily_cost' } },
-      { name: 'cpc', type: 'ratio', numerator: { name: 'ua_cost' }, denominator: { name: 'clicks' } },
+      { name: 'avg_cost_per_click', type: 'simple', measure: { name: 'avg_cost_per_click' } },
+      { name: 'cpc', type: 'ratio', numerator: { name: 'cost' }, denominator: { name: 'clicks' } },
     ],
   });
   assert.equal(out.parse.ok, true, `parse failed: ${JSON.stringify(out.parse)}`);
@@ -72,7 +86,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 const q = (input) => engine.query_semantic_model({ context_id: ctx, ...input });
 
 // SEED_DATA §11: 13 rows, cost 17.50, impressions 1280, clicks 64.
-test('measures declared in the schema are queryable: cost 17.50 / impressions 1280 / clicks 64', opts, async (t) => {
+test('a marked amount is aggregated the way the task asks: cost 17.50 / impressions 1280 / clicks 64', opts, async (t) => {
   if (skip(t)) return;
   const r = await q({ metrics: ['uacq_cost', 'uacq_impressions', 'uacq_clicks'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
@@ -81,19 +95,32 @@ test('measures declared in the schema are queryable: cost 17.50 / impressions 12
   assert.equal(num(r.rows[0].uacq_clicks), 64);
 });
 
-// A model-level measure is an EXPRESSION over the model's columns, and an aggregation that is
-// not a sum — including one that carries a parameter (percentile 0.9 over the 13 daily costs;
-// percentile_cont interpolates between 2.50 and 2.75 → 2.70).
-test('model-level measures: max 3.00 and a parameterised percentile p90 = 2.70', opts, async (t) => {
+// THE SAME marked field, three different aggregations chosen by the task — including one that
+// carries a parameter. Over the 13 daily costs: max 3.00, mean 17.50/13, and percentile_cont(0.9)
+// interpolating between 2.50 and 2.75 → 2.70. Nothing in the schema decided any of these.
+test('the same amount under three aggregations: max 3.00, mean 17.50/13, p90 2.70', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_max_daily_cost', 'uacq_p90_daily_cost'] });
+  const r = await q({ metrics: ['uacq_max_daily_cost', 'uacq_avg_daily_cost', 'uacq_p90_daily_cost'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(near(num(r.rows[0].uacq_max_daily_cost), 3.0), `max=${r.rows[0].uacq_max_daily_cost}`);
+  assert.ok(near(num(r.rows[0].uacq_avg_daily_cost), 17.5 / 13, 1e-6), `avg=${r.rows[0].uacq_avg_daily_cost}`);
   assert.ok(near(num(r.rows[0].uacq_p90_daily_cost), 2.7, 1e-4), `p90=${r.rows[0].uacq_p90_daily_cost}`);
 });
 
-// A ratio over two declared measures: 17.50 / 64.
-test('a ratio metric over two declared measures: CPC = 17.50/64', opts, async (t) => {
+// A model-level entry is an aggregatable EXPRESSION over the model's columns, equally free of a
+// fixed function. cost_per_click = cost / clicks per row; the four rows with no clicks are NULL,
+// so the mean is over the nine that have them.
+test('an aggregatable expression: the mean per-row cost per click over the rows that have clicks', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await q({ metrics: ['uacq_avg_cost_per_click'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const perRow = [[1.50, 5], [2.00, 8], [1.25, 6], [3.00, 10], [0.50, 2], [2.50, 9], [1.75, 7], [2.25, 8], [2.75, 9]].map(([c, k]) => c / k);
+  const expected = perRow.reduce((a, b) => a + b, 0) / perRow.length;
+  assert.ok(near(num(r.rows[0].uacq_avg_cost_per_click), expected, 1e-6), `avg cpc=${r.rows[0].uacq_avg_cost_per_click} want ${expected}`);
+});
+
+// A ratio over two of the task's own measures: 17.50 / 64.
+test('a ratio metric over two task measures: CPC = 17.50/64', opts, async (t) => {
   if (skip(t)) return;
   const r = await q({ metrics: ['uacq_cpc'] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
@@ -169,15 +196,19 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
   if (skip(t)) return;
   const model = await engine.semantic_index({ model: 'acquisition' });
   const dims = model.dimensions.map((d) => d.name);
-  assert.deepEqual(dims.sort(), ['campaign', 'campaign_id', 'media_source'], 'measures and the opted-out column are not attributes');
-  // The declared measures come back self-describing — name, aggregation, expression, unit and
-  // the percentile parameter, all straight from the schema.
-  const ms = Object.fromEntries(model.measures.map((x) => [x.name, x]));
-  assert.deepEqual(Object.keys(ms).sort(), ['clicks', 'impressions', 'max_daily_cost', 'p90_daily_cost', 'ua_cost']);
-  assert.equal(ms.ua_cost.agg, 'sum');
-  assert.equal(ms.ua_cost.expr, 'cost', 'a renamed column measure keeps the column as its expression');
-  assert.equal(ms.ua_cost.unit, 'usd');
-  assert.equal(ms.p90_daily_cost.agg_params.percentile, 0.9);
+  // The measure columns and the `dimension: false` column are NOT attributes; the source's
+  // declared time axis is (grouping spend by its own day needs no join).
+  assert.deepEqual(dims.sort(), ['campaign', 'campaign_id', 'media_source', 'spend_date'], 'measures and the opted-out column are not attributes');
+  assert.equal(model.time, 'spend_date', 'the declared axis is reported as the source\'s time');
+  // The amounts come back marked and self-describing — field, unit, meaning — and with NO
+  // aggregation attached, because choosing one is the caller's job, not the schema's.
+  const amounts = Object.fromEntries(model.aggregatable.map((x) => [x.field, x]));
+  assert.deepEqual(Object.keys(amounts).sort(), ['clicks', 'cost', 'cost_per_click', 'impressions']);
+  assert.equal(amounts.cost.unit, 'usd');
+  assert.equal(amounts.cost.label, 'UA cost');
+  assert.equal(amounts.cost_per_click.expr, 'cost / nullif(clicks, 0)', 'an expression amount carries its expression');
+  for (const a of Object.values(amounts)) assert.equal(a.agg, undefined, 'no aggregation is fixed in the schema');
+  assert.deepEqual(model.measures, [], 'this source fixes no governed measure');
   const cols = model.columns.map((c) => c.name);
   for (const c of ['cost', 'impressions', 'clicks', 'ingest_batch_id']) assert.ok(cols.includes(c), `${c} is still a real column`);
 

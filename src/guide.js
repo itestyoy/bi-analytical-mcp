@@ -18,9 +18,12 @@ export function buildGuide(catalog, recipes, { task } = {}) {
   const multi = facts.length > 1;
   // A catalog may also carry NON-events sources that declare MEASURES (acquisition spend, say):
   // no event vocabulary, but their own time axis and their own aggregatable amounts.
+  // Relationships the schema declares between two models — what a `via` join and a
+  // <relationship>__<attribute> group-by can name.
+  const joinNames = catalog.joinEntityNames();
   const measureSources = catalog.modelKeys()
-    .filter((k) => !catalog.isFact(k) && Object.keys(catalog.getModel(k).measures || {}).length)
-    .map((k) => ({ key: k, measures: Object.keys(catalog.getModel(k).measures) }));
+    .filter((k) => !catalog.isFact(k) && catalog.aggregatableFields(k).length)
+    .map((k) => ({ key: k, measures: catalog.aggregatableFields(k).map((a) => a.name) }));
   const sem = Object.fromEntries(facts.flatMap((f) => Object.entries(catalog.getModel(f).event_semantics || {}).map(([k, v]) => [multi ? `${f}.${k}` : k, v])));
 
   const workflow = [
@@ -38,13 +41,17 @@ export function buildGuide(catalog, recipes, { task } = {}) {
     { if: 'an A/B question ("is variant B better")', do: `compute per-variant aggregates first (a pipeline joining '${experimentsModel}'), then experiment({ action: 'analyze' }); run experiment({ action: 'check_split' }) BEFORE trusting any lift.` },
     { if: 'comparing TWO groups for significance that are NOT an experiment (first vs last, before vs after, cohort A vs B, organic vs paid)', do: 'do NOT hand-roll a t-test. Aggregate per group in one pipeline (mean: n+mean+stddev; rate: conversions+n), then ab_test({ metric: "mean" | "proportion" }) — "control"/"variants" are just group A vs B; no experiments table needed. See semantic_index({ recipe: "two_sample_significance" }).' },
     { if: 'segmenting by a user attribute (country / platform / source)', do: `join/group by the '${usersModel}' model (user__<attr>) — it is NOT on the event payload.` },
+    ...(joinNames.length ? [
+      { if: 'combining two sources (events with spend, an events source with another, a source with the install record)', do: `use the RELATIONSHIP the schema declares — ${joinNames.join(', ')} — never hand-picked columns. In a metric query: group by <relationship>__<attribute> and declare the other model in use_base_models. In a pipeline: add_step { stage: 'join', with: '<model>', via: '<relationship>' }. semantic_index({ model }) lists each model's relationships, their key columns and what they point at. The key may be composite (player + day) and may line a time column up at a coarser grain, so the join matches at the declared grain and does not fan out.` },
+      { if: 'a join returns far MORE rows than the base table (or a sum is suspiciously large)', do: 'you joined on too little of the key — a per-day table matched on the player alone multiplies every row by that player\'s days. Re-join `via` the declared relationship, which carries the full key.' },
+    ] : []),
     ...(multi ? [
       { if: 'choosing WHERE to look', do: `there are ${facts.length} independent events sources — ${facts.join(', ')} — each with its OWN events and payload properties, never mixed. Decide which one records the thing being asked about, then name it: semantic_index({ source, event }), build_native_model({ source }), create_semantic_model({ semantic_models: [{ from: <source> }] }). Inside a pipeline or semantic model built from a source, its event/property names are used as-is.` },
       { if: 'a funnel/sequence that would span TWO sources (something in one, then something in the other)', do: 'not expressible: a row-pattern match scans ONE table. Compute a per-user outcome from each source separately (one pipeline each), then compare the two groups with ab_test, or join the aggregates on the user key.' },
       { if: 'comparing volumes from different sources', do: 'ONE create_semantic_model with a semantic model per source, then query both metrics grouped by metric_time — MetricFlow aligns them on the shared time axis. Do NOT put measures from two sources in one semantic model.' },
     ] : []),
     ...(measureSources.length ? [
-      { if: `the question is about an AMOUNT that is not an event (${measureSources.map((m) => `${m.key}: ${m.measures.join(', ')}`).join(' · ')})`, do: `those measures are already declared on the source — do NOT re-derive them. create_semantic_model({ use_base_models: ['${measureSources[0].key}'], metrics: [{ name: ..., type: 'simple', measure: { name: <one of them> } }] }) and query it; semantic_index({ model: '${measureSources[0].key}' }) lists each measure with its aggregation, expression and unit. Such a source has its own time axis (metric_time works) and carries the user entity, so user__<attr> segments it.` },
+      { if: `the question is about an AMOUNT that is not an event (${measureSources.map((m) => `${m.key}: ${m.measures.join(', ')}`).join(' · ')})`, do: `the source already marks those fields aggregatable — do NOT re-derive them from events. The schema fixes NO aggregation: choose the function the question needs. create_semantic_model({ semantic_models: [{ from: '${measureSources[0].key}', measures: [{ name: <your name>, agg: 'sum' | 'average' | 'max' | 'median' | 'percentile', field: '${measureSources[0].measures[0]}' }] }], metrics: [{ name: ..., type: 'simple', measure: { name: <your name> } }] }); semantic_index({ model: '${measureSources[0].key}' }) lists each amount with its unit and meaning. Such a source has its own time axis (metric_time works) and carries the user entity, so user__<attr> segments it.` },
       { if: 'joining a per-day table (spend, budgets) to events in a pipeline', do: 'join on a COMPOSITE key — the user column AND the day (on: ["<user column>", "<day column>"]). Joining on the user alone multiplies every event by that user\'s rows in the daily table, silently inflating counts and sums.' },
     ] : []),
     { if: 'a property reads mostly NULL', do: 'you probably did not scope to the event(s) that carry it — most event_data properties are event-specific (see semantic_index({ property }).event_coverage).' },

@@ -110,6 +110,15 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
       fail(`measure '${decl.name}': property '${field}' is type '${spec.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
     }
     valueExpr = propExpr(catalog, modelKey, propName, spec);
+  } else if (catalog.aggregatableField(modelKey, field)) {
+    // An AMOUNT the schema marks aggregatable on this source. The schema says only WHAT may be
+    // aggregated (a column, or an expression over columns); the function is this caller's choice.
+    const amount = catalog.aggregatableField(modelKey, field);
+    const numericAgg = ['sum', 'average', 'median', 'min', 'max', 'percentile'].includes(decl.agg);
+    if (numericAgg && amount.type && !isNumericType(amount.type) && !decl.cast) {
+      fail(`measure '${decl.name}': '${field}' is type '${amount.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
+    }
+    valueExpr = amount.expr;
   } else {
     // a physical column (entity key like user_id/session_id, or model column)
     valueExpr = field;

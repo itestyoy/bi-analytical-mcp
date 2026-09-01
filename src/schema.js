@@ -50,10 +50,12 @@ function measureFieldSchema(catalog, modelKey) {
   if (catalog.isFact(modelKey)) {
     const props = catalog.scalarEventProps(modelKey);
     if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
-  } else {
-    // numeric model columns are rare in dims; allow none by default
   }
-  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), or an event_data property. A STRING property that holds numbers needs "cast":"numeric" to sum/average it.', oneOf: opts };
+  // Amounts the schema marks aggregatable on this model. They carry NO aggregation of their
+  // own — pick the function that answers the question in `agg`.
+  const amounts = catalog.aggregatableFields(modelKey).map((a) => a.name);
+  if (amounts.length) opts.push({ type: 'string', enum: amounts, title: 'amount' });
+  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), an event_data property, or an AMOUNT the schema marks aggregatable on this source. An amount fixes no function — choose the one the question needs in `agg` (sum / average / max / median / percentile / …). A STRING field that holds numbers needs "cast":"numeric" to sum/average it.', oneOf: opts };
 }
 
 function dimensionItemSchema(catalog, modelKey) {
@@ -102,7 +104,9 @@ function genericMeasureField(catalog) {
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
   const props = catalog.scalarEventPropEnum();
   if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
-  return { description: 'What to aggregate: "*", an entity-key column, or a numeric event_data property of the target semantic model\'s own source.', oneOf: opts };
+  const amounts = catalog.aggregatableFieldNames();
+  if (amounts.length) opts.push({ type: 'string', enum: amounts, title: 'amount' });
+  return { description: 'What to aggregate: "*", an entity-key column, a numeric event_data property, or an AMOUNT the schema marks aggregatable — all of the target semantic model\'s own source. An amount fixes no function; choose it in `agg`.', oneOf: opts };
 }
 
 function genericWhereItem(catalog) {

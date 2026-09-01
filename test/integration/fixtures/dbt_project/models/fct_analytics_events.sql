@@ -5,6 +5,7 @@
 select
     event_id,
     appsflyer_id                                           as player_id_of_internal,
+    tracking_id,
     session_number,
     event_name,
     bundle_id,

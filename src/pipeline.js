@@ -393,13 +393,15 @@ const STAGES = {
 
   join: {
     schema: (catalog) => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'with', 'on'],
-      description: 'Bring in attributes from a related model on a shared entity key, exposing its columns. Enriches events with user attributes (e.g. country / platform / install_date) for segmentation or date math. Optional `between` adds a point-in-time / SCD-2 condition (a temporal validity window) alongside the key equality.',
+      type: 'object', additionalProperties: false, required: ['stage', 'with'],
+      description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot get the grain wrong. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Optional `between` adds a point-in-time / SCD-2 condition (a temporal validity window) alongside the key equality.',
+      anyOf: [{ required: ['via'] }, { required: ['on'] }],
       properties: {
         stage: { const: 'join' },
-        with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join.' },
+        with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join (any model but the pipeline\'s own source).' },
+        via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog — including a composite key (user + day) and a time column lined up at a coarser grain — so the join matches at the declared grain and the two sides may name their columns differently. semantic_index({ model }) lists what each model carries.' },
         on: {
-          description: 'Shared key column(s), present on BOTH sides. A single name, or several for a composite key (e.g. ["player_id_of_internal","event_date"] to match a per-player-per-day table without fanning out).',
+          description: 'Ad-hoc fallback when no relationship is declared: key column(s) that exist under the SAME NAME on both sides. A single name, or several for a composite key.',
           oneOf: [{ type: 'string' }, { type: 'array', minItems: 1, items: { type: 'string' } }],
         },
         attrs: { type: 'array', items: { type: 'string' }, description: 'Columns of the joined model to expose (default: all its dimensions).' },
@@ -415,11 +417,28 @@ const STAGES = {
         kind: { enum: ['left', 'inner'], default: 'left' },
       },
     }),
-    build: ({ catalog, cols }, p) => {
+    build: ({ catalog, cols, source }, p) => {
       const m = catalog.getModel(p.with);
-      const on = Array.isArray(p.on) ? p.on : [p.on];
-      if (!on.length || on.some((k) => typeof k !== 'string' || !k)) throw new Error('join: `on` needs a key column name, or a list of them');
-      for (const k of on) requireCol(cols, k); // every key must exist on THIS side
+      if (p.with === source) throw new Error(`join: '${p.with}' is the pipeline's own source — join a DIFFERENT model (a self-join is not expressible as a stage)`);
+      if (p.via && p.on) throw new Error('join: pass `via` (the declared relationship) OR `on` (ad-hoc shared column names), not both');
+      let on = []; let onKeys;
+      if (p.via) {
+        // The key columns come from the SCHEMA, on both sides — including a composite key and a
+        // time column lined up at a coarser grain, and each side may name its columns its own way.
+        const left = catalog.entityKey(source, p.via);
+        const right = catalog.entityKey(p.with, p.via);
+        if (!left || !right) {
+          const missing = !left ? source : p.with;
+          const shared = catalog.sharedEntities(source, p.with).map((x) => x.entity);
+          throw new Error(`join via '${p.via}': '${missing}' declares no such relationship.${shared.length ? ` '${source}' and '${p.with}' share: ${shared.join(', ')}.` : ` '${source}' and '${p.with}' share no declared relationship — declare one (meta.mcp.entities) or use \`on\` with a column both sides name identically.`}`);
+        }
+        for (const part of left) requireCol(cols, part.column); // the left key must survive to here
+        onKeys = { left, right };
+      } else {
+        on = Array.isArray(p.on) ? p.on : [p.on];
+        if (!on.length || on.some((k) => typeof k !== 'string' || !k)) throw new Error('join: `on` needs a key column name, or a list of them');
+        for (const k of on) requireCol(cols, k); // every key must exist on THIS side
+      }
       const attrs = p.attrs?.length ? p.attrs : Object.keys(m.dimensions || {});
       const relation = `{{ ref('${m.dbt_model}') }}`;
       let out = cols;
@@ -438,7 +457,9 @@ const STAGES = {
       }
       // A `between` predicate cannot be expressed with the BigQuery pipe `USING (...)` form, so it
       // forces the chained-CTE `ON ...` assembly (both dialects render the same ON clause there).
-      return { op: { op: 'join', relation, alias: 'j', on, attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
+      // A per-side key expression cannot be written as the BigQuery pipe `USING (...)` form, so a
+      // `via` join takes the chained-CTE `ON ...` assembly — as a `between` predicate already does.
+      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys, requiresCte: true } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
     },
   },
 

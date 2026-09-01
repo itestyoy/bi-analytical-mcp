@@ -15,14 +15,14 @@ export { SUPPORTED_DIALECTS };
 export const MEASURE_AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'sum_boolean', 'median', 'percentile']);
 
 /**
- * Normalise one declared measure (model-level meta.mcp.measures entry, or a column-level
+ * Normalise one GOVERNED measure — the opt-in case where a declaration also fixes its
+ * aggregation for everyone (model-level meta.mcp.measures entry, or a column-level
  * meta.mcp.measure) into the dbt shape. `expr` defaults to the column it is declared on.
  * Validates the aggregation so a typo fails at load with the allowed set, not at dbt parse.
  */
 function normalizeMeasure(name, decl, { model, column } = {}) {
   const where = column ? `column '${column}' of model '${model}'` : `measure '${name}' of model '${model}'`;
   const agg = decl.agg;
-  if (!agg) throw new Error(`${where}: meta.mcp.measure needs an 'agg' (one of: ${[...MEASURE_AGGS].join(', ')})`);
   if (!MEASURE_AGGS.has(agg)) throw new Error(`${where}: unknown aggregation '${agg}' — use one of: ${[...MEASURE_AGGS].join(', ')}`);
   const expr = decl.expr ?? column;
   if (!expr) throw new Error(`${where}: a model-level measure needs an 'expr' (a SQL expression over the model's columns)`);
@@ -36,6 +36,75 @@ function normalizeMeasure(name, decl, { model, column } = {}) {
   if (decl.description) out.description = decl.description;
   if (decl.unit) out.unit = decl.unit;
   return out;
+}
+
+/**
+ * Normalise an AGGREGATABLE field: a column (or an expression over columns) the schema marks as
+ * an AMOUNT rather than an attribute. It carries NO aggregation — which function to apply is the
+ * caller's decision at build time, per question (a sum today, an average or a p90 tomorrow).
+ * The schema only says WHAT may be aggregated, and what it means.
+ */
+function normalizeAggregatable(name, decl, { model, column, type } = {}) {
+  const where = column ? `column '${column}' of model '${model}'` : `aggregatable '${name}' of model '${model}'`;
+  const expr = decl.expr ?? column;
+  if (!expr) throw new Error(`${where}: needs an 'expr' (a SQL expression over the model's columns) when it is not declared on a column`);
+  return {
+    name, expr, ...(column ? { column } : {}), ...(type ? { type } : {}),
+    ...(decl.unit ? { unit: decl.unit } : {}),
+    ...(decl.label ? { label: decl.label } : {}),
+    ...(decl.description ? { description: decl.description } : {}),
+  };
+}
+
+// Entity roles a join key may take. `primary`/`unique` make the model the join TARGET for
+// that entity; `foreign` points at whichever model owns it; `natural` is the SCD-2 form.
+export const ENTITY_TYPES = new Set(['primary', 'unique', 'foreign', 'natural']);
+
+/**
+ * Normalise the PARTS of one key: a column name, or a list of them for a composite key. A part
+ * may be { column, granularity } to name a coarser grain for a time column — that is how a
+ * per-event source lines up with a per-day one.
+ */
+function normalizeKeyParts(raw, { where, columns }) {
+  const parts = (Array.isArray(raw) ? raw : [raw]).map((p) => (typeof p === 'string'
+    ? { column: p }
+    : { column: p?.column, ...(p?.granularity ? { granularity: p.granularity } : {}) }));
+  if (!parts.length || parts.some((p) => !p.column)) {
+    throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key (a part may be { column, granularity } to line a time column up at a coarser grain)`);
+  }
+  if (columns?.size) {
+    for (const p of parts) if (!columns.has(p.column)) throw new Error(`${where}: '${p.column}' is not a column of the model`);
+  }
+  return parts;
+}
+
+/**
+ * Normalise ONE declared join key into { type, key: [parts], column?, variants? }. `column` is
+ * kept for the plain single-column case so everything that already reads it keeps working.
+ */
+function normalizeEntityKey(name, decl, { model, columns }) {
+  const where = `entity '${name}' of model '${model}'`;
+  if (!name) throw new Error(`${model}: an entity declaration needs a name`);
+  const type = decl.type || 'foreign';
+  if (!ENTITY_TYPES.has(type)) throw new Error(`${where}: unknown entity type '${type}' — use one of: ${[...ENTITY_TYPES].join(', ')}`);
+  // VARIANTS: the same relationship carried by SEVERAL alternative key columns on this side —
+  // e.g. a crash row that reports one tracking id per ad format. Each becomes its own
+  // '<relationship>_<variant>' key, and the caller picks which one to join on.
+  const variants = {};
+  for (const [vName, vDecl] of Object.entries(decl.variants || {})) {
+    if (!/^[a-z][a-z0-9_]*$/.test(vName)) throw new Error(`${where}: variant name '${vName}' must be lowercase snake_case`);
+    if (vName.includes('__')) throw new Error(`${where}: variant name '${vName}' may not contain '__'`);
+    const vRaw = Array.isArray(vDecl) || typeof vDecl === 'string' ? vDecl : (vDecl || {}).key ?? (vDecl || {}).column;
+    variants[vName] = normalizeKeyParts(vRaw, { where: `${where} variant '${vName}'`, columns });
+  }
+  const raw = decl.key !== undefined ? decl.key : decl.column;
+  if (raw === undefined) {
+    if (!Object.keys(variants).length) throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key (a part may be { column, granularity } to line a time column up at a coarser grain)`);
+    return { type, variants }; // variants only: this side has no single canonical key
+  }
+  const parts = normalizeKeyParts(raw, { where, columns });
+  const single = parts.length === 1 && !parts[0].granularity;
+  return { type, key: parts, ...(single ? { column: parts[0].column } : {}), ...(Object.keys(variants).length ? { variants } : {}) };
 }
 
 // Native dbt `data_type`s that map to a MetricFlow time dimension.
@@ -271,8 +340,13 @@ export function dbtSchemaToCatalog(doc) {
     if (mcp.role) m.role = mcp.role;
     if (mcp.primary_entity !== undefined) m.primary_entity = mcp.primary_entity;
     if (mcp.known_events) m.known_events = mcp.known_events;
-    if (mcp.measures) {
-      m.measures = Object.fromEntries(Object.entries(mcp.measures).map(([name, decl]) => [name, normalizeMeasure(name, decl || {}, { model: model.name })]));
+    // Model-level declarations. An entry WITHOUT `agg` is an aggregatable EXPRESSION — the
+    // caller picks the function; an entry WITH `agg` is additionally a governed measure whose
+    // function is fixed (a standard KPI everyone must compute the same way).
+    for (const [name, raw] of Object.entries(mcp.measures || {})) {
+      const decl = raw || {};
+      (m.aggregatable ||= {})[name] = normalizeAggregatable(name, decl, { model: model.name });
+      if (decl.agg) (m.measures ||= {})[name] = normalizeMeasure(name, decl, { model: model.name });
     }
     // Business meaning of key events (e.g. acquisition_event: first_launch) — lets an
     // AI pick the right base events for retention/conversion without guessing.
@@ -314,18 +388,43 @@ export function dbtSchemaToCatalog(doc) {
       if (!cm.is_event_data) allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
       if (cm.entity) {
-        if (cm.entity.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name };
-        else entities[cm.entity.name] = { column: col.name, type: cm.entity.type };
+        // A column-level entity is the single-column case of the same declaration.
+        const ent = normalizeEntityKey(cm.entity.name, { type: cm.entity.type, key: col.name }, { model: model.name });
+        if (ent.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name, key: ent.key };
+        else entities[cm.entity.name] = ent;
         continue; // entity key columns are not dimensions
       }
-      if (cm.is_time) { m.time = { column: col.name, granularity: cm.granularity || 'day' }; continue; }
+      if (cm.is_time) {
+        m.time = { column: col.name, granularity: cm.granularity || 'day' };
+        // On an events source the time axis is the event time, surfaced as the fact's own
+        // time dimension. On any OTHER source (an install record, a daily spend table) the
+        // axis is equally a groupable attribute — "installs by install day" — so it stays in
+        // the dimension list and everything reading dimensions keeps seeing it.
+        if (!isFact) dimensions[col.name] = { type: 'time', granularity: m.time.granularity };
+        continue;
+      }
       // A column declared a MEASURE becomes a base measure of this model (any aggregation from
       // MEASURE_AGGS, on any column — nothing is special-cased). An amount is not a groupable
       // attribute, so it is neither a dimension nor a value-index target unless the author also
       // marks it meta.mcp.dimension.
       if (cm.measure && !cm.dimension) {
-        const name = cm.measure.name || col.name;
-        (m.measures ||= {})[name] = normalizeMeasure(name, { ...cm.measure, unit: cm.measure.unit ?? cm.unit }, { model: model.name, column: col.name });
+        // `measure: true` (or a bare object) MARKS the column as an amount: aggregatable with
+        // ANY function, chosen per question at build time — the schema never fixes one. An
+        // amount is not a groupable attribute, so it is neither a dimension nor a value-index
+        // target. An optional `agg` ADDITIONALLY declares a governed measure with that fixed
+        // function, under `name` — the free choice over the raw column stays either way.
+        if (cm.measure !== true && (typeof cm.measure !== 'object' || Array.isArray(cm.measure))) {
+          throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.measure must be true, or an object with unit/label/description (and optionally agg to also fix a governed measure)`);
+        }
+        const decl = cm.measure === true ? {} : cm.measure;
+        m.aggregatable = m.aggregatable || {};
+        m.aggregatable[col.name] = normalizeAggregatable(col.name, { ...decl, unit: decl.unit ?? cm.unit }, {
+          model: model.name, column: col.name, type: pipelineColumnType(cm, col),
+        });
+        if (decl.agg) {
+          const name = decl.name || col.name;
+          (m.measures ||= {})[name] = normalizeMeasure(name, { ...decl, unit: decl.unit ?? cm.unit }, { model: model.name, column: col.name });
+        }
         continue;
       }
       if (cm.is_event_name) { m.event_name = { column: col.name }; continue; }
@@ -403,6 +502,24 @@ export function dbtSchemaToCatalog(doc) {
     }
     if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
     m.columns = allColumns;
+    // Model-level `meta.mcp.entities`: a join key that spans SEVERAL columns, or that lines a
+    // time column up at a coarser grain. It lives on the MODEL because it belongs to no single
+    // column. The same entity NAME on two models is the join between them, and the key is
+    // declared once here rather than passed in at every call site.
+    {
+      const known = new Set(allColumns.map((c) => c.name));
+      for (const [name, decl] of Object.entries(mcp.entities || {})) {
+        const ent = normalizeEntityKey(name, decl || {}, { model: model.name, columns: known });
+        if (ent.type === 'primary') {
+          if (ent.variants) throw new Error(`entity '${name}' of model '${model.name}': a primary entity is the model's single identity and cannot have variants; declare the alternatives as type: unique or foreign.`);
+          const prev = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          if (prev && prev !== name) throw new Error(`model '${model.name}' declares two primary entities ('${prev}' and '${name}'). A model has exactly one identity; declare the other key as type: unique (still a join target) or foreign.`);
+          m.primary_entity = { name, ...(ent.column ? { column: ent.column } : {}), key: ent.key };
+        } else {
+          entities[name] = ent;
+        }
+      }
+    }
     if (Object.keys(entities).length) m.entities = entities;
     if (Object.keys(dimensions).length) m.dimensions = dimensions;
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
@@ -434,6 +551,73 @@ export function dbtSchemaToCatalog(doc) {
     }
     primaryEntityOwner.set(pe, key);
   }
+  // EXPAND KEY VARIANTS. A relationship may be carried by several alternative key columns on one
+  // side (a crash row reporting one tracking id per ad format). Each variant becomes its own
+  // '<relationship>_<variant>' key so the caller can pick which one to join on. A side that
+  // declares a PLAIN key for the same relationship mirrors it to every variant — the install
+  // record has one tracking column and it is the counterpart of all of them.
+  {
+    const variantsOf = new Map(); // relationship -> Set(variant name)
+    for (const m of Object.values(out.models)) {
+      for (const [rel, e] of Object.entries(m.entities || {})) {
+        for (const v of Object.keys(e.variants || {})) {
+          if (!variantsOf.has(rel)) variantsOf.set(rel, new Set());
+          variantsOf.get(rel).add(v);
+        }
+      }
+    }
+    for (const m of Object.values(out.models)) {
+      for (const [rel, e] of Object.entries({ ...(m.entities || {}) })) {
+        const vs = variantsOf.get(rel);
+        if (!vs) continue;
+        for (const v of vs) {
+          const name = `${rel}_${v}`;
+          if (m.entities[name]) continue; // an explicit declaration wins over the expansion
+          const parts = e.variants?.[v] || e.key;
+          if (!parts) continue; // this side carries neither that variant nor a plain key
+          const single = parts.length === 1 && !parts[0].granularity;
+          m.entities[name] = { type: e.type, key: parts, ...(single ? { column: parts[0].column } : {}) };
+        }
+        // A side declared ONLY as variants has no canonical key of its own.
+        if (!e.key) delete m.entities[rel];
+        else delete m.entities[rel].variants;
+      }
+    }
+  }
+
+  // A join key is only a join if BOTH sides agree on it: exactly one owner (primary or unique),
+  // and every side of the same entity built from the same NUMBER of key parts — two sides with
+  // different arity would compare a one-part key against a two-part one and silently match
+  // nothing. Checked at load so a mistyped key fails here, not as an empty result set.
+  const ownerOf = new Map();
+  for (const [key, m] of Object.entries(out.models)) {
+    const pe = m.primary_entity;
+    if (pe && typeof pe === 'object' && pe.name) ownerOf.set(pe.name, key);
+  }
+  for (const [key, m] of Object.entries(out.models)) {
+    for (const [name, e] of Object.entries(m.entities || {})) {
+      if (e.type !== 'unique') continue;
+      if (ownerOf.has(name) && ownerOf.get(name) !== key) {
+        throw new Error(`models '${ownerOf.get(name)}' and '${key}' both OWN entity '${name}' (as primary/unique). An entity has exactly one join target — make one of them type: foreign.`);
+      }
+      ownerOf.set(name, key);
+    }
+  }
+  const arityOf = new Map();
+  for (const [key, m] of Object.entries(out.models)) {
+    const all = [];
+    const pe = m.primary_entity;
+    if (pe && typeof pe === 'object' && pe.key) all.push([pe.name, pe.key]);
+    for (const [name, e] of Object.entries(m.entities || {})) if (e.key) all.push([name, e.key]);
+    for (const [name, parts] of all) {
+      const prev = arityOf.get(name);
+      if (prev && prev.n !== parts.length) {
+        throw new Error(`entity '${name}' is declared with ${prev.n} key part(s) on '${prev.model}' but ${parts.length} on '${key}'. Both sides of a join must be built from the same number of parts, in the same order.`);
+      }
+      if (!prev) arityOf.set(name, { n: parts.length, model: key });
+    }
+  }
+
   // Schema validation: names that become MetricFlow identifiers (event-property keys
   // and dimension columns) MUST NOT contain '__' — MetricFlow reserves it as the
   // entity/dimension separator. Fail loudly at load so the dbt schema is corrected at
@@ -477,11 +661,19 @@ export class Catalog {
     // another source does not.
     this._requireTimeRangeAll = raw.require_time_range;
     this.requireTimeRange = !!(raw.require_time_range ?? this.facts.some((f) => this.models[f]?.require_time_range));
-    // Map: entity name -> model key that owns it as primary/unique (join target).
+    // Map: entity name -> model key that OWNS it (the join target). A model's primary entity is
+    // its identity; a `unique` entity is a second key that is also unique per row, so it is an
+    // equally valid target — that is how a per-day source is joined on (user, day) while keeping
+    // its own surrogate identity.
     this.primaryByEntity = {};
     for (const [key, m] of Object.entries(this.models)) {
       const name = primaryEntityName(m);
       if (name) this.primaryByEntity[name] = key;
+    }
+    for (const [key, m] of Object.entries(this.models)) {
+      for (const [name, e] of Object.entries(m.entities || {})) {
+        if (e.type === 'unique' && !this.primaryByEntity[name]) this.primaryByEntity[name] = key;
+      }
     }
   }
 
@@ -702,11 +894,40 @@ export class Catalog {
     const m = this.getModel(key);
     const cols = [];
     const pe = m.primary_entity;
-    if (typeof pe === 'object' && pe.column) cols.push(pe.column);
+    if (typeof pe === 'object') for (const p of pe.key || (pe.column ? [{ column: pe.column }] : [])) cols.push(p.column);
     for (const e of Object.values(m.entities || {})) {
-      if (e.column) cols.push(e.column);
+      for (const p of e.key || (e.column ? [{ column: e.column }] : [])) cols.push(p.column);
     }
     return [...new Set(cols)];
+  }
+
+  /** Every join key `key` declares, by entity name: { <entity>: { type, key: [parts] } }. */
+  entitiesOf(key) {
+    const m = this.getModel(key);
+    const out = {};
+    const pe = m.primary_entity;
+    if (pe && typeof pe === 'object' && pe.name) out[pe.name] = { type: 'primary', key: pe.key || [{ column: pe.column }] };
+    for (const [name, e] of Object.entries(m.entities || {})) out[name] = { type: e.type, key: e.key || [{ column: e.column }] };
+    return out;
+  }
+
+  /** The parts of `entity`'s key ON `modelKey`, or undefined when it declares no such key. */
+  entityKey(modelKey, entity) {
+    return this.entitiesOf(modelKey)[entity]?.key;
+  }
+
+  /** The model that OWNS `entity` (declares it primary/unique) — the join target. */
+  joinTargetFor(entity) {
+    return this.primaryByEntity[entity];
+  }
+
+  /**
+   * Entity names declared on BOTH models — the join(s) the schema sanctions between them.
+   * Each carries the key parts on either side, so a caller never restates the columns.
+   */
+  sharedEntities(a, b) {
+    const ea = this.entitiesOf(a); const eb = this.entitiesOf(b);
+    return Object.keys(ea).filter((n) => eb[n]).map((n) => ({ entity: n, left: ea[n], right: eb[n] }));
   }
 
   /**
@@ -728,9 +949,7 @@ export class Catalog {
         if (!targetKey) continue; // pruned: dangling foreign (m3)
         const target = this.models[targetKey];
         const newPrefix = prefix ? `${prefix}__${entName}` : entName;
-        for (const dim of Object.keys(target.dimensions || {})) {
-          out.add(`${newPrefix}__${dim}`);
-        }
+        for (const dim of Object.keys(target.dimensions || {})) out.add(`${newPrefix}__${dim}`);
         visit(targetKey, newPrefix, hop + 1);
       }
     };
@@ -744,6 +963,25 @@ export class Catalog {
       for (const dim of Object.keys(this.models[key].dimensions || {})) out.add(`${ent}__${dim}`);
     }
     return [...out];
+  }
+
+  /**
+   * Fields of `key` the schema marks as AGGREGATABLE amounts. Each is { name, expr, column?,
+   * type?, unit?, label?, description? } and carries NO aggregation — a task measure names one
+   * as its `field` and chooses the function itself.
+   */
+  aggregatableFields(key) {
+    return Object.values(this.getModel(key).aggregatable || {});
+  }
+
+  /** One aggregatable field of `key` by name, or undefined. */
+  aggregatableField(key, name) {
+    return this.getModel(key).aggregatable?.[name];
+  }
+
+  /** Aggregatable field names across every model (for the model-agnostic update schema). */
+  aggregatableFieldNames() {
+    return [...new Set(this.modelKeys().flatMap((k) => Object.keys(this.models[k].aggregatable || {})))];
   }
 
   /** The model that declares a base measure (meta.mcp.measures), or undefined. */
@@ -760,9 +998,17 @@ export class Catalog {
     return refs;
   }
 
-  /** Models that may be JOINED to the source a task is built from. */
+  /** Models that may be JOINED to the source a task is built from — every source is equal here,
+   *  so the list is every model; joining a source to ITSELF is what gets rejected, at build. */
   joinableModelKeys() {
-    return this.modelKeys().filter((k) => k !== this.anchor);
+    return this.modelKeys();
+  }
+
+  /** Entity names that appear on at least TWO models — the joins the schema sanctions. */
+  joinEntityNames() {
+    const seen = new Map();
+    for (const k of this.modelKeys()) for (const name of Object.keys(this.entitiesOf(k))) seen.set(name, (seen.get(name) || 0) + 1);
+    return [...seen.entries()].filter(([, n]) => n > 1).map(([name]) => name).sort();
   }
 
   timeGranularities() {

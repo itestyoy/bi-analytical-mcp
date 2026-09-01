@@ -305,6 +305,38 @@ export class Engine {
       // Catalog-declared measures are SELF-DESCRIBING here: the name alone does not say what a
       // measure aggregates, over which expression, or in what unit — and since any column of any
       // source may declare one, this view is the only place to find out.
+      // RELATIONSHIPS this model declares: the join name, the key columns on THIS side, and the
+      // model the key points at. This is what makes a pipeline `join { via }` discoverable —
+      // the caller names the relationship, never the columns.
+      const rels = Object.entries(c.entitiesOf(k)).map(([entity, e]) => {
+        const target = c.joinTargetFor(entity);
+        return {
+          entity, type: e.type,
+          key: e.key.map((part) => (part.granularity ? `${part.column} (by ${part.granularity})` : part.column)),
+          ...(target && target !== k ? { joins: target } : {}),
+          ...(target === k ? { owned_here: true } : {}),
+        };
+      });
+      if (rels.length) {
+        out.relationships = rels;
+        const viaable = rels.filter((r) => r.joins);
+        if (viaable.length) out.join_note = `Join with the declared relationship rather than restating columns: build_native_model add_step { stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}' }. In a metric query, group by <entity>__<attribute> (e.g. ${viaable[0].entity}__<attr>) with use_base_models: ['${viaable[0].joins}'].`;
+      }
+      // AMOUNTS the schema marks aggregatable on this source. They fix NO function: name one as
+      // a measure's `field` and choose the aggregation the question needs.
+      const amounts = c.aggregatableFields(k);
+      if (amounts.length) {
+        out.aggregatable = amounts.map((a) => ({
+          field: a.name,
+          ...(a.expr !== a.name ? { expr: a.expr } : {}),
+          ...(a.type ? { type: a.type } : {}),
+          ...(a.unit ? { unit: a.unit } : {}),
+          ...(a.label ? { label: a.label } : {}),
+          ...(a.description ? { description: a.description } : {}),
+        }));
+        out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: create_semantic_model({ semantic_models: [{ from: '${k}', measures: [{ name: <your name>, agg: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', field: '${amounts[0].name}' }] }] }) (percentile also takes { percentile: 0.9 }).`;
+      }
+      // GOVERNED measures, if the schema fixes one: a standard KPI everyone computes the same way.
       out.measures = Object.entries(m.measures || {}).map(([name, mm]) => ({
         name, agg: mm.agg, expr: mm.expr,
         ...(mm.agg_params ? { agg_params: mm.agg_params } : {}),

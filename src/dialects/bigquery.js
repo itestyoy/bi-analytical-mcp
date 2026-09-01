@@ -95,6 +95,8 @@ export class BigQueryDialect extends Dialect {
     return `EXTRACT(DAY FROM (CAST(${to} AS DATETIME) - CAST(${from} AS DATETIME)))`;
   }
 
+  timestampExpr(expr) { return `CAST(${expr} AS TIMESTAMP)`; }
+
   dateTrunc(granularity, expr) {
     const g = { day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
     if (!g) throw new Error(`dateTrunc: bad granularity ${granularity}`);
@@ -158,7 +160,12 @@ export class BigQueryDialect extends Dialect {
         return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
       }
       case 'join': {
-        const eq = op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
+        // `onKeys` = a relationship declared in the schema: each side brings its OWN expression
+        // for the same logical key (different column names, a time column truncated to the
+        // declared grain), compared part by part. `on` = the plain shared-name form.
+        const eq = op.onKeys
+          ? op.onKeys.left.map((lp, i) => `${this.keyPartExpr(lp, (c) => `base.${c}`)} = ${this.keyPartExpr(op.onKeys.right[i], (c) => `j.${c}`)}`).join(' AND ')
+          : op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
         const btw = op.between ? ` AND base.${this.ident(op.between.value)} BETWEEN j.${this.ident(op.between.from)} AND j.${this.ident(op.between.to)}` : '';
         const attrs = op.attrs.map((a) => `j.${this.ident(a)} AS ${this.ident(a)}`);
         return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
@@ -196,6 +203,9 @@ export class BigQueryDialect extends Dialect {
         return op.field ? `|> ${join}\n|> EXTEND ${element} AS ${this.ident(op.as)}` : `|> ${join}`;
       }
       case 'join': {
+        // A per-side key expression has no `USING (...)` form; such a join is flagged
+        // requiresCte at build and assembled as chained CTEs instead of reaching this path.
+        if (op.onKeys) throw new Error('bigquery: a join on a declared relationship renders as a CTE, not a pipe step');
         const onCond = op.on.map((c) => this.ident(c)).join(', ');
         return `|> ${op.kind === 'INNER' ? 'INNER ' : 'LEFT '}JOIN ${op.relation} ${op.alias} USING (${onCond})`;
       }

@@ -4,6 +4,10 @@
 -- the same flattened `*_of_event_data` shape. Joined to dim_users by player_id_of_internal.
 select
     appsflyer_id  as player_id_of_internal,
+    tracking_id,
+    rewarded_tracking_id,
+    interstitial_tracking_id,
+    banner_tracking_id,
     event_name,
     event_time,
     issue_title   as issue_title_of_event_data,

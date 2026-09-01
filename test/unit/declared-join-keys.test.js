@@ -1,8 +1,9 @@
-// Input-validation guards on the join keys declared in the schema (allowed as a non-data test:
-// bad input is rejected at catalog load, before anything can query a silently-broken join).
+// INPUT-VALIDATION GUARDS ONLY — the one kind of non-data test the project rules allow: a bad
+// schema is rejected at catalog load, before anything can query a silently-broken join.
 //
-// What a working key actually JOINS, and the numbers it returns, is asserted on real query
-// results in test/integration/declared-joins.test.js.
+// Nothing here asserts that a WORKING key parses into some shape. What a key actually joins,
+// and the numbers it returns, is proven by running against the warehouse in
+// test/integration/declared-joins.test.js — that is the only evidence that counts.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -77,37 +78,6 @@ ${extra}    columns:
       - { name: valid_from, data_type: timestamp, meta: { mcp: { dimension: { validity: start } } } }
       - { name: valid_until, data_type: timestamp, meta: { mcp: { dimension: { validity: end } } } }
 `;
-
-test('a composite key is parsed, shared by both sides, and offered to the caller', () => {
-  const c = load(EVENTS + CRASH + USERS());
-  assert.deepEqual(c.entityKey('events', 'ad_funnel_rewarded'), [{ column: 'tracking_id' }, { column: 'user_id' }]);
-  assert.deepEqual(c.entityKey('crashlytics', 'ad_funnel_rewarded'), [{ column: 'rewarded_track' }, { column: 'user_id' }]);
-  assert.deepEqual(c.sharedEntities('crashlytics', 'events').map((x) => x.entity).sort(),
-    ['ad_funnel_banner', 'ad_funnel_rewarded', 'user']);
-  assert.ok(c.joinEntityNames().includes('ad_funnel_rewarded'));
-});
-
-// One funnel id spans SEVERAL events, so neither side is unique on it: there is no join target,
-// and the relationship must NOT show up as a governed group-by path.
-test('a relationship nobody owns is pipeline-only: no target, no group-by path', () => {
-  const c = load(EVENTS + CRASH + USERS());
-  assert.equal(c.joinTargetFor('ad_funnel_rewarded'), undefined);
-  assert.ok(!c.reachableGroupByPaths().some((p) => p.startsWith('ad_funnel')));
-  // …while the player key IS owned, so its paths are there
-  assert.equal(c.joinTargetFor('user'), 'users');
-  assert.ok(c.reachableGroupByPaths().includes('user__country'));
-});
-
-test('key VARIANTS expand into one relationship per variant; the plain side answers each', () => {
-  const c = load(EVENTS + CRASH + USERS());
-  assert.deepEqual(c.entityKey('crashlytics', 'ad_funnel_banner'), [{ column: 'banner_track' }, { column: 'user_id' }]);
-  // the side with ONE column answers every variant with it, declared once
-  assert.deepEqual(c.entityKey('events', 'ad_funnel_banner'), [{ column: 'tracking_id' }, { column: 'user_id' }]);
-  // a variants-only side keeps no base relationship, so it cannot be joined ambiguously
-  assert.equal(c.entityKey('crashlytics', 'ad_funnel'), undefined);
-  // the base is carried by one model only, so it is not offered as a join
-  assert.ok(!c.joinEntityNames().includes('ad_funnel'));
-});
 
 test('a key naming a column the model does not have is rejected', () => {
   assert.throws(() => load(EVENTS.replace('key: [tracking_id, user_id]', 'key: [nope, user_id]') + USERS()),

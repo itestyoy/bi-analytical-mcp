@@ -361,6 +361,18 @@ test('relationships are discoverable, with their key columns and what they point
     'the single-column side answers every variant');
 });
 
+// A relationship nobody owns has NO governed path — MetricFlow can only join onto a unique
+// key. Asking for one must be refused rather than silently answered from some other join.
+test('an unowned relationship offers no governed group-by path', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await q(evCtx, { metrics: ['jev_evts'], group_by: ['ad_funnel_rewarded__country'] }).catch((e) => ({ ok: false, error: String(e.message || e) }));
+  assert.equal(r.ok, false, 'the funnel key must not be groupable in a metric query');
+  // …while the owned player key is, and answers with real numbers.
+  const good = await q(evCtx, { metrics: ['jev_evts'], group_by: ['user__country'] });
+  assert.equal(good.ok, true, JSON.stringify(good.error));
+  assert.equal(sumCol(good.rows, 'jev_evts'), 184);
+});
+
 test('join guards: an undeclared relationship, a self-join and via+on are all rejected', opts, async (t) => {
   if (skip(t)) return;
   await assert.rejects(() => joinStep('events', { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' }),

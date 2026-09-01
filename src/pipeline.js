@@ -404,7 +404,23 @@ const STAGES = {
           description: 'Ad-hoc fallback when no relationship is declared: key column(s) that exist under the SAME NAME on both sides. A single name, or several for a composite key.',
           oneOf: [{ type: 'string' }, { type: 'array', minItems: 1, items: { type: 'string' } }],
         },
-        attrs: { type: 'array', items: { type: 'string' }, description: 'Columns of the joined model to expose (default: all its dimensions).' },
+        attrs: {
+          type: 'array',
+          description: 'Columns of the joined model to expose. DEFAULT: ALL of them — every column the joined model has, minus any whose name the pipeline already carries (two columns with one name are ambiguous downstream, so the joined one is skipped and the step response says which). Pass a list to narrow it, and { column, as } to bring in a column whose name collides, under a name of your own.',
+          items: {
+            oneOf: [
+              { type: 'string', description: 'A column of the joined model, exposed under its own name.' },
+              {
+                type: 'object', additionalProperties: false, required: ['column'],
+                description: 'A column of the joined model exposed under a different name — use it for a column both sides name identically.',
+                properties: {
+                  column: { type: 'string', description: 'Column of the JOINED model.' },
+                  as: { type: 'string', description: 'Name it gets in the pipeline (defaults to `column`).' },
+                },
+              },
+            ],
+          },
+        },
         between: {
           type: 'object', additionalProperties: false, required: ['value', 'from', 'to'],
           description: 'Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the moment being asked about. Which moment that is CHANGES THE ANSWER: attributing a crash by the crash time and by the time of the ad that preceded it can land the same player in different cohorts — so state it deliberately. Ensure the joined windows do not overlap, or a row can match several versions. In a metric query nothing has to be stated: MetricFlow applies the window itself.',
@@ -441,10 +457,34 @@ const STAGES = {
         if (!on.length || on.some((k) => typeof k !== 'string' || !k)) throw new Error('join: `on` needs a key column name, or a list of them');
         for (const k of on) requireCol(cols, k); // every key must exist on THIS side
       }
-      const attrs = p.attrs?.length ? p.attrs : Object.keys(m.dimensions || {});
+      // What the joined model REALLY has (declared, and already grounded to the physical table at
+      // catalog load), with each column's type — so a joined amount stays numeric downstream
+      // instead of arriving as an untyped string. A fact's raw payload blob is a column too.
+      const joined = new Map(catalog.modelColumns(p.with).map((c) => [c.name, c.type || 'string']));
+      if (m.event_data_column && !joined.has(m.event_data_column)) joined.set(m.event_data_column, 'json');
+      const known = joined.size ? joined : null; // no column info -> accept what the caller names
+      const avail = () => [...joined.keys()].join(', ');
+      let attrs;
+      let shadowed = [];
+      if (p.attrs?.length) {
+        attrs = p.attrs.map((a) => (typeof a === 'string' ? { column: a, as: a } : { column: a.column, as: a.as || a.column }));
+        for (const a of attrs) {
+          if (known && !known.has(a.column)) throw new Error(`join attrs: '${a.column}' is not a column of '${p.with}' (available: ${avail()})`);
+          if (cols.has(a.as)) throw new Error(`join attrs: '${a.as}' already exists in the pipeline, so exposing '${p.with}'.${a.column} under that name would be ambiguous — rename it with { column: '${a.column}', as: '<new name>' }`);
+        }
+      } else {
+        // DEFAULT: bring EVERYTHING the joined model has. A column whose name the pipeline
+        // already carries is skipped rather than duplicated (two columns with one name cannot be
+        // referenced downstream); name it explicitly with { column, as } to bring it in too.
+        attrs = [];
+        for (const [name, type] of joined) {
+          if (cols.has(name)) { shadowed.push(name); continue; }
+          attrs.push({ column: name, as: name, type });
+        }
+      }
       const relation = `{{ ref('${m.dbt_model}') }}`;
       let out = cols;
-      for (const a of attrs) out = addCol(out, a, 'string');
+      for (const a of attrs) out = addCol(out, a.as, joined.get(a.column) || 'string');
       let between;
       if (p.between) {
         // `value` is a column on THIS side (validated against the live column set); `from`/`to`
@@ -461,7 +501,7 @@ const STAGES = {
       // forces the chained-CTE `ON ...` assembly (both dialects render the same ON clause there).
       // A per-side key expression cannot be written as the BigQuery pipe `USING (...)` form, so a
       // `via` join takes the chained-CTE `ON ...` assembly — as a `between` predicate already does.
-      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys, requiresCte: true } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
+      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys, requiresCte: true } : {}), attrs, ...(shadowed.length ? { shadowed } : {}), kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
     },
   },
 

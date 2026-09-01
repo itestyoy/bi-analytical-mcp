@@ -30,7 +30,9 @@
 //               from both ends, plus the governed path over two facts at the same time;
 //   I   (41-43) the governed side of the same rules: a join path needs its owning model loaded,
 //               a chained `via` resolves on the pipeline's own source, and three sources line up
-//               on metric_time without joining each other.
+//               on metric_time without joining each other;
+//   J   (44-48) a join exposes the joined model's WHOLE column set — ids, event-scoped payload
+//               and amounts included — with a shadowed name reported and reachable by alias.
 //
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
@@ -1038,4 +1040,136 @@ test('43. three sources side by side on metric_time keep their own totals: 17.50
   assert.equal(total('jtri_evts'), 184);
   assert.equal(total('jtri_crashes'), 13);
   assert.ok(r.rows.length > 1, 'a real day-by-day series, not one collapsed row');
+});
+
+// ═══════════ J. A JOIN BRINGS THE WHOLE MODEL, NOT ITS DIMENSIONS ═══════════
+//
+// A pipeline works on physical columns, so a join has to expose the joined model's COLUMNS —
+// all of them. Exposing only its "dimensions" quietly dropped most of what a source carries:
+// its ids, its time axis, its event-scoped payload, and — worst of all — its AMOUNTS, since an
+// amount is deliberately not a groupable attribute. Joining acquisition used to hand you the
+// channel columns and silently leave cost, impressions and clicks behind.
+//
+// The default is now everything, minus a name the pipeline already carries (two columns under
+// one name cannot be referenced downstream). Nothing is lost even then: `{ column, as }` brings
+// the shadowed one in under a name of your own. These cases pass NO attrs at all and then USE
+// fields from all three models — a dropped field is an "unknown column" failure, not a silent
+// zero.
+
+/** crashlytics → the funnel's events → that player's spend, with NOT ONE attrs list. */
+const OPEN_CHAIN = [
+  { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner' },
+  { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner' },
+];
+
+// 44. Fields from all three models in one aggregate — ids, event-scoped payload and amounts.
+test('44. every field of every joined model is usable: 7 crashes / 8 events / 25.00 spend', opts, async (t) => {
+  if (skip(t)) return;
+  const rows = await pipeRows('crashlytics', ...OPEN_CHAIN, {
+    stage: 'aggregate',
+    measures: [
+      { name: 'n', fn: 'count' },
+      // crashlytics (the base): its id and an EVENT-SCOPED payload column
+      { name: 'crashes', fn: 'count_distinct', column: 'crash_id' },
+      { name: 'issues', fn: 'count_distinct', column: 'issue_title_of_event_data' },
+      // events (joined): its id, its funnel key and its own event-scoped payload
+      { name: 'events', fn: 'count_distinct', column: 'event_id' },
+      { name: 'funnels', fn: 'count_distinct', column: 'tracking_id' },
+      { name: 'ad_types', fn: 'count_distinct', column: 'ad_type_of_event_data' },
+      // acquisition (joined): the AMOUNTS — the fields a dimensions-only join never exposed
+      { name: 'spend', fn: 'sum', column: 'cost' },
+      { name: 'impressions', fn: 'sum', column: 'impressions' },
+      { name: 'clicks', fn: 'sum', column: 'clicks' },
+      { name: 'spend_rows', fn: 'count_distinct', column: 'acquisition_id' },
+    ],
+  });
+  const r = rows[0];
+  assert.equal(num(r.n), 22);
+  assert.equal(num(r.crashes), 7);
+  assert.equal(num(r.issues), 5);
+  assert.equal(num(r.events), 8);
+  assert.equal(num(r.funnels), 4, 'fnl_01, fnl_04, fnl_06, fnl_08');
+  assert.equal(num(r.ad_types), 1, 'every one of these funnels is a rewarded ad');
+  assert.ok(near(num(r.spend), 25.0), `spend=${r.spend}`);
+  assert.equal(num(r.impressions), 1780);
+  assert.equal(num(r.clicks), 90);
+  assert.equal(num(r.spend_rows), 5);
+});
+
+// 45. …and they group by each other: an attribute from the third model as the key, amounts from
+//     the same model and a count of the first one as the measures.
+test('45. group by a joined attribute, measure joined amounts: meta 18 / organic 2 / applovin 2', opts, async (t) => {
+  if (skip(t)) return;
+  const rows = await pipeRows('crashlytics', ...OPEN_CHAIN, {
+    stage: 'aggregate',
+    group_by: ['media_source'],
+    measures: [{ name: 'n', fn: 'count' }, { name: 'spend', fn: 'sum', column: 'cost' }, { name: 'impressions', fn: 'sum', column: 'impressions' }],
+  });
+  const n = mapCol(rows, 'media_source', 'n');
+  const spend = mapCol(rows, 'media_source', 'spend');
+  const imp = mapCol(rows, 'media_source', 'impressions');
+  assert.deepEqual(Object.keys(n).sort(), ['applovin', 'meta', 'organic']);
+  assert.equal(n.meta, 18); assert.equal(n.organic, 2); assert.equal(n.applovin, 2);
+  assert.ok(near(spend.meta, 20.0) && near(spend.organic, 0.0) && near(spend.applovin, 5.0), JSON.stringify(spend));
+  assert.equal(imp.meta, 1420); assert.equal(imp.organic, 0); assert.equal(imp.applovin, 360);
+});
+
+// 46. A joined TIME column is a time column, not a string: date math across two models works.
+//     Days from the spend row to the crash — 2 to 6 across the 22 pairs.
+test('46. date math between a base time column and a joined one: 2..6 days, 82 in total', opts, async (t) => {
+  if (skip(t)) return;
+  const rows = await pipeRows('crashlytics', ...OPEN_CHAIN,
+    { stage: 'compute', name: 'days_after_spend', op: 'date_diff', from: { column: 'spend_date' }, to: { column: 'event_time' }, unit: 'day' },
+    { stage: 'aggregate', measures: [{ name: 'lo', fn: 'min', column: 'days_after_spend' }, { name: 'hi', fn: 'max', column: 'days_after_spend' }, { name: 'total', fn: 'sum', column: 'days_after_spend' }] });
+  assert.equal(num(rows[0].lo), 2);
+  assert.equal(num(rows[0].hi), 6);
+  assert.equal(num(rows[0].total), 82);
+});
+
+// 47. A name both sides use is NOT silently overwritten — the joined one is skipped and the step
+//     says so. It is not lost either: ask for it under another name and it comes.
+test('47. a shadowed column is reported, and reachable under an alias', opts, async (t) => {
+  if (skip(t)) return;
+  const step = await joinStep('crashlytics', { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner' });
+  const recs = JSON.stringify(step.recommendations || []);
+  assert.match(recs, /NOT brought in/);
+  assert.match(recs, /event_name/, 'both sources have an event_name');
+  assert.match(recs, /player_id_of_internal/, 'and both have the player key');
+
+  // base event_name stays the CRASH type…
+  const base = await pipeRows('crashlytics', ...OPEN_CHAIN,
+    { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] });
+  const byCrash = mapCol(base, 'event_name', 'n');
+  assert.equal(byCrash.fatal_crash, 14);
+  assert.equal(byCrash.non_fatal, 6);
+  assert.equal(byCrash.anr, 2);
+
+  // …and the events one arrives alongside it, renamed.
+  const both = await pipeRows('crashlytics',
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id', { column: 'event_name', as: 'ad_event_name' }] },
+    { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['cost'] },
+    { stage: 'aggregate', group_by: ['ad_event_name'], measures: [{ name: 'n', fn: 'count' }] });
+  const byAd = mapCol(both, 'ad_event_name', 'n');
+  assert.equal(byAd.ad_started, 11);
+  assert.equal(byAd.ad_finished, 11);
+});
+
+// 48. Guards: attrs is checked against the joined model's real columns, and an alias that would
+//     collide is refused with the fix — neither reaches the warehouse as a SQL error.
+test('48. join attrs guards: unknown column and colliding alias are both refused', opts, async (t) => {
+  if (skip(t)) return;
+  await assert.rejects(
+    () => joinStep('crashlytics', { stage: 'join', with: 'acquisition', via: 'user', attrs: ['cost', 'nope'] }),
+    /'nope' is not a column of 'acquisition'.*cost/s,
+  );
+  await assert.rejects(
+    () => joinStep('crashlytics', { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: ['event_name'] }),
+    /'event_name' already exists in the pipeline.*column: 'event_name', as:/s,
+  );
+  // …and the documented fix is accepted.
+  const ok = await joinStep('crashlytics', {
+    stage: 'join', with: 'events', via: 'ad_funnel_rewarded',
+    attrs: [{ column: 'event_name', as: 'ad_event_name' }],
+  });
+  assert.ok(!ok.error, JSON.stringify(ok.error));
 });

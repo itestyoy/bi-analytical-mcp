@@ -1371,7 +1371,7 @@ export class Engine {
       recommendations: [
         ...filterWarnings,
         ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
-        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._draftStepRecommendations(changedStage, after)] : []),
+        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._joinShadowNote(changedStage, before), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;
@@ -1391,6 +1391,23 @@ export class Engine {
    * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
    * add the window (and fix it) instead of trusting a silently wrong join.
    */
+  /**
+   * A join brings in EVERY column of the joined model by default; one whose name the pipeline
+   * already carries is skipped, because two columns under one name cannot be referenced
+   * downstream. Say which ones, and how to bring them in anyway — otherwise a field looks like
+   * it silently vanished.
+   */
+  _joinShadowNote(stage, before) {
+    if (!stage || stage.stage !== 'join' || stage.attrs?.length) return [];
+    let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
+    const names = new Set(this.catalog.modelColumns(stage.with).map((c) => c.name));
+    if (m.event_data_column) names.add(m.event_data_column);
+    const taken = new Set(before.map((c) => c.name));
+    const shadowed = [...names].filter((n) => taken.has(n));
+    if (!shadowed.length) return [];
+    return [`Every other column of '${stage.with}' is now available. NOT brought in: ${shadowed.join(', ')} — the pipeline already has a column of that name (the join key usually is one). To use the joined model's version too, name it: attrs: [{ column: '${shadowed[0]}', as: '${stage.with}_${shadowed[0]}' }].`];
+  }
+
   _joinCompletenessWarnings(stage, draft = null) {
     if (!stage || stage.stage !== 'join' || stage.between) return [];
     let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }

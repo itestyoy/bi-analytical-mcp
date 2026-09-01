@@ -425,9 +425,9 @@ models:
     description: >
       Player-level acquisition spend: one row per (player, day) with the cost, impressions and
       clicks attributed to that player. Amounts are MEASURES (aggregate them), the channel
-      columns are attributes (group by them). Joins to dim_users / the events sources on
-      player_id_of_internal; on a per-day question join on player_id_of_internal + the date so
-      the daily grain does not fan out.
+      columns are attributes (group by them). Joins to an events source by the PLAYER key alone
+      (many-to-many by design — carry a channel attribute onto events, never sum money over it),
+      and to the install record by the player key AND the validity window, point-in-time.
     meta:
       mcp:
         role: acquisition

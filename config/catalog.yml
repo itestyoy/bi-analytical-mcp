@@ -1605,9 +1605,13 @@ models:
   #   meta.mcp.is_time                -> the source's time axis, so metric_time and time_range
   #                                     work here exactly as on an events source.
   #
-  # A per-day table joins on player + day: build_native_model's join stage takes a COMPOSITE key
-  # (on: ["player_id_of_internal", "<the day column>"]), which is what stops the daily rows from
-  # fanning out across a player's events.
+  # HOW IT JOINS (both keys declared in the schema, never restated at the call site):
+  #   · to an events source        — by the PLAYER key alone (via: 'user'). One player has many
+  #     events and several spend days, so this pairing is many-to-many BY DESIGN: use it to carry
+  #     a channel attribute onto events, NEVER to sum money over (the total inflates).
+  #   · to the install record      — by the PLAYER key AND the validity window, point-in-time:
+  #     the governed path applies the window itself; a pipeline states it in the join stage's
+  #     `between` ({ value: spend_date, from: install_time_valid_from, to: install_time_valid_until }).
   #
   # - name: fct_player_acquisition           # TODO: the real dbt model / view name
   #   description: >

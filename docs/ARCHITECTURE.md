@@ -36,7 +36,7 @@ The declarative tool input is a direct transcription of that pipe chain:
     { "stage": "where",  "conditions": [ ... ] },
     { "stage": "derive", "name": "n_words", "source": "words_collected", "op": "array_length" },
     { "stage": "unnest", "source": "words_collected", "as": "word" },
-    { "stage": "join",   "with": "users", "on": "user" },
+    { "stage": "join",   "with": "users", "via": "user" },
     { "stage": "match_recognize", "partition_by": "user", "steps": [ ... ], "metrics": [ ... ] },
     { "stage": "aggregate", "group_by": ["country"], "measures": [ ... ] },
     { "stage": "order_by", "keys": [ ... ] },
@@ -70,7 +70,7 @@ Stage = {
 | `derive` | `\|> EXTEND` | add a scalar column from an event_data property (extract / array_length / contains / struct_field) | unchanged |
 | `compute` | `\|> EXTEND` | add a column over existing columns: arithmetic, round/floor/ceil/abs, coalesce/least/greatest, cast, **date_diff / date_trunc / date_part**, **CASE**, **window functions** (row_number/rank/lag/lead/running sum…) | unchanged |
 | `unnest` | `\|> JOIN UNNEST` | explode an array (or array-of-struct field) into rows | **expands** |
-| `join` | `\|> JOIN` | join another catalog model on a shared entity (1-hop) | unchanged (1:1 / many:1) |
+| `join` | `\|> JOIN` | join another catalog model through a relationship DECLARED in the schema (`via`); stages stack, so a chain can reach several models. `between` adds the point-in-time window of a slowly-changing target | unchanged (1:1 / many:1) — many:many when the relationship has no owner |
 | `aggregate` | `\|> AGGREGATE … GROUP BY` | group + measures | **collapses** to group keys |
 | `pivot` | `\|> PIVOT` | turn listed values of a column into columns | **collapses** to group keys |
 | `unpivot` | `\|> UNPIVOT` | fold listed columns into (name, value) rows | **expands** |
@@ -117,9 +117,10 @@ an aggregate) before generating SQL.
   (escaped). JSON keys / column names pass strict identifier regexes.
 - **Catalog is the boundary.** Scalar vs complex (array/struct) properties are
   distinguished: complex props are rejected where a scalar is required and may
-  only be consumed by `derive`/`unnest`. Joins are restricted to 1-hop entity
-  paths defined in the catalog (the two-source rule holds — `join` can only
-  target a catalog model on a shared entity).
+  only be consumed by `derive`/`unnest`. A `join` can only target a catalog model
+  through a relationship BOTH sides declare — the key columns come from the schema,
+  never from the call. Stages stack, so a chain reaches several models; `via` always
+  resolves its left-hand key on the pipeline's own source.
 - **Per-stage validation** happens on the threaded schema (§3): unknown column →
   rejected at the boundary, with a clear message, before any SQL runs.
 - **Generated SQL is read-only** and confined to the context overlay; results are

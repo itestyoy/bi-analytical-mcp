@@ -394,12 +394,12 @@ const STAGES = {
   join: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'with'],
-      description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot get the grain wrong. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Optional `between` adds a point-in-time / SCD-2 condition (a temporal validity window) alongside the key equality.',
+      description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
       anyOf: [{ required: ['via'] }, { required: ['on'] }],
       properties: {
         stage: { const: 'join' },
         with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join (any model but the pipeline\'s own source).' },
-        via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog — including a composite key (user + day) and a time column lined up at a coarser grain — so the join matches at the declared grain and the two sides may name their columns differently. semantic_index({ model }) lists what each model carries.' },
+        via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ model }) lists each model\'s relationships, their key columns and what they point at.' },
         on: {
           description: 'Ad-hoc fallback when no relationship is declared: key column(s) that exist under the SAME NAME on both sides. A single name, or several for a composite key.',
           oneOf: [{ type: 'string' }, { type: 'array', minItems: 1, items: { type: 'string' } }],
@@ -407,7 +407,7 @@ const STAGES = {
         attrs: { type: 'array', items: { type: 'string' }, description: 'Columns of the joined model to expose (default: all its dimensions).' },
         between: {
           type: 'object', additionalProperties: false, required: ['value', 'from', 'to'],
-          description: 'Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the event time. Ensure the joined windows do not overlap, or a row can match several versions.',
+          description: 'Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the moment being asked about. Which moment that is CHANGES THE ANSWER: attributing a crash by the crash time and by the time of the ad that preceded it can land the same player in different cohorts — so state it deliberately. Ensure the joined windows do not overlap, or a row can match several versions. In a metric query nothing has to be stated: MetricFlow applies the window itself.',
           properties: {
             value: { type: 'string', description: 'A column on THIS (left) side compared against the window — e.g. the event time.' },
             from: { type: 'string', description: 'Window LOWER-bound column on the joined model (inclusive), e.g. valid_from.' },
@@ -423,8 +423,10 @@ const STAGES = {
       if (p.via && p.on) throw new Error('join: pass `via` (the declared relationship) OR `on` (ad-hoc shared column names), not both');
       let on = []; let onKeys;
       if (p.via) {
-        // The key columns come from the SCHEMA, on both sides — including a composite key and a
-        // time column lined up at a coarser grain, and each side may name its columns its own way.
+        // The key columns come from the SCHEMA, on both sides — including a composite key — and
+        // each side may name its columns its own way. The LEFT key is resolved on the pipeline's
+        // own SOURCE, not on whatever the previous stages accumulated, so a chained join must use
+        // a relationship the source itself declares.
         const left = catalog.entityKey(source, p.via);
         const right = catalog.entityKey(p.with, p.via);
         if (!left || !right) {

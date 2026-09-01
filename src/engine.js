@@ -308,11 +308,20 @@ export class Engine {
       // RELATIONSHIPS this model declares: the join name, the key columns on THIS side, and the
       // model the key points at. This is what makes a pipeline `join { via }` discoverable —
       // the caller names the relationship, never the columns.
+      // `use` says what the caller may actually DO with each one, which the type alone does not:
+      // an owned relationship has a governed path AND a pipeline join; one nobody owns but two
+      // models carry is a pipeline join only (MetricFlow joins onto a unique key); one no other
+      // model declares is not a join at all yet — it is a key waiting for a counterpart.
+      const shared = new Set(c.joinEntityNames());
       const rels = Object.entries(c.entitiesOf(k)).map(([entity, e]) => {
         const target = c.joinTargetFor(entity);
+        const use = (target && target !== k) ? 'metric query + pipeline'
+          : shared.has(entity) ? 'pipeline only'
+            : target === k ? (shared.has(entity) ? 'owned here — other models point at it' : "owned here (this model's identity; nothing points at it yet)") : 'no counterpart declares it (not joinable)';
         return {
           entity, type: e.type,
-          key: e.key.map((part) => (part.granularity ? `${part.column} (by ${part.granularity})` : part.column)),
+          key: e.key.map((part) => part.column),
+          use,
           ...(target && target !== k ? { joins: target } : {}),
           ...(target === k ? { owned_here: true } : {}),
         };
@@ -320,7 +329,13 @@ export class Engine {
       if (rels.length) {
         out.relationships = rels;
         const viaable = rels.filter((r) => r.joins);
-        if (viaable.length) out.join_note = `Join with the declared relationship rather than restating columns: build_native_model add_step { stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}' }. In a metric query, group by <entity>__<attribute> (e.g. ${viaable[0].entity}__<attr>) with use_base_models: ['${viaable[0].joins}'].`;
+        const pipeOnly = rels.filter((r) => r.use === 'pipeline only').map((r) => r.entity);
+        const notes = [];
+        if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_native_model add_step { stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}' }. In a metric query, group by <entity>__<attribute> (e.g. ${viaable[0].entity}__<attr>) with use_base_models: ['${viaable[0].joins}'].`);
+        // A relationship NO model owns cannot be a governed group-by path (MetricFlow joins only
+        // onto a unique key) — say so here, or it looks like a missing feature at query time.
+        if (pipeOnly.length) notes.push(`No model owns ${pipeOnly.map((n) => `'${n}'`).join(', ')}, so ${pipeOnly.length === 1 ? 'it has' : 'they have'} NO governed group-by path — join ${pipeOnly.length === 1 ? 'it' : 'them'} in a pipeline (via: '${pipeOnly[0]}'). That is by nature: several rows share the key, so neither side is unique on it.`);
+        if (notes.length) out.join_note = notes.join(' ');
       }
       // AMOUNTS the schema marks aggregatable on this source. They fix NO function: name one as
       // a measure's `field` and choose the aggregation the question needs.

@@ -27,7 +27,10 @@
 //   G   (34)    the same join driven through a real MCP client: tools/list, tools/call, JSON in
 //               and the answer read out of the MCP content block;
 //   H   (35-40) all FOUR sources in one chain — three declared relationships at once, walked
-//               from both ends, plus the governed path over two facts at the same time.
+//               from both ends, plus the governed path over two facts at the same time;
+//   I   (41-43) the governed side of the same rules: a join path needs its owning model loaded,
+//               a chained `via` resolves on the pipeline's own source, and three sources line up
+//               on metric_time without joining each other.
 //
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
@@ -941,4 +944,98 @@ test('40. governed: spend and events from two sources, sliced by the same instal
   // neither source fanned the other out: the totals are still the honest per-source totals.
   assert.ok(near(sumCol(r.rows, 'jmix_cost'), 17.5));
   assert.equal(sumCol(r.rows, 'jmix_evts'), 184);
+});
+
+// ═══════════ I. THE GOVERNED SIDE OF THE SAME RULES ═══════════
+//
+// The pipeline cases above prove what `via` builds. These prove the metric-query side of the
+// same declarations: which join paths a context actually offers, what happens when the model
+// that owns the path was not loaded, and that measures from three different sources line up on
+// metric_time without any of them joining the others.
+
+// 41. A governed join path is not free-floating: the model that OWNS the relationship has to be
+//     loaded into the task. Refused with the fix, not answered from somewhere else — and the
+//     same task WITH the model answers.
+test('41. a join path without its owning model is refused, and works once loaded', opts, async (t) => {
+  if (skip(t)) return;
+  const bare = await engine.create_semantic_model({
+    name: 'jbare',
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+  });
+  assert.equal(bare.parse.ok, true, JSON.stringify(bare.parse));
+  await assert.rejects(
+    () => engine.query_semantic_model({ context_id: bare.context_id, metrics: ['jbare_evts'], group_by: ['user__country'] }),
+    /needs model 'users', which is not loaded.*use_base_models/s,
+  );
+  // the metric itself answers fine — it is the PATH that needed the model, not the measure.
+  const flat = await engine.query_semantic_model({ context_id: bare.context_id, metrics: ['jbare_evts'] });
+  assert.equal(flat.ok, true, JSON.stringify(flat.error));
+  assert.equal(num(flat.rows[0].jbare_evts), 184);
+  // …and the context that DID load it returns the point-in-time breakdown.
+  const loaded = await q(evCtx, { metrics: ['jev_evts'], group_by: ['user__country'] });
+  assert.equal(loaded.ok, true, JSON.stringify(loaded.error));
+  assert.equal(sumCol(loaded.rows, 'jev_evts'), 184);
+});
+
+// 42. Chaining has a rule worth pinning: `via` resolves its LEFT key on the pipeline's OWN
+//     source, so a relationship declared only on a model joined earlier is not reachable. The
+//     refusal says which model was asked and what the two sides actually share.
+test('42. a chained relationship the pipeline source does not declare is refused', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_native_model({ action: 'start', name: `ch_${seq++}`, source: 'acquisition' });
+  const ok = await engine.build_native_model({
+    action: 'add_step', draft_id: s.draft_id,
+    stage: { stage: 'join', with: 'events', via: 'user', kind: 'inner', attrs: ['tracking_id'] },
+  });
+  assert.ok(!ok.error, JSON.stringify(ok.error));
+  // `tracking_id` is now IN the pipeline — but the ad-funnel relationship belongs to the events
+  // source, not to acquisition, so it cannot be the next hop.
+  await assert.rejects(
+    () => engine.build_native_model({
+      action: 'add_step', draft_id: s.draft_id,
+      stage: { stage: 'join', with: 'crashlytics', via: 'ad_funnel_rewarded' },
+    }),
+    /'acquisition' declares no such relationship.*share: user/s,
+  );
+  // the hop the source DOES declare works from the same draft.
+  const good = await engine.build_native_model({
+    action: 'add_step', draft_id: s.draft_id,
+    stage: { stage: 'join', with: 'crashlytics', via: 'user', kind: 'inner', attrs: ['crash_id'] },
+  });
+  assert.ok(!good.error, JSON.stringify(good.error));
+});
+
+// 43. Three sources, no join between them: a spend measure, an event measure and a crash measure
+//     in ONE task, aligned on metric_time. Each keeps its own time axis and its own total — this
+//     is how sources are compared when a row-to-row join would be wrong.
+test('43. three sources side by side on metric_time keep their own totals: 17.50 / 184 / 13', opts, async (t) => {
+  if (skip(t)) return;
+  const task = await engine.create_semantic_model({
+    name: 'jtri',
+    semantic_models: [
+      { from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] },
+      { from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] },
+      { from: 'crashlytics', measures: [{ name: 'crashes', agg: 'count', field: '*' }] },
+    ],
+    metrics: [
+      { name: 'cost', type: 'simple', measure: { name: 'cost' } },
+      { name: 'evts', type: 'simple', measure: { name: 'evts' } },
+      { name: 'crashes', type: 'simple', measure: { name: 'crashes' } },
+    ],
+  });
+  assert.equal(task.parse.ok, true, JSON.stringify(task.parse));
+  const r = await engine.query_semantic_model({
+    context_id: task.context_id,
+    metrics: ['jtri_cost', 'jtri_evts', 'jtri_crashes'],
+    group_by: [{ time: 'metric_time', grain: 'day' }],
+  });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  // A day may carry spend but no crash (and the other way round), so the series has holes —
+  // that is the honest shape of an outer alignment, not a bug. Total each metric over it.
+  const total = (col) => r.rows.reduce((s, row) => s + (Number.isFinite(num(row[col])) ? num(row[col]) : 0), 0);
+  assert.ok(near(total('jtri_cost'), 17.5), `cost=${total('jtri_cost')}`);
+  assert.equal(total('jtri_evts'), 184);
+  assert.equal(total('jtri_crashes'), 13);
+  assert.ok(r.rows.length > 1, 'a real day-by-day series, not one collapsed row');
 });

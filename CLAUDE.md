@@ -53,8 +53,9 @@
   source that carries the user entity.
 - JOIN KEYS ARE DECLARED IN THE SCHEMA, NEVER PASSED IN AT THE CALL SITE. A model
   declares `meta.mcp.entities: { <relationship>: { type, key: [...] } }`; a key may
-  span SEVERAL columns and a part may be `{ column, granularity }` to line a time
-  column up at a coarser grain. `primary`/`unique` makes the model the join TARGET
+  span SEVERAL columns, and the two sides may name their columns differently — only
+  the relationship name and the NUMBER of key parts have to agree.
+  `primary`/`unique` makes the model the join TARGET
   (exactly one owner, unique per row there); `foreign` points at the owner. Both
   paths consume the SAME declaration — `<relationship>__<attribute>` in a metric
   query, `join { with, via }` in a pipeline. A side may declare `variants` when the

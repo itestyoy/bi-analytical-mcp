@@ -495,9 +495,9 @@ export function dbtSchemaToCatalog(doc) {
     }
     if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
     m.columns = allColumns;
-    // Model-level `meta.mcp.entities`: a join key that spans SEVERAL columns, or that lines a
-    // time column up at a coarser grain. It lives on the MODEL because it belongs to no single
-    // column. The same entity NAME on two models is the join between them, and the key is
+    // Model-level `meta.mcp.entities`: a join key that spans SEVERAL columns, or one relationship
+    // carried by several ALTERNATIVE columns (`variants`). It lives on the MODEL because it
+    // belongs to no single column. The same entity NAME on two models is the join between them, and the key is
     // declared once here rather than passed in at every call site.
     {
       const known = new Set(allColumns.map((c) => c.name));

@@ -248,7 +248,7 @@ function predicateDefs(catalog) {
       _reachable_paths: paths,
       description: 'The field a condition applies to: a dimension path or the metric time axis.',
       oneOf: [
-        { type: 'object', additionalProperties: false, required: ['kind', 'path'], description: 'A dimension, addressed by its (possibly entity-qualified) path.', properties: { kind: { const: 'dimension', description: 'Filter on a dimension.' }, path: { type: 'string', description: 'Dimension path: a task-local dimension name, or an entity-qualified join path like user__country. Validated against the context.' } } },
+        { type: 'object', additionalProperties: false, required: ['kind', 'path'], description: 'A dimension, addressed by its (possibly entity-qualified) path.', properties: { kind: { const: 'dimension', description: 'Filter on a dimension.' }, path: { type: 'string', description: 'Dimension path: a task-local dimension name, or an entity-qualified join path like user__country (the owning model must be in use_base_models). Only a relationship some model OWNS has such a path; one nobody owns is joinable in a pipeline only. Validated against the context.' } } },
         { type: 'object', additionalProperties: false, required: ['kind'], description: 'The metric time axis.', properties: { kind: { const: 'metric_time', description: 'Filter on the metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain to bucket by.' } } },
       ],
     },
@@ -287,7 +287,7 @@ export function buildSchemas(catalog) {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
       description: { type: 'string', description: 'Free-text note describing what this task computes (metadata only).' },
-      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional source models to load so their dimensions become joinable (e.g. "users" to slice by country/platform). The events source is always available.' },
+      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as <relationship>__<attribute> (e.g. "users" to slice by country/platform via user__country). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
       semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
       metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
@@ -376,7 +376,7 @@ export function buildSchemas(catalog) {
         items: {
           oneOf: [
             { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { const: 'metric_time', description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
-            { type: 'string', description: 'A dimension path to group by.' },
+            { type: 'string', description: 'A dimension path to group by: a task-local dimension name, or an entity-qualified path like user__country (the owning model must be in use_base_models). A relationship nobody owns has no such path — join it in a pipeline instead.' },
           ],
         },
       },

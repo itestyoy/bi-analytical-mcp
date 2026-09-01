@@ -666,10 +666,16 @@ export class Catalog {
     // another source does not.
     this._requireTimeRangeAll = raw.require_time_range;
     this.requireTimeRange = !!(raw.require_time_range ?? this.facts.some((f) => this.models[f]?.require_time_range));
-    // Map: entity name -> model key that OWNS it (the join target). A model's primary entity is
-    // its identity; a `unique` entity is a second key that is also unique per row, so it is an
-    // equally valid target — that is how a per-day source is joined on (user, day) while keeping
-    // its own surrogate identity.
+    this._indexOwners();
+  }
+
+  /**
+   * (Re)build the map: entity name -> model key that OWNS it (the join target). A model's primary
+   * entity is its identity; a `unique` entity is a second key that is also unique per row, so it
+   * is an equally valid target. Rebuilt after grounding, because a key whose column turns out not
+   * to exist is dropped there and must stop being advertised as a target.
+   */
+  _indexOwners() {
     this.primaryByEntity = {};
     for (const [key, m] of Object.entries(this.models)) {
       const name = primaryEntityName(m);
@@ -714,8 +720,31 @@ export class Catalog {
       // indexer never groups by a missing column (per-app coverage is simply unavailable).
       if (m.bundle_column && !has(m.bundle_column)) delete m.bundle_column;
       if (m.column_descriptions) for (const name of Object.keys(m.column_descriptions)) if (!has(name)) delete m.column_descriptions[name];
+      // A DECLARED JOIN KEY whose column is not physically there cannot be executed, so it must
+      // stop being offered: `via` would otherwise build SQL against a missing column and fail in
+      // the warehouse instead of here. The model's PRIMARY entity is left alone — it is the
+      // model's identity, and dropping it would leave a model that cannot render at all.
+      if (m.entities) for (const [name, e] of Object.entries(m.entities)) {
+        const parts = e.key || (e.column ? [{ column: e.column }] : []);
+        if (parts.some((p) => !has(p.column))) { delete m.entities[name]; gone.add(`entity:${name}`); }
+      }
+      // A model is SLOWLY-CHANGING only while it still HAS its window. If the validity columns
+      // did not survive, the table has no windows to join on, so the flag has to go with them:
+      // left set, the model would render a `natural` entity with no validity_params, which
+      // MetricFlow rejects outright — an error about columns that are no longer even visible.
+      // Cleared, it renders as an ordinary primary-key dimension, which is what such a table is.
+      if (m.scd) {
+        const v = Object.values(m.dimensions || {}).filter((d) => d.validity);
+        if (v.filter((d) => d.validity === 'start').length !== 1 || v.filter((d) => d.validity === 'end').length !== 1) {
+          delete m.scd;
+          gone.add('(validity window — no longer treated as slowly-changing)');
+        }
+      }
       if (gone.size) pruned[key] = [...gone];
     }
+    // Grounding may have dropped a key that OWNED a relationship — re-index so nothing points at
+    // a target that no longer declares it.
+    this._indexOwners();
     return { pruned };
   }
 

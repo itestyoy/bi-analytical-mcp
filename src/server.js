@@ -217,7 +217,9 @@ export async function makeEngine(opts = {}) {
   if (runner && baseProjectDir && !/^(0|false|no|off)$/i.test(String(process.env.MCP_GROUND_CATALOG ?? 'true').trim())) {
     try {
       const { pruned } = await groundCatalogToPhysical(catalog, runner, baseProjectDir);
-      for (const [k, names] of Object.entries(pruned)) console.error(`[mcp] ${new Date().toISOString()} catalog grounding: '${k}' — excluded ${names.length} declared field(s) absent from the physical table: ${names.slice(0, 12).join(', ')}${names.length > 12 ? ', …' : ''}`);
+      // The report lists columns the table lacks, plus anything that had to go with them —
+      // a join key built on a missing column, or a validity window that is no longer one.
+      for (const [k, names] of Object.entries(pruned)) console.error(`[mcp] ${new Date().toISOString()} catalog grounding: '${k}' — dropped ${names.length} declaration(s) the physical table does not back: ${names.slice(0, 12).join(', ')}${names.length > 12 ? ', …' : ''}`);
     } catch (e) { console.error(`[mcp] ${new Date().toISOString()} catalog grounding skipped: ${e?.message || e}`); }
   }
   // Optional semantic memory search: an embedder is built ONLY when MEMORY_EMBEDDINGS is

@@ -24,11 +24,12 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { loadCatalog } from '../../src/catalog.js';
+import yaml from 'js-yaml';
+import { loadCatalog, groundCatalogToPhysical } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
@@ -43,6 +44,9 @@ const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
 const opts = { timeout: 300000 };
 
 let pg; let engine; let backend; let acqCtx; let evCtx; let seq = 0;
+// A second catalog over the SAME warehouse, declaring things the tables do not actually have —
+// see section E. `phantom` is that catalog AFTER real introspection has grounded it.
+let phantom; let phantomEngine; let phantomPruned; let phantomCostCtx;
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -84,6 +88,47 @@ before(async () => {
   });
   assert.equal(ev.parse.ok, true, JSON.stringify(ev.parse));
   evCtx = ev.context_id;
+
+  // ── the PHANTOM catalog: declares columns the built tables do not have ──────────────
+  // Same dbt project, so introspection is real; only the declaration lies. Built here rather
+  // than checked in as a second fixture so it cannot drift from the catalog it is derived from.
+  const doc = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
+  const M = Object.fromEntries(doc.models.map((m) => [m.name, m]));
+  // (a) a validity window whose BOTH columns are missing
+  M.fct_player_acquisition.columns.push(
+    { name: 'ghost_valid_from', data_type: 'timestamp', meta: { mcp: { dimension: { validity: 'start' } } } },
+    { name: 'ghost_valid_until', data_type: 'timestamp', meta: { mcp: { dimension: { validity: 'end' } } } },
+  );
+  // (b) a relationship a model OWNS, on a column that is missing. It goes on the experiments
+  // source, not on the one above: a validity window and an owned key cannot coexist, and the
+  // catalog rejects that combination outright (see the unit guards).
+  M.fct_experiment_assignments.columns.push({ name: 'ghost_pair_id', data_type: 'string' });
+  M.fct_experiment_assignments.meta.mcp.entities = { ghost_pair: { type: 'unique', key: ['ghost_pair_id', 'player_id_of_internal'] } };
+  M.fct_analytics_events.meta.mcp.entities.ghost_pair = { type: 'foreign', key: ['event_id', 'player_id_of_internal'] };
+  // (c) HALF a window: the start column is real, the end column is missing
+  M.dim_users.columns.find((c) => c.name === 'install_time_valid_until').name = 'ghost_valid_end';
+  // (d) a variant of a working relationship, on a missing column
+  M.fct_crashlytics_events.columns.push({ name: 'ghost_tracking_id', data_type: 'string' });
+  M.fct_crashlytics_events.meta.mcp.entities.ad_funnel.variants.ghost = { key: ['ghost_tracking_id', 'player_id_of_internal'] };
+
+  const phantomPath = join(mkdtempSync(join(tmpdir(), 'phantom-')), 'catalog.yml');
+  writeFileSync(phantomPath, yaml.dump(doc));
+  phantom = loadCatalog(phantomPath, { profilesDir: BASE, projectDir: BASE });
+  // every phantom declaration survives the LOAD — only the warehouse knows they are not there
+  assert.equal(phantom.getModel('acquisition').scd, true, 'declared as slowly-changing before grounding');
+  assert.ok(phantom.joinEntityNames().includes('ad_funnel_ghost'));
+  assert.equal(phantom.joinTargetFor('ghost_pair'), 'experiments');
+
+  ({ pruned: phantomPruned } = await groundCatalogToPhysical(phantom, backend, BASE));
+
+  phantomEngine = new Engine({ catalog: phantom, contextManager: ctxs, runner: backend });
+  const pc = await phantomEngine.create_semantic_model({
+    name: 'jph',
+    semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
+    metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
+  });
+  assert.equal(pc.parse.ok, true, `the grounded phantom catalog must still parse: ${JSON.stringify(pc.parse)}`);
+  phantomCostCtx = pc.context_id;
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
@@ -345,6 +390,91 @@ test('20. the funnel is isolated: u1 gets its rewarded pair or its interstitial 
   assert.deepEqual(await ids('rewarded'), new Set(['e129', 'e130']));
   assert.deepEqual(await ids('interstitial'), new Set(['e131', 'e132']));
   assert.deepEqual(await ids('banner'), new Set(), 'u1 saw no banner before the crash');
+});
+
+// ═══════════ E. GROUNDING: a declaration the warehouse does not back ═══════════
+//
+// The catalog is reconciled against the real tables on load, and anything the warehouse does
+// not have is pruned. Two things used to survive that pruning and break downstream: the
+// slowly-changing FLAG (leaving a `natural` entity with no window, which MetricFlow rejects
+// outright) and a declared JOIN KEY (leaving `via` to build SQL against a missing column).
+// Every case below runs against the same built warehouse, through real introspection.
+
+// 21. A window whose columns were never built: the model must stop being slowly-changing, and —
+//     the point of it — the manifest must still parse and the metric still answer. Before the
+//     fix dbt rejected it: "natural entities are supported only with a validity window".
+test('21. a phantom validity window is dropped and the source still queries: cost 17.50', opts, async (t) => {
+  if (skip(t)) return;
+  assert.match(String(phantomPruned.acquisition || ''), /ghost_valid_from/);
+  assert.match(String(phantomPruned.acquisition || ''), /no longer treated as slowly-changing/);
+  assert.ok(!phantom.getModel('acquisition').scd, 'the flag went with the columns');
+  const r = await phantomEngine.query_semantic_model({ context_id: phantomCostCtx, metrics: ['jph_cost'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.ok(near(num(r.rows[0].jph_cost), 17.5), `cost=${r.rows[0].jph_cost}`);
+});
+
+// 22. HALF a window is not a window: one bound survived, the other did not, so the model is not
+//     slowly-changing either (MetricFlow needs exactly one start and one end).
+test('22. a half-built window also drops the slowly-changing flag', opts, async (t) => {
+  if (skip(t)) return;
+  const dims = phantom.getModel('users').dimensions;
+  assert.ok(dims.install_time_valid_from, 'the start column is real and survived');
+  assert.ok(!dims.ghost_valid_end, 'the end column was never built and was pruned');
+  assert.ok(!phantom.getModel('users').scd, 'one bound alone cannot make a validity window');
+  assert.match(String(phantomPruned.users || ''), /no longer treated as slowly-changing/);
+});
+
+// 23. A relationship whose key column is missing stops being offered — and cannot be called.
+test('23. a phantom relationship is pruned and rejected at the call', opts, async (t) => {
+  if (skip(t)) return;
+  assert.ok(!phantom.joinEntityNames().includes('ad_funnel_ghost'), 'not offered any more');
+  assert.equal(phantom.entityKey('crashlytics', 'ad_funnel_ghost'), undefined);
+  assert.match(String(phantomPruned.crashlytics || ''), /entity:ad_funnel_ghost/);
+  const s = await phantomEngine.build_native_model({ action: 'start', name: `ph_${seq++}`, source: 'crashlytics' });
+  await assert.rejects(
+    () => phantomEngine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'events', via: 'ad_funnel_ghost' } }),
+    /declares no such relationship/,
+    'a key the warehouse cannot back is refused here, not as a SQL error',
+  );
+});
+
+// 24. Pruning is surgical: the sibling variants, built on real columns, still join and still
+//     return the same numbers as in the honest catalog.
+test('24. the real variants are untouched by the pruning: 14 / 12 / 8', opts, async (t) => {
+  if (skip(t)) return;
+  for (const v of ['rewarded', 'interstitial', 'banner']) {
+    assert.deepEqual(phantom.entityKey('crashlytics', `ad_funnel_${v}`), [{ column: `${v}_tracking_id` }, { column: 'player_id_of_internal' }]);
+  }
+  const n = async (variant) => {
+    const st = await phantomEngine.build_native_model({ action: 'start', name: `ph_${seq++}`, source: 'crashlytics' });
+    for (const stage of [
+      { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: ['event_id'] },
+      { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] },
+    ]) {
+      const r = await phantomEngine.build_native_model({ action: 'add_step', draft_id: st.draft_id, stage });
+      assert.ok(!r.error, JSON.stringify(r.error));
+    }
+    const c = await phantomEngine.build_native_model({ action: 'materialize', draft_id: st.draft_id });
+    assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+    return num(c.rows[0].n);
+  };
+  assert.equal(await n('rewarded'), 14);
+  assert.equal(await n('interstitial'), 12);
+  assert.equal(await n('banner'), 8);
+});
+
+// 25. When the pruned key was the OWNER of a relationship, the ownership index must be rebuilt —
+//     otherwise a target keeps being advertised by a model that no longer declares the key.
+test('25. pruning an owning key clears the join target', opts, async (t) => {
+  if (skip(t)) return;
+  assert.equal(phantom.entityKey('experiments', 'ghost_pair'), undefined, 'the owner lost the key');
+  assert.equal(phantom.joinTargetFor('ghost_pair'), undefined, 'so nothing points at it as a target');
+  assert.ok(!phantom.reachableGroupByPaths().some((p) => p.startsWith('ghost_pair__')), 'and it offers no group-by path');
+  // the events side still declares it, but with no owner it is not offered as a join
+  assert.ok(!phantom.joinEntityNames().includes('ghost_pair'));
+  // the owner's other, real relationship is untouched
+  assert.deepEqual(phantom.entityKey('experiments', 'user'), [{ column: 'player_id_of_internal' }]);
+  assert.equal(phantom.joinTargetFor('user'), 'users');
 });
 
 // ═══════════ discovery + guards (input validation) ═══════════

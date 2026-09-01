@@ -49,6 +49,10 @@ models:
           - tutorial
           - screen_changed
     columns:
+      - name: event_id
+        data_type: string
+        description: "Event identifier (one row per event)."
+        meta: { mcp: { index: false } }
       - name: player_id_of_internal
         data_type: string
         description: "Player identifier; joins events to dim_users / fct_experiment_assignments."

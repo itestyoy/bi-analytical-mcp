@@ -273,7 +273,7 @@ test('9. summing cost over the event pairing inflates it to 267.75, not 17.50', 
 // 10. The SCD join also works in a FILTER, not just a group-by: GB spend is 5.00.
 test('10. filtering a metric by a point-in-time attribute: GB spend = 5.00', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(acqCtx, { metrics: ['jacq_cost'], where: [{ field: { kind: 'dimension', path: 'user__country' }, op: 'eq', value: 'GB' }] });
+  const r = await q(acqCtx, { metrics: ['jacq_cost'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'user__country' }, op: 'eq', value: 'GB' }] } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(near(num(r.rows[0].jacq_cost), 5.0), `GB=${r.rows[0].jacq_cost}`);
 });
@@ -455,9 +455,11 @@ test('23. a phantom relationship is pruned and rejected at the call', opts, asyn
   assert.equal(phantom.entityKey('crashlytics', 'ad_funnel_ghost'), undefined);
   assert.match(String(phantomPruned.crashlytics || ''), /entity:ad_funnel_ghost/);
   const s = await phantomEngine.build_native_model({ action: 'start', name: `ph_${seq++}`, source: 'crashlytics' });
+  // Refused before any SQL exists: the pruned name is not even in the tool's `via` enum, so the
+  // rejection lists the relationships that DID survive and never mentions the ghost.
   await assert.rejects(
     () => phantomEngine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'events', via: 'ad_funnel_ghost' } }),
-    /declares no such relationship/,
+    (e) => /must be one of|declares no such relationship/.test(e.message) && !/ad_funnel_ghost/.test(e.message),
     'a key the warehouse cannot back is refused here, not as a SQL error',
   );
 });

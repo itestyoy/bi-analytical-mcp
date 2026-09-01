@@ -583,8 +583,11 @@ export function dbtSchemaToCatalog(doc) {
   // nothing. Checked at load so a mistyped key fails here, not as an empty result set.
   const ownerOf = new Map();
   for (const [key, m] of Object.entries(out.models)) {
-    const pe = m.primary_entity;
-    if (pe && typeof pe === 'object' && pe.name) ownerOf.set(pe.name, key);
+    // A primary entity is written EITHER as a bare name (meta.mcp.primary_entity: event, the
+    // events-source form) or as an object with a key — both make the model the owner, so read
+    // it through the same accessor the owner index uses.
+    const pe = primaryEntityName(m);
+    if (pe) ownerOf.set(pe, key);
   }
   for (const [key, m] of Object.entries(out.models)) {
     for (const [name, e] of Object.entries(m.entities || {})) {

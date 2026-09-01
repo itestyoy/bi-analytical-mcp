@@ -332,7 +332,12 @@ test('semantic_index({ property: "users.country" }) returns the attribute value 
   assert.equal(out.column, 'country');
   assert.equal(out.distinct_count, 4);
   assert.equal(valOf(out.sample_values, 'US').freq, 4);
-  assert.equal(out.value_stats.top_value, 'US');
+  // dim_users is SCD-2 and u1 has a US version and a GB one, so US and GB are TIED at 4
+  // versions each. Pin the invariant — the reported top value IS a most-frequent one —
+  // rather than an arbitrary tie-break the warehouse is free to decide either way.
+  assert.equal(valOf(out.sample_values, 'GB').freq, 4);
+  const maxFreq = Math.max(...out.sample_values.map((v) => v.freq));
+  assert.equal(valOf(out.sample_values, out.value_stats.top_value).freq, maxFreq);
   // the guidance names the JOIN path (user attributes are reached via the users join).
   assert.ok(out.recommendations.some((r) => r.includes('user__country') || r.includes("join with:'users'")), JSON.stringify(out.recommendations));
   // unknown attribute → clear error, not a silent empty result.

@@ -22,6 +22,12 @@ seeds:
       +column_types:
         assigned_at: timestamp
         ended_at: timestamp
+    seed_acquisition:
+      +column_types:
+        spend_date: timestamp
+        cost: numeric(10,2)
+        impressions: integer
+        clicks: integer
     seed_crashlytics:
       +column_types:
         event_time: timestamp

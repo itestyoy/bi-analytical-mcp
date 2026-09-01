@@ -398,7 +398,10 @@ const STAGES = {
       properties: {
         stage: { const: 'join' },
         with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join.' },
-        on: { type: 'string', description: 'Shared entity key column (present on both sides).' },
+        on: {
+          description: 'Shared key column(s), present on BOTH sides. A single name, or several for a composite key (e.g. ["player_id_of_internal","event_date"] to match a per-player-per-day table without fanning out).',
+          oneOf: [{ type: 'string' }, { type: 'array', minItems: 1, items: { type: 'string' } }],
+        },
         attrs: { type: 'array', items: { type: 'string' }, description: 'Columns of the joined model to expose (default: all its dimensions).' },
         between: {
           type: 'object', additionalProperties: false, required: ['value', 'from', 'to'],
@@ -414,6 +417,9 @@ const STAGES = {
     }),
     build: ({ catalog, cols }, p) => {
       const m = catalog.getModel(p.with);
+      const on = Array.isArray(p.on) ? p.on : [p.on];
+      if (!on.length || on.some((k) => typeof k !== 'string' || !k)) throw new Error('join: `on` needs a key column name, or a list of them');
+      for (const k of on) requireCol(cols, k); // every key must exist on THIS side
       const attrs = p.attrs?.length ? p.attrs : Object.keys(m.dimensions || {});
       const relation = `{{ ref('${m.dbt_model}') }}`;
       let out = cols;
@@ -432,7 +438,7 @@ const STAGES = {
       }
       // A `between` predicate cannot be expressed with the BigQuery pipe `USING (...)` form, so it
       // forces the chained-CTE `ON ...` assembly (both dialects render the same ON clause there).
-      return { op: { op: 'join', relation, alias: 'j', on: [p.on], attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
+      return { op: { op: 'join', relation, alias: 'j', on, attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
     },
   },
 

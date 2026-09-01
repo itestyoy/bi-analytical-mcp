@@ -96,7 +96,8 @@ test('1a. semantic_index overview lists models + event names (no column dump)', 
   if (skip(t)) return;
   const overview = await engine.semantic_index();
   assert.ok(overview.models.find((m) => m.key === 'events'), 'events model present');
-  assert.ok(Array.isArray(overview.event_names) && overview.event_names.includes('ad_finished'), 'overview lists event names incl. ad_finished');
+  assert.ok(overview.event_names.events.includes('ad_finished'), 'the events source lists its own event names incl. ad_finished');
+  assert.ok(overview.event_names.crashlytics.includes('fatal_crash'), 'the crash source lists ITS own event names, not merged into one list');
   assert.equal(overview.models.find((m) => m.key === 'events').physical_columns, undefined, 'overview stays compact');
 });
 
@@ -153,8 +154,11 @@ test('2. semantic_index({ status }) reports a clean value-index sync with EXACT 
   //   · its categorical dimensions except the event_name column,
   // and the categorical dimensions of every non-fact model (users/experiments). No gaps.
   const c = engine.catalog;
-  const catDims = (k, skip) => Object.keys(c.getModel(k).dimensions || {})
-    .filter((d) => d !== skip && String(c.getModel(k).dimensions[d]?.type || '').toLowerCase() !== 'time');
+  // …minus anything the schema opted OUT of value indexing (meta.mcp.index:false — an id
+  // column is groupable but has no enumerable value set worth scanning).
+  const catDims = (k, skip) => Object.entries(c.getModel(k).dimensions || {})
+    .filter(([d, spec]) => d !== skip && spec?.index !== false && String(spec?.type || '').toLowerCase() !== 'time')
+    .map(([d]) => d);
   const expected = c.facts.reduce((n, f) => n + c.eventProps(f).length + catDims(f, c.eventNameColumn(f)).length, 0)
     + c.modelKeys().filter((k) => !c.isFact(k)).reduce((n, k) => n + catDims(k).length, 0);
   assert.equal(vi.indexed_properties, expected, 'one prop_stats row per indexable property/attribute');
@@ -239,7 +243,7 @@ test('3b. get_query_result re-reads the committed pipeline rows (same 12/8/5/3)'
 
 test('3c. commit equals the all-at-once register_native_model path (fidelity 12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.register_native_model({ name: 'e2e_funnel_aao', pipeline: { stages: [matchActivation()] } });
+  const out = await engine.register_native_model({ name: 'e2e_funnel_aao', pipeline: { source: 'events', stages: [matchActivation()] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   assert.equal(reached(out.rows, 'launch'), 12);
   assert.equal(reached(out.rows, 'tut1'), 8);

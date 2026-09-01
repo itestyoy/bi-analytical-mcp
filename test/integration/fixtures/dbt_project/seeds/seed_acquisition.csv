@@ -1,0 +1,14 @@
+row_id,player_id,spend_date,media_source,campaign,campaign_id,ingest_batch_id,cost,impressions,clicks
+a1,u1,2026-01-01,meta,winter_promo,cmp_1001,b-2026-01-01-01,1.50,100,5
+a2,u2,2026-01-01,organic,none,cmp_0000,b-2026-01-01-02,0.00,0,0
+a3,u3,2026-01-02,meta,winter_promo,cmp_1001,b-2026-01-02-01,2.00,150,8
+a4,u4,2026-01-02,google,search_brand,cmp_1002,b-2026-01-02-02,1.25,120,6
+a5,u5,2026-01-03,organic,none,cmp_0000,b-2026-01-03-01,0.00,0,0
+a6,u6,2026-01-03,applovin,ua_scale,cmp_1003,b-2026-01-03-02,3.00,200,10
+a7,u1,2026-01-03,meta,winter_promo,cmp_1001,b-2026-01-03-03,0.50,40,2
+a8,u7,2026-01-04,applovin,ua_scale,cmp_1003,b-2026-01-04-01,2.50,180,9
+a9,u8,2026-01-04,organic,none,cmp_0000,b-2026-01-04-02,0.00,0,0
+a10,u9,2026-01-04,meta,winter_promo,cmp_1001,b-2026-01-04-03,1.75,140,7
+a11,u10,2026-01-05,google,search_brand,cmp_1002,b-2026-01-05-01,2.25,160,8
+a12,u11,2026-01-05,organic,none,cmp_0000,b-2026-01-05-02,0.00,0,0
+a13,u12,2026-01-05,applovin,ua_scale,cmp_1003,b-2026-01-05-03,2.75,190,9

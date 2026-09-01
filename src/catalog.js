@@ -10,6 +10,34 @@ import { isNumericType, SUPPORTED_DIALECTS } from './dialect.js';
 
 export { SUPPORTED_DIALECTS };
 
+// Aggregations a catalog measure may declare — dbt/MetricFlow's set. Any column or model
+// measure may use ANY of these; nothing here is specific to a role or a column name.
+export const MEASURE_AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'sum_boolean', 'median', 'percentile']);
+
+/**
+ * Normalise one declared measure (model-level meta.mcp.measures entry, or a column-level
+ * meta.mcp.measure) into the dbt shape. `expr` defaults to the column it is declared on.
+ * Validates the aggregation so a typo fails at load with the allowed set, not at dbt parse.
+ */
+function normalizeMeasure(name, decl, { model, column } = {}) {
+  const where = column ? `column '${column}' of model '${model}'` : `measure '${name}' of model '${model}'`;
+  const agg = decl.agg;
+  if (!agg) throw new Error(`${where}: meta.mcp.measure needs an 'agg' (one of: ${[...MEASURE_AGGS].join(', ')})`);
+  if (!MEASURE_AGGS.has(agg)) throw new Error(`${where}: unknown aggregation '${agg}' — use one of: ${[...MEASURE_AGGS].join(', ')}`);
+  const expr = decl.expr ?? column;
+  if (!expr) throw new Error(`${where}: a model-level measure needs an 'expr' (a SQL expression over the model's columns)`);
+  const out = { agg, expr };
+  if (agg === 'percentile') {
+    const q = decl.percentile;
+    if (!(typeof q === 'number' && q > 0 && q < 1)) throw new Error(`${where}: agg 'percentile' needs a 'percentile' between 0 and 1`);
+    out.agg_params = { percentile: q, use_discrete_percentile: !!decl.use_discrete_percentile };
+  }
+  if (decl.label) out.label = decl.label;
+  if (decl.description) out.description = decl.description;
+  if (decl.unit) out.unit = decl.unit;
+  return out;
+}
+
 // Native dbt `data_type`s that map to a MetricFlow time dimension.
 const TIME_DATA_TYPES = new Set(['date', 'timestamp', 'timestamptz', 'timestamp_ntz', 'timestamp_tz', 'datetime', 'time']);
 
@@ -243,7 +271,9 @@ export function dbtSchemaToCatalog(doc) {
     if (mcp.role) m.role = mcp.role;
     if (mcp.primary_entity !== undefined) m.primary_entity = mcp.primary_entity;
     if (mcp.known_events) m.known_events = mcp.known_events;
-    if (mcp.measures) m.measures = mcp.measures;
+    if (mcp.measures) {
+      m.measures = Object.fromEntries(Object.entries(mcp.measures).map(([name, decl]) => [name, normalizeMeasure(name, decl || {}, { model: model.name })]));
+    }
     // Business meaning of key events (e.g. acquisition_event: first_launch) — lets an
     // AI pick the right base events for retention/conversion without guessing.
     if (mcp.event_semantics) m.event_semantics = mcp.event_semantics;
@@ -254,20 +284,20 @@ export function dbtSchemaToCatalog(doc) {
     // (no time window) are rejected instead of full-scanning the warehouse.
     if (mcp.require_time_range != null) m.require_time_range = !!mcp.require_time_range;
 
-    // A FACT (events source) is DETECTED structurally: a model declaring the
-    // event_name / event_data / time columns. SEVERAL facts may coexist — e.g. the
-    // analytics events fact and a Crashlytics events fact — each with its OWN event
-    // vocabulary (known_events + event-scoped properties). `anchor: true` marks the
-    // PRIMARY fact: the default pipeline source, and the one whose event/property
-    // names stay UNQUALIFIED (secondary facts are addressed as '<fact>.<name>',
-    // the same convention as the 'users.country' dimension attributes). Without an
-    // explicit marker the FIRST declared fact is the primary one.
+    // A FACT (events source) is DETECTED structurally: a model declaring an
+    // event_name / event_data column. SEVERAL facts may coexist — e.g. an analytics
+    // events source and a Crashlytics one — and they are INDEPENDENT AND EQUAL: each
+    // owns its event vocabulary (known_events + event-scoped properties) and its own
+    // space in the value index, and the SOURCE is always a separate argument. A model
+    // with neither column is not a fact even if it declares a time axis (a measures
+    // source such as acquisition). `anchor: true` only names the source a tool falls
+    // back to when the catalog has several and the caller named none.
     const isFact = mcp.anchor === true
-      || (model.columns || []).some((c) => { const cm = c.meta?.mcp || {}; return cm.is_event_name || cm.is_event_data || cm.is_time; });
+      || (model.columns || []).some((c) => { const cm = c.meta?.mcp || {}; return cm.is_event_name || cm.is_event_data; });
     if (isFact) {
       (out.facts ||= []).push(key);
       if (mcp.anchor === true) {
-        if (out.anchor_model && out.anchor_model !== key) throw new Error(`multiple PRIMARY facts: '${out.anchor_model}' and '${key}' both declare meta.mcp.anchor: true. Exactly one fact may be primary; the others are addressed as '<role>.<event>'.`);
+        if (out.anchor_model && out.anchor_model !== key) throw new Error(`'${out.anchor_model}' and '${key}' both declare meta.mcp.anchor: true. At most one source may be the fallback; every source is addressed by naming it explicitly.`);
         out.anchor_model = key;
       }
     }
@@ -289,6 +319,15 @@ export function dbtSchemaToCatalog(doc) {
         continue; // entity key columns are not dimensions
       }
       if (cm.is_time) { m.time = { column: col.name, granularity: cm.granularity || 'day' }; continue; }
+      // A column declared a MEASURE becomes a base measure of this model (any aggregation from
+      // MEASURE_AGGS, on any column — nothing is special-cased). An amount is not a groupable
+      // attribute, so it is neither a dimension nor a value-index target unless the author also
+      // marks it meta.mcp.dimension.
+      if (cm.measure && !cm.dimension) {
+        const name = cm.measure.name || col.name;
+        (m.measures ||= {})[name] = normalizeMeasure(name, { ...cm.measure, unit: cm.measure.unit ?? cm.unit }, { model: model.name, column: col.name });
+        continue;
+      }
       if (cm.is_event_name) { m.event_name = { column: col.name }; continue; }
       if (cm.is_event_data) {
         m.event_data_column = col.name;
@@ -338,6 +377,9 @@ export function dbtSchemaToCatalog(doc) {
       // (date/timestamp -> time, else categorical) — not from meta. Only the bits
       // dbt has no native field for stay in meta: time `granularity` (non-day)
       // and categorical `values` hints. `meta.mcp.dimension` is still honored.
+      // meta.mcp.dimension: false takes a column OUT of the group-by surface (it stays a real
+      // column a pipeline can reference) — the opt-out for anything that is not an attribute.
+      if (cm.dimension === false) continue;
       if (cm.dimension || !isFact) {
         const explicit = cm.dimension || {};
         // A validity-window bound (meta.mcp.dimension.validity: start|end) marks the SCD-2 pair
@@ -350,6 +392,9 @@ export function dbtSchemaToCatalog(doc) {
         if (validity) { d.validity = validity; m.scd = true; }
         const values = explicit.values || cm.values;
         if (values) d.values = values;
+        // meta.mcp.index: false keeps a column out of the VALUE index (an id or a free-text
+        // column has no enumerable value set worth scanning) while staying groupable.
+        if (cm.index === false || explicit.index === false) d.index = false;
         dimensions[col.name] = d;
         // A dimension explicitly marked the BUNDLE/app identifier on the anchor lets the
         // value index break coverage down per app (which properties are empty for which app).
@@ -415,9 +460,10 @@ export class Catalog {
     this.raw = raw;
     this.dialect = raw.warehouse_dialect;
     this.models = raw.models;
-    // `anchor` = the PRIMARY fact: the default pipeline source and the fact whose
-    // event/property names are used UNQUALIFIED. `facts` = every events source; a
-    // secondary fact's events/properties are addressed as '<fact>.<name>'.
+    // `facts` = every events source; they are equal, and each is addressed by name.
+    // `anchor` is only an internal fallback (the default `fact` argument of the event
+    // accessors below) — with several sources a caller must say which one it means,
+    // which `defaultSource()` enforces.
     this.anchor = raw.anchor_model || 'events';
     if (!this.models?.[this.anchor]) {
       throw new Error(`anchor_model '${this.anchor}' not found in catalog.models`);
@@ -488,17 +534,6 @@ export class Catalog {
 
   primaryEntityName(key) {
     return primaryEntityName(this.getModel(key));
-  }
-
-  /** Model key whose PRIMARY entity is `entity` (the join target), excluding the anchor. */
-  dimensionModelForEntity(entity) {
-    const key = this.primaryByEntity[entity];
-    return key && key !== this.anchor ? key : undefined;
-  }
-
-  /** Physical column on the anchor for an entity (e.g. the user/session key). */
-  anchorEntityColumn(entity) {
-    return this.models[this.anchor]?.entities?.[entity]?.column;
   }
 
   /** True when queries over `source` must carry a time window (partition-pruning guardrail). */
@@ -700,6 +735,14 @@ export class Catalog {
       }
     };
     for (const fact of this.facts) visit(fact, '', 1);
+    // A source's OWN attributes are groupable under its primary entity — that is how a base
+    // measure declared on a non-events source (acquisition spend, say) is sliced by its own
+    // channel/campaign columns, without a join and without declaring a task dimension.
+    for (const key of this.modelKeys()) {
+      const ent = primaryEntityName(this.models[key]);
+      if (!ent) continue;
+      for (const dim of Object.keys(this.models[key].dimensions || {})) out.add(`${ent}__${dim}`);
+    }
     return [...out];
   }
 
@@ -717,7 +760,7 @@ export class Catalog {
     return refs;
   }
 
-  /** Models that may be referenced in `use_base_models` (everything but the primary fact). */
+  /** Models that may be JOINED to the source a task is built from. */
   joinableModelKeys() {
     return this.modelKeys().filter((k) => k !== this.anchor);
   }

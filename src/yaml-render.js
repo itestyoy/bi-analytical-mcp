@@ -69,6 +69,13 @@ export function renderBaseModel(catalog, key) {
   }
   sm.dimensions = [];
   let timeDim;
+  // A non-events source may still have a TIME AXIS (meta.mcp.is_time) — e.g. a daily
+  // acquisition table. It is not a groupable attribute list entry, so emit it here and let it
+  // be the model's agg_time_dimension, exactly as an events source's event_time is.
+  if (m.time?.column) {
+    sm.dimensions.push({ name: m.time.column, type: 'time', type_params: { time_granularity: m.time.granularity || 'day' } });
+    timeDim = m.time.column;
+  }
   for (const [name, d] of Object.entries(m.dimensions || {})) {
     if (d.type === 'time') {
       const dim = { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } };
@@ -87,7 +94,12 @@ export function renderBaseModel(catalog, key) {
   // dimension-only and drop any catalog measures — measures belong on the events fact, not on a
   // slowly-changing dimension.
   if (!scd) {
-    const measures = Object.entries(m.measures || {}).map(([name, mm]) => ({ name, agg: mm.agg, expr: mm.expr }));
+    const measures = Object.entries(m.measures || {}).map(([name, mm]) => ({
+      name, agg: mm.agg, expr: mm.expr,
+      ...(mm.agg_params ? { agg_params: mm.agg_params } : {}),
+      ...(mm.label ? { label: mm.label } : {}),
+      ...(mm.description ? { description: mm.description } : {}),
+    }));
     if (measures.length) {
       sm.measures = measures;
       if (timeDim) sm.defaults = { agg_time_dimension: timeDim };

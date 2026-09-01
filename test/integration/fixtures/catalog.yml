@@ -262,11 +262,11 @@ models:
         data_type: timestamp
         description: "When the player's assignment ended."
 
-  # A SECOND events fact. Same shape as fct_analytics_events (event_name + time axis +
-  # flattened, event-scoped `*_of_event_data` payload) but a SEPARATE vocabulary: nothing is
-  # shared with the analytics fact, and its events/properties are addressed 'crashlytics.<name>'
-  # outside a pipeline / semantic model built FROM it. `primary_entity` MUST differ from the
-  # analytics fact's (MetricFlow rejects two semantic models sharing a primary entity).
+  # A SECOND events source, equal and independent. Same shape as fct_analytics_events
+  # (event_name + time axis + flattened, event-scoped `*_of_event_data` payload) but a SEPARATE
+  # vocabulary: nothing is shared with the analytics source, and its events/properties are
+  # addressed with source: 'crashlytics'. `primary_entity` MUST differ from every other model's
+  # (MetricFlow rejects two semantic models sharing a primary entity).
   - name: fct_crashlytics_events
     description: >
       Crash-reporting events fact — one row per crash / non-fatal error / ANR reported from
@@ -352,3 +352,82 @@ models:
           mcp:
             events: [fatal_crash, non_fatal, anr]
             array: { items: string, encoding: json }
+
+  # A NON-EVENTS source with its own MEASURES, declared entirely in this schema. It has no
+  # event_name, so it is not an events fact — but it does have a time axis (is_time) and a
+  # grain of its own (one row per player per day). Every measure below is a plain declaration:
+  # any column, any aggregation from the supported set, no code knows these names.
+  - name: fct_player_acquisition
+    description: >
+      Player-level acquisition spend: one row per (player, day) with the cost, impressions and
+      clicks attributed to that player. Amounts are MEASURES (aggregate them), the channel
+      columns are attributes (group by them). Joins to dim_users / the events sources on
+      player_id_of_internal; on a per-day question join on player_id_of_internal + the date so
+      the daily grain does not fan out.
+    meta:
+      mcp:
+        role: acquisition
+        primary_entity: acquisition
+        # A model-level measure is an expression over the model's columns — used here for an
+        # aggregation that is not a plain column sum.
+        measures:
+          max_daily_cost: { agg: max, expr: cost, unit: usd, label: "Max daily cost" }
+          p90_daily_cost: { agg: percentile, expr: cost, percentile: 0.9, unit: usd }
+    columns:
+      - name: acquisition_id
+        data_type: string
+        description: "Surrogate key of the (player, day) row."
+        meta:
+          mcp:
+            entity: { name: acquisition, type: primary }
+      - name: player_id_of_internal
+        data_type: string
+        description: "Player the spend is attributed to; joins to dim_users and the events sources."
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }
+      - name: spend_date
+        data_type: timestamp
+        description: "The day the spend was recorded — this source's time axis."
+        meta:
+          mcp:
+            is_time: true
+      # ── MEASURES: declared per column, aggregated, never groupable ──────────────
+      - name: cost
+        data_type: numeric
+        description: "Acquisition cost attributed to the player on that day."
+        meta:
+          mcp:
+            unit: usd
+            measure: { agg: sum, name: ua_cost, label: "UA cost" }
+      - name: impressions
+        data_type: integer
+        description: "Ad impressions that led to the attribution, that day."
+        meta:
+          mcp:
+            measure: { agg: sum }
+      - name: clicks
+        data_type: integer
+        description: "Ad clicks that led to the attribution, that day."
+        meta:
+          mcp:
+            measure: { agg: sum }
+      # ── ATTRIBUTES: groupable ───────────────────────────────────────────────────
+      - name: media_source
+        data_type: string
+        description: "Acquisition channel the spend was booked against."
+      - name: campaign
+        data_type: string
+        description: "Campaign name the spend was booked against."
+      - name: campaign_id
+        data_type: string
+        description: "Campaign id — groupable, but not worth profiling (an id has no value set)."
+        meta:
+          mcp:
+            index: false
+      - name: ingest_batch_id
+        data_type: string
+        description: "Loader batch id — a real column a pipeline can reference, but not an attribute."
+        meta:
+          mcp:
+            dimension: false

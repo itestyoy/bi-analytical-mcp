@@ -7,10 +7,12 @@ any seed CSV, regenerate this document.
 
 Seed files:
 - `dbt_project/seeds/seed_users.csv` -> `dim_users` (role: users)
-- `dbt_project/seeds/seed_events.csv` -> `fct_analytics_events` (role: events — the PRIMARY fact)
+- `dbt_project/seeds/seed_events.csv` -> `fct_analytics_events` (role: events — the product-analytics events source)
 - `dbt_project/seeds/seed_experiments.csv` -> `fct_experiment_assignments` (role: experiments)
 - `dbt_project/seeds/seed_crashlytics.csv` -> `fct_crashlytics_events` (role: crashlytics — a
-  SECOND events fact; see §10)
+  SECOND events source; see §10)
+- `dbt_project/seeds/seed_acquisition.csv` -> `fct_player_acquisition` (role: acquisition — a
+  NON-events source with its own measures; see §11)
 
 Vocabulary is restricted to `config/catalog.yml` (events, event_data property
 keys, and user attributes). All monetary values are integers. `campaign_id` is a
@@ -290,7 +292,7 @@ distinct users with any event on that day in this dataset).
 
 ---
 
-## 10. Crash reports (`seed_crashlytics.csv`) — the SECOND events fact
+## 10. Crash reports (`seed_crashlytics.csv`) — the SECOND events source
 
 `dbt_project/seeds/seed_crashlytics.csv` -> `fct_crashlytics_events` (`role: crashlytics`).
 A separate events fact with its OWN event vocabulary (`fatal_crash` / `non_fatal` / `anr`)
@@ -357,6 +359,64 @@ NULL elsewhere — exactly like the analytics fact:
 
 `app_version` is written as a three-part version string (`1.0.0`, not `1.0`) so the seed
 loader keeps it TEXT — a two-part value is coerced to a number and comes back as `1`.
+
+---
+
+## 11. Acquisition spend (`seed_acquisition.csv`) — a NON-events source with measures
+
+`dbt_project/seeds/seed_acquisition.csv` -> `fct_player_acquisition` (`role: acquisition`).
+One row per (player, day). It has no `event_name`, so it is not an events source — but it has
+its own TIME AXIS (`spend_date`) and its own MEASURES, all declared in `meta.mcp`, and it joins
+to `dim_users` / the events sources on `player_id_of_internal`.
+
+| id | player | day | media_source | campaign | cost | impressions | clicks |
+|----|--------|-----|--------------|----------|------|-------------|--------|
+| a1  | u1  | 2026-01-01 | meta     | winter_promo | 1.50 | 100 | 5  |
+| a2  | u2  | 2026-01-01 | organic  | none         | 0.00 | 0   | 0  |
+| a3  | u3  | 2026-01-02 | meta     | winter_promo | 2.00 | 150 | 8  |
+| a4  | u4  | 2026-01-02 | google   | search_brand | 1.25 | 120 | 6  |
+| a5  | u5  | 2026-01-03 | organic  | none         | 0.00 | 0   | 0  |
+| a6  | u6  | 2026-01-03 | applovin | ua_scale     | 3.00 | 200 | 10 |
+| a7  | u1  | 2026-01-03 | meta     | winter_promo | 0.50 | 40  | 2  |
+| a8  | u7  | 2026-01-04 | applovin | ua_scale     | 2.50 | 180 | 9  |
+| a9  | u8  | 2026-01-04 | organic  | none         | 0.00 | 0   | 0  |
+| a10 | u9  | 2026-01-04 | meta     | winter_promo | 1.75 | 140 | 7  |
+| a11 | u10 | 2026-01-05 | google   | search_brand | 2.25 | 160 | 8  |
+| a12 | u11 | 2026-01-05 | organic  | none         | 0.00 | 0   | 0  |
+| a13 | u12 | 2026-01-05 | applovin | ua_scale     | 2.75 | 190 | 9  |
+
+Total rows: **13**. **u1 appears twice** (2026-01-01 and 2026-01-03) — that is what makes the
+grain (player, day) rather than player, and what a single-key join fans out on.
+
+### Measures (declared in the catalog, not in code)
+
+| measure | declared as | value over all 13 rows |
+|---|---|---|
+| `ua_cost` | column `cost`, `agg: sum` | **17.50** |
+| `impressions` | column `impressions`, `agg: sum` | **1280** |
+| `clicks` | column `clicks`, `agg: sum` | **64** |
+| `max_daily_cost` | model-level, `agg: max, expr: cost` | **3.00** |
+| `p90_daily_cost` | model-level, `agg: percentile, percentile: 0.9` | **2.70** (percentile_cont interpolates 2.50→2.75) |
+
+- CPC (`ua_cost / clicks`) = 17.50 / 64 = **0.2734375**
+- cost by `media_source`: meta **5.75**, applovin **8.25**, google **3.50**, organic **0**
+- cost by `user__country` (join to `dim_users`): US **7.25**, GB **4.50**, DE **4.00**, BR **1.75**
+- cost by day (`metric_time`): 01-01 **1.50**, 01-02 **3.25**, 01-03 **3.50**, 01-04 **4.25**, 01-05 **5.00**
+
+### Schema opt-outs exercised here
+
+- `campaign_id` — groupable, but `meta.mcp.index: false`: it is NOT a value-index target
+  (the indexer's targets for this source are exactly `media_source` and `campaign`).
+- `ingest_batch_id` — `meta.mcp.dimension: false`: not an attribute, still a real column a
+  pipeline can read (grouping a pipeline by it yields all **13** rows, one per batch).
+- The three measure columns are neither attributes nor value-index targets.
+
+### Composite join key
+
+Joining the 12 `first_launch` events to this table on `player_id_of_internal` **+ the day**
+yields **12** rows (one cost row per event); joining on the player alone yields **13**, because
+u1's event matches both of u1's spend days. That difference is the fan-out a composite key
+prevents.
 
 ---
 

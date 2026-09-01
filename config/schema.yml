@@ -1542,3 +1542,63 @@ models:
   #       data_type: numeric
   #       description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
   #       meta: { mcp: { unit: seconds, events: [anr] } }
+
+  # ── ACQUISITION SPEND (TEMPLATE, not active) ──────────────────────────────────────────
+  # A NON-events source: no event_name, so it is not an events fact — but it has its own time
+  # axis and its own MEASURES, and both are declared HERE, in the schema. Nothing about a
+  # measure is known to the code: any column, any aggregation from
+  #   sum | average | min | max | count | count_distinct | sum_boolean | median | percentile
+  # (a bad one fails at catalog load, naming the allowed set).
+  #
+  #   meta.mcp.measure  on a COLUMN   -> a base measure over that column. An amount is not an
+  #                                     attribute, so the column is neither groupable nor value-
+  #                                     indexed. Options: name (default: the column), label,
+  #                                     description, unit, percentile (for agg: percentile).
+  #   meta.mcp.measures on the MODEL  -> a measure whose `expr` is any SQL over the model's
+  #                                     columns (a max, a percentile, a ratio numerator, ...).
+  #   meta.mcp.dimension: false       -> a real column that is NOT an attribute (a batch id).
+  #   meta.mcp.index: false           -> groupable, but not profiled by the value index (an id).
+  #   meta.mcp.is_time                -> the source's time axis, so metric_time and time_range
+  #                                     work here exactly as on an events source.
+  #
+  # A per-day table joins on player + day: build_native_model's join stage takes a COMPOSITE key
+  # (on: ["player_id_of_internal", "<the day column>"]), which is what stops the daily rows from
+  # fanning out across a player's events.
+  #
+  # - name: fct_player_acquisition           # TODO: the real dbt model / view name
+  #   description: >
+  #     Player-level acquisition spend: one row per (player, day) with the cost and impressions
+  #     attributed to that player. Amounts are MEASURES; the channel columns are attributes.
+  #   meta:
+  #     mcp:
+  #       role: acquisition
+  #       primary_entity: acquisition        # MUST differ from every other model's
+  #       partition_column: spend_date       # TODO: the real partition column (cost hint)
+  #       measures:
+  #         max_daily_cost: { agg: max, expr: cost, unit: usd }
+  #   columns:
+  #     - name: acquisition_id               # TODO: a surrogate key for the (player, day) grain
+  #       data_type: string
+  #       meta: { mcp: { entity: { name: acquisition, type: primary } } }
+  #     - name: internal_player_id
+  #       data_type: integer
+  #       meta: { mcp: { entity: { name: user, type: foreign } } }
+  #     - name: spend_date
+  #       data_type: timestamp
+  #       description: "The day the spend was recorded — this source's time axis."
+  #       meta: { mcp: { is_time: true } }
+  #     - name: cost
+  #       data_type: numeric
+  #       description: "Acquisition cost attributed to the player that day."
+  #       meta: { mcp: { unit: usd, measure: { agg: sum, name: ua_cost, label: "UA cost" } } }
+  #     - name: impressions
+  #       data_type: integer
+  #       meta: { mcp: { measure: { agg: sum } } }
+  #     - name: media_source                 # a plain attribute: groupable, value-indexed
+  #       data_type: string
+  #     - name: campaign_id
+  #       data_type: string
+  #       meta: { mcp: { index: false } }    # groupable, but an id has no value set worth profiling
+  #     - name: ingest_batch_id
+  #       data_type: string
+  #       meta: { mcp: { dimension: false } } # a real column, not an attribute

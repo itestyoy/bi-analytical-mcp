@@ -1,6 +1,6 @@
-// A SECOND events fact (role: crashlytics) is a first-class citizen: its own event
+// A SECOND events source (role: crashlytics) is an equal, independent source: its own event
 // vocabulary, its own event-scoped payload, governed metrics, a funnel over it, a join to
-// dim_users, and metrics from BOTH facts answered in one query. Every assertion is on the
+// dim_users, and metrics from BOTH sources answered in one query. Every assertion is on the
 // NUMBERS returned by dbt + MetricFlow / the pipeline against PGlite — the exact totals
 // recorded in test/integration/fixtures/SEED_DATA.md (§10).
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
@@ -51,8 +51,8 @@ before(async () => {
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
 
-  // Metrics built FROM the crashlytics fact. Inside the semantic model its events and
-  // properties are named bare, exactly like the primary fact's.
+  // Metrics built FROM the crashlytics source. A semantic model is built from ONE source, so
+  // inside it the source's own events and properties are named as-is.
   const crash = await engine.create_semantic_model({
     name: 'stab',
     use_base_models: ['users'],

@@ -18,8 +18,23 @@
   3. **experiments** — A/B-test assignments (one row per user×experiment:
      experiment_name, variant_group, assigned_at, ended_at); joined to events by
      the user entity for A/B analysis.
+  4. **a MEASURES source** — a non-events fact whose columns are amounts, not
+     events (e.g. `acquisition`: one row per player×day with cost/impressions/
+     clicks). It has no `event_name`; it declares its own time axis
+     (`meta.mcp.is_time`) and its own measures, and joins to users / an events
+     source by the user entity — on a per-day grain with a COMPOSITE join key
+     (`on: [<user column>, <day column>]`) so the daily rows do not fan out.
 - Do NOT invent other tables/fixtures (no orders/customers/Jaffle, no "step"
   tables). Only the roles above.
+- MEASURES ARE DECLARED IN THE SCHEMA, NEVER IN CODE. Any column of any source
+  may carry `meta.mcp.measure: { agg, name?, expr?, label?, description?, unit?,
+  percentile? }`, and any model may carry `meta.mcp.measures` for an expression
+  measure; `agg` is one of sum | average | min | max | count | count_distinct |
+  sum_boolean | median | percentile, validated at catalog load. Do NOT special-case
+  a measure, a column name or a role in `src/` — if a new source needs something,
+  it becomes a schema key that every source can use. Two opt-outs go with it:
+  `meta.mcp.dimension: false` (a real column that is not a groupable attribute)
+  and `meta.mcp.index: false` (groupable, but not profiled by the value index).
 - An events source is EXTENDED, never duplicated: a new source reuses the same
   machinery — the catalog accessors (`eventNames/eventProps/eventNameFor/propertyFor`),
   the indexer worklist and the value-index API all take the source as an argument.

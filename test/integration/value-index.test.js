@@ -335,7 +335,7 @@ test('semantic_index({ property: "users.country" }) returns the attribute value 
   // the guidance names the JOIN path (user attributes are reached via the users join).
   assert.ok(out.recommendations.some((r) => r.includes('user__country') || r.includes("join with:'users'")), JSON.stringify(out.recommendations));
   // unknown attribute → clear error, not a silent empty result.
-  await assert.rejects(() => engine.semantic_index({ property: 'users.nope' }), /unknown attribute/);
+  await assert.rejects(() => engine.semantic_index({ source: 'users', property: 'nope' }), /is not a property or dimension of 'users'/);
 });
 
 // search now finds: attribute VALUES (a country code), dimension attributes by name,
@@ -344,16 +344,16 @@ test('semantic_index({ search }) finds attribute values, dimensions, experiments
   if (skip(t)) return;
   // a known country code resolves to the users.country attribute.
   const de = await engine.semantic_index({ search: 'DE' });
-  const deHit = de.value_matches.find((m) => m.property === 'users.country' && m.value === 'DE');
+  const deHit = de.value_matches.find((m) => m.source === 'users' && m.property === 'country' && m.value === 'DE');
   assert.ok(deHit, `expected users.country DE value match: ${JSON.stringify(de.value_matches)}`);
   assert.equal(deHit.freq, 3);
   assert.equal(deHit.model, 'users');
   // an experiment name is discoverable by substring.
   const exp = await engine.semantic_index({ search: 'checkout' });
-  assert.ok(exp.value_matches.some((m) => m.property === 'experiments.experiment_name' && m.value === 'checkout_flow'), JSON.stringify(exp.value_matches));
+  assert.ok(exp.value_matches.some((m) => m.source === 'experiments' && m.property === 'experiment_name' && m.value === 'checkout_flow'), JSON.stringify(exp.value_matches));
   // a dimension attribute is discoverable by its name.
   const dim = await engine.semantic_index({ search: 'country' });
-  assert.ok(dim.dimension_matches.some((d) => d.property === 'users.country'), JSON.stringify(dim.dimension_matches));
+  assert.ok(dim.dimension_matches.some((d) => d.source === 'users' && d.column === 'country'), JSON.stringify(dim.dimension_matches));
   // a recipe is discoverable by task keyword.
   const ret = await engine.semantic_index({ search: 'retention' });
   assert.ok(ret.recipe_matches.some((r) => r.id === 'nday_retention'), JSON.stringify(ret.recipe_matches));
@@ -376,13 +376,13 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
   const colorfit = await engine.semantic_index({ bundle: 'com.omg.colorfit' });
   assert.equal(colorfit.event_rows, 53);
   assert.ok(colorfit.populated.some((p) => p.property === 'level_id_of_event_data'), 'level_id populated for colorfit');
-  assert.ok(colorfit.empty.includes('ad_type_of_event_data'), 'ad_type EMPTY for colorfit');
+  assert.ok(colorfit.empty.some((x) => x.source === 'events' && x.property === 'ad_type_of_event_data'), 'ad_type EMPTY for colorfit');
   assert.ok(!colorfit.populated.some((p) => p.property === 'ad_type_of_event_data'));
 
   // wordsearch = ad/iap/etc (no level events) → ad_type populated, level_id EMPTY.
   const words = await engine.semantic_index({ bundle: 'com.omg.wordsearch' });
   assert.ok(words.populated.some((p) => p.property === 'ad_type_of_event_data'), 'ad_type populated for wordsearch');
-  assert.ok(words.empty.includes('level_id_of_event_data'), 'level_id EMPTY for wordsearch');
+  assert.ok(words.empty.some((x) => x.source === 'events' && x.property === 'level_id_of_event_data'), 'level_id EMPTY for wordsearch');
 
   // the { property } view carries the same per-app split: by default a summary (empty_apps count),
   // and the full per-app list under include_coverage:true — ad_type is non_null=0 for colorfit.
@@ -411,9 +411,9 @@ test('triple coverage: per (bundle × event) cell fill matches the seeded data',
 });
 
 // ─────────── SECOND EVENTS FACT: the SAME mechanism, namespaced keys ───────────
-// The crash fact goes through the same worklist → batch scan → store path as the analytics
-// fact, but against ITS table, ITS event_name column and ITS time column. Everything below
-// is read back from the SAME SQLite store the primary fact writes to. SEED_DATA §10.
+// The crash source goes through the same worklist → batch scan → store path as the analytics
+// source, but against ITS table, ITS event_name column and ITS time column. Everything below
+// is read back from the SAME SQLite store both sources write to. SEED_DATA §10.
 
 test('crash-fact property values land in the index with the seed frequencies', opts, async (t) => {
   if (skip(t)) return;
@@ -428,7 +428,8 @@ test('crash-fact property values land in the index with the seed frequencies', o
   const st = index.stats('crashlytics', 'issue_title_of_event_data');
   assert.equal(st.distinctCount, 5);
   assert.equal(st.totalCount, 13); // every crash row carries an issue title
-  // the key is NAMESPACED — it does not occupy the primary fact's bare namespace
+  // the index is keyed by (source, property), so the same property name on another source is
+  // a different key entirely — nothing is written into the other source's space
   assert.ok(!index.stats('events', 'issue_title_of_event_data'), "the crash fact's property is not written into the events source's space");
 });
 

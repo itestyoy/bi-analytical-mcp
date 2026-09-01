@@ -438,6 +438,7 @@ export class BackgroundIndexer {
       // column (already enum-validated) and time dimensions (not an enumerable value set).
       for (const [col, spec] of Object.entries(m.dimensions || {})) {
         if (col === evCol) continue;
+        if (spec?.index === false) continue; // opted out of value indexing (an id / free text)
         if (String(spec?.type || '').toLowerCase() === 'time') continue;
         targets.push({ source: fact, property: col, ref, expr: col, eventCol: evCol, timeCol, bundleCol });
       }
@@ -447,6 +448,7 @@ export class BackgroundIndexer {
       const m = c.getModel(key);
       const ref = `{{ ref('${m.dbt_model}') }}`;
       for (const [col, spec] of Object.entries(m.dimensions || {})) {
+        if (spec?.index === false) continue; // opted out of value indexing (an id / free text)
         if (String(spec?.type || '').toLowerCase() === 'time') continue; // dates aren't enumerable value sets
         targets.push({ source: key, property: col, ref, expr: col, eventCol: null, timeCol: null, bundleCol: null });
       }

@@ -28,9 +28,6 @@ export class CatalogSearch {
   _build() {
     if (this._indexes) return this._indexes;
     const c = this.catalog;
-    // EVERY fact's vocabulary is searchable, under the same names the tools accept (bare on
-    // the primary fact, '<fact>.<name>' elsewhere) — so a hit is directly usable as an argument
-    // and the fact it belongs to is visible in the name itself.
     // Every source's vocabulary is searchable. An item carries its SOURCE as a field, so a hit
     // says where it lives without the source being glued into the name.
     const eventItems = c.facts.flatMap((f) => c.eventNames(f).map((name) => ({ source: f, name })));
@@ -56,15 +53,15 @@ export class CatalogSearch {
       if (c.isFact(mk)) continue;
       const dDescs = c.columnDescriptions(mk);
       for (const [col, dspec] of Object.entries(c.getModel(mk).dimensions || {})) {
-        dimItems.push({ property: `${mk}.${col}`, model: mk, column: col, type: dspec.type, description: dDescs[col] || '' });
+        dimItems.push({ source: mk, column: col, type: dspec.type, description: dDescs[col] || '' });
       }
     }
     const dimensions = new FuzzyIndex(dimItems, {
       keys: [
-        { name: 'name', weight: NAME_WEIGHT, get: (d) => [d.column, d.property] },
+        { name: 'name', weight: NAME_WEIGHT, get: (d) => [d.column] },
         { name: 'desc', weight: DESC_WEIGHT, get: (d) => d.description },
       ],
-      tiebreak: (d) => d.property,
+      tiebreak: (d) => `${d.source}.${d.column}`,
     });
     const recipes = this.recipes ? new FuzzyIndex(this.recipes.summary(), {
       keys: [
@@ -109,7 +106,7 @@ export class CatalogSearch {
       score: round3(score), match,
     }));
     const dimension_matches = dimensions.search(query, opts).map(({ item: d, score, match }) => ({
-      property: d.property, model: d.model, type: d.type, description: d.description || undefined, score: round3(score), match,
+      source: d.source, column: d.column, type: d.type, description: d.description || undefined, score: round3(score), match,
     }));
     const recipe_matches = recipes
       ? recipes.search(query, opts).map(({ item: r, score, match }) => ({ id: r.id, title: r.title, task_type: r.task_type, score: round3(score), match }))
@@ -137,13 +134,13 @@ export class CatalogSearch {
     const recs = [];
     if (value_matches.length) {
       const top = value_matches[0];
-      recs.push(`Value '${top.value}' lives in ${top.model ? `attribute '${top.property}' (the '${top.model}' model)` : `property '${top.property}'`}${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ property: '${top.property}' }).`);
-      if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ event: '${top.events[0]}' }).`);
+      recs.push(`Value '${top.value}' lives in ${top.model ? 'attribute' : 'property'} '${top.property}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ source: '${top.source}', property: '${top.property}' }).`);
+      if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ source: '${top.source}', event: '${top.events[0]}' }).`);
     }
     if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ recipe: '${recipe_matches[0].id}' }) returns a ready payload + the reusable technique.`);
-    if (dimension_matches.length) recs.push(`Attribute '${dimension_matches[0].property}' matches — drill its values with semantic_index({ property: '${dimension_matches[0].property}' }).`);
-    if (property_matches.length) recs.push(`Drill into property '${property_matches[0].property}' for its real values + cardinality: semantic_index({ property: '${property_matches[0].property}' }).`);
-    if (event_names.length) recs.push(`See what event '${event_names[0].event}' carries: semantic_index({ event: '${event_names[0].event}' }).`);
+    if (dimension_matches.length) { const d = dimension_matches[0]; recs.push(`Attribute '${d.column}' of source '${d.source}' matches — drill its values with semantic_index({ source: '${d.source}', property: '${d.column}' }).`); }
+    if (property_matches.length) { const pm = property_matches[0]; recs.push(`Drill into property '${pm.property}' of source '${pm.source}' for its real values + cardinality: semantic_index({ source: '${pm.source}', property: '${pm.property}' }).`); }
+    if (event_names.length) { const ev = event_names[0]; recs.push(`See what event '${ev.event}' of source '${ev.source}' carries: semantic_index({ source: '${ev.source}', event: '${ev.event}' }).`); }
 
     const all = [...event_names, ...property_matches, ...dimension_matches, ...value_matches, ...recipe_matches];
     if (all.length && !all.some((m) => m.match === 'exact')) {

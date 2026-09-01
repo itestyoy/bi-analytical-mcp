@@ -301,7 +301,17 @@ export class Engine {
       if (!c.models[k]) throw new ToolError(`unknown model '${k}'. Known models: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'model' });
       const m = c.getModel(k);
       const descs = c.columnDescriptions(k);
-      const out = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description, primary_entity: c.primaryEntityName(k), entities: m.entities, time: m.time?.column, measures: Object.keys(m.measures || {}) };
+      const out = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description, primary_entity: c.primaryEntityName(k), entities: m.entities, time: m.time?.column };
+      // Catalog-declared measures are SELF-DESCRIBING here: the name alone does not say what a
+      // measure aggregates, over which expression, or in what unit — and since any column of any
+      // source may declare one, this view is the only place to find out.
+      out.measures = Object.entries(m.measures || {}).map(([name, mm]) => ({
+        name, agg: mm.agg, expr: mm.expr,
+        ...(mm.agg_params ? { agg_params: mm.agg_params } : {}),
+        ...(mm.unit ? { unit: mm.unit } : {}),
+        ...(mm.label ? { label: mm.label } : {}),
+        ...(mm.description ? { description: mm.description } : {}),
+      }));
       // The ONE list of columns you can work with on this source (reference in where/
       // compute/group_by/order_by/match_recognize). `time` above is the default order axis.
       // It is silently grounded to the physical table below — only real columns appear.

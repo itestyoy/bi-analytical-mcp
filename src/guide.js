@@ -16,6 +16,11 @@ export function buildGuide(catalog, recipes, { task } = {}) {
   // ONE of them, named explicitly.
   const facts = catalog.facts;
   const multi = facts.length > 1;
+  // A catalog may also carry NON-events sources that declare MEASURES (acquisition spend, say):
+  // no event vocabulary, but their own time axis and their own aggregatable amounts.
+  const measureSources = catalog.modelKeys()
+    .filter((k) => !catalog.isFact(k) && Object.keys(catalog.getModel(k).measures || {}).length)
+    .map((k) => ({ key: k, measures: Object.keys(catalog.getModel(k).measures) }));
   const sem = Object.fromEntries(facts.flatMap((f) => Object.entries(catalog.getModel(f).event_semantics || {}).map(([k, v]) => [multi ? `${f}.${k}` : k, v])));
 
   const workflow = [
@@ -37,6 +42,10 @@ export function buildGuide(catalog, recipes, { task } = {}) {
       { if: 'choosing WHERE to look', do: `there are ${facts.length} independent events sources — ${facts.join(', ')} — each with its OWN events and payload properties, never mixed. Decide which one records the thing being asked about, then name it: semantic_index({ source, event }), build_native_model({ source }), create_semantic_model({ semantic_models: [{ from: <source> }] }). Inside a pipeline or semantic model built from a source, its event/property names are used as-is.` },
       { if: 'a funnel/sequence that would span TWO sources (something in one, then something in the other)', do: 'not expressible: a row-pattern match scans ONE table. Compute a per-user outcome from each source separately (one pipeline each), then compare the two groups with ab_test, or join the aggregates on the user key.' },
       { if: 'comparing volumes from different sources', do: 'ONE create_semantic_model with a semantic model per source, then query both metrics grouped by metric_time — MetricFlow aligns them on the shared time axis. Do NOT put measures from two sources in one semantic model.' },
+    ] : []),
+    ...(measureSources.length ? [
+      { if: `the question is about an AMOUNT that is not an event (${measureSources.map((m) => `${m.key}: ${m.measures.join(', ')}`).join(' · ')})`, do: `those measures are already declared on the source — do NOT re-derive them. create_semantic_model({ use_base_models: ['${measureSources[0].key}'], metrics: [{ name: ..., type: 'simple', measure: { name: <one of them> } }] }) and query it; semantic_index({ model: '${measureSources[0].key}' }) lists each measure with its aggregation, expression and unit. Such a source has its own time axis (metric_time works) and carries the user entity, so user__<attr> segments it.` },
+      { if: 'joining a per-day table (spend, budgets) to events in a pipeline', do: 'join on a COMPOSITE key — the user column AND the day (on: ["<user column>", "<day column>"]). Joining on the user alone multiplies every event by that user\'s rows in the daily table, silently inflating counts and sums.' },
     ] : []),
     { if: 'a property reads mostly NULL', do: 'you probably did not scope to the event(s) that carry it — most event_data properties are event-specific (see semantic_index({ property }).event_coverage).' },
     ...(catalog.bundleColumn() ? [{ if: 'the question is about ONE app (a bundle id), or a property looks empty for an app', do: 'semantic_index({ bundle: "<bundle id>" }) lists which event properties are POPULATED vs EMPTY for that app — skip the empty ones rather than querying them. The overview lists apps under `bundles`; a property empty for one app may be populated for another (see { property }.bundle_coverage). Group/filter by the app column to segment per app.' }] : []),

@@ -41,7 +41,7 @@ test('rankFuzzy: substring is exact even with fuzzy disabled; short queries are 
 // ── ValueIndex fuzzy value fallback (exact substring → fuzzy on miss) ──────────
 test('ValueIndex.searchValues: exact substring tier, then fuzzy fallback on a typo', () => {
   const idx = new ValueIndex();
-  idx.upsertProperty('users.country', { distinctCount: 3, totalCount: 24, values: [{ value: 'Germany', freq: 10 }, { value: 'France', freq: 8 }, { value: 'Spain', freq: 6 }] });
+  idx.upsertProperty('users', 'country', { distinctCount: 3, totalCount: 24, values: [{ value: 'Germany', freq: 10 }, { value: 'France', freq: 8 }, { value: 'Spain', freq: 6 }] });
   // exact substring (case-insensitive) → match 'exact', score 1.
   const exact = idx.searchValues('ger');
   assert.ok(exact[0].value === 'Germany' && exact[0].match === 'exact' && exact[0].score === 1);

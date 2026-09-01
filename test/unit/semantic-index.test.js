@@ -30,7 +30,7 @@ test('semantic_index({ status }): idle state before any sync', async () => {
 test('semantic_index({ status }): reflects a recorded sync run', async () => {
   const e = engine();
   const runId = e.valueIndex.startRun();
-  e.valueIndex.upsertProperty('p', { distinctCount: 1, totalCount: 3, values: [{ value: 'x', freq: 3 }] });
+  e.valueIndex.upsertProperty('events', 'p', { distinctCount: 1, totalCount: 3, values: [{ value: 'x', freq: 3 }] });
   e.valueIndex.finishRun(runId, { status: 'ok', propertiesIndexed: 1, valuesWritten: 1, errors: 0 });
   const out = await e.semantic_index({ status: true });
   assert.equal(out.value_index.running, false);
@@ -45,11 +45,11 @@ test('semantic_index: per-property timing + drill-down by run and via the proper
   // two runs, recording per-property timings (as the BackgroundIndexer does) — for
   // REAL catalog properties (the property passport validates names against the catalog).
   const r1 = e.valueIndex.startRun();
-  e.valueIndex.recordPropertyTiming(r1, { property: 'result_of_event_data', ms: 5, valuesWritten: 2, distinctCount: 2, totalCount: 9, status: 'ok' });
-  e.valueIndex.recordPropertyTiming(r1, { property: 'ad_type_of_event_data', ms: 80, valuesWritten: 4, distinctCount: 4, totalCount: 50, status: 'ok' });
+  e.valueIndex.recordPropertyTiming(r1, { source: 'events', property: 'result_of_event_data', ms: 5, valuesWritten: 2, distinctCount: 2, totalCount: 9, status: 'ok' });
+  e.valueIndex.recordPropertyTiming(r1, { source: 'events', property: 'ad_type_of_event_data', ms: 80, valuesWritten: 4, distinctCount: 4, totalCount: 50, status: 'ok' });
   e.valueIndex.finishRun(r1, { status: 'ok', propertiesIndexed: 2, valuesWritten: 6, errors: 0 });
   const r2 = e.valueIndex.startRun();
-  e.valueIndex.recordPropertyTiming(r2, { property: 'ad_type_of_event_data', ms: 60, valuesWritten: 4, distinctCount: 4, totalCount: 51, status: 'ok' });
+  e.valueIndex.recordPropertyTiming(r2, { source: 'events', property: 'ad_type_of_event_data', ms: 60, valuesWritten: 4, distinctCount: 4, totalCount: 51, status: 'ok' });
   e.valueIndex.finishRun(r2, { status: 'ok', propertiesIndexed: 1, valuesWritten: 4, errors: 0 });
 
   // status view previews the slowest properties of the last run + exposes run ids.

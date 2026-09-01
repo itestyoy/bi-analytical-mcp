@@ -1,0 +1,96 @@
+// Lifecycle check (allowed as a non-data test): the value index is keyed by (SOURCE, property),
+// and a database written by the previous single-namespace layout is carried over without loss.
+// v1 kept one flat `property` text key and encoded the source inside it ('users.country'); the
+// carry-over asks the caller — which holds the catalog — who owns each old key.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+import { openStore } from '../../src/store.js';
+import { ValueIndex } from '../../src/value-index.js';
+
+const dbFile = () => join(mkdtempSync(join(tmpdir(), 'vi-mig-')), 'value-index.sqlite');
+
+// Two sources may carry the SAME property name; each keeps its own row.
+test('the index keys values by (source, property) — same name on two sources never collides', () => {
+  const index = new ValueIndex();
+  index.upsertProperty('events', 'status_of_event_data', { distinctCount: 2, totalCount: 10, nullCount: 0, values: [{ value: 'success', freq: 7 }, { value: 'crash', freq: 3 }] });
+  index.upsertProperty('crashlytics', 'status_of_event_data', { distinctCount: 1, totalCount: 4, nullCount: 0, values: [{ value: 'fatal', freq: 4 }] });
+
+  assert.equal(index.stats('events', 'status_of_event_data').totalCount, 10);
+  assert.equal(index.stats('crashlytics', 'status_of_event_data').totalCount, 4);
+  assert.deepEqual(index.sampleValues('crashlytics', 'status_of_event_data', 5), [{ value: 'fatal', freq: 4 }]);
+  assert.equal(index.sampleValues('events', 'status_of_event_data', 5).length, 2);
+  // and each is listed as its own key
+  const keys = index.properties();
+  assert.ok(keys.some((k) => k.source === 'events' && k.property === 'status_of_event_data'));
+  assert.ok(keys.some((k) => k.source === 'crashlytics' && k.property === 'status_of_event_data'));
+  // dropping one leaves the other intact
+  index.removeProperty('events', 'status_of_event_data');
+  assert.equal(index.stats('events', 'status_of_event_data'), null);
+  assert.equal(index.stats('crashlytics', 'status_of_event_data').totalCount, 4);
+  index.close();
+});
+
+test('a v1 (single-namespace) database is carried over into (source, property)', () => {
+  const path = dbFile();
+  // Write a database in the OLD layout: one `property` key, the source glued into the name.
+  const db = new DatabaseSync(path);
+  db.exec('CREATE TABLE prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, high_cardinality INTEGER, data_watermark INTEGER)');
+  db.exec('CREATE TABLE prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
+  db.exec('CREATE TABLE prop_coverage (property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(property, event_name))');
+  db.exec("INSERT INTO prop_stats VALUES ('ad_type_of_event_data', 3, 24, 6, 111, 0, 900)");
+  db.exec("INSERT INTO prop_stats VALUES ('users.country', 4, 12, 0, 111, 0, NULL)");
+  db.exec("INSERT INTO prop_values VALUES ('ad_type_of_event_data', 'rewarded', 10)");
+  db.exec("INSERT INTO prop_values VALUES ('users.country', 'US', 4)");
+  db.exec("INSERT INTO prop_coverage VALUES ('ad_type_of_event_data', 'ad_finished', 12, 12)");
+  db.close();
+
+  const store = openStore({ dbPath: path });
+  const index = new ValueIndex({ store });
+  // The resolver stands in for the catalog: a bare name belongs to the events source, and a
+  // '<model>.<column>' name to that model.
+  const res = index.migrateLegacyKeys((key) => {
+    const dot = key.indexOf('.');
+    if (dot > 0) return { source: key.slice(0, dot), property: key.slice(dot + 1) };
+    return { source: 'events', property: key };
+  });
+  assert.ok(res.migrated > 0, 'rows were carried over');
+  assert.equal(res.dropped, 0);
+
+  // stats, values and coverage all landed under the right source, with the numbers intact.
+  const st = index.stats('events', 'ad_type_of_event_data');
+  assert.equal(st.totalCount, 24);
+  assert.equal(st.nullCount, 6);
+  assert.equal(st.dataWatermark, 900, 'the incremental watermark survives, so no full re-scan');
+  assert.deepEqual(index.sampleValues('events', 'ad_type_of_event_data', 5), [{ value: 'rewarded', freq: 10 }]);
+  assert.deepEqual(index.coverage('events', 'ad_type_of_event_data'), [{ event_name: 'ad_finished', row_count: 12, non_null: 12, null_count: 0 }]);
+  assert.equal(index.stats('users', 'country').totalCount, 12);
+  assert.deepEqual(index.sampleValues('users', 'country', 5), [{ value: 'US', freq: 4 }]);
+  // the glued name is NOT a key any more
+  assert.equal(index.stats('events', 'users.country'), null);
+
+  // Running it again is a no-op (the carried-over tables are gone).
+  assert.deepEqual(index.migrateLegacyKeys(() => null), { migrated: 0, dropped: 0 });
+  index.close();
+});
+
+test('a legacy key the catalog cannot place is dropped, not mis-filed', () => {
+  const path = dbFile();
+  const db = new DatabaseSync(path);
+  db.exec('CREATE TABLE prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, high_cardinality INTEGER, data_watermark INTEGER)');
+  db.exec("INSERT INTO prop_stats VALUES ('gone_column', 1, 1, 0, 111, 0, NULL)");
+  db.close();
+
+  const store = openStore({ dbPath: path });
+  const index = new ValueIndex({ store });
+  // The index is a rebuildable cache: an unplaceable key is dropped rather than guessed at.
+  const res = index.migrateLegacyKeys(() => null);
+  assert.equal(res.migrated, 0);
+  assert.equal(res.dropped, 1);
+  assert.deepEqual(index.properties(), []);
+  index.close();
+});

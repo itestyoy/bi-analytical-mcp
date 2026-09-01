@@ -426,7 +426,11 @@ export class Catalog {
     if (!this.facts.includes(this.anchor)) this.facts.unshift(this.anchor);
     // Cost guardrail: reject unbounded (no time window) queries when the anchor model
     // (or a loadCatalog override) demands a bounded window. See engine guards.
-    this.requireTimeRange = !!(raw.require_time_range ?? this.models[this.anchor]?.require_time_range);
+    // Cost guardrail per SOURCE: a catalog-wide override, else that source's own
+    // meta.mcp.require_time_range. A partitioned source can demand a bounded window even when
+    // another source does not.
+    this._requireTimeRangeAll = raw.require_time_range;
+    this.requireTimeRange = !!(raw.require_time_range ?? this.facts.some((f) => this.models[f]?.require_time_range));
     // Map: entity name -> model key that owns it as primary/unique (join target).
     this.primaryByEntity = {};
     for (const [key, m] of Object.entries(this.models)) {
@@ -497,103 +501,65 @@ export class Catalog {
     return this.models[this.anchor]?.entities?.[entity]?.column;
   }
 
+  /** True when queries over `source` must carry a time window (partition-pruning guardrail). */
+  requireTimeRangeFor(source) {
+    return !!(this._requireTimeRangeAll ?? this.models[source]?.require_time_range);
+  }
+
+  /** The source a tool may assume when the caller omits it: the only one, else null (with
+   *  several events sources there is no default — the caller says which). */
+  defaultSource() {
+    return this.facts.length === 1 ? this.facts[0] : null;
+  }
+
   /** True when `key` is an events fact (has its own event vocabulary). */
   isFact(key) {
     return this.facts.includes(key);
   }
 
-  /** Facts other than the primary one (their names are qualified '<fact>.<name>'). */
-  secondaryFacts() {
-    return this.facts.filter((k) => k !== this.anchor);
-  }
-
-  /** The name the tools use for a fact-scoped event/property: bare on the PRIMARY
-   *  fact, '<fact>.<name>' on any other (the 'users.country' convention). */
-  qualify(fact, name) {
-    return fact === this.anchor ? name : `${fact}.${name}`;
-  }
-
-  /** Split a possibly-qualified name into { fact, name }; null when the prefix is
-   *  not a fact (so '<model>.<column>' dimension attributes fall through). */
-  _splitQualified(name) {
-    const s = String(name);
-    const dot = s.indexOf('.');
-    if (dot <= 0) return { fact: this.anchor, name: s };
-    const fact = s.slice(0, dot);
-    return this.isFact(fact) ? { fact, name: s.slice(dot + 1) } : null;
-  }
-
-  /** Resolve an event name (bare = primary fact, '<fact>.<event>' = that fact) to
-   *  { fact, name }, or null when no fact declares it. */
-  resolveEvent(name) {
-    const q = this._splitQualified(name);
-    return q && this.eventNames(q.fact).includes(q.name) ? q : null;
-  }
-
-  /** Resolve an event PROPERTY the same way. Returns { fact, name } or null. */
-  resolveProperty(name) {
-    const q = this._splitQualified(name);
-    return q && this.eventPropertySpec(q.name, q.fact) ? q : null;
-  }
-
   /**
-   * The PHYSICAL event name for `name` as seen from `fact`. Accepts the bare name (the
-   * natural form once a fact is fixed) and the tool-facing qualified '<fact>.<event>'.
-   * THROWS when the name belongs to a different fact or to none — a cross-fact mistake must
-   * not degrade into a filter that silently matches nothing. `hint` appends the caller's fix.
+   * The event `name` as seen from `fact`. Every source names its own events, so the name is
+   * always bare here; it THROWS when this source does not declare it — naming which source
+   * does, when one exists — so a cross-source mistake never degrades into a filter that
+   * silently matches nothing. `hint` appends the caller's fix.
    */
   eventNameFor(fact, name, { hint } = {}) {
-    if (this.eventNames(fact).includes(name)) return name; // bare name of THIS fact
-    const q = this.resolveEvent(name);
-    if (q && q.fact === fact) return q.name; // qualified name of THIS fact
-    if (q) throw new Error(`event '${name}' belongs to the '${q.fact}' fact, not '${fact}'${hint ? ` — ${hint}` : ''}`);
+    if (this.eventNames(fact).includes(name)) return name;
+    const other = this.facts.find((f) => f !== fact && this.eventNames(f).includes(name));
+    if (other) throw new Error(`event '${name}' belongs to the '${other}' source, not '${fact}'${hint ? ` — ${hint}` : ''}`);
     throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ model: '${fact}' })`);
   }
 
   /**
-   * One event PROPERTY as seen from `fact`: { name (PHYSICAL), spec }, or null when this fact
-   * simply has no such property. Accepts bare + qualified names and THROWS when the property
-   * belongs to a different fact (reading another fact's payload is never what was meant).
+   * One event PROPERTY as seen from `fact`: { name, spec }, or null when this source simply has
+   * no such property. THROWS when another source declares it (reading another source's payload
+   * is never what was meant).
    */
   propertyFor(fact, name, { hint } = {}) {
     const props = this.models[fact]?.properties || {};
     if (props[name]) return { name, spec: props[name] };
-    const q = this.resolveProperty(name);
-    if (!q) return null;
-    if (q.fact !== fact) throw new Error(`'${name}' is a property of the '${q.fact}' fact, not of '${fact}'${hint ? ` — ${hint}` : ''}`);
-    return props[q.name] ? { name: q.name, spec: props[q.name] } : null;
-  }
-
-  /** Every event across ALL facts, under the names the tools accept. */
-  allEventNames() {
-    return this.facts.flatMap((f) => this.eventNames(f).map((e) => this.qualify(f, e)));
-  }
-
-  /** Every event property across ALL facts, under the names the tools accept. */
-  allEventProps() {
-    return this.facts.flatMap((f) => this.eventProps(f).map((p) => this.qualify(f, p)));
-  }
-
-  /** Every SCALAR event property across ALL facts (tool-facing names). */
-  allScalarEventProps() {
-    return this.facts.flatMap((f) => this.scalarEventProps(f).map((p) => this.qualify(f, p)));
+    const other = this.facts.find((f) => f !== fact && this.eventProps(f).includes(name));
+    if (other) throw new Error(`'${name}' is a property of the '${other}' source, not of '${fact}'${hint ? ` — ${hint}` : ''}`);
+    return null;
   }
 
   /**
-   * Enum of event names for a schema whose FACT is not fixed at schema-build time — the
-   * pipeline stages, where the source is chosen per draft. It carries every fact's BARE name
-   * (the natural form once a source is picked) plus the qualified form of the secondary facts
-   * (so a cross-fact mistake is caught by the stage with a fix, not by a bare enum rejection).
-   * Callers MUST still resolve the name against the actual source; `allEventNames()` stays the
-   * canonical, unambiguous list for discovery surfaces.
+   * Enums for a schema whose SOURCE is not fixed when the schema is built — the pipeline
+   * stages, where the source is chosen per draft, and the model-agnostic update payloads.
+   * They are the union of every source's own (bare) names; the caller still resolves the name
+   * against the actual source via eventNameFor / propertyFor, which reports a cross-source
+   * mistake with the fix.
    */
   eventNameEnum() {
-    return [...new Set([...this.facts.flatMap((f) => this.eventNames(f)), ...this.allEventNames()])];
+    return [...new Set(this.facts.flatMap((f) => this.eventNames(f)))];
   }
 
-  /** The same widened enum for event PROPERTIES (bare on every fact + qualified secondaries). */
   eventPropEnum() {
-    return [...new Set([...this.facts.flatMap((f) => this.eventProps(f)), ...this.allEventProps()])];
+    return [...new Set(this.facts.flatMap((f) => this.eventProps(f)))];
+  }
+
+  scalarEventPropEnum() {
+    return [...new Set(this.facts.flatMap((f) => this.scalarEventProps(f)))];
   }
 
   /** dbt column descriptions for a model: { columnName: description }. */
@@ -735,6 +701,11 @@ export class Catalog {
     };
     for (const fact of this.facts) visit(fact, '', 1);
     return [...out];
+  }
+
+  /** The model that declares a base measure (meta.mcp.measures), or undefined. */
+  modelOwningMeasure(ref) {
+    return this.modelKeys().find((k) => (this.models[k].measures || {})[ref]);
   }
 
   /** Base measure reference names available across the registry. */

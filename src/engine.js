@@ -34,6 +34,15 @@ export class Engine {
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
+    // A value index written before sources were explicit keyed rows by one flat name; carry it
+    // over to (source, property) using the catalog to say who owns each old key. Idempotent and
+    // best-effort: the index is a rebuildable cache, so a failure here just means a re-scan.
+    try {
+      const moved = this.valueIndex.migrateLegacyKeys((key) => this._legacyIndexKeyOwner(key));
+      if (moved?.migrated || moved?.dropped) {
+        console.error(`[mcp] value index carried over to (source, property): ${moved.migrated} row(s) moved, ${moved.dropped} unplaceable row(s) dropped`);
+      }
+    } catch (e) { console.error(`[mcp] value-index carry-over skipped: ${e?.message || e}`); }
     // Memory is curated, non-re-derivable knowledge. By default it shares the store (and
     // survives reset). Point MCP_MEMORY_DB at a PERSISTENT volume to keep findings across
     // container restarts — then it lives in its own store, isolated from the value index.
@@ -80,8 +89,10 @@ export class Engine {
     const c = this.catalog;
     const out = [];
     for (const k of c.modelKeys()) out.push({ kind: 'model', key: k, canon: `model:${k}` });
-    for (const ev of c.allEventNames()) out.push({ kind: 'event', key: ev, canon: `event:${ev}` });
-    for (const p of c.allEventProps()) out.push({ kind: 'property', key: p, canon: `property:${p}` });
+    for (const f of c.facts) {
+      for (const ev of c.eventNames(f)) out.push({ kind: 'event', key: `${f}.${ev}`, canon: `event:${f}.${ev}` });
+      for (const prop of c.eventProps(f)) out.push({ kind: 'property', key: `${f}.${prop}`, canon: `property:${f}.${prop}` });
+    }
     for (const k of c.modelKeys()) {
       for (const col of Object.keys(c.getModel(k).dimensions || {})) out.push({ kind: 'property', key: `${k}.${col}`, canon: `property:${k}.${col}` });
     }
@@ -104,8 +115,12 @@ export class Engine {
       if (c.models[mk] && (c.getModel(mk).dimensions || {})[col]) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
     }
     if (c.models[s]) return { kind: 'model', key: s, canon: `model:${s}` };
-    if (c.resolveEvent(s)) return { kind: 'event', key: s, canon: `event:${s}` };
-    if (c.resolveProperty(s)) return { kind: 'property', key: s, canon: `property:${s}` };
+    // A bare name is attributed to the source that declares it, so a note recorded before
+    // sources were explicit still links to the same entity.
+    for (const f of c.facts) {
+      if (c.eventNames(f).includes(s)) return { kind: 'event', key: `${f}.${s}`, canon: `event:${f}.${s}` };
+      if (c.eventProps(f).includes(s)) return { kind: 'property', key: `${f}.${s}`, canon: `property:${f}.${s}` };
+    }
     // Fuzzy fallback: a near-miss entity name links to the real entity (marked fuzzy) rather
     // than becoming an orphan term. High threshold so only a confident match auto-links.
     const [best] = rankFuzzy(s, this._memoryTargetCandidates(), { fields: (x) => [x.key], threshold: 0.82, limit: 1 });
@@ -295,9 +310,8 @@ export class Engine {
         out.kind = 'events_fact';
         out.event_count = c.eventNames(k).length;
         out.property_count = c.eventProps(k).length;
-        if (k !== c.anchor) {
-          out.name_prefix = `${k}.`;
-          out.naming_note = `This is a SECONDARY events fact: address its events and payload properties as '${k}.<name>' outside a pipeline/semantic model built on it (inside one, the bare name works).`;
+        if (c.facts.length > 1) {
+          out.naming_note = `One of ${c.facts.length} independent events sources. Its events and payload properties are ITS OWN: address them with source: '${k}' (semantic_index({ source, event })), or build a pipeline / semantic model from '${k}' and use the names as-is.`;
         }
         if (m.event_semantics) out.event_semantics = m.event_semantics;
         // Static cost hint (no live runner needed): always constrain the partition
@@ -314,12 +328,12 @@ export class Engine {
         }
         out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The `columns` above are what you can reference in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
       } else {
-        // Dimension attributes WITH their real indexed values (cardinality + top 3) — the
-        // index stores them under namespaced '<model>.<column>' keys (e.g. 'users.country').
+        // Dimension attributes WITH their real indexed values (cardinality + top 3) — the index
+        // keys them by (this model, column), so each source has its own value space.
         const dims = m.dimensions || {};
         out.dimensions = Object.keys(dims).map((d) => {
-          const st = this.valueIndex.stats(`${k}.${d}`);
-          return { name: d, type: dims[d].type, description: descs[d], distinct_count: st?.distinctCount ?? null, sample_values: this.valueIndex.sampleValues(`${k}.${d}`, 3) };
+          const st = this.valueIndex.stats(k, d);
+          return { name: d, type: dims[d].type, description: descs[d], distinct_count: st?.distinctCount ?? null, sample_values: this.valueIndex.sampleValues(k, d, 3) };
         });
       }
       const base = this.ctxs.baseProjectDir;
@@ -337,7 +351,7 @@ export class Engine {
       }
       out.recommendations = c.isFact(k)
         ? [
-          `Drill into an event to see the properties it carries: semantic_index({ event: '${c.qualify(k, c.eventNames(k)[0] || '<event_name>')}' }).`,
+          `Drill into an event to see the properties it carries: semantic_index({ source: '${k}', event: '${c.eventNames(k)[0] || '<event_name>'}' }).`,
           `Then inspect a property's real values + frequency distribution: semantic_index({ property: '<name>' }).`,
           ...(c.bundleColumn(k) && this.valueIndex.bundles().length ? [`Scoping to one app? semantic_index({ bundle: '${this.valueIndex.bundles()[0].bundle}' }) lists which properties carry data for it vs are EMPTY.`] : []),
           `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ search: '<value>' }).`,
@@ -349,7 +363,7 @@ export class Engine {
       // Concrete next calls (structured) for this model.
       out.next_actions = c.isFact(k)
         ? [
-          { call: `semantic_index({ event: '${c.qualify(k, c.eventNames(k)[0] || '<event_name>')}' })`, why: 'see the properties an event carries (what you can measure/group/filter)' },
+          { call: `semantic_index({ source: '${k}', event: '${c.eventNames(k)[0] || '<event_name>'}' })`, why: 'see the properties an event carries (what you can measure/group/filter)' },
           ...(c.bundleColumn(k) && this.valueIndex.bundles().length ? [{ call: `semantic_index({ bundle: '${this.valueIndex.bundles()[0].bundle}' })`, why: 'for one app — which properties carry data vs are EMPTY' }] : []),
           { call: "semantic_index({ search: '<value>' })", why: 'trace a value to the property/event that carries it' },
         ]
@@ -364,24 +378,22 @@ export class Engine {
 
     // ── { event }: the properties populated on this event (NULL on others) ──
     if (input.event) {
-      // The event names its OWN fact: bare = the primary fact, '<fact>.<event>' = that one.
-      // Everything below (payload, coverage, indexed values) then comes from THAT fact only.
-      const evRef = c.resolveEvent(input.event);
-      if (!evRef) throw new ToolError(`unknown event '${input.event}'. See semantic_index().event_names (an event of a secondary fact is qualified, e.g. 'crashlytics.<event>')`, { stage: 'validate', field: 'event' });
-      const { fact, name: eventName } = evRef;
+      // The event belongs to ONE source; everything below (payload, coverage, indexed values)
+      // comes from that source only. `source` says which; a bare name that only one source
+      // declares resolves on its own, and an ambiguous one is reported rather than guessed.
+      const { fact, name: eventName } = this._resolveEventRef(input);
       const numeric = new Set(c.eventNumericProps(fact));
       // DATA-DERIVED applicability: which properties are actually populated on this event (from the
       // value index), not the declared meta.mcp.events. A property with no coverage yet (unknown)
       // is kept — a cold index must not hide fields.
-      const idxKey = (prop) => c.qualify(fact, prop); // the value-index key for this fact's property
-      const applies = this.valueIndex.appliesMap(c.eventProps(fact).map(idxKey));
+      const applies = this.valueIndex.appliesMap(fact, c.eventProps(fact));
       const descs = c.eventPropertyDescriptions(fact);
-      const props = c.eventProps(fact).filter((p) => { const evs = applies[idxKey(p)]; return !evs || evs.includes(eventName); });
+      const props = c.eventProps(fact).filter((p) => { const evs = applies[p]; return !evs || evs.includes(eventName); });
       const rows = props.map((p) => {
         // Compact index hint: cardinality + the top 3 real values (null/[] until indexed).
-        const st = this.valueIndex.stats(idxKey(p));
+        const st = this.valueIndex.stats(fact, p);
         const spec = c.eventPropertySpec(p, fact) || {};
-        return { name: idxKey(p), type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric: numeric.has(p), complex: c.isComplexEventProp(p, fact), description: descs[p], distinct_count: st?.distinctCount ?? null, sample_values: this.valueIndex.sampleValues(idxKey(p), 3) };
+        return { name: p, type: spec.type, ...(spec.unit ? { unit: spec.unit } : {}), numeric: numeric.has(p), complex: c.isComplexEventProp(p, fact), description: descs[p], distinct_count: st?.distinctCount ?? null, sample_values: this.valueIndex.sampleValues(fact, p, 3) };
       });
       // Drill-down guidance: point at properties whose real values are worth inspecting
       // next (prefer ones already indexed so the AI sees data), plus value search.
@@ -414,29 +426,28 @@ export class Engine {
         next_actions: nextActions,
         recommendations: recommendations.slice(0, 4),
       };
-      this._attachMemory(eventOut, [`event:${input.event}`], input.event);
+      this._attachMemory(eventOut, [`event:${fact}.${eventName}`, `event:${eventName}`], `${fact}.${eventName}`);
       return eventOut;
     }
 
     // ── { property }: one property's full spec ──
     if (input.property) {
-      const p = String(input.property);
-      // Namespaced '<model>.<column>' (e.g. 'users.country', 'experiments.experiment_name'):
-      // a dimension ATTRIBUTE of a non-anchor model — same indexed value listing as an
-      // event property, plus how to reach it in queries (join path).
-      const dot = p.indexOf('.');
-      const qualifiedProp = c.resolveProperty(p); // '<fact>.<property>' → an EVENT property
-      if (dot > 0 && !qualifiedProp) {
-        const mk = p.slice(0, dot); const col = p.slice(dot + 1);
-        const dim = c.models[mk] ? (c.getModel(mk).dimensions || {})[col] : undefined;
-        if (!dim) throw new ToolError(`unknown attribute '${p}'. Dimension attributes are '<model>.<column>' — see semantic_index({ model: '${c.models[mk] ? mk : 'users'}' }) for the list; bare names are properties of the primary events fact, and a secondary fact's are '<fact>.<property>'`, { stage: 'validate', field: 'property' });
+      // The SOURCE is a separate argument, so a name never has to carry it. For convenience the
+      // '<model>.<column>' form is still accepted and split here, and a bare name is resolved to
+      // the source that declares it (ambiguity is reported, never guessed).
+      const { source: pSource, property: p } = this._resolvePropertyRef(input);
+      const isEventProp = c.isFact(pSource) && c.eventProps(pSource).includes(p);
+      if (!isEventProp) {
+        const mk = pSource; const col = p;
+        const dim = (c.getModel(mk).dimensions || {})[col];
+        if (!dim) throw new ToolError(`'${col}' is not a property or dimension of '${mk}'. See semantic_index({ model: '${mk}' }) for what it carries.`, { stage: 'validate', field: 'property' });
         const dDescs = c.columnDescriptions(mk);
-        const { samples, value_stats } = this._valueListing(p, input);
+        const { samples, value_stats } = this._valueListing(mk, col, input);
         // NULL coverage + indexing freshness make this ONE page the full truth about the
         // column: meaning, values, completeness, and how recently it was profiled.
         // (event_coverage is [] here — attributes live on the dimension model, not on
         // events — but the SHAPE matches the event-property page exactly.)
-        const { nulls, coverage: attrCoverage, recs: nullRecs } = this._nullCoverage(p);
+        const { nulls, coverage: attrCoverage, recs: nullRecs } = this._nullCoverage(mk, col);
         Object.assign(value_stats, nulls);
         const ent = c.primaryEntityName(mk);
         const recommendations = [];
@@ -448,30 +459,30 @@ export class Engine {
           ? `Group/filter by it in metric queries via '${ent}__${col}', or reference '${col}' after a pipeline join with:'${mk}'.`
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
         const attrOut = {
-          property: p, model: mk, column: col, type: dim.type,
+          property: col, source: mk, model: mk, column: col, type: dim.type,
           ...(dim.values ? { declared_values: dim.values } : {}),
           description: dDescs[col],
           sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
           indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
-          indexing: this._indexHistory(p, input.recent ?? 3),
+          indexing: this._indexHistory(mk, col, input.recent ?? 3),
           recommendations: recommendations.slice(0, 3),
         };
-        this._attachMemory(attrOut, [`property:${p}`], p);
+        this._attachMemory(attrOut, [`property:${mk}.${col}`, `property:${col}`], `${mk}.${col}`);
         return attrOut;
       }
-      const spec = qualifiedProp && c.eventPropertySpec(qualifiedProp.name, qualifiedProp.fact);
-      if (!spec) throw new ToolError(`unknown event property '${p}'. Discover properties via semantic_index({ event }) or ({ search }); a secondary fact's property is '<fact>.<property>', and user/experiment attributes are namespaced ('users.country')`, { stage: 'validate', field: 'property' });
-      const propFact = qualifiedProp.fact; const propName = qualifiedProp.name;
+      const propFact = pSource; const propName = p;
+      const spec = c.eventPropertySpec(propName, propFact);
+      if (!spec) throw new ToolError(`unknown event property '${propName}' on '${propFact}'. Discover properties via semantic_index({ source, event }) or ({ search }).`, { stage: 'validate', field: 'property' });
       const numeric = c.eventNumericProps(propFact).includes(propName);
       const complex = c.isComplexEventProp(propName, propFact);
       // Applicability is DATA-DERIVED from the value index (which events actually carry this
       // property), NOT the declared meta.mcp.events. null = not indexed yet ⇒ unknown.
-      const evs = this.valueIndex.appliesEvents(p);
+      const evs = this.valueIndex.appliesEvents(propFact, propName);
       // Pageable/orderable view of the real indexed VALUES (limit/offset/order_by/direction)
       // + NULL coverage per event + indexing freshness: ONE page = the full truth about the
       // column (meaning, values, completeness, profiling recency).
-      const { samples, value_stats } = this._valueListing(p, input);
-      const { nulls, coverage, recs: nullRecs } = this._nullCoverage(p, { eventScoped: true });
+      const { samples, value_stats } = this._valueListing(propFact, propName, input);
+      const { nulls, coverage, recs: nullRecs } = this._nullCoverage(propFact, propName, { eventScoped: true });
       Object.assign(value_stats, nulls);
       const dc = value_stats.distinct_count;
       // Drill-down guidance: keep exploring the VALUES — trace them across the catalog,
@@ -484,14 +495,14 @@ export class Engine {
         else recommendations.push(`Complex (${spec.type}) property — no examples indexed yet (the value index may not have run); its structure is in \`items\`/\`fields\` above.`);
       } else if (samples.length) {
         recommendations.push(`${dc != null ? `${dc} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
-        if (value_stats.has_more) recommendations.push(`More values exist — page with semantic_index({ property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} }), or re-order with order_by:'value'.`);
+        if (value_stats.has_more) recommendations.push(`More values exist — page with semantic_index({ source: '${propFact}', property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} }), or re-order with order_by:'value'.`);
         recommendations.push(`Trace any of these values across the catalog (which other properties/events carry it): semantic_index({ search: '<value>' }).`);
       } else {
         recommendations.push(`No values indexed yet (the background value index may not have run).${dc != null ? ` distinct_count is ${dc}.` : ''}`);
       }
       if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${dc} distinct values are indexed — a RARE value may be absent here; do NOT treat "not found" as proof it does not exist, verify with a direct query/filter.`);
       recommendations.push(...nullRecs);
-      if (evs) recommendations.push(`Carried by event(s) ${evs.join(', ')} — see everything they carry: semantic_index({ event: '${c.qualify(propFact, evs[0])}' }).`);
+      if (evs) recommendations.push(`Carried by event(s) ${evs.join(', ')} — see everything they carry: semantic_index({ source: '${propFact}', event: '${evs[0]}' }).`);
       // Unit-aware cast hint: a numeric-in-meaning value (declared unit) physically typed
       // string must be cast before aggregation — say so HERE, before a query mixes units
       // or averages a string.
@@ -516,12 +527,12 @@ export class Engine {
         indexed: value_stats.indexed, value_stats,
         event_coverage: showFullCoverage ? coverage : carriers,
         ...(showFullCoverage || coverageOmitted <= 0 ? {} : { event_coverage_omitted: coverageOmitted }),
-        indexing: this._indexHistory(p, historyN),
+        indexing: this._indexHistory(propFact, propName, historyN),
         next_actions: [
-          ...(evs ? [{ call: `semantic_index({ event: '${c.qualify(propFact, evs[0])}' })`, why: 'see everything the carrying event(s) provide alongside this property' }] : []),
+          ...(evs ? [{ call: `semantic_index({ source: '${propFact}', event: '${evs[0]}' })`, why: 'see everything the carrying event(s) provide alongside this property' }] : []),
           { call: "semantic_index({ search: '<value>' })", why: 'trace one of these values across the catalog' },
-          ...(value_stats.has_more ? [{ call: `semantic_index({ property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} })`, why: 'page further through the value distribution' }] : []),
-          ...(!showFullCoverage && coverageOmitted > 0 ? [{ call: `semantic_index({ property: '${p}', include_coverage: true })`, why: `full per-event + per-app coverage, incl. the ${coverageOmitted} event(s) where '${p}' is always NULL (hidden by default)` }] : []),
+          ...(value_stats.has_more ? [{ call: `semantic_index({ source: '${propFact}', property: '${p}', offset: ${(input.offset ?? 0) + (input.limit ?? 10)} })`, why: 'page further through the value distribution' }] : []),
+          ...(!showFullCoverage && coverageOmitted > 0 ? [{ call: `semantic_index({ source: '${propFact}', property: '${p}', include_coverage: true })`, why: `full per-event + per-app coverage, incl. the ${coverageOmitted} event(s) where '${p}' is always NULL (hidden by default)` }] : []),
         ],
         recommendations: recommendations.slice(0, 4),
       };
@@ -532,7 +543,7 @@ export class Engine {
       // Per-app split: which apps populate this property vs leave it empty (non_null=0).
       // Surfaced so the AI sees a property is app-specific before using it cross-app.
       if (c.bundleColumn()) {
-        const bcov = this.valueIndex.bundleCoverage(p);
+        const bcov = this.valueIndex.bundleCoverage(propFact, propName);
         if (bcov.length) {
           const populated = bcov.filter((b) => b.non_null > 0);
           const empty = bcov.filter((b) => b.non_null === 0);
@@ -551,7 +562,7 @@ export class Engine {
           if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ bundle: '<app>' }) or include_coverage:true.`];
         }
       }
-      this._attachMemory(out, [`property:${p}`], p);
+      this._attachMemory(out, [`property:${propFact}.${p}`, `property:${p}`], `${propFact}.${p}`);
       return out;
     }
 
@@ -569,8 +580,8 @@ export class Engine {
       const hit = known.find((b) => b.bundle === bundleId);
       if (!hit) throw new ToolError(`unknown app '${bundleId}'. Indexed apps: ${known.map((b) => b.bundle).join(', ')}`, { stage: 'validate', field: 'bundle' });
       const cov = this.valueIndex.bundlePropertyCoverage(bundleId);
-      const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ property: r.property, non_null: r.non_null }));
-      const empty = cov.filter((r) => r.non_null === 0).map((r) => r.property);
+      const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ source: r.source, property: r.property, non_null: r.non_null }));
+      const empty = cov.filter((r) => r.non_null === 0).map((r) => ({ source: r.source, property: r.property }));
       return {
         bundle: bundleId,
         event_rows: hit.row_count,
@@ -582,14 +593,14 @@ export class Engine {
         // Properties that are ALWAYS NULL for this app — do NOT query them here (other apps may populate them).
         empty,
         next_actions: [
-          ...(populated.length ? [{ call: `semantic_index({ property: '${populated[0].property}' })`, why: 'drill a property that carries data for this app (per-app split under bundle_coverage)' }] : []),
+          ...(populated.length ? [{ call: `semantic_index({ source: '${populated[0].source}', property: '${populated[0].property}' })`, why: 'drill a property that carries data for this app (per-app split under bundle_coverage)' }] : []),
           ...(known.length > 1 ? [{ call: `semantic_index({ bundle: '${known.find((b) => b.bundle !== bundleId).bundle}' })`, why: 'compare another app — a property empty here may be populated there' }] : []),
         ],
         recommendations: [
           empty.length
-            ? `${empty.length} of ${cov.length} properties are EMPTY for '${bundleId}' (always NULL) — do not use them for this app: ${empty.slice(0, 8).join(', ')}${empty.length > 8 ? ', …' : ''}.`
+            ? `${empty.length} of ${cov.length} properties are EMPTY for '${bundleId}' (always NULL) — do not use them for this app: ${empty.slice(0, 8).map((x) => `${x.source}.${x.property}`).join(', ')}${empty.length > 8 ? ', …' : ''}.`
             : `Every indexed property carries data for '${bundleId}'.`,
-          `Use the ${populated.length} populated properties; drill one with semantic_index({ property: '${(populated[0] || {}).property || '<name>'}' }) (its per-app split is under bundle_coverage).`,
+          `Use the ${populated.length} populated properties; drill one with semantic_index({ source: '${(populated[0] || {}).source || '<source>'}', property: '${(populated[0] || {}).property || '<name>'}' }) (its per-app split is under bundle_coverage).`,
           known.length > 1 ? `Other apps: ${known.filter((b) => b.bundle !== bundleId).map((b) => b.bundle).slice(0, 6).join(', ')} — a property empty here may be populated there.` : `Only one app is indexed.`,
         ],
       };
@@ -640,9 +651,7 @@ export class Engine {
         return {
           ...head, kind: 'events_fact', entities: Object.keys(m.entities || {}), time: m.time?.column,
           event_count: c.eventNames(k).length, property_count: c.eventProps(k).length,
-          // How this fact's events/properties are NAMED in tool arguments: bare on the primary
-          // fact, '<fact>.<name>' on the others (so two facts can carry the same event name).
-          ...(k === c.anchor ? { primary: true } : { name_prefix: `${k}.` }),
+
           // Business meaning of the key events (which event = install / session / purchase),
           // so retention/conversion metrics are anchored on the RIGHT events, not a guess.
           ...(m.event_semantics ? { event_semantics: m.event_semantics } : {}),
@@ -651,7 +660,8 @@ export class Engine {
       }
       return { ...head, kind: 'dimension', dimension_count: Object.keys(m.dimensions || {}).length };
     });
-    const exEvent = c.qualify(c.anchor, c.eventNames()[0]);
+    const exFact = c.facts[0];
+    const exEvent = c.eventNames(exFact)[0];
     // Freshness of the value index (sample_values/cardinality across responses): lets
     // the AI distinguish "no values exist" from "the index has not run yet".
     const sync = this.valueIndex.syncStatus ? this.valueIndex.syncStatus({ recent: 1 }) : null;
@@ -668,8 +678,10 @@ export class Engine {
       // The events FACTS, in the order the tools default to (the first is the primary one:
       // the default pipeline source and the fact whose event/property names are unqualified).
       facts: c.facts,
-      ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} SEPARATE events facts, each with its OWN events and payload properties — they are never mixed. '${c.anchor}' is primary (bare names); ${c.secondaryFacts().map((f) => `'${f}' events/properties are written '${f}.<name>'`).join(', ')}. Pick the fact per question (build a pipeline/semantic model FROM it); a funnel runs over ONE fact, while metrics from different facts can still be compared side by side over metric_time.` } : {}),
-      event_names: c.allEventNames(),
+      ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ source, event }), build_native_model({ source }), semantic_models[].from; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
+      // Each events source lists its OWN event names — they are never merged into one list,
+      // because two sources may legitimately carry the same event name.
+      event_names: Object.fromEntries(c.facts.map((f) => [f, c.eventNames(f)])),
       groupable_paths: c.reachableGroupByPaths(),
       // Saved analyst findings (the memory tool): how many are stored + how to reach them.
       // They also surface inline on the entity views/{ search } they were linked to.
@@ -711,14 +723,14 @@ export class Engine {
       // prose paragraph so the model can execute the next step without parsing English.
       next_actions: [
         { call: 'semantic_index({ guide: true })', why: 'unsure how to approach the question — get the workflow + IF/DO routing first' },
-        { call: `semantic_index({ event: '${exEvent || '<event_name>'}' })`, why: "see an event's properties with real sample values + cardinality" },
+        { call: `semantic_index({ source: '${exFact}', event: '${exEvent || '<event_name>'}' })`, why: "see an event's properties with real sample values + cardinality" },
         { call: `semantic_index({ model: '${userModel || 'users'}' })`, why: 'list segmentation attributes (country/platform/…) with real values' },
         ...(bundleList.length ? [{ call: `semantic_index({ bundle: '${bundleList[0].bundle}' })`, why: 'scope to one app — which properties carry data vs are EMPTY for it' }] : []),
         { call: "semantic_index({ search: '<word or value>' })", why: 'find an event/property/attribute/value/recipe by name or value' },
       ],
       recommendations: [
         `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
-        `Start by inspecting an event's properties: semantic_index({ event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
+        `Start by inspecting an event's properties: semantic_index({ source: '${exFact}', event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
         `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
         ...(bundleList.length ? [`Working with ONE app? semantic_index({ bundle: '${bundleList[0].bundle}' }) lists which event properties carry data for it vs are EMPTY (skip the empty ones); ${bundleList.length} app(s) are in the data.`] : []),
         `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,
@@ -727,27 +739,101 @@ export class Engine {
   }
 
   /**
+   * Resolve the { source?, event } arguments into an explicit (source, event) pair — the mirror
+   * of _resolvePropertyRef. Accepts the legacy '<source>.<event>' form too.
+   *
+   * _defaultSource(field) above answers the other half: which source to read when the caller
+   * omitted it — allowed only when the catalog has ONE events source, since with several every
+   * source is equal and the caller must name the one the question is about.
+   */
+  /** Who owns a value-index key written by the pre-source layout: a '<model>.<column>' name
+   *  belongs to that model, and a bare name to the source that declares it (an events source's
+   *  payload property, or a model's dimension). null when nothing in the catalog claims it. */
+  _legacyIndexKeyOwner(key) {
+    const c = this.catalog;
+    const dot = String(key).indexOf('.');
+    if (dot > 0) {
+      const mk = key.slice(0, dot); const col = key.slice(dot + 1);
+      if (c.models[mk] && ((c.getModel(mk).dimensions || {})[col] || c.eventProps(mk).includes(col))) return { source: mk, property: col };
+    }
+    for (const f of c.facts) if (c.eventProps(f).includes(key)) return { source: f, property: key };
+    const owner = c.modelKeys().find((k) => (c.getModel(k).dimensions || {})[key]);
+    return owner ? { source: owner, property: key } : null;
+  }
+
+  _defaultSource(field) {
+    const only = this.catalog.defaultSource();
+    if (only) return only;
+    throw new ToolError(`this catalog has several events sources (${this.catalog.facts.join(', ')}) — pass ${field} to say which one to read`, { stage: 'validate', field });
+  }
+
+  _resolveEventRef(input) {
+    const c = this.catalog;
+    const raw = String(input.event);
+    if (input.source) {
+      if (!c.isFact(input.source)) throw new ToolError(`'${input.source}' is not an events source. Events sources: ${c.facts.join(', ')}`, { stage: 'validate', field: 'source' });
+      if (!c.eventNames(input.source).includes(raw)) throw new ToolError(`unknown event '${raw}' on '${input.source}'. See semantic_index({ model: '${input.source}' }).known_events`, { stage: 'validate', field: 'event' });
+      return { fact: input.source, name: raw };
+    }
+    const dot = raw.indexOf('.');
+    if (dot > 0 && c.isFact(raw.slice(0, dot))) {
+      const fact = raw.slice(0, dot); const name = raw.slice(dot + 1);
+      if (c.eventNames(fact).includes(name)) return { fact, name };
+    }
+    const owners = c.facts.filter((f) => c.eventNames(f).includes(raw));
+    if (owners.length === 1) return { fact: owners[0], name: raw };
+    if (owners.length > 1) throw new ToolError(`event '${raw}' exists on ${owners.join(' and ')} — pass source to say which one.`, { stage: 'validate', field: 'source' });
+    throw new ToolError(`unknown event '${raw}'. semantic_index() lists each source's events under models[].known_events.`, { stage: 'validate', field: 'event' });
+  }
+
+  /**
+   * Resolve the { source?, property } arguments of the { property } view into an explicit
+   * (source, property) pair. `source` given → used as-is. Otherwise '<model>.<column>' is split
+   * (the form used before sources became explicit), and a bare name is attributed to the ONE
+   * source that declares it — an ambiguous name is reported, never guessed.
+   */
+  _resolvePropertyRef(input) {
+    const c = this.catalog;
+    const raw = String(input.property);
+    if (input.source) {
+      if (!c.models[input.source]) throw new ToolError(`unknown source '${input.source}'. Known sources: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'source' });
+      return { source: input.source, property: raw };
+    }
+    const dot = raw.indexOf('.');
+    if (dot > 0 && c.models[raw.slice(0, dot)]) return { source: raw.slice(0, dot), property: raw.slice(dot + 1) };
+    const owners = [...new Set([
+      ...c.facts.filter((f) => c.eventProps(f).includes(raw)),
+      ...c.modelKeys().filter((k) => (c.getModel(k).dimensions || {})[raw]),
+    ])];
+    if (owners.length === 1) return { source: owners[0], property: raw };
+    if (owners.length > 1) {
+      throw new ToolError(`'${raw}' exists on ${owners.join(' and ')} — pass source to say which one (each source keeps its own values).`, { stage: 'validate', field: 'source' });
+    }
+    throw new ToolError(`unknown property '${raw}'. Pass source + a property of it (semantic_index({ model }) lists what a source carries), or find it with semantic_index({ search }).`, { stage: 'validate', field: 'property' });
+  }
+
+  /**
    * Pageable/orderable view of one indexed key's VALUES (limit/offset/order_by/direction)
    * + descriptive stats. Shared by event-property and dimension-attribute drill-downs.
    * Over-fetches by one so has_more is accurate at the boundary (next page non-empty).
    */
-  _valueListing(key, input = {}) {
-    const st = this.valueIndex.stats(key);
+  _valueListing(source, key, input = {}) {
+    const st = this.valueIndex.stats(source, key);
     const dc = st?.distinctCount ?? null;
     const total = st?.totalCount ?? null;
     const orderBy = input.order_by === 'value' ? 'value' : 'freq';
     const dir = (input.direction === 'asc' || input.direction === 'desc') ? input.direction : (orderBy === 'value' ? 'asc' : 'desc');
     const limit = input.limit ?? 10;
     const offset = input.offset ?? 0;
-    const fetched = this.valueIndex.listValues(key, { limit: limit + 1, offset, by: orderBy, dir });
+    const fetched = this.valueIndex.listValues(source, key, { limit: limit + 1, offset, by: orderBy, dir });
     const has_more = fetched.length > limit;
     const samples = has_more ? fetched.slice(0, limit) : fetched;
     // top_value is the single most frequent value; share = its fraction of indexed rows.
-    const top = this.valueIndex.sampleValues(key, 1)[0] || null;
+    const top = this.valueIndex.sampleValues(source, key, 1)[0] || null;
     // The index keeps only the top-N values by frequency. If the column has MORE distinct
     // values than are stored, rare ones are NOT in the index — a search for them will miss,
     // so callers must verify a "not found" with a direct query rather than trust absence.
-    const storedValues = this.valueIndex.valueCount(key);
+    const storedValues = this.valueIndex.valueCount(source, key);
     const valuesCapped = !!st && dc != null && storedValues != null && dc > storedValues;
     const value_stats = {
       distinct_count: dc, total_count: total,
@@ -773,15 +859,15 @@ export class Engine {
    * each event is annotated with `applies` (from meta.mcp.events) so EXPECTED nulls
    * are distinguishable from real data gaps. Returns null fields when not indexed.
    */
-  _nullCoverage(key, { eventScoped = false } = {}) {
-    const st = this.valueIndex.stats(key);
+  _nullCoverage(source, key, { eventScoped = false } = {}) {
+    const st = this.valueIndex.stats(source, key);
     const rowCount = (st && st.totalCount != null && st.nullCount != null) ? st.totalCount + st.nullCount : null;
     const frac = (n, d) => (d ? Number((n / d).toFixed(4)) : null);
     const nulls = { non_null_count: st?.totalCount ?? null, null_count: st?.nullCount ?? null, row_count: rowCount, null_fraction: (st?.nullCount != null && rowCount) ? frac(st.nullCount, rowCount) : null };
     // Applicability is DATA-DERIVED: for an event property an event "carries" the field when it is
     // non-null on >= 1 of that event's rows (observed, not a declared meta.mcp.events list). For a
     // non-event key (a dimension attribute) applicability is not event-scoped, so `applies` is true.
-    const coverage = this.valueIndex.coverage(key).map((e) => ({
+    const coverage = this.valueIndex.coverage(source, key).map((e) => ({
       event_name: e.event_name, row_count: e.row_count, non_null: e.non_null, null_count: e.null_count,
       null_fraction: frac(e.null_count, e.row_count), applies: eventScoped ? (e.non_null || 0) > 0 : true,
     }));
@@ -793,8 +879,8 @@ export class Engine {
   }
 
   /** Per-sync indexing history of one key: { runs, avg_ms, history } (most recent first). */
-  _indexHistory(key, recent = 10) {
-    const history = this.valueIndex.propertyHistory(key, { limit: recent }).map((r) => ({ run_id: r.run_id, started_at: r.started_at, ...this._indexPropRow(r) }));
+  _indexHistory(source, key, recent = 10) {
+    const history = this.valueIndex.propertyHistory(source, key, { limit: recent }).map((r) => ({ run_id: r.run_id, started_at: r.started_at, ...this._indexPropRow(r) }));
     const timed = history.filter((r) => r.ms != null);
     return { runs: history.length, avg_ms: timed.length ? Math.round(timed.reduce((s, r) => s + r.ms, 0) / timed.length) : null, history };
   }
@@ -1019,7 +1105,7 @@ export class Engine {
 
   async _draftStart(input) {
     const ctx = input.draft_id ? this.ctxs.get(input.draft_id) : this.ctxs.create();
-    const source = input.source || this.catalog.anchor;
+    const source = input.source || this._defaultSource('source');
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
@@ -1197,7 +1283,7 @@ export class Engine {
     if (changedStage && changedStage.stage === 'where' && Array.isArray(changedStage.conditions)) {
       filterWarnings = this._guardFilterValues(changedStage.conditions
         .filter((cd) => cd && cd.column != null && Object.prototype.hasOwnProperty.call(cd, 'value'))
-        .map((cd) => ({ key: this._valueKeyForColumn(draft.source, cd.column), op: cd.op, value: cd.value, where: `where ${cd.column}` })));
+        .map((cd) => ({ at: this._valueKeyForColumn(draft.source, cd.column), op: cd.op, value: cd.value, where: `where ${cd.column}` })));
     }
     draft.stages = newStages;
     this.ctxs.touch(ctx.id);
@@ -1254,7 +1340,7 @@ export class Engine {
     if (!m?.scd) return [];
     const from = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'start')?.[0];
     const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
-    const eventTime = this.catalog.getModel(draft?.source || this.catalog.anchor)?.time?.column;
+    const eventTime = draft?.source ? this.catalog.getModel(draft.source)?.time?.column : null;
     const fix = (from && to && eventTime)
       ? ` Add between: { value: '${eventTime}', from: '${from}', to: '${to}' } to keep only the version valid at the event time.`
       : ' Add a `between` window (value = the event time column; from/to = the validity-window columns) to keep only the version valid at the event time.';
@@ -1262,7 +1348,7 @@ export class Engine {
   }
 
   /**
-   * Verify ONE filter literal against the REAL indexed values of `key` (source-scoped). The
+   * Verify ONE filter literal against the REAL indexed values at `at` = { source, property }. The
    * guard against silently filtering on a wrong-cased / non-existent value (user wrote
    * 'organic' but the column holds 'Organic'). Returns null when OK or unverifiable (cold
    * index, numeric/bool value), else { kind, value, suggest?, note? }:
@@ -1271,12 +1357,12 @@ export class Engine {
    *   absent   — value not present AND the full value set is indexed (not capped) → HARD
    *   unverifiable — value not found but only the top-N is indexed → WARN, do not block
    */
-  _checkFilterValue(key, value) {
+  _checkFilterValue(at, value) {
     if (value == null || typeof value === 'number' || typeof value === 'boolean') return null; // only string literals are case/value-checked
-    if (!key) return null;
-    const st = this.valueIndex.stats(key);
+    if (!at) return null;
+    const st = this.valueIndex.stats(at.source, at.property);
     if (!st) return null; // not indexed → cannot verify (do not block)
-    const stored = this.valueIndex.sampleValues(key, 1000); // all stored values (≤ indexer cap)
+    const stored = this.valueIndex.sampleValues(at.source, at.property, 1000); // all stored values (≤ indexer cap)
     if (!stored.length) return null;
     const sval = String(value);
     if (stored.some((v) => String(v.value) === sval)) return null; // exact, real value → OK
@@ -1289,39 +1375,38 @@ export class Engine {
     // without being indexed — so we must NOT hard-reject it. We also treat a near-cap count
     // as capped, because distinct_count can be HLL-approximate and under-count near the cap.
     const VALUE_CAP = 50; // mirrors the value indexer's default maxValues
-    const storedCount = this.valueIndex.valueCount(key) ?? stored.length;
+    const storedCount = this.valueIndex.valueCount(at.source, at.property) ?? stored.length;
     const capped = storedCount < (st.distinctCount ?? Infinity) || storedCount >= VALUE_CAP;
     if (capped) return { kind: 'unverifiable', value: sval, note: 'this column has more values than are indexed (top-N only) — the value may well exist but is not in the index; verify with a direct query before relying on this filter' };
     return { kind: 'absent', value: sval, suggest: stored.slice(0, 10).map((v) => String(v.value)) };
   }
 
-  /** Value-index key for a column filtered on `sourceKey` (pipeline source), or null. */
+  /** Where a column filtered on `sourceKey` (the pipeline source) lives in the value index:
+   *  { source, property } or null. The index keys rows by that pair, per source. */
   _valueKeyForColumn(sourceKey, column) {
     const c = this.catalog;
     if (!column) return null;
+    const at = { source: sourceKey, property: column };
     if (c.isFact(sourceKey)) {
-      // payload property → bare on the primary fact, '<fact>.<prop>' elsewhere; envelope/app dim
-      // is always '<fact>.<col>' (the same keys the value indexer writes).
-      if (c.eventProps(sourceKey).includes(column)) return c.qualify(sourceKey, column);
-      if ((c.getModel(sourceKey).dimensions || {})[column]) return `${sourceKey}.${column}`;
-      return null;
+      if (c.eventProps(sourceKey).includes(column)) return at; // event payload property
+      return (c.getModel(sourceKey).dimensions || {})[column] ? at : null; // envelope/app dimension
     }
-    return (c.getModel(sourceKey)?.dimensions || {})[column] ? `${sourceKey}.${column}` : null;
+    return (c.getModel(sourceKey)?.dimensions || {})[column] ? at : null;
   }
 
-  /** Value-index key for a query_semantic_model dimension PATH (e.g. user__country), or null. */
+  /** Where a query_semantic_model dimension PATH (e.g. user__country) lives in the value index:
+   *  { source, property } or null. */
   _valueKeyForPath(path) {
     const c = this.catalog;
     const i = String(path).indexOf('__');
     if (i > 0) {
       const entity = path.slice(0, i); const col = path.slice(i + 2);
       const mk = c.modelKeys().find((k) => c.primaryEntityName(k) === entity || (c.getModel(k).entities || {})[entity]);
-      if (mk && (c.getModel(mk).dimensions || {})[col]) return `${mk}.${col}`;
-      return null;
+      return mk && (c.getModel(mk).dimensions || {})[col] ? { source: mk, property: col } : null;
     }
     for (const fact of c.facts) {
-      if (c.eventProps(fact).includes(path)) return c.qualify(fact, path);
-      if ((c.getModel(fact).dimensions || {})[path]) return `${fact}.${path}`;
+      if (c.eventProps(fact).includes(path)) return { source: fact, property: path };
+      if ((c.getModel(fact).dimensions || {})[path]) return { source: fact, property: path };
     }
     return null;
   }
@@ -1335,10 +1420,10 @@ export class Engine {
   _guardFilterValues(specs) {
     const EQ = new Set(['eq', 'neq', 'in', 'not_in']);
     const errors = []; const warnings = [];
-    for (const { key, op, value, where } of specs) {
+    for (const { at, op, value, where } of specs) {
       if (!EQ.has(op)) continue;
       for (const v of Array.isArray(value) ? value : [value]) {
-        const r = this._checkFilterValue(key, v);
+        const r = this._checkFilterValue(at, v);
         if (!r) continue;
         const fix = r.suggest && r.suggest.length ? ` Did you mean: ${r.suggest.map((s) => `'${s}'`).join(', ')}?` : '';
         // HARD-reject ONLY the certain cases: an exact case-mismatch (the value provably
@@ -1365,18 +1450,17 @@ export class Engine {
     // (cold index) can't be assessed, so such a property is not flagged.
     const c = this.catalog;
     const fact = c.isFact(draft?.source) ? draft.source : c.anchor; // the pipeline reads ONE fact
-    const idxKey = (prop) => c.qualify(fact, prop);
-    const applies = this.valueIndex.appliesMap(c.eventProps(fact).map(idxKey)); // key -> observed [event_name]
+    const applies = this.valueIndex.appliesMap(fact, c.eventProps(fact)); // key -> observed [event_name]
     const s = JSON.stringify(stage);
     const referenced = c.eventProps(fact).filter((p) => s.includes(`"${p}"`));
     if (!referenced.length) return [];
     const evCol = c.eventNameColumn(fact);
     const scoped = new Set(); let hasScope = false;
     for (const st of draft.stages) if (st.stage === 'where') for (const c of st.conditions || []) if (c.column === evCol) { hasScope = true; (Array.isArray(c.value) ? c.value : [c.value]).forEach((v) => scoped.add(v)); }
-    const risky = referenced.filter((p) => { const evs = applies[idxKey(p)]; return evs && evs.length && !evs.every((e) => scoped.has(e)); });
+    const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !evs.every((e) => scoped.has(e)); });
     if (!risky.length) return [];
-    const p = risky[0]; const evs = applies[idxKey(p)] || [];
-    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ property: '${idxKey(p)}' }).event_coverage).`];
+    const p = risky[0]; const evs = applies[p] || [];
+    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ property: '${p}' }).event_coverage).`];
   }
 
   /**
@@ -1392,7 +1476,6 @@ export class Engine {
     const bundleCol = c.bundleColumn(fact);
     const evCol = c.eventNameColumn(fact);
     const props = c.scalarEventProps(fact);
-    const idxKey = (prop) => c.qualify(fact, prop); // value-index key of THIS fact's property
     const s = JSON.stringify(stage);
     const used = props.filter((p) => s.includes(`"${p}"`)); // event-properties referenced by THIS step
     if (!used.length) return [];
@@ -1412,21 +1495,21 @@ export class Engine {
         // Precise triple: every scoped app×event pair where the field carries no value.
         const empty = [];
         for (const b of scopedBundles) for (const ev of scopedEvents) {
-          const cell = this.valueIndex.cellCoverage(idxKey(p), { bundle: b, event: ev });
+          const cell = this.valueIndex.cellCoverage(fact, p, { bundle: b, event: ev });
           if (!cell || cell.non_null === 0) empty.push(`${b} + ${ev}`); // missing cell = no rows for that combo
         }
         const total = scopedBundles.size * scopedEvents.size;
-        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ bundle: '${[...scopedBundles][0]}' }) or semantic_index({ property: '${idxKey(p)}' }).bundle_coverage / event_coverage.`);
+        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ bundle: '${[...scopedBundles][0]}' }) or semantic_index({ property: '${p}' }).bundle_coverage / event_coverage.`);
         else if (empty.length) warns.push(`'${p}' is empty for app+event ${fmt(empty)} (present for the other scoped pairs) — those rows contribute no '${p}'.`);
       } else if (scopedBundles.size) {
-        const byB = new Map(this.valueIndex.bundleCoverage(idxKey(p)).map((x) => [x.bundle, x]));
+        const byB = new Map(this.valueIndex.bundleCoverage(fact, p).map((x) => [x.bundle, x]));
         const empty = [...scopedBundles].filter((b) => byB.get(b) && byB.get(b).non_null === 0);
         if (empty.length === scopedBundles.size) warns.push(`'${p}' is NULL for app(s) ${fmt(empty)} — this step likely yields no '${p}' values for ${empty.length > 1 ? 'them' : 'this app'} (semantic_index({ bundle: '${empty[0]}' })).`);
         else if (empty.length) warns.push(`'${p}' is empty for app(s) ${fmt(empty)} (populated for the other scoped app(s)).`);
       } else {
-        const byE = new Map(this.valueIndex.coverage(idxKey(p)).map((x) => [x.event_name, x]));
+        const byE = new Map(this.valueIndex.coverage(fact, p).map((x) => [x.event_name, x]));
         const empty = [...scopedEvents].filter((ev) => byE.get(ev) && byE.get(ev).non_null === 0);
-        if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ property: '${idxKey(p)}' }).event_coverage).`);
+        if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ property: '${p}' }).event_coverage).`);
         else if (empty.length) warns.push(`'${p}' is empty on event(s) ${fmt(empty)} (populated on the other scoped event(s)).`);
       }
     }
@@ -1490,7 +1573,7 @@ export class Engine {
    */
   async _registerPipeline(input) {
     const dialect = this.catalog.dialect;
-    const source = input.pipeline.source || this.catalog.anchor;
+    const source = input.pipeline.source || this._defaultSource('pipeline.source');
     // A pipeline-level time_range is applied as a leading WHERE on the source's time
     // column — one place to bound the window (parity with query_semantic_model).
     // Timezone-aware via _timeRangeConditions (boundaries are wall-clock in tr.timezone).
@@ -1500,7 +1583,7 @@ export class Engine {
       if (!this.catalog.getModel(source).time?.column) throw new ToolError(`time_range given but source '${source}' has no time column`, { stage: 'validate', field: 'time_range' });
       const conditions = this._timeRangeConditions(source, tr);
       if (conditions) stages = [{ stage: 'where', conditions }, ...stages];
-    } else if (this.catalog.requireTimeRange && !this._stagesBoundInTime(source, stages)) {
+    } else if (this.catalog.requireTimeRangeFor(source) && !this._stagesBoundInTime(source, stages)) {
       // Cost guardrail (catalog require_time_range): an unbounded pipeline over the fact
       // would scan the whole history — demand a window unless a stage already bounds it.
       throw new ToolError(
@@ -2003,7 +2086,7 @@ export class Engine {
           this._checkPathLoaded(ctx, p.field.path);
           // Verify the filter literal against the column's REAL values (source-scoped):
           // reject a wrong-cased/non-existent value instead of filtering to nothing.
-          specs.push({ key: this._valueKeyForPath(p.field.path), op: p.op, value: p.value, where: `where ${p.field.path}` });
+          specs.push({ at: this._valueKeyForPath(p.field.path), op: p.op, value: p.value, where: `where ${p.field.path}` });
         }
       });
       filterWarnings = this._guardFilterValues(specs); // throws on a case/typo/absent mismatch
@@ -2026,9 +2109,11 @@ export class Engine {
     // generate SQL). MetricFlow requires the spine materialized for metric_time / SCD joins.
     if (!(input.dry_run || input.explain)) await this._ensureTimeSpineBuilt(ctx.id);
 
-    // Cost guardrail (catalog require_time_range): block unbounded scans over the fact.
-    if (this.catalog.requireTimeRange && !input.time_range?.start) {
-      throw new ToolError('this catalog requires a bounded time window (require_time_range): pass time_range { start, end } to prune partitions', { stage: 'validate', field: 'time_range' });
+    // Cost guardrail (require_time_range): block an unbounded scan over any source this context
+    // reads, so a partitioned source is protected whichever one the metrics come from.
+    const guarded = (ctx.state.usedModels || []).filter((k) => this.catalog.requireTimeRangeFor(k));
+    if (guarded.length && !input.time_range?.start) {
+      throw new ToolError(`source(s) ${guarded.join(', ')} require a bounded time window (require_time_range): pass time_range { start, end } to prune partitions`, { stage: 'validate', field: 'time_range' });
     }
     // Timezone-aware boundaries: time_range.timezone reads start/end as wall-clock in
     // that IANA zone and converts them to the UTC instants the warehouse stores.
@@ -2065,7 +2150,7 @@ export class Engine {
     // report the freshness of each one it reads, and headline the STALEST — that is the date
     // the combined result is actually complete through.
     const usedFacts = (ctx.state.usedModels || []).filter((k) => this.catalog.isFact(k));
-    const factsRead = usedFacts.length ? usedFacts : [this.catalog.anchor];
+    const factsRead = usedFacts.length ? usedFacts : (ctx.state.usedModels || []);
     const freshByFact = {};
     for (const f of factsRead) freshByFact[f] = await this._dataFreshness(f);
     const knownFresh = Object.values(freshByFact).filter(Boolean);

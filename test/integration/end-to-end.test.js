@@ -170,18 +170,18 @@ test('2b. the value index holds the exact seeded values (direct read)', opts, as
   if (skip(t)) return;
   const vi = engine.valueIndex;
   // ad_type over the whole fact: rewarded 10 / interstitial 8 / banner 6 (SEED_DATA §5, ad_started+ad_finished).
-  const adStat = vi.stats('ad_type_of_event_data');
+  const adStat = vi.stats('events', 'ad_type_of_event_data');
   assert.equal(adStat.distinctCount, 3);
   assert.equal(adStat.totalCount, 24);
   assert.ok(typeof adStat.indexedAt === 'number');
-  assert.deepEqual(vi.sampleValues('ad_type_of_event_data'), [{ value: 'rewarded', freq: 10 }, { value: 'interstitial', freq: 8 }, { value: 'banner', freq: 6 }]);
+  assert.deepEqual(vi.sampleValues('events', 'ad_type_of_event_data'), [{ value: 'rewarded', freq: 10 }, { value: 'interstitial', freq: 8 }, { value: 'banner', freq: 6 }]);
   // level result: win 20 / lose 5 (SEED_DATA §4), distinct 2 / total 25.
-  const rStat = vi.stats('result_of_event_data');
+  const rStat = vi.stats('events', 'result_of_event_data');
   assert.equal(rStat.distinctCount, 2);
   assert.equal(rStat.totalCount, 25);
-  assert.deepEqual(vi.sampleValues('result_of_event_data'), [{ value: 'win', freq: 20 }, { value: 'lose', freq: 5 }]);
+  assert.deepEqual(vi.sampleValues('events', 'result_of_event_data'), [{ value: 'win', freq: 20 }, { value: 'lose', freq: 5 }]);
   // direct paging/order over the index (order_by value → alphabetical).
-  assert.deepEqual(vi.listValues('ad_type_of_event_data', { by: 'value' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
+  assert.deepEqual(vi.listValues('events', 'ad_type_of_event_data', { by: 'value' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   // substring search may legitimately match more than one value (e.g. 'rewarded_ad'),
   // ordered by freq desc → the exact ad_type 'rewarded' (10) is the top hit.
   const sv = vi.searchValues('rewarded');

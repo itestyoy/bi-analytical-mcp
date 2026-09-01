@@ -155,7 +155,9 @@ export function compileDeclaration(catalog, decl) {
   const declaredMeasures = new Set(); // namespaced
   const ensure = (k) => (additions[k] ||= { measures: [], dimensions: [] });
 
-  const usedModels = new Set([catalog.anchor]);
+  // The models this task READS — taken from the payload, never assumed. A context carries only
+  // the sources it was asked for, so a task on one events source does not drag in another.
+  const usedModels = new Set();
   for (const k of decl.use_base_models || []) {
     if (!catalog.models[k]) fail(`use_base_models: unknown model '${k}'. Known models: ${Object.keys(catalog.models).join(', ')}`, 'use_base_models');
     usedModels.add(k);
@@ -179,7 +181,11 @@ export function compileDeclaration(catalog, decl) {
   const resolveMeasure = (ref) => {
     const nsName = NS(task, ref);
     if (declaredMeasures.has(nsName)) return nsName;
-    if (baseMeasureRefs.has(ref)) return ref; // base measure (already global name)
+    if (baseMeasureRefs.has(ref)) { // base measure (already a global name) — load its own model
+      const owner = catalog.modelOwningMeasure(ref);
+      if (owner) usedModels.add(owner);
+      return ref;
+    }
     fail(`metric references unknown measure '${ref}'. Declared in this task: ${[...declaredMeasures].join(', ') || '(none)'}`, 'metrics.measure');
   };
 
@@ -251,6 +257,10 @@ export function compileDeclaration(catalog, decl) {
     } else {
       fail(`unknown metric type: ${md.type}`, 'metrics.type');
     }
+  }
+
+  if (!usedModels.size) {
+    fail('this task reads no source: declare at least one semantic_models entry (from: <source>) or use_base_models', 'semantic_models');
   }
 
   return {

@@ -47,9 +47,21 @@ export class MemoryBackend {
   constructor() {
     this.kind = 'memory';
     this.persistent = false;
-    const props = new Map(); // property -> { distinctCount, totalCount, nullCount, indexedAt, values:[{value,freq}], coverage:[{event_name,row_count,non_null}] }
+    // source -> property -> { distinctCount, totalCount, nullCount, indexedAt, values:[{value,freq}],
+    // coverage:[{event_name,row_count,non_null}], ... }. Each SOURCE owns its own index space, so
+    // two events facts can carry the same property name without sharing a row.
+    const bySource = new Map();
+    const entryOf = (source, property) => bySource.get(source)?.get(property) || null;
+    const putEntry = (source, property, e) => {
+      let m = bySource.get(source);
+      if (!m) { m = new Map(); bySource.set(source, m); }
+      m.set(property, e);
+    };
+    function* allEntries() {
+      for (const [source, m] of bySource) for (const [property, e] of m) yield { source, property, e };
+    }
     const runs = [];
-    const runProps = []; // { run_id, property, ms, values_written, distinct_count, total_count, status, error, started_at }
+    const runProps = []; // { run_id, source, property, ms, values_written, distinct_count, total_count, status, error, started_at }
     const runNotes = []; // { run_id, note, at } — run-level events (e.g. a batch fell back to per-property)
     const memory = new Map(); // id -> { id, note, targets:[], aliases:[], links:[], created_at }
     const vectors = new Map(); // id -> { vec:number[], model } (semantic memory search)
@@ -61,8 +73,8 @@ export class MemoryBackend {
     };
 
     this.values = {
-      replaceProperty: (property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [], highCardinality = false, dataWatermark = null } = {}) => {
-        props.set(property, {
+      replaceProperty: (source, property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [], highCardinality = false, dataWatermark = null } = {}) => {
+        putEntry(source, property, {
           distinctCount: distinctCount ?? null,
           totalCount: totalCount ?? null,
           nullCount: nullCount ?? null,
@@ -78,12 +90,12 @@ export class MemoryBackend {
           cellCoverage: new Map(cellCoverage.map((e) => [`${e.bundle} ${e.event}`, { bundle: String(e.bundle), event_name: String(e.event), row_count: Number(e.rowCount) || 0, non_null: Number(e.nonNull) || 0 }])),
         });
       },
-      top: (property, limit) => {
-        const e = props.get(property);
+      top: (source, property, limit) => {
+        const e = entryOf(source, property);
         return e ? e.values.slice(0, limit).map((v) => ({ value: v.value, freq: v.freq })) : [];
       },
-      page: (property, { limit, offset, col, direction }) => {
-        const e = props.get(property);
+      page: (source, property, { limit, offset, col, direction }) => {
+        const e = entryOf(source, property);
         if (!e) return [];
         // primary key honours direction; ties always break on value ASC.
         const sign = direction === 'desc' ? -1 : 1;
@@ -93,63 +105,69 @@ export class MemoryBackend {
         });
         return arr.slice(offset, offset + limit).map((v) => ({ value: v.value, freq: v.freq }));
       },
-      stats: (property) => {
-        const e = props.get(property);
+      stats: (source, property) => {
+        const e = entryOf(source, property);
         return e ? { distinctCount: e.distinctCount, totalCount: e.totalCount, nullCount: e.nullCount, indexedAt: e.indexedAt, highCardinality: !!e.highCardinality, dataWatermark: e.dataWatermark ?? null } : null;
       },
       // All triple (bundle × event) cells for a property — used to MERGE a delta into what is stored.
-      allCells: (property) => {
-        const e = props.get(property);
+      allCells: (source, property) => {
+        const e = entryOf(source, property);
         return e && e.cellCoverage ? [...e.cellCoverage.values()].map((c) => ({ bundle: c.bundle, event: c.event_name, rowCount: c.row_count, nonNull: c.non_null })) : [];
       },
-      coverage: (property) => {
-        const e = props.get(property);
+      coverage: (source, property) => {
+        const e = entryOf(source, property);
         return e ? e.coverage.map((c) => ({ event_name: c.event_name, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null })) : [];
       },
       // ── per-bundle (app) coverage of a property: which apps populate it vs leave it empty ──
-      bundleCoverage: (property) => {
-        const e = props.get(property);
+      bundleCoverage: (source, property) => {
+        const e = entryOf(source, property);
         return e ? (e.bundleCoverage || []).map((c) => ({ bundle: c.bundle, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null })) : [];
       },
       // Distinct apps seen (max events per app across properties) — the catalogue of bundles.
       bundles: () => {
         const agg = new Map();
-        for (const e of props.values()) for (const c of e.bundleCoverage || []) agg.set(c.bundle, Math.max(agg.get(c.bundle) ?? 0, c.row_count));
+        for (const { e } of allEntries()) for (const c of e.bundleCoverage || []) agg.set(c.bundle, Math.max(agg.get(c.bundle) ?? 0, c.row_count));
         return [...agg.entries()].map(([bundle, row_count]) => ({ bundle, row_count })).sort((a, b) => b.row_count - a.row_count || a.bundle.localeCompare(b.bundle));
       },
       // For one app: each property's coverage (non_null=0 → empty for this app).
       bundlePropertyCoverage: (bundle) => {
         const out = [];
-        for (const [property, e] of props) for (const c of e.bundleCoverage || []) if (c.bundle === bundle) out.push({ property, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null });
+        for (const { source, property, e } of allEntries()) for (const c of e.bundleCoverage || []) if (c.bundle === bundle) out.push({ source, property, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null });
         return out.sort((a, b) => b.non_null - a.non_null || a.property.localeCompare(b.property));
       },
       // ── triple (property × bundle × event) cell: is the field filled at this exact combo? ──
-      cellCoverage: (property, { bundle, event } = {}) => {
-        const e = props.get(property); if (!e || !e.cellCoverage) return null;
+      cellCoverage: (source, property, { bundle, event } = {}) => {
+        const e = entryOf(source, property); if (!e || !e.cellCoverage) return null;
         const c = e.cellCoverage.get(`${bundle} ${event}`);
         return c ? { bundle: c.bundle, event_name: c.event_name, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null } : null;
       },
       search: (query, limit) => {
         const q = String(query).toLowerCase();
         const out = [];
-        for (const [property, e] of props) for (const v of e.values) if (v.value.toLowerCase().includes(q)) out.push({ property, value: v.value, freq: v.freq });
+        for (const { source, property, e } of allEntries()) for (const v of e.values) if (v.value.toLowerCase().includes(q)) out.push({ source, property, value: v.value, freq: v.freq });
         return out.sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)).slice(0, limit);
       },
       // Bounded candidate pool for a fuzzy (typo-tolerant) value match, ranked in JS by
       // the caller. Highest-frequency values first so the cap keeps the most relevant.
       candidates: (cap = 5000) => {
         const out = [];
-        for (const [property, e] of props) for (const v of e.values) out.push({ property, value: v.value, freq: v.freq });
+        for (const { source, property, e } of allEntries()) for (const v of e.values) out.push({ source, property, value: v.value, freq: v.freq });
         return out.sort((a, b) => b.freq - a.freq || a.value.localeCompare(b.value)).slice(0, cap);
       },
-      counts: () => ({ properties: props.size, values: [...props.values()].reduce((s, e) => s + e.values.length, 0) }),
+      counts: () => {
+        let properties = 0; let values = 0;
+        for (const { e } of allEntries()) { properties += 1; values += e.values.length; }
+        return { properties, values };
+      },
       // How many values are actually STORED for a property (the indexer caps at top-N) —
       // compared to distinct_count it reveals whether rare values were left out of the index.
-      valueCount: (property) => { const e = props.get(property); return e ? e.values.length : 0; },
-      // All indexed property keys — used to reconcile the index against the live schema.
-      properties: () => [...props.keys()],
+      valueCount: (source, property) => { const e = entryOf(source, property); return e ? e.values.length : 0; },
+      // Every indexed key as { source, property } — used to reconcile the index against the live schema.
+      properties: () => [...allEntries()].map(({ source, property }) => ({ source, property })),
       // Drop everything stored for one property (a column gone from the table) — no full reindex.
-      removeProperty: (property) => props.delete(property),
+      removeProperty: (source, property) => !!bySource.get(source)?.delete(property),
+      // Nothing persisted here, so there is no legacy schema to carry over.
+      migrateLegacyKeys: () => ({ migrated: 0, dropped: 0 }),
     };
 
     // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
@@ -173,7 +191,7 @@ export class MemoryBackend {
     // Wipe state (used by MCP_DB_RESET on startup). Memory is curated knowledge that is
     // NOT re-derivable (unlike the value index, which the background indexer repopulates),
     // so a routine clean-slate reset deliberately PRESERVES it.
-    this.reset = () => { props.clear(); runs.length = 0; runProps.length = 0; runNotes.length = 0; runSeq = 0; };
+    this.reset = () => { bySource.clear(); runs.length = 0; runProps.length = 0; runNotes.length = 0; runSeq = 0; };
 
     this.runs = {
       reconcile: () => {},
@@ -182,12 +200,12 @@ export class MemoryBackend {
       all: () => [...runs].sort((a, b) => b.id - a.id),
       get: (id) => runs.find((x) => x.id === id) || null,
       recordProperty: (runId, p = {}) => {
-        const row = { run_id: runId, property: p.property, ms: p.ms ?? null, values_written: p.valuesWritten ?? null, distinct_count: p.distinctCount ?? null, total_count: p.totalCount ?? null, status: p.status ?? null, error: p.error ?? null, started_at: runs.find((x) => x.id === runId)?.started_at ?? null };
-        const i = runProps.findIndex((x) => x.run_id === runId && x.property === p.property);
+        const row = { run_id: runId, source: p.source ?? null, property: p.property, ms: p.ms ?? null, values_written: p.valuesWritten ?? null, distinct_count: p.distinctCount ?? null, total_count: p.totalCount ?? null, status: p.status ?? null, error: p.error ?? null, started_at: runs.find((x) => x.id === runId)?.started_at ?? null };
+        const i = runProps.findIndex((x) => x.run_id === runId && x.source === row.source && x.property === p.property);
         if (i >= 0) runProps[i] = row; else runProps.push(row);
       },
       properties: (runId, { limit = 1000 } = {}) => runProps.filter((x) => x.run_id === runId).sort((a, b) => (b.ms ?? -1) - (a.ms ?? -1) || String(a.property).localeCompare(b.property)).slice(0, limit),
-      propertyHistory: (property, { limit = 20 } = {}) => runProps.filter((x) => x.property === property).sort((a, b) => b.run_id - a.run_id).slice(0, limit),
+      propertyHistory: (source, property, { limit = 20 } = {}) => runProps.filter((x) => x.source === source && x.property === property).sort((a, b) => b.run_id - a.run_id).slice(0, limit),
       addNote: (runId, note) => { runNotes.push({ run_id: runId, note: String(note), at: Date.now() }); },
       notes: (runId) => runNotes.filter((x) => x.run_id === runId).map((x) => ({ note: x.note, at: x.at })),
     };
@@ -205,8 +223,19 @@ export class SqliteBackend {
     this._db = db;
     this._stmts = new Map();
     db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
-    db.exec('CREATE TABLE IF NOT EXISTS prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
-    db.exec('CREATE TABLE IF NOT EXISTS prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER)');
+    // Every index table is keyed by (SOURCE, property): each catalog source — an events fact,
+    // the users dimension — owns its own index space, so two facts may carry the same property
+    // name without sharing a row. A v1 database keyed rows by a single `property` text and
+    // encoded the source inside it ('users.country'); such tables are renamed aside here and
+    // carried over by values.migrateLegacyKeys(), which needs the catalog to say who owns a key.
+    for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage']) {
+      const cols = db.prepare(`PRAGMA table_info(${t})`).all();
+      if (cols.length && !cols.some((c) => c.name === 'source')) {
+        try { db.exec(`DROP TABLE IF EXISTS ${t}_v1`); db.exec(`ALTER TABLE ${t} RENAME TO ${t}_v1`); } catch { /* leave as-is; the scan repopulates */ }
+      }
+    }
+    db.exec('CREATE TABLE IF NOT EXISTS prop_values (source TEXT, property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(source, property, value))');
+    db.exec('CREATE TABLE IF NOT EXISTS prop_stats (source TEXT, property TEXT, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, PRIMARY KEY(source, property))');
     // columns added later; bring an older DB up to schema (SQLite has no ADD COLUMN IF NOT EXISTS).
     //  null_count       — nulls per property.
     //  high_cardinality — 1 when the field is near-unique (distinct ≥ threshold): its top-N is noise,
@@ -216,17 +245,19 @@ export class SqliteBackend {
     for (const col of ['null_count INTEGER', 'high_cardinality INTEGER', 'data_watermark INTEGER']) { try { db.exec(`ALTER TABLE prop_stats ADD COLUMN ${col}`); } catch { /* already present */ } }
     // Per-property × event_name coverage: row_count vs non_null per event, so a field that is
     // NULL on events it does not apply to (expected) is distinguishable from genuine gaps.
-    db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(property, event_name))');
+    db.exec('CREATE TABLE IF NOT EXISTS prop_coverage (source TEXT, property TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, event_name))');
     // Per-property × bundle (app) coverage: row_count vs non_null per app, so a property that
     // is empty for one app but populated for another is visible (the { bundle } index view).
-    db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_coverage (property TEXT, bundle TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(property, bundle))');
+    db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_coverage (source TEXT, property TEXT, bundle TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle))');
     // Per-property × bundle × event TRIPLE coverage: the exact fill of a field at one app+event
     // combo — so a native-model step scoped to a concrete bundle_id AND event_name can warn the
     // field is always NULL there (the marginals above can miss a cell that is empty only jointly).
-    db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_event_coverage (property TEXT, bundle TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(property, bundle, event_name))');
+    db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_event_coverage (source TEXT, property TEXT, bundle TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle, event_name))');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
-    db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
+    db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, source TEXT, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, source, property))');
+    // per-property run rows predate the source column; an older DB just starts a fresh history.
+    try { db.exec('ALTER TABLE index_run_props ADD COLUMN source TEXT'); } catch { /* already present */ }
     // Run-level events surfaced in semantic_index({ status })/({ run }), e.g. "a batch fell
     // back to per-property because the combined scan failed: <reason>".
     db.exec('CREATE TABLE IF NOT EXISTS index_run_notes (run_id INTEGER, note TEXT, at INTEGER)');
@@ -254,46 +285,46 @@ export class SqliteBackend {
     };
 
     this.values = {
-      replaceProperty(property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [], highCardinality = false, dataWatermark = null } = {}) {
+      replaceProperty(source, property, { distinctCount, totalCount, nullCount, values = [], coverage = [], bundleCoverage = [], cellCoverage = [], highCardinality = false, dataWatermark = null } = {}) {
         s._tx(() => {
-          s._run('DELETE FROM prop_values WHERE property = ?', property);
-          for (const v of values) s._run('INSERT INTO prop_values (property, value, freq) VALUES (?, ?, ?)', property, String(v.value), Number(v.freq) || 0);
-          s._run('DELETE FROM prop_coverage WHERE property = ?', property);
-          for (const e of coverage) s._run('INSERT INTO prop_coverage (property, event_name, row_count, non_null) VALUES (?, ?, ?, ?)', property, String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
-          s._run('DELETE FROM prop_bundle_coverage WHERE property = ?', property);
-          for (const e of bundleCoverage) s._run('INSERT INTO prop_bundle_coverage (property, bundle, row_count, non_null) VALUES (?, ?, ?, ?)', property, String(e.bundle), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
-          s._run('DELETE FROM prop_bundle_event_coverage WHERE property = ?', property);
-          for (const e of cellCoverage) s._run('INSERT INTO prop_bundle_event_coverage (property, bundle, event_name, row_count, non_null) VALUES (?, ?, ?, ?, ?)', property, String(e.bundle), String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
-          s._run('INSERT INTO prop_stats (property, distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, null_count=excluded.null_count, indexed_at=excluded.indexed_at, high_cardinality=excluded.high_cardinality, data_watermark=excluded.data_watermark', property, distinctCount ?? null, totalCount ?? null, nullCount ?? null, Date.now(), highCardinality ? 1 : 0, dataWatermark ?? null);
+          s._run('DELETE FROM prop_values WHERE source = ? AND property = ?', source, property);
+          for (const v of values) s._run('INSERT INTO prop_values (source, property, value, freq) VALUES (?, ?, ?, ?)', source, property, String(v.value), Number(v.freq) || 0);
+          s._run('DELETE FROM prop_coverage WHERE source = ? AND property = ?', source, property);
+          for (const e of coverage) s._run('INSERT INTO prop_coverage (source, property, event_name, row_count, non_null) VALUES (?, ?, ?, ?, ?)', source, property, String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
+          s._run('DELETE FROM prop_bundle_coverage WHERE source = ? AND property = ?', source, property);
+          for (const e of bundleCoverage) s._run('INSERT INTO prop_bundle_coverage (source, property, bundle, row_count, non_null) VALUES (?, ?, ?, ?, ?)', source, property, String(e.bundle), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
+          s._run('DELETE FROM prop_bundle_event_coverage WHERE source = ? AND property = ?', source, property);
+          for (const e of cellCoverage) s._run('INSERT INTO prop_bundle_event_coverage (source, property, bundle, event_name, row_count, non_null) VALUES (?, ?, ?, ?, ?, ?)', source, property, String(e.bundle), String(e.event), Number(e.rowCount) || 0, Number(e.nonNull) || 0);
+          s._run('INSERT INTO prop_stats (source, property, distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source, property) DO UPDATE SET distinct_count=excluded.distinct_count, total_count=excluded.total_count, null_count=excluded.null_count, indexed_at=excluded.indexed_at, high_cardinality=excluded.high_cardinality, data_watermark=excluded.data_watermark', source, property, distinctCount ?? null, totalCount ?? null, nullCount ?? null, Date.now(), highCardinality ? 1 : 0, dataWatermark ?? null);
         });
       },
       // value ASC tiebreak → deterministic on ties (value is unique per property via the PK).
-      top(property, limit) {
-        return s._all('SELECT value, freq FROM prop_values WHERE property = ? ORDER BY freq DESC, value ASC LIMIT ?', property, limit).map((r) => ({ value: r.value, freq: Number(r.freq) }));
+      top(source, property, limit) {
+        return s._all('SELECT value, freq FROM prop_values WHERE source = ? AND property = ? ORDER BY freq DESC, value ASC LIMIT ?', source, property, limit).map((r) => ({ value: r.value, freq: Number(r.freq) }));
       },
-      page(property, { limit, offset, col, direction }) {
+      page(source, property, { limit, offset, col, direction }) {
         // col ∈ {freq,value} and direction ∈ {asc,desc} are a closed set (normalised by the
         // caller), safe to interpolate; the value tiebreak keeps paging stable.
         const c = col === 'value' ? 'value' : 'freq';
         const d = direction === 'desc' ? 'DESC' : 'ASC';
-        return s._all(`SELECT value, freq FROM prop_values WHERE property = ? ORDER BY ${c} ${d}, value ASC LIMIT ? OFFSET ?`, property, limit, offset).map((r) => ({ value: r.value, freq: Number(r.freq) }));
+        return s._all(`SELECT value, freq FROM prop_values WHERE source = ? AND property = ? ORDER BY ${c} ${d}, value ASC LIMIT ? OFFSET ?`, source, property, limit, offset).map((r) => ({ value: r.value, freq: Number(r.freq) }));
       },
-      stats(property) {
-        const r = s._get('SELECT distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark FROM prop_stats WHERE property = ?', property);
+      stats(source, property) {
+        const r = s._get('SELECT distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark FROM prop_stats WHERE source = ? AND property = ?', source, property);
         return r ? { distinctCount: r.distinct_count, totalCount: r.total_count, nullCount: r.null_count, indexedAt: r.indexed_at, highCardinality: !!r.high_cardinality, dataWatermark: r.data_watermark ?? null } : null;
       },
       // All triple (bundle × event) cells for a property — used to MERGE a delta into what is stored.
-      allCells(property) {
-        return s._all('SELECT bundle, event_name, row_count, non_null FROM prop_bundle_event_coverage WHERE property = ?', property)
+      allCells(source, property) {
+        return s._all('SELECT bundle, event_name, row_count, non_null FROM prop_bundle_event_coverage WHERE source = ? AND property = ?', source, property)
           .map((r) => ({ bundle: r.bundle, event: r.event_name, rowCount: Number(r.row_count), nonNull: Number(r.non_null) }));
       },
-      coverage(property) {
-        return s._all('SELECT event_name, row_count, non_null FROM prop_coverage WHERE property = ? ORDER BY row_count DESC, event_name ASC', property)
+      coverage(source, property) {
+        return s._all('SELECT event_name, row_count, non_null FROM prop_coverage WHERE source = ? AND property = ? ORDER BY row_count DESC, event_name ASC', source, property)
           .map((r) => ({ event_name: r.event_name, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
       },
       // ── per-bundle (app) coverage: which apps populate a property vs leave it empty ──
-      bundleCoverage(property) {
-        return s._all('SELECT bundle, row_count, non_null FROM prop_bundle_coverage WHERE property = ? ORDER BY row_count DESC, bundle ASC', property)
+      bundleCoverage(source, property) {
+        return s._all('SELECT bundle, row_count, non_null FROM prop_bundle_coverage WHERE source = ? AND property = ? ORDER BY row_count DESC, bundle ASC', source, property)
           .map((r) => ({ bundle: r.bundle, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
       },
       bundles() {
@@ -301,40 +332,78 @@ export class SqliteBackend {
           .map((r) => ({ bundle: r.bundle, row_count: Number(r.row_count) }));
       },
       bundlePropertyCoverage(bundle) {
-        return s._all('SELECT property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? ORDER BY non_null DESC, property ASC', bundle)
-          .map((r) => ({ property: r.property, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+        return s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? ORDER BY non_null DESC, source ASC, property ASC', bundle)
+          .map((r) => ({ source: r.source, property: r.property, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
       },
       // ── triple (property × bundle × event) cell lookup: the field's fill at one combo ──
-      cellCoverage(property, { bundle, event } = {}) {
-        const r = s._get('SELECT row_count, non_null FROM prop_bundle_event_coverage WHERE property = ? AND bundle = ? AND event_name = ?', property, String(bundle), String(event));
+      cellCoverage(source, property, { bundle, event } = {}) {
+        const r = s._get('SELECT row_count, non_null FROM prop_bundle_event_coverage WHERE source = ? AND property = ? AND bundle = ? AND event_name = ?', source, property, String(bundle), String(event));
         return r ? { bundle, event_name: event, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) } : null;
       },
       search(query, limit) {
         const q = String(query).toLowerCase();
-        return s._all('SELECT property, value, freq FROM prop_values WHERE instr(lower(value), ?) > 0 ORDER BY freq DESC, value ASC LIMIT ?', q, limit).map((r) => ({ property: r.property, value: r.value, freq: Number(r.freq) }));
+        return s._all('SELECT source, property, value, freq FROM prop_values WHERE instr(lower(value), ?) > 0 ORDER BY freq DESC, value ASC LIMIT ?', q, limit).map((r) => ({ source: r.source, property: r.property, value: r.value, freq: Number(r.freq) }));
       },
       // Bounded candidate pool for a fuzzy (typo-tolerant) value match, ranked in JS by
       // the caller. Highest-frequency values first so the cap keeps the most relevant.
       candidates(cap = 5000) {
-        return s._all('SELECT property, value, freq FROM prop_values ORDER BY freq DESC, value ASC LIMIT ?', cap).map((r) => ({ property: r.property, value: r.value, freq: Number(r.freq) }));
+        return s._all('SELECT source, property, value, freq FROM prop_values ORDER BY freq DESC, value ASC LIMIT ?', cap).map((r) => ({ source: r.source, property: r.property, value: r.value, freq: Number(r.freq) }));
       },
-      valueCount(property) {
-        return Number(s._get('SELECT COUNT(*) AS n FROM prop_values WHERE property = ?', property).n);
+      valueCount(source, property) {
+        return Number(s._get('SELECT COUNT(*) AS n FROM prop_values WHERE source = ? AND property = ?', source, property).n);
       },
       counts() {
         return { properties: Number(s._get('SELECT COUNT(*) AS n FROM prop_stats').n), values: Number(s._get('SELECT COUNT(*) AS n FROM prop_values').n) };
       },
       // All indexed property keys — used to reconcile the index against the live schema.
       properties() {
-        return s._all('SELECT property FROM prop_stats').map((r) => r.property);
+        return s._all('SELECT source, property FROM prop_stats').map((r) => ({ source: r.source, property: r.property }));
       },
       // Drop EVERYTHING stored for one property (a column gone from the table) — no full reindex.
-      removeProperty(property) {
+      removeProperty(source, property) {
         s._tx(() => {
           for (const tbl of ['prop_values', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'prop_stats']) {
-            s._run(`DELETE FROM ${tbl} WHERE property = ?`, property);
+            s._run(`DELETE FROM ${tbl} WHERE source = ? AND property = ?`, source, property);
           }
         });
+      },
+      /**
+       * Carry a v1 index (one flat `property` namespace) into the (source, property) schema.
+       * `resolve(oldKey)` -> { source, property } | null; the caller supplies it because only the
+       * catalog knows which source owns a key. A key it cannot place is DROPPED: the value index
+       * is a rebuildable cache, and the next scan repopulates it under the right source.
+       * Idempotent — the renamed v1 tables are dropped once their rows are moved.
+       */
+      migrateLegacyKeys(resolve) {
+        const legacy = ['prop_stats_v1', 'prop_values_v1', 'prop_coverage_v1', 'prop_bundle_coverage_v1', 'prop_bundle_event_coverage_v1']
+          .filter((t) => s._all(`PRAGMA table_info(${t})`).length);
+        if (!legacy.length || typeof resolve !== 'function') return { migrated: 0, dropped: 0 };
+        let migrated = 0; let dropped = 0;
+        const placed = new Map(); // oldKey -> { source, property } | null (resolved once)
+        const place = (key) => {
+          if (!placed.has(key)) placed.set(key, resolve(key) || null);
+          return placed.get(key);
+        };
+        const copy = (table, cols) => {
+          if (!s._all(`PRAGMA table_info(${table}_v1)`).length) return;
+          for (const r of s._all(`SELECT * FROM ${table}_v1`)) {
+            const at = place(r.property);
+            if (!at) { dropped += 1; continue; }
+            const names = ['source', 'property', ...cols];
+            const vals = [at.source, at.property, ...cols.map((c) => r[c] ?? null)];
+            s._run(`INSERT OR REPLACE INTO ${table} (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`, ...vals);
+            migrated += 1;
+          }
+        };
+        s._tx(() => {
+          copy('prop_stats', ['distinct_count', 'total_count', 'null_count', 'indexed_at', 'high_cardinality', 'data_watermark']);
+          copy('prop_values', ['value', 'freq']);
+          copy('prop_coverage', ['event_name', 'row_count', 'non_null']);
+          copy('prop_bundle_coverage', ['bundle', 'row_count', 'non_null']);
+          copy('prop_bundle_event_coverage', ['bundle', 'event_name', 'row_count', 'non_null']);
+          for (const t of legacy) s._run(`DROP TABLE IF EXISTS ${t}`);
+        });
+        return { migrated, dropped };
       },
     };
 
@@ -347,10 +416,10 @@ export class SqliteBackend {
       get(id) { return s._get('SELECT * FROM index_runs WHERE id = ?', id) || null; },
       // per-property timing/coverage within a run
       recordProperty(runId, p = {}) {
-        s._run('INSERT INTO index_run_props (run_id, property, ms, values_written, distinct_count, total_count, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, property) DO UPDATE SET ms=excluded.ms, values_written=excluded.values_written, distinct_count=excluded.distinct_count, total_count=excluded.total_count, status=excluded.status, error=excluded.error', runId, p.property, p.ms ?? null, p.valuesWritten ?? null, p.distinctCount ?? null, p.totalCount ?? null, p.status ?? null, p.error ?? null);
+        s._run('INSERT INTO index_run_props (run_id, source, property, ms, values_written, distinct_count, total_count, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, source, property) DO UPDATE SET ms=excluded.ms, values_written=excluded.values_written, distinct_count=excluded.distinct_count, total_count=excluded.total_count, status=excluded.status, error=excluded.error', runId, p.source ?? null, p.property, p.ms ?? null, p.valuesWritten ?? null, p.distinctCount ?? null, p.totalCount ?? null, p.status ?? null, p.error ?? null);
       },
       properties(runId, { limit = 1000 } = {}) { return s._all('SELECT * FROM index_run_props WHERE run_id = ? ORDER BY ms DESC, property ASC LIMIT ?', runId, limit); },
-      propertyHistory(property, { limit = 20 } = {}) { return s._all('SELECT p.*, r.started_at FROM index_run_props p JOIN index_runs r ON r.id = p.run_id WHERE p.property = ? ORDER BY p.run_id DESC LIMIT ?', property, limit); },
+      propertyHistory(source, property, { limit = 20 } = {}) { return s._all('SELECT p.*, r.started_at FROM index_run_props p JOIN index_runs r ON r.id = p.run_id WHERE p.source = ? AND p.property = ? ORDER BY p.run_id DESC LIMIT ?', source, property, limit); },
       addNote(runId, note) { s._run('INSERT INTO index_run_notes (run_id, note, at) VALUES (?, ?, ?)', runId, String(note), Date.now()); },
       notes(runId) { return s._all('SELECT note, at FROM index_run_notes WHERE run_id = ? ORDER BY at ASC', runId).map((r) => ({ note: r.note, at: Number(r.at) })); },
     };

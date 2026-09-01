@@ -19,7 +19,7 @@ const add = (e, id, stage) => e.build_native_model({ action: 'add_step', draft_i
 // that uses it (the field is wrong FOR THIS APP+EVENT, so the step yields no values).
 test('warns when a used field is empty for the scoped bundle+event (triple)', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('ad_type_of_event_data', {
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', {
     distinctCount: 3, totalCount: 50, values: [{ value: 'rewarded', freq: 30 }],
     cellCoverage: [
       { bundle: 'com.omg.colorfit', event: 'level_started', rowCount: 53, nonNull: 0 },  // EMPTY here
@@ -39,7 +39,7 @@ test('warns when a used field is empty for the scoped bundle+event (triple)', as
 // The SAME field on a combination where it IS populated → no empty-combination warning.
 test('no warning when the field is populated for the scoped bundle+event', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('ad_type_of_event_data', {
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', {
     distinctCount: 3, totalCount: 50, values: [{ value: 'rewarded', freq: 30 }],
     cellCoverage: [{ bundle: 'com.omg.wordsearch', event: 'ad_finished', rowCount: 50, nonNull: 50 }],
   });
@@ -53,7 +53,7 @@ test('no warning when the field is populated for the scoped bundle+event', async
 // MARGINAL (bundle only, no event scope): field NULL for the scoped app → warned.
 test('warns from the per-bundle marginal when only the app is scoped', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('ad_type_of_event_data', {
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', {
     distinctCount: 3, totalCount: 50, values: [{ value: 'rewarded', freq: 30 }],
     bundleCoverage: [{ bundle: 'com.omg.colorfit', rowCount: 53, nonNull: 0 }, { bundle: 'com.omg.wordsearch', rowCount: 1000, nonNull: 50 }],
   });
@@ -66,7 +66,7 @@ test('warns from the per-bundle marginal when only the app is scoped', async () 
 // Nothing scoped → no empty-combination warning (left to the generic event-scope hint).
 test('no empty-combination warning when nothing concrete is scoped', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('ad_type_of_event_data', { distinctCount: 3, cellCoverage: [{ bundle: 'com.omg.colorfit', event: 'level_started', rowCount: 53, nonNull: 0 }] });
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', { distinctCount: 3, cellCoverage: [{ bundle: 'com.omg.colorfit', event: 'level_started', rowCount: 53, nonNull: 0 }] });
   const s = await e.build_native_model({ action: 'start', name: 'noscope', source: 'events' });
   const r = await add(e, s.draft_id, { stage: 'aggregate', group_by: ['ad_type_of_event_data'], measures: [{ name: 'n', fn: 'count' }] });
   assert.ok(!r.recommendations.some((x) => /NO values|NULL for app/.test(x)), JSON.stringify(r.recommendations));

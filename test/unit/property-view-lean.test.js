@@ -21,7 +21,7 @@ function engine() {
 test('event_coverage is carriers-only by default, with an omitted count + include_coverage drill', async () => {
   const e = engine();
   // ad_type carries data on 1 event, is always-NULL on 2 others (3 events in coverage).
-  e.valueIndex.upsertProperty('ad_type_of_event_data', {
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', {
     distinctCount: 2, totalCount: 30, nullCount: 20, values: [{ value: 'rewarded', freq: 30 }],
     coverage: [
       { event: 'ad_finished', rowCount: 30, nonNull: 30 },

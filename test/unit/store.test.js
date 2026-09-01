@@ -26,7 +26,7 @@ test('one shared store backs BOTH the job registry and the value index (separate
   const id = jobs.create({ contextId: 'c1' });
   jobs.ready(id);
   const runId = idx.startRun();
-  idx.upsertProperty('p', { distinctCount: 1, totalCount: 3, values: [{ value: 'x', freq: 3 }] });
+  idx.upsertProperty('events', 'p', { distinctCount: 1, totalCount: 3, values: [{ value: 'x', freq: 3 }] });
   idx.finishRun(runId, { status: 'ok', propertiesIndexed: 1, valuesWritten: 1, errors: 0 });
 
   // Reopen the SAME file with fresh managers over a fresh store → both subsystems reloaded.
@@ -34,7 +34,7 @@ test('one shared store backs BOTH the job registry and the value index (separate
   const jobs2 = new JobManager({ store: store2 });
   const idx2 = new ValueIndex({ store: store2 });
   assert.equal(jobs2.get(id).status, 'ready', 'jobs table persisted');
-  assert.deepEqual(idx2.sampleValues('p'), [{ value: 'x', freq: 3 }], 'value index tables persisted in the same file');
+  assert.deepEqual(idx2.sampleValues('events', 'p'), [{ value: 'x', freq: 3 }], 'value index tables persisted in the same file');
   assert.equal(idx2.syncStatus().last_run.status, 'ok', 'index_runs persisted in the same file');
   store.close(); store2.close();
 });
@@ -47,8 +47,8 @@ test('a custom backend can be registered and selected (database is swappable)', 
   assert.equal(s.kind, 'memory');
   // The managers work over it unchanged (no SQL knowledge in them).
   const idx = new ValueIndex({ store: s });
-  idx.upsertProperty('p', { distinctCount: 1, totalCount: 1, values: [{ value: 'v', freq: 1 }] });
-  assert.deepEqual(idx.sampleValues('p'), [{ value: 'v', freq: 1 }]);
+  idx.upsertProperty('events', 'p', { distinctCount: 1, totalCount: 1, values: [{ value: 'v', freq: 1 }] });
+  assert.deepEqual(idx.sampleValues('events', 'p'), [{ value: 'v', freq: 1 }]);
 });
 
 test('openStore throws on an unknown backend name', () => {
@@ -66,7 +66,7 @@ test('openStore({ reset: true }) wipes all state on open (MCP_DB_RESET)', () => 
   const idx = new ValueIndex({ store: seed });
   jobs.ready(jobs.create({ contextId: 'c1' }));
   const r = idx.startRun();
-  idx.upsertProperty('p', { distinctCount: 1, totalCount: 1, values: [{ value: 'v', freq: 1 }] });
+  idx.upsertProperty('events', 'p', { distinctCount: 1, totalCount: 1, values: [{ value: 'v', freq: 1 }] });
   idx.finishRun(r, { status: 'ok' });
   seed.close();
 
@@ -75,7 +75,7 @@ test('openStore({ reset: true }) wipes all state on open (MCP_DB_RESET)', () => 
   const jobs2 = new JobManager({ store: fresh });
   const idx2 = new ValueIndex({ store: fresh });
   assert.equal(jobs2.list().length, 0, 'jobs cleared');
-  assert.deepEqual(idx2.sampleValues('p'), [], 'values cleared');
+  assert.deepEqual(idx2.sampleValues('events', 'p'), [], 'values cleared');
   assert.equal(idx2.syncStatus().total_runs, 0, 'run log cleared');
   fresh.close();
 });

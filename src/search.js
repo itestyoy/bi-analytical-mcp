@@ -31,25 +31,26 @@ export class CatalogSearch {
     // EVERY fact's vocabulary is searchable, under the same names the tools accept (bare on
     // the primary fact, '<fact>.<name>' elsewhere) — so a hit is directly usable as an argument
     // and the fact it belongs to is visible in the name itself.
-    const descs = {};
-    for (const fact of c.facts) {
-      const d = c.eventPropertyDescriptions(fact);
-      for (const [prop, text] of Object.entries(d)) descs[c.qualify(fact, prop)] = text;
-    }
-
-    const events = new FuzzyIndex(c.allEventNames(), {
-      keys: [{ name: 'name', get: (e) => e }],
-      tiebreak: (e) => e,
+    // Every source's vocabulary is searchable. An item carries its SOURCE as a field, so a hit
+    // says where it lives without the source being glued into the name.
+    const eventItems = c.facts.flatMap((f) => c.eventNames(f).map((name) => ({ source: f, name })));
+    const propItems = c.facts.flatMap((f) => {
+      const d = c.eventPropertyDescriptions(f);
+      return c.eventProps(f).map((name) => ({ source: f, name, desc: d[name] || '' }));
     });
-    const properties = new FuzzyIndex(c.allEventProps(), {
+    const events = new FuzzyIndex(eventItems, {
+      keys: [{ name: 'name', get: (e) => e.name }],
+      tiebreak: (e) => `${e.source}.${e.name}`,
+    });
+    const properties = new FuzzyIndex(propItems, {
       keys: [
-        { name: 'name', weight: NAME_WEIGHT, get: (p) => p },
-        { name: 'desc', weight: DESC_WEIGHT, get: (p) => descs[p] || '' },
+        { name: 'name', weight: NAME_WEIGHT, get: (p) => p.name },
+        { name: 'desc', weight: DESC_WEIGHT, get: (p) => p.desc },
       ],
-      tiebreak: (p) => p,
+      tiebreak: (p) => `${p.source}.${p.name}`,
     });
-    // Dimension attributes of the non-fact models (users/experiments), keyed as
-    // '<model>.<column>' — CONSISTENT with the { property } drill-down that accepts it.
+    // Dimension attributes of the non-fact models (users/experiments): { source, column } —
+    // the same pair the { property } drill-down takes.
     const dimItems = [];
     for (const mk of c.modelKeys()) {
       if (c.isFact(mk)) continue;
@@ -88,29 +89,25 @@ export class CatalogSearch {
     const opts = { threshold: fuzzy ? 0.6 : 1.01, fuzzy };
     // DATA-DERIVED applicability from the value index (which events actually carry each property),
     // not the declared meta.mcp.events. Absent/unknown ⇒ treated as "all events" downstream.
-    const applies = this.valueIndex.appliesMap(c.allEventProps()); // index key -> observed [event_name]
+    // DATA-DERIVED applicability per source (which events actually carry each property).
+    const appliesOf = (source) => this.valueIndex.appliesMap(source, c.eventProps(source));
 
     const event_names = events.search(query, opts).map(({ item: e, score, match }) => {
-      // `e` is the tool-facing name; count the properties OF ITS OWN fact that carry it.
-      const ref = c.resolveEvent(e);
-      const props = ref ? c.eventProps(ref.fact) : [];
+      const applies = appliesOf(e.source);
       return {
-        event: e,
-        ...(ref && ref.fact !== c.anchor ? { source: ref.fact } : {}),
-        property_count: props.filter((p) => { const evs = applies[c.qualify(ref.fact, p)]; return !evs || evs.includes(ref.name); }).length,
+        event: e.name,
+        source: e.source,
+        property_count: c.eventProps(e.source).filter((p) => { const evs = applies[p]; return !evs || evs.includes(e.name); }).length,
         score: round3(score), match,
       };
     });
-    const property_matches = properties.search(query, opts).map(({ item: p, score, match }) => {
-      const ref = c.resolveProperty(p);
-      return {
-        property: p,
-        ...(ref && ref.fact !== c.anchor ? { source: ref.fact } : {}),
-        type: (ref && c.eventPropertySpec(ref.name, ref.fact)?.type) ?? null,
-        events: applies[p] || null,
-        score: round3(score), match,
-      };
-    });
+    const property_matches = properties.search(query, opts).map(({ item: p, score, match }) => ({
+      property: p.name,
+      source: p.source,
+      type: c.eventPropertySpec(p.name, p.source)?.type ?? null,
+      events: appliesOf(p.source)[p.name] || null,
+      score: round3(score), match,
+    }));
     const dimension_matches = dimensions.search(query, opts).map(({ item: d, score, match }) => ({
       property: d.property, model: d.model, type: d.type, description: d.description || undefined, score: round3(score), match,
     }));
@@ -119,28 +116,17 @@ export class CatalogSearch {
       : [];
 
     // VALUE matches live in the (dynamic) value index: exact substring + fuzzy fallback.
-    // Namespaced keys ('users.country') are dimension attributes; bare keys are event
-    // properties with the event(s) carrying them — so "rewarded" resolves to its
-    // property, and a mistyped "germny" still surfaces 'Germany'.
+    // Each hit names its SOURCE plus the property within it — so "rewarded" resolves to the
+    // property that carries it, and a mistyped "germny" still surfaces 'Germany'.
     const value_matches = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
-      const base = { value: v.value, freq: v.freq, property: v.property, score: round3(v.score ?? 1), match: v.match || 'exact' };
-      // An event PROPERTY first (bare on the primary fact, '<fact>.<prop>' on a secondary one),
-      // then a '<model>.<column>' dimension attribute.
-      const ref = c.resolveProperty(v.property);
-      if (ref) {
-        return {
-          ...base,
-          ...(ref.fact !== c.anchor ? { source: ref.fact } : {}),
-          type: c.eventPropertySpec(ref.name, ref.fact)?.type ?? null,
-          events: applies[v.property] || null,
-        };
+      const base = { value: v.value, freq: v.freq, source: v.source, property: v.property, score: round3(v.score ?? 1), match: v.match || 'exact' };
+      // An indexed value belongs to (source, property): an event property of that source, or one
+      // of its dimension columns.
+      const isEventProp = c.isFact(v.source) && c.eventProps(v.source).includes(v.property);
+      if (isEventProp) {
+        return { ...base, type: c.eventPropertySpec(v.property, v.source)?.type ?? null, events: appliesOf(v.source)[v.property] || null };
       }
-      const dot = v.property.indexOf('.');
-      if (dot > 0) {
-        const mk = v.property.slice(0, dot); const col = v.property.slice(dot + 1);
-        return { ...base, type: c.models[mk]?.dimensions?.[col]?.type ?? null, model: mk, events: null };
-      }
-      return { ...base, type: null, events: applies[v.property] || null };
+      return { ...base, type: c.models[v.source]?.dimensions?.[v.property]?.type ?? null, model: v.source, events: null };
     });
 
     return { query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches, recommendations: this._recommend({ query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches }) };

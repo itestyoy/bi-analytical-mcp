@@ -192,7 +192,7 @@ const STAGES = {
         stage: { const: 'derive' },
         name: { type: 'string', pattern: NAME },
         op: { enum: ['extract', 'array_length', 'contains', 'struct_field'] },
-        source: propEnum(catalog.eventPropEnum(), 'event_data property the value derives from (a property of a SECONDARY events fact is qualified, e.g. "crashlytics.<property>"; on the pipeline\'s own source the bare name works).'),
+        source: propEnum(catalog.eventPropEnum(), 'event_data property the value derives from — one of the PIPELINE SOURCE\'s own properties (a property of another source is rejected, naming the source that has it).'),
         value: { description: 'Membership value for op=contains.' },
         field: { type: 'string', description: 'Struct field for op=struct_field.' },
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Result/extract type (default string).' },

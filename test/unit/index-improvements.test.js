@@ -20,7 +20,7 @@ function engine(extra = {}) {
 test('values_capped is flagged when distinct_count exceeds stored values', async () => {
   const e = engine();
   // 100 distinct level ids but only 2 stored → the index is incomplete for this column.
-  e.valueIndex.upsertProperty('level_id_of_event_data', { distinctCount: 100, totalCount: 900, values: [{ value: '1', freq: 10 }, { value: '2', freq: 5 }] });
+  e.valueIndex.upsertProperty('events', 'level_id_of_event_data', { distinctCount: 100, totalCount: 900, values: [{ value: '1', freq: 10 }, { value: '2', freq: 5 }] });
   const p = await e.semantic_index({ property: 'level_id_of_event_data' });
   assert.equal(p.value_stats.values_capped, true);
   assert.equal(p.value_stats.indexed_value_count, 2);
@@ -40,7 +40,7 @@ test('memory record fuzzy-resolves a near-miss target to the real entity', async
   const out = await e.memory({ action: 'record', note: 'ad format lives here', targets: ['ad_type_of_even_data'] });
   const link = out.linked_to[0];
   assert.equal(link.kind, 'property');
-  assert.equal(link.target, 'ad_type_of_event_data', 'fuzzy-linked to the real property');
+  assert.equal(link.target, 'events.ad_type_of_event_data', 'fuzzy-linked to the real property, named with its source');
   assert.equal(link.fuzzy_resolved_from, 'ad_type_of_even_data');
   assert.ok(out.fuzzy_links_note, 'flags that a fuzzy link was used');
   // and it actually surfaces on the real property's view.

@@ -5,10 +5,11 @@ version: 2
 # (model-level and column-level). The loader (src/catalog.js) transforms this into the
 # internal registry. Every model here is a thin view over a finished bi-dbt prod table
 # declared in sources.yml. Exactly one model per ROLE; several models may be events
-# FACTS (each with its own known_events + event-scoped payload + primary_entity). The
-# fact carrying `meta.mcp.anchor: true` — or the first declared one — is PRIMARY: its
-# events/properties are named bare, another fact's are '<role>.<name>' (bare inside a
-# pipeline or semantic model built FROM that fact).
+# SOURCES (each with its own known_events + event-scoped payload + primary_entity).
+# Events sources are INDEPENDENT AND EQUAL — none is a default: the source is always a
+# separate tool argument (semantic_index({ source, event }), build_native_model({ source }),
+# semantic_models[].from) and never part of a name, and each keeps its own space in the
+# value index. Within a source, event and property names are used as-is.
 # The parsing/attribution already happened upstream — we DO NOT re-parse anything;
 # we take the ready, flattened columns as-is and only re-shape (rename role columns).
 #
@@ -1460,9 +1461,10 @@ models:
   #   · primary_entity MUST differ from the analytics fact's `event` (a primary entity has
   #     exactly one owner — it is the join target for that entity).
   #   · a fact MUST declare is_event_name + is_time.
-  #   · do NOT set `anchor: true` — fct_analytics_events stays the PRIMARY fact, so its names
-  #     remain bare and this fact's are addressed 'crashlytics.<event>' / 'crashlytics.<prop>'
-  #     (bare inside a pipeline or semantic model built FROM this fact).
+  #   · this source is EQUAL to the analytics one, not nested under it: address its events and
+  #     properties with source: 'crashlytics' (semantic_index({ source, event }),
+  #     build_native_model({ source: 'crashlytics' }), semantic_models[].from), and use the
+  #     names as-is inside a pipeline or semantic model built from it.
   #   · column names use the `_of_` form, never `__` (MetricFlow reserves `__`).
   #   · a payload column carries `events: [...]` — the event(s) it is populated on; it reads
   #     NULL on every other event, so scope by event_name before using it.

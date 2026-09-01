@@ -137,7 +137,7 @@ test('add_step warns when an event-specific property is used without its event s
   const e = engine();
   // Applicability is DATA-DERIVED from the value index: seed coverage showing ad_type is populated
   // only on ad_started/ad_finished (NULL on first_launch) — the nudge reads this, not a declared list.
-  e.valueIndex.upsertProperty('ad_type_of_event_data', { coverage: [
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', { coverage: [
     { event: 'ad_started', rowCount: 10, nonNull: 10 },
     { event: 'ad_finished', rowCount: 10, nonNull: 10 },
     { event: 'first_launch', rowCount: 5, nonNull: 0 },

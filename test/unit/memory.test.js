@@ -58,9 +58,9 @@ test('memory record resolves targets to catalog entities (property/attr/event/mo
   assert.equal(out.saved, true);
   assert.ok(out.id, 'returns a note id');
   const byKey = Object.fromEntries(out.linked_to.map((l) => [l.target, l.kind]));
-  assert.equal(byKey['ad_type_of_event_data'], 'property');
+  assert.equal(byKey['events.ad_type_of_event_data'], 'property', 'a target names its source');
   assert.equal(byKey['users.country'], 'property');
-  assert.equal(byKey['ad_finished'], 'event');
+  assert.equal(byKey['events.ad_finished'], 'event');
   assert.equal(byKey['users'], 'model');
   assert.equal(byKey['ad format'], 'term', 'an unmatched phrase is kept as a free term');
   assert.deepEqual(out.unresolved_terms, ['ad format']);
@@ -79,7 +79,7 @@ test('a recorded finding surfaces through semantic_index (views + search) by its
   const prop = await e.semantic_index({ property: 'ad_type_of_event_data' });
   assert.ok(prop.memory?.some((m) => m.id === rec.id && m.note === note), 'note attached to the property view');
   const attached = prop.memory.find((m) => m.id === rec.id);
-  assert.ok(attached.about.some((a) => a.kind === 'property' && a.key === 'ad_type_of_event_data'));
+  assert.ok(attached.about.some((a) => a.kind === 'property' && a.key === 'events.ad_type_of_event_data'));
 
   // { event } — the carrying event.
   const ev = await e.semantic_index({ event: 'ad_finished' });
@@ -91,7 +91,7 @@ test('a recorded finding surfaces through semantic_index (views + search) by its
 
   // { search } by the ALIAS the user used → resolves back to the finding (+ the real field).
   const s = await e.semantic_index({ search: 'ad format' });
-  assert.ok(s.memory_matches?.some((m) => m.id === rec.id && m.about.some((a) => a.key === 'ad_type_of_event_data')), 'alias search resurfaces the note pointing at the real field');
+  assert.ok(s.memory_matches?.some((m) => m.id === rec.id && m.about.some((a) => a.key === 'events.ad_type_of_event_data')), 'alias search resurfaces the note pointing at the real field');
 
   // an UNlinked property carries no memory.
   const other = await e.semantic_index({ property: 'level_id_of_event_data' });

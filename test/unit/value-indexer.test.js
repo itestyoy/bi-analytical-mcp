@@ -49,10 +49,10 @@ test('BackgroundIndexer logs sync start → steps → results, records the run +
 
   // null/coverage was captured per property: null_count = rows_total - non_null = 5 - 3 = 2.
   const prop = catalog.scalarEventProps()[0];
-  const st = index.stats(prop);
+  const st = index.stats('events', prop);
   assert.equal(st.totalCount, 3);
   assert.equal(st.nullCount, 2);
-  const cov = index.coverage(prop);
+  const cov = index.coverage('events', prop);
   assert.deepEqual(cov, [{ event_name: 'first_launch', row_count: 5, non_null: 3, null_count: 2 }]);
   index.close();
 });
@@ -80,15 +80,15 @@ test('merge mode accumulates counts across syncs (delta), scanned as ONE combine
   const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, merge: true, logger: () => {} });
 
   await bi.refresh(); // first: full bootstrap scan (one combined query per source), records the watermark
-  assert.deepEqual(index.sampleValues(prop, 5), [{ value: 'x', freq: 3 }], 'full scan stores freq 3');
-  assert.equal(index.stats(prop).totalCount, 3);
-  assert.equal(index.stats(prop).dataWatermark, 1000, 'watermark recorded');
+  assert.deepEqual(index.sampleValues('events', prop, 5), [{ value: 'x', freq: 3 }], 'full scan stores freq 3');
+  assert.equal(index.stats('events', prop).totalCount, 3);
+  assert.equal(index.stats('events', prop).dataWatermark, 1000, 'watermark recorded');
   assert.equal(combinedCard, groupCount, 'event props indexed by ONE combined scan per source (batched), not one-per-property');
   assert.ok(combinedCard < nEvent, 'far fewer scans than properties');
 
   await bi.refresh(); // second: delta since the watermark → still ONE combined query per source → MERGE
-  assert.deepEqual(index.sampleValues(prop, 5), [{ value: 'x', freq: 6 }], 'delta merged: 3 + 3 = 6');
-  assert.equal(index.stats(prop).totalCount, 6, 'non-null total accumulated');
+  assert.deepEqual(index.sampleValues('events', prop, 5), [{ value: 'x', freq: 6 }], 'delta merged: 3 + 3 = 6');
+  assert.equal(index.stats('events', prop).totalCount, 6, 'non-null total accumulated');
   assert.equal(combinedCard, groupCount * 2, 'the delta pass is also batched (one combined query per source, not hundreds)');
   index.close();
 });
@@ -101,15 +101,15 @@ test('high-cardinality fields are flagged and skipped on the next sync', async (
   const bi = new BackgroundIndexer({ catalog, runner: shapeStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, highCardPct: 90, logger: () => {} });
 
   await bi.refresh();
-  assert.equal(index.stats(prop).highCardinality, true, 'distinct/total = 100% ≥ 90% → flagged high-cardinality');
-  const at1 = index.stats(prop).indexedAt;
+  assert.equal(index.stats('events', prop).highCardinality, true, 'distinct/total = 100% ≥ 90% → flagged high-cardinality');
+  const at1 = index.stats('events', prop).indexedAt;
   assert.ok(index.syncStatus().last_run.properties_indexed > 0, 'first run indexes the fields');
 
   await bi.refresh(); // flagged SCALAR fields are now skipped; complex props still get coverage-only
   // refresh() runs the complex-coverage pass per FACT, so count every fact's complex properties
   const complexN = catalog.facts.reduce((n, f) => n + catalog.complexEventProps(f).length, 0);
   assert.equal(index.syncStatus().last_run.properties_indexed, complexN, 'all high-cardinality SCALARS skipped; only complex-coverage refreshes');
-  assert.equal(index.stats(prop).indexedAt, at1, 'the flagged field was not re-scanned');
+  assert.equal(index.stats('events', prop).indexedAt, at1, 'the flagged field was not re-scanned');
   index.close();
 });
 
@@ -135,7 +135,7 @@ test('runModels rebuilds the source models (dbt run) before indexing', async () 
   assert.equal(order[0], 'run', 'dbt run happens FIRST');
   assert.ok(order.includes('show'), 'then the index scans');
   assert.ok(order.indexOf('run') < order.indexOf('show'), 'models rebuilt before scanning');
-  assert.ok(index.stats(catalog.scalarEventProps()[0]) != null, 'index populated after the rebuild');
+  assert.ok(index.stats('events', catalog.scalarEventProps()[0]) != null, 'index populated after the rebuild');
   index.close();
 });
 
@@ -156,7 +156,7 @@ test('runModels: a failed dbt run still indexes existing data (best-effort)', as
 
   await bi.refresh();
 
-  assert.ok(index.stats(catalog.scalarEventProps()[0]) != null, 'still indexed despite the failed build');
+  assert.ok(index.stats('events', catalog.scalarEventProps()[0]) != null, 'still indexed despite the failed build');
   const notes = index.runNotes(index.syncStatus().last_run.id);
   assert.ok(notes.some((n) => /dbt run of source models failed/.test(n.note)), 'the build failure is recorded on the run');
   index.close();
@@ -168,14 +168,14 @@ test('a field gone from the schema is pruned from the index on the next sync', a
   const index = new ValueIndex();
   const bi = new BackgroundIndexer({ catalog, runner: shapeStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} });
   // seed a stale entry for a column that no longer exists (not produced by _targets()).
-  index.upsertProperty('events.ghost_col', { distinctCount: 1, totalCount: 1, nullCount: 0, values: [{ value: 'g', freq: 1 }] });
-  assert.ok(index.properties().includes('events.ghost_col'));
+  index.upsertProperty('events', 'ghost_col', { distinctCount: 1, totalCount: 1, nullCount: 0, values: [{ value: 'g', freq: 1 }] });
+  assert.ok(index.properties().some((k) => k.source === 'events' && k.property === 'ghost_col'));
 
   await bi.refresh();
 
   assert.ok(!index.properties().includes('events.ghost_col'), 'orphan field pruned');
-  assert.equal(index.stats('events.ghost_col'), null);
-  assert.ok(index.stats(catalog.scalarEventProps()[0]) != null, 'valid fields stay indexed');
+  assert.equal(index.stats('events', 'ghost_col'), null);
+  assert.ok(index.stats('events', catalog.scalarEventProps()[0]) != null, 'valid fields stay indexed');
   index.close();
 });
 
@@ -198,13 +198,13 @@ test('a newly added field is indexed individually; existing fields stay delta-sc
   await bi.refresh(); // bootstrap — all full, no delta
   assert.equal(deltaScans, 0, 'first pass is a full bootstrap');
   const newbie = catalog.scalarEventProps()[0];
-  index.removeProperty(newbie); // simulate a freshly ADDED column: nothing stored for it yet
+  index.removeProperty('events', newbie); // simulate a freshly ADDED column: nothing stored for it yet
   deltaScans = 0;
 
   await bi.refresh();
 
   assert.equal(deltaScans, 1, 'existing anchor fields delta-scanned in ONE combined query — not full re-run');
-  assert.ok(index.stats(newbie) != null, 'the new field was indexed on its own (full scan)');
+  assert.ok(index.stats('events', newbie) != null, 'the new field was indexed on its own (full scan)');
   index.close();
 });
 
@@ -246,16 +246,16 @@ test('BackgroundIndexer stores per (bundle × event) triple cells', async () => 
 
   const prop = catalog.scalarEventProps()[0];
   // populated cell
-  const filled = index.cellCoverage(prop, { bundle: 'com.omg.words', event: 'ad_finished' });
+  const filled = index.cellCoverage('events', prop, { bundle: 'com.omg.words', event: 'ad_finished' });
   assert.equal(filled.non_null, 10);
   // empty cell (field NULL for this app+event)
-  const empty = index.cellCoverage(prop, { bundle: 'com.omg.relax', event: 'level_started' });
+  const empty = index.cellCoverage('events', prop, { bundle: 'com.omg.relax', event: 'level_started' });
   assert.equal(empty.non_null, 0);
   assert.equal(empty.row_count, 8);
   // a combo that was never seen → no cell
-  assert.equal(index.cellCoverage(prop, { bundle: 'com.omg.words', event: 'level_started' }), null);
+  assert.equal(index.cellCoverage('events', prop, { bundle: 'com.omg.words', event: 'level_started' }), null);
   // the marginals still derive correctly from the same cells
-  assert.ok(index.bundleCoverage(prop).some((b) => b.bundle === 'com.omg.words' && b.non_null === 10));
+  assert.ok(index.bundleCoverage('events', prop).some((b) => b.bundle === 'com.omg.words' && b.non_null === 10));
   index.close();
 });
 
@@ -278,7 +278,7 @@ test('BackgroundIndexer combines top-values via approx_top_k on a capable dialec
   await bi.refresh();
 
   const prop = catalog.scalarEventProps()[0];
-  const vals = index.sampleValues(prop, 10);
+  const vals = index.sampleValues('events', prop, 10);
   assert.deepEqual(new Set(vals.map((v) => v.value)), new Set(['rewarded', 'banner']), 'values parsed from approx_top_k');
   assert.equal(vals.find((v) => v.value === 'rewarded').freq, 30);
   assert.equal(perPropTopCalls, 0, 'no per-property top-values query when the dialect combines them');
@@ -318,7 +318,7 @@ test('a failed combined batch logs the reason and falls back to per-property', a
   assert.ok(notes.some((n) => /column limit exceeded/.test(n.note)), `real fallback reason recorded in the run: ${JSON.stringify(notes)}`);
   // indexing still completed via the per-property fallback.
   assert.equal(s.last_run.status, 'ok');
-  assert.equal(index.stats(catalog.scalarEventProps()[0]).totalCount, 3);
+  assert.equal(index.stats('events', catalog.scalarEventProps()[0]).totalCount, 3);
   index.close();
 });
 
@@ -374,7 +374,7 @@ test('a failed combined top-k degrades ONLY top-values, keeping cardinality+cove
   // FULL raw output is kept verbatim (banner AND the real error line) — nothing stripped/truncated.
   assert.ok(notes.some((n) => /top-k .* FAILED/.test(n) && /Resources exceeded during query execution/.test(n) && /Running with dbt/.test(n)), JSON.stringify(notes));
   // stats + values still landed.
-  assert.equal(index.stats(catalog.scalarEventProps()[0]).totalCount, 3);
+  assert.equal(index.stats('events', catalog.scalarEventProps()[0]).totalCount, 3);
   index.close();
 });
 
@@ -404,13 +404,13 @@ test('complex-coverage merges a delta into stored coverage (incremental, not ful
 
   // 2nd arg is the FACT to scan (the app column is derived from it); default = primary fact.
   await bi._indexComplexCoverage(1); // first pass: no watermark → FULL scan
-  assert.equal(index.coverage(prop).find((e) => e.event_name === 'level_completed').non_null, 5, 'full scan stored 5');
-  assert.equal(index.stats(prop).dataWatermark, 1000, 'watermark advanced to the full scan max');
-  assert.ok(index.sampleValues(prop).length > 0, 'examples stored');
+  assert.equal(index.coverage('events', prop).find((e) => e.event_name === 'level_completed').non_null, 5, 'full scan stored 5');
+  assert.equal(index.stats('events', prop).dataWatermark, 1000, 'watermark advanced to the full scan max');
+  assert.ok(index.sampleValues('events', prop).length > 0, 'examples stored');
 
   await bi._indexComplexCoverage(2); // second pass: watermark set → DELTA, counts ADD
-  assert.equal(index.coverage(prop).find((e) => e.event_name === 'level_completed').non_null, 8, 'delta ADDED (5 + 3), not replaced');
-  assert.equal(index.stats(prop).dataWatermark, 2000, 'watermark advanced to the delta max');
+  assert.equal(index.coverage('events', prop).find((e) => e.event_name === 'level_completed').non_null, 8, 'delta ADDED (5 + 3), not replaced');
+  assert.equal(index.stats('events', prop).dataWatermark, 2000, 'watermark advanced to the delta max');
   const complexN = catalog.complexEventProps().length;
   assert.ok(covQueries.slice(0, complexN).every((x) => x === 'full'), 'first pass = full scan per complex prop');
   assert.ok(covQueries.slice(complexN).length > 0 && covQueries.slice(complexN).every((x) => x === 'delta'), 'second pass = since-watermark delta per complex prop (no full re-scan)');

@@ -31,7 +31,7 @@ function strEnum(values, description) {
   return values.length ? { type: 'string', enum: values, description } : { type: 'string', description };
 }
 
-function whereItemSchema(catalog, modelKey = catalog.anchor) {
+function whereItemSchema(catalog, modelKey) {
   return {
     type: 'object', additionalProperties: false, required: ['property', 'op'],
     description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
@@ -100,14 +100,14 @@ function genericMeasureField(catalog) {
   const opts = [{ const: '*', title: 'rows' }];
   const keys = [...new Set(catalog.modelKeys().flatMap((k) => catalog.entityKeyColumns(k)))];
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
-  const props = catalog.allScalarEventProps();
+  const props = catalog.scalarEventPropEnum();
   if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
-  return { description: 'What to aggregate: "*", an entity-key column, or a numeric event_data property. A property of a SECONDARY events fact is qualified, e.g. "crashlytics.<property>".', oneOf: opts };
+  return { description: 'What to aggregate: "*", an entity-key column, or a numeric event_data property of the target semantic model\'s own source.', oneOf: opts };
 }
 
 function genericWhereItem(catalog) {
-  const item = whereItemSchema(catalog);
-  item.properties.property = strEnum(catalog.allScalarEventProps(), 'Scalar event_data property (qualified as "<fact>.<property>" for a secondary events fact). NB: each property is only populated on specific events; scope the measure to those event_name(s) or it reads NULL.');
+  const item = whereItemSchema(catalog, catalog.facts[0]); // shape only — the enum is replaced below
+  item.properties.property = strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: each property is only populated on specific events; scope the measure to those event_name(s) or it reads NULL.');
   return item;
 }
 
@@ -124,7 +124,7 @@ function genericMeasureItem(catalog) {
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
       cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
       label: { type: 'string', description: D.label },
-      event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.allEventNames() }, description: D.event_name },
+      event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNameEnum() }, description: D.event_name },
       where: { type: 'array', description: D.where_measure, items: genericWhereItem(catalog) },
     },
     allOf: [{ if: { properties: { agg: { const: 'percentile' } } }, then: { required: ['percentile'] } }],
@@ -138,7 +138,7 @@ function genericDimensionItem(catalog) {
     description: 'A dimension to add to the target semantic model (a column or an event_data property).',
     oneOf: [
       { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { const: 'model_column', description: 'Use a physical table column.' }, column: strEnum(cols, 'Physical column name.'), as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
-      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: strEnum(catalog.allScalarEventProps(), 'Scalar event_data property (qualified as "<fact>.<property>" for a secondary events fact). NB: only populated on specific events (see semantic_index({ event })); NULL on others.'), as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
+      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: only populated on specific events (see semantic_index({ source, event })); NULL on others.'), as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
     ],
   };
 }
@@ -306,7 +306,7 @@ export function buildSchemas(catalog) {
         type: 'object', additionalProperties: false, required: ['stages'],
         description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
         properties: {
-          source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table for the pipeline (default: the events fact).' },
+          source: { type: 'string', enum: modelKeys, ...(catalog.defaultSource() ? { default: catalog.defaultSource() } : {}), description: `Source table the pipeline reads. ${catalog.defaultSource() ? 'Defaults to the only events source.' : `REQUIRED: this catalog has several events sources (${catalog.facts.join(', ')}), each with its own events and payload — name the one the question is about.`}` },
           time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
           stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
         },
@@ -343,7 +343,7 @@ export function buildSchemas(catalog) {
       draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for everything except start. For fork it may also be a context whose pipeline was already materialized.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
-      source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table (start only; default the events fact).' },
+      source: { type: 'string', enum: modelKeys, ...(catalog.defaultSource() ? { default: catalog.defaultSource() } : {}), description: `Source table the pipeline reads (start only). ${catalog.defaultSource() ? 'Defaults to the only events source.' : `REQUIRED here: this catalog has several events sources (${catalog.facts.join(', ')}) — name the one the question is about.`}` },
       time_range: trProp,
       stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
       stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
@@ -475,8 +475,9 @@ export function buildSchemas(catalog) {
       description: 'THE entry point for exploring the data: one progressive index over what every event/property/attribute MEANS, the REAL values it carries, how complete it is (NULL coverage), and how fresh the profiling is. Call with NO arguments for a compact overview (models, event names, event_semantics, group-by paths, value-index freshness). Then pass EXACTLY ONE view key: model → that model\'s entities/time/dimension attributes (with real sample values) + physical columns; event → only the properties populated on that event; property → ONE COLUMN\'S FULL PASSPORT (spec + unit, real value distribution paged by limit/offset/order_by/direction, NULL coverage per event with expected-vs-gap annotation, indexing history) — accepts bare event properties AND "<model>.<column>" attributes; search → events, properties, attributes, indexed VALUES and recipes by substring; bundle → for ONE app (bundle id), which event properties are populated vs EMPTY (the overview lists apps under `bundles`); status:true → operational state (value-index sync runs + background query jobs); run → one sync run\'s per-property breakdown. Views are mutually exclusive; paging params apply only to property/search.',
       properties: {
         model: { enum: catalog.modelKeys(), description: 'VIEW: one model — its entities, time axis, dimension attributes (with indexed sample values) and REAL physical columns.' },
-        event: strEnum(catalog.allEventNames(), 'VIEW: one event — the event_data properties POPULATED on it (what you can measure/group/filter), each with real sample values + units.'),
-        property: { type: 'string', description: 'VIEW: one column\'s full passport. An event property of the PRIMARY fact (bare name, e.g. "ad_type_of_event_data"), a property of another events fact as "<fact>.<property>" (e.g. "crashlytics.issue_title_of_event_data"), OR a dimension attribute as "<model>.<column>" (e.g. "users.country", "experiments.experiment_name"): type/unit, where it applies, real value distribution (paged), NULL coverage per event, indexing history.' },
+        source: { enum: catalog.modelKeys(), description: 'Which SOURCE the `event` / `property` below belongs to. Every source owns its own events, payload properties and indexed values, so two sources may carry the same name — pass this to say which one. Optional when a name is unique across sources (then it is resolved for you; an ambiguous one is reported).' },
+        event: strEnum(catalog.eventNameEnum(), 'VIEW: one event of `source` — the event_data properties POPULATED on it (what you can measure/group/filter), each with real sample values + units.'),
+        property: { type: 'string', description: 'VIEW: one column\'s full passport, within `source`: an event property (e.g. "ad_type_of_event_data") or a dimension attribute (e.g. "country" on the users model): type/unit, where it applies, real value distribution (paged), NULL coverage per event, indexing history.' },
         search: { type: 'string', description: 'VIEW: find across event names, event properties, dimension attributes (users/experiments columns), indexed VALUES, and recipes. FUZZY by default — typo- and paraphrase-tolerant (e.g. "retenton"→retention, "germny"→Germany); exact substring hits rank first, each match carries a score + match:"exact"|"fuzzy". Set fuzzy:false for substring-only.' },
         fuzzy: { type: 'boolean', description: 'For { search }: enable typo/approximate matching (default true). false = exact substring only.' },
         status: { type: 'boolean', description: 'VIEW: operational state — value-index sync runs (freshness, errors, slowest properties) + background query jobs.' },

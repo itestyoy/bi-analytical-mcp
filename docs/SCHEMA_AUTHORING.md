@@ -202,6 +202,392 @@ measures:
 
 ---
 
+## 2b. Полный гайд: куда что вставлять
+
+Один файл — `schema.yml` вашего dbt-проекта (или `config/catalog.yml`, если каталог ведётся
+отдельно). Всё управляющее лежит в `meta.mcp` на **двух уровнях**: на модели и на колонке.
+Ниже — полный скелет со всеми четырьмя ролями. Скопируйте, замените имена колонок, удалите
+то, чего у вас нет. Каждая пометка прокомментирована: что она включает.
+
+```yaml
+version: 2
+models:
+
+  # ───────────────────────────── 1. ИСТОЧНИК СОБЫТИЙ ─────────────────────────────
+  - name: fct_analytics_events                     # имя dbt-модели — любое
+    description: >                                 # читается ЦЕЛИКОМ в обзоре при первом вызове
+      Client analytics events: one row = one tracked in-game event from the player's device.
+      Time axis is device_time (player's zone). Joins to dim_users by player (point-in-time —
+      dim_users is slowly-changing). Payload is flattened into *_of_event_data columns; the raw
+      event_data JSON is kept only for complex (array) properties.
+    meta:
+      mcp:                                         # ── уровень МОДЕЛИ ──
+        role: events                               # идентичность источника
+        primary_entity: event                      # строкой: у событий нет ключа-колонки
+        anchor: true                               # (опц.) fallback, когда источников событий > 1
+        require_time_range: true                   # (опц.) запрет запросов без окна времени
+        partition_column: event_date               # (опц.) подсказка стоимости
+        known_events: [first_launch, new_session, level_completed, iap_purchase_completed, ad_finished]
+        event_semantics:                           # какие события что значат
+          acquisition_event: first_launch
+          session_event: new_session
+          purchase_event: iap_purchase_completed
+          ad_impression_event: ad_finished
+        entities:                                  # связи с СОСТАВНЫМ ключом — только здесь
+          ad_funnel: { type: foreign, key: [tracking_id, player_id_of_internal] }
+    columns:                                       # ── уровень КОЛОНКИ ──
+      - name: player_id_of_internal
+        description: "Stable internal player id — the join key to dim_users and experiments."
+        meta: { mcp: { entity: { name: user, type: foreign } } }      # одноколоночный ключ
+      - name: session_number
+        meta: { mcp: { entity: { name: session, type: foreign } } }
+      - name: device_time
+        description: "When the event happened on the device, in the player's time zone."
+        meta: { mcp: { is_time: true } }                              # ось времени
+      - name: event_name
+        meta: { mcp: { is_event_name: true } }                        # делает модель источником событий
+      - name: bundle_id
+        meta: { mcp: { dimension: { bundle: true } } }                # идентификатор приложения
+      - name: tracking_id
+        meta: { mcp: { index: false } }                               # ключ; не профилировать
+      - name: event_date
+        meta: { mcp: { dimension: false } }                           # техническая, не атрибут
+
+      # плоские СКАЛЯРНЫЕ свойства payload — events: делает колонку event-scoped
+      - name: price_in_usd_of_event_data
+        data_type: numeric
+        description: "IAP price in USD as charged by the store, before tax."
+        meta: { mcp: { events: [iap_purchase_completed, iap_purchase_failed], unit: usd } }
+      - name: result_of_event_data
+        data_type: string
+        meta: { mcp: { events: [level_completed], values: [win, lose] } }   # словарь-контракт
+
+      # сырой JSON — нужен для СЛОЖНЫХ свойств без плоской колонки (см. §2c)
+      - name: event_data
+        data_type: jsonb
+        meta:
+          mcp:
+            is_event_data: true
+            properties:
+              words_collected: { type: array, items: string, description: "Words collected on a level." }
+              rewards: { type: "array<struct>", fields: { item: string, qty: int }, description: "Rewards granted." }
+
+  # ────────────────────────── 2. ВТОРОЙ ИСТОЧНИК СОБЫТИЙ ──────────────────────────
+  - name: fct_crashlytics_events
+    description: "Crash reports: one row = one report. Independent event vocabulary. See §5."
+    meta:
+      mcp:
+        role: crashlytics
+        primary_entity: crash
+        known_events: [fatal_crash, non_fatal, anr]
+        entities:
+          ad_funnel:                               # одна связь, НЕСКОЛЬКО альтернативных колонок
+            type: foreign
+            variants:
+              rewarded:     { key: [rewarded_tracking_id, player_id_of_internal] }
+              interstitial: { key: [interstitial_tracking_id, player_id_of_internal] }
+              banner:       { key: [banner_tracking_id, player_id_of_internal] }
+    columns:
+      - name: player_id_of_internal
+        meta: { mcp: { entity: { name: user, type: foreign } } }
+      - name: event_time
+        meta: { mcp: { is_time: true } }
+      - name: event_name
+        meta: { mcp: { is_event_name: true } }
+      - name: app_version                          # атрибут ФАКТА — доступен через связь
+        meta: { mcp: { dimension: true } }         #   как ad_funnel__app_version у того, кто ссылается
+      - name: device_model
+        meta: { mcp: { dimension: true } }
+      - name: anr_duration_of_event_data
+        data_type: numeric
+        meta: { mcp: { events: [anr], unit: seconds } }
+      # сложные типы в ПЛОСКИХ колонках — полностью в §2c
+      - name: breadcrumbs_of_event_data
+        data_type: string
+        meta: { mcp: { events: [fatal_crash, non_fatal, anr], array: { items: string, encoding: json } } }
+      - name: stack_frames_of_event_data
+        data_type: string
+        meta: { mcp: { events: [fatal_crash, non_fatal], array: { encoding: json, fields: { file: string, line: int, in_app: boolean } } } }
+      - name: custom_keys_of_event_data
+        data_type: string
+        description: "Custom keys attached to the report — a JSON object { level, coins, network }."
+        meta: { mcp: { events: [fatal_crash, non_fatal, anr] } }
+
+  # ───────────────────── 3. РАЗМЕРНОСТЬ ПОЛЬЗОВАТЕЛЕЙ (SCD-2) ─────────────────────
+  - name: dim_users
+    description: >
+      Player attributes: one row = one player PER VERSION of their attributes. Slowly-changing:
+      every join is point-in-time on [install_time_valid_from, install_time_valid_until).
+    meta:
+      mcp:
+        role: users                                # primary_entity не нужна: ключ на колонке
+    columns:
+      - name: player_id_of_internal
+        meta: { mcp: { entity: { name: user, type: primary } } }     # владелец связи user
+      - name: install_time_valid_from
+        data_type: timestamp
+        meta: { mcp: { dimension: { validity: start } } }           # окно — ПАРОЙ
+      - name: install_time_valid_until
+        data_type: timestamp
+        meta: { mcp: { dimension: { validity: end } } }
+      - name: install_date
+        data_type: date
+        meta: { mcp: { is_time: true } }                              # ось времени размерности
+      - name: platform
+        data_type: string
+        meta: { mcp: { values: [ios, android] } }
+      - name: country                              # без пометок: на размерности КАЖДАЯ колонка — атрибут
+        data_type: string
+      - name: media_source
+        data_type: string
+
+  # ─────────────────────────── 4. НАЗНАЧЕНИЯ A/B-ТЕСТОВ ───────────────────────────
+  - name: fct_experiment_assignments
+    description: "A/B assignments: one row = (player, experiment) with the [assigned_at, ended_at] window."
+    meta:
+      mcp:
+        role: experiments
+    columns:
+      - name: player_id_of_internal
+        meta: { mcp: { entity: { name: user, type: foreign } } }
+      - { name: experiment_name, data_type: string }
+      - { name: variant_group,   data_type: string }
+      - { name: assigned_at,     data_type: timestamp }
+      - { name: ended_at,        data_type: timestamp }
+
+  # ───────────────────────────── 5. ИСТОЧНИК МЕР ─────────────────────────────────
+  - name: fct_player_acquisition
+    description: "Acquisition spend: one row = (player, day). Amounts, not events. Joins to players by (player, day)."
+    meta:
+      mcp:
+        role: acquisition
+        primary_entity: acquisition                # объектная форма не нужна: ключ на колонке
+        measures:                                  # выражения над колонками
+          cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd }             # функцию выберет вызывающий
+          total_spend:    { expr: cost, agg: sum, unit: usd, description: "Total spend." }  # + губернируемая
+    columns:
+      - name: acquisition_id
+        meta: { mcp: { entity: { name: acquisition, type: primary } } }
+      - name: player_id_of_internal
+        meta: { mcp: { entity: { name: user, type: foreign } } }
+      - name: spend_date
+        data_type: timestamp
+        meta: { mcp: { is_time: true } }
+      - name: cost
+        data_type: numeric
+        meta: { mcp: { measure: { unit: usd, label: "UA cost" } } }   # сумма, не атрибут
+      - name: clicks
+        data_type: integer
+        meta: { mcp: { measure: true } }
+      - { name: media_source, data_type: string }                    # атрибуты — без пометок
+      - name: campaign_id
+        meta: { mcp: { index: false } }
+      - name: ingest_batch_id
+        meta: { mcp: { dimension: false } }
+```
+
+Три правила размещения, которые чаще всего путают:
+
+| хочу | куда |
+|---|---|
+| ключ связи из **одной** колонки | на колонку: `meta.mcp.entity: { name, type }` |
+| ключ связи из **нескольких** колонок, или несколько альтернативных колонок | на модель: `meta.mcp.entities` (`key: [...]` или `variants`) |
+| величина — **колонка** | на колонку: `meta.mcp.measure` |
+| величина — **выражение** над колонками | на модель: `meta.mcp.measures` |
+| свойство события с **плоской** колонкой | на колонку: `meta.mcp.events` (+ `array` для массива) |
+| свойство события **без** плоской колонки (в JSON-blob) | на колонку `is_event_data`: `meta.mcp.properties` |
+
+Это ровно фикстура `test/integration/fixtures/catalog.yml` — на ней гоняются все
+интеграционные сценарии, так что каждая пометка выше проверена на складе.
+
+---
+
+## 2c. Сложные типы: массивы, объекты, JSON — полный гайд
+
+Четыре формы, в которых сложное значение встречается на складе. Для каждой: как выглядят
+данные, что писать в схему, что покажет `semantic_index`, и какие стадии pipeline с этим
+работают — с числами из фикстуры, которыми это доказано (`crashlytics-complex-types.test.js`).
+
+Общее правило: **сложное значение доступно только через pipeline.** В управляемой метрике
+(`create_semantic_model`) массив или объект не сгруппировать и не просуммировать напрямую —
+сначала pipeline извлекает скаляр или разворачивает строки.
+
+### Форма A. Массив скаляров в плоской колонке
+
+Данные: колонка `breadcrumbs_of_event_data` типа `string`, в строке — JSON-массив
+`["level_start","ad_shown"]`. На BigQuery это же может быть настоящий `ARRAY<STRING>`.
+
+```yaml
+- name: breadcrumbs_of_event_data
+  data_type: string                        # или ARRAY<STRING> на BigQuery
+  description: "Breadcrumb trail leading up to the report — a JSON array of strings, in order."
+  meta:
+    mcp:
+      events: [fatal_crash, non_fatal, anr]
+      array:
+        items: string                      # тип элемента
+        encoding: json                     # строка с JSON-массивом; для ARRAY-колонки — native
+```
+
+`encoding` можно не писать: для `data_type: string` подразумевается `json`, для остального —
+`native`. `semantic_index({ event })` покажет свойство с `type: array`, `complex: true`.
+
+Что с ним делать в pipeline — и что это даёт на фикстуре (13 отчётов, 20 элементов):
+
+```js
+// одна строка на элемент — «на каком шаге ломалось»
+{ stage: 'unnest', source: 'breadcrumbs_of_event_data', as: 'crumb', type: 'string' }
+//   → 20 строк; group_by crumb: level_start 4, net_retry 4, ui_freeze 3, gc_pause 3, …
+
+// длина массива, не меняя грань
+{ stage: 'derive', name: 'n_crumbs', op: 'array_length', source: 'breadcrumbs_of_event_data' }
+//   → sum(n_crumbs) = 20 по 13 отчётам
+
+// членство: был ли шаг
+{ stage: 'derive', name: 'retried', op: 'contains', source: 'breadcrumbs_of_event_data', value: 'net_retry' }
+//   → retried = true у 3 отчётов (net_retry встречается 4 раза, но k8 записал его дважды)
+
+// первый / последний элемент — «куда вошёл, где умер»
+{ stage: 'compute', name: 'trail',   op: 'json_parse_array', column: 'breadcrumbs_of_event_data' }
+{ stage: 'compute', name: 'entered', op: 'element_at', column: 'trail', index: 1 }
+{ stage: 'compute', name: 'died_at', op: 'array_last',  column: 'trail' }
+```
+
+`unnest` **меняет грань**: строки без массива (NULL) выпадают. Если нужно сохранить все
+отчёты — берите `array_length` / `contains`, они грань не меняют.
+
+### Форма B. Массив объектов (структур) в плоской колонке
+
+Данные: `stack_frames_of_event_data` — JSON-массив объектов
+`[{"file":"Game.cs","line":42,"in_app":true}, …]`. На BigQuery — `ARRAY<STRUCT<…>>`.
+
+```yaml
+- name: stack_frames_of_event_data
+  data_type: string
+  description: "Exception stack, innermost frame first — a JSON array of { file, line, in_app }."
+  meta:
+    mcp:
+      events: [fatal_crash, non_fatal]     # у anr стека нет — там NULL
+      array:
+        encoding: json
+        fields:                            # форма элемента — делает тип array<struct>
+          file: string
+          line: int
+          in_app: boolean
+```
+
+`fields` — то, что отличает массив структур от массива скаляров: без него `unnest` отдаст
+элемент целиком как JSON, с ним — можно сразу привязать одно поле.
+
+```js
+// одно поле элемента, одной стадией — «какие файлы падают»
+{ stage: 'unnest', source: 'stack_frames_of_event_data', as: 'file', field: 'file' }
+//   → 16 кадров по 10 отчётам; group_by file: Game.cs 5, Net.cs 4, Engine.cs 3, Shop.cs 2, Decode.cs 1, Ads.cs 1
+
+// несколько полей — элемент целиком, потом json_field по каждому
+{ stage: 'unnest',  source: 'stack_frames_of_event_data', as: 'frame' }
+{ stage: 'compute', name: 'file',   op: 'json_field', column: 'frame', field: 'file' }
+{ stage: 'compute', name: 'line',   op: 'json_field', column: 'frame', field: 'line', type: 'int' }
+{ stage: 'compute', name: 'in_app', op: 'json_field', column: 'frame', field: 'in_app' }
+//   → where in_app = false: 3 кадра (все три — Engine.cs); true: 13
+
+// глубина стека без разворота
+{ stage: 'derive', name: 'depth', op: 'array_length', source: 'stack_frames_of_event_data' }
+//   → 13 строк: k1 2, k2 1, k3 3 … ; у anr — NULL
+```
+
+Скрещивание с обычным соединением работает как всегда: `unnest` → `join { with: 'users',
+via: 'user', between: … }` → 20 хлебных крошек по странам GB 10 / US 6 / DE 3 / BR 1, дублей нет.
+
+### Форма C. JSON-объект в плоской колонке
+
+Данные: `custom_keys_of_event_data` — одиночный объект `{"level":"12","coins":"340","network":"wifi"}`.
+Ключи известны, но **не заданы схемой** — их состав может отличаться от строки к строке.
+
+```yaml
+- name: custom_keys_of_event_data
+  data_type: string                        # или JSON / jsonb
+  description: >
+    Custom keys attached to the report — a JSON object. Known keys: level (int), coins (int),
+    network (wifi | cellular). Read a key with struct_field / json_field.
+  meta:
+    mcp:
+      events: [fatal_crash, non_fatal, anr]
+```
+
+Специальной пометки у объекта **нет** — он остаётся обычным event-scoped свойством. Поэтому
+это единственный случай, когда **форму значения надо описать словами** в `description`: индекс
+профилирует скаляры, а вложенные ключи объекта — нет, и агенту неоткуда узнать, что внутри.
+
+```js
+// один ключ как строка
+{ stage: 'derive', name: 'network', op: 'struct_field', source: 'custom_keys_of_event_data', field: 'network' }
+//   → wifi 8 / cellular 5
+
+// один ключ с приведением типа — для сумм
+{ stage: 'compute', name: 'coins', op: 'json_field', column: 'custom_keys_of_event_data', field: 'coins', type: 'int' }
+{ stage: 'compute', name: 'level', op: 'json_field', column: 'custom_keys_of_event_data', field: 'level', type: 'int' }
+//   → sum(coins) 5205; max(level) 31; median(level) 12
+```
+
+Не путайте с формой A: `array_length` / `contains` / `unnest` на объекте отвергаются с
+подсказкой — «это не массив; для JSON-объекта используйте struct_field или json_field».
+
+### Форма D. Сырой JSON-blob события с вложенными сложными свойствами
+
+Данные: колонка `event_data` (jsonb) целиком, а внутри — ключи, для которых **нет плоских
+колонок**: `{"words_collected":["cat","dog"],"rewards":[{"item":"coin","qty":10}]}`.
+
+```yaml
+- name: event_data
+  data_type: jsonb
+  description: "Raw per-event JSON payload; kept for complex array properties that have no flat column."
+  meta:
+    mcp:
+      is_event_data: true
+      properties:                          # свойства, живущие ТОЛЬКО в blob
+        words_collected:
+          type: array
+          items: string
+          description: "Words collected on a completed level."
+        rewards:
+          type: "array<struct>"
+          fields: { item: string, qty: int }
+          description: "Rewards granted on level completion (item + quantity)."
+        difficulty:                        # скаляр в blob тоже можно — но плоская колонка лучше
+          type: int
+          description: "Level difficulty tier."
+```
+
+Свойство из `properties` адресуется **по имени ключа**, а не по колонке, и читается
+извлечением из JSON. Стадии — те же, что для форм A и B:
+
+```js
+{ stage: 'derive', name: 'n_words', op: 'array_length', source: 'words_collected' }
+{ stage: 'derive', name: 'has_cat', op: 'contains',     source: 'words_collected', value: 'cat' }
+{ stage: 'unnest', source: 'rewards', as: 'rw' }          // элемент-структура целиком
+{ stage: 'compute', name: 'item', op: 'json_field', column: 'rw', field: 'item' }
+```
+
+Когда blob, а когда плоская колонка: **плоская всегда лучше** — она типизирована,
+профилируется индексом и не требует парсинга на каждом запросе. Blob оставляют для редких
+сложных свойств, которые не стоит материализовать колонками.
+
+### Сводка: какая форма → что писать → чем читать
+
+| данные | схема | pipeline |
+|---|---|---|
+| массив скаляров, плоская колонка | `array: { items, encoding? }` | `unnest` · `array_length` · `contains` · `json_parse_array` + `element_at` / `array_last` |
+| массив объектов, плоская колонка | `array: { fields: {…}, encoding? }` | `unnest` с `field` · `unnest` целиком + `json_field` · `array_length` |
+| JSON-объект, плоская колонка | ничего особого + `description` с формой | `struct_field` · `json_field` с `type` |
+| массив / объект внутри blob | `properties` под `is_event_data` | те же стадии, `source` = имя ключа |
+| настоящий ARRAY / REPEATED (BigQuery) | `array: { …, encoding: native }` | те же стадии без парсинга |
+
+Что **нельзя**: объявить массив под `dimension` (сложное значение — не атрибут), группировать
+метрику по массиву напрямую, ставить `values` на массив (словарь — для скаляров).
+
+---
+
 ## 3. Конфиги, которые загрузка отвергает
 
 Каждый из них раньше загружался и собирал модель по **одному** из двух объявлений — какое

@@ -180,13 +180,35 @@ value-индекса и интроспекции склада. Дублиров�
 ```yaml
 # ХОРОШО — смысл и назначение; значения агент возьмёт из индекса, свежие
 - name: app_id_of_main_data
-  description: "Короткий код игры — стабильный внутренний идентификатор приложения, не
-    меняется при ребрендинге и не совпадает с bundle_id. Ось для сравнения игр между собой."
+  description: "Short internal game code — a stable app identifier that survives rebranding
+    and is NOT the store bundle_id. The axis for comparing games with each other."
 ```
 
 Исключение: если у поля **закрытый словарь-контракт** из 2-4 значений, от которых зависит
 логика (`win` / `lose`, `success` / `failed`), объявите его в `meta.mcp.values` — это ключ
 схемы, а не проза; агент увидит его и когда индекс ещё не прогонялся.
+
+---
+
+## Язык описаний — английский
+
+Все `description` — модели, колонки, величины — пишутся **на английском**. Это правило, а не
+рекомендация, и причины у него технические:
+
+- **Один язык на весь контекст агента.** Имена колонок, ключи схемы (`role`, `entities`,
+  `measure`), тексты инструментов MCP, сообщения об ошибках и значения в индексе — английские.
+  Русское описание посреди этого читается как исключение, и модель тратит внимание на
+  переключение, а не на смысл.
+- **Поиск работает по словам.** `semantic_index({ search })` сравнивает запрос с именами и
+  описаниями. Английское описание находится и по английскому имени колонки, и по термину
+  из вопроса; смесь языков дробит одно понятие на два набора слов, и половина совпадений
+  теряется.
+- **Так уже устроен продовый каталог** — все 202 колонки `fct_analytics_events` описаны
+  по-английски. Новые источники не должны заводить второй язык.
+
+Термины бизнеса, у которых нет устоявшегося английского эквивалента, транслитерируются и
+поясняются один раз: `"Fillwords (word-search game) app code"`. Внутри этого документа
+пояснения — на русском, а **примеры описаний — на английском**, как они и должны стоять в схеме.
 
 ---
 
@@ -210,13 +232,14 @@ value-индекса и интроспекции склада. Дублиров�
 
 ```yaml
 description: >
-  Отчёты о падениях: одна строка = один отчёт с устройства. Независимый от продуктовых
-  событий источник со своим словарём событий (fatal_crash / non_fatal / anr) и своим
-  payload. Ось времени — event_time (время устройства, в часовом поясе игрока).
-  Соединяется с dim_users по игроку; поскольку dim_users — медленно меняющаяся
-  размерность, это соединение point-in-time: в pipeline указывайте окно в join.between.
-  Здесь НЕТ продуктовых событий и выручки — за ними в источник событий.
-  Стек и хлебные крошки — сложные типы, доступны только через pipeline (unnest / struct_field).
+  Crash reports: one row = one report sent from a device. A source independent of the
+  product events, with its own event vocabulary (fatal_crash / non_fatal / anr) and its
+  own payload. Time axis is event_time — device time in the player's time zone.
+  Joins to dim_users by player; dim_users is slowly-changing, so the join is
+  point-in-time: in a pipeline state the window in join.between.
+  There are NO product events and NO revenue here — those live on the events source.
+  Stack frames and breadcrumbs are complex types, reachable only through a pipeline
+  (unnest / struct_field).
 ```
 
 Чего в описании модели не надо: числа строк, перечни событий (их считает сервер), список
@@ -243,22 +266,22 @@ description: >
 
 | что | зачем | пример |
 |---|---|---|
-| расшифровку сокращённого имени | `anr` = Application Not Responding | «ANR — зависание основного потока» |
-| смысл, а не тип | тип агент видит | «порядковый номер сессии игрока» |
-| **шкалу и единицу** | главный источник ошибок в 10× и 100× | «выручка в **центах**», «playtime в секундах» |
-| **какие часы** | сдвиг на сутки в отчётах | «время устройства в поясе игрока, не UTC сервера» |
-| **чем отличается от соседнего поля** | их два, а правильный один | «в отличие от `bundle_id` — не меняется при ребрендинге» |
-| **как заполняется** | объясняет пропуски и перекосы | «ставится на запросе рекламы, не на показе» |
-| **историю схемы** | иначе тихий недосчёт по старым данным | «есть с версии v1; в старых событиях отсутствует» |
-| **смысл особых значений** | не список, а значение | «пустая строка = игрок отказался, NULL = вопрос не задавался» |
-| для какого вопроса брать | маршрутизирует | «ось жизненного цикла для retention» |
-| синонимы, которыми это называют вслух | поиск индексирует описания | «медиа-источник, он же сеть привлечения, он же канал» |
+| расшифровку сокращённого имени | `anr` = Application Not Responding | "ANR — the main thread stopped responding" |
+| смысл, а не тип | тип агент видит | "per-player session counter" |
+| **шкалу и единицу** | главный источник ошибок в 10× и 100× | "revenue in **cents**", "playtime in seconds" |
+| **какие часы** | сдвиг на сутки в отчётах | "device time in the player's zone, not server UTC" |
+| **чем отличается от соседнего поля** | их два, а правильный один | "unlike `bundle_id`, survives rebranding" |
+| **как заполняется** | объясняет пропуски и перекосы | "set on the ad request, not on the impression" |
+| **историю схемы** | иначе тихий недосчёт по старым данным | "present from v1; absent on older events" |
+| **смысл особых значений** | не список, а значение | "empty string = declined, NULL = never asked" |
+| для какого вопроса брать | маршрутизирует | "the lifetime axis for retention" |
+| синонимы, которыми это называют вслух | поиск индексирует описания | "media source, a.k.a. acquisition network / channel" |
 
 ### Не пиши
 
 - значения и их частоты, кардинальность, доли NULL — **сервер измеряет** (см. §4);
 - на каких событиях встречается — это ключ `meta.mcp.events`;
-- имя колонки другими словами: `device_model — модель устройства` не добавляет ничего;
+- имя колонки другими словами: `device_model — "Device model."` не добавляет ничего;
 - тип данных и «может быть NULL»;
 - как соединять и по какой колонке — это `entities`;
 - какую агрегацию применять — функцию выбирает вызывающий;
@@ -270,39 +293,40 @@ description: >
 ```yaml
 # ПЛОХО: пересказ имени
 - name: revenue_of_event_data
-  description: "Выручка от рекламы."
+  description: "Ad revenue."
 # ХОРОШО: шкала + как заполняется + ловушка
 - name: revenue_of_event_data
   description: >
-    Выручка с одного показа рекламы, в ЦЕНТАХ (делите на 100 для долларов). Оценка сети,
-    приходит вместе с событием показа и позже не пересчитывается, поэтому сумма здесь
-    расходится с отчётом сети за тот же день. На ad_started пустое — заполняется на ad_finished.
+    Revenue from ONE ad impression, in CENTS (divide by 100 for USD). The network's
+    estimate, delivered with the impression event and never restated afterwards, so the
+    sum here differs from the network's own report for the same day. Empty on ad_started —
+    populated on ad_finished.
 ```
 
 ```yaml
 # ПЛОХО: тип и очевидность
 - name: device_time
-  description: "Timestamp события, может быть NULL."
+  description: "Event timestamp, may be NULL."
 # ХОРОШО: какие часы + роль поля
 - name: device_time
   description: >
-    Когда событие произошло на устройстве игрока, нормализовано в его часовой пояс — не
-    время приёма на сервере. Основная ось времени источника: сутки здесь = сутки игрока,
-    поэтому дневные графики не совпадут с серверными на границе часовых поясов.
+    When the event happened on the player's device, normalized to the player's time
+    zone — not the server's receive time. The source's primary time axis: a day here is
+    the player's day, so daily charts will not match server-side ones across zone borders.
 ```
 
 ```yaml
 # ПЛОХО: дублирует то, что считает индекс
 - name: media_source
-  description: "Источник привлечения. Значения: organic, meta, google, applovin (около 40 всего),
-    у 12% игроков пустое."
+  description: "Acquisition source. Values: organic, meta, google, applovin (about 40 in
+    total); empty for 12% of players."
 # ХОРОШО: смысл + различение + синонимы
 - name: media_source
   description: >
-    Канал, который привёл игрока (он же медиа-источник, он же сеть привлечения) — по данным
-    атрибуции на момент установки, потом не меняется. Органика приходит отдельным значением,
-    а не пустотой: пустое означает, что атрибуция не доехала, и такие игроки не считаются
-    органикой. Основной срез для сравнения качества трафика.
+    The channel that brought the player (a.k.a. media source, acquisition network) — from
+    attribution at install time, never updated afterwards. Organic arrives as its own value,
+    not as an empty one: empty means attribution did not arrive, and such players are NOT
+    organic. The primary cut for comparing traffic quality.
 ```
 
 ### Длина
@@ -322,17 +346,17 @@ BIRD-Bench), — но это про **смысл и ловушки**, а не п
 В тексте — что это за величина и её единица.
 
 **Величины.** `unit` и `label` — ключи, не проза. В `description` — что именно входит в сумму
-и что не входит: «расход на привлечение без НДС и без агентской комиссии».
+и что не входит: "acquisition spend excluding VAT and agency fees".
 
 **Ключи связей.** Обычно описания не требуют вообще: тип, части ключа и цель отдаёт
-`semantic_index`. Пишите, только если ключ неочевиден: «сквозной id рекламной воронки —
-события одной воронки делят его; на неигровых событиях пустой».
+`semantic_index`. Пишите, только если ключ неочевиден: "ad-funnel id shared by every event of one
+funnel; empty on events outside an ad funnel".
 
 **Колонки окна валидности.** Скажите, что это границы версии строки, а не бизнес-даты:
-«начало периода, в котором эта версия атрибутов игрока была актуальной».
+"start of the period during which this version of the player's attributes was current".
 
-**Сложные типы (массивы, JSON).** Скажите форму и что с ней делать: «JSON-массив кадров
-стека, каждый — `{ file, line, in_app }`; в pipeline через `unnest`/`struct_field`».
+**Сложные типы (массивы, JSON).** Скажите форму и что с ней делать: "JSON array of stack
+frames, each `{ file, line, in_app }`; reach it in a pipeline via `unnest` / `struct_field`".
 Это единственный случай, когда структура значения уместна в тексте: индекс профилирует
 скаляры, а не вложенные поля.
 
@@ -356,6 +380,7 @@ BIRD-Bench), — но это про **смысл и ловушки**, а не п
 
 Описания:
 
+- [ ] все описания — на английском, один язык на весь каталог;
 - [ ] у модели описаны грань строки, назначение, способ соединения, границы применимости;
 - [ ] правила поведения (окно данных, требование ограничивать время) — в описании модели;
 - [ ] у каждого поля со шкалой указана единица; у каждого времени — какие часы;

@@ -255,9 +255,18 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_event_coverage (source TEXT, property TEXT, bundle TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle, event_name))');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
+    // Per-property run rows are keyed by (run, SOURCE, property) like every other index table. A
+    // v1 database keyed them by (run, property) alone — and ADD COLUMN cannot widen a PRIMARY KEY,
+    // so the upsert's ON CONFLICT(run_id, source, property) would be rejected by SQLite on every
+    // write and abort the sync. Rename the old table aside (history is per-run diagnostics, not
+    // data worth carrying) and let the CREATE below make the correctly keyed one.
+    {
+      const cols = db.prepare('PRAGMA table_info(index_run_props)').all();
+      if (cols.length && !cols.some((c) => c.name === 'source')) {
+        try { db.exec('DROP TABLE IF EXISTS index_run_props_v1'); db.exec('ALTER TABLE index_run_props RENAME TO index_run_props_v1'); } catch { /* leave as-is */ }
+      }
+    }
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, source TEXT, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, source, property))');
-    // per-property run rows predate the source column; an older DB just starts a fresh history.
-    try { db.exec('ALTER TABLE index_run_props ADD COLUMN source TEXT'); } catch { /* already present */ }
     // Run-level events surfaced in semantic_index({ status })/({ run }), e.g. "a batch fell
     // back to per-property because the combined scan failed: <reason>".
     db.exec('CREATE TABLE IF NOT EXISTS index_run_notes (run_id INTEGER, note TEXT, at INTEGER)');

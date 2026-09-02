@@ -402,17 +402,73 @@ test('complex-coverage merges a delta into stored coverage (incremental, not ful
   };
   const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, merge: true, logger: () => {} });
 
-  // 2nd arg is the FACT to scan (the app column is derived from it); default = primary fact.
-  await bi._indexComplexCoverage(1); // first pass: no watermark → FULL scan
+  // 2nd arg is the FACT to scan — always named: every scan is bound to ONE source's columns.
+  await bi._indexComplexCoverage(1, 'events'); // first pass: no watermark → FULL scan
   assert.equal(index.coverage('events', prop).find((e) => e.event_name === 'level_completed').non_null, 5, 'full scan stored 5');
   assert.equal(index.stats('events', prop).dataWatermark, 1000, 'watermark advanced to the full scan max');
   assert.ok(index.sampleValues('events', prop).length > 0, 'examples stored');
 
-  await bi._indexComplexCoverage(2); // second pass: watermark set → DELTA, counts ADD
+  await bi._indexComplexCoverage(2, 'events'); // second pass: watermark set → DELTA, counts ADD
   assert.equal(index.coverage('events', prop).find((e) => e.event_name === 'level_completed').non_null, 8, 'delta ADDED (5 + 3), not replaced');
   assert.equal(index.stats('events', prop).dataWatermark, 2000, 'watermark advanced to the delta max');
   const complexN = catalog.complexEventProps().length;
   assert.ok(covQueries.slice(0, complexN).every((x) => x === 'full'), 'first pass = full scan per complex prop');
   assert.ok(covQueries.slice(complexN).length > 0 && covQueries.slice(complexN).every((x) => x === 'delta'), 'second pass = since-watermark delta per complex prop (no full re-scan)');
+  index.close();
+});
+
+// ── EVERY SOURCE IS ITS OWN SCAN ────────────────────────────────────────────────────────────
+// Two events sources are two tables with two time axes. The fixture has events (device_time) and
+// crashlytics (event_time). The stub below behaves like a warehouse in the one way that matters
+// here: a query against the crash table that names the OTHER fact's time column is rejected.
+
+// A stub warehouse: canned shapes as above, but any SQL over the crash table that references the
+// events fact's time column fails the way Postgres would. The combined batch over the crash table
+// is made to fail so the per-property fallback (the path that used to borrow the anchor's column)
+// is what runs; rows carry a `wm` so a watermark gets stored and the SECOND sync goes delta.
+function twoFactStub() {
+  return { show: async (_dir, sql) => {
+    const crash = /fct_crashlytics_events/.test(sql);
+    if (crash && /device_time/.test(sql)) return { ok: false, stdout: '', stderr: 'column "device_time" does not exist' };
+    if (crash && / AS d0/.test(sql)) return { ok: false, stdout: '', stderr: 'combined scan refused' }; // force per-property
+    if (/ORDER BY n DESC/.test(sql)) return { ok: true, rows: [{ v: 'x', n: 3 }] };
+    if (/AS rows_total/.test(sql) && !/GROUP BY/.test(sql)) return { ok: true, rows: [aliasRow({ d: 1, t: 3, rows_total: 5, wm: 1000 }, 3)] };
+    if (/GROUP BY/.test(sql) && /AS ev/.test(sql)) return { ok: true, rows: [aliasRow({ ev: 'fatal_crash', app: null, row_count: 5, non_null: 3, wm: 1000 }, 3)] };
+    if (/AS v\b/.test(sql)) return { ok: true, rows: [] };
+    return { ok: true, rows: [{ wm: 1000 }] };
+  } };
+}
+
+test('a delta on the second source is bounded on ITS time column, not the first source\'s', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const crashProp = catalog.scalarEventProps('crashlytics')[0];
+  const index = new ValueIndex();
+  const bi = new BackgroundIndexer({ catalog, runner: twoFactStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, merge: true, maxValues: 5, logger: () => {} });
+
+  await bi.refresh(); // first sync: crash props fall back per-property, full scan, watermark stored
+  assert.equal(index.stats('crashlytics', crashProp)?.dataWatermark, 1000, 'the crash source recorded its own watermark');
+
+  await bi.refresh(); // second sync: the fallback goes DELTA — `event_time > …` on the crash table
+  const run = index.syncStatus().last_run;
+  const crashRows = index.runProperties(run.id).filter((r) => r.source === 'crashlytics');
+  assert.ok(crashRows.length > 0, 'crash properties were scanned');
+  assert.deepEqual([...new Set(crashRows.map((r) => r.status))], ['ok'], `every crash property indexed without error: ${JSON.stringify(crashRows.filter((r) => r.status !== 'ok').slice(0, 3))}`);
+  // and it WAS a delta: the stub answers the bounded query with 3 more rows, merged onto the 3 stored
+  assert.equal(index.stats('crashlytics', crashProp).totalCount, 6, 'delta counts ADDED to the stored ones');
+  index.close();
+});
+
+test('per-run diagnostics failing for one source never abort the scan of any source', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  // The run log refuses crash rows (the shape of the old-database bug): indexing must not notice.
+  const real = index.recordPropertyTiming.bind(index);
+  index.recordPropertyTiming = (runId, f) => { if (f.source === 'crashlytics') throw new Error('diagnostics store broken'); return real(runId, f); };
+  const bi = new BackgroundIndexer({ catalog, runner: shapeStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} });
+  await bi.refresh();
+  const run = index.syncStatus().last_run;
+  assert.equal(run.status, 'ok', `a diagnostics failure is not an indexing failure: ${JSON.stringify(run)}`);
+  assert.equal(index.stats('events', catalog.scalarEventProps('events')[0]).totalCount, 3, 'the events source is indexed');
+  assert.equal(index.stats('crashlytics', catalog.scalarEventProps('crashlytics')[0]).totalCount, 3, 'and so is the crash source');
   index.close();
 });

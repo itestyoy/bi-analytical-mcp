@@ -87,7 +87,7 @@ const propEnum = (values, description) => (values.length ? { type: 'string', enu
 /** An event property as seen from the pipeline's SOURCE fact (Catalog.propertyFor owns the
  *  bare-vs-qualified rules); a property of another fact is rejected with the fix. */
 const sourceProp = (catalog, source, name) => (source
-  ? catalog.propertyFor(source, name, { hint: `start the pipeline from '${source === catalog.anchor ? 'that fact' : source}' that owns it` })
+  ? catalog.propertyFor(source, name, { hint: 'start the pipeline from the source that owns it' }) // the message names the owner
   : null);
 
 // SQL for one operand: a column reference, a literal constant, or `now`.

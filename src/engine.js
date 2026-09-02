@@ -599,7 +599,7 @@ export class Engine {
       }
       // Per-app split: which apps populate this property vs leave it empty (non_null=0).
       // Surfaced so the AI sees a property is app-specific before using it cross-app.
-      if (c.bundleColumn()) {
+      if (c.bundleColumn(propFact)) {
         const bcov = this.valueIndex.bundleCoverage(propFact, propName);
         if (bcov.length) {
           const populated = bcov.filter((b) => b.non_null > 0);
@@ -1038,7 +1038,9 @@ export class Engine {
     for (const entity of segs.slice(0, -1)) {
       const model = this.catalog.primaryByEntity[entity];
       if (!model) continue; // already pruned/validated elsewhere
-      if (this.catalog.isFact(model)) continue;
+      // A fact is a hop like any other: a task built from one source does not load another
+      // source's semantic model, so a path onto that fact's attributes must be refused here
+      // with the fix, not left for MetricFlow to reject as an unknown entity.
       if (!ctx.state.usedModels.includes(model)) {
         throw new ToolError(
           `path '${path}' needs model '${model}', which is not loaded in this context. ` +
@@ -1511,7 +1513,8 @@ export class Engine {
     // each one from the value index (data, not the declared meta.mcp.events). Unknown coverage
     // (cold index) can't be assessed, so such a property is not flagged.
     const c = this.catalog;
-    const fact = c.isFact(draft?.source) ? draft.source : c.anchor; // the pipeline reads ONE fact
+    if (!c.isFact(draft?.source)) return []; // a measures/dimension pipeline reads no event payload
+    const fact = draft.source; // the pipeline reads ONE fact — its own
     const applies = this.valueIndex.appliesMap(fact, c.eventProps(fact)); // key -> observed [event_name]
     const s = JSON.stringify(stage);
     const referenced = c.eventProps(fact).filter((p) => s.includes(`"${p}"`));
@@ -1534,7 +1537,8 @@ export class Engine {
    */
   _emptyCombinationWarnings(draft, stage) {
     const c = this.catalog;
-    const fact = c.isFact(draft?.source) ? draft.source : c.anchor;
+    if (!c.isFact(draft?.source)) return []; // no events, no (app × event) cells to be empty
+    const fact = draft.source;
     const bundleCol = c.bundleColumn(fact);
     const evCol = c.eventNameColumn(fact);
     const props = c.scalarEventProps(fact);
@@ -2216,7 +2220,7 @@ export class Engine {
     const usedFacts = (ctx.state.usedModels || []).filter((k) => this.catalog.isFact(k));
     const factsRead = usedFacts.length ? usedFacts : (ctx.state.usedModels || []);
     const freshByFact = {};
-    for (const f of factsRead) freshByFact[f] = await this._dataFreshness(f);
+    await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this._dataFreshness(f); }));
     const knownFresh = Object.values(freshByFact).filter(Boolean);
     const fresh = knownFresh.length ? knownFresh.reduce((a, b) => (a < b ? a : b)) : null;
     // Situational recommendations: surface a risk ONLY when it is actually present.

@@ -297,7 +297,7 @@ export class BackgroundIndexer {
   }
 
   /** Value SQL expression for a property: a flat physical column, else a JSON extract. */
-  _valueExpr(name, spec, fact = this.catalog.anchor) {
+  _valueExpr(name, spec, fact) {
     if (spec.column) return spec.column;
     return jsonExtract(this.catalog.dialect, this.catalog.eventDataColumn(fact), name, spec.type);
   }
@@ -309,7 +309,7 @@ export class BackgroundIndexer {
    * key uses the dialect's JSON-array length). Used for per-event applicability coverage, so
    * COUNT(CASE WHEN <this> THEN 1 END) never runs COUNT() over an ARRAY (which BigQuery rejects).
    */
-  _complexPresence(name, spec, fact = this.catalog.anchor) {
+  _complexPresence(name, spec, fact) {
     const d = this.catalog.dialect;
     if (spec.column) {
       if (spec.encoding === 'native') return `${arrayLength(d, spec.column)} > 0`;
@@ -330,7 +330,7 @@ export class BackgroundIndexer {
    * are scanned and the counts are ADDED to what is stored (examples kept unless the delta yields
    * fresh ones); otherwise a full (windowed) scan replaces. Per-property (there are only a handful).
    */
-  async _indexComplexCoverage(runId, fact = this.catalog.anchor) {
+  async _indexComplexCoverage(runId, fact) {
     const c = this.catalog;
     const names = c.complexEventProps(fact);
     if (!names.length) return { props: 0, values: 0 };
@@ -458,7 +458,7 @@ export class BackgroundIndexer {
 
   /** Per-property recency window predicate (fact scans only), bounded on THAT fact's own
    *  time column, or '' when there is no window / no time axis. */
-  _winClauses(eventCol, timeCol = this.catalog.getModel(this.catalog.anchor).time?.column) {
+  _winClauses(eventCol, timeCol) {
     const win = (eventCol && this.windowDays && timeCol) ? recentSince(this.catalog.dialect, timeCol, this.windowDays) : null;
     return { andWin: win ? ` AND ${win}` : '', whereWin: win ? ` WHERE ${win}` : '' };
   }
@@ -601,7 +601,11 @@ export class BackgroundIndexer {
   // ── incremental merge (opt-in) ───────────────────────────────────────────────
   /** Delta predicate keeping only rows newer than an epoch-ms watermark, or null if the dialect
    *  has no safe expression (→ caller does a full re-scan instead of an unbounded merge). */
-  _sinceClause(watermarkMs, timeCol = this.catalog.getModel(this.catalog.anchor).time?.column) {
+  _sinceClause(watermarkMs, timeCol) {
+    // The delta predicate is bounded on the TARGET's own time column, passed in by every caller.
+    // There is deliberately no default: falling back to another source's time axis would build
+    // `WHERE <other fact's column> > …` against this table and fail on every sync.
+    if (!timeCol) throw new Error('value index: a delta scan needs the source\'s own time column');
     return sinceTimestampMs(this.catalog.dialect, timeCol, watermarkMs);
   }
 
@@ -740,12 +744,20 @@ export class BackgroundIndexer {
     }
     const nEvent = targets.filter((t) => t.eventCol).length;
     this.logger?.(`sync #${runId} started: indexing ${nEvent} scalar event properties from ${c.facts.map((f) => c.getModel(f).dbt_model).join(' + ')} + ${targets.length - nEvent} dimension attributes`);
-    // Group by source so a combined scan covers many properties of the same table at once.
+    // ONE INDEPENDENT SCAN PER SOURCE. Every events source (and every dimension model) is its own
+    // table with its own time axis, event column, app column and watermarks, so the pass is
+    // grouped by source and each group is scanned on its own: its batches never mix with another
+    // source's, its delta predicates are bound to its own time column, and an error that escapes
+    // one source's pass is recorded against that source and the next source still runs.
     const groups = new Map();
-    for (const t of targets) { if (!groups.has(t.ref)) groups.set(t.ref, []); groups.get(t.ref).push(t); }
+    for (const t of targets) { if (!groups.has(t.source)) groups.set(t.source, []); groups.get(t.source).push(t); }
+    const timing = (fields) => { try { this.index.recordPropertyTiming?.(runId, fields); } catch { /* run diagnostics never abort indexing */ } };
     try {
       let i = 0;
-      for (const [ref, groupTargets] of groups) {
+      for (const [source, groupTargets] of groups) {
+        const ref = groupTargets[0].ref;
+        const srcStart = Date.now(); const srcProps0 = props; const srcErrors0 = errors;
+        try {
         for (let off = 0; off < groupTargets.length; off += this.batchSize) {
           const batch = groupTargets.slice(off, off + this.batchSize);
           const eventCol = batch[0].eventCol;
@@ -798,7 +810,7 @@ export class BackgroundIndexer {
               } else if (merging) {
                 // batch failed → per-property merge fallback (delta if a watermark exists, else full)
                 const prior = this.index.stats?.(t.source, t.property);
-                const since = prior?.dataWatermark != null ? this._sinceClause(prior.dataWatermark) : null;
+                const since = (prior?.dataWatermark != null && t.timeCol) ? this._sinceClause(prior.dataWatermark, t.timeCol) : null;
                 if (since) { const inc = await this._indexIncremental(t, t.bundleCol || null, runId, prior, since); r = inc.r; watermark = inc.watermark; mergedNoNew = inc.r === null; }
                 else { r = await this._scanProperty(t, t.bundleCol || null, runId, ''); watermark = r.maxTime; }
               } else {
@@ -807,26 +819,38 @@ export class BackgroundIndexer {
               const ms = Date.now() - tProp;
               if (mergedNoNew) { // delta had no new rows → keep what is stored, just count the pass
                 props += 1;
-                this.index.recordPropertyTiming?.(runId, { source: t.source, property: t.property, ms, valuesWritten: 0, status: 'ok' });
+                timing({ source: t.source, property: t.property, ms, valuesWritten: 0, status: 'ok' });
                 this.logger?.(`sync #${runId} [${i}/${targets.length}] '${label(t)}': no new rows since watermark — kept stored values (${ms}ms)`);
               } else {
                 const highCardinality = this.highCardRatio > 0 && r.total != null && r.total > 0 && r.distinct != null && (r.distinct / r.total) >= this.highCardRatio;
                 this.index.upsertProperty(t.source, t.property, { distinctCount: r.distinct, totalCount: r.total, nullCount: r.nullCount, values: r.values, coverage: r.coverage, bundleCoverage: r.bundleCoverage, cellCoverage: r.cellCoverage, highCardinality, ...(watermark !== undefined ? { dataWatermark: watermark } : {}) });
                 props += 1; values += r.values.length;
-                this.index.recordPropertyTiming?.(runId, { source: t.source, property: t.property, ms, valuesWritten: r.values.length, distinctCount: r.distinct, totalCount: r.total, status: 'ok' });
+                timing({ source: t.source, property: t.property, ms, valuesWritten: r.values.length, distinctCount: r.distinct, totalCount: r.total, status: 'ok' });
                 this.logger?.(`sync #${runId} [${i}/${targets.length}] '${label(t)}': ${r.values.length} values stored, ${r.distinct ?? '?'} distinct / ${r.total ?? '?'} non-null / ${r.nullCount ?? '?'} null of ${r.rowsTotal ?? '?'} rows, ${r.coverage.length} events${r.bundleCoverage.length ? ` / ${r.bundleCoverage.length} apps` : ''} covered${deltaProps.has(t) ? ' (merged delta)' : ''}${highCardinality ? ' [high-cardinality → skipped next sync]' : ''} (${ms}ms)`);
               }
             } catch (e) {
               errors += 1; lastError = e?.message || String(e);
-              this.index.recordPropertyTiming?.(runId, { source: t.source, property: t.property, ms: Date.now() - tProp, status: 'error', error: lastError });
+              timing({ source: t.source, property: t.property, ms: Date.now() - tProp, status: 'error', error: lastError });
               this.logger?.(`sync #${runId} [${i}/${targets.length}] '${label(t)}': FAILED — ${lastError}`);
             }
           }
         }
+        } catch (e) {
+          // Something escaped the per-batch and per-property guards for THIS source. It is that
+          // source's failure alone: record it and move on to the next source's scan.
+          errors += 1; lastError = e?.message || String(e);
+          const note = `scan of source '${source}' (${ref}) aborted: ${lastError}`;
+          this.logger?.(`sync #${runId} ${note}`);
+          try { this.index.recordRunNote?.(runId, note); } catch { /* diagnostics never abort indexing */ }
+        }
+        this.logger?.(`sync #${runId} source '${source}': ${props - srcProps0} field(s) indexed, ${errors - srcErrors0} error(s), ${Date.now() - srcStart}ms`);
       }
       // COMPLEX props: per-event coverage only (so applicability is data-derived for them too).
-      try { for (const fact of c.facts) { const cx = await this._indexComplexCoverage(runId, fact); props += cx.props; values += cx.values; } }
-      catch (e) { errors += 1; lastError = e?.message || String(e); this.logger?.(`sync #${runId} complex-coverage pass FAILED — ${lastError}`); }
+      // Per source, in its own guard — one fact's complex pass failing must not skip another's.
+      for (const fact of c.facts) {
+        try { const cx = await this._indexComplexCoverage(runId, fact); props += cx.props; values += cx.values; }
+        catch (e) { errors += 1; lastError = e?.message || String(e); this.logger?.(`sync #${runId} complex-coverage pass for '${fact}' FAILED — ${lastError}`); }
+      }
     } finally {
       this._running = false;
       const status = errors ? (props ? 'partial' : 'error') : 'ok';

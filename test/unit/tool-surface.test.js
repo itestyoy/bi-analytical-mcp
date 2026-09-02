@@ -184,3 +184,19 @@ test('semantic_index recipe view is absent when no recipes configured', async ()
   assert.equal(overview.recipes, undefined);
   await assert.rejects(() => e.semantic_index({ recipe: 'x' }), /recipes are not configured|invalid input/);
 });
+
+// A governed path is served by the semantic model of the model it ends on. A task built from one
+// events source does not load the other's, so a path onto that fact's own attributes is refused
+// here with the fix — instead of reaching MetricFlow as an unknown entity.
+test('a group-by path onto an unloaded FACT is refused with the use_base_models fix', async () => {
+  const e = engine();
+  const out = await e.create_semantic_model({
+    name: 'evonly',
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+  });
+  await assert.rejects(
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: ['crash__app_version'] }),
+    /needs model 'crashlytics'.*use_base_models/s,
+  );
+});

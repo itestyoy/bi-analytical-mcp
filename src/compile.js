@@ -93,6 +93,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
 
   let agg = decl.agg;
   let valueExpr;
+  let found = null; // the event property, when `field` names one (resolved once)
 
   const field = decl.field;
   if (field === '*' || field === undefined) {
@@ -101,10 +102,10 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     }
     agg = 'sum'; // count(*) rendered as sum(1) so scope folds cleanly
     valueExpr = '1';
-  } else if (catalog.isFact(modelKey) && factProp(catalog, modelKey, field, 'measures.field')) {
+  } else if (catalog.isFact(modelKey) && (found = factProp(catalog, modelKey, field, 'measures.field'))) {
     // an event property; numeric aggregations need a numeric type OR an explicit cast
     // (e.g. complete_time arrives as STRING upstream → add "cast": "numeric").
-    const { name: propName, spec } = factProp(catalog, modelKey, field, 'measures.field');
+    const { name: propName, spec } = found;
     const numericAgg = ['sum', 'average', 'median', 'min', 'max', 'percentile'].includes(decl.agg);
     if (numericAgg && !isNumericType(spec.type) && !decl.cast) {
       fail(`measure '${decl.name}': property '${field}' is type '${spec.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');

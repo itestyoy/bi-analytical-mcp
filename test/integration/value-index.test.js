@@ -69,14 +69,14 @@ test('exact property names: ad_finished + level_completed carry the *_of_event_d
 // distinct = 3, total = 24 (SEED_DATA: 12 ad_started + 12 ad_finished).
 test('ad_type_of_event_data indexes the real value SET with seed frequencies', opts, async (t) => {
   if (skip(t)) return;
-  const vals = index.sampleValues('ad_type_of_event_data');
+  const vals = index.sampleValues('events', 'ad_type_of_event_data');
   assert.deepEqual(new Set(vals.map((v) => v.value)), new Set(['rewarded', 'interstitial', 'banner']));
   assert.equal(valOf(vals, 'rewarded').freq, 10);
   assert.equal(valOf(vals, 'interstitial').freq, 8);
   assert.equal(valOf(vals, 'banner').freq, 6);
   // ordered by freq desc
   assert.deepEqual(vals.map((v) => v.value), ['rewarded', 'interstitial', 'banner']);
-  const st = index.stats('ad_type_of_event_data');
+  const st = index.stats('events', 'ad_type_of_event_data');
   assert.equal(st.distinctCount, 3);
   assert.equal(st.totalCount, 24);
 });
@@ -84,11 +84,11 @@ test('ad_type_of_event_data indexes the real value SET with seed frequencies', o
 // result over the whole fact (only level_completed carries it): win 20 / lose 5, distinct = 2.
 test('result_of_event_data indexes win/lose with the seed counts (20 wins / 5 losses)', opts, async (t) => {
   if (skip(t)) return;
-  const vals = index.sampleValues('result_of_event_data');
+  const vals = index.sampleValues('events', 'result_of_event_data');
   assert.deepEqual(new Set(vals.map((v) => v.value)), new Set(['win', 'lose']));
   assert.equal(valOf(vals, 'win').freq, 20);
   assert.equal(valOf(vals, 'lose').freq, 5);
-  const st = index.stats('result_of_event_data');
+  const st = index.stats('events', 'result_of_event_data');
   assert.equal(st.distinctCount, 2);
   assert.equal(st.totalCount, 25); // 25 level_completed rows
 });
@@ -115,7 +115,7 @@ test('semantic_index({ property }) returns sample_values + counts matching the i
 test('semantic_index({ property }).events is derived from per-event coverage (not a declared list)', opts, async (t) => {
   if (skip(t)) return;
   const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
-  const cov = index.coverage('ad_type_of_event_data');
+  const cov = index.coverage('events', 'ad_type_of_event_data');
   const observed = cov.filter((e) => e.non_null > 0).map((e) => e.event_name).sort();
   assert.ok(observed.length > 0, 'the scan observed at least one carrier');
   assert.deepEqual([...out.events].sort(), observed, 'reported events == observed non-null carriers');
@@ -132,11 +132,11 @@ test('complex array property gets DATA-DERIVED per-event coverage (no leak onto 
   if (skip(t)) return;
   const prop = 'words_selected_of_event_data';
   assert.ok(engine.catalog.complexEventProps().includes(prop), 'precondition: it is a complex property');
-  const cov = index.coverage(prop);
+  const cov = index.coverage('events', prop);
   assert.ok(cov.length > 0, 'complex prop has per-event coverage after the refresh');
   const carriers = cov.filter((e) => e.non_null > 0).map((e) => e.event_name).sort();
   assert.deepEqual(carriers, ['level_completed'], `carried only on level_completed (got ${JSON.stringify(carriers)})`);
-  assert.deepEqual([...index.appliesEvents(prop)].sort(), carriers, 'appliesEvents == observed carriers');
+  assert.deepEqual([...index.appliesEvents('events', prop)].sort(), carriers, 'appliesEvents == observed carriers');
   // the leak we fixed: an unrelated event must NOT list this complex prop
   const fl = await engine.semantic_index({ event: 'first_launch' });
   assert.ok(!fl.properties.some((p) => p.name === prop), 'complex prop does NOT leak onto first_launch');
@@ -285,28 +285,29 @@ test('semantic_index({ property }) reports null_count + per-event coverage from 
 
 // ── Non-anchor attribute indexing (users / experiments) — DATA from the seed ──
 
-// users.country is indexed under its namespaced key with the SEED distribution:
-// US=4, GB=3, DE=3, BR=2 (12 users), no NULLs.
-test('users.country is indexed with the real seed distribution (US4/GB3/DE3/BR2)', opts, async (t) => {
+// users.country is indexed under its namespaced key with the SEED distribution. dim_users is
+// SCD-2, so the index counts VERSIONS, not players: 13 rows for 12 players, because u1 has a US
+// version and a GB one. US=4, GB=4, DE=3, BR=2, no NULLs.
+test('users.country is indexed with the real seed distribution (US4/GB4/DE3/BR2 over 13 versions)', opts, async (t) => {
   if (skip(t)) return;
-  const vals = index.sampleValues('users.country');
+  const vals = index.sampleValues('users', 'country');
   assert.deepEqual(new Set(vals.map((v) => v.value)), new Set(['US', 'GB', 'DE', 'BR']));
   assert.equal(valOf(vals, 'US').freq, 4);
-  assert.equal(valOf(vals, 'GB').freq, 3);
+  assert.equal(valOf(vals, 'GB').freq, 4);
   assert.equal(valOf(vals, 'DE').freq, 3);
   assert.equal(valOf(vals, 'BR').freq, 2);
-  const st = index.stats('users.country');
+  const st = index.stats('users', 'country');
   assert.equal(st.distinctCount, 4);
-  assert.equal(st.totalCount, 12);  // one row per user, none NULL
+  assert.equal(st.totalCount, 13);  // one row per player VERSION, none NULL
   assert.equal(st.nullCount, 0);
 });
 
 // Experiments become DISCOVERABLE: experiment names + variant groups are indexed.
 test('experiments.experiment_name / variant_group are indexed (checkout_flow; control 6 / variant_b 6)', opts, async (t) => {
   if (skip(t)) return;
-  const names = index.sampleValues('experiments.experiment_name');
+  const names = index.sampleValues('experiments', 'experiment_name');
   assert.deepEqual(names, [{ value: 'checkout_flow', freq: 12 }]);
-  const variants = index.sampleValues('experiments.variant_group');
+  const variants = index.sampleValues('experiments', 'variant_group');
   assert.deepEqual(new Set(variants.map((v) => v.value)), new Set(['control', 'variant_b']));
   assert.equal(valOf(variants, 'control').freq, 6);
   assert.equal(valOf(variants, 'variant_b').freq, 6);
@@ -331,11 +332,16 @@ test('semantic_index({ property: "users.country" }) returns the attribute value 
   assert.equal(out.column, 'country');
   assert.equal(out.distinct_count, 4);
   assert.equal(valOf(out.sample_values, 'US').freq, 4);
-  assert.equal(out.value_stats.top_value, 'US');
+  // dim_users is SCD-2 and u1 has a US version and a GB one, so US and GB are TIED at 4
+  // versions each. Pin the invariant — the reported top value IS a most-frequent one —
+  // rather than an arbitrary tie-break the warehouse is free to decide either way.
+  assert.equal(valOf(out.sample_values, 'GB').freq, 4);
+  const maxFreq = Math.max(...out.sample_values.map((v) => v.freq));
+  assert.equal(valOf(out.sample_values, out.value_stats.top_value).freq, maxFreq);
   // the guidance names the JOIN path (user attributes are reached via the users join).
   assert.ok(out.recommendations.some((r) => r.includes('user__country') || r.includes("join with:'users'")), JSON.stringify(out.recommendations));
   // unknown attribute → clear error, not a silent empty result.
-  await assert.rejects(() => engine.semantic_index({ property: 'users.nope' }), /unknown attribute/);
+  await assert.rejects(() => engine.semantic_index({ source: 'users', property: 'nope' }), /is not a property or dimension of 'users'/);
 });
 
 // search now finds: attribute VALUES (a country code), dimension attributes by name,
@@ -344,16 +350,16 @@ test('semantic_index({ search }) finds attribute values, dimensions, experiments
   if (skip(t)) return;
   // a known country code resolves to the users.country attribute.
   const de = await engine.semantic_index({ search: 'DE' });
-  const deHit = de.value_matches.find((m) => m.property === 'users.country' && m.value === 'DE');
+  const deHit = de.value_matches.find((m) => m.source === 'users' && m.property === 'country' && m.value === 'DE');
   assert.ok(deHit, `expected users.country DE value match: ${JSON.stringify(de.value_matches)}`);
   assert.equal(deHit.freq, 3);
   assert.equal(deHit.model, 'users');
   // an experiment name is discoverable by substring.
   const exp = await engine.semantic_index({ search: 'checkout' });
-  assert.ok(exp.value_matches.some((m) => m.property === 'experiments.experiment_name' && m.value === 'checkout_flow'), JSON.stringify(exp.value_matches));
+  assert.ok(exp.value_matches.some((m) => m.source === 'experiments' && m.property === 'experiment_name' && m.value === 'checkout_flow'), JSON.stringify(exp.value_matches));
   // a dimension attribute is discoverable by its name.
   const dim = await engine.semantic_index({ search: 'country' });
-  assert.ok(dim.dimension_matches.some((d) => d.property === 'users.country'), JSON.stringify(dim.dimension_matches));
+  assert.ok(dim.dimension_matches.some((d) => d.source === 'users' && d.column === 'country'), JSON.stringify(dim.dimension_matches));
   // a recipe is discoverable by task keyword.
   const ret = await engine.semantic_index({ search: 'retention' });
   assert.ok(ret.recipe_matches.some((r) => r.id === 'nday_retention'), JSON.stringify(ret.recipe_matches));
@@ -376,13 +382,13 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
   const colorfit = await engine.semantic_index({ bundle: 'com.omg.colorfit' });
   assert.equal(colorfit.event_rows, 53);
   assert.ok(colorfit.populated.some((p) => p.property === 'level_id_of_event_data'), 'level_id populated for colorfit');
-  assert.ok(colorfit.empty.includes('ad_type_of_event_data'), 'ad_type EMPTY for colorfit');
+  assert.ok(colorfit.empty.some((x) => x.source === 'events' && x.property === 'ad_type_of_event_data'), 'ad_type EMPTY for colorfit');
   assert.ok(!colorfit.populated.some((p) => p.property === 'ad_type_of_event_data'));
 
   // wordsearch = ad/iap/etc (no level events) → ad_type populated, level_id EMPTY.
   const words = await engine.semantic_index({ bundle: 'com.omg.wordsearch' });
   assert.ok(words.populated.some((p) => p.property === 'ad_type_of_event_data'), 'ad_type populated for wordsearch');
-  assert.ok(words.empty.includes('level_id_of_event_data'), 'level_id EMPTY for wordsearch');
+  assert.ok(words.empty.some((x) => x.source === 'events' && x.property === 'level_id_of_event_data'), 'level_id EMPTY for wordsearch');
 
   // the { property } view carries the same per-app split: by default a summary (empty_apps count),
   // and the full per-app list under include_coverage:true — ad_type is non_null=0 for colorfit.
@@ -402,10 +408,84 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
 test('triple coverage: per (bundle × event) cell fill matches the seeded data', opts, async (t) => {
   if (skip(t)) return;
   // ad_type_of_event_data is NULL on colorfit's level_started rows (it only carries on ad_*).
-  const adCell = index.cellCoverage('ad_type_of_event_data', { bundle: 'com.omg.colorfit', event: 'level_started' });
+  const adCell = index.cellCoverage('events', 'ad_type_of_event_data', { bundle: 'com.omg.colorfit', event: 'level_started' });
   assert.ok(adCell, 'cell exists (colorfit emits level_started)');
   assert.equal(adCell.non_null, 0, 'ad_type is empty for colorfit+level_started');
   // result_of_event_data IS populated on level_completed (which colorfit emits).
-  const resCell = index.cellCoverage('result_of_event_data', { bundle: 'com.omg.colorfit', event: 'level_completed' });
+  const resCell = index.cellCoverage('events', 'result_of_event_data', { bundle: 'com.omg.colorfit', event: 'level_completed' });
   assert.ok(resCell && resCell.non_null > 0, JSON.stringify(resCell));
+});
+
+// ─────────── SECOND EVENTS FACT: the SAME mechanism, namespaced keys ───────────
+// The crash source goes through the same worklist → batch scan → store path as the analytics
+// source, but against ITS table, ITS event_name column and ITS time column. Everything below
+// is read back from the SAME SQLite store both sources write to. SEED_DATA §10.
+
+test('crash-fact property values land in the index with the seed frequencies', opts, async (t) => {
+  if (skip(t)) return;
+  const vals = index.sampleValues('crashlytics', 'issue_title_of_event_data');
+  assert.deepEqual(new Set(vals.map((v) => v.value)),
+    new Set(['NullPointer', 'OutOfMemory', 'NetworkTimeout', 'DecodeError', 'MainThreadBlocked']));
+  assert.equal(valOf(vals, 'NullPointer').freq, 4);
+  assert.equal(valOf(vals, 'OutOfMemory').freq, 2);
+  assert.equal(valOf(vals, 'NetworkTimeout').freq, 3);
+  assert.equal(valOf(vals, 'DecodeError').freq, 1);
+  assert.equal(valOf(vals, 'MainThreadBlocked').freq, 3);
+  const st = index.stats('crashlytics', 'issue_title_of_event_data');
+  assert.equal(st.distinctCount, 5);
+  assert.equal(st.totalCount, 13); // every crash row carries an issue title
+  // the index is keyed by (source, property), so the same property name on another source is
+  // a different key entirely — nothing is written into the other source's space
+  assert.ok(!index.stats('events', 'issue_title_of_event_data'), "the crash fact's property is not written into the events source's space");
+});
+
+test('per-event coverage on the crash fact is keyed by ITS event names', opts, async (t) => {
+  if (skip(t)) return;
+  // anr_duration exists ONLY on anr (3 rows); crash_message ONLY on fatal_crash (6 rows)
+  const anr = index.coverage('crashlytics', 'anr_duration_of_event_data').filter((e) => e.non_null > 0);
+  assert.deepEqual(anr.map((e) => e.event_name), ['anr']);
+  assert.equal(anr[0].non_null, 3);
+  const msg = index.coverage('crashlytics', 'crash_message_of_event_data').filter((e) => e.non_null > 0);
+  assert.deepEqual(msg.map((e) => e.event_name), ['fatal_crash']);
+  assert.equal(msg[0].non_null, 6);
+});
+
+test('semantic_index({ event }) on the crash fact lists only what THAT event carries', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.semantic_index({ source: 'crashlytics', event: 'anr' });
+  assert.equal(out.source, 'crashlytics');
+  const names = out.properties.map((p) => p.name);
+  assert.ok(names.includes('anr_duration_of_event_data'), 'anr carries its duration');
+  assert.ok(!names.includes('crash_message_of_event_data'), 'a fatal-only property is not listed on anr');
+});
+
+test('semantic_index({ property }) resolves a qualified crash property', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.semantic_index({ source: 'crashlytics', property: 'issue_title_of_event_data' });
+  assert.equal(out.source, 'crashlytics');
+  assert.equal(out.indexed, true);
+  assert.equal(out.distinct_count, 5);
+  assert.equal(out.total_count, 13);
+  assert.deepEqual([...out.events].sort(), ['anr', 'fatal_crash', 'non_fatal']);
+  assert.equal(out.value_stats.top_value, 'NullPointer');
+  assert.equal(out.value_stats.top_freq, 4);
+});
+
+test('a DIMENSION of the crash fact is indexed under its own namespaced key', opts, async (t) => {
+  if (skip(t)) return;
+  const vals = index.sampleValues('crashlytics', 'app_version');
+  assert.equal(valOf(vals, '1.0.0').freq, 7);
+  assert.equal(valOf(vals, '1.1.0').freq, 6);
+  assert.equal(index.stats('crashlytics', 'app_version').totalCount, 13);
+});
+
+test('the crash fact ARRAY property gets complex coverage + example values', opts, async (t) => {
+  if (skip(t)) return;
+  const cov = index.coverage('crashlytics', 'breadcrumbs_of_event_data').filter((e) => e.non_null > 0);
+  assert.deepEqual(cov.map((e) => e.event_name).sort(), ['anr', 'fatal_crash', 'non_fatal']);
+  const by = Object.fromEntries(cov.map((e) => [e.event_name, e.non_null]));
+  assert.equal(by.fatal_crash, 6);
+  assert.equal(by.non_fatal, 4);
+  assert.equal(by.anr, 3);
+  assert.ok(index.sampleValues('crashlytics', 'breadcrumbs_of_event_data').length > 0, 'shape examples stored');
 });

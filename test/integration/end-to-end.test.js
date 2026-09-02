@@ -96,7 +96,8 @@ test('1a. semantic_index overview lists models + event names (no column dump)', 
   if (skip(t)) return;
   const overview = await engine.semantic_index();
   assert.ok(overview.models.find((m) => m.key === 'events'), 'events model present');
-  assert.ok(Array.isArray(overview.event_names) && overview.event_names.includes('ad_finished'), 'overview lists event names incl. ad_finished');
+  assert.ok(overview.event_names.events.includes('ad_finished'), 'the events source lists its own event names incl. ad_finished');
+  assert.ok(overview.event_names.crashlytics.includes('fatal_crash'), 'the crash source lists ITS own event names, not merged into one list');
   assert.equal(overview.models.find((m) => m.key === 'events').physical_columns, undefined, 'overview stays compact');
 });
 
@@ -148,13 +149,19 @@ test('2. semantic_index({ status }) reports a clean value-index sync with EXACT 
   assert.equal(vi.running, false);
   assert.equal(vi.last_successful_run.status, 'ok');
   assert.equal(vi.last_successful_run.errors, 0);
-  // EXACT coverage: every scalar event property PLUS every categorical dimension
-  // attribute of the non-anchor models (users/experiments) was indexed — no silent gaps…
-  const dimTargets = engine.catalog.modelKeys()
-    .filter((k) => k !== engine.catalog.anchor)
-    .flatMap((k) => Object.entries(engine.catalog.getModel(k).dimensions || {})
-      .filter(([, s]) => String(s?.type || '').toLowerCase() !== 'time'));
-  assert.equal(vi.indexed_properties, engine.catalog.scalarEventProps().length + dimTargets.length, 'one prop_stats row per indexable property/attribute');
+  // EXACT coverage — one prop_stats row per indexable key, over EVERY events fact:
+  //   · that fact's event properties (scalar top-values AND complex coverage-only), plus
+  //   · its categorical dimensions except the event_name column,
+  // and the categorical dimensions of every non-fact model (users/experiments). No gaps.
+  const c = engine.catalog;
+  // …minus anything the schema opted OUT of value indexing (meta.mcp.index:false — an id
+  // column is groupable but has no enumerable value set worth scanning).
+  const catDims = (k, skip) => Object.entries(c.getModel(k).dimensions || {})
+    .filter(([d, spec]) => d !== skip && spec?.index !== false && String(spec?.type || '').toLowerCase() !== 'time')
+    .map(([d]) => d);
+  const expected = c.facts.reduce((n, f) => n + c.eventProps(f).length + catDims(f, c.eventNameColumn(f)).length, 0)
+    + c.modelKeys().filter((k) => !c.isFact(k)).reduce((n, k) => n + catDims(k).length, 0);
+  assert.equal(vi.indexed_properties, expected, 'one prop_stats row per indexable property/attribute');
   // …and the persisted counts equal what the run itself reported (DB COUNT == run counters).
   assert.equal(vi.indexed_properties, vi.last_successful_run.properties_indexed);
   assert.equal(vi.total_values, vi.last_successful_run.values_written);
@@ -167,18 +174,18 @@ test('2b. the value index holds the exact seeded values (direct read)', opts, as
   if (skip(t)) return;
   const vi = engine.valueIndex;
   // ad_type over the whole fact: rewarded 10 / interstitial 8 / banner 6 (SEED_DATA §5, ad_started+ad_finished).
-  const adStat = vi.stats('ad_type_of_event_data');
+  const adStat = vi.stats('events', 'ad_type_of_event_data');
   assert.equal(adStat.distinctCount, 3);
   assert.equal(adStat.totalCount, 24);
   assert.ok(typeof adStat.indexedAt === 'number');
-  assert.deepEqual(vi.sampleValues('ad_type_of_event_data'), [{ value: 'rewarded', freq: 10 }, { value: 'interstitial', freq: 8 }, { value: 'banner', freq: 6 }]);
+  assert.deepEqual(vi.sampleValues('events', 'ad_type_of_event_data'), [{ value: 'rewarded', freq: 10 }, { value: 'interstitial', freq: 8 }, { value: 'banner', freq: 6 }]);
   // level result: win 20 / lose 5 (SEED_DATA §4), distinct 2 / total 25.
-  const rStat = vi.stats('result_of_event_data');
+  const rStat = vi.stats('events', 'result_of_event_data');
   assert.equal(rStat.distinctCount, 2);
   assert.equal(rStat.totalCount, 25);
-  assert.deepEqual(vi.sampleValues('result_of_event_data'), [{ value: 'win', freq: 20 }, { value: 'lose', freq: 5 }]);
+  assert.deepEqual(vi.sampleValues('events', 'result_of_event_data'), [{ value: 'win', freq: 20 }, { value: 'lose', freq: 5 }]);
   // direct paging/order over the index (order_by value → alphabetical).
-  assert.deepEqual(vi.listValues('ad_type_of_event_data', { by: 'value' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
+  assert.deepEqual(vi.listValues('events', 'ad_type_of_event_data', { by: 'value' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   // substring search may legitimately match more than one value (e.g. 'rewarded_ad'),
   // ordered by freq desc → the exact ad_type 'rewarded' (10) is the top hit.
   const sv = vi.searchValues('rewarded');
@@ -236,7 +243,7 @@ test('3b. get_query_result re-reads the committed pipeline rows (same 12/8/5/3)'
 
 test('3c. commit equals the all-at-once register_native_model path (fidelity 12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.register_native_model({ name: 'e2e_funnel_aao', pipeline: { stages: [matchActivation()] } });
+  const out = await engine.register_native_model({ name: 'e2e_funnel_aao', pipeline: { source: 'events', stages: [matchActivation()] } });
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   assert.equal(reached(out.rows, 'launch'), 12);
   assert.equal(reached(out.rows, 'tut1'), 8);

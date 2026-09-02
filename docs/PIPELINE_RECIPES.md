@@ -17,7 +17,9 @@ contract.
 ```jsonc
 [ {stage:"where",  conditions:[{column:"event_name",op:"eq",value:"iap_purchase_completed"}]},
   {stage:"derive", name:"price", op:"extract", source:"price_in_usd", type:"numeric"},
-  {stage:"join",   with:"users", on:"appsflyer_id", attrs:["country"]},
+  {stage:"join",   with:"users", via:"user", attrs:["country"]},   // `via` = the relationship the schema declares; add
+  //                                                                 between:{value:"device_time",from:…,to:…} if the
+  //                                                                 install record is slowly-changing (validity window)
   {stage:"aggregate", group_by:["country"], measures:[{name:"revenue",fn:"sum",column:"price"}]} ]
 ```
 `FROM events |> WHERE event_name='iap_purchase_completed' |> EXTEND … AS price |> JOIN dim_users USING(appsflyer_id) |> AGGREGATE SUM(price) AS revenue GROUP BY country`
@@ -41,7 +43,7 @@ contract.
 
 ### Days-since-install (retention-day building block)
 ```jsonc
-[ {stage:"join", with:"users", on:"appsflyer_id", attrs:["install_date"]},
+[ {stage:"join", with:"users", via:"user", attrs:["install_date"]},
   {stage:"compute", name:"dsi", op:"date_diff", from:{column:"install_date"}, to:{column:"device_time"}, unit:"day"} ]
 ```
 Then `where dsi=1` + `aggregate count_distinct(appsflyer_id)` ⇒ **D1 active users**;

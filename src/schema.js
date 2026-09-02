@@ -31,12 +31,12 @@ function strEnum(values, description) {
   return values.length ? { type: 'string', enum: values, description } : { type: 'string', description };
 }
 
-function whereItemSchema(catalog) {
+function whereItemSchema(catalog, modelKey) {
   return {
     type: 'object', additionalProperties: false, required: ['property', 'op'],
     description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
     properties: {
-      property: strEnum(catalog.scalarEventProps(), 'Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ event })); scope the measure to those event_name(s) or it reads NULL.'),
+      property: strEnum(catalog.scalarEventProps(modelKey), 'Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ event })); scope the measure to those event_name(s) or it reads NULL.'),
       op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator. Use in/not_in with an array value; the rest take a scalar.' },
       value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in.' },
     },
@@ -47,13 +47,15 @@ function measureFieldSchema(catalog, modelKey) {
   const opts = [{ const: '*', title: 'rows' }];
   const keys = catalog.entityKeyColumns(modelKey);
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
-  if (modelKey === catalog.anchor) {
-    const props = catalog.scalarEventProps();
+  if (catalog.isFact(modelKey)) {
+    const props = catalog.scalarEventProps(modelKey);
     if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
-  } else {
-    // numeric model columns are rare in dims; allow none by default
   }
-  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), or an event_data property. A STRING property that holds numbers needs "cast":"numeric" to sum/average it.', oneOf: opts };
+  // Amounts the schema marks aggregatable on this model. They carry NO aggregation of their
+  // own — pick the function that answers the question in `agg`.
+  const amounts = catalog.aggregatableFields(modelKey).map((a) => a.name);
+  if (amounts.length) opts.push({ type: 'string', enum: amounts, title: 'amount' });
+  return { description: 'What to aggregate: "*" (count rows), an entity-key column (for count_distinct of users/sessions), an event_data property, or an AMOUNT the schema marks aggregatable on this source. An amount fixes no function — choose the one the question needs in `agg` (sum / average / max / median / percentile / …). A STRING field that holds numbers needs "cast":"numeric" to sum/average it.', oneOf: opts };
 }
 
 function dimensionItemSchema(catalog, modelKey) {
@@ -75,7 +77,7 @@ function dimensionItemSchema(catalog, modelKey) {
       },
     });
   }
-  if (modelKey === catalog.anchor) {
+  if (catalog.isFact(modelKey)) {
     branches.push({
       title: 'event_property',
       type: 'object',
@@ -84,7 +86,7 @@ function dimensionItemSchema(catalog, modelKey) {
       description: 'A dimension taken from an event_data property (e.g. level_id, product_id) so you can group/filter by it.',
       properties: {
         source: { const: 'event_property', description: 'Take the dimension from an event_data property.' },
-        property: strEnum(catalog.scalarEventProps(), 'Scalar event_data property to expose as a dimension. NB: only populated on specific events (see semantic_index({ event })); NULL on others.'),
+        property: strEnum(catalog.scalarEventProps(modelKey), 'Scalar event_data property to expose as a dimension. NB: only populated on specific events (see semantic_index({ event })); NULL on others.'),
         as_type: { const: 'categorical', default: 'categorical', description: 'event_data dimensions are always categorical.' },
         label: { type: 'string', description: D.label },
       },
@@ -100,9 +102,17 @@ function genericMeasureField(catalog) {
   const opts = [{ const: '*', title: 'rows' }];
   const keys = [...new Set(catalog.modelKeys().flatMap((k) => catalog.entityKeyColumns(k)))];
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
-  const props = catalog.scalarEventProps();
+  const props = catalog.scalarEventPropEnum();
   if (props.length) opts.push({ type: 'string', enum: props, title: 'event_property' });
-  return { description: 'What to aggregate: "*", an entity-key column, or a numeric event_data property.', oneOf: opts };
+  const amounts = catalog.aggregatableFieldNames();
+  if (amounts.length) opts.push({ type: 'string', enum: amounts, title: 'amount' });
+  return { description: 'What to aggregate: "*", an entity-key column, a numeric event_data property, or an AMOUNT the schema marks aggregatable — all of the target semantic model\'s own source. An amount fixes no function; choose it in `agg`.', oneOf: opts };
+}
+
+function genericWhereItem(catalog) {
+  const item = whereItemSchema(catalog, catalog.facts[0]); // shape only — the enum is replaced below
+  item.properties.property = strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: each property is only populated on specific events; scope the measure to those event_name(s) or it reads NULL.');
+  return item;
 }
 
 function genericMeasureItem(catalog) {
@@ -118,8 +128,8 @@ function genericMeasureItem(catalog) {
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
       cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
       label: { type: 'string', description: D.label },
-      event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: D.event_name },
-      where: { type: 'array', description: D.where_measure, items: whereItemSchema(catalog) },
+      event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNameEnum() }, description: D.event_name },
+      where: { type: 'array', description: D.where_measure, items: genericWhereItem(catalog) },
     },
     allOf: [{ if: { properties: { agg: { const: 'percentile' } } }, then: { required: ['percentile'] } }],
   };
@@ -132,7 +142,7 @@ function genericDimensionItem(catalog) {
     description: 'A dimension to add to the target semantic model (a column or an event_data property).',
     oneOf: [
       { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { const: 'model_column', description: 'Use a physical table column.' }, column: strEnum(cols, 'Physical column name.'), as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
-      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: strEnum(catalog.scalarEventProps(), 'Scalar event_data property. NB: only populated on specific events (see semantic_index({ event })); NULL on others.'), as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
+      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: only populated on specific events (see semantic_index({ source, event })); NULL on others.'), as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
     ],
   };
 }
@@ -150,13 +160,13 @@ function measureItemSchema(catalog, modelKey) {
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
       cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
       label: { type: 'string', description: D.label },
-      ...(modelKey === catalog.anchor
+      ...(catalog.isFact(modelKey)
         ? {
-            event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: D.event_name },
+            event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames(modelKey) }, description: D.event_name },
             where: {
               type: 'array',
               description: D.where_measure,
-              items: whereItemSchema(catalog),
+              items: whereItemSchema(catalog, modelKey),
             },
           }
         : {}),
@@ -173,13 +183,13 @@ function semanticModelBranch(catalog, modelKey) {
     dimensions: { type: 'array', items: dimensionItemSchema(catalog, modelKey), description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
     measures: { type: 'array', items: measureItemSchema(catalog, modelKey), description: 'Measures (aggregations) defined on this model; metrics reference these by name.' },
   };
-  if (modelKey === catalog.anchor) {
+  if (catalog.isFact(modelKey)) {
     props.event_scope = {
       type: 'object',
       additionalProperties: false,
       description: 'Default event filter applied to ALL measures in this semantic model (each measure can still narrow further via its own event_name). Use when the whole task concerns one event type.',
       properties: {
-        event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames() }, description: 'Events that scope every measure here.' },
+        event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames(modelKey) }, description: 'Events that scope every measure here.' },
       },
     };
   }
@@ -238,7 +248,7 @@ function predicateDefs(catalog) {
       _reachable_paths: paths,
       description: 'The field a condition applies to: a dimension path or the metric time axis.',
       oneOf: [
-        { type: 'object', additionalProperties: false, required: ['kind', 'path'], description: 'A dimension, addressed by its (possibly entity-qualified) path.', properties: { kind: { const: 'dimension', description: 'Filter on a dimension.' }, path: { type: 'string', description: 'Dimension path: a task-local dimension name, or an entity-qualified join path like user__country. Validated against the context.' } } },
+        { type: 'object', additionalProperties: false, required: ['kind', 'path'], description: 'A dimension, addressed by its (possibly entity-qualified) path.', properties: { kind: { const: 'dimension', description: 'Filter on a dimension.' }, path: { type: 'string', description: 'Dimension path: a task-local dimension name, or an entity-qualified join path like user__country (the owning model must be in use_base_models). Only a relationship some model OWNS has such a path; one nobody owns is joinable in a pipeline only. Validated against the context.' } } },
         { type: 'object', additionalProperties: false, required: ['kind'], description: 'The metric time axis.', properties: { kind: { const: 'metric_time', description: 'Filter on the metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain to bucket by.' } } },
       ],
     },
@@ -277,7 +287,7 @@ export function buildSchemas(catalog) {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
       description: { type: 'string', description: 'Free-text note describing what this task computes (metadata only).' },
-      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional source models to load so their dimensions become joinable (e.g. "users" to slice by country/platform). The events source is always available.' },
+      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as <relationship>__<attribute> (e.g. "users" to slice by country/platform via user__country). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
       semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
       metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
@@ -300,7 +310,7 @@ export function buildSchemas(catalog) {
         type: 'object', additionalProperties: false, required: ['stages'],
         description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
         properties: {
-          source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table for the pipeline (default: the events fact).' },
+          source: { type: 'string', enum: modelKeys, ...(catalog.defaultSource() ? { default: catalog.defaultSource() } : {}), description: `Source table the pipeline reads. ${catalog.defaultSource() ? 'Defaults to the only events source.' : `REQUIRED: this catalog has several events sources (${catalog.facts.join(', ')}), each with its own events and payload — name the one the question is about.`}` },
           time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
           stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
         },
@@ -337,7 +347,7 @@ export function buildSchemas(catalog) {
       draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for everything except start. For fork it may also be a context whose pipeline was already materialized.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
-      source: { type: 'string', enum: modelKeys, default: catalog.anchor, description: 'Starting table (start only; default the events fact).' },
+      source: { type: 'string', enum: modelKeys, ...(catalog.defaultSource() ? { default: catalog.defaultSource() } : {}), description: `Source table the pipeline reads (start only). ${catalog.defaultSource() ? 'Defaults to the only events source.' : `REQUIRED here: this catalog has several events sources (${catalog.facts.join(', ')}) — name the one the question is about.`}` },
       time_range: trProp,
       stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
       stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
@@ -366,7 +376,7 @@ export function buildSchemas(catalog) {
         items: {
           oneOf: [
             { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { const: 'metric_time', description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
-            { type: 'string', description: 'A dimension path to group by.' },
+            { type: 'string', description: 'A dimension path to group by: a task-local dimension name, or an entity-qualified path like user__country (the owning model must be in use_base_models). A relationship nobody owns has no such path — join it in a pipeline instead.' },
           ],
         },
       },
@@ -469,8 +479,9 @@ export function buildSchemas(catalog) {
       description: 'THE entry point for exploring the data: one progressive index over what every event/property/attribute MEANS, the REAL values it carries, how complete it is (NULL coverage), and how fresh the profiling is. Call with NO arguments for a compact overview (models, event names, event_semantics, group-by paths, value-index freshness). Then pass EXACTLY ONE view key: model → that model\'s entities/time/dimension attributes (with real sample values) + physical columns; event → only the properties populated on that event; property → ONE COLUMN\'S FULL PASSPORT (spec + unit, real value distribution paged by limit/offset/order_by/direction, NULL coverage per event with expected-vs-gap annotation, indexing history) — accepts bare event properties AND "<model>.<column>" attributes; search → events, properties, attributes, indexed VALUES and recipes by substring; bundle → for ONE app (bundle id), which event properties are populated vs EMPTY (the overview lists apps under `bundles`); status:true → operational state (value-index sync runs + background query jobs); run → one sync run\'s per-property breakdown. Views are mutually exclusive; paging params apply only to property/search.',
       properties: {
         model: { enum: catalog.modelKeys(), description: 'VIEW: one model — its entities, time axis, dimension attributes (with indexed sample values) and REAL physical columns.' },
-        event: strEnum(catalog.eventNames(), 'VIEW: one event — the event_data properties POPULATED on it (what you can measure/group/filter), each with real sample values + units.'),
-        property: { type: 'string', description: 'VIEW: one column\'s full passport. An event property (bare name, e.g. "ad_type_of_event_data") OR a dimension attribute as "<model>.<column>" (e.g. "users.country", "experiments.experiment_name"): type/unit, where it applies, real value distribution (paged), NULL coverage per event, indexing history.' },
+        source: { enum: catalog.modelKeys(), description: 'Which SOURCE the `event` / `property` below belongs to. Every source owns its own events, payload properties and indexed values, so two sources may carry the same name — pass this to say which one. Optional when a name is unique across sources (then it is resolved for you; an ambiguous one is reported).' },
+        event: strEnum(catalog.eventNameEnum(), 'VIEW: one event of `source` — the event_data properties POPULATED on it (what you can measure/group/filter), each with real sample values + units.'),
+        property: { type: 'string', description: 'VIEW: one column\'s full passport, within `source`: an event property (e.g. "ad_type_of_event_data") or a dimension attribute (e.g. "country" on the users model): type/unit, where it applies, real value distribution (paged), NULL coverage per event, indexing history.' },
         search: { type: 'string', description: 'VIEW: find across event names, event properties, dimension attributes (users/experiments columns), indexed VALUES, and recipes. FUZZY by default — typo- and paraphrase-tolerant (e.g. "retenton"→retention, "germny"→Germany); exact substring hits rank first, each match carries a score + match:"exact"|"fuzzy". Set fuzzy:false for substring-only.' },
         fuzzy: { type: 'boolean', description: 'For { search }: enable typo/approximate matching (default true). false = exact substring only.' },
         status: { type: 'boolean', description: 'VIEW: operational state — value-index sync runs (freshness, errors, slowest properties) + background query jobs.' },

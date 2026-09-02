@@ -10,6 +10,96 @@ import { isNumericType, SUPPORTED_DIALECTS } from './dialect.js';
 
 export { SUPPORTED_DIALECTS };
 
+// Aggregations a catalog measure may declare — dbt/MetricFlow's set. Any column or model
+// measure may use ANY of these; nothing here is specific to a role or a column name.
+export const MEASURE_AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'sum_boolean', 'median', 'percentile']);
+
+/**
+ * Normalise one GOVERNED measure — the opt-in case where a declaration also fixes its
+ * aggregation for everyone (model-level meta.mcp.measures entry, or a column-level
+ * meta.mcp.measure) into the dbt shape. `expr` defaults to the column it is declared on.
+ * Validates the aggregation so a typo fails at load with the allowed set, not at dbt parse.
+ */
+function normalizeMeasure(name, decl, { model, column } = {}) {
+  const where = column ? `column '${column}' of model '${model}'` : `measure '${name}' of model '${model}'`;
+  const agg = decl.agg;
+  if (!MEASURE_AGGS.has(agg)) throw new Error(`${where}: unknown aggregation '${agg}' — use one of: ${[...MEASURE_AGGS].join(', ')}`);
+  const expr = decl.expr ?? column;
+  if (!expr) throw new Error(`${where}: a model-level measure needs an 'expr' (a SQL expression over the model's columns)`);
+  const out = { agg, expr };
+  if (agg === 'percentile') {
+    const q = decl.percentile;
+    if (!(typeof q === 'number' && q > 0 && q < 1)) throw new Error(`${where}: agg 'percentile' needs a 'percentile' between 0 and 1`);
+    out.agg_params = { percentile: q, use_discrete_percentile: !!decl.use_discrete_percentile };
+  }
+  if (decl.label) out.label = decl.label;
+  if (decl.description) out.description = decl.description;
+  if (decl.unit) out.unit = decl.unit;
+  return out;
+}
+
+/**
+ * Normalise an AGGREGATABLE field: a column (or an expression over columns) the schema marks as
+ * an AMOUNT rather than an attribute. It carries NO aggregation — which function to apply is the
+ * caller's decision at build time, per question (a sum today, an average or a p90 tomorrow).
+ * The schema only says WHAT may be aggregated, and what it means.
+ */
+function normalizeAggregatable(name, decl, { model, column, type } = {}) {
+  const where = column ? `column '${column}' of model '${model}'` : `aggregatable '${name}' of model '${model}'`;
+  const expr = decl.expr ?? column;
+  if (!expr) throw new Error(`${where}: needs an 'expr' (a SQL expression over the model's columns) when it is not declared on a column`);
+  return {
+    name, expr, ...(column ? { column } : {}), ...(type ? { type } : {}),
+    ...(decl.unit ? { unit: decl.unit } : {}),
+    ...(decl.label ? { label: decl.label } : {}),
+    ...(decl.description ? { description: decl.description } : {}),
+  };
+}
+
+// Entity roles a join key may take. `primary`/`unique` make the model the join TARGET for
+// that entity; `foreign` points at whichever model owns it; `natural` is the SCD-2 form.
+export const ENTITY_TYPES = new Set(['primary', 'unique', 'foreign', 'natural']);
+
+/** Normalise the PARTS of one key: a column name, or a list of them for a composite key. */
+function normalizeKeyParts(raw, { where, columns }) {
+  const parts = (Array.isArray(raw) ? raw : [raw]).map((p) => (typeof p === 'string' ? { column: p } : { column: p?.column }));
+  if (!parts.length || parts.some((p) => !p.column)) {
+    throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key`);
+  }
+  if (columns?.size) {
+    for (const p of parts) if (!columns.has(p.column)) throw new Error(`${where}: '${p.column}' is not a column of the model`);
+  }
+  return parts;
+}
+
+/**
+ * Normalise ONE declared join key into { type, key: [parts], column?, variants? }. `column` is
+ * kept for the plain single-column case so everything that already reads it keeps working.
+ */
+function normalizeEntityKey(name, decl, { model, columns }) {
+  const where = `entity '${name}' of model '${model}'`;
+  if (!name) throw new Error(`${model}: an entity declaration needs a name`);
+  const type = decl.type || 'foreign';
+  if (!ENTITY_TYPES.has(type)) throw new Error(`${where}: unknown entity type '${type}' — use one of: ${[...ENTITY_TYPES].join(', ')}`);
+  // VARIANTS: the same relationship carried by SEVERAL alternative key columns on this side —
+  // e.g. a crash row that reports one tracking id per ad format. Each becomes its own
+  // '<relationship>_<variant>' key, and the caller picks which one to join on.
+  const variants = {};
+  for (const [vName, vDecl] of Object.entries(decl.variants || {})) {
+    if (!/^[a-z][a-z0-9_]*$/.test(vName)) throw new Error(`${where}: variant name '${vName}' must be lowercase snake_case`);
+    if (vName.includes('__')) throw new Error(`${where}: variant name '${vName}' may not contain '__'`);
+    const vRaw = Array.isArray(vDecl) || typeof vDecl === 'string' ? vDecl : (vDecl || {}).key ?? (vDecl || {}).column;
+    variants[vName] = normalizeKeyParts(vRaw, { where: `${where} variant '${vName}'`, columns });
+  }
+  const raw = decl.key !== undefined ? decl.key : decl.column;
+  if (raw === undefined) {
+    if (!Object.keys(variants).length) throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key`);
+    return { type, variants }; // variants only: this side has no single canonical key
+  }
+  const parts = normalizeKeyParts(raw, { where, columns });
+  return { type, key: parts, ...(parts.length === 1 ? { column: parts[0].column } : {}), ...(Object.keys(variants).length ? { variants } : {}) };
+}
+
 // Native dbt `data_type`s that map to a MetricFlow time dimension.
 const TIME_DATA_TYPES = new Set(['date', 'timestamp', 'timestamptz', 'timestamp_ntz', 'timestamp_tz', 'datetime', 'time']);
 
@@ -243,7 +333,14 @@ export function dbtSchemaToCatalog(doc) {
     if (mcp.role) m.role = mcp.role;
     if (mcp.primary_entity !== undefined) m.primary_entity = mcp.primary_entity;
     if (mcp.known_events) m.known_events = mcp.known_events;
-    if (mcp.measures) m.measures = mcp.measures;
+    // Model-level declarations. An entry WITHOUT `agg` is an aggregatable EXPRESSION — the
+    // caller picks the function; an entry WITH `agg` is additionally a governed measure whose
+    // function is fixed (a standard KPI everyone must compute the same way).
+    for (const [name, raw] of Object.entries(mcp.measures || {})) {
+      const decl = raw || {};
+      (m.aggregatable ||= {})[name] = normalizeAggregatable(name, decl, { model: model.name });
+      if (decl.agg) (m.measures ||= {})[name] = normalizeMeasure(name, decl, { model: model.name });
+    }
     // Business meaning of key events (e.g. acquisition_event: first_launch) — lets an
     // AI pick the right base events for retention/conversion without guessing.
     if (mcp.event_semantics) m.event_semantics = mcp.event_semantics;
@@ -254,19 +351,27 @@ export function dbtSchemaToCatalog(doc) {
     // (no time window) are rejected instead of full-scanning the warehouse.
     if (mcp.require_time_range != null) m.require_time_range = !!mcp.require_time_range;
 
-    // The anchor (events fact) is DETECTED structurally: the model that declares
-    // the event_name / event_data / time columns. `anchor: true` is an optional
-    // override. Exactly one model may be the fact.
-    const isAnchor = mcp.anchor === true
-      || (model.columns || []).some((c) => { const cm = c.meta?.mcp || {}; return cm.is_event_name || cm.is_event_data || cm.is_time; });
-    if (isAnchor) {
-      if (out.anchor_model && out.anchor_model !== key) throw new Error(`multiple anchor (fact) models: '${out.anchor_model}' and '${key}'. Exactly one model may declare event_name/event_data/time columns.`);
-      out.anchor_model = key;
+    // A FACT (events source) is DETECTED structurally: a model declaring an
+    // event_name / event_data column. SEVERAL facts may coexist — e.g. an analytics
+    // events source and a Crashlytics one — and they are INDEPENDENT AND EQUAL: each
+    // owns its event vocabulary (known_events + event-scoped properties) and its own
+    // space in the value index, and the SOURCE is always a separate argument. A model
+    // with neither column is not a fact even if it declares a time axis (a measures
+    // source such as acquisition). `anchor: true` only names the source a tool falls
+    // back to when the catalog has several and the caller named none.
+    const isFact = mcp.anchor === true
+      || (model.columns || []).some((c) => { const cm = c.meta?.mcp || {}; return cm.is_event_name || cm.is_event_data; });
+    if (isFact) {
+      (out.facts ||= []).push(key);
+      if (mcp.anchor === true) {
+        if (out.anchor_model && out.anchor_model !== key) throw new Error(`'${out.anchor_model}' and '${key}' both declare meta.mcp.anchor: true. At most one source may be the fallback; every source is addressed by naming it explicitly.`);
+        out.anchor_model = key;
+      }
     }
 
     const entities = {};
     const dimensions = {};
-    const flatProps = {}; // anchor-only: flattened event_data__* payload columns
+    const flatProps = {}; // fact-only: flattened event_data__* payload columns
     const columnDescriptions = {};
     const allColumns = []; // EVERY physical column (name + pipeline type) — referenceable in native pipelines
     for (const col of model.columns || []) {
@@ -276,22 +381,56 @@ export function dbtSchemaToCatalog(doc) {
       if (!cm.is_event_data) allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
       if (col.description) columnDescriptions[col.name] = col.description; // dbt column doc
       if (cm.entity) {
-        if (cm.entity.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name };
-        else entities[cm.entity.name] = { column: col.name, type: cm.entity.type };
+        // A column-level entity is the single-column case of the same declaration.
+        const ent = normalizeEntityKey(cm.entity.name, { type: cm.entity.type, key: col.name }, { model: model.name });
+        if (ent.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name, key: ent.key };
+        else entities[cm.entity.name] = ent;
         continue; // entity key columns are not dimensions
       }
-      if (cm.is_time) { m.time = { column: col.name, granularity: cm.granularity || 'day' }; continue; }
+      if (cm.is_time) {
+        m.time = { column: col.name, granularity: cm.granularity || 'day' };
+        // On an events source the time axis is the event time, surfaced as the fact's own
+        // time dimension. On any OTHER source (an install record, a daily spend table) the
+        // axis is equally a groupable attribute — "installs by install day" — so it stays in
+        // the dimension list and everything reading dimensions keeps seeing it.
+        if (!isFact) dimensions[col.name] = { type: 'time', granularity: m.time.granularity };
+        continue;
+      }
+      // A column declared a MEASURE becomes a base measure of this model (any aggregation from
+      // MEASURE_AGGS, on any column — nothing is special-cased). An amount is not a groupable
+      // attribute, so it is neither a dimension nor a value-index target unless the author also
+      // marks it meta.mcp.dimension.
+      if (cm.measure && !cm.dimension) {
+        // `measure: true` (or a bare object) MARKS the column as an amount: aggregatable with
+        // ANY function, chosen per question at build time — the schema never fixes one. An
+        // amount is not a groupable attribute, so it is neither a dimension nor a value-index
+        // target. An optional `agg` ADDITIONALLY declares a governed measure with that fixed
+        // function, under `name` — the free choice over the raw column stays either way.
+        if (cm.measure !== true && (typeof cm.measure !== 'object' || Array.isArray(cm.measure))) {
+          throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.measure must be true, or an object with unit/label/description (and optionally agg to also fix a governed measure)`);
+        }
+        const decl = cm.measure === true ? {} : cm.measure;
+        m.aggregatable = m.aggregatable || {};
+        m.aggregatable[col.name] = normalizeAggregatable(col.name, { ...decl, unit: decl.unit ?? cm.unit }, {
+          model: model.name, column: col.name, type: pipelineColumnType(cm, col),
+        });
+        if (decl.agg) {
+          const name = decl.name || col.name;
+          (m.measures ||= {})[name] = normalizeMeasure(name, { ...decl, unit: decl.unit ?? cm.unit }, { model: model.name, column: col.name });
+        }
+        continue;
+      }
       if (cm.is_event_name) { m.event_name = { column: col.name }; continue; }
       if (cm.is_event_data) {
         m.event_data_column = col.name;
         if (cm.properties) m.properties = cm.properties;
         continue;
       }
-      // Flattened event payload: on the anchor, an event_data__* column (or any
+      // Flattened event payload: on a FACT, an event_data__* column (or any
       // column scoped to specific events via meta.mcp.events) is a per-event
       // PROPERTY. Unlike the legacy JSON-blob form, these are REAL physical columns
       // — recorded with `column` so SQL references them directly (no JSON extract).
-      if (isAnchor && !cm.dimension && cm.array) {
+      if (isFact && !cm.dimension && cm.array) {
         // A flattened ARRAY/array<struct> payload column. `meta.mcp.array` declares how
         // to read it: encoding 'native' (a real ARRAY/REPEATED column) or 'json' (a STRING
         // holding a JSON array → parse before unnest). items = scalar element type;
@@ -309,7 +448,7 @@ export function dbtSchemaToCatalog(doc) {
         };
         continue;
       }
-      if (isAnchor && !cm.dimension && cm.events) {
+      if (isFact && !cm.dimension && cm.events) {
         // A flattened event-payload property: a real column populated only on the
         // events in meta.mcp.events. The column is named directly (no `__`, which
         // MetricFlow reserves), so it is used as-is for both the key and the expr.
@@ -325,12 +464,15 @@ export function dbtSchemaToCatalog(doc) {
         };
         continue;
       }
-      // Dimensions: on a non-anchor (dimension) model, every remaining column is
+      // Dimensions: on a non-fact (dimension) model, every remaining column is
       // a groupable dimension. Its TYPE comes from the native dbt `data_type`
       // (date/timestamp -> time, else categorical) — not from meta. Only the bits
       // dbt has no native field for stay in meta: time `granularity` (non-day)
       // and categorical `values` hints. `meta.mcp.dimension` is still honored.
-      if (cm.dimension || !isAnchor) {
+      // meta.mcp.dimension: false takes a column OUT of the group-by surface (it stays a real
+      // column a pipeline can reference) — the opt-out for anything that is not an attribute.
+      if (cm.dimension === false) continue;
+      if (cm.dimension || !isFact) {
         const explicit = cm.dimension || {};
         // A validity-window bound (meta.mcp.dimension.validity: start|end) marks the SCD-2 pair
         // MetricFlow uses for a point-in-time join — force it to a TIME dimension regardless of
@@ -342,21 +484,148 @@ export function dbtSchemaToCatalog(doc) {
         if (validity) { d.validity = validity; m.scd = true; }
         const values = explicit.values || cm.values;
         if (values) d.values = values;
+        // meta.mcp.index: false keeps a column out of the VALUE index (an id or a free-text
+        // column has no enumerable value set worth scanning) while staying groupable.
+        if (cm.index === false || explicit.index === false) d.index = false;
         dimensions[col.name] = d;
         // A dimension explicitly marked the BUNDLE/app identifier on the anchor lets the
         // value index break coverage down per app (which properties are empty for which app).
-        if (isAnchor && explicit.bundle) m.bundle_column = col.name;
+        if (isFact && explicit.bundle) m.bundle_column = col.name;
       }
     }
     if (Object.keys(flatProps).length) m.properties = { ...(m.properties || {}), ...flatProps };
     m.columns = allColumns;
+    // Model-level `meta.mcp.entities`: a join key that spans SEVERAL columns, or one relationship
+    // carried by several ALTERNATIVE columns (`variants`). It lives on the MODEL because it
+    // belongs to no single column. The same entity NAME on two models is the join between them, and the key is
+    // declared once here rather than passed in at every call site.
+    {
+      const known = new Set(allColumns.map((c) => c.name));
+      for (const [name, decl] of Object.entries(mcp.entities || {})) {
+        const ent = normalizeEntityKey(name, decl || {}, { model: model.name, columns: known });
+        if (ent.type === 'primary') {
+          if (ent.variants) throw new Error(`entity '${name}' of model '${model.name}': a primary entity is the model's single identity and cannot have variants; declare the alternatives as type: unique or foreign.`);
+          const prev = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          if (prev && prev !== name) throw new Error(`model '${model.name}' declares two primary entities ('${prev}' and '${name}'). A model has exactly one identity; declare the other key as type: unique (still a join target) or foreign.`);
+          m.primary_entity = { name, ...(ent.column ? { column: ent.column } : {}), key: ent.key };
+        } else {
+          entities[name] = ent;
+        }
+      }
+    }
     if (Object.keys(entities).length) m.entities = entities;
     if (Object.keys(dimensions).length) m.dimensions = dimensions;
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
     out.models[key] = m;
   }
-  out.anchor_model = out.anchor_model || doc.anchor_model;
-  if (!out.anchor_model) throw new Error('no anchor (events fact) model: exactly one model must declare an event_name / event_data / time column');
+  // Primary fact: the explicit `anchor: true`, a legacy top-level anchor_model, else
+  // the first declared fact. Secondary facts keep their own event vocabulary.
+  out.anchor_model = out.anchor_model || doc.anchor_model || (out.facts || [])[0];
+  if (!out.anchor_model) throw new Error('no events fact model: at least one model must declare an event_name / event_data / time column');
+  if (out.facts && !out.facts.includes(out.anchor_model)) out.facts.unshift(out.anchor_model);
+
+  // Every fact needs the two columns the event machinery is built on.
+  for (const key of out.facts || []) {
+    const m = out.models[key];
+    if (!m.event_name) throw new Error(`fact model '${key}' declares no event_name column: add meta.mcp.is_event_name to the column carrying the event type.`);
+    if (!m.time) throw new Error(`fact model '${key}' declares no time column: add meta.mcp.is_time to the column carrying the event time.`);
+  }
+
+  // A PRIMARY entity must be owned by exactly ONE model: it is both the MetricFlow
+  // identity of the semantic model and the join TARGET for that entity, so a second
+  // claimant would silently hijack the join (e.g. a new fact stealing `user` from the
+  // users dimension) and MetricFlow would reject the duplicate identity anyway.
+  const primaryEntityOwner = new Map();
+  for (const [key, m] of Object.entries(out.models)) {
+    const pe = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+    if (!pe) continue;
+    if (primaryEntityOwner.has(pe)) {
+      throw new Error(`models '${primaryEntityOwner.get(pe)}' and '${key}' both declare primary entity '${pe}'. A primary entity has exactly one owner (it is the join target for that entity) — give each model its own meta.mcp.primary_entity, e.g. 'event' for the analytics fact and 'crash' for a crash fact.`);
+    }
+    primaryEntityOwner.set(pe, key);
+  }
+  // EXPAND KEY VARIANTS. A relationship may be carried by several alternative key columns on one
+  // side (a crash row reporting one tracking id per ad format). Each variant becomes its own
+  // '<relationship>_<variant>' key so the caller can pick which one to join on. A side that
+  // declares a PLAIN key for the same relationship mirrors it to every variant — the install
+  // record has one tracking column and it is the counterpart of all of them.
+  {
+    const variantsOf = new Map(); // relationship -> Set(variant name)
+    for (const m of Object.values(out.models)) {
+      for (const [rel, e] of Object.entries(m.entities || {})) {
+        for (const v of Object.keys(e.variants || {})) {
+          if (!variantsOf.has(rel)) variantsOf.set(rel, new Set());
+          variantsOf.get(rel).add(v);
+        }
+      }
+    }
+    for (const m of Object.values(out.models)) {
+      for (const [rel, e] of Object.entries({ ...(m.entities || {}) })) {
+        const vs = variantsOf.get(rel);
+        if (!vs) continue;
+        for (const v of vs) {
+          const name = `${rel}_${v}`;
+          if (m.entities[name]) continue; // an explicit declaration wins over the expansion
+          const parts = e.variants?.[v] || e.key;
+          if (!parts) continue; // this side carries neither that variant nor a plain key
+          m.entities[name] = { type: e.type, key: parts, ...(parts.length === 1 ? { column: parts[0].column } : {}) };
+        }
+        // A side declared ONLY as variants has no canonical key of its own.
+        if (!e.key) delete m.entities[rel];
+        else delete m.entities[rel].variants;
+      }
+    }
+  }
+
+  // A join key is only a join if BOTH sides agree on it: exactly one owner (primary or unique),
+  // and every side of the same entity built from the same NUMBER of key parts — two sides with
+  // different arity would compare a one-part key against a two-part one and silently match
+  // nothing. Checked at load so a mistyped key fails here, not as an empty result set.
+  const ownerOf = new Map();
+  for (const [key, m] of Object.entries(out.models)) {
+    // A primary entity is written EITHER as a bare name (meta.mcp.primary_entity: event, the
+    // events-source form) or as an object with a key — both make the model the owner, so read
+    // it through the same accessor the owner index uses.
+    const pe = primaryEntityName(m);
+    if (pe) ownerOf.set(pe, key);
+  }
+  for (const [key, m] of Object.entries(out.models)) {
+    for (const [name, e] of Object.entries(m.entities || {})) {
+      if (e.type !== 'unique') continue;
+      if (ownerOf.has(name) && ownerOf.get(name) !== key) {
+        throw new Error(`models '${ownerOf.get(name)}' and '${key}' both OWN entity '${name}' (as primary/unique). An entity has exactly one join target — make one of them type: foreign.`);
+      }
+      ownerOf.set(name, key);
+    }
+  }
+  const arityOf = new Map();
+  for (const [key, m] of Object.entries(out.models)) {
+    const all = [];
+    const pe = m.primary_entity;
+    if (pe && typeof pe === 'object' && pe.key) all.push([pe.name, pe.key]);
+    for (const [name, e] of Object.entries(m.entities || {})) if (e.key) all.push([name, e.key]);
+    for (const [name, parts] of all) {
+      const prev = arityOf.get(name);
+      if (prev && prev.n !== parts.length) {
+        throw new Error(`entity '${name}' is declared with ${prev.n} key part(s) on '${prev.model}' but ${parts.length} on '${key}'. Both sides of a join must be built from the same number of parts, in the same order.`);
+      }
+      if (!prev) arityOf.set(name, { n: parts.length, model: key });
+    }
+  }
+
+  // A SLOWLY-CHANGING model (validity window) may expose only ONE join key, and only as its
+  // natural key: MetricFlow rejects a manifest where a model with validity params also carries a
+  // `primary` or `unique` entity ("we do not currently process joins against these key types for
+  // semantic models with validity windows"). Catch it here, where we can say what to do, instead
+  // of letting `dbt parse` fail with that sentence and no context.
+  for (const [key, m] of Object.entries(out.models)) {
+    if (!m.scd) continue;
+    const extra = Object.entries(m.entities || {}).filter(([, e]) => e.type === 'primary' || e.type === 'unique').map(([n]) => n);
+    if (extra.length) {
+      throw new Error(`model '${key}' declares a validity window (meta.mcp.dimension.validity) and also owns join key(s) ${extra.map((n) => `'${n}'`).join(', ')} as primary/unique. A slowly-changing model can only be joined on its natural key, so MetricFlow rejects the others — declare them 'foreign' (they stay usable as a pipeline join) or drop them.`);
+    }
+  }
+
   // Schema validation: names that become MetricFlow identifiers (event-property keys
   // and dimension columns) MUST NOT contain '__' — MetricFlow reserves it as the
   // entity/dimension separator. Fail loudly at load so the dbt schema is corrected at
@@ -383,18 +652,42 @@ export class Catalog {
     this.raw = raw;
     this.dialect = raw.warehouse_dialect;
     this.models = raw.models;
+    // `facts` = every events source; they are equal, and each is addressed by name.
+    // `anchor` is only an internal fallback (the default `fact` argument of the event
+    // accessors below) — with several sources a caller must say which one it means,
+    // which `defaultSource()` enforces.
     this.anchor = raw.anchor_model || 'events';
     if (!this.models?.[this.anchor]) {
       throw new Error(`anchor_model '${this.anchor}' not found in catalog.models`);
     }
+    this.facts = (Array.isArray(raw.facts) && raw.facts.length ? raw.facts : [this.anchor]).filter((k) => this.models[k]);
+    if (!this.facts.includes(this.anchor)) this.facts.unshift(this.anchor);
     // Cost guardrail: reject unbounded (no time window) queries when the anchor model
     // (or a loadCatalog override) demands a bounded window. See engine guards.
-    this.requireTimeRange = !!(raw.require_time_range ?? this.models[this.anchor]?.require_time_range);
-    // Map: entity name -> model key that owns it as primary/unique (join target).
+    // Cost guardrail per SOURCE: a catalog-wide override, else that source's own
+    // meta.mcp.require_time_range. A partitioned source can demand a bounded window even when
+    // another source does not.
+    this._requireTimeRangeAll = raw.require_time_range;
+    this.requireTimeRange = !!(raw.require_time_range ?? this.facts.some((f) => this.models[f]?.require_time_range));
+    this._indexOwners();
+  }
+
+  /**
+   * (Re)build the map: entity name -> model key that OWNS it (the join target). A model's primary
+   * entity is its identity; a `unique` entity is a second key that is also unique per row, so it
+   * is an equally valid target. Rebuilt after grounding, because a key whose column turns out not
+   * to exist is dropped there and must stop being advertised as a target.
+   */
+  _indexOwners() {
     this.primaryByEntity = {};
     for (const [key, m] of Object.entries(this.models)) {
       const name = primaryEntityName(m);
       if (name) this.primaryByEntity[name] = key;
+    }
+    for (const [key, m] of Object.entries(this.models)) {
+      for (const [name, e] of Object.entries(m.entities || {})) {
+        if (e.type === 'unique' && !this.primaryByEntity[name]) this.primaryByEntity[name] = key;
+      }
     }
   }
 
@@ -430,8 +723,31 @@ export class Catalog {
       // indexer never groups by a missing column (per-app coverage is simply unavailable).
       if (m.bundle_column && !has(m.bundle_column)) delete m.bundle_column;
       if (m.column_descriptions) for (const name of Object.keys(m.column_descriptions)) if (!has(name)) delete m.column_descriptions[name];
+      // A DECLARED JOIN KEY whose column is not physically there cannot be executed, so it must
+      // stop being offered: `via` would otherwise build SQL against a missing column and fail in
+      // the warehouse instead of here. The model's PRIMARY entity is left alone — it is the
+      // model's identity, and dropping it would leave a model that cannot render at all.
+      if (m.entities) for (const [name, e] of Object.entries(m.entities)) {
+        const parts = e.key || (e.column ? [{ column: e.column }] : []);
+        if (parts.some((p) => !has(p.column))) { delete m.entities[name]; gone.add(`entity:${name}`); }
+      }
+      // A model is SLOWLY-CHANGING only while it still HAS its window. If the validity columns
+      // did not survive, the table has no windows to join on, so the flag has to go with them:
+      // left set, the model would render a `natural` entity with no validity_params, which
+      // MetricFlow rejects outright — an error about columns that are no longer even visible.
+      // Cleared, it renders as an ordinary primary-key dimension, which is what such a table is.
+      if (m.scd) {
+        const v = Object.values(m.dimensions || {}).filter((d) => d.validity);
+        if (v.filter((d) => d.validity === 'start').length !== 1 || v.filter((d) => d.validity === 'end').length !== 1) {
+          delete m.scd;
+          gone.add('(validity window — no longer treated as slowly-changing)');
+        }
+      }
       if (gone.size) pruned[key] = [...gone];
     }
+    // Grounding may have dropped a key that OWNED a relationship — re-index so nothing points at
+    // a target that no longer declares it.
+    this._indexOwners();
     return { pruned };
   }
 
@@ -449,15 +765,65 @@ export class Catalog {
     return primaryEntityName(this.getModel(key));
   }
 
-  /** Model key whose PRIMARY entity is `entity` (the join target), excluding the anchor. */
-  dimensionModelForEntity(entity) {
-    const key = this.primaryByEntity[entity];
-    return key && key !== this.anchor ? key : undefined;
+  /** True when queries over `source` must carry a time window (partition-pruning guardrail). */
+  requireTimeRangeFor(source) {
+    return !!(this._requireTimeRangeAll ?? this.models[source]?.require_time_range);
   }
 
-  /** Physical column on the anchor for an entity (e.g. the user/session key). */
-  anchorEntityColumn(entity) {
-    return this.models[this.anchor]?.entities?.[entity]?.column;
+  /** The source a tool may assume when the caller omits it: the only one, else null (with
+   *  several events sources there is no default — the caller says which). */
+  defaultSource() {
+    return this.facts.length === 1 ? this.facts[0] : null;
+  }
+
+  /** True when `key` is an events fact (has its own event vocabulary). */
+  isFact(key) {
+    return this.facts.includes(key);
+  }
+
+  /**
+   * The event `name` as seen from `fact`. Every source names its own events, so the name is
+   * always bare here; it THROWS when this source does not declare it — naming which source
+   * does, when one exists — so a cross-source mistake never degrades into a filter that
+   * silently matches nothing. `hint` appends the caller's fix.
+   */
+  eventNameFor(fact, name, { hint } = {}) {
+    if (this.eventNames(fact).includes(name)) return name;
+    const other = this.facts.find((f) => f !== fact && this.eventNames(f).includes(name));
+    if (other) throw new Error(`event '${name}' belongs to the '${other}' source, not '${fact}'${hint ? ` — ${hint}` : ''}`);
+    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ model: '${fact}' })`);
+  }
+
+  /**
+   * One event PROPERTY as seen from `fact`: { name, spec }, or null when this source simply has
+   * no such property. THROWS when another source declares it (reading another source's payload
+   * is never what was meant).
+   */
+  propertyFor(fact, name, { hint } = {}) {
+    const props = this.models[fact]?.properties || {};
+    if (props[name]) return { name, spec: props[name] };
+    const other = this.facts.find((f) => f !== fact && this.eventProps(f).includes(name));
+    if (other) throw new Error(`'${name}' is a property of the '${other}' source, not of '${fact}'${hint ? ` — ${hint}` : ''}`);
+    return null;
+  }
+
+  /**
+   * Enums for a schema whose SOURCE is not fixed when the schema is built — the pipeline
+   * stages, where the source is chosen per draft, and the model-agnostic update payloads.
+   * They are the union of every source's own (bare) names; the caller still resolves the name
+   * against the actual source via eventNameFor / propertyFor, which reports a cross-source
+   * mistake with the fix.
+   */
+  eventNameEnum() {
+    return [...new Set(this.facts.flatMap((f) => this.eventNames(f)))];
+  }
+
+  eventPropEnum() {
+    return [...new Set(this.facts.flatMap((f) => this.eventProps(f)))];
+  }
+
+  scalarEventPropEnum() {
+    return [...new Set(this.facts.flatMap((f) => this.scalarEventProps(f)))];
   }
 
   /** dbt column descriptions for a model: { columnName: description }. */
@@ -466,8 +832,8 @@ export class Catalog {
   }
 
   /** event_data property descriptions (if declared): { property: description }. */
-  eventPropertyDescriptions() {
-    const props = this.models[this.anchor]?.properties || {};
+  eventPropertyDescriptions(fact = this.anchor) {
+    const props = this.models[fact]?.properties || {};
     const out = {};
     for (const [k, v] of Object.entries(props)) if (v && v.description) out[k] = v.description;
     return out;
@@ -479,63 +845,63 @@ export class Catalog {
    * it MUST be scoped (event_name / event_scope) to those events. Only properties that
    * declare an applicability list are included.
    */
-  eventPropertyEvents() {
-    const props = this.models[this.anchor]?.properties || {};
+  eventPropertyEvents(fact = this.anchor) {
+    const props = this.models[fact]?.properties || {};
     const out = {};
     for (const [k, v] of Object.entries(props)) if (v && Array.isArray(v.events) && v.events.length) out[k] = v.events;
     return out;
   }
 
   /** Physical JSON column holding event-specific properties on the events model. */
-  eventDataColumn() {
-    return this.models[this.anchor]?.event_data_column || 'event_properties';
+  eventDataColumn(fact = this.anchor) {
+    return this.models[fact]?.event_data_column || 'event_properties';
   }
 
   /** Physical column on the anchor that carries the event type, or null. */
-  eventNameColumn() {
-    return this.models[this.anchor]?.event_name?.column || null;
+  eventNameColumn(fact = this.anchor) {
+    return this.models[fact]?.event_name?.column || null;
   }
 
   /** Anchor column identifying the app/bundle (meta.mcp.dimension:{bundle:true}), or null.
    *  When set, the value index breaks per-property coverage down by it (per-app emptiness). */
-  bundleColumn() {
-    return this.models[this.anchor]?.bundle_column || null;
+  bundleColumn(fact = this.anchor) {
+    return this.models[fact]?.bundle_column || null;
   }
 
   /** event_name values enum. */
-  eventNames() {
-    return this.models[this.anchor]?.known_events || [];
+  eventNames(fact = this.anchor) {
+    return this.models[fact]?.known_events || [];
   }
 
   /** event_properties keys (all, including complex array/struct ones). */
-  eventProps() {
-    return Object.keys(this.models[this.anchor]?.properties || {});
+  eventProps(fact = this.anchor) {
+    return Object.keys(this.models[fact]?.properties || {});
   }
 
   /** Full spec for one event_data property ({ type, items?, fields?, values?, description? }). */
-  eventPropertySpec(name) {
-    return (this.models[this.anchor]?.properties || {})[name];
+  eventPropertySpec(name, fact = this.anchor) {
+    return (this.models[fact]?.properties || {})[name];
   }
 
   /** True if a property is a complex (array / struct / array-of-struct) type. */
-  isComplexEventProp(name) {
-    const t = String(this.eventPropertySpec(name)?.type || '').toLowerCase();
+  isComplexEventProp(name, fact = this.anchor) {
+    const t = String(this.eventPropertySpec(name, fact)?.type || '').toLowerCase();
     return t === 'array' || t === 'struct' || t === 'array<struct>';
   }
 
   /** SCALAR event_property keys — usable directly as categorical dims / scalar filters. */
-  scalarEventProps() {
-    return this.eventProps().filter((k) => !this.isComplexEventProp(k));
+  scalarEventProps(fact = this.anchor) {
+    return this.eventProps(fact).filter((k) => !this.isComplexEventProp(k, fact));
   }
 
   /** COMPLEX (array/struct) event_property keys — only usable via prepare stages. */
-  complexEventProps() {
-    return this.eventProps().filter((k) => this.isComplexEventProp(k));
+  complexEventProps(fact = this.anchor) {
+    return this.eventProps(fact).filter((k) => this.isComplexEventProp(k, fact));
   }
 
   /** Numeric event_properties keys (valid for sum/avg/median/percentile). */
-  eventNumericProps() {
-    const props = this.models[this.anchor]?.properties || {};
+  eventNumericProps(fact = this.anchor) {
+    const props = this.models[fact]?.properties || {};
     return Object.keys(props).filter((k) => isNumericType(props[k].type));
   }
 
@@ -547,7 +913,7 @@ export class Catalog {
   /** Plain (non-JSON) physical columns of a model usable as categorical dims. */
   modelDimensionColumns(key) {
     const m = this.getModel(key);
-    if (key === this.anchor) {
+    if (this.isFact(key)) {
       // events: event_name + the real session key column, plus any column explicitly
       // marked meta.mcp.dimension (e.g. bundle_id — present on every event, so it
       // can segment by app without a users-join).
@@ -565,11 +931,40 @@ export class Catalog {
     const m = this.getModel(key);
     const cols = [];
     const pe = m.primary_entity;
-    if (typeof pe === 'object' && pe.column) cols.push(pe.column);
+    if (typeof pe === 'object') for (const p of pe.key || (pe.column ? [{ column: pe.column }] : [])) cols.push(p.column);
     for (const e of Object.values(m.entities || {})) {
-      if (e.column) cols.push(e.column);
+      for (const p of e.key || (e.column ? [{ column: e.column }] : [])) cols.push(p.column);
     }
     return [...new Set(cols)];
+  }
+
+  /** Every join key `key` declares, by entity name: { <entity>: { type, key: [parts] } }. */
+  entitiesOf(key) {
+    const m = this.getModel(key);
+    const out = {};
+    const pe = m.primary_entity;
+    if (pe && typeof pe === 'object' && pe.name) out[pe.name] = { type: 'primary', key: pe.key || [{ column: pe.column }] };
+    for (const [name, e] of Object.entries(m.entities || {})) out[name] = { type: e.type, key: e.key || [{ column: e.column }] };
+    return out;
+  }
+
+  /** The parts of `entity`'s key ON `modelKey`, or undefined when it declares no such key. */
+  entityKey(modelKey, entity) {
+    return this.entitiesOf(modelKey)[entity]?.key;
+  }
+
+  /** The model that OWNS `entity` (declares it primary/unique) — the join target. */
+  joinTargetFor(entity) {
+    return this.primaryByEntity[entity];
+  }
+
+  /**
+   * Entity names declared on BOTH models — the join(s) the schema sanctions between them.
+   * Each carries the key parts on either side, so a caller never restates the columns.
+   */
+  sharedEntities(a, b) {
+    const ea = this.entitiesOf(a); const eb = this.entitiesOf(b);
+    return Object.keys(ea).filter((n) => eb[n]).map((n) => ({ entity: n, left: ea[n], right: eb[n] }));
   }
 
   /**
@@ -579,7 +974,6 @@ export class Catalog {
    */
   reachableGroupByPaths(maxHops = 2) {
     const out = new Set(['metric_time']);
-    const anchor = this.models[this.anchor];
 
     // local categorical columns on the anchor are added per-task; here we expose
     // only join-reachable dimensions + metric_time (task dims added at runtime).
@@ -592,14 +986,44 @@ export class Catalog {
         if (!targetKey) continue; // pruned: dangling foreign (m3)
         const target = this.models[targetKey];
         const newPrefix = prefix ? `${prefix}__${entName}` : entName;
-        for (const dim of Object.keys(target.dimensions || {})) {
-          out.add(`${newPrefix}__${dim}`);
-        }
+        for (const dim of Object.keys(target.dimensions || {})) out.add(`${newPrefix}__${dim}`);
         visit(targetKey, newPrefix, hop + 1);
       }
     };
-    visit(this.anchor, '', 1);
+    for (const fact of this.facts) visit(fact, '', 1);
+    // A source's OWN attributes are groupable under its primary entity — that is how a base
+    // measure declared on a non-events source (acquisition spend, say) is sliced by its own
+    // channel/campaign columns, without a join and without declaring a task dimension.
+    for (const key of this.modelKeys()) {
+      const ent = primaryEntityName(this.models[key]);
+      if (!ent) continue;
+      for (const dim of Object.keys(this.models[key].dimensions || {})) out.add(`${ent}__${dim}`);
+    }
     return [...out];
+  }
+
+  /**
+   * Fields of `key` the schema marks as AGGREGATABLE amounts. Each is { name, expr, column?,
+   * type?, unit?, label?, description? } and carries NO aggregation — a task measure names one
+   * as its `field` and chooses the function itself.
+   */
+  aggregatableFields(key) {
+    return Object.values(this.getModel(key).aggregatable || {});
+  }
+
+  /** One aggregatable field of `key` by name, or undefined. */
+  aggregatableField(key, name) {
+    return this.getModel(key).aggregatable?.[name];
+  }
+
+  /** Aggregatable field names across every model (for the model-agnostic update schema). */
+  aggregatableFieldNames() {
+    return [...new Set(this.modelKeys().flatMap((k) => Object.keys(this.models[k].aggregatable || {})))];
+  }
+
+  /** The model that declares a base measure (meta.mcp.measures), or undefined. */
+  modelOwningMeasure(ref) {
+    return this.modelKeys().find((k) => (this.models[k].measures || {})[ref]);
   }
 
   /** Base measure reference names available across the registry. */
@@ -611,9 +1035,17 @@ export class Catalog {
     return refs;
   }
 
-  /** Models that may be referenced in `use_base_models` (everything but anchor). */
+  /** Models that may be JOINED to the source a task is built from — every source is equal here,
+   *  so the list is every model; joining a source to ITSELF is what gets rejected, at build. */
   joinableModelKeys() {
-    return this.modelKeys().filter((k) => k !== this.anchor);
+    return this.modelKeys();
+  }
+
+  /** Entity names that appear on at least TWO models — the joins the schema sanctions. */
+  joinEntityNames() {
+    const seen = new Map();
+    for (const k of this.modelKeys()) for (const name of Object.keys(this.entitiesOf(k))) seen.set(name, (seen.get(name) || 0) + 1);
+    return [...seen.entries()].filter(([, n]) => n > 1).map(([name]) => name).sort();
   }
 
   timeGranularities() {

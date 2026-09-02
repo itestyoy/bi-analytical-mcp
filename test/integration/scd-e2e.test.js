@@ -168,7 +168,7 @@ test('native pipeline key-only join (no between) fans out: total inflates to 130
 test('native pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real column names', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_native_model({ action: 'start', name: 'scd_warn', source: 'events' });
-  const r = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: 'internal_player_id' } });
+  const r = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: 'internal_player_id', attrs: ['country'] } });
   const w = (r.recommendations || []).find((x) => /INCOMPLETE JOIN/.test(x));
   assert.ok(w, `expected an INCOMPLETE JOIN nudge, got ${JSON.stringify(r.recommendations)}`);
   assert.match(w, /internal_player_id/);        // the caller's join key, echoed
@@ -177,6 +177,6 @@ test('native pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with
   assert.match(w, /install_time_valid_until/);
   // and the correct form (WITH between) produces NO such nudge
   const s2 = await engine.build_native_model({ action: 'start', name: 'scd_ok', source: 'events' });
-  const r2 = await engine.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'users', on: 'internal_player_id', between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } } });
+  const r2 = await engine.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'users', on: 'internal_player_id', attrs: ['country'], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } } });
   assert.ok(!(r2.recommendations || []).some((x) => /INCOMPLETE JOIN/.test(x)), 'no nudge once between is present');
 });

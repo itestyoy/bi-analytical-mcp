@@ -11,7 +11,20 @@
 export function buildGuide(catalog, recipes, { task } = {}) {
   const usersModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'users') || 'users';
   const experimentsModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'experiments') || 'experiments';
-  const sem = catalog.getModel(catalog.anchor).event_semantics || {};
+  // A catalog may carry SEVERAL events sources (e.g. analytics events + crash reports). They are
+  // equal and never mixed: each has its own events/properties, and a question is answered from
+  // ONE of them, named explicitly.
+  const facts = catalog.facts;
+  const multi = facts.length > 1;
+  // A catalog may also carry NON-events sources that declare MEASURES (acquisition spend, say):
+  // no event vocabulary, but their own time axis and their own aggregatable amounts.
+  // Relationships the schema declares between two models — what a `via` join and a
+  // <relationship>__<attribute> group-by can name.
+  const joinNames = catalog.joinEntityNames();
+  const measureSources = catalog.modelKeys()
+    .filter((k) => !catalog.isFact(k) && catalog.aggregatableFields(k).length)
+    .map((k) => ({ key: k, measures: catalog.aggregatableFields(k).map((a) => a.name) }));
+  const sem = Object.fromEntries(facts.flatMap((f) => Object.entries(catalog.getModel(f).event_semantics || {}).map(([k, v]) => [multi ? `${f}.${k}` : k, v])));
 
   const workflow = [
     'CLARIFY the ask before querying: time window (resolve "last week" to the last COMPLETE period), segment, and the decision behind it.',
@@ -28,6 +41,20 @@ export function buildGuide(catalog, recipes, { task } = {}) {
     { if: 'an A/B question ("is variant B better")', do: `compute per-variant aggregates first (a pipeline joining '${experimentsModel}'), then experiment({ action: 'analyze' }); run experiment({ action: 'check_split' }) BEFORE trusting any lift.` },
     { if: 'comparing TWO groups for significance that are NOT an experiment (first vs last, before vs after, cohort A vs B, organic vs paid)', do: 'do NOT hand-roll a t-test. Aggregate per group in one pipeline (mean: n+mean+stddev; rate: conversions+n), then ab_test({ metric: "mean" | "proportion" }) — "control"/"variants" are just group A vs B; no experiments table needed. See semantic_index({ recipe: "two_sample_significance" }).' },
     { if: 'segmenting by a user attribute (country / platform / source)', do: `join/group by the '${usersModel}' model (user__<attr>) — it is NOT on the event payload.` },
+    ...(joinNames.length ? [
+      { if: 'combining two sources (events with spend, an events source with another, a source with the install record)', do: `use the RELATIONSHIP the schema declares — ${joinNames.join(', ')} — never hand-picked columns. In a metric query: group by <relationship>__<attribute> and declare the other model in use_base_models. In a pipeline: add_step { stage: 'join', with: '<model>', via: '<relationship>' }. semantic_index({ model }) lists each model's relationships, their key columns and what they point at. A key may span several columns and the two sides may name their columns differently. Join stages STACK, so one pipeline can chain several relationships and reach four sources at once; via always resolves its left-hand key on the pipeline's OWN source.` },
+      { if: 'a join returns far MORE rows than the base table (or a sum is suspiciously large)', do: 'you probably joined a SLOWLY-CHANGING model on its key alone, so every row matched every historical version. Add the point-in-time window to the join stage: between: { value: <this source\'s time column>, from: <validity start column>, to: <validity end column> } — semantic_index({ model }) names them. In a metric query MetricFlow applies the window for you.' },
+      { if: 'you want to know what advertising was running when the app crashed', do: 'the crash source records the last ad-funnel id per ad format; join it to the events source with the matching variant (via: <relationship>_<format>) to get that funnel\'s events. Several events share one funnel id, so this is a pipeline join — there is no governed path for it.' },
+    ] : []),
+    ...(multi ? [
+      { if: 'choosing WHERE to look', do: `there are ${facts.length} independent events sources — ${facts.join(', ')} — each with its OWN events and payload properties, never mixed. Decide which one records the thing being asked about, then name it: semantic_index({ source, event }), build_native_model({ source }), create_semantic_model({ semantic_models: [{ from: <source> }] }). Inside a pipeline or semantic model built from a source, its event/property names are used as-is.` },
+      { if: 'a funnel/sequence that would span TWO sources (something in one, then something in the other)', do: 'not expressible: a row-pattern match scans ONE table. Compute a per-user outcome from each source separately (one pipeline each), then compare the two groups with ab_test, or join the aggregates on the user key.' },
+      { if: 'comparing volumes from different sources', do: 'ONE create_semantic_model with a semantic model per source, then query both metrics grouped by metric_time — MetricFlow aligns them on the shared time axis. Do NOT put measures from two sources in one semantic model.' },
+    ] : []),
+    ...(measureSources.length ? [
+      { if: `the question is about an AMOUNT that is not an event (${measureSources.map((m) => `${m.key}: ${m.measures.join(', ')}`).join(' · ')})`, do: `the source already marks those fields aggregatable — do NOT re-derive them from events. The schema fixes NO aggregation: choose the function the question needs. create_semantic_model({ semantic_models: [{ from: '${measureSources[0].key}', measures: [{ name: <your name>, agg: 'sum' | 'average' | 'max' | 'median' | 'percentile', field: '${measureSources[0].measures[0]}' }] }], metrics: [{ name: ..., type: 'simple', measure: { name: <your name> } }] }); semantic_index({ model: '${measureSources[0].key}' }) lists each amount with its unit and meaning. Such a source has its own time axis (metric_time works) and carries the user entity, so user__<attr> segments it.` },
+      { if: 'joining a per-day table (spend, budgets) to an events source in a pipeline', do: 'join by the PLAYER relationship (via). One player has many events and several dated rows, so the pairing is MANY-TO-MANY by design: it is how you carry an attribute (channel, campaign) onto events, and summing the amount over it inflates the total many times over. For the total, aggregate the per-day source itself; for a per-day comparison, aggregate each source separately and line them up on metric_time.' },
+    ] : []),
     { if: 'a property reads mostly NULL', do: 'you probably did not scope to the event(s) that carry it — most event_data properties are event-specific (see semantic_index({ property }).event_coverage).' },
     ...(catalog.bundleColumn() ? [{ if: 'the question is about ONE app (a bundle id), or a property looks empty for an app', do: 'semantic_index({ bundle: "<bundle id>" }) lists which event properties are POPULATED vs EMPTY for that app — skip the empty ones rather than querying them. The overview lists apps under `bundles`; a property empty for one app may be populated for another (see { property }.bundle_coverage). Group/filter by the app column to segment per app.' }] : []),
     { if: 'unsure which field or value to use', do: 'semantic_index({ search }) maps a word/value to the property + the event(s) carrying it — do not guess. Search also returns saved findings (memory) — a fuzzy term someone used before may already resolve to the real field.' },
@@ -51,6 +78,7 @@ export function buildGuide(catalog, recipes, { task } = {}) {
   }
 
   return {
+    ...(multi ? { events_sources: { sources: facts, note: 'Independent, equal events sources: each owns its events, payload properties and indexed values. Name the source you mean (semantic_index({ source, event }), build_native_model({ source }), semantic_models[].from); within one, names are used as-is. A funnel runs over ONE source; metrics from different sources can still be compared over metric_time.' } } : {}),
     note: 'The analyst procedure + routing for this server. Follow `workflow`; use `routing_triggers` (IF…DO) to pick the right tool; `tasks` lists ready-made recipes per family — fetch one with semantic_index({ recipe: id }). Narrow to one family with semantic_index({ guide: "<task_type>" }).',
     workflow,
     routing_triggers,

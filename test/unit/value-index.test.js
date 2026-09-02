@@ -12,17 +12,17 @@ test('ValueIndex persists to a file on disk across reopen', () => {
   const a = new ValueIndex({ dbPath });
   if (!a.persistent) { a.close(); return; } // node:sqlite not available here → nothing to assert
   const runId = a.startRun();
-  a.upsertProperty('p', { distinctCount: 2, totalCount: 9, nullCount: 3, values: [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }], coverage: [{ event: 'e1', rowCount: 12, nonNull: 9 }] });
+  a.upsertProperty('events', 'p', { distinctCount: 2, totalCount: 9, nullCount: 3, values: [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }], coverage: [{ event: 'e1', rowCount: 12, nonNull: 9 }] });
   a.finishRun(runId, { status: 'ok', propertiesIndexed: 1, valuesWritten: 2, errors: 0 });
   a.close();
 
   // Reopen the SAME file in a fresh instance — the values + run log are still there.
   const b = new ValueIndex({ dbPath });
   assert.ok(b.persistent, 'reopened a real persistent store');
-  assert.deepEqual(b.sampleValues('p'), [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }]);
-  assert.equal(b.stats('p').distinctCount, 2);
-  assert.equal(b.stats('p').nullCount, 3); // null_count persisted
-  assert.deepEqual(b.coverage('p'), [{ event_name: 'e1', row_count: 12, non_null: 9, null_count: 3 }]); // coverage persisted
+  assert.deepEqual(b.sampleValues('events', 'p'), [{ value: 'x', freq: 5 }, { value: 'y', freq: 4 }]);
+  assert.equal(b.stats('events', 'p').distinctCount, 2);
+  assert.equal(b.stats('events', 'p').nullCount, 3); // null_count persisted
+  assert.deepEqual(b.coverage('events', 'p'), [{ event_name: 'e1', row_count: 12, non_null: 9, null_count: 3 }]); // coverage persisted
   const s = b.syncStatus();
   assert.equal(s.indexed_properties, 1);
   assert.equal(s.total_values, 2);
@@ -34,20 +34,20 @@ test('ValueIndex persists to a file on disk across reopen', () => {
 // Map fallback), not any generated SQL. Round-trips upsert → sample/search/stats.
 test('ValueIndex in-memory fallback round-trips upsert → sampleValues/stats/searchValues', () => {
   const idx = new ValueIndex(); // no dbPath -> in-memory Map fallback
-  idx.upsertProperty('ad_type_of_event_data', {
+  idx.upsertProperty('events', 'ad_type_of_event_data', {
     distinctCount: 3,
     totalCount: 24,
     values: [{ value: 'rewarded', freq: 10 }, { value: 'interstitial', freq: 8 }, { value: 'banner', freq: 6 }],
   });
 
   // sampleValues is ordered by freq desc and respects the limit.
-  const top = idx.sampleValues('ad_type_of_event_data');
+  const top = idx.sampleValues('events', 'ad_type_of_event_data');
   assert.deepEqual(top.map((v) => v.value), ['rewarded', 'interstitial', 'banner']);
   assert.deepEqual(top.map((v) => v.freq), [10, 8, 6]);
-  assert.deepEqual(idx.sampleValues('ad_type_of_event_data', 2).map((v) => v.value), ['rewarded', 'interstitial']);
+  assert.deepEqual(idx.sampleValues('events', 'ad_type_of_event_data', 2).map((v) => v.value), ['rewarded', 'interstitial']);
 
   // stats round-trip.
-  const st = idx.stats('ad_type_of_event_data');
+  const st = idx.stats('events', 'ad_type_of_event_data');
   assert.equal(st.distinctCount, 3);
   assert.equal(st.totalCount, 24);
   assert.equal(typeof st.indexedAt, 'number');
@@ -60,12 +60,12 @@ test('ValueIndex in-memory fallback round-trips upsert → sampleValues/stats/se
   assert.equal(m[0].freq, 10);
 
   // Unknown property → empty/null, never throws.
-  assert.deepEqual(idx.sampleValues('nope'), []);
-  assert.equal(idx.stats('nope'), null);
+  assert.deepEqual(idx.sampleValues('events', 'nope'), []);
+  assert.equal(idx.stats('events', 'nope'), null);
 
   // Re-upsert REPLACES prior rows for that property (no stale leftovers).
-  idx.upsertProperty('ad_type_of_event_data', { distinctCount: 1, totalCount: 5, values: [{ value: 'banner', freq: 5 }] });
-  assert.deepEqual(idx.sampleValues('ad_type_of_event_data').map((v) => v.value), ['banner']);
+  idx.upsertProperty('events', 'ad_type_of_event_data', { distinctCount: 1, totalCount: 5, values: [{ value: 'banner', freq: 5 }] });
+  assert.deepEqual(idx.sampleValues('events', 'ad_type_of_event_data').map((v) => v.value), ['banner']);
   assert.equal(idx.searchValues('rewarded').length, 0);
   idx.close();
 });
@@ -74,7 +74,7 @@ test('ValueIndex in-memory fallback round-trips upsert → sampleValues/stats/se
 // survives upsert (and the persistent backend, when available, across reopen).
 test('ValueIndex stores null_count + per-event coverage and round-trips them', () => {
   const idx = new ValueIndex();
-  idx.upsertProperty('ad_type_of_event_data', {
+  idx.upsertProperty('events', 'ad_type_of_event_data', {
     distinctCount: 3, totalCount: 24, nullCount: 160,
     values: [{ value: 'rewarded', freq: 10 }],
     coverage: [
@@ -83,42 +83,42 @@ test('ValueIndex stores null_count + per-event coverage and round-trips them', (
       { event: 'first_launch', rowCount: 160, nonNull: 0 }, // applies to no ad event → all NULL
     ],
   });
-  const st = idx.stats('ad_type_of_event_data');
+  const st = idx.stats('events', 'ad_type_of_event_data');
   assert.equal(st.totalCount, 24);
   assert.equal(st.nullCount, 160);
   // coverage is ordered by row_count desc, with null_count derived per event.
-  const cov = idx.coverage('ad_type_of_event_data');
+  const cov = idx.coverage('events', 'ad_type_of_event_data');
   assert.deepEqual(cov, [
     { event_name: 'first_launch', row_count: 160, non_null: 0, null_count: 160 },
     { event_name: 'ad_finished', row_count: 12, non_null: 12, null_count: 0 },
     { event_name: 'ad_started', row_count: 12, non_null: 12, null_count: 0 },
   ]);
   // re-upsert REPLACES coverage (no stale events linger).
-  idx.upsertProperty('ad_type_of_event_data', { distinctCount: 1, totalCount: 5, nullCount: 0, values: [], coverage: [{ event: 'ad_started', rowCount: 5, nonNull: 5 }] });
-  assert.deepEqual(idx.coverage('ad_type_of_event_data'), [{ event_name: 'ad_started', row_count: 5, non_null: 5, null_count: 0 }]);
-  assert.equal(idx.stats('ad_type_of_event_data').nullCount, 0);
+  idx.upsertProperty('events', 'ad_type_of_event_data', { distinctCount: 1, totalCount: 5, nullCount: 0, values: [], coverage: [{ event: 'ad_started', rowCount: 5, nonNull: 5 }] });
+  assert.deepEqual(idx.coverage('events', 'ad_type_of_event_data'), [{ event_name: 'ad_started', row_count: 5, non_null: 5, null_count: 0 }]);
+  assert.equal(idx.stats('events', 'ad_type_of_event_data').nullCount, 0);
   // unknown property → empty coverage, never throws.
-  assert.deepEqual(idx.coverage('nope'), []);
+  assert.deepEqual(idx.coverage('events', 'nope'), []);
   idx.close();
 });
 
 // listValues: ordering (freq/value, asc/desc) + paging (limit/offset) over the store.
 test('ValueIndex.listValues orders + pages the in-memory store', () => {
   const idx = new ValueIndex();
-  idx.upsertProperty('p', { distinctCount: 3, totalCount: 24, values: [{ value: 'rewarded', freq: 10 }, { value: 'interstitial', freq: 8 }, { value: 'banner', freq: 6 }] });
+  idx.upsertProperty('events', 'p', { distinctCount: 3, totalCount: 24, values: [{ value: 'rewarded', freq: 10 }, { value: 'interstitial', freq: 8 }, { value: 'banner', freq: 6 }] });
 
   // default: freq desc.
-  assert.deepEqual(idx.listValues('p').map((v) => v.value), ['rewarded', 'interstitial', 'banner']);
+  assert.deepEqual(idx.listValues('events', 'p').map((v) => v.value), ['rewarded', 'interstitial', 'banner']);
   // freq asc.
-  assert.deepEqual(idx.listValues('p', { by: 'freq', dir: 'asc' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
+  assert.deepEqual(idx.listValues('events', 'p', { by: 'freq', dir: 'asc' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   // value asc (alphabetical) — default dir for value is asc.
-  assert.deepEqual(idx.listValues('p', { by: 'value' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
+  assert.deepEqual(idx.listValues('events', 'p', { by: 'value' }).map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   // value desc.
-  assert.deepEqual(idx.listValues('p', { by: 'value', dir: 'desc' }).map((v) => v.value), ['rewarded', 'interstitial', 'banner']);
+  assert.deepEqual(idx.listValues('events', 'p', { by: 'value', dir: 'desc' }).map((v) => v.value), ['rewarded', 'interstitial', 'banner']);
   // paging: limit + offset over freq desc.
-  assert.deepEqual(idx.listValues('p', { limit: 1 }).map((v) => v.value), ['rewarded']);
-  assert.deepEqual(idx.listValues('p', { limit: 1, offset: 1 }).map((v) => v.value), ['interstitial']);
-  assert.deepEqual(idx.listValues('p', { offset: 3 }), []); // past the end
+  assert.deepEqual(idx.listValues('events', 'p', { limit: 1 }).map((v) => v.value), ['rewarded']);
+  assert.deepEqual(idx.listValues('events', 'p', { limit: 1, offset: 1 }).map((v) => v.value), ['interstitial']);
+  assert.deepEqual(idx.listValues('events', 'p', { offset: 3 }), []); // past the end
   idx.close();
 });
 
@@ -126,16 +126,16 @@ test('ValueIndex.listValues orders + pages the in-memory store', () => {
 // in-memory fallback matches the SQLite `ORDER BY ..., value ASC` path exactly).
 test('ValueIndex tie-break is deterministic (value ASC) on equal frequencies', () => {
   const idx = new ValueIndex();
-  idx.upsertProperty('t', { distinctCount: 3, totalCount: 15, values: [{ value: 'zebra', freq: 5 }, { value: 'apple', freq: 5 }, { value: 'mango', freq: 5 }] });
+  idx.upsertProperty('events', 't', { distinctCount: 3, totalCount: 15, values: [{ value: 'zebra', freq: 5 }, { value: 'apple', freq: 5 }, { value: 'mango', freq: 5 }] });
   // freq desc, ties → value ASC.
-  assert.deepEqual(idx.sampleValues('t').map((v) => v.value), ['apple', 'mango', 'zebra']);
-  assert.deepEqual(idx.listValues('t', { by: 'freq', dir: 'desc' }).map((v) => v.value), ['apple', 'mango', 'zebra']);
+  assert.deepEqual(idx.sampleValues('events', 't').map((v) => v.value), ['apple', 'mango', 'zebra']);
+  assert.deepEqual(idx.listValues('events', 't', { by: 'freq', dir: 'desc' }).map((v) => v.value), ['apple', 'mango', 'zebra']);
   // freq asc, ties → still value ASC (tie-break never flips with direction).
-  assert.deepEqual(idx.listValues('t', { by: 'freq', dir: 'asc' }).map((v) => v.value), ['apple', 'mango', 'zebra']);
+  assert.deepEqual(idx.listValues('events', 't', { by: 'freq', dir: 'asc' }).map((v) => v.value), ['apple', 'mango', 'zebra']);
   // searchValues ties → value ASC ('a' occurs in all three).
   assert.deepEqual(idx.searchValues('a').map((v) => v.value), ['apple', 'mango', 'zebra']);
   // paging is stable across the tie.
-  assert.deepEqual(idx.listValues('t', { limit: 1, offset: 1 }).map((v) => v.value), ['mango']);
+  assert.deepEqual(idx.listValues('events', 't', { limit: 1, offset: 1 }).map((v) => v.value), ['mango']);
   idx.close();
 });
 
@@ -158,7 +158,7 @@ test('ValueIndex sync-run log: startRun/finishRun + syncStatus', () => {
   assert.equal(s.last_run.finished_at, null);
 
   // Index a property mid-run, then finish.
-  idx.upsertProperty('p', { distinctCount: 2, totalCount: 9, values: [{ value: 'a', freq: 5 }, { value: 'b', freq: 4 }] });
+  idx.upsertProperty('events', 'p', { distinctCount: 2, totalCount: 9, values: [{ value: 'a', freq: 5 }, { value: 'b', freq: 4 }] });
   idx.finishRun(runId, { status: 'ok', propertiesIndexed: 1, valuesWritten: 2, errors: 0 });
   s = idx.syncStatus();
   assert.equal(s.running, false);

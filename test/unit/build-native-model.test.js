@@ -141,7 +141,7 @@ test('build_native_model: schema rejects action-irrelevant fields', async () => 
   await assert.rejects(() => e.build_native_model({ action: 'preview', draft_id: s.draft_id, stage: mr }), 'preview + stage rejected');
   await assert.rejects(() => e.build_native_model({ action: 'materialize', draft_id: s.draft_id, materialized: 'view' }), 'commit + materialized rejected');
   // start MAY carry draft_id (legitimate context reuse) — not rejected.
-  const reuse = await e.build_native_model({ action: 'start', draft_id: s.draft_id, name: 'reused' });
+  const reuse = await e.build_native_model({ action: 'start', draft_id: s.draft_id, name: 'reused', source: 'events' });
   assert.equal(reuse.draft_id, s.draft_id);
 });
 
@@ -162,7 +162,7 @@ test('build_native_model: join between (temporal window) validates and exposes j
   const s2 = await e.build_native_model({ action: 'start', name: 'pit2', source: 'events' });
   await assert.rejects(
     () => e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: {
-      stage: 'join', with: 'users', on: 'player_id_of_internal',
+      stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'],
       between: { value: 'device_time', from: 'no_such_col', to: 'install_date' },
     } }),
     /not a column of/,

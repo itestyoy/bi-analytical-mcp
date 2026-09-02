@@ -80,6 +80,22 @@ export class BigQueryDialect extends Dialect {
     return ct ? `CAST(${base} AS ${ct})` : base;
   }
 
+  // ── column-level complex primitives (a flattened payload column, no blob) ──
+  jsonColumnArrayLength(column) { return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$'))`; }
+
+  jsonColumnArrayContains(column, value) {
+    return `${this.sqlLiteral(value)} IN UNNEST(JSON_EXTRACT_STRING_ARRAY(${column}, '$'))`;
+  }
+
+  arrayContains(column, value) { return `${this.sqlLiteral(value)} IN UNNEST(${column})`; }
+
+  jsonColumnStructField(column, field, type = 'string') {
+    this.ident(field);
+    const base = `JSON_VALUE(${column}, '$.${field}')`;
+    const ct = this.castType(type);
+    return ct ? `CAST(${base} AS ${ct})` : base;
+  }
+
   // ── time / scalar / statistical ────────────────────────────────────────────
   dateDiff(unit, from, to) {
     const u = { day: 'DAY', hour: 'HOUR', minute: 'MINUTE', second: 'SECOND' }[unit];
@@ -158,9 +174,14 @@ export class BigQueryDialect extends Dialect {
         return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
       }
       case 'join': {
-        const eq = op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
+        // `onKeys` = a relationship declared in the schema: each side brings its OWN expression
+        // for the same logical key (different column names, a time column truncated to the
+        // declared grain), compared part by part. `on` = the plain shared-name form.
+        const eq = op.onKeys
+          ? op.onKeys.left.map((lp, i) => `${this.keyPartExpr(lp, (c) => `base.${c}`)} = ${this.keyPartExpr(op.onKeys.right[i], (c) => `j.${c}`)}`).join(' AND ')
+          : op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
         const btw = op.between ? ` AND base.${this.ident(op.between.value)} BETWEEN j.${this.ident(op.between.from)} AND j.${this.ident(op.between.to)}` : '';
-        const attrs = op.attrs.map((a) => `j.${this.ident(a)} AS ${this.ident(a)}`);
+        const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
         return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
       }
       case 'aggregate': {
@@ -196,6 +217,9 @@ export class BigQueryDialect extends Dialect {
         return op.field ? `|> ${join}\n|> EXTEND ${element} AS ${this.ident(op.as)}` : `|> ${join}`;
       }
       case 'join': {
+        // A per-side key expression has no `USING (...)` form; such a join is flagged
+        // requiresCte at build and assembled as chained CTEs instead of reaching this path.
+        if (op.onKeys) throw new Error('bigquery: a join on a declared relationship renders as a CTE, not a pipe step');
         const onCond = op.on.map((c) => this.ident(c)).join(', ');
         return `|> ${op.kind === 'INNER' ? 'INNER ' : 'LEFT '}JOIN ${op.relation} ${op.alias} USING (${onCond})`;
       }

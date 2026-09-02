@@ -90,7 +90,7 @@ test('overview carries join_note + value_index_status; payload-less event is not
   // OTHER than first_launch (non-null=0 on first_launch) → first_launch legitimately carries no
   // payload, from the data rather than a declared meta.mcp.events list.
   for (const p of e.catalog.eventProps()) {
-    e.valueIndex.upsertProperty(p, { coverage: [{ event: 'level_completed', rowCount: 5, nonNull: 5 }, { event: 'first_launch', rowCount: 3, nonNull: 0 }] });
+    e.valueIndex.upsertProperty('events', p, { coverage: [{ event: 'level_completed', rowCount: 5, nonNull: 5 }, { event: 'first_launch', rowCount: 3, nonNull: 0 }] });
   }
   // first_launch carries no event-specific payload — the response says what it IS for.
   const fl = await e.semantic_index({ event: 'first_launch' });

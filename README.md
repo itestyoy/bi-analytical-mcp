@@ -7,8 +7,9 @@ isolated per execution **context**.
 
 SQL generation and joins are delegated to dbt/MetricFlow; the AI only declares
 typed semantic objects whose column/property/event names come from a **catalog**
-(two+ dbt models: an events fact and a user-attributes dimension, plus optional
-dimension models such as campaigns).
+(two+ dbt models: one or more events facts — each with its own event vocabulary, e.g.
+product-analytics events and crash reports — a user-attributes dimension, and optional
+dimension models such as experiment assignments).
 
 Design docs:
 - [`docs/dbt-semantic-layer-spec.md`](docs/dbt-semantic-layer-spec.md) — dbt SL spec

@@ -31,7 +31,7 @@ const reached = (rows, step) => rows.filter((r) => tru(r[`reached_${step}`])).le
 
 // Build a funnel/transform pipeline and return the materialized result rows.
 async function pipe(stages, name) {
-  const out = await engine.register_native_model({ name: name || `fnl_${seq++}`, context_id: ctxId, pipeline: { stages } });
+  const out = await engine.register_native_model({ name: name || `fnl_${seq++}`, context_id: ctxId, pipeline: { source: 'events', stages } });
   assert.equal(out.kind, 'pipeline');
   assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
   ctxId = out.context_id;
@@ -60,13 +60,21 @@ before(async () => {
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
+// dim_users is SLOWLY-CHANGING, so a join to it is point-in-time. After match_recognize the
+// per-event time is gone — `first_seen_at` (the funnel's first event) survives and is the right
+// instant to attribute a funnel to: the user as they were when the funnel started.
+const AT_FUNNEL = { value: 'first_seen_at', from: 'install_time_valid_from', to: 'install_time_valid_until' };
+// A join placed BEFORE match_recognize — or in a pipeline with no funnel at all — still sees
+// one row per EVENT, so the instant to attribute it to is the event's own time.
+const AT_EVENT = { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' };
+
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 // #9: a pipeline-level time_range bounds the window (applied before the stages).
 test('native pipeline time_range bounds the window: full 8 purchases vs windowed 6', opts, async (t) => {
   if (skip(t)) return;
   const count = async (time_range) => {
-    const out = await engine.register_native_model({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { time_range, stages: [
+    const out = await engine.register_native_model({ name: `tr_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
       { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
     ] } });
@@ -121,8 +129,8 @@ test('pipeline response: output_columns (carried partition key) + read_with hint
 test('dry_run estimated_source_rows: real count, monotonic in the time window', opts, async (t) => {
   if (skip(t)) return;
   const stages = [{ stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] }];
-  const wide = await engine.register_native_model({ dry_run: true, name: 'est_wide', pipeline: { stages } });
-  const narrow = await engine.register_native_model({ dry_run: true, name: 'est_narrow', pipeline: { time_range: { start: '2026-01-05', end: '2026-01-05' }, stages } });
+  const wide = await engine.register_native_model({ dry_run: true, name: 'est_wide', pipeline: { source: 'events', stages } });
+  const narrow = await engine.register_native_model({ dry_run: true, name: 'est_narrow', pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages } });
   assert.ok(Number.isInteger(wide.estimated_source_rows) && wide.estimated_source_rows > 0, 'full source count is a positive integer');
   assert.ok(narrow.estimated_source_rows > 0 && narrow.estimated_source_rows < wide.estimated_source_rows, 'a single day scans fewer rows than the whole fact');
   assert.ok(wide.output_columns.some((c) => c.name === 'event_name'), 'dry_run also reports output_columns');
@@ -230,7 +238,7 @@ test('funnel sliced by a user attribute: join dim_users → reached_tut1 by coun
   if (skip(t)) return;
   // The funnel is sliced by joining dim_users AFTER match_recognize — all within
   // the pipeline (no separate semantic layer).
-  const out = await pipe([matchActivation(), { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country', 'platform'] }]);
+  const out = await pipe([matchActivation(), { stage: 'join', with: 'users', via: 'user', between: AT_FUNNEL, attrs: ['country', 'platform'] }]);
   assert.ok(out.rows.every((r) => 'country' in r && 'platform' in r), 'attrs joined onto each row');
   assert.equal(reached(out.rows, 'tut1'), 8);
   const byCountry = {};
@@ -259,7 +267,7 @@ test('funnel filtered to a user segment via join+where (country=US): only the 4 
   // user-attribute filtering is now a pipeline concern: join dim_users, where on
   // the attribute, THEN match_recognize — no special user_segment property.
   const out = await pipe([
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: ['country'] },
     { stage: 'where', conditions: [{ column: 'country', op: 'eq', value: 'US' }] },
     { stage: 'match_recognize', partition_by: ['player_id_of_internal'], mode: 'ordered', steps: activationSteps.slice(0, 2) },
   ]);
@@ -305,7 +313,7 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: ['country'] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] },
   ]);
   const by = Object.fromEntries(out.rows.map((r) => [String(r.country), num(r.revenue)]));
@@ -317,7 +325,7 @@ test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t)
   const out = await pipe([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT_EVENT, attrs: ['country'] },
     { stage: 'pivot', group_by: [], on: 'country', fn: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
   ]);
   assert.equal(out.rows.length, 1);
@@ -327,7 +335,7 @@ test('pipeline pivot: revenue pivoted into per-country columns', opts, async (t)
 
 test('register_native_model: dry_run returns SQL without building', opts, async (t) => {
   if (skip(t)) return;
-  const dr = await engine.register_native_model({ name: 'dry_pipe', dry_run: true, pipeline: { stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', fn: 'count' }] }] } });
+  const dr = await engine.register_native_model({ name: 'dry_pipe', dry_run: true, pipeline: { source: 'events', stages: [{ stage: 'aggregate', group_by: [], measures: [{ name: 'n', fn: 'count' }] }] } });
   assert.equal(dr.dry_run, true);
   assert.equal(dr.kind, 'pipeline');
   assert.equal(typeof dr.model_sql, 'string');
@@ -338,8 +346,8 @@ test('register_native_model: dry_run returns SQL without building', opts, async 
 
 test('register_native_model: same name in two contexts → distinct relations', opts, async (t) => {
   if (skip(t)) return;
-  const a = await engine.register_native_model({ name: 'iso', pipeline: { stages: [{ stage: 'limit', n: 1 }] } });
-  const b = await engine.register_native_model({ name: 'iso', pipeline: { stages: [{ stage: 'limit', n: 1 }] } });
+  const a = await engine.register_native_model({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', n: 1 }] } });
+  const b = await engine.register_native_model({ name: 'iso', pipeline: { source: 'events', stages: [{ stage: 'limit', n: 1 }] } });
   assert.notEqual(a.context_id, b.context_id);
   assert.notEqual(a.model, b.model);
   assert.match(a.model, /^pipe_iso_[a-z0-9]{6,}$/);
@@ -349,7 +357,8 @@ test('semantic_index: overview lists models, then { model } drills into the usab
   if (skip(t)) return;
   const overview = await engine.semantic_index();
   assert.ok(overview.models.find((m) => m.key === 'events'), 'events model present in overview');
-  assert.ok(Array.isArray(overview.event_names) && overview.event_names.length > 0, 'overview lists event names');
+  // event_names is keyed BY SOURCE — each events source lists its own vocabulary, never merged.
+  assert.ok(overview.event_names.events.length > 0, 'the events source lists its own event names');
   assert.equal(overview.models.find((m) => m.key === 'events').columns, undefined, 'overview does NOT dump columns');
   // drill down for the ONE list of usable columns (grounded to the real relation)
   const events = await engine.semantic_index({ model: 'events' });
@@ -368,7 +377,7 @@ test('semantic_index: overview lists models, then { model } drills into the usab
 // #2: a date-only time_range bound includes the WHOLE day (not collapsed to midnight).
 test('native pipeline time_range: single date-only day is not collapsed to a midnight instant', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.register_native_model({ name: `day_${seq++}`, context_id: ctxId, pipeline: { time_range: { start: '2026-01-05', end: '2026-01-05' }, stages: [
+  const out = await engine.register_native_model({ name: `day_${seq++}`, context_id: ctxId, pipeline: { source: 'events', time_range: { start: '2026-01-05', end: '2026-01-05' }, stages: [
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] },
   ] } });

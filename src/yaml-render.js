@@ -3,8 +3,21 @@
 // template from the catalog, augmented with the task additions.
 
 import yaml from 'js-yaml';
+import { getDialect } from './dialects/index.js';
 
 const EVENT_TIME_DIM = 'event_time';
+
+/**
+ * The `expr` MetricFlow joins a declared entity on. A single column is emitted as the column
+ * itself (what MetricFlow has always seen); a COMPOSITE key becomes one concatenated
+ * expression, so the two sides compare the same value even when their columns differ in name.
+ */
+function entityExpr(catalog, ent) {
+  const parts = ent.key || (ent.column ? [{ column: ent.column }] : []);
+  if (!parts.length) return undefined;
+  if (parts.length === 1) return parts[0].column;
+  return getDialect(catalog.dialect).compositeKeyExpr(parts);
+}
 
 /** A model is treated as SCD-2 (validity_params emitted) when the catalog marked validity columns
  *  AND the escape hatch MCP_SCD_VALIDITY_PARAMS is not disabling it. SCD models are join-only. */
@@ -29,10 +42,13 @@ export function renderBaseModel(catalog, key) {
   const m = catalog.getModel(key);
   const sm = { name: key, model: `ref('${m.dbt_model}')` };
 
-  if (key === catalog.anchor) {
+  // Every FACT renders the same way — its own event-time dimension, its own primary
+  // entity, its own measures. `EVENT_TIME_DIM` is scoped to the semantic model, so two
+  // facts each get their own agg_time_dimension without colliding.
+  if (catalog.isFact(key)) {
     sm.defaults = { agg_time_dimension: EVENT_TIME_DIM };
     sm.primary_entity = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity.name;
-    sm.entities = Object.entries(m.entities || {}).map(([name, e]) => ({ name, type: e.type, expr: e.column }));
+    sm.entities = Object.entries(m.entities || {}).map(([name, e]) => ({ name, type: e.type, expr: entityExpr(catalog, e) }));
     sm.dimensions = [
       { name: EVENT_TIME_DIM, type: 'time', type_params: { time_granularity: m.time.granularity || 'day' }, expr: m.time.column },
     ];
@@ -51,18 +67,26 @@ export function renderBaseModel(catalog, key) {
   // then the model emits a plain primary-key form (use a pipeline join.between for point-in-time).
   const scd = isScdModel(m);
   const pe = m.primary_entity;
+  if (!pe) {
+    throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one can only be reached through a pipeline join stage, not use_base_models.`);
+  }
   const peName = typeof pe === 'string' ? pe : pe.name;
   const peCol = typeof pe === 'string' ? undefined : pe.column;
   // For SCD the join key is a `natural` entity (not unique per row). dbt still requires the model
   // to declare a PRIMARY entity when it has dimensions, so also set the model-level primary_entity
   // (verified via `dbt parse` + `mf query`: this yields the point-in-time join, no fan-out).
   if (scd) sm.primary_entity = peName;
-  sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peCol ? { expr: peCol } : {}) }];
+  const peExpr = typeof pe === 'string' ? undefined : entityExpr(catalog, pe);
+  sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : (peCol ? { expr: peCol } : {})) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
-    sm.entities.push({ name, type: e.type, expr: e.column });
+    sm.entities.push({ name, type: e.type, expr: entityExpr(catalog, e) });
   }
   sm.dimensions = [];
-  let timeDim;
+  // A non-events source may still have a TIME AXIS (meta.mcp.is_time) — an install record's
+  // install day, a daily spend table's spend day. It is the model's agg_time_dimension, exactly
+  // as an events source's event_time is, and it is emitted by the dimension loop below (the
+  // catalog keeps it there so it stays groupable); this only names it as the axis.
+  let timeDim = m.time?.column;
   for (const [name, d] of Object.entries(m.dimensions || {})) {
     if (d.type === 'time') {
       const dim = { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } };
@@ -75,17 +99,23 @@ export function renderBaseModel(catalog, key) {
       sm.dimensions.push({ name, type: 'categorical' });
     }
   }
+  // The model's aggregation time axis is a property of the MODEL, not of whether the catalog
+  // happens to declare a measure on it: a task may add one later, and MetricFlow then needs the
+  // axis already named or it refuses the manifest.
+  if (!scd && timeDim) sm.defaults = { agg_time_dimension: timeDim };
   // MetricFlow HARD CONSTRAINT: a semantic model with validity_params (SCD-2) may NOT also define
   // measures ("Semantic model X has both measures and validity param dimensions defined. This is
   // not currently supported!"). An SCD dimension is join-only (point-in-time), so we emit it
   // dimension-only and drop any catalog measures — measures belong on the events fact, not on a
   // slowly-changing dimension.
   if (!scd) {
-    const measures = Object.entries(m.measures || {}).map(([name, mm]) => ({ name, agg: mm.agg, expr: mm.expr }));
-    if (measures.length) {
-      sm.measures = measures;
-      if (timeDim) sm.defaults = { agg_time_dimension: timeDim };
-    }
+    const measures = Object.entries(m.measures || {}).map(([name, mm]) => ({
+      name, agg: mm.agg, expr: mm.expr,
+      ...(mm.agg_params ? { agg_params: mm.agg_params } : {}),
+      ...(mm.label ? { label: mm.label } : {}),
+      ...(mm.description ? { description: mm.description } : {}),
+    }));
+    if (measures.length) sm.measures = measures;
   }
   return sm;
 }
@@ -113,7 +143,7 @@ export function renderContext(catalog, state) {
         // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.
         if (scd) { droppedMeasures.add(me.name); continue; }
         const mm = { ...me };
-        if (key === catalog.anchor && !mm.agg_time_dimension) mm.agg_time_dimension = EVENT_TIME_DIM;
+        if (catalog.isFact(key) && !mm.agg_time_dimension) mm.agg_time_dimension = EVENT_TIME_DIM;
         (sm.measures ||= []).push(mm);
       }
     }

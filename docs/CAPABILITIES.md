@@ -73,11 +73,11 @@ and the integration tests.
 
 ## 3. Hard boundaries — not possible
 
-- **Anything needing a third data source.** Two-source rule is enforced by the schema enums; the AI cannot name a campaigns/orders/extra-dimension table. (`campaign_id` is a plain attribute on `dim_users`; there is no campaigns table.) ROAS / ad-spend / cross-app / server-side cost: out of scope.
+- **Anything needing a source the catalog does not declare.** The schema enums are the boundary: the AI cannot name a table that is not a catalog role. What IS available is whatever the catalog declares — several events sources (product analytics, crash reports), the install record, experiment assignments, and a measures source such as acquisition spend, whose amounts the schema marks aggregatable (so ad-spend / ROAS questions ARE in scope once that source is in the catalog). A table nobody declared, and a role no catalog defines, stay out of scope.
 - **Exact point-in-time D-N retention** (active precisely on day N): only window-approximated.
 - **Open-ended path / flow discovery** (top user paths, Sankey over `screen_changed`): only fixed, hand-built sequences are expressible; there is no path-discovery / top-N-path engine.
 - **Window functions or raw SQL inside semantic models** (`LAG/LEAD/ROW_NUMBER/RANK`, subqueries): not expressible; `derived` metrics are limited to safe arithmetic over other metrics. The row-pattern native model is the only escape hatch, and only for ordered sequences.
-- **Multi-hop / event-to-event joins** beyond the 1-hop `events.user → dim_users` (and `session`): event self-joins are only available via conversion metrics or the sequence engine.
+- **A self-join of ONE source** (event-to-event inside the same table): only via conversion metrics or the sequence engine — a join stage always targets a DIFFERENT model. Joins BETWEEN sources are no longer 1-hop-limited: join stages stack, so one pipeline chains several declared relationships (crash reports → the ad funnel's events → the install record valid at that moment → that player's spend). In a metric query the reach is the declared entity graph: only a relationship some model OWNS has a `<relationship>__<attribute>` path; one nobody owns (a many-to-many match, e.g. an ad-funnel id shared by several events) is a pipeline join, by nature.
 
 ---
 

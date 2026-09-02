@@ -10,6 +10,8 @@ import { renderBaseModel, renderContext } from '../../src/yaml-render.js';
 
 const scdCatalog = {
   anchor: 'events',
+  facts: ['events'],
+  isFact: (k) => k === 'events',
   getModel: () => ({
     dbt_model: 'dim_users',
     primary_entity: { name: 'user', column: 'internal_player_id' },
@@ -67,6 +69,8 @@ test('SCD model with a catalog measure → measure is NOT emitted (dimension-onl
   try {
     const cat = {
       anchor: 'events',
+      facts: ['events'],
+      isFact: (k) => k === 'events',
       getModel: () => ({
         dbt_model: 'dim_users',
         primary_entity: { name: 'user', column: 'internal_player_id' },
@@ -92,6 +96,8 @@ test('renderContext drops a task measure + its metric on an SCD model, with a wa
   try {
     const cat = {
       anchor: 'events',
+      facts: ['events'],
+      isFact: (k) => k === 'events',
       getModel: (k) => (k === 'users' ? {
         dbt_model: 'dim_users',
         primary_entity: { name: 'user', column: 'internal_player_id' },
@@ -117,6 +123,8 @@ test('renderContext drops a task measure + its metric on an SCD model, with a wa
 test('a non-SCD dimension model keeps a primary entity and no validity_params', () => {
   const plain = {
     anchor: 'events',
+    facts: ['events'],
+    isFact: (k) => k === 'events',
     getModel: () => ({
       dbt_model: 'dim_users',
       primary_entity: { name: 'user', column: 'internal_player_id' },

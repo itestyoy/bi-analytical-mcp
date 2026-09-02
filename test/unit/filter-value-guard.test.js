@@ -20,7 +20,7 @@ const whereStep = (e, draftId, column, op, value) => e.build_native_model({ acti
 test('a wrong-cased filter value is rejected with the correct casing suggested', async () => {
   const e = engine();
   // real indexed values for result_of_event_data are lowercase win/lose.
-  e.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
+  e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
   const s = await e.build_native_model({ action: 'start', name: 'casecheck', source: 'events' });
 
   await assert.rejects(
@@ -36,7 +36,7 @@ test('a wrong-cased filter value is rejected with the correct casing suggested',
 // A value that does NOT occur (and the full value set is indexed) is rejected as absent.
 test('an absent value is rejected when the full value set is indexed', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
+  e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
   const s = await e.build_native_model({ action: 'start', name: 'absent', source: 'events' });
   await assert.rejects(
     () => whereStep(e, s.draft_id, 'result_of_event_data', 'eq', 'victory'),
@@ -47,7 +47,7 @@ test('an absent value is rejected when the full value set is indexed', async () 
 // The check is SOURCE-SCOPED via the anchor dimension key (events.<col>), e.g. bundle_id.
 test('anchor dimension values are verified source-scoped (events.<col>)', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('events.bundle_id', { distinctCount: 2, totalCount: 150, values: [{ value: 'com.omg.wordsearch', freq: 100 }, { value: 'com.omg.colorfit', freq: 50 }] });
+  e.valueIndex.upsertProperty('events', 'bundle_id', { distinctCount: 2, totalCount: 150, values: [{ value: 'com.omg.wordsearch', freq: 100 }, { value: 'com.omg.colorfit', freq: 50 }] });
   const s = await e.build_native_model({ action: 'start', name: 'bundlefilter', source: 'events' });
   await assert.rejects(
     () => whereStep(e, s.draft_id, 'bundle_id', 'eq', 'com.omg.WORDSEARCH'),
@@ -61,7 +61,7 @@ test('anchor dimension values are verified source-scoped (events.<col>)', async 
 // legitimately-rare value is never rejected on incomplete index data.
 test('a capped (top-N) column warns instead of blocking an unindexed value', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 500, totalCount: 9999, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
+  e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 500, totalCount: 9999, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
   const s = await e.build_native_model({ action: 'start', name: 'capped', source: 'events' });
   const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'eq', 'some_rare_status');
   assert.equal(r.action, 'add_step', 'not blocked');
@@ -74,7 +74,7 @@ test('a capped (top-N) column warns instead of blocking an unindexed value', asy
 test('a many-valued column (at the cap) never hard-rejects an unindexed value', async () => {
   const e = engine();
   const many = Array.from({ length: 50 }, (_, i) => ({ value: `v${i}`, freq: 50 - i }));
-  e.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 50, totalCount: 9999, values: many });
+  e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 50, totalCount: 9999, values: many });
   const s = await e.build_native_model({ action: 'start', name: 'manyvals', source: 'events' });
   const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'eq', 'v999_not_indexed');
   assert.equal(r.action, 'add_step', 'a value beyond the cap is not blocked');
@@ -85,7 +85,7 @@ test('a many-valued column (at the cap) never hard-rejects an unindexed value', 
 // must never be rejected just because it resembles an indexed one.
 test('a fuzzy near-match warns but does not block', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'level_1', freq: 10 }, { value: 'level_2', freq: 5 }] });
+  e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'level_1', freq: 10 }, { value: 'level_2', freq: 5 }] });
   const s = await e.build_native_model({ action: 'start', name: 'fuzzyok', source: 'events' });
   const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'eq', 'level_3');
   assert.equal(r.action, 'add_step', 'a similar-but-distinct value is not blocked');
@@ -102,7 +102,7 @@ test('an unindexed column is not blocked (cannot verify)', async () => {
 // Numeric/range filters are not value-checked (only categorical equality).
 test('numeric/range comparisons are not value-checked', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 2, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
+  e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 2, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
   const s = await e.build_native_model({ action: 'start', name: 'range', source: 'events' });
   // a gt on a value not in the set is fine (it's a range op, not equality).
   const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'gt', 'aaa');

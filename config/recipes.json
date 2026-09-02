@@ -1347,7 +1347,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "player_id_of_internal",
+              "via": "user",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -1653,7 +1653,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "player_id_of_internal",
+              "via": "user",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -1800,7 +1800,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "player_id_of_internal",
+              "via": "user",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -2054,7 +2054,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "player_id_of_internal",
+              "via": "user",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -2265,7 +2265,7 @@
             {
               "stage": "join",
               "with": "experiments",
-              "on": "player_id_of_internal",
+              "via": "user",
               "attrs": [
                 "experiment_name",
                 "variant_group",
@@ -2513,7 +2513,7 @@
             {
               "stage": "join",
               "with": "users",
-              "on": "player_id_of_internal",
+              "via": "user",
               "attrs": [
                 "install_date"
               ]
@@ -2555,7 +2555,7 @@
           ]
         }
       },
-      "notes": "day_n = date_diff(install_date -> device_time) buckets every session by its exact day offset since install; returners at day_n=N over the cohort size = exact D-N retention. Divide by the cohort (day_n=0 row, or a separate first_launch count) to get rates. This is point-in-time retention — stricter than the conversion-window approximation in nday_retention.",
+      "notes": "day_n = date_diff(install_date -> device_time) buckets every session by its exact day offset since install; returners at day_n=N over the cohort size = exact D-N retention. Divide by the cohort (day_n=0 row, or a separate first_launch count) to get rates. This is point-in-time retention \u2014 stricter than the conversion-window approximation in nday_retention. The join uses the declared 'user' relationship, so it needs no column names. If the install record is SLOWLY-CHANGING (semantic_index({ model }) shows a validity window), add between: { value: 'device_time', from: '<validity start>', to: '<validity end>' } to the join stage \u2014 otherwise every session matches every historical version of the player and the returner counts inflate.",
       "hack": "Exact Dn = join the install date, date_diff it against the activity time, group by the offset. The same offset axis powers cohort heatmaps and lifetime curves."
     },
     {

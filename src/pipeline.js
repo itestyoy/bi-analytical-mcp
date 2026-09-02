@@ -84,6 +84,12 @@ const OPSYM = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 // open string — there is nothing valid to pick anyway.
 const propEnum = (values, description) => (values.length ? { type: 'string', enum: values, description } : { type: 'string', description });
 
+/** An event property as seen from the pipeline's SOURCE fact (Catalog.propertyFor owns the
+ *  bare-vs-qualified rules); a property of another fact is rejected with the fix. */
+const sourceProp = (catalog, source, name) => (source
+  ? catalog.propertyFor(source, name, { hint: `start the pipeline from '${source === catalog.anchor ? 'that fact' : source}' that owns it` })
+  : null);
+
 // SQL for one operand: a column reference, a literal constant, or `now`.
 function operandSql(d, cols, o, label = 'operand') {
   if (o === null || typeof o !== 'object') throw new Error(`${label}: must be { column } | { value } | { now: true }`);
@@ -186,24 +192,44 @@ const STAGES = {
         stage: { const: 'derive' },
         name: { type: 'string', pattern: NAME },
         op: { enum: ['extract', 'array_length', 'contains', 'struct_field'] },
-        source: propEnum(catalog.eventProps(), 'event_data property the value derives from.'),
+        source: propEnum(catalog.eventPropEnum(), 'event_data property the value derives from — one of the PIPELINE SOURCE\'s own properties (a property of another source is rejected, naming the source that has it).'),
         value: { description: 'Membership value for op=contains.' },
         field: { type: 'string', description: 'Struct field for op=struct_field.' },
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Result/extract type (default string).' },
       },
     }),
-    build: ({ d, catalog, cols }, p) => {
-      const json = catalog.eventDataColumn();
-      const spec = catalog.eventPropertySpec(p.source);
+    build: ({ d, catalog, cols, source }, p) => {
+      // The RAW payload blob. Only a BLOB property is ever read through it; a flattened payload
+      // column carries its value itself and is referenced directly below — which is what makes
+      // these ops work on a fully flattened fact (a crash report exploded into real columns),
+      // where there is no blob at all.
+      const blob = catalog.eventDataColumn(source);
+      const found = sourceProp(catalog, source, p.source);
+      const spec = found?.spec;
+      const key = found?.name || p.source; // the PHYSICAL payload key (qualifier stripped)
+      // A FLATTENED payload column carries the array/object itself; `encoding` says whether it
+      // is a native ARRAY or a STRING holding JSON, which decides how to read it.
+      const flat = spec?.column || null;
+      const native = flat && (spec.encoding || 'native') === 'native';
+      // An array op on a property that is not an array builds SQL the warehouse will reject
+      // (array_length over text). Say so here, naming what the property actually is.
+      if ((p.op === 'array_length' || p.op === 'contains') && spec && !String(spec.type || '').toLowerCase().startsWith('array')) {
+        throw new Error(`derive ${p.op}: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — ${p.op} needs an array (declare the column with meta.mcp.array, or an array / array<struct> entry in the payload spec). For a JSON OBJECT use op=struct_field, or compute op=json_field.`);
+      }
       let expr; let type;
-      // Flattened payload (spec.column) is a real column → reference it directly;
-      // legacy JSON-blob payload is extracted from the event_data column.
-      if (p.op === 'extract' && spec?.column) { expr = spec.column; type = p.type || spec.type || 'string'; }
-      else if (p.op === 'extract') { expr = d.jsonExtract(json, p.source, p.type || 'string'); type = p.type || 'string'; }
-      else if (p.op === 'array_length') { expr = d.jsonArrayLength(json, p.source); type = 'int'; }
-      else if (p.op === 'contains') { expr = d.jsonArrayContains(json, p.source, p.value); type = 'boolean'; }
-      else if (p.op === 'struct_field') { expr = d.jsonStructField(json, p.source, p.field, p.type); type = p.type || 'string'; }
-      else throw new Error(`derive: bad op ${p.op}`);
+      if (p.op === 'extract') {
+        if (flat) { expr = flat; type = p.type || spec.type || 'string'; }
+        else { expr = d.jsonExtract(blob, key, p.type || 'string'); type = p.type || 'string'; }
+      } else if (p.op === 'array_length') {
+        expr = flat ? (native ? d.arrayLength(flat) : d.jsonColumnArrayLength(flat)) : d.jsonArrayLength(blob, key);
+        type = 'int';
+      } else if (p.op === 'contains') {
+        expr = flat ? (native ? d.arrayContains(flat, p.value) : d.jsonColumnArrayContains(flat, p.value)) : d.jsonArrayContains(blob, key, p.value);
+        type = 'boolean';
+      } else if (p.op === 'struct_field') {
+        expr = flat ? d.jsonColumnStructField(flat, p.field, p.type) : d.jsonStructField(blob, key, p.field, p.type);
+        type = p.type || 'string';
+      } else throw new Error(`derive: bad op ${p.op}`);
       return { op: { op: 'extend', cols: [{ name: p.name, expr }] }, cols: addCol(cols, p.name, type) };
     },
   },
@@ -237,7 +263,7 @@ const STAGES = {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
         op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'json_parse_array', 'element_at', 'array_last', 'raw', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'elapsed_days', 'case', 'window'] },
-        field: { type: 'string', description: 'Struct field name for op=json_field (extract from a JSON column, e.g. an unnested array-of-struct element).' },
+        field: { type: 'string', description: 'Struct field name for op=json_field — extract one field from a column holding a JSON OBJECT: an unnested array-of-struct element, or a flattened payload column that holds JSON (e.g. a crash report\'s custom keys).' },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
         from: OPERAND, to: OPERAND, // date_diff / elapsed_days (each may be { column } / { value } / { now: true })
@@ -321,7 +347,14 @@ const STAGES = {
       else if (p.op === 'date_trunc') { expr = d.dateTrunc(p.granularity, col()); type = 'time'; }
       else if (p.op === 'date_part') { expr = d.datePart(p.part, col()); type = 'int'; }
       else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }
-      else if (p.op === 'json_field') { expr = d.jsonColumnField(col(), p.field, p.type); type = p.type || 'string'; }
+      else if (p.op === 'json_field') {
+        // An unnested struct element is already JSON-typed; a flattened payload column holding
+        // JSON is TEXT and has to be parsed first, or the json operators do not apply to it.
+        requireCol(cols, p.column);
+        const asJson = cols.get(p.column)?.type === 'json';
+        expr = asJson ? d.jsonColumnField(col(), p.field, p.type) : d.jsonColumnStructField(col(), p.field, p.type);
+        type = p.type || 'string';
+      }
       else if (p.op === 'json_parse_array') { expr = d.jsonParseArray(col()); type = 'array'; } // STRING JSON array → native array (then unnest)
       else if (p.op === 'element_at') { requireArrayCol(cols, p.column, 'element_at'); expr = d.arrayElementAt(col(), p.index); type = p.type || 'string'; }
       else if (p.op === 'array_last') { requireArrayCol(cols, p.column, 'array_last'); expr = d.arrayLast(col()); type = p.type || 'string'; }
@@ -365,17 +398,21 @@ const STAGES = {
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'] },
       },
     }),
-    build: ({ catalog, cols }, p) => {
-      const spec = catalog.eventPropertySpec(p.source);
+    build: ({ catalog, cols, source }, p) => {
+      const found = sourceProp(catalog, source, p.source);
+      const spec = found?.spec;
       let column; let key; let encoding; let isStruct = false;
       if (spec) {
+        if (!String(spec.type || '').toLowerCase().startsWith('array')) {
+          throw new Error(`unnest: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — there is nothing to explode. Declare the column with meta.mcp.array if it holds one, or read a single field with compute op=json_field.`);
+        }
         isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
         if (spec.column) { column = spec.column; key = null; encoding = spec.encoding || 'native'; } // flattened array column
-        else { column = catalog.eventDataColumn(); key = p.source; encoding = 'blob'; } // legacy JSON-blob property
+        else { column = catalog.eventDataColumn(source); key = found.name; encoding = 'blob'; } // legacy JSON-blob property
       } else if (cols.has(p.source) && cols.get(p.source).type === 'array') {
         column = p.source; key = null; encoding = 'native'; // a pipeline-derived array (e.g. from json_parse_array)
       } else {
-        throw new Error(`unnest: '${p.source}' is not an array event property or an array column at this stage`);
+        throw new Error(`unnest: '${p.source}' is not an array event property of '${source}' nor an array column at this stage`);
       }
       const type = p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string'));
       return { op: { op: 'unnest', column, key, as: p.as, field: p.field, type, encoding }, cols: addCol(cols, p.as, type) };
@@ -384,16 +421,38 @@ const STAGES = {
 
   join: {
     schema: (catalog) => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'with', 'on'],
-      description: 'Bring in attributes from a related model on a shared entity key, exposing its columns. Enriches events with user attributes (e.g. country / platform / install_date) for segmentation or date math. Optional `between` adds a point-in-time / SCD-2 condition (a temporal validity window) alongside the key equality.',
+      type: 'object', additionalProperties: false, required: ['stage', 'with'],
+      description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ model }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
+      anyOf: [{ required: ['via'] }, { required: ['on'] }],
       properties: {
         stage: { const: 'join' },
-        with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join.' },
-        on: { type: 'string', description: 'Shared entity key column (present on both sides).' },
-        attrs: { type: 'array', items: { type: 'string' }, description: 'Columns of the joined model to expose (default: all its dimensions).' },
+        with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join (any model but the pipeline\'s own source).' },
+        via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ model }) lists each model\'s relationships, their key columns and what they point at.' },
+        on: {
+          description: 'Ad-hoc fallback when no relationship is declared: key column(s) that exist under the SAME NAME on both sides. A single name, or several for a composite key.',
+          oneOf: [{ type: 'string' }, { type: 'array', minItems: 1, items: { type: 'string' } }],
+        },
+        attrs: {
+          type: 'array',
+          minItems: 1,
+          description: 'REQUIRED — the columns of the joined model to expose, and the ONLY ones that arrive. Nothing is added implicitly: list what the downstream stages will use. Each entry is a column name, or { column, as } to expose it under a different name. A name that would end up used twice — because the pipeline already has one, or because two entries resolve to the same name — is rejected with the reason and the rename to apply, since one name cannot address two columns. semantic_index({ model }) lists the joined model\'s columns.',
+          items: {
+            oneOf: [
+              { type: 'string', description: 'A column of the joined model, exposed under its own name.' },
+              {
+                type: 'object', additionalProperties: false, required: ['column'],
+                description: 'A column of the joined model exposed under a different name — use it for a column both sides name identically.',
+                properties: {
+                  column: { type: 'string', description: 'Column of the JOINED model.' },
+                  as: { type: 'string', description: 'Name it gets in the pipeline (defaults to `column`).' },
+                },
+              },
+            ],
+          },
+        },
         between: {
           type: 'object', additionalProperties: false, required: ['value', 'from', 'to'],
-          description: 'Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the event time. Ensure the joined windows do not overlap, or a row can match several versions.',
+          description: 'Point-in-time / SCD-2 range condition ANDed with the key equality: keep the joined row whose validity window contains a value from THIS side — `base.<value> BETWEEN joined.<from> AND joined.<to>`. Use it to pick the version of a slowly-changing dimension valid at the moment being asked about. Which moment that is CHANGES THE ANSWER: attributing a crash by the crash time and by the time of the ad that preceded it can land the same player in different cohorts — so state it deliberately. Ensure the joined windows do not overlap, or a row can match several versions. In a metric query nothing has to be stated: MetricFlow applies the window itself.',
           properties: {
             value: { type: 'string', description: 'A column on THIS (left) side compared against the window — e.g. the event time.' },
             from: { type: 'string', description: 'Window LOWER-bound column on the joined model (inclusive), e.g. valid_from.' },
@@ -403,12 +462,68 @@ const STAGES = {
         kind: { enum: ['left', 'inner'], default: 'left' },
       },
     }),
-    build: ({ catalog, cols }, p) => {
+    build: ({ catalog, cols, source }, p) => {
       const m = catalog.getModel(p.with);
-      const attrs = p.attrs?.length ? p.attrs : Object.keys(m.dimensions || {});
+      if (p.with === source) throw new Error(`join: '${p.with}' is the pipeline's own source — join a DIFFERENT model (a self-join is not expressible as a stage)`);
+      if (p.via && p.on) throw new Error('join: pass `via` (the declared relationship) OR `on` (ad-hoc shared column names), not both');
+      let on = []; let onKeys;
+      if (p.via) {
+        // The key columns come from the SCHEMA, on both sides — including a composite key — and
+        // each side may name its columns its own way. The LEFT key is resolved on the pipeline's
+        // own SOURCE, not on whatever the previous stages accumulated, so a chained join must use
+        // a relationship the source itself declares.
+        const left = catalog.entityKey(source, p.via);
+        const right = catalog.entityKey(p.with, p.via);
+        if (!left || !right) {
+          const missing = !left ? source : p.with;
+          const shared = catalog.sharedEntities(source, p.with).map((x) => x.entity);
+          throw new Error(`join via '${p.via}': '${missing}' declares no such relationship.${shared.length ? ` '${source}' and '${p.with}' share: ${shared.join(', ')}.` : ` '${source}' and '${p.with}' share no declared relationship — declare one (meta.mcp.entities) or use \`on\` with a column both sides name identically.`}`);
+        }
+        for (const part of left) requireCol(cols, part.column); // the left key must survive to here
+        onKeys = { left, right };
+      } else {
+        on = Array.isArray(p.on) ? p.on : [p.on];
+        if (!on.length || on.some((k) => typeof k !== 'string' || !k)) throw new Error('join: `on` needs a key column name, or a list of them');
+        for (const k of on) requireCol(cols, k); // every key must exist on THIS side
+      }
+      // What the joined model REALLY has (declared, and already grounded to the physical table at
+      // catalog load), with each column's type — so a joined amount stays numeric downstream
+      // instead of arriving as an untyped string. A fact's raw payload blob is a column too.
+      const joined = new Map(catalog.modelColumns(p.with).map((c) => [c.name, c.type || 'string']));
+      if (m.event_data_column && !joined.has(m.event_data_column)) joined.set(m.event_data_column, 'json');
+      const known = joined.size ? joined : null; // no column info -> accept what the caller names
+      const avail = () => [...joined.keys()].join(', ');
+      // `attrs` IS the contract: exactly what is listed arrives, nothing implicit. A join that
+      // quietly widened the row would change what the next stage sees without anyone saying so.
+      if (!p.attrs?.length) {
+        throw new Error(
+          `join '${p.with}': \`attrs\` is required — list the columns you want from it; nothing is added implicitly.`
+          + `${joined.size ? ` Columns of '${p.with}': ${avail()}.` : ''}`
+          + ` Use { column, as } to expose one under a different name. semantic_index({ model: '${p.with}' }) describes them.`,
+        );
+      }
+      const attrs = p.attrs.map((a) => (typeof a === 'string' ? { column: a, as: a } : { column: a.column, as: a.as || a.column }));
+      const byName = new Map();
+      for (const a of attrs) {
+        if (known && !known.has(a.column)) throw new Error(`join '${p.with}' attrs: '${a.column}' is not a column of '${p.with}' (available: ${avail()})`);
+        // A name used twice is unaddressable downstream, so say WHICH two things collide and
+        // what to rename. The join key is worth calling out: its value is the same on both
+        // sides, so the copy is usually not wanted at all.
+        if (cols.has(a.as)) {
+          const isKey = onKeys ? onKeys.right.some((k) => k.column === a.column) : on.includes(a.column);
+          throw new Error(
+            `join '${p.with}' attrs: the pipeline already has a column named '${a.as}', so exposing '${p.with}'.${a.column} under that name would leave two columns sharing one name — unaddressable in every later stage.`
+            + (isKey
+              ? ` '${a.column}' is the join key: it matched on both sides, so the column the pipeline already has holds the same value — drop it from attrs.`
+              : ` The two hold different data, so rename the joined one: { column: '${a.column}', as: '${p.with}_${a.column}' }.`),
+          );
+        }
+        if (byName.has(a.as)) throw new Error(`join '${p.with}' attrs: '${byName.get(a.as)}' and '${a.column}' would both be named '${a.as}'. Give each its own \`as\`.`);
+        byName.set(a.as, a.column);
+      }
       const relation = `{{ ref('${m.dbt_model}') }}`;
       let out = cols;
-      for (const a of attrs) out = addCol(out, a, 'string');
+      for (const a of attrs) out = addCol(out, a.as, joined.get(a.column) || 'string');
       let between;
       if (p.between) {
         // `value` is a column on THIS side (validated against the live column set); `from`/`to`
@@ -423,7 +538,9 @@ const STAGES = {
       }
       // A `between` predicate cannot be expressed with the BigQuery pipe `USING (...)` form, so it
       // forces the chained-CTE `ON ...` assembly (both dialects render the same ON clause there).
-      return { op: { op: 'join', relation, alias: 'j', on: [p.on], attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
+      // A per-side key expression cannot be written as the BigQuery pipe `USING (...)` form, so a
+      // `via` join takes the chained-CTE `ON ...` assembly — as a `between` predicate already does.
+      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys, requiresCte: true } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
     },
   },
 
@@ -563,7 +680,7 @@ function sourceColumns(catalog, key, physicalCols = null) {
   const cols = new Map();
   for (const c of catalog.modelColumns(key)) cols.set(c.name, { type: c.type });
   // Fallbacks for catalogs that predate column capture (keep entity/time/event_name/dims).
-  if (key === catalog.anchor) {
+  if (catalog.isFact(key)) {
     if (m.event_name?.column && !cols.has(m.event_name.column)) cols.set(m.event_name.column, { type: 'string' });
     if (m.time?.column && !cols.has(m.time.column)) cols.set(m.time.column, { type: 'time' });
     if (m.event_data_column && !cols.has(m.event_data_column)) cols.set(m.event_data_column, { type: 'json' });
@@ -584,13 +701,13 @@ function sourceColumns(catalog, key, physicalCols = null) {
 export function anchorColumns(catalog) { return sourceColumns(catalog, catalog.anchor); }
 
 /** The scalar columns a `prepare` stage list adds (name -> { type }) — threads prep columns. */
-export function prepareColumns(catalog, dialectName, stages = []) {
+export function prepareColumns(catalog, dialectName, stages = [], source = catalog.anchor) {
   const d = getDialect(dialectName);
   let cols = new Map();
   for (const st of stages) {
     const def = STAGES[st.stage];
     if (!def) throw new Error(`unknown prepare stage: ${st.stage}`);
-    cols = def.build({ d, catalog, cols }, st).cols;
+    cols = def.build({ d, catalog, cols, source }, st).cols;
   }
   return cols;
 }
@@ -601,14 +718,17 @@ export function pipelineStageSchema(catalog) {
   return { discriminator: { propertyName: 'stage' }, oneOf: Object.values(STAGES).map((s) => s.schema(catalog)) };
 }
 
-// Fold stages -> { ops, cols } (validating column references along the way).
-function buildOps(catalog, d, baseColumns, stages) {
+// Fold stages -> { ops, cols } (validating column references along the way). `source`
+// is the catalog model the pipeline reads FROM: stages that name an event or an
+// event_data property resolve it against THAT fact, so a multi-fact catalog cannot
+// silently mix one fact's payload into another fact's pipeline.
+function buildOps(catalog, d, baseColumns, stages, source = catalog.anchor) {
   let cols = new Map(baseColumns);
   const ops = [];
   for (const st of stages) {
     const def = STAGES[st.stage];
     if (!def) throw new Error(`unknown pipeline stage: ${st.stage}`);
-    const res = def.build({ d, catalog, cols }, st);
+    const res = def.build({ d, catalog, cols, source }, st);
     ops.push(res.op);
     cols = res.cols;
   }
@@ -635,9 +755,9 @@ function assembleCteSql(d, dialectName, baseRelation, ops) {
  * Lower a pipeline over an explicit base relation to one SQL text (chained-CTE
  * form). Used by the funnel: [...prepare, match_recognize].
  */
-export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages) {
+export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages, source = catalog.anchor) {
   const d = getDialect(dialectName);
-  const { ops } = buildOps(catalog, d, baseColumns, stages);
+  const { ops } = buildOps(catalog, d, baseColumns, stages, source);
   return assembleCteSql(d, dialectName, baseRelation, ops);
 }
 
@@ -653,7 +773,7 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
   const baseRelation = `{{ ref('${m.dbt_model}') }}`;
-  const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source, physicalCols), stages);
+  const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source, physicalCols), stages, source);
   const sql = ops.some((o) => o.requiresCte) ? assembleCteSql(d, dialectName, baseRelation, ops) : d.renderPipeline(baseRelation, ops);
   return { sql, columns: cols };
 }

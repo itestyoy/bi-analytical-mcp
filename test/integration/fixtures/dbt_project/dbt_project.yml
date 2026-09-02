@@ -18,7 +18,24 @@ seeds:
     seed_users:
       +column_types:
         install_date: date
+        # Границы окна — TIMESTAMP, а не date: событие в середине дня должно попадать в
+        # окно, закрывающееся в конце этого дня, иначе BETWEEN отрежет его по полуночи.
+        install_time_valid_from: timestamp
+        install_time_valid_until: timestamp
     seed_experiments:
       +column_types:
         assigned_at: timestamp
         ended_at: timestamp
+    seed_acquisition:
+      +column_types:
+        spend_date: timestamp
+        cost: numeric(10,2)
+        impressions: integer
+        clicks: integer
+    seed_crashlytics:
+      +column_types:
+        event_time: timestamp
+        is_fatal: boolean
+        anr_duration: numeric
+        app_version: varchar(16)
+        breadcrumbs: varchar(200)

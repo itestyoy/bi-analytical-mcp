@@ -25,12 +25,12 @@ test('catalog exposes the bundle/app column', () => {
 test('semantic_index({ bundle }) splits populated vs empty properties per app', async () => {
   const e = engine();
   // ad_type_of_event_data: populated for words (40/1000), EMPTY for relax (0/500).
-  e.valueIndex.upsertProperty('ad_type_of_event_data', {
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', {
     distinctCount: 3, totalCount: 40, nullCount: 1460, values: [{ value: 'rewarded', freq: 30 }],
     bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 40 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 0 }],
   });
   // level_id_of_event_data: populated for BOTH apps.
-  e.valueIndex.upsertProperty('level_id_of_event_data', {
+  e.valueIndex.upsertProperty('events', 'level_id_of_event_data', {
     distinctCount: 10, totalCount: 900, nullCount: 600, values: [{ value: '1', freq: 100 }],
     bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 600 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 300 }],
   });
@@ -46,7 +46,7 @@ test('semantic_index({ bundle }) splits populated vs empty properties per app', 
   const relax = await e.semantic_index({ bundle: 'com.omg.relax' });
   assert.equal(relax.bundle, 'com.omg.relax');
   assert.equal(relax.event_rows, 500);
-  assert.ok(relax.empty.includes('ad_type_of_event_data'), 'ad_type is empty for relax');
+  assert.ok(relax.empty.some((x) => x.source === 'events' && x.property === 'ad_type_of_event_data'), 'ad_type is empty for relax');
   assert.ok(relax.populated.some((p) => p.property === 'level_id_of_event_data'), 'level_id is populated for relax');
   assert.ok(!relax.populated.some((p) => p.property === 'ad_type_of_event_data'), 'ad_type not in populated for relax');
   assert.equal(relax.empty_count + relax.populated_count, relax.property_count);
@@ -63,7 +63,7 @@ test('semantic_index({ bundle }) splits populated vs empty properties per app', 
 // The { property } view carries the per-app split (bundle_coverage) + an empty-for-app rec.
 test('semantic_index({ property }) surfaces per-app bundle_coverage', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('ad_type_of_event_data', {
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', {
     distinctCount: 3, totalCount: 40, nullCount: 1460, values: [{ value: 'rewarded', freq: 30 }],
     bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 40 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 0 }],
   });
@@ -83,11 +83,11 @@ test('semantic_index({ property }) surfaces per-app bundle_coverage', async () =
 // bundle is a HELPER across the other views (discoverability), not just its own view.
 test('bundle is integrated as a helper across the index views', async () => {
   const e = engine();
-  e.valueIndex.upsertProperty('ad_type_of_event_data', {
+  e.valueIndex.upsertProperty('events', 'ad_type_of_event_data', {
     distinctCount: 3, totalCount: 40, nullCount: 1460, values: [{ value: 'rewarded', freq: 30 }],
     bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 40 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 0 }],
   });
-  e.valueIndex.upsertProperty('level_id_of_event_data', {
+  e.valueIndex.upsertProperty('events', 'level_id_of_event_data', {
     distinctCount: 10, totalCount: 900, nullCount: 600, values: [{ value: '1', freq: 100 }],
     bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 600 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 300 }],
   });

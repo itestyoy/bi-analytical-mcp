@@ -2,6 +2,8 @@
 select
     appsflyer_id as player_id_of_internal,
     install_date,
+    install_time_valid_from,
+    install_time_valid_until,
     platform,
     os_version,
     device_model,

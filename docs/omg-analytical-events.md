@@ -74,7 +74,9 @@ names (current, non-deprecated).
 
 ## 3. How this maps to our two-model semantic layer
 
-The MCP server models **one events fact + one user dimension joined by `user`**.
+The MCP server models **an events fact + a user dimension joined by `user`**. (The catalog
+can carry SEVERAL events facts — each with its own event vocabulary, e.g. a crash-reporting
+fact alongside this analytics one; the mapping below concerns the analytics fact.)
 Mapping the real OMG table onto that:
 
 | Logical (catalog) | Real column |

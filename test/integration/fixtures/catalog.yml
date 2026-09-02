@@ -18,6 +18,15 @@ models:
       mcp:
         role: events
         primary_entity: event
+        # RELATIONSHIPS declared once, here, and used by both the semantic layer and pipeline
+        # joins. A key may span SEVERAL columns, and a time column may be lined up at a coarser
+        # grain — that is how a per-event source meets a per-day one without fanning out.
+        entities:
+          # The AD FUNNEL: several events sharing one tracking_id are one funnel. The crash
+          # source points at it with whichever per-format column it recorded last.
+          ad_funnel:
+            type: foreign
+            key: [tracking_id, player_id_of_internal]
         event_semantics:
           acquisition_event: first_launch
           session_event: new_session
@@ -40,12 +49,22 @@ models:
           - tutorial
           - screen_changed
     columns:
+      - name: event_id
+        data_type: string
+        description: "Event identifier (one row per event)."
+        meta: { mcp: { index: false } }
       - name: player_id_of_internal
         data_type: string
         description: "Player identifier; joins events to dim_users / fct_experiment_assignments."
         meta:
           mcp:
             entity: { name: user, type: foreign }
+      - name: tracking_id
+        data_type: string
+        description: >
+          Ad-funnel id: the events of one ad funnel share it, so joining on it reconstructs
+          what happened in that funnel. NULL on events that are not part of an ad funnel.
+        meta: { mcp: { index: false } }
       - name: session_number
         data_type: integer
         description: "Per-user session counter."
@@ -187,20 +206,35 @@ models:
         meta: { mcp: { unit: seconds, events: [level_completed] } }
 
   - name: dim_users
-    description: "User attributes — one row per player."
+    description: >
+      The install record: one row per player PER VALIDITY WINDOW (SCD-2), so a player whose
+      attributes changed has several versions. Every join to it is point-in-time — the player
+      key AND a time that falls inside the window — otherwise a row matches every historical
+      version and counts inflate. The window bounds are install_time_valid_from /
+      install_time_valid_until; MetricFlow applies them itself, a pipeline states them in
+      `between`.
     meta:
       mcp:
         role: users
     columns:
       - name: player_id_of_internal
         data_type: string
-        description: "Player identifier (primary key)."
+        description: "Player identifier. NOT unique here — unique only within one validity window."
         meta:
           mcp:
             entity: { name: user, type: primary }
+      - name: install_time_valid_from
+        data_type: timestamp
+        description: "Start of this version's validity window (inclusive)."
+        meta: { mcp: { dimension: { validity: start } } }
+      - name: install_time_valid_until
+        data_type: timestamp
+        description: "End of this version's validity window (inclusive)."
+        meta: { mcp: { dimension: { validity: end } } }
       - name: install_date
         data_type: date
-        description: "Install date."
+        description: "Install date — the same across a player's versions; groupable as a cohort attribute."
+        meta: { mcp: { is_time: true } }
       - name: platform
         data_type: string
         description: "Device platform (ios/android)."
@@ -261,3 +295,228 @@ models:
       - name: ended_at
         data_type: timestamp
         description: "When the player's assignment ended."
+
+  # A SECOND events source, equal and independent. Same shape as fct_analytics_events
+  # (event_name + time axis + flattened, event-scoped `*_of_event_data` payload) but a SEPARATE
+  # vocabulary: nothing is shared with the analytics source, and its events/properties are
+  # addressed with source: 'crashlytics'. `primary_entity` MUST differ from every other model's
+  # (MetricFlow rejects two semantic models sharing a primary entity).
+  - name: fct_crashlytics_events
+    description: >
+      Crash-reporting events fact — one row per crash / non-fatal error / ANR reported from
+      the player's device. Its payload is event-scoped exactly like the analytics fact:
+      anr_duration_of_event_data exists only on anr, crash_message_of_event_data only on
+      fatal_crash — scope by event_name first or they read NULL. Joins to dim_users on
+      player_id_of_internal.
+    meta:
+      mcp:
+        role: crashlytics
+        primary_entity: crash
+        entities:
+          # A crash row records the LAST ad funnel of each format seen before the app died —
+          # one column per format, only the one in play populated. Each is a VARIANT of the
+          # same relationship, so the caller picks the format the question is about:
+          # ad_funnel_rewarded / _interstitial / _banner. Joining it to the events source
+          # reconstructs the funnel that was running when the crash happened.
+          # NOBODY owns this key: one funnel id spans SEVERAL events, so neither side is
+          # unique on it and MetricFlow cannot join it — it is a pipeline join.
+          ad_funnel:
+            type: foreign
+            variants:
+              rewarded:     { key: [rewarded_tracking_id, player_id_of_internal] }
+              interstitial: { key: [interstitial_tracking_id, player_id_of_internal] }
+              banner:       { key: [banner_tracking_id, player_id_of_internal] }
+        event_semantics:
+          crash_event: fatal_crash
+        known_events:
+          - fatal_crash
+          - non_fatal
+          - anr
+    columns:
+      - name: player_id_of_internal
+        data_type: string
+        description: "Player identifier; joins crash reports to dim_users."
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }
+      - name: crash_id
+        data_type: string
+        description: "Crash report identifier (one row per report)."
+        meta: { mcp: { index: false } }
+      - name: rewarded_tracking_id
+        data_type: string
+        description: "Last REWARDED ad funnel seen before the crash; NULL if there was none."
+        meta: { mcp: { index: false } }
+      - name: interstitial_tracking_id
+        data_type: string
+        description: "Last INTERSTITIAL ad funnel seen before the crash; NULL if there was none."
+        meta: { mcp: { index: false } }
+      - name: banner_tracking_id
+        data_type: string
+        description: "Last BANNER ad funnel seen before the crash; NULL if there was none."
+        meta: { mcp: { index: false } }
+      - name: event_time
+        data_type: timestamp
+        description: "When the crash was reported (the metric time axis of this fact)."
+        meta:
+          mcp:
+            is_time: true
+      - name: event_name
+        data_type: string
+        description: "Crash event type (fatal_crash / non_fatal / anr)."
+        meta:
+          mcp:
+            is_event_name: true
+      - name: app_version
+        data_type: string
+        description: "App version the crash was reported from. Present on every crash row."
+        meta:
+          mcp:
+            dimension: {}
+      - name: device_model
+        data_type: string
+        description: "Device model the crash was reported from. Present on every crash row."
+        meta:
+          mcp:
+            dimension: {}
+      - name: issue_title_of_event_data
+        data_type: string
+        description: "Crashlytics issue title (the grouping key of a crash). Events: fatal_crash, non_fatal, anr."
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal, anr]
+      - name: is_fatal_of_event_data
+        data_type: boolean
+        description: "Whether the report crashed the app. Events: fatal_crash, non_fatal (NULL on anr)."
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal]
+      - name: anr_duration_of_event_data
+        data_type: numeric
+        description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
+        meta:
+          mcp:
+            unit: seconds
+            events: [anr]
+      - name: crash_message_of_event_data
+        data_type: string
+        description: "Exception message of the crash. Events: fatal_crash ONLY."
+        meta:
+          mcp:
+            events: [fatal_crash]
+      # A COMPLEX (array) payload property — the crash fact carries the same kind of
+      # nested payload the analytics fact does, so the unnest pipeline + the complex
+      # coverage/example pass of the value index must work here too.
+      - name: breadcrumbs_of_event_data
+        data_type: string
+        description: >
+          Breadcrumb trail leading up to the report — a JSON array of strings, in order.
+          Explode it with an unnest stage for per-step frequency. Events: all crash events.
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal, anr]
+            array: { items: string, encoding: json }
+      # An ARRAY OF STRUCTS, flattened into one column holding JSON: the exception stack. Unnest
+      # it with `field` for one field per row, or without `field` to bind the whole frame and
+      # pull several fields off it downstream (compute op=json_field). NULL on anr — a blocked
+      # main thread has no exception stack — so those reports drop out of an unnest.
+      - name: stack_frames_of_event_data
+        data_type: string
+        description: >
+          Exception stack, innermost frame first — a JSON array of { file, line, in_app }.
+          Events: fatal_crash, non_fatal (NULL on anr).
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal]
+            array:
+              encoding: json
+              fields: { file: string, line: int, in_app: boolean }
+      # A JSON OBJECT (not an array): Crashlytics custom keys, whatever the app attached to the
+      # report. Read one key with compute op=json_field / derive op=struct_field; the column is
+      # TEXT holding JSON, so it is parsed before the field is taken.
+      - name: custom_keys_of_event_data
+        data_type: string
+        description: >
+          Custom keys attached to the report — a JSON object (level / coins / network here).
+          Present on every crash row.
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal, anr]
+
+  # A NON-EVENTS source with its own MEASURES, declared entirely in this schema. It has no
+  # event_name, so it is not an events fact — but it does have a time axis (is_time) and a
+  # grain of its own (one row per player per day). Every measure below is a plain declaration:
+  # any column, any aggregation from the supported set, no code knows these names.
+  - name: fct_player_acquisition
+    description: >
+      Player-level acquisition spend: one row per (player, day) with the cost, impressions and
+      clicks attributed to that player. Amounts are MEASURES (aggregate them), the channel
+      columns are attributes (group by them). Joins to an events source by the PLAYER key alone
+      (many-to-many by design — carry a channel attribute onto events, never sum money over it),
+      and to the install record by the player key AND the validity window, point-in-time.
+    meta:
+      mcp:
+        role: acquisition
+        primary_entity: acquisition
+        # A model-level entry is an aggregatable EXPRESSION over the model's columns. Like a
+        # marked column it fixes NO function — the caller picks one per question.
+        measures:
+          cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd, description: "Per-row cost per click." }
+    columns:
+      - name: acquisition_id
+        data_type: string
+        description: "Surrogate key of the (player, day) row."
+        meta:
+          mcp:
+            entity: { name: acquisition, type: primary }
+      - name: player_id_of_internal
+        data_type: string
+        description: "Player the spend is attributed to; joins to dim_users and the events sources."
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }
+      - name: spend_date
+        data_type: timestamp
+        description: "The day the spend was recorded — this source's time axis."
+        meta:
+          mcp:
+            is_time: true
+      # ── AMOUNTS: marked aggregatable, never groupable. No function is fixed here —
+      #    the caller chooses sum / average / max / median / percentile per question.
+      - name: cost
+        data_type: numeric
+        description: "Acquisition cost attributed to the player on that day."
+        meta:
+          mcp:
+            measure: { unit: usd, label: "UA cost" }
+      - name: impressions
+        data_type: integer
+        description: "Ad impressions that led to the attribution, that day."
+        meta:
+          mcp:
+            measure: true
+      - name: clicks
+        data_type: integer
+        description: "Ad clicks that led to the attribution, that day."
+        meta:
+          mcp:
+            measure: true
+      # ── ATTRIBUTES: groupable ───────────────────────────────────────────────────
+      - name: media_source
+        data_type: string
+        description: "Acquisition channel the spend was booked against."
+      - name: campaign
+        data_type: string
+        description: "Campaign name the spend was booked against."
+      - name: campaign_id
+        data_type: string
+        description: "Campaign id — groupable, but not worth profiling (an id has no value set)."
+        meta:
+          mcp:
+            index: false
+      - name: ingest_batch_id
+        data_type: string
+        description: "Loader batch id — a real column a pipeline can reference, but not an attribute."
+        meta:
+          mcp:
+            dimension: false

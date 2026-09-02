@@ -78,6 +78,23 @@ export class PostgresDialect extends Dialect {
     return ct ? `${base}::${ct}` : base;
   }
 
+  // ── column-level complex primitives (a flattened payload column, no blob) ──
+  // A TEXT column holding JSON must be cast before the jsonb operators apply.
+  jsonColumnArrayLength(column) { return `jsonb_array_length((${column})::jsonb)`; }
+
+  jsonColumnArrayContains(column, value) {
+    return `(((${column})::jsonb) @> ${this.sqlLiteral(JSON.stringify([value]))}::jsonb)`;
+  }
+
+  arrayContains(column, value) { return `(${this.sqlLiteral(value)} = ANY(${column}))`; }
+
+  jsonColumnStructField(column, field, type = 'string') {
+    this.ident(field);
+    const base = `((${column})::jsonb->>'${field}')`;
+    const ct = this.castType(type);
+    return ct ? `${base}::${ct}` : base;
+  }
+
   // ── time / scalar / statistical ────────────────────────────────────────────
   dateDiff(unit, from, to) {
     switch (unit) {
@@ -173,9 +190,14 @@ export class PostgresDialect extends Dialect {
         return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
       }
       case 'join': {
-        const eq = op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
+        // `onKeys` = a relationship declared in the schema: each side brings its OWN expression
+        // for the same logical key (different column names, a time column truncated to the
+        // declared grain), compared part by part. `on` = the plain shared-name form.
+        const eq = op.onKeys
+          ? op.onKeys.left.map((lp, i) => `${this.keyPartExpr(lp, (c) => `base.${c}`)} = ${this.keyPartExpr(op.onKeys.right[i], (c) => `j.${c}`)}`).join(' AND ')
+          : op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
         const btw = op.between ? ` AND base.${this.ident(op.between.value)} BETWEEN j.${this.ident(op.between.from)} AND j.${this.ident(op.between.to)}` : '';
-        const attrs = op.attrs.map((a) => `j.${this.ident(a)} AS ${this.ident(a)}`);
+        const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
         return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
       }
       case 'aggregate': {

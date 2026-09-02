@@ -28,35 +28,40 @@ export class CatalogSearch {
   _build() {
     if (this._indexes) return this._indexes;
     const c = this.catalog;
-    const descs = c.eventPropertyDescriptions();
-
-    const events = new FuzzyIndex(c.eventNames(), {
-      keys: [{ name: 'name', get: (e) => e }],
-      tiebreak: (e) => e,
+    // Every source's vocabulary is searchable. An item carries its SOURCE as a field, so a hit
+    // says where it lives without the source being glued into the name.
+    const eventItems = c.facts.flatMap((f) => c.eventNames(f).map((name) => ({ source: f, name })));
+    const propItems = c.facts.flatMap((f) => {
+      const d = c.eventPropertyDescriptions(f);
+      return c.eventProps(f).map((name) => ({ source: f, name, desc: d[name] || '' }));
     });
-    const properties = new FuzzyIndex(c.eventProps(), {
+    const events = new FuzzyIndex(eventItems, {
+      keys: [{ name: 'name', get: (e) => e.name }],
+      tiebreak: (e) => `${e.source}.${e.name}`,
+    });
+    const properties = new FuzzyIndex(propItems, {
       keys: [
-        { name: 'name', weight: NAME_WEIGHT, get: (p) => p },
-        { name: 'desc', weight: DESC_WEIGHT, get: (p) => descs[p] || '' },
+        { name: 'name', weight: NAME_WEIGHT, get: (p) => p.name },
+        { name: 'desc', weight: DESC_WEIGHT, get: (p) => p.desc },
       ],
-      tiebreak: (p) => p,
+      tiebreak: (p) => `${p.source}.${p.name}`,
     });
-    // Dimension attributes of the non-anchor models (users/experiments), keyed as
-    // '<model>.<column>' — CONSISTENT with the { property } drill-down that accepts it.
+    // Dimension attributes of the non-fact models (users/experiments): { source, column } —
+    // the same pair the { property } drill-down takes.
     const dimItems = [];
     for (const mk of c.modelKeys()) {
-      if (mk === c.anchor) continue;
+      if (c.isFact(mk)) continue;
       const dDescs = c.columnDescriptions(mk);
       for (const [col, dspec] of Object.entries(c.getModel(mk).dimensions || {})) {
-        dimItems.push({ property: `${mk}.${col}`, model: mk, column: col, type: dspec.type, description: dDescs[col] || '' });
+        dimItems.push({ source: mk, column: col, type: dspec.type, description: dDescs[col] || '' });
       }
     }
     const dimensions = new FuzzyIndex(dimItems, {
       keys: [
-        { name: 'name', weight: NAME_WEIGHT, get: (d) => [d.column, d.property] },
+        { name: 'name', weight: NAME_WEIGHT, get: (d) => [d.column] },
         { name: 'desc', weight: DESC_WEIGHT, get: (d) => d.description },
       ],
-      tiebreak: (d) => d.property,
+      tiebreak: (d) => `${d.source}.${d.column}`,
     });
     const recipes = this.recipes ? new FuzzyIndex(this.recipes.summary(), {
       keys: [
@@ -81,35 +86,44 @@ export class CatalogSearch {
     const opts = { threshold: fuzzy ? 0.6 : 1.01, fuzzy };
     // DATA-DERIVED applicability from the value index (which events actually carry each property),
     // not the declared meta.mcp.events. Absent/unknown ⇒ treated as "all events" downstream.
-    const applies = this.valueIndex.appliesMap(c.eventProps()); // property -> observed [event_name]
+    // DATA-DERIVED applicability per source (which events actually carry each property).
+    const appliesOf = (source) => this.valueIndex.appliesMap(source, c.eventProps(source));
 
-    const event_names = events.search(query, opts).map(({ item: e, score, match }) => ({
-      event: e,
-      property_count: c.eventProps().filter((p) => { const evs = applies[p]; return !evs || evs.includes(e); }).length,
+    const event_names = events.search(query, opts).map(({ item: e, score, match }) => {
+      const applies = appliesOf(e.source);
+      return {
+        event: e.name,
+        source: e.source,
+        property_count: c.eventProps(e.source).filter((p) => { const evs = applies[p]; return !evs || evs.includes(e.name); }).length,
+        score: round3(score), match,
+      };
+    });
+    const property_matches = properties.search(query, opts).map(({ item: p, score, match }) => ({
+      property: p.name,
+      source: p.source,
+      type: c.eventPropertySpec(p.name, p.source)?.type ?? null,
+      events: appliesOf(p.source)[p.name] || null,
       score: round3(score), match,
     }));
-    const property_matches = properties.search(query, opts).map(({ item: p, score, match }) => ({
-      property: p, type: c.eventPropertySpec(p)?.type ?? null, events: applies[p] || null, score: round3(score), match,
-    }));
     const dimension_matches = dimensions.search(query, opts).map(({ item: d, score, match }) => ({
-      property: d.property, model: d.model, type: d.type, description: d.description || undefined, score: round3(score), match,
+      source: d.source, column: d.column, type: d.type, description: d.description || undefined, score: round3(score), match,
     }));
     const recipe_matches = recipes
       ? recipes.search(query, opts).map(({ item: r, score, match }) => ({ id: r.id, title: r.title, task_type: r.task_type, score: round3(score), match }))
       : [];
 
     // VALUE matches live in the (dynamic) value index: exact substring + fuzzy fallback.
-    // Namespaced keys ('users.country') are dimension attributes; bare keys are event
-    // properties with the event(s) carrying them — so "rewarded" resolves to its
-    // property, and a mistyped "germny" still surfaces 'Germany'.
+    // Each hit names its SOURCE plus the property within it — so "rewarded" resolves to the
+    // property that carries it, and a mistyped "germny" still surfaces 'Germany'.
     const value_matches = this.valueIndex.searchValues(query, limit, { fuzzy }).map((v) => {
-      const dot = v.property.indexOf('.');
-      const base = { value: v.value, freq: v.freq, property: v.property, score: round3(v.score ?? 1), match: v.match || 'exact' };
-      if (dot > 0) {
-        const mk = v.property.slice(0, dot); const col = v.property.slice(dot + 1);
-        return { ...base, type: c.models[mk]?.dimensions?.[col]?.type ?? null, model: mk, events: null };
+      const base = { value: v.value, freq: v.freq, source: v.source, property: v.property, score: round3(v.score ?? 1), match: v.match || 'exact' };
+      // An indexed value belongs to (source, property): an event property of that source, or one
+      // of its dimension columns.
+      const isEventProp = c.isFact(v.source) && c.eventProps(v.source).includes(v.property);
+      if (isEventProp) {
+        return { ...base, type: c.eventPropertySpec(v.property, v.source)?.type ?? null, events: appliesOf(v.source)[v.property] || null };
       }
-      return { ...base, type: c.eventPropertySpec(v.property)?.type ?? null, events: applies[v.property] || null };
+      return { ...base, type: c.models[v.source]?.dimensions?.[v.property]?.type ?? null, model: v.source, events: null };
     });
 
     return { query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches, recommendations: this._recommend({ query, fuzzy, event_names, property_matches, dimension_matches, value_matches, recipe_matches }) };
@@ -120,13 +134,13 @@ export class CatalogSearch {
     const recs = [];
     if (value_matches.length) {
       const top = value_matches[0];
-      recs.push(`Value '${top.value}' lives in ${top.model ? `attribute '${top.property}' (the '${top.model}' model)` : `property '${top.property}'`}${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ property: '${top.property}' }).`);
-      if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ event: '${top.events[0]}' }).`);
+      recs.push(`Value '${top.value}' lives in ${top.model ? 'attribute' : 'property'} '${top.property}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ source: '${top.source}', property: '${top.property}' }).`);
+      if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ source: '${top.source}', event: '${top.events[0]}' }).`);
     }
     if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ recipe: '${recipe_matches[0].id}' }) returns a ready payload + the reusable technique.`);
-    if (dimension_matches.length) recs.push(`Attribute '${dimension_matches[0].property}' matches — drill its values with semantic_index({ property: '${dimension_matches[0].property}' }).`);
-    if (property_matches.length) recs.push(`Drill into property '${property_matches[0].property}' for its real values + cardinality: semantic_index({ property: '${property_matches[0].property}' }).`);
-    if (event_names.length) recs.push(`See what event '${event_names[0].event}' carries: semantic_index({ event: '${event_names[0].event}' }).`);
+    if (dimension_matches.length) { const d = dimension_matches[0]; recs.push(`Attribute '${d.column}' of source '${d.source}' matches — drill its values with semantic_index({ source: '${d.source}', property: '${d.column}' }).`); }
+    if (property_matches.length) { const pm = property_matches[0]; recs.push(`Drill into property '${pm.property}' of source '${pm.source}' for its real values + cardinality: semantic_index({ source: '${pm.source}', property: '${pm.property}' }).`); }
+    if (event_names.length) { const ev = event_names[0]; recs.push(`See what event '${ev.event}' of source '${ev.source}' carries: semantic_index({ source: '${ev.source}', event: '${ev.event}' }).`); }
 
     const all = [...event_names, ...property_matches, ...dimension_matches, ...value_matches, ...recipe_matches];
     if (all.length && !all.some((m) => m.match === 'exact')) {

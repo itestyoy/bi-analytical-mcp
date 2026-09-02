@@ -37,6 +37,11 @@ before(async () => {
 }, opts);
 
 after(async () => { if (pg) await pg.stop(); });
+// dim_users is SLOWLY-CHANGING (one row per player per validity window), so every join to it
+// is point-in-time: the declared player key AND the event time inside the window. Without the
+// window a player with several versions matches all of them and counts inflate.
+const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_time_valid_until' });
+
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 // where -> derive -> join -> aggregate(group_by)
@@ -45,7 +50,7 @@ test('pipeline aggregate: IAP revenue by country = US35 / GB25 / BR25', opts, as
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: ['country'] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -147,7 +152,7 @@ test('pipeline pivot: revenue pivoted into per-country columns (US=35, GB=25, BR
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: ['country'] },
     { stage: 'pivot', group_by: [], on: 'country', fn: 'sum', value_column: 'price', values: ['US', 'GB', 'BR'] },
   ]);
   assert.equal(r.ok, true, JSON.stringify(r));
@@ -397,7 +402,7 @@ test('pipeline compute date_diff: u1 purchases on install-day and +1 → sum(dsi
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'player_id_of_internal', op: 'eq', value: 'u1' }, { column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['install_date'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: ['install_date'] },
     { stage: 'compute', name: 'dsi', op: 'date_diff', from: { column: 'install_date' }, to: { column: 'device_time' }, unit: 'day' },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'total_dsi', fn: 'sum', column: 'dsi' }, { name: 'max_dsi', fn: 'max', column: 'dsi' }, { name: 'n', fn: 'count' }] },
   ]);
@@ -427,7 +432,7 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, as
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
     { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
-    { stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'] },
+    { stage: 'join', with: 'users', via: 'user', between: AT('device_time'), attrs: ['country'] },
     { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }, { name: 'n', fn: 'count' }] },
     { stage: 'unpivot', keep: ['country'], columns: ['revenue', 'n'], name_as: 'metric', value_as: 'value' },
   ]);

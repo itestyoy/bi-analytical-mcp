@@ -530,6 +530,62 @@ inflates it to **267.75** — it is a many-to-many pairing, not a spend metric.
 
 ---
 
+## 14. Complex payload types on the crash source
+
+Three of the crash columns are not scalars. All three are FLATTENED — one real column each,
+holding JSON — which is the shape a modelled warehouse produces and the shape with no raw
+payload blob to key into.
+
+| column | shape | present on |
+|---|---|---|
+| `breadcrumbs_of_event_data` | JSON array of strings | every report (13) |
+| `stack_frames_of_event_data` | JSON array of `{ file, line, in_app }` | fatal_crash + non_fatal (10); NULL on anr |
+| `custom_keys_of_event_data` | JSON object `{ level, coins, network }` | every report (13) |
+
+**Breadcrumbs** — 20 elements over 13 reports:
+
+| value | elements | reports |
+|---|---|---|
+| level_start | 4 | 4 |
+| net_retry | **4** | **3** (k8 logged it twice) |
+| ui_freeze | 3 | 3 |
+| gc_pause | 3 | 2 |
+| ad_shown | 2 | 2 |
+| shop_open | 2 | 2 |
+| iap_start | 1 | 1 |
+| decode | 1 | 1 |
+
+Per report: k1 2, k2 1, k3 2, k4 2, k5 1, k6 1, k7 1, k8 2, k9 1, k10 1, k11 2, k12 1, k13 3.
+First → last breadcrumb: k1 `level_start→ad_shown`, k3 `shop_open→iap_start`,
+k11 `ui_freeze→gc_pause`, k13 `gc_pause→gc_pause`, k2 `level_start→level_start` (one element).
+
+**Stack frames** — 16 frames over 10 reports, 6 distinct files:
+
+| file | frames | reports |
+|---|---|---|
+| Game.cs | 5 | 5 |
+| Net.cs | 4 | 3 (k8 has two) |
+| Engine.cs | 3 | 3 |
+| Shop.cs | 2 | 2 |
+| Ads.cs | 1 | 1 |
+| Decode.cs | 1 | 1 |
+
+`in_app` true 13 / false 3 (the three Engine.cs frames). `sum(line)` **922**, deepest
+**Engine.cs:250** in k6. Depth per report: k1 2, k2 1, k3 3, k4 2, k5 1, k6 2, k7 1, k8 2,
+k9 1, k10 1; k11–k13 NULL (an ANR has no exception stack). So an `unnest` yields 16 rows over
+10 reports while `array_length` keeps all 13 with NULL for the ANRs.
+
+**Custom keys** — `network` wifi **8** / cellular **5**; `sum(coins)` **5205**;
+`sum(level)` **163**, max **31**, median **12**. Breadcrumb elements split by network:
+wifi **13** / cellular **7**.
+
+Crossing the complex data with a join: breadcrumb elements by the install country valid at the
+crash — GB **10** / US **6** / DE **3** / BR **1** (20, no duplicates). Stack frames × the
+rewarded ad funnel — **20** rows over 6 reports, 5 files, 6 funnel events (k13 carries a funnel
+but no stack, Ads.cs sits only on k4 which carries none).
+
+---
+
 ## Notes for test authors
 
 - All `event_data` values are valid JSON objects; inner double quotes are

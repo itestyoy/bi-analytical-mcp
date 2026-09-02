@@ -15,6 +15,8 @@ select
     anr_duration  as anr_duration_of_event_data,
     crash_message as crash_message_of_event_data,
     breadcrumbs   as breadcrumbs_of_event_data,
+    stack_frames  as stack_frames_of_event_data,
+    custom_keys   as custom_keys_of_event_data,
     app_version,
     device_model
 from {{ ref('seed_crashlytics') }}

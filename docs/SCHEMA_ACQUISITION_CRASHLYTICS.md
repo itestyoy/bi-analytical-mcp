@@ -162,8 +162,9 @@
         description: "Exception message of the crash. Events: fatal_crash ONLY."
         meta: { mcp: { events: [fatal_crash] } }
 
-      # ── a COMPLEX (array) payload property — explode it with an unnest stage ────
-      - name: breadcrumbs_of_event_data
+      # ── COMPLEX payload: a crash report is not flat. Flattened, each of these is ONE
+      #    column holding JSON — declare the shape and the pipeline can explode or read it.
+      - name: breadcrumbs_of_event_data           # ARRAY of scalars
         data_type: string
         description: >
           Breadcrumb trail leading up to the report — a JSON array of strings, in order.
@@ -172,7 +173,38 @@
           mcp:
             events: [fatal_crash, non_fatal, anr]
             array: { items: string, encoding: json }
+      - name: stack_frames_of_event_data          # ARRAY OF STRUCTS
+        data_type: string
+        description: >
+          Exception stack, innermost frame first — a JSON array of { file, line, in_app }.
+          Events: fatal_crash, non_fatal (NULL on anr).
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal]
+            array:
+              encoding: json                      # a STRING holding JSON; `native` = a real ARRAY column
+              fields: { file: string, line: int, in_app: boolean }
+      - name: custom_keys_of_event_data           # a JSON OBJECT, not an array
+        data_type: string
+        description: "Custom keys attached to the report — a JSON object."
+        meta: { mcp: { events: [fatal_crash, non_fatal, anr] } }
 ```
+
+### Как конвейер это читает
+
+| что нужно | стадия |
+|---|---|
+| массив, по элементам | `unnest { source, as }` — одна строка на элемент |
+| массив, по отчёту | `derive { op: array_length }` / `{ op: contains, value }` — зерно не меняется |
+| массив структур, одно поле | `unnest { source, as, field }` |
+| массив структур, несколько полей | `unnest { source, as }`, затем `compute { op: json_field, field }` на каждое поле |
+| массив, по позиции | `compute { op: json_parse_array }` → `element_at` / `array_last` |
+| JSON-объект | `derive { op: struct_field, field }` или `compute { op: json_field, field }` |
+
+`unnest` **выбрасывает** отчёты, у которых массив NULL (у ANR нет стека исключения);
+`array_length` их сохраняет и читает NULL. Оба чтения верны — выбирается то зерно, о котором
+вопрос. Комплексная операция над не-комплексной колонкой отвергается с указанием, чем колонка
+объявлена на самом деле.
 
 **На что смотреть при заполнении**
 

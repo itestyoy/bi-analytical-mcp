@@ -80,6 +80,22 @@ export class BigQueryDialect extends Dialect {
     return ct ? `CAST(${base} AS ${ct})` : base;
   }
 
+  // ── column-level complex primitives (a flattened payload column, no blob) ──
+  jsonColumnArrayLength(column) { return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$'))`; }
+
+  jsonColumnArrayContains(column, value) {
+    return `${this.sqlLiteral(value)} IN UNNEST(JSON_EXTRACT_STRING_ARRAY(${column}, '$'))`;
+  }
+
+  arrayContains(column, value) { return `${this.sqlLiteral(value)} IN UNNEST(${column})`; }
+
+  jsonColumnStructField(column, field, type = 'string') {
+    this.ident(field);
+    const base = `JSON_VALUE(${column}, '$.${field}')`;
+    const ct = this.castType(type);
+    return ct ? `CAST(${base} AS ${ct})` : base;
+  }
+
   // ── time / scalar / statistical ────────────────────────────────────────────
   dateDiff(unit, from, to) {
     const u = { day: 'DAY', hour: 'HOUR', minute: 'MINUTE', second: 'SECOND' }[unit];

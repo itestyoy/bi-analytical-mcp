@@ -416,6 +416,32 @@ models:
           mcp:
             events: [fatal_crash, non_fatal, anr]
             array: { items: string, encoding: json }
+      # An ARRAY OF STRUCTS, flattened into one column holding JSON: the exception stack. Unnest
+      # it with `field` for one field per row, or without `field` to bind the whole frame and
+      # pull several fields off it downstream (compute op=json_field). NULL on anr — a blocked
+      # main thread has no exception stack — so those reports drop out of an unnest.
+      - name: stack_frames_of_event_data
+        data_type: string
+        description: >
+          Exception stack, innermost frame first — a JSON array of { file, line, in_app }.
+          Events: fatal_crash, non_fatal (NULL on anr).
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal]
+            array:
+              encoding: json
+              fields: { file: string, line: int, in_app: boolean }
+      # A JSON OBJECT (not an array): Crashlytics custom keys, whatever the app attached to the
+      # report. Read one key with compute op=json_field / derive op=struct_field; the column is
+      # TEXT holding JSON, so it is parsed before the field is taken.
+      - name: custom_keys_of_event_data
+        data_type: string
+        description: >
+          Custom keys attached to the report — a JSON object (level / coins / network here).
+          Present on every crash row.
+        meta:
+          mcp:
+            events: [fatal_crash, non_fatal, anr]
 
   # A NON-EVENTS source with its own MEASURES, declared entirely in this schema. It has no
   # event_name, so it is not an events fact — but it does have a time axis (is_time) and a

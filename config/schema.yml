@@ -1554,6 +1554,36 @@ models:
   #       data_type: numeric
   #       description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
   #       meta: { mcp: { unit: seconds, events: [anr] } }
+  #     # COMPLEX payload columns. A crash report is not flat: a breadcrumb trail, an exception
+  #     # stack of frames, and whatever custom keys the app attached. Flattened, each is ONE
+  #     # column holding JSON — declare the shape and the pipeline can explode or read it.
+  #     - name: breadcrumbs_of_event_data          # ARRAY of scalars
+  #       data_type: string
+  #       description: "Breadcrumb trail leading up to the report — a JSON array of strings, in order."
+  #       meta: { mcp: { events: [fatal_crash, non_fatal, anr], array: { items: string, encoding: json } } }
+  #     - name: stack_frames_of_event_data         # ARRAY OF STRUCTS
+  #       data_type: string
+  #       description: "Exception stack, innermost frame first — a JSON array of { file, line, in_app }."
+  #       meta:
+  #         mcp:
+  #           events: [fatal_crash, non_fatal]     # NULL on anr: a blocked thread has no stack
+  #           array:
+  #             encoding: json                     # a STRING holding JSON (native = a real ARRAY column)
+  #             fields: { file: string, line: int, in_app: boolean }
+  #     - name: custom_keys_of_event_data          # a JSON OBJECT, not an array
+  #       data_type: string
+  #       description: "Custom keys attached to the report — a JSON object."
+  #       meta: { mcp: { events: [fatal_crash, non_fatal, anr] } }
+  #
+  #   HOW A PIPELINE READS THEM:
+  #     array, per element   unnest { source, as }                    -> one row per element
+  #     array, per report    derive { op: array_length | contains }   -> grain unchanged
+  #     array<struct>        unnest { source, as, field }             -> one field per row, or
+  #                          unnest { source, as } + compute json_field -> several fields, same row
+  #     array, positional    compute json_parse_array -> element_at / array_last
+  #     JSON object          derive { op: struct_field, field } or compute json_field
+  #   An unnest DROPS reports whose array is NULL; array_length keeps them and reads NULL. Both
+  #   readings are correct — pick the grain the question is about.
 
   # ── DECLARED JOIN KEYS (meta.mcp.entities) ────────────────────────────────────────────
   # A relationship between two models is declared ONCE, in the schema, and both paths use it:

@@ -78,6 +78,23 @@ export class PostgresDialect extends Dialect {
     return ct ? `${base}::${ct}` : base;
   }
 
+  // ── column-level complex primitives (a flattened payload column, no blob) ──
+  // A TEXT column holding JSON must be cast before the jsonb operators apply.
+  jsonColumnArrayLength(column) { return `jsonb_array_length((${column})::jsonb)`; }
+
+  jsonColumnArrayContains(column, value) {
+    return `(((${column})::jsonb) @> ${this.sqlLiteral(JSON.stringify([value]))}::jsonb)`;
+  }
+
+  arrayContains(column, value) { return `(${this.sqlLiteral(value)} = ANY(${column}))`; }
+
+  jsonColumnStructField(column, field, type = 'string') {
+    this.ident(field);
+    const base = `((${column})::jsonb->>'${field}')`;
+    const ct = this.castType(type);
+    return ct ? `${base}::${ct}` : base;
+  }
+
   // ── time / scalar / statistical ────────────────────────────────────────────
   dateDiff(unit, from, to) {
     switch (unit) {

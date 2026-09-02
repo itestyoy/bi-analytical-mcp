@@ -199,19 +199,37 @@ const STAGES = {
       },
     }),
     build: ({ d, catalog, cols, source }, p) => {
-      const json = catalog.eventDataColumn(source);
+      // The RAW payload blob. Only a BLOB property is ever read through it; a flattened payload
+      // column carries its value itself and is referenced directly below — which is what makes
+      // these ops work on a fully flattened fact (a crash report exploded into real columns),
+      // where there is no blob at all.
+      const blob = catalog.eventDataColumn(source);
       const found = sourceProp(catalog, source, p.source);
       const spec = found?.spec;
       const key = found?.name || p.source; // the PHYSICAL payload key (qualifier stripped)
+      // A FLATTENED payload column carries the array/object itself; `encoding` says whether it
+      // is a native ARRAY or a STRING holding JSON, which decides how to read it.
+      const flat = spec?.column || null;
+      const native = flat && (spec.encoding || 'native') === 'native';
+      // An array op on a property that is not an array builds SQL the warehouse will reject
+      // (array_length over text). Say so here, naming what the property actually is.
+      if ((p.op === 'array_length' || p.op === 'contains') && spec && !String(spec.type || '').toLowerCase().startsWith('array')) {
+        throw new Error(`derive ${p.op}: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — ${p.op} needs an array (declare the column with meta.mcp.array, or an array / array<struct> entry in the payload spec). For a JSON OBJECT use op=struct_field, or compute op=json_field.`);
+      }
       let expr; let type;
-      // Flattened payload (spec.column) is a real column → reference it directly;
-      // legacy JSON-blob payload is extracted from the event_data column.
-      if (p.op === 'extract' && spec?.column) { expr = spec.column; type = p.type || spec.type || 'string'; }
-      else if (p.op === 'extract') { expr = d.jsonExtract(json, key, p.type || 'string'); type = p.type || 'string'; }
-      else if (p.op === 'array_length') { expr = d.jsonArrayLength(json, key); type = 'int'; }
-      else if (p.op === 'contains') { expr = d.jsonArrayContains(json, key, p.value); type = 'boolean'; }
-      else if (p.op === 'struct_field') { expr = d.jsonStructField(json, key, p.field, p.type); type = p.type || 'string'; }
-      else throw new Error(`derive: bad op ${p.op}`);
+      if (p.op === 'extract') {
+        if (flat) { expr = flat; type = p.type || spec.type || 'string'; }
+        else { expr = d.jsonExtract(blob, key, p.type || 'string'); type = p.type || 'string'; }
+      } else if (p.op === 'array_length') {
+        expr = flat ? (native ? d.arrayLength(flat) : d.jsonColumnArrayLength(flat)) : d.jsonArrayLength(blob, key);
+        type = 'int';
+      } else if (p.op === 'contains') {
+        expr = flat ? (native ? d.arrayContains(flat, p.value) : d.jsonColumnArrayContains(flat, p.value)) : d.jsonArrayContains(blob, key, p.value);
+        type = 'boolean';
+      } else if (p.op === 'struct_field') {
+        expr = flat ? d.jsonColumnStructField(flat, p.field, p.type) : d.jsonStructField(blob, key, p.field, p.type);
+        type = p.type || 'string';
+      } else throw new Error(`derive: bad op ${p.op}`);
       return { op: { op: 'extend', cols: [{ name: p.name, expr }] }, cols: addCol(cols, p.name, type) };
     },
   },
@@ -245,7 +263,7 @@ const STAGES = {
         stage: { const: 'compute' },
         name: { type: 'string', pattern: NAME },
         op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'json_parse_array', 'element_at', 'array_last', 'raw', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'elapsed_days', 'case', 'window'] },
-        field: { type: 'string', description: 'Struct field name for op=json_field (extract from a JSON column, e.g. an unnested array-of-struct element).' },
+        field: { type: 'string', description: 'Struct field name for op=json_field — extract one field from a column holding a JSON OBJECT: an unnested array-of-struct element, or a flattened payload column that holds JSON (e.g. a crash report\'s custom keys).' },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
         from: OPERAND, to: OPERAND, // date_diff / elapsed_days (each may be { column } / { value } / { now: true })
@@ -329,7 +347,14 @@ const STAGES = {
       else if (p.op === 'date_trunc') { expr = d.dateTrunc(p.granularity, col()); type = 'time'; }
       else if (p.op === 'date_part') { expr = d.datePart(p.part, col()); type = 'int'; }
       else if (p.op === 'unix_date') { expr = d.unixDateExpr(col()); type = 'int'; }
-      else if (p.op === 'json_field') { expr = d.jsonColumnField(col(), p.field, p.type); type = p.type || 'string'; }
+      else if (p.op === 'json_field') {
+        // An unnested struct element is already JSON-typed; a flattened payload column holding
+        // JSON is TEXT and has to be parsed first, or the json operators do not apply to it.
+        requireCol(cols, p.column);
+        const asJson = cols.get(p.column)?.type === 'json';
+        expr = asJson ? d.jsonColumnField(col(), p.field, p.type) : d.jsonColumnStructField(col(), p.field, p.type);
+        type = p.type || 'string';
+      }
       else if (p.op === 'json_parse_array') { expr = d.jsonParseArray(col()); type = 'array'; } // STRING JSON array → native array (then unnest)
       else if (p.op === 'element_at') { requireArrayCol(cols, p.column, 'element_at'); expr = d.arrayElementAt(col(), p.index); type = p.type || 'string'; }
       else if (p.op === 'array_last') { requireArrayCol(cols, p.column, 'array_last'); expr = d.arrayLast(col()); type = p.type || 'string'; }
@@ -378,6 +403,9 @@ const STAGES = {
       const spec = found?.spec;
       let column; let key; let encoding; let isStruct = false;
       if (spec) {
+        if (!String(spec.type || '').toLowerCase().startsWith('array')) {
+          throw new Error(`unnest: '${p.source}' is ${spec.type ? `declared as ${spec.type}` : 'a scalar property'}, not an array — there is nothing to explode. Declare the column with meta.mcp.array if it holds one, or read a single field with compute op=json_field.`);
+        }
         isStruct = String(spec.type || '').toLowerCase() === 'array<struct>';
         if (spec.column) { column = spec.column; key = null; encoding = spec.encoding || 'native'; } // flattened array column
         else { column = catalog.eventDataColumn(source); key = found.name; encoding = 'blob'; } // legacy JSON-blob property

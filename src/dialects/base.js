@@ -94,6 +94,22 @@ export class Dialect {
   unixDateExpr(_expr) { throw new Error('abstract unixDateExpr'); }
   /** Extract a scalar field from a JSON-valued column (e.g. an unnested struct element). */
   jsonColumnField(_column, _field, _type) { throw new Error('abstract jsonColumnField'); }
+
+  // ── COLUMN-level complex primitives. The pair above works on a JSON BLOB plus a key; these
+  // work on a FLATTENED payload column that itself holds the array/object — the shape a
+  // warehouse produces when the payload is exploded into real columns (a crash fact's
+  // breadcrumbs / stack frames / custom keys), where there is no blob to key into.
+  /** Element count of a column holding a JSON ARRAY (string or json-typed). */
+  jsonColumnArrayLength(_column) { throw new Error('abstract jsonColumnArrayLength'); }
+
+  /** Membership in a column holding a JSON ARRAY. */
+  jsonColumnArrayContains(_column, _value) { throw new Error('abstract jsonColumnArrayContains'); }
+
+  /** Membership in a NATIVE array column. */
+  arrayContains(_column, _value) { throw new Error('abstract arrayContains'); }
+
+  /** One field of a column holding a JSON OBJECT (string or json-typed). */
+  jsonColumnStructField(_column, _field, _type) { throw new Error('abstract jsonColumnStructField'); }
   /** Statistical aggregate (stddev|variance|median|percentile) over a column. */
   statAggExpr(_fn, _columnSql, _q) { throw new Error('abstract statAggExpr'); }
   /** Approximate distinct count (HLL++ where available). */

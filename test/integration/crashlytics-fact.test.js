@@ -270,3 +270,30 @@ test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retr
   assert.equal(by.gc_pause, 3);
   assert.equal(by.iap_start, 1);
 });
+
+// A GOVERNED measure — one the SCHEMA declares with a fixed aggregation (meta.mcp.measures with
+// `agg`), not one the task invents. The task only names it in a metric; the aggregation is the
+// schema's. It has to reach the semantic model of whatever source declared it: an events source
+// used to publish none of them, so a metric naming one pointed at a measure the manifest did not
+// contain. Same 3 ANR rows, same 26 seconds — but the function is fixed for every caller.
+test('a governed measure declared on an events source: anr_seconds = 26', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.create_semantic_model({
+    name: 'gov',
+    semantic_models: [{ from: 'crashlytics', dimensions: [{ source: 'model_column', column: 'app_version' }] }],
+    metrics: [{ name: 'anr_seconds', type: 'simple', measure: { name: 'anr_seconds' } }],
+  });
+  assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
+  const r = await q(out.context_id, { metrics: ['gov_anr_seconds'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.equal(num(r.rows[0].gov_anr_seconds), 26, 'the schema fixed sum(anr_duration_of_event_data)');
+
+  // …and it slices like any other measure: only the ANR reports carry the column, and their
+  // versions split 5.5 on 1.0.0 against 8.0 + 12.5 on 1.1.0 (SEED_DATA §10).
+  const g = await q(out.context_id, { metrics: ['gov_anr_seconds'], group_by: ['gov_app_version'] });
+  assert.equal(g.ok, true, JSON.stringify(g.error));
+  const by = mapCol(g.rows, groupCol(g, 'gov_anr_seconds'), 'gov_anr_seconds');
+  assert.equal(by['1.0.0'], 5.5);
+  assert.equal(by['1.1.0'], 20.5);
+  assert.equal(sumCol(g.rows, 'gov_anr_seconds'), 26);
+});

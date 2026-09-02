@@ -310,6 +310,16 @@ models:
       player_id_of_internal.
     meta:
       mcp:
+        # A GOVERNED measure declared on an EVENTS source: unlike a plain `measure: true`
+        # column (any function, chosen per question), an entry WITH `agg` fixes the function for
+        # everyone. Declared here to keep the fact path honest — a source that owns a measure has
+        # to publish it into the semantic model, whatever its role.
+        measures:
+          anr_seconds:
+            expr: anr_duration_of_event_data
+            agg: sum
+            unit: second
+            description: Total ANR blocked time. Fixed as a sum — the governed form.
         role: crashlytics
         primary_entity: crash
         entities:
@@ -462,6 +472,9 @@ models:
         # marked column it fixes NO function — the caller picks one per question.
         measures:
           cost_per_click: { expr: "cost / nullif(clicks, 0)", unit: usd, description: "Per-row cost per click." }
+          # …and the governed twin: the same schema key WITH `agg` fixes one function for
+          # everyone, while `cost` itself stays freely aggregatable per question.
+          total_spend: { expr: cost, agg: sum, unit: usd, description: "Total acquisition spend — fixed as a sum." }
     columns:
       - name: acquisition_id
         data_type: string

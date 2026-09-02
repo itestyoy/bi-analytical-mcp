@@ -850,6 +850,22 @@ export class Catalog {
     return this.facts.length === 1 ? this.facts[0] : null;
   }
 
+  /**
+   * Resolve the SOURCE an event accessor is asked about. The source is always a separate
+   * argument; it may be omitted only when the catalog has exactly one events source. With
+   * several, an omitted source is a programming error — there is no "default" fact to fall back
+   * to, and silently reading one source's vocabulary for another is exactly the mix-up the
+   * per-source design exists to prevent — so it is refused here, at the accessor.
+   */
+  _fact(fact) {
+    if (fact) {
+      if (!this.facts.includes(fact)) throw new Error(`'${fact}' is not an events source. Events sources: ${this.facts.join(', ')}`);
+      return fact;
+    }
+    if (this.facts.length === 1) return this.facts[0];
+    throw new Error(`a source is required: this catalog has ${this.facts.length} events sources (${this.facts.join(', ')}) and they are never mixed — name the one you mean`);
+  }
+
   /** True when `key` is an events fact (has its own event vocabulary). */
   isFact(key) {
     return this.facts.includes(key);
@@ -906,7 +922,8 @@ export class Catalog {
   }
 
   /** event_data property descriptions (if declared): { property: description }. */
-  eventPropertyDescriptions(fact = this.anchor) {
+  eventPropertyDescriptions(fact) {
+    fact = this._fact(fact);
     const props = this.models[fact]?.properties || {};
     const out = {};
     for (const [k, v] of Object.entries(props)) if (v && v.description) out[k] = v.description;
@@ -919,7 +936,8 @@ export class Catalog {
    * it MUST be scoped (event_name / event_scope) to those events. Only properties that
    * declare an applicability list are included.
    */
-  eventPropertyEvents(fact = this.anchor) {
+  eventPropertyEvents(fact) {
+    fact = this._fact(fact);
     const props = this.models[fact]?.properties || {};
     const out = {};
     for (const [k, v] of Object.entries(props)) if (v && Array.isArray(v.events) && v.events.length) out[k] = v.events;
@@ -927,54 +945,64 @@ export class Catalog {
   }
 
   /** Physical JSON column holding event-specific properties on the events model. */
-  eventDataColumn(fact = this.anchor) {
+  eventDataColumn(fact) {
+    fact = this._fact(fact);
     return this.models[fact]?.event_data_column || 'event_properties';
   }
 
   /** Physical column on the anchor that carries the event type, or null. */
-  eventNameColumn(fact = this.anchor) {
+  eventNameColumn(fact) {
+    fact = this._fact(fact);
     return this.models[fact]?.event_name?.column || null;
   }
 
   /** Anchor column identifying the app/bundle (meta.mcp.dimension:{bundle:true}), or null.
    *  When set, the value index breaks per-property coverage down by it (per-app emptiness). */
-  bundleColumn(fact = this.anchor) {
+  bundleColumn(fact) {
+    fact = this._fact(fact);
     return this.models[fact]?.bundle_column || null;
   }
 
   /** event_name values enum. */
-  eventNames(fact = this.anchor) {
+  eventNames(fact) {
+    fact = this._fact(fact);
     return this.models[fact]?.known_events || [];
   }
 
   /** event_properties keys (all, including complex array/struct ones). */
-  eventProps(fact = this.anchor) {
+  eventProps(fact) {
+    fact = this._fact(fact);
     return Object.keys(this.models[fact]?.properties || {});
   }
 
   /** Full spec for one event_data property ({ type, items?, fields?, values?, description? }). */
-  eventPropertySpec(name, fact = this.anchor) {
+  eventPropertySpec(name, fact) {
+    fact = this._fact(fact);
     return (this.models[fact]?.properties || {})[name];
   }
 
   /** True if a property is a complex (array / struct / array-of-struct) type. */
-  isComplexEventProp(name, fact = this.anchor) {
+  isComplexEventProp(name, fact) {
+    fact = this._fact(fact);
     const t = String(this.eventPropertySpec(name, fact)?.type || '').toLowerCase();
     return t === 'array' || t === 'struct' || t === 'array<struct>';
   }
 
   /** SCALAR event_property keys — usable directly as categorical dims / scalar filters. */
-  scalarEventProps(fact = this.anchor) {
+  scalarEventProps(fact) {
+    fact = this._fact(fact);
     return this.eventProps(fact).filter((k) => !this.isComplexEventProp(k, fact));
   }
 
   /** COMPLEX (array/struct) event_property keys — only usable via prepare stages. */
-  complexEventProps(fact = this.anchor) {
+  complexEventProps(fact) {
+    fact = this._fact(fact);
     return this.eventProps(fact).filter((k) => this.isComplexEventProp(k, fact));
   }
 
   /** Numeric event_properties keys (valid for sum/avg/median/percentile). */
-  eventNumericProps(fact = this.anchor) {
+  eventNumericProps(fact) {
+    fact = this._fact(fact);
     const props = this.models[fact]?.properties || {};
     return Object.keys(props).filter((k) => isNumericType(props[k].type));
   }

@@ -15,8 +15,8 @@ function v(tool, input) {
 test('create: accepts a valid declaration', () => {
   // Derive valid names from the catalog so this stays correct as the catalog
   // evolves (vocabulary differs across catalogs; the shape under test does not).
-  const numericField = catalog.eventNumericProps()[0];
-  const someEvent = catalog.eventNames()[0];
+  const numericField = catalog.eventNumericProps('events')[0];
+  const someEvent = catalog.eventNames('events')[0];
   const r = v('create_semantic_model', {
     name: 'task_a',
     semantic_models: [{ from: 'events', event_scope: { event_name: [someEvent] }, measures: [{ name: 'rev', agg: 'sum', field: numericField }] }],

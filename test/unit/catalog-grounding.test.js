@@ -38,15 +38,15 @@ function groundedEngine() {
 
 test('groundToPhysical prunes a phantom event property from the catalog accessors', () => {
   const catalog = loadCatalog(CATALOG, {});
-  assert.ok(catalog.scalarEventProps().includes('complete_time_of_event_data'), 'declared before grounding');
+  assert.ok(catalog.scalarEventProps('events').includes('complete_time_of_event_data'), 'declared before grounding');
   const { pruned } = catalog.groundToPhysical(physicalSets(catalog));
   assert.ok(pruned.events.includes('complete_time_of_event_data'), 'reported as pruned');
   // gone from EVERY catalog accessor that feeds tools/schemas/index.
-  assert.ok(!catalog.scalarEventProps().includes('complete_time_of_event_data'));
-  assert.ok(!catalog.eventProps().includes('complete_time_of_event_data'));
+  assert.ok(!catalog.scalarEventProps('events').includes('complete_time_of_event_data'));
+  assert.ok(!catalog.eventProps('events').includes('complete_time_of_event_data'));
   assert.ok(!catalog.modelColumns('events').some((c) => c.name === 'complete_time_of_event_data'));
   // a physically-present property is untouched.
-  assert.ok(catalog.scalarEventProps().includes('ad_type_of_event_data'));
+  assert.ok(catalog.scalarEventProps('events').includes('ad_type_of_event_data'));
 });
 
 test('grounded catalog: phantom field is absent from the tool SCHEMAS (enums)', () => {
@@ -75,9 +75,9 @@ test('grounded catalog: phantom field is absent from semantic_index everywhere',
 
 test('groundToPhysical leaves models with no physical info untouched (best-effort)', () => {
   const catalog = loadCatalog(CATALOG, {});
-  const before = catalog.scalarEventProps().length;
+  const before = catalog.scalarEventProps('events').length;
   catalog.groundToPhysical({}); // nothing known → prune nothing
-  assert.equal(catalog.scalarEventProps().length, before);
+  assert.equal(catalog.scalarEventProps('events').length, before);
 });
 
 test('groundCatalogToPhysical introspects via the runner and prunes', async () => {
@@ -90,7 +90,7 @@ test('groundCatalogToPhysical introspects via the runner and prunes', async () =
   } };
   const { pruned } = await groundCatalogToPhysical(catalog, runner, '/tmp/x');
   assert.ok(pruned.events.includes('complete_time_of_event_data'));
-  assert.ok(!catalog.scalarEventProps().includes('complete_time_of_event_data'));
+  assert.ok(!catalog.scalarEventProps('events').includes('complete_time_of_event_data'));
   // no runner → no-op.
   const c2 = loadCatalog(CATALOG, {});
   const r2 = await groundCatalogToPhysical(c2, null, '/tmp/x');

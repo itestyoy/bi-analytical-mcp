@@ -379,7 +379,7 @@ export class Engine {
         }
         // The app/bundle dimension: groupable per event AND the axis for per-app coverage.
         if (c.bundleColumn(k)) {
-          const apps = this.valueIndex.bundles();
+          const apps = this.valueIndex.bundles(k); // the apps seen in THIS source
           out.bundle_column = c.bundleColumn(k);
           out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ bundle: '${apps[0].bundle}' }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
         }
@@ -410,7 +410,7 @@ export class Engine {
         ? [
           `Drill into an event to see the properties it carries: semantic_index({ source: '${k}', event: '${c.eventNames(k)[0] || '<event_name>'}' }).`,
           `Then inspect a property's real values + frequency distribution: semantic_index({ property: '<name>' }).`,
-          ...(c.bundleColumn(k) && this.valueIndex.bundles().length ? [`Scoping to one app? semantic_index({ bundle: '${this.valueIndex.bundles()[0].bundle}' }) lists which properties carry data for it vs are EMPTY.`] : []),
+          ...(c.bundleColumn(k) && this.valueIndex.bundles(k).length ? [`Scoping to one app? semantic_index({ source: '${k}', bundle: '${this.valueIndex.bundles(k)[0].bundle}' }) lists which properties carry data for it vs are EMPTY.`] : []),
           `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ search: '<value>' }).`,
         ]
         : [
@@ -421,7 +421,7 @@ export class Engine {
       out.next_actions = c.isFact(k)
         ? [
           { call: `semantic_index({ source: '${k}', event: '${c.eventNames(k)[0] || '<event_name>'}' })`, why: 'see the properties an event carries (what you can measure/group/filter)' },
-          ...(c.bundleColumn(k) && this.valueIndex.bundles().length ? [{ call: `semantic_index({ bundle: '${this.valueIndex.bundles()[0].bundle}' })`, why: 'for one app — which properties carry data vs are EMPTY' }] : []),
+          ...(c.bundleColumn(k) && this.valueIndex.bundles(k).length ? [{ call: `semantic_index({ source: '${k}', bundle: '${this.valueIndex.bundles(k)[0].bundle}' })`, why: 'for one app — which properties carry data vs are EMPTY' }] : []),
           { call: "semantic_index({ search: '<value>' })", why: 'trace a value to the property/event that carries it' },
         ]
         : [
@@ -469,11 +469,11 @@ export class Engine {
       }
       if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ property }).`);
       // Per-app helper: these properties may be empty for some apps — point at the bundle view.
-      if (c.bundleColumn(fact) && this.valueIndex.bundles().length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ bundle: '<app>' }) shows the populated-vs-empty split per app.`);
+      if (c.bundleColumn(fact) && this.valueIndex.bundles(fact).length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ bundle: '<app>' }) shows the populated-vs-empty split per app.`);
       const nextActions = [
         ...(pick.length ? [{ call: `semantic_index({ property: '${pick[0].name}' })`, why: "drill this property's real value distribution + completeness" }] : []),
         { call: "semantic_index({ search: '<value>' })", why: 'trace a value seen above to every property/event carrying it' },
-        ...(c.bundleColumn(fact) && this.valueIndex.bundles().length > 1 ? [{ call: "semantic_index({ bundle: '<app>' })", why: 'a property here may be EMPTY for some apps — see the per-app split' }] : []),
+        ...(c.bundleColumn(fact) && this.valueIndex.bundles(fact).length > 1 ? [{ call: `semantic_index({ source: '${fact}', bundle: '<app>' })`, why: 'a property here may be EMPTY for some apps — see the per-app split' }] : []),
       ];
       const eventOut = {
         event: input.event,
@@ -628,39 +628,62 @@ export class Engine {
     // instead of querying them blindly. Requires the anchor to designate a bundle column
     // (meta.mcp.dimension:{bundle:true}) AND the value index to have run. ──
     if (input.bundle !== undefined && input.bundle !== false) {
-      if (!c.facts.some((f) => c.bundleColumn(f))) throw new ToolError('this catalog has no app/bundle dimension — mark the app column on an events fact with meta.mcp.dimension:{ bundle: true } to enable per-app coverage', { stage: 'validate', field: 'bundle' });
+      const withBundle = c.facts.filter((f) => c.bundleColumn(f));
+      if (!withBundle.length) throw new ToolError('this catalog has no app/bundle dimension — mark the app column on an events source with meta.mcp.dimension:{ bundle: true } to enable per-app coverage', { stage: 'validate', field: 'bundle' });
       const bundleId = String(input.bundle);
-      const known = this.valueIndex.bundles();
-      if (!known.length) {
-        return { bundle: bundleId, note: 'No per-app coverage indexed yet (the background value index may not have run).', bundles: [] };
+      // The SOURCE is a separate argument. Coverage is measured per source — the same app emits
+      // events into every source that carries it, with its own row count and its own populated /
+      // empty split in each — so the view NEVER merges sources: named, it answers for that one;
+      // omitted, it answers for every source that saw the app, each in its own block.
+      if (input.source) {
+        if (!c.isFact(input.source)) throw new ToolError(`'${input.source}' is not an events source. Events sources: ${c.facts.join(', ')}`, { stage: 'validate', field: 'source' });
+        if (!c.bundleColumn(input.source)) throw new ToolError(`source '${input.source}' declares no app/bundle column (meta.mcp.dimension:{ bundle: true }). Sources with one: ${withBundle.join(', ')}`, { stage: 'validate', field: 'source' });
       }
-      const hit = known.find((b) => b.bundle === bundleId);
-      if (!hit) throw new ToolError(`unknown app '${bundleId}'. Indexed apps: ${known.map((b) => b.bundle).join(', ')}`, { stage: 'validate', field: 'bundle' });
-      const cov = this.valueIndex.bundlePropertyCoverage(bundleId);
-      const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ source: r.source, property: r.property, non_null: r.non_null }));
-      const empty = cov.filter((r) => r.non_null === 0).map((r) => ({ source: r.source, property: r.property }));
-      return {
+      // What was MEASURED is the truth here: every (source, app) the indexer recorded coverage for.
+      const known = this.valueIndex.bundles(input.source || undefined);
+      if (!known.length) {
+        return { bundle: bundleId, ...(input.source ? { source: input.source } : {}), note: 'No per-app coverage indexed yet (the background value index may not have run).', bundles: [] };
+      }
+      const hits = known.filter((b) => b.bundle === bundleId);
+      if (!hits.length) {
+        const list = (xs) => xs.map((b) => `${b.source}: ${b.bundle}`).join(', ');
+        throw new ToolError(`unknown app '${bundleId}'${input.source ? ` on source '${input.source}'` : ''}. Indexed apps: ${list(known)}`, { stage: 'validate', field: 'bundle' });
+      }
+      const block = (hit) => {
+        const cov = this.valueIndex.bundlePropertyCoverage(bundleId, hit.source);
+        const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ property: r.property, non_null: r.non_null }));
+        const empty = cov.filter((r) => r.non_null === 0).map((r) => r.property);
+        return {
+          source: hit.source,
+          event_rows: hit.row_count,
+          property_count: cov.length,
+          populated_count: populated.length,
+          empty_count: empty.length,
+          // The properties that carry data for THIS app in THIS source (use these).
+          populated,
+          // Properties ALWAYS NULL for this app here — do NOT query them (another app, or the same app in another source, may populate them).
+          empty,
+        };
+      };
+      const blocks = hits.map(block);
+      const others = known.filter((b) => b.bundle !== bundleId);
+      const first = blocks.find((b) => b.populated.length) || blocks[0];
+      const out = {
         bundle: bundleId,
-        event_rows: hit.row_count,
-        property_count: cov.length,
-        populated_count: populated.length,
-        empty_count: empty.length,
-        // The properties that carry data for THIS app (use these); each with its non-null count.
-        populated,
-        // Properties that are ALWAYS NULL for this app — do NOT query them here (other apps may populate them).
-        empty,
+        ...(blocks.length === 1 ? blocks[0] : { by_source: blocks, note: `'${bundleId}' emits into ${blocks.length} sources; coverage is reported per source and never merged.` }),
         next_actions: [
-          ...(populated.length ? [{ call: `semantic_index({ source: '${populated[0].source}', property: '${populated[0].property}' })`, why: 'drill a property that carries data for this app (per-app split under bundle_coverage)' }] : []),
-          ...(known.length > 1 ? [{ call: `semantic_index({ bundle: '${known.find((b) => b.bundle !== bundleId).bundle}' })`, why: 'compare another app — a property empty here may be populated there' }] : []),
+          ...(first.populated.length ? [{ call: `semantic_index({ source: '${first.source}', property: '${first.populated[0].property}' })`, why: 'drill a property that carries data for this app (per-app split under bundle_coverage)' }] : []),
+          ...(others.length ? [{ call: `semantic_index({ source: '${others[0].source}', bundle: '${others[0].bundle}' })`, why: 'compare another app — a property empty here may be populated there' }] : []),
         ],
         recommendations: [
-          empty.length
-            ? `${empty.length} of ${cov.length} properties are EMPTY for '${bundleId}' (always NULL) — do not use them for this app: ${empty.slice(0, 8).map((x) => `${x.source}.${x.property}`).join(', ')}${empty.length > 8 ? ', …' : ''}.`
-            : `Every indexed property carries data for '${bundleId}'.`,
-          `Use the ${populated.length} populated properties; drill one with semantic_index({ source: '${(populated[0] || {}).source || '<source>'}', property: '${(populated[0] || {}).property || '<name>'}' }) (its per-app split is under bundle_coverage).`,
-          known.length > 1 ? `Other apps: ${known.filter((b) => b.bundle !== bundleId).map((b) => b.bundle).slice(0, 6).join(', ')} — a property empty here may be populated there.` : `Only one app is indexed.`,
+          ...blocks.map((b) => (b.empty.length
+            ? `[${b.source}] ${b.empty.length} of ${b.property_count} properties are EMPTY for '${bundleId}' (always NULL) — do not use them for this app on this source: ${b.empty.slice(0, 8).join(', ')}${b.empty.length > 8 ? ', …' : ''}.`
+            : `[${b.source}] Every indexed property carries data for '${bundleId}'.`)),
+          `Use the populated properties; drill one with semantic_index({ source: '${first.source}', property: '${(first.populated[0] || {}).property || '<name>'}' }) (its per-app split is under bundle_coverage).`,
+          others.length ? `Other apps: ${[...new Set(others.map((b) => `${b.source}: ${b.bundle}`))].slice(0, 6).join(', ')} — a property empty here may be populated there.` : 'Only one app is indexed.',
         ],
       };
+      return out;
     }
 
     // ── { search }: fuzzy discovery across events/properties/attributes/values/recipes ──
@@ -685,12 +708,13 @@ export class Engine {
       }
       // App/bundle ids are not indexed as property VALUES, so match them here: a query that
       // hits a known app routes the AI to its per-app coverage view.
-      if (c.bundleColumn()) {
+      if (c.facts.some((f) => c.bundleColumn(f))) {
         const q = String(input.search).toLowerCase();
         const bundleHits = this.valueIndex.bundles().filter((b) => b.bundle.toLowerCase().includes(q));
         if (bundleHits.length) {
-          res.bundle_matches = bundleHits.map((b) => ({ bundle: b.bundle, event_rows: b.row_count, view: `semantic_index({ bundle: '${b.bundle}' })` }));
-          (res.recommendations ||= []).push(`'${input.search}' matches app(s) ${bundleHits.map((b) => b.bundle).join(', ')} — semantic_index({ bundle }) shows which properties are populated vs EMPTY for an app.`);
+          // one match per (source, app): the same app is a different row set in each source
+          res.bundle_matches = bundleHits.map((b) => ({ source: b.source, bundle: b.bundle, event_rows: b.row_count, view: `semantic_index({ source: '${b.source}', bundle: '${b.bundle}' })` }));
+          (res.recommendations ||= []).push(`'${input.search}' matches app(s) ${[...new Set(bundleHits.map((b) => b.bundle))].join(', ')} — semantic_index({ source, bundle }) shows which properties are populated vs EMPTY for an app in that source.`);
         }
       }
       return res;
@@ -728,7 +752,7 @@ export class Engine {
     const memCount = this.memoryStore.counts().notes;
     // Apps (bundle ids) seen during indexing — drill one with { bundle } to see which
     // properties are populated vs empty for it (skip the empties for that app).
-    const bundleList = c.bundleColumn() ? this.valueIndex.bundles() : [];
+    const bundleList = c.facts.some((f) => c.bundleColumn(f)) ? this.valueIndex.bundles() : []; // [{ source, bundle, row_count }]
     return {
       dialect: c.dialect,
       models,
@@ -757,7 +781,8 @@ export class Engine {
       } : null,
       // Apps in the data (by bundle id). Different apps populate different properties, so
       // drill one with semantic_index({ bundle }) to see what carries data for that app.
-      ...(bundleList.length ? { bundles: bundleList.map((b) => ({ bundle: b.bundle, event_rows: b.row_count })) } : {}),
+      // Apps PER SOURCE — the same bundle id is a different row set in each source that carries it.
+      ...(bundleList.length ? { bundles: bundleList.map((b) => ({ source: b.source, bundle: b.bundle, event_rows: b.row_count })) } : {}),
       enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
       ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
@@ -782,14 +807,14 @@ export class Engine {
         { call: 'semantic_index({ guide: true })', why: 'unsure how to approach the question — get the workflow + IF/DO routing first' },
         { call: `semantic_index({ source: '${exFact}', event: '${exEvent || '<event_name>'}' })`, why: "see an event's properties with real sample values + cardinality" },
         { call: `semantic_index({ model: '${userModel || 'users'}' })`, why: 'list segmentation attributes (country/platform/…) with real values' },
-        ...(bundleList.length ? [{ call: `semantic_index({ bundle: '${bundleList[0].bundle}' })`, why: 'scope to one app — which properties carry data vs are EMPTY for it' }] : []),
+        ...(bundleList.length ? [{ call: `semantic_index({ source: '${bundleList[0].source}', bundle: '${bundleList[0].bundle}' })`, why: 'scope to one app in one source — which properties carry data vs are EMPTY for it' }] : []),
         { call: "semantic_index({ search: '<word or value>' })", why: 'find an event/property/attribute/value/recipe by name or value' },
       ],
       recommendations: [
         `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
         `Start by inspecting an event's properties: semantic_index({ source: '${exFact}', event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
         `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
-        ...(bundleList.length ? [`Working with ONE app? semantic_index({ bundle: '${bundleList[0].bundle}' }) lists which event properties carry data for it vs are EMPTY (skip the empty ones); ${bundleList.length} app(s) are in the data.`] : []),
+        ...(bundleList.length ? [`Working with ONE app? semantic_index({ source: '${bundleList[0].source}', bundle: '${bundleList[0].bundle}' }) lists which event properties carry data for it vs are EMPTY in that source (skip the empty ones); ${bundleList.length} app(s) are in the data.`] : []),
         `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,
       ],
     };

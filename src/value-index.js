@@ -81,13 +81,15 @@ export class ValueIndex {
   }
 
   /** Distinct apps seen during indexing: [{ bundle, row_count }] (max events per app). */
-  bundles() {
-    return this.store.values.bundles ? this.store.values.bundles() : [];
+  /** Apps seen during indexing, per SOURCE: [{ source, bundle, row_count }]. Optional filter. */
+  bundles(source) {
+    return this.store.values.bundles(source);
   }
 
   /** For one app: each property's coverage (non_null=0 → empty for this app). */
-  bundlePropertyCoverage(bundle) {
-    return this.store.values.bundlePropertyCoverage ? this.store.values.bundlePropertyCoverage(bundle) : [];
+  /** One app's per-property fill, per SOURCE (optionally one source). */
+  bundlePropertyCoverage(bundle, source) {
+    return this.store.values.bundlePropertyCoverage(bundle, source);
   }
 
   /** Triple cell: fill of `property` at one (bundle × event) combo, or null if not indexed. */

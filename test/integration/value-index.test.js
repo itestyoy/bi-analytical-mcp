@@ -131,7 +131,7 @@ test('semantic_index({ property }).events is derived from per-event coverage (no
 test('complex array property gets DATA-DERIVED per-event coverage (no leak onto unrelated events)', opts, async (t) => {
   if (skip(t)) return;
   const prop = 'words_selected_of_event_data';
-  assert.ok(engine.catalog.complexEventProps().includes(prop), 'precondition: it is a complex property');
+  assert.ok(engine.catalog.complexEventProps('events').includes(prop), 'precondition: it is a complex property');
   const cov = index.coverage('events', prop);
   assert.ok(cov.length > 0, 'complex prop has per-event coverage after the refresh');
   const carriers = cov.filter((e) => e.non_null > 0).map((e) => e.event_name).sort();
@@ -382,13 +382,14 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
   const colorfit = await engine.semantic_index({ bundle: 'com.omg.colorfit' });
   assert.equal(colorfit.event_rows, 53);
   assert.ok(colorfit.populated.some((p) => p.property === 'level_id_of_event_data'), 'level_id populated for colorfit');
-  assert.ok(colorfit.empty.some((x) => x.source === 'events' && x.property === 'ad_type_of_event_data'), 'ad_type EMPTY for colorfit');
+  assert.equal(colorfit.source, 'events', 'one source carries the app column, so the block is that source');
+  assert.ok(colorfit.empty.includes('ad_type_of_event_data'), 'ad_type EMPTY for colorfit');
   assert.ok(!colorfit.populated.some((p) => p.property === 'ad_type_of_event_data'));
 
   // wordsearch = ad/iap/etc (no level events) → ad_type populated, level_id EMPTY.
   const words = await engine.semantic_index({ bundle: 'com.omg.wordsearch' });
   assert.ok(words.populated.some((p) => p.property === 'ad_type_of_event_data'), 'ad_type populated for wordsearch');
-  assert.ok(words.empty.some((x) => x.source === 'events' && x.property === 'level_id_of_event_data'), 'level_id EMPTY for wordsearch');
+  assert.ok(words.empty.includes('level_id_of_event_data'), 'level_id EMPTY for wordsearch');
 
   // the { property } view carries the same per-app split: by default a summary (empty_apps count),
   // and the full per-app list under include_coverage:true — ad_type is non_null=0 for colorfit.

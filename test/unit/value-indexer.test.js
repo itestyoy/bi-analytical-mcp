@@ -48,7 +48,7 @@ test('BackgroundIndexer logs sync start → steps → results, records the run +
   assert.ok(s.indexed_properties > 0);
 
   // null/coverage was captured per property: null_count = rows_total - non_null = 5 - 3 = 2.
-  const prop = catalog.scalarEventProps()[0];
+  const prop = catalog.scalarEventProps('events')[0];
   const st = index.stats('events', prop);
   assert.equal(st.totalCount, 3);
   assert.equal(st.nullCount, 2);
@@ -63,8 +63,8 @@ test('merge mode accumulates counts across syncs (delta), scanned as ONE combine
   const catalog = loadCatalog(CATALOG, {});
   assert.ok(['postgres', 'postgresql'].includes(catalog.dialect), 'fixture is a dialect with a since-clause');
   const index = new ValueIndex();
-  const prop = catalog.scalarEventProps()[0];
-  const nEvent = catalog.scalarEventProps().length;
+  const prop = catalog.scalarEventProps('events')[0];
+  const nEvent = catalog.scalarEventProps('events').length;
   assert.ok(nEvent >= 3, 'fixture has several event properties in one batch');
   // Batched = ONE combined cardinality scan (per-property d0 alias) PER SOURCE, not one per
   // property — so the count is the number of source groups, far fewer than the property count.
@@ -96,7 +96,7 @@ test('merge mode accumulates counts across syncs (delta), scanned as ONE combine
 test('high-cardinality fields are flagged and skipped on the next sync', async () => {
   const catalog = loadCatalog(CATALOG, {});
   const index = new ValueIndex();
-  const prop = catalog.scalarEventProps()[0];
+  const prop = catalog.scalarEventProps('events')[0];
   // stub: distinct 3 of non-null 3 → 100% unique; threshold 90% → every field flagged near-unique.
   const bi = new BackgroundIndexer({ catalog, runner: shapeStub(), index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, highCardPct: 90, logger: () => {} });
 
@@ -135,7 +135,7 @@ test('runModels rebuilds the source models (dbt run) before indexing', async () 
   assert.equal(order[0], 'run', 'dbt run happens FIRST');
   assert.ok(order.includes('show'), 'then the index scans');
   assert.ok(order.indexOf('run') < order.indexOf('show'), 'models rebuilt before scanning');
-  assert.ok(index.stats('events', catalog.scalarEventProps()[0]) != null, 'index populated after the rebuild');
+  assert.ok(index.stats('events', catalog.scalarEventProps('events')[0]) != null, 'index populated after the rebuild');
   index.close();
 });
 
@@ -156,7 +156,7 @@ test('runModels: a failed dbt run still indexes existing data (best-effort)', as
 
   await bi.refresh();
 
-  assert.ok(index.stats('events', catalog.scalarEventProps()[0]) != null, 'still indexed despite the failed build');
+  assert.ok(index.stats('events', catalog.scalarEventProps('events')[0]) != null, 'still indexed despite the failed build');
   const notes = index.runNotes(index.syncStatus().last_run.id);
   assert.ok(notes.some((n) => /dbt run of source models failed/.test(n.note)), 'the build failure is recorded on the run');
   index.close();
@@ -175,7 +175,7 @@ test('a field gone from the schema is pruned from the index on the next sync', a
 
   assert.ok(!index.properties().includes('events.ghost_col'), 'orphan field pruned');
   assert.equal(index.stats('events', 'ghost_col'), null);
-  assert.ok(index.stats('events', catalog.scalarEventProps()[0]) != null, 'valid fields stay indexed');
+  assert.ok(index.stats('events', catalog.scalarEventProps('events')[0]) != null, 'valid fields stay indexed');
   index.close();
 });
 
@@ -197,7 +197,7 @@ test('a newly added field is indexed individually; existing fields stay delta-sc
 
   await bi.refresh(); // bootstrap — all full, no delta
   assert.equal(deltaScans, 0, 'first pass is a full bootstrap');
-  const newbie = catalog.scalarEventProps()[0];
+  const newbie = catalog.scalarEventProps('events')[0];
   index.removeProperty('events', newbie); // simulate a freshly ADDED column: nothing stored for it yet
   deltaScans = 0;
 
@@ -244,7 +244,7 @@ test('BackgroundIndexer stores per (bundle × event) triple cells', async () => 
   const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} });
   await bi.refresh();
 
-  const prop = catalog.scalarEventProps()[0];
+  const prop = catalog.scalarEventProps('events')[0];
   // populated cell
   const filled = index.cellCoverage('events', prop, { bundle: 'com.omg.words', event: 'ad_finished' });
   assert.equal(filled.non_null, 10);
@@ -277,7 +277,7 @@ test('BackgroundIndexer combines top-values via approx_top_k on a capable dialec
   const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, maxValues: 5, logger: () => {} });
   await bi.refresh();
 
-  const prop = catalog.scalarEventProps()[0];
+  const prop = catalog.scalarEventProps('events')[0];
   const vals = index.sampleValues('events', prop, 10);
   assert.deepEqual(new Set(vals.map((v) => v.value)), new Set(['rewarded', 'banner']), 'values parsed from approx_top_k');
   assert.equal(vals.find((v) => v.value === 'rewarded').freq, 30);
@@ -318,7 +318,7 @@ test('a failed combined batch logs the reason and falls back to per-property', a
   assert.ok(notes.some((n) => /column limit exceeded/.test(n.note)), `real fallback reason recorded in the run: ${JSON.stringify(notes)}`);
   // indexing still completed via the per-property fallback.
   assert.equal(s.last_run.status, 'ok');
-  assert.equal(index.stats('events', catalog.scalarEventProps()[0]).totalCount, 3);
+  assert.equal(index.stats('events', catalog.scalarEventProps('events')[0]).totalCount, 3);
   index.close();
 });
 
@@ -374,7 +374,7 @@ test('a failed combined top-k degrades ONLY top-values, keeping cardinality+cove
   // FULL raw output is kept verbatim (banner AND the real error line) — nothing stripped/truncated.
   assert.ok(notes.some((n) => /top-k .* FAILED/.test(n) && /Resources exceeded during query execution/.test(n) && /Running with dbt/.test(n)), JSON.stringify(notes));
   // stats + values still landed.
-  assert.equal(index.stats('events', catalog.scalarEventProps()[0]).totalCount, 3);
+  assert.equal(index.stats('events', catalog.scalarEventProps('events')[0]).totalCount, 3);
   index.close();
 });
 
@@ -385,7 +385,7 @@ test('complex-coverage merges a delta into stored coverage (incremental, not ful
   const catalog = loadCatalog(CATALOG, {});
   const index = new ValueIndex();
   const prop = 'words_selected_of_event_data';
-  assert.ok(catalog.complexEventProps().includes(prop), 'fixture has a complex prop');
+  assert.ok(catalog.complexEventProps('events').includes(prop), 'fixture has a complex prop');
   const covQueries = [];
   const runner = {
     show: async (_d, sql) => {
@@ -411,7 +411,7 @@ test('complex-coverage merges a delta into stored coverage (incremental, not ful
   await bi._indexComplexCoverage(2, 'events'); // second pass: watermark set → DELTA, counts ADD
   assert.equal(index.coverage('events', prop).find((e) => e.event_name === 'level_completed').non_null, 8, 'delta ADDED (5 + 3), not replaced');
   assert.equal(index.stats('events', prop).dataWatermark, 2000, 'watermark advanced to the delta max');
-  const complexN = catalog.complexEventProps().length;
+  const complexN = catalog.complexEventProps('events').length;
   assert.ok(covQueries.slice(0, complexN).every((x) => x === 'full'), 'first pass = full scan per complex prop');
   assert.ok(covQueries.slice(complexN).length > 0 && covQueries.slice(complexN).every((x) => x === 'delta'), 'second pass = since-watermark delta per complex prop (no full re-scan)');
   index.close();

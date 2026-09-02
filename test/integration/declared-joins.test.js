@@ -34,8 +34,10 @@
 //   J   (44-49) `attrs` is the contract: exactly the listed columns arrive — any column of the
 //               joined model, amounts and event-scoped payload included — nothing implicit, and
 //               a name that would be used twice REJECTS the step with the rename to apply;
-//   K   (50-51) a FACT as the join target: owning a key with `type: unique` gives its attributes
-//               a governed path — and `unique` is a claim about the data that nothing verifies.
+//   K   (50-54) a FACT as the join target: owning a key with `type: unique` gives its attributes
+//               a governed path, in whatever key shape was declared; nothing the catalog
+//               advertises may be refused; and `unique` is a claim about the data that nothing
+//               verifies — a false one inflates the count, a true one cannot.
 //
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
@@ -71,6 +73,8 @@ let phantom; let phantomEngine; let phantomPruned; let phantomCostCtx;
 // A third catalog over the SAME warehouse, in which the CRASH source OWNS the ad funnel
 // (type: unique) instead of both sides pointing at nobody — see section K.
 let ownerCatalog; let ownerEngine; let ownerCtx;
+let oneCatalog; let oneEngine; let oneCtx;
+let trueCatalog; let trueEngine; let trueCtx;
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -173,6 +177,46 @@ before(async () => {
   });
   assert.equal(oc.parse.ok, true, JSON.stringify(oc.parse));
   ownerCtx = oc.context_id;
+
+  // Two MORE catalogs over the same warehouse, each making the crash source the owner of the
+  // funnel with a DIFFERENT key, so that what gets generated can only come from what was
+  // declared. `one` uses a ONE-column key on a column that repeats (the claim is false, as
+  // above); `true` uses funnel_tracking_id, which really is one row per value.
+  const owned = (crashKey, eventKey, declareColumn) => {
+    const d = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
+    const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
+    if (declareColumn) {
+      M.fct_crashlytics_events.columns.push({
+        name: declareColumn, data_type: 'string', meta: { mcp: { index: false } },
+        description: 'The one ad funnel this crash report belongs to; unique per report.',
+      });
+    }
+    M.fct_crashlytics_events.meta.mcp.entities = { ad_funnel: { type: 'unique', key: crashKey } };
+    M.fct_analytics_events.meta.mcp.entities.ad_funnel = { type: 'foreign', key: eventKey };
+    const at = join(mkdtempSync(join(tmpdir(), 'owned-')), 'catalog.yml');
+    writeFileSync(at, yaml.dump(d));
+    return loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
+  };
+  // `users` is loaded too: the catalog advertises TWO-hop paths through the owned
+  // relationship (ad_funnel__user__*), and a path can only be served when the model that owns
+  // its last leg is in the context.
+  const evtsOn = async (engine, name) => {
+    const r = await engine.create_semantic_model({
+      name, use_base_models: ['crashlytics', 'users'],
+      semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+      metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+    });
+    assert.equal(r.parse.ok, true, JSON.stringify(r.parse));
+    return r;
+  };
+
+  oneCatalog = owned(['rewarded_tracking_id'], ['tracking_id']);
+  oneEngine = new Engine({ catalog: oneCatalog, contextManager: ctxs, runner: backend });
+  oneCtx = (await evtsOn(oneEngine, 'jone')).context_id;
+
+  trueCatalog = owned(['funnel_tracking_id'], ['tracking_id'], 'funnel_tracking_id');
+  trueEngine = new Engine({ catalog: trueCatalog, contextManager: ctxs, runner: backend });
+  trueCtx = (await evtsOn(trueEngine, 'jtrue')).context_id;
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
@@ -1311,4 +1355,92 @@ test('51. `unique` is a claim nobody checks: a false one inflates 184 to 190', o
     SELECT rewarded_tracking_id, player_id_of_internal FROM public.fct_crashlytics_events
     WHERE rewarded_tracking_id IS NOT NULL GROUP BY 1, 2 HAVING count(*) > 1) d`);
   assert.equal(num(dup.rows[0].n), 1, 'one duplicated (funnel, player) pair — u1 with fnl_01, four times');
+});
+
+
+// 52. The KEY SHAPE comes from the declaration and nothing else. The same warehouse, the same
+//     question, the crash source owning the funnel by ONE column instead of two: both sides
+//     render that one column, the keys still meet, and the answer is identical to scenario 50.
+test('52. a one-column `unique` key answers exactly as the two-column one', opts, async (t) => {
+  if (skip(t)) return;
+  assert.equal(oneCatalog.joinTargetFor('ad_funnel'), 'crashlytics', 'one column is enough to own it');
+  assert.deepEqual(oneCatalog.entityKey('crashlytics', 'ad_funnel'), [{ column: 'rewarded_tracking_id' }]);
+  assert.deepEqual(oneCatalog.entityKey('events', 'ad_funnel'), [{ column: 'tracking_id' }]);
+
+  const r = await oneEngine.query_semantic_model({
+    context_id: oneCtx, metrics: ['jone_evts'], group_by: ['ad_funnel__app_version'],
+  });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const key = r.columns.map((c) => c.name).find((n) => n.includes('app_version'));
+  const by = Object.fromEntries(r.rows.map((x) => [x[key] == null ? 'none' : String(x[key]), num(x.jone_evts)]));
+  assert.deepEqual(by, { none: 176, '1.0.0': 6, '1.1.0': 8 }, 'same numbers as the two-column key');
+
+  const dev = await oneEngine.query_semantic_model({
+    context_id: oneCtx, metrics: ['jone_evts'], group_by: ['ad_funnel__device_model'],
+  });
+  assert.equal(dev.ok, true, JSON.stringify(dev.error));
+  const dk = dev.columns.map((c) => c.name).find((n) => n.includes('device_model'));
+  assert.deepEqual(Object.fromEntries(dev.rows.map((x) => [x[dk] == null ? 'none' : String(x[dk]), num(x.jone_evts)])),
+    { none: 176, iphone: 14 });
+});
+
+// 53. NOTHING IS ADVERTISED THAT CANNOT BE ANSWERED. Whatever the catalog lists under the owned
+//     relationship is queried here, one path at a time, driven off the catalog itself — so a
+//     newly declared attribute is covered without touching this test. Each one must come back
+//     with rows; the owner's OWN attributes must also total exactly 184, since a truthful
+//     many-to-one join cannot add a row.
+test('53. every group-by path the catalog advertises for an owned relationship answers', opts, async (t) => {
+  if (skip(t)) return;
+  const paths = trueCatalog.reachableGroupByPaths().filter((x) => String(x).startsWith('ad_funnel__'));
+  const own = Object.keys(trueCatalog.getModel('crashlytics').dimensions || {});
+  assert.ok(own.length >= 2, `the owning fact must declare attributes to reach: ${own}`);
+  assert.ok(paths.length >= own.length, `advertised: ${paths.length}`);
+
+  const refused = []; const totals = {};
+  for (const path of paths) {
+    let r;
+    try {
+      r = await trueEngine.query_semantic_model({ context_id: trueCtx, metrics: ['jtrue_evts'], group_by: [path] });
+    } catch (e) { refused.push(`${path}: threw ${e.message}`); continue; }
+    if (!r.ok) { refused.push(`${path}: ${JSON.stringify(r.error)}`); continue; }
+    if (!r.rows.length) { refused.push(`${path}: answered with no rows`); continue; }
+    totals[path] = sumCol(r.rows, 'jtrue_evts');
+  }
+  assert.deepEqual(refused, [], 'the catalog must not offer a path the engine refuses');
+  for (const a of own) assert.equal(totals[`ad_funnel__${a}`], 184, `ad_funnel__${a} must not inflate`);
+  for (const [path, n] of Object.entries(totals)) assert.ok(n <= 184, `${path} returned ${n} > 184`);
+});
+
+// 54. THE ANSWER TO "how can a many-to-one join fan out". It cannot. Section K's 190 came from a
+//     FALSE claim; here the owning column really does hold one row per value (checked against
+//     the warehouse below), and the very same generated join keeps the count at exactly 184 —
+//     24 events find their one crash report, 160 find none.
+test('54. a truthful `unique` never duplicates: 184 stays 184', opts, async (t) => {
+  if (skip(t)) return;
+  const dup = await pg.db.query(`SELECT count(*) AS n FROM (
+    SELECT funnel_tracking_id FROM public.fct_crashlytics_events
+    WHERE funnel_tracking_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1) d`);
+  assert.equal(num(dup.rows[0].n), 0, 'the claim is true on this warehouse: no repeated key');
+
+  const flat = await trueEngine.query_semantic_model({ context_id: trueCtx, metrics: ['jtrue_evts'] });
+  assert.equal(flat.ok, true, JSON.stringify(flat.error));
+  assert.equal(num(flat.rows[0].jtrue_evts), 184);
+
+  const r = await trueEngine.query_semantic_model({
+    context_id: trueCtx, metrics: ['jtrue_evts'], group_by: ['ad_funnel__app_version'],
+  });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const key = r.columns.map((c) => c.name).find((n) => n.includes('app_version'));
+  const by = Object.fromEntries(r.rows.map((x) => [x[key] == null ? 'none' : String(x[key]), num(x.jtrue_evts)]));
+  assert.deepEqual(by, { none: 160, '1.0.0': 16, '1.1.0': 8 }, '24 matched, none twice');
+  assert.equal(sumCol(r.rows, 'jtrue_evts'), 184, 'the join added nothing — many-to-ONE');
+
+  const dev = await trueEngine.query_semantic_model({
+    context_id: trueCtx, metrics: ['jtrue_evts'], group_by: ['ad_funnel__device_model'],
+  });
+  assert.equal(dev.ok, true, JSON.stringify(dev.error));
+  const dk = dev.columns.map((c) => c.name).find((n) => n.includes('device_model'));
+  assert.deepEqual(Object.fromEntries(dev.rows.map((x) => [x[dk] == null ? 'none' : String(x[dk]), num(x.jtrue_evts)])),
+    { none: 160, iphone: 12, pixel: 8, galaxy: 4 });
+  assert.equal(sumCol(dev.rows, 'jtrue_evts'), 184);
 });

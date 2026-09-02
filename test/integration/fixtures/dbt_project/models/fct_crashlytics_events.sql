@@ -8,6 +8,9 @@ select
     rewarded_tracking_id,
     interstitial_tracking_id,
     banner_tracking_id,
+    -- one funnel id per crash row and no repeats — the ONE key on this table that a
+    -- `type: unique` declaration can truthfully claim (see SEED_DATA.md §15).
+    funnel_tracking_id,
     event_name,
     event_time,
     issue_title   as issue_title_of_event_data,

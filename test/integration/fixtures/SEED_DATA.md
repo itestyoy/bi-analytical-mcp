@@ -584,6 +584,26 @@ crash — GB **10** / US **6** / DE **3** / BR **1** (20, no duplicates). Stack 
 rewarded ad funnel — **20** rows over 6 reports, 5 files, 6 funnel events (k13 carries a funnel
 but no stack, Ads.cs sits only on k4 which carries none).
 
+## 15. `funnel_tracking_id` — the one key on the crash source a `unique` claim fits
+
+The three `*_tracking_id` columns record the last funnel per ad format, so a value repeats
+across reports (`fnl_01` is on four of u1's reports) — no `unique` claim about them is true.
+`funnel_tracking_id` is the opposite by construction: **one distinct value per crash report**,
+so it is the column a `type: unique` declaration can honestly own.
+
+| report | k1 | k2 | k3 | k4 | k5 | k6 | k7 | k8 | k9 | k10 | k11 | k12 | k13 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| funnel | fnl_01 | fnl_02 | fnl_04 | fnl_dup | fnl_05 | fnl_06 | fnl_07 | fnl_08 | fnl_09 | fnl_10 | fnl_12 | fnl_90 | fnl_91 |
+
+Eleven of the values are funnels the events fact really carries; `fnl_90` / `fnl_91` match
+nothing. Joining events to reports by this key alone (many events → one report) matches **24**
+of the 184 events and, because the key is genuinely unique, adds no row: grouped by the report's
+`app_version` the count is 1.0.0 **16** / 1.1.0 **8** / unmatched **160**, total **184**; by
+`device_model` iphone **12** / pixel **8** / galaxy **4** / unmatched **160**. The same query
+over `rewarded_tracking_id` — where the claim is false — totals **190** instead.
+
+---
+
 ---
 
 ## Notes for test authors

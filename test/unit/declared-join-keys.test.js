@@ -127,3 +127,68 @@ test('a slowly-changing model with only its natural key loads fine', () => {
   assert.equal(c.getModel('users').scd, true);
   assert.deepEqual(Object.keys(c.entitiesOf('users')), ['user']);
 });
+
+// ── DECLARATIONS THAT USED TO BE SILENTLY DROPPED ───────────────────────────────────────
+// Each of these once loaded and produced a model built from ONE of the two declarations, with
+// nothing said about the other. Which one survived came down to the order of keys in the file.
+
+test('two columns claiming the identity is rejected, with the composite form named', () => {
+  const bad = USERS().replace('- { name: country, data_type: string }',
+    '- { name: country, data_type: string, meta: { mcp: { entity: { name: place, type: primary } } } }');
+  assert.throws(() => load(EVENTS + bad),
+    /columns 'user_id' and 'country' both declare a PRIMARY entity.*composite key/s);
+});
+
+test('a column claiming a different identity than the model declares is rejected', () => {
+  const bad = USERS('        primary_entity: household\n');
+  assert.throws(() => load(EVENTS + bad), /declares meta\.mcp\.primary_entity 'household', but column 'user_id' declares primary entity 'user'/);
+});
+
+test('one relationship declared on two columns is rejected', () => {
+  const bad = CRASH.replace('- { name: banner_track, data_type: string }',
+    '- { name: banner_track, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }');
+  assert.throws(() => load(bad + EVENTS + USERS()),
+    /entity 'user' is declared on two columns \('user_id' and 'banner_track'\)/);
+});
+
+test('the same relationship at column level and model level is rejected', () => {
+  const bad = EVENTS.replace('          ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
+    '          ad_funnel: { type: foreign, key: [tracking_id, user_id] }\n          user: { type: foreign, key: [tracking_id] }');
+  assert.throws(() => load(bad + USERS()),
+    /entity 'user' is declared both on column 'user_id' \(meta\.mcp\.entity\) and in meta\.mcp\.entities/);
+});
+
+test("a relationship named after the model's own identity is rejected", () => {
+  const bad = EVENTS.replace('          ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
+    '          event: { type: unique, key: [tracking_id] }');
+  assert.throws(() => load(bad + USERS()), /already the model's PRIMARY entity/);
+});
+
+// `natural` is what a model with a validity window GETS; declared by hand it reaches dbt as a
+// natural entity with no window and fails there, quoting a window the author never wrote.
+test('type: natural is rejected, pointing at the validity window instead', () => {
+  const bad = EVENTS.replace('{ type: foreign, key: [tracking_id, user_id] }', '{ type: natural, key: [tracking_id, user_id] }');
+  assert.throws(() => load(bad + USERS()), /as type: natural.*meta\.mcp\.dimension\.validity/s);
+});
+
+// A window says a ROW HAS VERSIONS. An events source has one row per event, MetricFlow forbids
+// measures alongside validity params, and the fact renderer has no window to apply — so this
+// declaration used to be read, believed, and then ignored.
+test('a validity window on an events source is rejected', () => {
+  const bad = EVENTS.replace('      - { name: tracking_id, data_type: string }',
+    `      - { name: tracking_id, data_type: string }
+      - { name: valid_from, data_type: timestamp, meta: { mcp: { dimension: { validity: start } } } }
+      - { name: valid_until, data_type: timestamp, meta: { mcp: { dimension: { validity: end } } } }`);
+  assert.throws(() => load(bad + USERS()),
+    /events source 'events' declares a validity window .*'valid_from \(start\)', 'valid_until \(end\)'/s);
+});
+
+test('a validity mark on a column that is not a dimension is rejected', () => {
+  const onKey = USERS_SCD().replace('{ name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }',
+    '{ name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary }, dimension: { validity: start } } } }');
+  assert.throws(() => load(EVENTS + onKey), /is a join key \(meta\.mcp\.entity\), so it never becomes a groupable time dimension/);
+
+  const onAxis = USERS_SCD().replace('{ name: country, data_type: string }',
+    '{ name: seen_at, data_type: timestamp, meta: { mcp: { is_time: true, dimension: { validity: end } } } }');
+  assert.throws(() => load(EVENTS + onAxis), /is the model's time axis \(meta\.mcp\.is_time\), so it never becomes a groupable time dimension/);
+});

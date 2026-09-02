@@ -370,12 +370,28 @@ export function dbtSchemaToCatalog(doc) {
     }
 
     const entities = {};
+    let primaryFromColumn = null; // the column that claimed this model's identity, if any
     const dimensions = {};
     const flatProps = {}; // fact-only: flattened event_data__* payload columns
     const columnDescriptions = {};
     const allColumns = []; // EVERY physical column (name + pipeline type) — referenceable in native pipelines
     for (const col of model.columns || []) {
       const cm = col.meta?.mcp || {};
+      // A VALIDITY MARK only means something on a groupable time dimension — that is the only
+      // place it can become validity_params. On a column that is a join key, a measure, the
+      // model's time axis or an opted-out dimension, the branches below take the column first
+      // and the mark would never be read: reject it here rather than let the author believe the
+      // window is in effect.
+      {
+        const v = cm.dimension && typeof cm.dimension === 'object' ? cm.dimension.validity : undefined;
+        const taken = cm.entity ? 'a join key (meta.mcp.entity)'
+          : cm.is_time ? "the model's time axis (meta.mcp.is_time)"
+            : (cm.measure && !cm.dimension) ? 'a measure (meta.mcp.measure)'
+              : cm.is_event_name ? 'the event-name column' : cm.is_event_data ? 'the event-data payload' : null;
+        if (v && taken) {
+          throw new Error(`column '${col.name}' of model '${model.name}' is marked meta.mcp.dimension.validity: ${v}, but that column is ${taken}, so it never becomes a groupable time dimension and the window would be ignored. A validity window is a PAIR of separate time columns (start and end) on a slowly-changing dimension model.`);
+        }
+      }
       // Expose every REAL column to native pipelines — except the raw is_event_data
       // payload marker, which may not exist as a physical column once flattened.
       if (!cm.is_event_data) allColumns.push({ name: col.name, type: pipelineColumnType(cm, col) });
@@ -383,8 +399,29 @@ export function dbtSchemaToCatalog(doc) {
       if (cm.entity) {
         // A column-level entity is the single-column case of the same declaration.
         const ent = normalizeEntityKey(cm.entity.name, { type: cm.entity.type, key: col.name }, { model: model.name });
-        if (ent.type === 'primary') m.primary_entity = { name: cm.entity.name, column: col.name, key: ent.key };
-        else entities[cm.entity.name] = ent;
+        // Two declarations of the SAME thing must not silently pick a winner: whichever the
+        // loop happened to see last would decide the model's identity — or its join key — and
+        // the author would never learn which of the two the manifest was built from.
+        if (ent.type === 'primary') {
+          // The model may already NAME its identity (meta.mcp.primary_entity: acquisition) — this
+          // column then supplies its key, which is the normal pairing. What must not pass is a
+          // SECOND column claiming the identity, or a column claiming a different name than the
+          // model declared: either way one of the two declarations would be dropped in silence.
+          const declaredName = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          if (primaryFromColumn) {
+            throw new Error(`model '${model.name}': columns '${primaryFromColumn.column}' and '${col.name}' both declare a PRIMARY entity ('${primaryFromColumn.name}' and '${cm.entity.name}'). A model has exactly one identity — for a key that spans BOTH columns declare it once in meta.mcp.entities with a composite key; for a second join key use type: unique (still a join target) or foreign.`);
+          }
+          if (declaredName && declaredName !== cm.entity.name) {
+            throw new Error(`model '${model.name}' declares meta.mcp.primary_entity '${declaredName}', but column '${col.name}' declares primary entity '${cm.entity.name}'. One of the two would be dropped — name the identity once.`);
+          }
+          primaryFromColumn = { name: cm.entity.name, column: col.name };
+          m.primary_entity = { name: cm.entity.name, column: col.name, key: ent.key };
+        } else {
+          if (entities[cm.entity.name]) {
+            throw new Error(`model '${model.name}': entity '${cm.entity.name}' is declared on two columns ('${entities[cm.entity.name].column}' and '${col.name}'). One relationship has one key here — use meta.mcp.entities with a composite key if it spans both columns, or 'variants' if they are alternative keys for it.`);
+          }
+          entities[cm.entity.name] = ent;
+        }
         continue; // entity key columns are not dimensions
       }
       if (cm.is_time) {
@@ -509,6 +546,16 @@ export function dbtSchemaToCatalog(doc) {
           if (prev && prev !== name) throw new Error(`model '${model.name}' declares two primary entities ('${prev}' and '${name}'). A model has exactly one identity; declare the other key as type: unique (still a join target) or foreign.`);
           m.primary_entity = { name, ...(ent.column ? { column: ent.column } : {}), key: ent.key };
         } else {
+          // The same name declared BOTH on a column and here: the model-level entry would win
+          // by position in the file. Say so instead — the author has two keys for one
+          // relationship and must state which it is.
+          if (entities[name]) {
+            throw new Error(`model '${model.name}': entity '${name}' is declared both on column '${entities[name].column}' (meta.mcp.entity) and in meta.mcp.entities. Declare it in ONE place — meta.mcp.entities is the form that can carry a composite key or variants.`);
+          }
+          const peName = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          if (peName === name) {
+            throw new Error(`model '${model.name}': '${name}' is already the model's PRIMARY entity, so it cannot also be declared in meta.mcp.entities — the semantic model would carry two entities of that name. Drop the duplicate, or give this key its own relationship name.`);
+          }
           entities[name] = ent;
         }
       }
@@ -611,6 +658,33 @@ export function dbtSchemaToCatalog(doc) {
       }
       if (!prev) arityOf.set(name, { n: parts.length, model: key });
     }
+  }
+
+  // `natural` IS NOT DECLARED — it is derived. The renderer emits it for the primary key of a
+  // model that has a validity window, because that is the only place MetricFlow accepts one
+  // ("The use of `natural` entities is currently supported only in conjunction with a validity
+  // window", dbt_semantic_interfaces/validations/entities.py). Declared by hand it passes
+  // straight into the manifest and dbt fails with that sentence, about a window the author never
+  // mentioned. Refuse it here, where the fix can be named.
+  for (const [key, m] of Object.entries(out.models)) {
+    const nat = Object.entries(m.entities || {}).filter(([, e]) => e.type === 'natural').map(([n]) => n);
+    if (nat.length) {
+      throw new Error(`model '${key}' declares entit${nat.length === 1 ? 'y' : 'ies'} ${nat.map((n) => `'${n}'`).join(', ')} as type: natural. That type is not declared by hand — it is what a model with a VALIDITY WINDOW gets automatically for its own key: mark the window columns meta.mcp.dimension.validity (start/end) and make the key the model's meta.mcp.primary_entity. For an ordinary join key use 'unique' (this model owns it) or 'foreign' (it points at the owner).`);
+    }
+  }
+
+  // A VALIDITY WINDOW belongs to a dimension, never to an events source. An events source is one
+  // row per event: there is no version of a row to be valid between two instants, MetricFlow
+  // forbids measures on a model with validity params (and an events source exists to carry
+  // measures), and the fact renderer has no window to apply — so a window declared here would be
+  // silently ignored, which is the one outcome worse than an error.
+  for (const key of out.facts || []) {
+    const m = out.models[key];
+    if (!m?.scd) continue;
+    // The time axis of a fact is a dimension too, so both marks are found here; a mark on a
+    // column that is not a dimension at all cannot reach this code (scd is set from one).
+    const cols = Object.entries(m.dimensions || {}).filter(([, d]) => d.validity).map(([n, d]) => `${n} (${d.validity})`);
+    throw new Error(`events source '${key}' declares a validity window (meta.mcp.dimension.validity on ${cols.map((n) => `'${n}'`).join(', ')}). A window describes VERSIONS of a row, so it belongs to a dimension model (one row per key per period), not to a source with one row per event. Move the window to the dimension this source joins to, or drop the validity marks and keep the columns as ordinary time dimensions.`);
   }
 
   // A SLOWLY-CHANGING model (validity window) may expose only ONE join key, and only as its

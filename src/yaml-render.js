@@ -37,6 +37,17 @@ function metricRefsMeasure(metric, names) {
   return refs.some((r) => names.has(r));
 }
 
+/** The model's own governed measures, in dbt shape. Declared once in the schema with a FIXED
+ *  aggregation, so every task computes them the same way. */
+function declaredMeasures(m) {
+  return Object.entries(m.measures || {}).map(([name, mm]) => ({
+    name, agg: mm.agg, expr: mm.expr,
+    ...(mm.agg_params ? { agg_params: mm.agg_params } : {}),
+    ...(mm.label ? { label: mm.label } : {}),
+    ...(mm.description ? { description: mm.description } : {}),
+  }));
+}
+
 /** Build the base semantic model object for a model key from the catalog. */
 export function renderBaseModel(catalog, key) {
   const m = catalog.getModel(key);
@@ -63,7 +74,12 @@ export function renderBaseModel(catalog, key) {
         ? { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } }
         : { name, type: 'categorical' });
     }
-    sm.measures = [];
+    // A source's own DECLARED measures (a `meta.mcp.measures` entry with `agg`, or a column
+    // marked `measure: { agg }`) — the governed form, whose function the schema fixes for
+    // everyone. They are published for EVERY role: the catalog already offers them as base
+    // measure references, so a fact that dropped them left a metric pointing at a measure the
+    // manifest did not contain. Its agg_time_dimension is the event-time axis set above.
+    sm.measures = declaredMeasures(m);
     return sm;
   }
 
@@ -120,12 +136,7 @@ export function renderBaseModel(catalog, key) {
   // dimension-only and drop any catalog measures — measures belong on the events fact, not on a
   // slowly-changing dimension.
   if (!scd) {
-    const measures = Object.entries(m.measures || {}).map(([name, mm]) => ({
-      name, agg: mm.agg, expr: mm.expr,
-      ...(mm.agg_params ? { agg_params: mm.agg_params } : {}),
-      ...(mm.label ? { label: mm.label } : {}),
-      ...(mm.description ? { description: mm.description } : {}),
-    }));
+    const measures = declaredMeasures(m);
     if (measures.length) sm.measures = measures;
   }
   return sm;

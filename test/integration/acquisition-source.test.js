@@ -206,12 +206,14 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
   // The amounts come back marked and self-describing — field, unit, meaning — and with NO
   // aggregation attached, because choosing one is the caller's job, not the schema's.
   const amounts = Object.fromEntries(model.aggregatable.map((x) => [x.field, x]));
-  assert.deepEqual(Object.keys(amounts).sort(), ['clicks', 'cost', 'cost_per_click', 'impressions']);
+  assert.deepEqual(Object.keys(amounts).sort(), ['clicks', 'cost', 'cost_per_click', 'impressions', 'total_spend']);
   assert.equal(amounts.cost.unit, 'usd');
   assert.equal(amounts.cost.label, 'UA cost');
   assert.equal(amounts.cost_per_click.expr, 'cost / nullif(clicks, 0)', 'an expression amount carries its expression');
   for (const a of Object.values(amounts)) assert.equal(a.agg, undefined, 'no aggregation is fixed in the schema');
-  assert.deepEqual(model.measures, [], 'this source fixes no governed measure');
+  // The one declaration WITH `agg` is additionally reported as a governed measure — the free
+  // choice over the same expression stays above, which is why `total_spend` appears in both.
+  assert.deepEqual(model.measures.map((x) => [x.name, x.agg]), [['total_spend', 'sum']], 'the governed measure is listed with its fixed function');
   const cols = model.columns.map((c) => c.name);
   for (const c of ['cost', 'impressions', 'clicks', 'ingest_batch_id']) assert.ok(cols.includes(c), `${c} is still a real column`);
 
@@ -223,4 +225,38 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 13, 'one row per (player, day) — the column is readable even though it is not an attribute');
   assert.equal(sumCol(c.rows, 'n'), 13);
+});
+
+// The GOVERNED twin of the free-choice form. `cost` is a marked amount — every task above picked
+// its own function over it (sum, max, average, p90). `total_spend` is the same column declared
+// WITH `agg: sum` in the schema, so it is one measure whose function nobody re-decides. The task
+// only names it; it must reach the manifest from the source that declared it.
+test('a governed measure declared in the schema: total_spend = 17.50, applovin 8.25', opts, async (t) => {
+  if (skip(t)) return;
+  // The task declares NO measure of its own: it names the schema's, and adds only the attribute
+  // it wants to slice by.
+  const out = await engine.create_semantic_model({
+    name: 'gov',
+    use_base_models: ['users'],
+    semantic_models: [{ from: 'acquisition', dimensions: [{ source: 'model_column', column: 'media_source' }] }],
+    metrics: [{ name: 'total_spend', type: 'simple', measure: { name: 'total_spend' } }],
+  });
+  assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
+  const r = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'] });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  assert.ok(near(num(r.rows[0].gov_total_spend), 17.5), `total_spend=${r.rows[0].gov_total_spend}`);
+
+  // it groups like any other measure — by the source's own attribute…
+  const g = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: ['gov_media_source'] });
+  assert.equal(g.ok, true, JSON.stringify(g.error));
+  const by = mapCol(g.rows, groupCol(g, 'gov_total_spend'), 'gov_total_spend');
+  assert.ok(near(by.applovin, 8.25), `applovin=${by.applovin}`);
+  assert.ok(near(by.meta, 5.75), `meta=${by.meta}`);
+  assert.ok(near(by.google, 3.5), `google=${by.google}`);
+  assert.ok(near(sumCol(g.rows, 'gov_total_spend'), 17.5));
+
+  // …and through a declared relationship, exactly as a task measure does.
+  const byCountry = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: ['user__country'] });
+  assert.equal(byCountry.ok, true, JSON.stringify(byCountry.error));
+  assert.ok(near(sumCol(byCountry.rows, 'gov_total_spend'), 17.5), 'the point-in-time join keeps the total');
 });

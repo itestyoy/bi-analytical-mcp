@@ -31,8 +31,9 @@
 //   I   (41-43) the governed side of the same rules: a join path needs its owning model loaded,
 //               a chained `via` resolves on the pipeline's own source, and three sources line up
 //               on metric_time without joining each other;
-//   J   (44-48) a join exposes the joined model's WHOLE column set — ids, event-scoped payload
-//               and amounts included — with a shadowed name reported and reachable by alias.
+//   J   (44-49) a join exposes the joined model's WHOLE column set — ids, event-scoped payload
+//               and amounts included — and a name it cannot bring in under is REPORTED with the
+//               reason and the exact fix, on the incremental and the all-at-once path alike.
 //
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
@@ -1131,10 +1132,21 @@ test('46. date math between a base time column and a joined one: 2..6 days, 82 i
 test('47. a shadowed column is reported, and reachable under an alias', opts, async (t) => {
   if (skip(t)) return;
   const step = await joinStep('crashlytics', { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner' });
+  // The report distinguishes the two cases, because they mean opposite things: a join key holds
+  // the same value on both sides (nothing lost), while a shared NAME over different data is a
+  // field the caller will otherwise think they got.
+  const notAdded = Object.fromEntries((step.columns_not_added || []).map((x) => [x.column, x]));
+  assert.deepEqual(Object.keys(notAdded).sort(), ['event_name', 'player_id_of_internal']);
+  assert.ok(!notAdded.event_name.join_key, 'an event_name is not a key — it is real data on both sides');
+  assert.match(notAdded.event_name.reason, /DIFFERENT data/);
+  assert.deepEqual(notAdded.event_name.add_with, { column: 'event_name', as: 'events_event_name' });
+  assert.equal(notAdded.player_id_of_internal.join_key, true);
+  assert.match(notAdded.player_id_of_internal.reason, /join key.*Nothing is lost/s);
+  // …and the recommendation names only the one that costs data, with the fix.
   const recs = JSON.stringify(step.recommendations || []);
-  assert.match(recs, /NOT brought in/);
-  assert.match(recs, /event_name/, 'both sources have an event_name');
-  assert.match(recs, /player_id_of_internal/, 'and both have the player key');
+  assert.match(recs, /came in EXCEPT 'event_name'/);
+  assert.match(recs, /as: 'events_event_name'/);
+  assert.ok(!/EXCEPT[^"]*player_id_of_internal/.test(recs), 'the key is not reported as a loss');
 
   // base event_name stays the CRASH type…
   const base = await pipeRows('crashlytics', ...OPEN_CHAIN,
@@ -1146,12 +1158,41 @@ test('47. a shadowed column is reported, and reachable under an alias', opts, as
 
   // …and the events one arrives alongside it, renamed.
   const both = await pipeRows('crashlytics',
-    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id', { column: 'event_name', as: 'ad_event_name' }] },
+    { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id', { column: 'event_name', as: notAdded.event_name.add_with.as }] },
     { stage: 'join', with: 'acquisition', via: 'user', kind: 'inner', attrs: ['cost'] },
-    { stage: 'aggregate', group_by: ['ad_event_name'], measures: [{ name: 'n', fn: 'count' }] });
-  const byAd = mapCol(both, 'ad_event_name', 'n');
-  assert.equal(byAd.ad_started, 11);
+    { stage: 'aggregate', group_by: [notAdded.event_name.add_with.as], measures: [{ name: 'n', fn: 'count' }] });
+  const byAd = mapCol(both, notAdded.event_name.add_with.as, 'n');
+  assert.equal(byAd.ad_started, 11, 'the fix the response handed us returns the events side');
   assert.equal(byAd.ad_finished, 11);
+});
+
+// 49. The all-at-once path is told the same thing: a pipeline handed over whole (or previewed)
+//     reports every join that left a genuinely different column behind, per step, with the fix.
+test('49. a pipeline passed whole reports the same shadowed columns, per step', opts, async (t) => {
+  if (skip(t)) return;
+  const dr = await engine.register_native_model({
+    name: 'shadow_preview', dry_run: true,
+    pipeline: { source: 'crashlytics', stages: [
+      { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner' },
+      { stage: 'join', with: 'users', via: 'user', kind: 'inner' },
+    ] },
+  });
+  const w = (dr.warnings || []).join('\n');
+  assert.match(w, /step 1 \(join 'events'\).*'event_name'/s);
+  // crashlytics and the install record BOTH carry app_version and device_model, and they mean
+  // different things (the version that crashed vs the version at install) — exactly the case a
+  // silent skip would hide.
+  assert.match(w, /step 2 \(join 'users'\)/);
+  assert.match(w, /app_version/);
+  assert.match(w, /device_model/);
+  assert.match(w, /as: 'users_app_version'/);
+  // and the columns ARE there once asked for: the install record's version, renamed.
+  const rows = await pipeRows('crashlytics',
+    { stage: 'join', with: 'users', via: 'user', between: AT('event_time'), kind: 'inner', attrs: [{ column: 'app_version', as: 'install_app_version' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'crash_versions', fn: 'count_distinct', column: 'app_version' }, { name: 'install_versions', fn: 'count_distinct', column: 'install_app_version' }] });
+  assert.equal(num(rows[0].n), 13);
+  assert.ok(num(rows[0].crash_versions) >= 1, 'the crash side is still the base column');
+  assert.ok(num(rows[0].install_versions) >= 1, 'and the install side arrived under its own name');
 });
 
 // 48. Guards: attrs is checked against the joined model's real columns, and an alias that would

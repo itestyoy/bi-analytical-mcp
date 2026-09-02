@@ -406,7 +406,7 @@ const STAGES = {
         },
         attrs: {
           type: 'array',
-          description: 'Columns of the joined model to expose. DEFAULT: ALL of them — every column the joined model has, minus any whose name the pipeline already carries (two columns with one name are ambiguous downstream, so the joined one is skipped and the step response says which). Pass a list to narrow it, and { column, as } to bring in a column whose name collides, under a name of your own.',
+          description: 'Columns of the joined model to expose. DEFAULT: ALL of them — every column the joined model has, minus any whose name the pipeline already carries (two columns with one name are not addressable downstream). Those are NOT lost silently: the step response lists them under `columns_not_added`, each with the reason and the exact entry that brings it in — a JOIN KEY column is the same value on both sides so nothing is lost, while any OTHER shared name holds DIFFERENT data on the two sides and the pipeline keeps its own. Pass a list to narrow the set, and { column, as } to bring a colliding column in under a name of your own.',
           items: {
             oneOf: [
               { type: 'string', description: 'A column of the joined model, exposed under its own name.' },

@@ -1348,6 +1348,7 @@ export class Engine {
     const beforeNames = new Set(before.map((c) => c.name));
     const afterNames = new Set(after.map((c) => c.name));
     const removed = before.filter((c) => !afterNames.has(c.name)).map((c) => c.name);
+    const shadowed = changedStage ? this._joinShadowed(changedStage, draft.source, before) : [];
     const allSteps = this._draftSteps(draft);
     // add_step is APPEND-ONLY: the AI already saw every prior step in earlier responses, so echoing
     // the whole (growing) steps list each call is O(n²) waste across a build. Return only the applied
@@ -1361,6 +1362,9 @@ export class Engine {
         : { steps: allSteps }),
       column_count: after.length,
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
+      // A join leaves out a column whose name the pipeline already carries. Report it with the
+      // reason and the exact attrs entry that brings it in, so nothing looks like it vanished.
+      ...(shadowed.length ? { columns_not_added: shadowed } : {}),
       // Compact by default: a step that drops 200 columns must not reprint 200 names every call.
       // Always give the count; include the full list only when it is short or include_columns is set.
       columns_removed_count: removed.length,
@@ -1371,7 +1375,7 @@ export class Engine {
       recommendations: [
         ...filterWarnings,
         ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
-        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._joinShadowNote(changedStage, before), ...this._draftStepRecommendations(changedStage, after)] : []),
+        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._joinShadowNote(shadowed, changedStage.with), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;
@@ -1393,19 +1397,82 @@ export class Engine {
    */
   /**
    * A join brings in EVERY column of the joined model by default; one whose name the pipeline
-   * already carries is skipped, because two columns under one name cannot be referenced
-   * downstream. Say which ones, and how to bring them in anyway — otherwise a field looks like
-   * it silently vanished.
+   * already carries cannot come in under that name (two columns with one name are not
+   * addressable downstream). Rather than let a field look like it vanished, report each one
+   * with WHY it was left out and the exact `attrs` entry that brings it in.
+   *
+   * The two cases are not the same thing, and conflating them is what makes the report useless:
+   *   · a JOIN KEY column holds the same value on both sides by construction — leaving it out
+   *     loses nothing, and there is normally no reason to ask for it;
+   *   · any OTHER shared name holds DIFFERENT data on the two sides (a crash row's app_version
+   *     is the version that crashed; the install record's is the version at install) — there the
+   *     pipeline keeps its own and the joined one is genuinely absent until asked for.
+   * @returns [{ column, reason, add_with }] — real collisions first, key columns after.
    */
-  _joinShadowNote(stage, before) {
+  _joinShadowed(stage, source, before) {
     if (!stage || stage.stage !== 'join' || stage.attrs?.length) return [];
     let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
     const names = new Set(this.catalog.modelColumns(stage.with).map((c) => c.name));
     if (m.event_data_column) names.add(m.event_data_column);
     const taken = new Set(before.map((c) => c.name));
-    const shadowed = [...names].filter((n) => taken.has(n));
-    if (!shadowed.length) return [];
-    return [`Every other column of '${stage.with}' is now available. NOT brought in: ${shadowed.join(', ')} — the pipeline already has a column of that name (the join key usually is one). To use the joined model's version too, name it: attrs: [{ column: '${shadowed[0]}', as: '${stage.with}_${shadowed[0]}' }].`];
+    // Key columns ON THE JOINED SIDE: `via` reads them from the schema, `on` means both sides
+    // name them identically.
+    const keyCols = new Set();
+    if (stage.via) for (const part of (this.catalog.entityKey(stage.with, stage.via) || [])) keyCols.add(part.column);
+    else for (const c of (Array.isArray(stage.on) ? stage.on : [stage.on]).filter(Boolean)) keyCols.add(c);
+    const out = [];
+    for (const column of names) {
+      if (!taken.has(column)) continue;
+      const isKey = keyCols.has(column);
+      out.push({
+        column,
+        reason: isKey
+          ? `join key — '${column}' matched on both sides, so the joined value is identical to the one the pipeline already has. Nothing is lost.`
+          : `both '${source}' and '${stage.with}' have a column named '${column}', and they hold DIFFERENT data. The pipeline keeps '${source}'.${column}; '${stage.with}'.${column} is not in the result until you ask for it under another name.`,
+        add_with: { column, as: `${stage.with}_${column}` },
+        ...(isKey ? { join_key: true } : {}),
+      });
+    }
+    return out.sort((a, b) => (a.join_key ? 1 : 0) - (b.join_key ? 1 : 0));
+  }
+
+  /**
+   * Same report, for a pipeline handed over ALL AT ONCE (register_native_model / materialize):
+   * walk the stages, and for every join that left a genuinely different column out, say so with
+   * the fix. Otherwise the all-at-once caller never learns what the incremental caller is told.
+   */
+  _joinShadowWarnings(source, stages, physSet) {
+    const joins = (stages || []).filter((st) => st?.stage === 'join' && !st.attrs?.length);
+    if (!joins.length) return [];
+    const out = [];
+    for (let i = 0; i < stages.length; i++) {
+      const st = stages[i];
+      if (!joins.includes(st)) continue;
+      let before;
+      try {
+        if (i === 0) {
+          before = this._groundedDeclared(source, physSet).cols.slice();
+          // sourceColumns also exposes a fact's raw payload blob — count it, or a second events
+          // source's event_data would look like it simply arrived.
+          const sm = this.catalog.getModel(source);
+          if (sm.event_data_column && !before.some((c) => c.name === sm.event_data_column)) before.push({ name: sm.event_data_column });
+        } else {
+          before = [...renderPipeline(this.catalog, this.catalog.dialect, source, stages.slice(0, i), { physicalCols: physSet }).columns].map(([name]) => ({ name }));
+        }
+      } catch { continue; }
+      const shadowed = this._joinShadowed(st, source, before).filter((x) => !x.join_key);
+      if (!shadowed.length) continue;
+      out.push(`step ${i + 1} (join '${st.with}'): ${shadowed.map((x) => `'${x.column}'`).join(', ')} did NOT come in — '${source}' already has a column of that name, holding different data, and two columns cannot share one name. Add attrs: [${shadowed.map((x) => `{ column: '${x.column}', as: '${x.add_with.as}' }`).join(', ')}] (plus whatever else you need) to get ${shadowed.length === 1 ? 'it' : 'them'} too.`);
+    }
+    return out;
+  }
+
+  /** One recommendation naming the shadowed columns that actually cost you data. */
+  _joinShadowNote(shadowed, joined) {
+    const real = shadowed.filter((x) => !x.join_key);
+    if (!real.length) return [];
+    const fix = real.map((x) => `{ column: '${x.column}', as: '${x.add_with.as}' }`).join(', ');
+    return [`Every column of '${joined}' came in EXCEPT ${real.map((x) => `'${x.column}'`).join(', ')} — the pipeline already has a column of that name, holding different data, and two columns cannot share one name. See columns_not_added for the reason per column. To bring ${real.length === 1 ? 'it' : 'them'} in as well, re-run this step with attrs naming what you want plus: attrs: [${fix}].`];
   }
 
   _joinCompletenessWarnings(stage, draft = null) {
@@ -1685,6 +1752,10 @@ export class Engine {
         output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
         model_sql: out.sql,
       };
+      // Same shadowed-column report as the built path — a preview that hides it would send the
+      // caller off to build a pipeline missing a field they think they asked for.
+      const shadowWarnings = this._joinShadowWarnings(source, stages, physSet);
+      if (shadowWarnings.length) resp.warnings = shadowWarnings;
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before materializing.
       const est = await this._estimateSourceRows(source, tr);
@@ -1730,9 +1801,12 @@ export class Engine {
         `Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`,
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
       ],
-      warnings: (this.runner && rows.length === 0)
-        ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
-        : [],
+      warnings: [
+        ...((this.runner && rows.length === 0)
+          ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
+          : []),
+        ...this._joinShadowWarnings(source, stages, physSet),
+      ],
     };
   }
 

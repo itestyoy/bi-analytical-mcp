@@ -152,39 +152,39 @@ test('monetization: ARPPU == revenue/payers and AOV == revenue/purchases', opts,
   assert.ok(Math.abs(num(row.mon_aov) - rev / pur) < 1e-6, `aov=${row.mon_aov}`);
 });
 
-test('monetization: revenue by user__country = US 35 / GB 25 / BR 25 (sums to 85)', opts, async (t) => {
+test('monetization: revenue by users.country = US 35 / GB 25 / BR 25 (sums to 85)', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: ['user__country'] });
+  const r = await q('mon', { metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'user__country', 'mon_revenue');
+  const by = mapCol(r.rows, 'users_country', 'mon_revenue');
   assert.equal(by.US, 35); assert.equal(by.GB, 25); assert.equal(by.BR, 25);
   assert.ok(!Number.isFinite(by.DE) || by.DE === 0, `DE=${by.DE}`);
   assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
 });
 
-test('monetization: revenue by user__platform = ios 65 / android 20 (sums to 85)', opts, async (t) => {
+test('monetization: revenue by users.platform = ios 65 / android 20 (sums to 85)', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: ['user__platform'] });
+  const r = await q('mon', { metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'platform' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'user__platform', 'mon_revenue');
+  const by = mapCol(r.rows, 'users_platform', 'mon_revenue');
   assert.equal(by.ios, 65); assert.equal(by.android, 20);
   assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
 });
 
-test('monetization: revenue by user__media_source = meta 25 / organic 30 / google 20 / applovin 10', opts, async (t) => {
+test('monetization: revenue by users.media_source = meta 25 / organic 30 / google 20 / applovin 10', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: ['user__media_source'] });
+  const r = await q('mon', { metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'media_source' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'user__media_source', 'mon_revenue');
+  const by = mapCol(r.rows, 'users_media_source', 'mon_revenue');
   assert.equal(by.meta, 25); assert.equal(by.organic, 30); assert.equal(by.google, 20); assert.equal(by.applovin, 10);
   assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
 });
 
-test('monetization: revenue by user__acquisition_type = paid 55 / organic 30', opts, async (t) => {
+test('monetization: revenue by users.acquisition_type = paid 55 / organic 30', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: ['user__acquisition_type'] });
+  const r = await q('mon', { metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'acquisition_type' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'user__acquisition_type', 'mon_revenue');
+  const by = mapCol(r.rows, 'users_acquisition_type', 'mon_revenue');
   assert.equal(by.paid, 55); assert.equal(by.organic, 30);
   assert.equal(sumCol(r.rows, 'mon_revenue'), 85);
 });
@@ -200,8 +200,8 @@ test('monetization: nested where (country in [US,GB] AND paid) -> 5+10+15+20 = 5
   if (skip(t)) return;
   // GB paid payers: u3(5), u7(10); US paid payers: u1(15), u10(20) -> 5+10+15+20 = 50
   const r = await q('mon', { metrics: ['mon_revenue'], where: { op: 'and', conditions: [
-    { field: { kind: 'dimension', path: 'user__country' }, op: 'in', value: ['US', 'GB'] },
-    { field: { kind: 'dimension', path: 'user__acquisition_type' }, op: 'eq', value: 'paid' },
+    { field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB'] },
+    { field: { kind: 'dimension', model: 'users', attribute: 'acquisition_type' }, op: 'eq', value: 'paid' },
   ] } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(sumCol(r.rows, 'mon_revenue'), 50);
@@ -210,8 +210,8 @@ test('monetization: nested where (country in [US,GB] AND paid) -> 5+10+15+20 = 5
 test('monetization: where with OR (US OR BR) -> 35 + 25 = 60', opts, async (t) => {
   if (skip(t)) return;
   const r = await q('mon', { metrics: ['mon_revenue'], where: { op: 'or', conditions: [
-    { field: { kind: 'dimension', path: 'user__country' }, op: 'eq', value: 'US' },
-    { field: { kind: 'dimension', path: 'user__country' }, op: 'eq', value: 'BR' },
+    { field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'US' },
+    { field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'BR' },
   ] } });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(sumCol(r.rows, 'mon_revenue'), 60);
@@ -219,14 +219,14 @@ test('monetization: where with OR (US OR BR) -> 35 + 25 = 60', opts, async (t) =
 
 test('monetization: revenue by product_id = p1 15 / p2 30 / p3 40; order_by+limit top = 40', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('mon', { metrics: ['mon_revenue'], group_by: ['mon_product_id_of_event_data'] });
+  const r = await q('mon', { metrics: ['mon_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'event__mon_product_id_of_event_data', 'mon_revenue');
+  const by = mapCol(r.rows, 'events_product_id_of_event_data', 'mon_revenue');
   assert.equal(by.p1, 15); assert.equal(by.p2, 30); assert.equal(by.p3, 40);
 
   const top = await q('mon', {
-    metrics: ['mon_revenue'], group_by: ['mon_product_id_of_event_data'],
-    where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'mon_product_id_of_event_data' }, op: 'is_not_null' }] },
+    metrics: ['mon_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }],
+    where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'events', attribute: 'product_id_of_event_data' }, op: 'is_not_null' }] },
     order_by: [{ key: 'mon_revenue', direction: 'desc' }], limit: 1,
   });
   assert.equal(top.ok, true, JSON.stringify(top.error));
@@ -259,12 +259,12 @@ test('monetization: revenue by day/week/month all sum to 85', opts, async (t) =>
 
 test('progression: per-level starts = 12/6/3 and completes = 12/4/3 (levels 1-3)', opts, async (t) => {
   if (skip(t)) return;
-  const s = await q('prog', { metrics: ['prog_starts'], group_by: ['prog_level_id_of_event_data'] });
-  const c = await q('prog', { metrics: ['prog_completes'], group_by: ['prog_level_id_of_event_data'] });
+  const s = await q('prog', { metrics: ['prog_starts'], group_by: [{ model: 'events', attribute: 'level_id_of_event_data' }] });
+  const c = await q('prog', { metrics: ['prog_completes'], group_by: [{ model: 'events', attribute: 'level_id_of_event_data' }] });
   assert.equal(s.ok, true, JSON.stringify(s.error));
   assert.equal(c.ok, true, JSON.stringify(c.error));
-  const sBy = mapCol(s.rows, 'event__prog_level_id_of_event_data', 'prog_starts');
-  const cBy = mapCol(c.rows, 'event__prog_level_id_of_event_data', 'prog_completes');
+  const sBy = mapCol(s.rows, 'events_level_id_of_event_data', 'prog_starts');
+  const cBy = mapCol(c.rows, 'events_level_id_of_event_data', 'prog_completes');
   assert.equal(sBy['1'], 12); assert.equal(sBy['2'], 6); assert.equal(sBy['3'], 3);
   assert.equal(cBy['1'], 12); assert.equal(cBy['2'], 4); assert.equal(cBy['3'], 3);
 });
@@ -281,9 +281,9 @@ test('progression totals: starts = 28, completes = 25 (completers <= starters)',
 
 test('progression: completion_rate per level in [0,1]; L1=1.0; L6=0.0', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('prog', { metrics: ['prog_completion_rate'], group_by: ['prog_level_id_of_event_data'] });
+  const r = await q('prog', { metrics: ['prog_completion_rate'], group_by: [{ model: 'events', attribute: 'level_id_of_event_data' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'event__prog_level_id_of_event_data', 'prog_completion_rate');
+  const by = mapCol(r.rows, 'events_level_id_of_event_data', 'prog_completion_rate');
   for (const v of Object.values(by)) if (Number.isFinite(v)) assert.ok(v >= 0 && v <= 1.0000001, `rate ${v}`);
   assert.ok(Math.abs(by['1'] - 1) < 1e-9, `L1=${by['1']}`);
   // level 6: 1 start, 0 completes -> rate 0
@@ -318,9 +318,9 @@ test('conversion: visit->purchase rate in [0,1] ~ payers/visitors = 7/12', opts,
   assert.ok(Math.abs(v - 7 / 12) < 0.06, `conversion≈0.583 got ${v}`);
 });
 
-test('conversion by user__country: every rate in [0,1]', opts, async (t) => {
+test('conversion by users.country: every rate in [0,1]', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q('conv', { metrics: ['conv_conversion'], group_by: ['user__country'] });
+  const r = await q('conv', { metrics: ['conv_conversion'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.ok(r.row_count > 0);
   for (const row of r.rows) { const v = num(row.conv_conversion); if (Number.isFinite(v)) assert.ok(v >= 0 && v <= 1.0000001, `rate ${v}`); }

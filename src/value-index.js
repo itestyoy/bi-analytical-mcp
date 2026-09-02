@@ -80,16 +80,14 @@ export class ValueIndex {
     return this.store.values.bundleCoverage ? this.store.values.bundleCoverage(source, property) : [];
   }
 
-  /** Distinct apps seen during indexing: [{ bundle, row_count }] (max events per app). */
   /** Apps seen during indexing, per SOURCE: [{ source, bundle, row_count }]. Optional filter. */
   bundles(source) {
     return this.store.values.bundles(source);
   }
 
-  /** For one app: each property's coverage (non_null=0 → empty for this app). */
-  /** One app's per-property fill, per SOURCE (optionally one source). */
-  bundlePropertyCoverage(bundle, source) {
-    return this.store.values.bundlePropertyCoverage(bundle, source);
+  /** One app's per-property fill, per SOURCE (`source` null = every source). */
+  bundlePropertyCoverage(source, bundle) {
+    return this.store.values.bundlePropertyCoverage(source, bundle);
   }
 
   /** Triple cell: fill of `property` at one (bundle × event) combo, or null if not indexed. */
@@ -226,13 +224,13 @@ export class ValueIndex {
 }
 
 /**
- * Non-blocking background indexer: walks the SCALAR, non-complex event properties
- * of the anchor (events) model PLUS the categorical dimension attributes of the
- * non-anchor models (users/experiments — under 'users.country'-style keys) and
- * stores, per property, the top values by frequency + cardinality/total. Runs an
- * initial pass fire-and-forget at start() and then on an unref'd interval.
- * Per-property errors are swallowed so one bad property never aborts a run or
- * crashes the server.
+ * Non-blocking background indexer. ONE INDEPENDENT SCAN PER SOURCE: for every events source its
+ * scalar event properties and marked dimensions, for every other model its categorical
+ * attributes — each stored under (source, property) with the top values by frequency,
+ * cardinality/total, NULL coverage per event and per app. Which events carry a property and
+ * which values it takes are MEASURED here; the schema declares neither. Runs an initial pass
+ * fire-and-forget at start() and then on an unref'd interval. Per-property errors are swallowed
+ * so one bad property never aborts a run or crashes the server.
  */
 export class BackgroundIndexer {
   constructor({ catalog, runner, index, baseProjectDir, intervalMs = 21600000, maxValues = 50, windowDays = 0, approxDistinct = true, batchSize = 40, scanTimeout = 0, merge = false, highCardPct = 0, runModels = false, runModelsSelect = null, logger } = {}) {
@@ -298,10 +296,9 @@ export class BackgroundIndexer {
     this._timer = null;
   }
 
-  /** Value SQL expression for a property: a flat physical column, else a JSON extract. */
-  _valueExpr(name, spec, fact) {
-    if (spec.column) return spec.column;
-    return jsonExtract(this.catalog.dialect, this.catalog.eventDataColumn(fact), name, spec.type);
+  /** Value SQL expression for a property — the catalog's one rule (flat column or JSON extract). */
+  _valueExpr(name, _spec, fact) {
+    return this.catalog.propertyExpr(fact, name, this.catalog.dialect);
   }
 
   /**

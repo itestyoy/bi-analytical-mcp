@@ -138,7 +138,7 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
   });
-  const r = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_ua_cost'], group_by: ['user__country'] });
+  const r = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_ua_cost'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'e2e_ua_cost'), 'e2e_ua_cost');
   assert.ok(near(by.US, 6.75), `US=${by.US}`);

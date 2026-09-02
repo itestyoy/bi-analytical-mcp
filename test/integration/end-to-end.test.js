@@ -263,9 +263,9 @@ test('4a. create_semantic_model (IAP revenue) → query by country = US35/GB25/B
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   S.semCtx = created.context_id;
 
-  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_revenue'], group_by: ['user__country'] });
+  const r = await engine.query_semantic_model({ context_id: S.semCtx, metrics: ['e2e_mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = Object.fromEntries(r.rows.map((x) => [String(x.user__country), num(x.e2e_mon_revenue)]));
+  const by = Object.fromEntries(r.rows.map((x) => [String(x.users_country), num(x.e2e_mon_revenue)]));
   assert.equal(by.US, 35);
   assert.equal(by.GB, 25);
   assert.equal(by.BR, 25);

@@ -51,7 +51,7 @@ test('timeRangeWarnings: unbounded and incomplete-period windows are flagged', (
 test('require_time_range rejects an unbounded pipeline; a bounded one passes validation', async () => {
   const CATALOG = new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname;
   const catalog = loadCatalog(CATALOG, { requireTimeRange: true });
-  assert.equal(catalog.requireTimeRange, true);
+  assert.equal(catalog.requireTimeRangeFor('events'), true);
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr-')) }) });
   const s = await e.build_native_model({ action: 'start', name: 'guard', source: 'events' });
   await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
@@ -74,7 +74,7 @@ test('require_time_range rejects an unbounded pipeline; a bounded one passes val
 test('without require_time_range an unbounded pipeline is not rejected', async () => {
   const CATALOG = new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname;
   const catalog = loadCatalog(CATALOG, {});
-  assert.equal(catalog.requireTimeRange, false);
+  assert.equal(catalog.requireTimeRangeFor('events'), false);
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr0-')) }) });
   const s = await e.build_native_model({ action: 'start', name: 'free', source: 'events' });
   await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });

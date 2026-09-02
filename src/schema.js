@@ -239,16 +239,15 @@ function metricSchema() {
 }
 
 function predicateDefs(catalog) {
-  const paths = catalog.reachableGroupByPaths();
   return {
     fieldRef: {
       type: 'object',
-      // `path` is validated per-context in the handler (task dims are not a
-      // static enum); `_paths` documents the catalog-reachable join paths.
-      _reachable_paths: paths,
-      description: 'The field a condition applies to: a dimension path or the metric time axis.',
+      // model/attribute are validated per-context in the handler (task dims are not a static
+      // enum); `_reachable_attributes` documents what the catalog can reach.
+      _reachable_attributes: catalog.reachableAttributes(),
+      description: 'The field a condition applies to: an attribute addressed by where it lives ({ kind: "dimension", model, attribute }) or the metric time axis.',
       oneOf: [
-        { type: 'object', additionalProperties: false, required: ['kind', 'path'], description: 'A dimension, addressed by its (possibly entity-qualified) path.', properties: { kind: { const: 'dimension', description: 'Filter on a dimension.' }, path: { type: 'string', description: 'Dimension path: a task-local dimension name, or an entity-qualified join path like user__country (the owning model must be in use_base_models). Only a relationship some model OWNS has such a path; one nobody owns is joinable in a pipeline only. Validated against the context.' } } },
+        { type: 'object', additionalProperties: false, required: ['kind', 'model', 'attribute'], description: 'A dimension addressed by WHERE IT LIVES: { kind: "dimension", model: "users", attribute: "country" } — the join path is resolved from the schema (add via when the source has several relationships to that model).', properties: { kind: { const: 'dimension', description: 'Filter on a dimension.' }, model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column) on that model.' }, via: { type: 'string', description: 'Optional relationship name when several lead to the model.' } } },
         { type: 'object', additionalProperties: false, required: ['kind'], description: 'The metric time axis.', properties: { kind: { const: 'metric_time', description: 'Filter on the metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain to bucket by.' } } },
       ],
     },
@@ -287,7 +286,7 @@ export function buildSchemas(catalog) {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
       description: { type: 'string', description: 'Free-text note describing what this task computes (metadata only).' },
-      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as <relationship>__<attribute> (e.g. "users" to slice by country/platform via user__country). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
+      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as { model, attribute } (e.g. "users" to slice by { model: "users", attribute: "country" }). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
       semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
       metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
@@ -371,17 +370,16 @@ export function buildSchemas(catalog) {
       metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Metric names to fetch (as exposed by the context, e.g. task_<metric>).' },
       group_by: {
         type: 'array',
-        description: 'Dimensions to break the metrics down by: either { time: "metric_time", grain } for a time series, or a dimension path string (task-local name or entity-qualified like user__country). Validated against the context.',
-        // dimension paths validated per-context in the handler (incl. task dims)
+        description: 'How to break the metrics down. Two forms only: { time: "metric_time", grain } for a time series, and { model, attribute } for an attribute addressed by WHERE IT LIVES — the join path is resolved from the schema (add via: "<relationship>" when the source carries several relationships to that model). The owning model must be in use_base_models. No path strings.',
         items: {
           oneOf: [
             { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { const: 'metric_time', description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
-            { type: 'string', description: 'A dimension path to group by: a task-local dimension name, or an entity-qualified path like user__country (the owning model must be in use_base_models). A relationship nobody owns has no such path — join it in a pipeline instead.' },
+            { type: 'object', additionalProperties: false, required: ['model', 'attribute'], description: 'An attribute addressed by where it lives: { model: "users", attribute: "country" }. semantic_index() lists every one under groupable_attributes; create_semantic_model returns the context\'s under groupable. The response echoes the resolved column under group_by_resolved.', properties: { model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column or task dimension) on that model, as semantic_index({ model }) lists it.' }, via: { type: 'string', description: 'Optional: the relationship to reach the model through, when there are several (key variants).' } } },
           ],
         },
       },
       where: { $ref: '#/$defs/predicateGroup', description: 'Row filter applied before aggregation (boolean tree of conditions on dimensions / metric_time).' },
-      order_by: { type: 'array', description: 'Sort order. Each key must be a requested metric or group-by token.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Metric or group-by token to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
+      order_by: { type: 'array', description: 'Sort order. Each key is a requested metric name, a RESULT COLUMN of this query ("metric_time_day", "users_country" — the names the rows come back with; "metric_time" is an alias of the time column), or a group_by attribute as { model, attribute }.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { oneOf: [{ type: 'string', description: 'A requested metric name, a result column name (e.g. "users_country", "metric_time_day"), or "metric_time".' }, { type: 'object', additionalProperties: false, required: ['model', 'attribute'], properties: { model: { enum: catalog.modelKeys() }, attribute: { type: 'string' }, via: { type: 'string' } }, description: 'A group_by attribute, addressed as in group_by.' }] }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
       time_range: { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },

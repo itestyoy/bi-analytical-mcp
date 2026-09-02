@@ -27,7 +27,7 @@ test('context_id is pattern-constrained (no path traversal) on all context tools
 test('derived metric expr is restricted to a safe arithmetic grammar', () => {
   assert.throws(() => compileDeclaration(catalog, {
     name: 'evil',
-    semantic_models: [{ from: 'events', measures: [{ name: 'r', agg: 'sum', field: 'price_in_usd' }] }],
+    semantic_models: [{ from: 'events', measures: [{ name: 'r', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
     metrics: [
       { name: 'r', type: 'simple', measure: { name: 'r' } },
       { name: 'bad', type: 'derived', expr: "r) as x, (select 1 from creds--", metrics: [{ name: 'r' }] },

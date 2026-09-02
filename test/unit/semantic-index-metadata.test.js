@@ -82,7 +82,7 @@ test('compile errors name the offending field', () => {
 test('overview carries join_note + value_index_status; payload-less event is not a dead end', async () => {
   const e = engine();
   const out = await e.semantic_index({});
-  assert.ok(out.join_note.includes('user__'), 'join_note explains entity-qualified paths');
+  assert.ok(/model: 'users', attribute:/.test(out.join_note), 'join_note shows the structured attribute reference');
   assert.ok(out.join_note.includes("use_base_models"), 'join_note names the declaration');
   assert.equal(out.value_index_status.ready, false); // no indexer ran in this unit engine
   assert.equal(typeof out.value_index_status.indexed_properties, 'number');

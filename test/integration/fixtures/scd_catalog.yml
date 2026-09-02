@@ -39,11 +39,11 @@ models:
       - name: price_in_usd_of_event_data
         data_type: numeric
         description: "IAP price in USD. Events: iap_purchase_completed."
-        meta: { mcp: { events: [iap_purchase_completed] } }
+        meta: { mcp: { property: true } }
       - name: product_id_of_event_data
         data_type: string
         description: "IAP product id. Events: iap_purchase_completed."
-        meta: { mcp: { events: [iap_purchase_completed] } }
+        meta: { mcp: { property: true } }
 
   - name: dim_users
     description: "Slowly-changing user dimension (one row per player×validity-window)."

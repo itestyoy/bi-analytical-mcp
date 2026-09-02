@@ -218,8 +218,9 @@ const STAGES = {
       }
       let expr; let type;
       if (p.op === 'extract') {
-        if (flat) { expr = flat; type = p.type || spec.type || 'string'; }
-        else { expr = d.jsonExtract(blob, key, p.type || 'string'); type = p.type || 'string'; }
+        // the catalog's one rule for reading a scalar property (flat column or JSON extract)
+        expr = spec ? catalog.propertyExpr(source, key, d.name, { type: p.type }) : d.jsonExtract(blob, key, p.type || 'string');
+        type = p.type || spec?.type || 'string';
       } else if (p.op === 'array_length') {
         expr = flat ? (native ? d.arrayLength(flat) : d.jsonColumnArrayLength(flat)) : d.jsonArrayLength(blob, key);
         type = 'int';

@@ -125,12 +125,12 @@ test('TASK active_users_trend: DAU/WAU/MAU & event volume', opts, async (t) => {
   assert.ok(typeof ex.plan.dataflow_plan === 'string' && ex.plan.dataflow_plan.length > 0); // dataflow plan present
   assert.ok(typeof ex.plan.execution_plan === 'string' && ex.plan.execution_plan.length > 0); // execution plan present
 
-  // #4b: order_by accepts the `metric_time` alias (resolves to metric_time__day, so the
+  // #4b: order_by accepts the `metric_time` alias (resolves to metric_time_day, so the
   // suffix need not be guessed); explain surfaces the orderable tokens; a bad key lists them.
-  assert.ok(ex.orderable_keys.includes('metric_time__day') && ex.orderable_keys.includes('active_users_dau'), `orderable_keys: ${JSON.stringify(ex.orderable_keys)}`);
+  assert.ok(ex.orderable_keys.includes('metric_time_day') && ex.orderable_keys.includes('active_users_dau'), `orderable_keys: ${JSON.stringify(ex.orderable_keys)}`);
   const sorted = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'metric_time' }] });
   assert.equal(sorted.ok, true, JSON.stringify(sorted.error || sorted));
-  assert.equal(sorted.row_count, 7); // same 7 days, now ordered by the resolved metric_time__day
+  assert.equal(sorted.row_count, 7); // same 7 days, now ordered by the resolved metric_time_day
   await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'nonsense' }] }), /Orderable:/);
 });
 
@@ -139,23 +139,23 @@ test('TASK metric_by_user_segment: revenue/payers/ARPPU by user attribute (1-hop
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'metric_by_user_segment');
   const total = await q(ctx, { metrics: ['rev_segment_revenue', 'rev_segment_payers'] });
-  const byCountry = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: ['user__country'] });
-  const byPlatform = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: ['user__platform'] });
-  const byAcq = await q(ctx, { metrics: ['rev_segment_revenue', 'rev_segment_payers'], group_by: ['user__acquisition_type'] });
-  const arppu = await q(ctx, { metrics: ['rev_segment_arppu'], group_by: ['user__acquisition_type'] });
+  const byCountry = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
+  const byPlatform = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ model: 'users', attribute: 'platform' }] });
+  const byAcq = await q(ctx, { metrics: ['rev_segment_revenue', 'rev_segment_payers'], group_by: [{ model: 'users', attribute: 'acquisition_type' }] });
+  const arppu = await q(ctx, { metrics: ['rev_segment_arppu'], group_by: [{ model: 'users', attribute: 'acquisition_type' }] });
   for (const r of [total, byCountry, byPlatform, byAcq, arppu]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(total.rows[0].rev_segment_revenue), 85);             // total revenue 85
   assert.equal(num(total.rows[0].rev_segment_payers), 7);              // payers 7
-  const cm = mapCol(byCountry.rows, 'user__country', 'rev_segment_revenue');
+  const cm = mapCol(byCountry.rows, 'users_country', 'rev_segment_revenue');
   assert.equal(cm.US, 35); assert.equal(cm.GB, 25); assert.equal(cm.BR, 25); // by country
   assert.equal(sumCol(byCountry.rows, 'rev_segment_revenue'), 85);      // grouped sum == grand total
   assert.equal(sumCol(byPlatform.rows, 'rev_segment_revenue'), 85);
-  const am = mapCol(byAcq.rows, 'user__acquisition_type', 'rev_segment_revenue');
+  const am = mapCol(byAcq.rows, 'users_acquisition_type', 'rev_segment_revenue');
   assert.equal(am.paid, 55); assert.equal(am.organic, 30);             // by acquisition_type
   // ARPPU == revenue/payers per acq segment
-  const payByAcq = mapCol(byAcq.rows, 'user__acquisition_type', 'rev_segment_payers');
+  const payByAcq = mapCol(byAcq.rows, 'users_acquisition_type', 'rev_segment_payers');
   for (const row of arppu.rows) {
-    const k = String(row.user__acquisition_type);
+    const k = String(row.users_acquisition_type);
     if (!Number.isFinite(payByAcq[k]) || payByAcq[k] === 0) continue;
     assert.ok(Math.abs(num(row.rev_segment_arppu) - am[k] / payByAcq[k]) < 1e-6, `ARPPU ${k}`);
   }
@@ -169,7 +169,7 @@ test('TASK step_conversion_funnel: distinct-user start->complete conversion', op
   const rate = await q(ctx, { metrics: ['lvl_funnel_completion_rate'] });
   const rateByDay = await q(ctx, { metrics: ['lvl_funnel_completion_rate'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   const startsByDay = await q(ctx, { metrics: ['lvl_funnel_starters'], group_by: [{ time: 'metric_time', grain: 'day' }] });
-  const byCountry = await q(ctx, { metrics: ['lvl_funnel_completion_rate'], group_by: ['user__country'] });
+  const byCountry = await q(ctx, { metrics: ['lvl_funnel_completion_rate'], group_by: [{ model: 'users', attribute: 'country' }] });
   for (const r of [counts, rate, rateByDay, startsByDay, byCountry]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   // all 12 users start AND complete at least one level (level 1 completed by all)
   assert.equal(num(counts.rows[0].lvl_funnel_starters), 12);
@@ -233,9 +233,9 @@ test('TASK cohort_retention_grid: install-cohort x activity revenue/buyers grid'
   const ctx = await buildRecipe(t, 'cohort_retention_grid');
   const total = await q(ctx, { metrics: ['cohort_grid_revenue'] });
   const buyersTotal = await q(ctx, { metrics: ['cohort_grid_buyers'] });
-  const byCohort = await q(ctx, { metrics: ['cohort_grid_revenue'], group_by: ['user__install_date'] });
-  const buyersByCohort = await q(ctx, { metrics: ['cohort_grid_buyers'], group_by: ['user__install_date'] });
-  const grid = await q(ctx, { metrics: ['cohort_grid_revenue'], group_by: ['user__install_date', { time: 'metric_time', grain: 'day' }] });
+  const byCohort = await q(ctx, { metrics: ['cohort_grid_revenue'], group_by: [{ model: 'users', attribute: 'install_date' }] });
+  const buyersByCohort = await q(ctx, { metrics: ['cohort_grid_buyers'], group_by: [{ model: 'users', attribute: 'install_date' }] });
+  const grid = await q(ctx, { metrics: ['cohort_grid_revenue'], group_by: [{ model: 'users', attribute: 'install_date' }, { time: 'metric_time', grain: 'day' }] });
   for (const r of [total, buyersTotal, byCohort, buyersByCohort, grid]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(total.rows[0].cohort_grid_revenue), 85);            // total revenue 85
   assert.equal(num(buyersTotal.rows[0].cohort_grid_buyers), 7);        // distinct buyers 7
@@ -274,8 +274,8 @@ test('TASK visit_to_purchase_conversion: native conversion metric', opts, async 
   const ctx = await buildRecipe(t, 'visit_to_purchase_conversion');
   const visits = await q(ctx, { metrics: ['visit_purchase_visits'] });
   const overall = await q(ctx, { metrics: ['visit_purchase_conversion'] });
-  const byCountry = await q(ctx, { metrics: ['visit_purchase_conversion'], group_by: ['user__country'] });
-  const byPlatform = await q(ctx, { metrics: ['visit_purchase_conversion'], group_by: ['user__platform'] });
+  const byCountry = await q(ctx, { metrics: ['visit_purchase_conversion'], group_by: [{ model: 'users', attribute: 'country' }] });
+  const byPlatform = await q(ctx, { metrics: ['visit_purchase_conversion'], group_by: [{ model: 'users', attribute: 'platform' }] });
   const byDay = await q(ctx, { metrics: ['visit_purchase_conversion'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   for (const r of [visits, overall, byCountry, byPlatform, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(visits.rows[0].visit_purchase_visits), 12);         // all 12 users visit
@@ -293,8 +293,8 @@ test('TASK level_progression: starts/completes/rate per level_id', opts, async (
   const totals = await q(ctx, { metrics: ['progression_starts', 'progression_completes'] });
   const rate = await q(ctx, { metrics: ['progression_completion_rate'] });
   const avgTime = await q(ctx, { metrics: ['progression_avg_time'] });
-  const startsByLevel = await q(ctx, { metrics: ['progression_starts'], group_by: ['progression_level_id_of_event_data'] });
-  const completesByLevel = await q(ctx, { metrics: ['progression_completes'], group_by: ['progression_level_id_of_event_data'] });
+  const startsByLevel = await q(ctx, { metrics: ['progression_starts'], group_by: [{ model: 'events', attribute: 'level_id_of_event_data' }] });
+  const completesByLevel = await q(ctx, { metrics: ['progression_completes'], group_by: [{ model: 'events', attribute: 'level_id_of_event_data' }] });
   for (const r of [totals, rate, avgTime, startsByLevel, completesByLevel]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(totals.rows[0].progression_starts), 28);            // total level_started 28
   assert.equal(num(totals.rows[0].progression_completes), 25);         // total level_completed 25
@@ -302,7 +302,7 @@ test('TASK level_progression: starts/completes/rate per level_id', opts, async (
   const cr = num(rate.rows[0].progression_completion_rate);
   assert.ok(Math.abs(cr - 25 / 28) < 1e-9 && cr >= 0 && cr <= 1, `rate ${cr}`); // 25/28 in [0,1]
   assert.ok(num(avgTime.rows[0].progression_avg_time) > 0);
-  const sBy = mapCol(startsByLevel.rows, 'event__progression_level_id_of_event_data', 'progression_starts');
+  const sBy = mapCol(startsByLevel.rows, 'events_level_id_of_event_data', 'progression_starts');
   assert.equal(sBy['1'], 12); assert.equal(sBy['2'], 6); assert.equal(sBy['3'], 3); // per-level starts
   assert.equal(sumCol(startsByLevel.rows, 'progression_starts'), 28);  // grouped starts sum to 28
 });
@@ -313,15 +313,15 @@ test('TASK monetization_metrics: revenue/ARPPU/AOV by product/day/segment', opts
   const ctx = await buildRecipe(t, 'monetization_metrics');
   const totals = await q(ctx, { metrics: ['monetization_revenue', 'monetization_payers', 'monetization_purchases'] });
   const aov = await q(ctx, { metrics: ['monetization_aov'] });
-  const byProduct = await q(ctx, { metrics: ['monetization_revenue'], group_by: ['monetization_product_id_of_event_data'] });
-  const byCountry = await q(ctx, { metrics: ['monetization_revenue'], group_by: ['user__country'] });
+  const byProduct = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }] });
+  const byCountry = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
   const byDay = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   for (const r of [totals, aov, byProduct, byCountry, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(totals.rows[0].monetization_revenue), 85);          // revenue 85
   assert.equal(num(totals.rows[0].monetization_payers), 7);            // payers 7
   assert.equal(num(totals.rows[0].monetization_purchases), 8);         // purchases 8
   assert.ok(Math.abs(num(aov.rows[0].monetization_aov) - 85 / 8) < 1e-6, 'AOV 85/8'); // AOV 10.625
-  const pm = mapCol(byProduct.rows, 'event__monetization_product_id_of_event_data', 'monetization_revenue');
+  const pm = mapCol(byProduct.rows, 'events_product_id_of_event_data', 'monetization_revenue');
   assert.equal(pm.p1, 15); assert.equal(pm.p2, 30); assert.equal(pm.p3, 40); // by product
   assert.equal(sumCol(byCountry.rows, 'monetization_revenue'), 85);    // country sum == grand total
   assert.equal(sumCol(byDay.rows, 'monetization_revenue'), 85);        // per-day sum == grand total
@@ -332,14 +332,14 @@ test('TASK ad_monetization: ad revenue & impressions by network/placement', opts
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'ad_monetization');
   const totals = await q(ctx, { metrics: ['ads_ad_revenue', 'ads_impressions'] });
-  const byNetwork = await q(ctx, { metrics: ['ads_ad_revenue'], group_by: ['ads_network_of_additional_info_of_event_data'] });
-  const byPlacement = await q(ctx, { metrics: ['ads_impressions'], group_by: ['ads_placement_of_event_data'] });
+  const byNetwork = await q(ctx, { metrics: ['ads_ad_revenue'], group_by: [{ model: 'events', attribute: 'network_of_additional_info_of_event_data' }] });
+  const byPlacement = await q(ctx, { metrics: ['ads_impressions'], group_by: [{ model: 'events', attribute: 'placement_of_event_data' }] });
   const revPerImp = await q(ctx, { metrics: ['ads_rev_per_imp'] });
-  const byType = await q(ctx, { metrics: ['ads_impressions'], group_by: ['ads_ad_type_of_event_data'] });
+  const byType = await q(ctx, { metrics: ['ads_impressions'], group_by: [{ model: 'events', attribute: 'ad_type_of_event_data' }] });
   for (const r of [totals, byNetwork, byPlacement, revPerImp, byType]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
   assert.equal(num(totals.rows[0].ads_ad_revenue), 29);                // total ad revenue 29 cents
   assert.equal(num(totals.rows[0].ads_impressions), 12);              // 12 ad_finished impressions
-  const nm = mapCol(byNetwork.rows, 'event__ads_network_of_additional_info_of_event_data', 'ads_ad_revenue');
+  const nm = mapCol(byNetwork.rows, 'events_network_of_additional_info_of_event_data', 'ads_ad_revenue');
   assert.equal(nm.admob, 12); assert.equal(nm.unity, 8); assert.equal(nm.ironsource, 6); assert.equal(nm.applovin, 3); // by network
   assert.equal(sumCol(byNetwork.rows, 'ads_ad_revenue'), 29);          // network sum == grand total
   assert.equal(sumCol(byPlacement.rows, 'ads_impressions'), 12);       // placement sum == total impressions
@@ -352,8 +352,8 @@ test('TASK currency_economy: coins in (510) vs out (140) & source split', opts, 
   if (skip(t)) return;
   const ctx = await buildRecipe(t, 'currency_economy');
   const totals = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out'] });
-  const inBySource = await q(ctx, { metrics: ['economy_coins_in'], group_by: ['economy_source_type_of_event_data'] });
-  const outBySource = await q(ctx, { metrics: ['economy_coins_out'], group_by: ['economy_source_type_of_event_data'] });
+  const inBySource = await q(ctx, { metrics: ['economy_coins_in'], group_by: [{ model: 'events', attribute: 'source_type_of_event_data' }] });
+  const outBySource = await q(ctx, { metrics: ['economy_coins_out'], group_by: [{ model: 'events', attribute: 'source_type_of_event_data' }] });
   const inByDay = await q(ctx, { metrics: ['economy_coins_in'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   const outByDay = await q(ctx, { metrics: ['economy_coins_out'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   for (const r of [totals, inBySource, outBySource, inByDay, outByDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));

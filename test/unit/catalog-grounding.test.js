@@ -24,7 +24,7 @@ function physicalSets(catalog) {
     const names = catalog.modelColumns(key).map((c) => c.name).filter((n) => !omit.has(n));
     // role columns / event_data live outside modelColumns for the anchor — add them back.
     const m = catalog.getModel(key);
-    if (key === catalog.anchor) { names.push(m.event_name?.column, m.time?.column, m.event_data_column); for (const e of Object.values(m.entities || {})) names.push(e.column); }
+    if (catalog.isFact(key)) { names.push(m.event_name?.column, m.time?.column, m.event_data_column); for (const e of Object.values(m.entities || {})) names.push(e.column); }
     phys[key] = new Set(names.filter(Boolean).map((n) => n.toLowerCase()));
   }
   return phys;
@@ -95,4 +95,26 @@ test('groundCatalogToPhysical introspects via the runner and prunes', async () =
   const c2 = loadCatalog(CATALOG, {});
   const r2 = await groundCatalogToPhysical(c2, null, '/tmp/x');
   assert.deepEqual(r2.pruned, {});
+});
+
+// A declaration the table does not back is not offered: an amount or governed measure whose
+// column is missing, and a time axis whose column is missing (it would otherwise become an
+// agg_time_dimension dbt rejects). Only the models present in the physical map are touched.
+test('grounding prunes amounts, governed measures and the time axis with their columns', () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const acq = catalog.getModel('acquisition');
+  assert.ok(catalog.aggregatableFields('acquisition').some((a) => a.name === 'clicks'), 'declared before grounding');
+  assert.ok(acq.measures.total_spend, 'governed measure declared');
+  assert.equal(acq.time.column, 'spend_date');
+  // the physical table lacks cost, clicks and spend_date
+  const phys = new Map([['acquisition', new Set(['acquisition_id', 'player_id_of_internal', 'impressions', 'media_source', 'campaign', 'campaign_id', 'ingest_batch_id'])]]);
+  const { pruned } = catalog.groundToPhysical(phys);
+  assert.ok(!catalog.aggregatableFields('acquisition').some((a) => a.name === 'clicks'), 'clicks (missing) is no longer an amount');
+  assert.ok(!catalog.aggregatableFields('acquisition').some((a) => a.name === 'cost'), 'cost (missing) is no longer an amount');
+  assert.equal(catalog.getModel('acquisition').measures?.total_spend, undefined, 'the governed measure whose expr IS the missing column is gone');
+  assert.ok(catalog.aggregatableFields('acquisition').some((a) => a.name === 'cost_per_click'), 'a real expression cannot be checked and is kept');
+  assert.equal(catalog.getModel('acquisition').time, undefined, 'the time axis over the missing column is gone');
+  assert.ok(pruned.acquisition.includes('amount:clicks') && pruned.acquisition.includes('measure:total_spend') && pruned.acquisition.includes('(time axis)'), JSON.stringify(pruned));
+  // the impressions amount, whose column IS there, stays
+  assert.ok(catalog.aggregatableFields('acquisition').some((a) => a.name === 'impressions'));
 });

@@ -74,9 +74,8 @@ export function stepPredicate(catalog, step, dialect, col, prepCols = new Map(),
     if (catalog.isComplexEventProp(c.property, source)) {
       throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (derive/unnest), not directly`);
     }
-    // flattened payload (p.column) is a real column → reference it; else extract from JSON
-    if (p.column) return comparePred(col ? `${col}.${p.column}` : p.column, c.op, c.value);
-    return comparePred(jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value);
+    // the catalog's one rule for reading a property (flat column or JSON extract), qualified by `col`
+    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type, qualifier: col || undefined }), c.op, c.value);
   });
   return [ev, ...props].join(' AND ');
 }
@@ -108,7 +107,7 @@ export function buildPrefilter(catalog, spec, dialect, col, source) {
       if (modelCols.has(c.property)) { clauses.push(comparePred(q(c.property), c.op, c.value)); continue; }
       throw new Error(`unknown event property or column in filter.where: ${c.property}`);
     }
-    clauses.push(comparePred(p.column ? q(p.column) : jsonExtract(dialect, dataCol, c.property, p.type), c.op, c.value));
+    clauses.push(comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value));
   }
   return clauses.join(' AND ');
 }
@@ -224,7 +223,7 @@ export function matchStepPostgres(r, fromRel, catalog) {
   const preds = r.stepPreds('postgres', null);
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
-  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : jsonExtract('postgres', catalog.eventDataColumn(r.fact), c.property, c.type)}) AS ${c.id}`);
+  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : catalog.propertyExpr(r.fact, c.property, 'postgres', { type: c.type })}) AS ${c.id}`);
   const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
   const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
   const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
@@ -285,7 +284,7 @@ export function matchStepBigQuery(r, fromRel, catalog) {
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn(r.fact)}`, c.property, c.type)}) AS ${c.id}`),
+    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : catalog.propertyExpr(r.fact, c.property, 'bigquery', { type: c.type, qualifier: `S${c.idx}` })}) AS ${c.id}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
   const gapMode = gapModeFor(r);
@@ -322,7 +321,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : jsonExtract('bigquery', `S${c.idx}.${catalog.eventDataColumn(r.fact)}`, c.property, c.type)}) AS ${c.id}`),
+    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : catalog.propertyExpr(r.fact, c.property, 'bigquery', { type: c.type, qualifier: `S${c.idx}` })}) AS ${c.id}`),
   ].join(',\n');
   const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
   const gapMode = gapModeFor(r);

@@ -108,3 +108,20 @@ test('numeric/range comparisons are not value-checked', async () => {
   const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'gt', 'aaa');
   assert.equal(r.action, 'add_step');
 });
+
+// A user__<attr> path resolves on the model that OWNS `user` (dim_users), so a case-mismatched
+// literal on it is rejected like any other — it used to slip through because the first model
+// merely DECLARING `user` (events, as a foreign key) has no such attribute.
+test('the value guard checks a joined attribute path against the owner\'s indexed values', async () => {
+  const e = engine();
+  e.valueIndex.upsertProperty('users', 'country', { distinctCount: 2, totalCount: 20, values: [{ value: 'DE', freq: 12 }, { value: 'US', freq: 8 }] });
+  const out = await e.create_semantic_model({
+    name: 'vguard', use_base_models: ['users'],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+  });
+  await assert.rejects(
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['vguard_n'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'eq', value: 'de' }] } }),
+    /different casing.*'DE'/s,
+  );
+});

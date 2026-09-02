@@ -80,7 +80,7 @@ test('get_query_result by query_id returns the same materialized rows', opts, as
 test('background: timeout -> running + query_id, then poll get_query_result to ready', opts, async (t) => {
   if (skip(t)) return;
   engine.queryTimeoutMs = 1; // force background
-  const started = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: ['user__country'], materialize: true });
+  const started = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
   assert.equal(started.status, 'running', JSON.stringify(started));
   assert.ok(started.query_id);
   let res;
@@ -99,7 +99,7 @@ test('background: timeout -> running + query_id, then poll get_query_result to r
 test('transform: compress/re-slice the materialized result table (where/group_by/agg/having)', opts, async (t) => {
   if (skip(t)) return;
   // materialize revenue by country (multi-row), then project over the stored table
-  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: ['user__country'], materialize: true });
+  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
   assert.equal(m.status, 'ready', JSON.stringify(m));
 
   // (a) compress to a single total
@@ -108,18 +108,18 @@ test('transform: compress/re-slice the materialized result table (where/group_by
   assert.equal(num(totalR.rows[0].total), 85);
 
   // (b) filter (where) to one country -> exact seed value (US revenue = 35)
-  const us = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { where: [{ column: 'user__country', op: 'eq', value: 'US' }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
+  const us = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { where: [{ column: 'users_country', op: 'eq', value: 'US' }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
   assert.equal(us.ok, true, JSON.stringify(us.error));
   assert.equal(num(us.rows[0].rev), 35);
 
   // (b2) injection/escaping proven on DATA: a value containing a quote+SQL is
   // bound as a literal -> the query runs safely and simply matches nothing.
-  const inj = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { where: [{ column: 'user__country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
+  const inj = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { where: [{ column: 'users_country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
   assert.equal(inj.ok, true, JSON.stringify(inj.error)); // no SQL error: the literal was escaped
   assert.ok(inj.rows.length === 0 || num(inj.rows[0].rev) === 0 || inj.rows[0].rev == null); // matches no country
 
   // (c) group_by + having + count of qualifying groups
-  const big = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { group_by: ['user__country'], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }], having: [{ fn: 'sum', column: 'mon_revenue', op: 'gte', value: 25 }], order_by: [{ key: 'rev', direction: 'desc' }] } });
+  const big = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { group_by: ['users_country'], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }], having: [{ fn: 'sum', column: 'mon_revenue', op: 'gte', value: 25 }], order_by: [{ key: 'rev', direction: 'desc' }] } });
   assert.equal(big.ok, true, JSON.stringify(big.error));
   assert.ok(big.rows.every((r) => num(r.rev) >= 25)); // HAVING applied
   assert.ok(big.rows.reduce((s, r) => s + num(r.rev), 0) <= 85);
@@ -150,7 +150,7 @@ test('transform count(column) counts NON-NULL only, not COUNT(*)', opts, async (
 
 test('sample: a random subset (not first-by-order) of the materialized result', opts, async (t) => {
   if (skip(t)) return;
-  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: ['user__country'], materialize: true });
+  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
   assert.equal(m.status, 'ready', JSON.stringify(m));
   // capped sample returns <= limit rows, flagged as sampled
   const s = await engine.get_query_result({ context_id: ctxId, table: m.table, sample: true, limit: 2 });
@@ -165,7 +165,7 @@ test('sample: a random subset (not first-by-order) of the materialized result', 
 
 test('materialized paging: limit/offset + has_more reconstruct the full stored result', opts, async (t) => {
   if (skip(t)) return;
-  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: ['user__country'], materialize: true });
+  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
   assert.equal(m.status, 'ready', JSON.stringify(m));
   const full = await engine.get_query_result({ context_id: ctxId, table: m.table, limit: 1000 });
   const total = full.row_count;

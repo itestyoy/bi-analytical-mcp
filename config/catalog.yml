@@ -42,8 +42,6 @@ version: 2
 #   is_event_name: true                             -> the event_name column
 #   dimension:     {}                               -> mark an events-fact column groupable
 #   array:         { items|fields, encoding }       -> an array column (encoding: native|json) — unnestable
-#   values:        [..]                             -> categorical value hints (optional)
-#   events:        [..]                             -> event_name(s) a payload field applies to
 #
 # The grain / join key across the models is `player_id_of_internal` (an INT64
 # surrogate id present on the prod events fact, installs and experiments tables).
@@ -381,213 +379,208 @@ models:
         description: "Ad format. Events: all ad_* (ad_requested, ad_loaded, ad_available, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_freezed, ad_redirected)."
         meta:
           mcp:
-            values: [rewarded, interstitial, banner]
-            events: [ad_requested, ad_loaded, ad_available, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_freezed, ad_redirected]
+            property: true
       - name: placement_of_event_data
         data_type: string
         description: "In-app ad placement / trigger point (e.g. store, level_fail, main_menu). Events: ad_available, ad_started, ad_finished, ad_freezed."
         meta:
           mcp:
-            events: [ad_available, ad_started, ad_finished, ad_freezed]
+            property: true
       - name: status_of_event_data
         data_type: string
         description: "Result of the ad action — ad_loaded: success/failure/expired; ad_available: ready/no_advertise/no_internet; ad_finished: success/crash/display_failed. Events: ad_loaded, ad_available, ad_finished (legacy ad_started)."
         meta:
           mcp:
-            events: [ad_loaded, ad_available, ad_finished, ad_started]
+            property: true
       - name: revenue_of_event_data
         data_type: numeric
         description: "Ad revenue for the impression; 0 on failure. Events: ad_loaded, ad_started, ad_finished."
         meta:
           mcp:
             unit: usd      # NOT comparable with coins amounts; declare the real unit of YOUR pipeline here
-            events: [ad_loaded, ad_started, ad_finished]
+            property: true
       - name: display_duration_of_event_data
         data_type: string
         description: "Seconds the ad was displayed on screen. Events: ad_finished."
         meta:
           mcp:
             unit: seconds  # numeric-in-meaning but typed string -> cast before aggregating
-            events: [ad_finished]
+            property: true
       - name: is_clicked_of_event_data
         data_type: string
         description: "Whether the player clicked the ad. Events: ad_finished, ad_redirected."
         meta:
           mcp:
-            events: [ad_finished, ad_redirected]
+            property: true
       - name: is_rewarded_of_event_data
         data_type: string
         description: "Whether the impression was a rewarded ad. Events: ad_started, ad_finished."
         meta:
           mcp:
-            events: [ad_started, ad_finished]
+            property: true
       - name: is_reward_received_of_event_data
         data_type: string
         description: "Whether the rewarded-ad reward was granted. Events: ad_finished, ad_freezed."
         meta:
           mcp:
-            events: [ad_finished, ad_freezed]
+            property: true
       - name: is_user_returned_of_event_data
         data_type: string
         description: "Whether the player returned to the app after the ad. Events: ad_finished."
         meta:
           mcp:
-            events: [ad_finished]
+            property: true
       - name: tracking_id_of_event_data
         data_type: string
         description: "Ad request tracking id; correlates an ad_requested with its later ad_loaded/started/finished. Events: ad_requested, ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected."
         meta:
           mcp:
-            events: [ad_requested, ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected]
+            property: true
       - name: substitution_reason_of_event_data
         data_type: string
         description: "Why a substitute ad was shown instead of the requested one. Events: ad_started, ad_finished."
         meta:
           mcp:
-            values: [higher_cost, no_fill]
-            events: [ad_started, ad_finished]
+            property: true
       - name: start_watch_time_of_event_data
         data_type: timestamp
         description: "When the player started watching the ad. Events: ad_finished."
         meta:
           mcp:
-            events: [ad_finished]
+            property: true
       - name: creative_id_of_additional_info_of_event_data
         data_type: string
         description: "Ad creative id (mediation metadata). Events: ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected."
         meta:
           mcp:
-            events: [ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected]
+            property: true
       - name: ad_unit_of_additional_info_of_event_data
         data_type: string
         description: "Ad unit id requested from the mediation SDK. Events: ad_requested, ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected."
         meta:
           mcp:
-            events: [ad_requested, ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected]
+            property: true
       - name: network_of_additional_info_of_event_data
         data_type: string
         description: "Ad network that filled the impression (e.g. admob, unity, applovin, ironsource). Events: ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected."
         meta:
           mcp:
-            events: [ad_loaded, ad_blocked, ad_incident, ad_analyzed, ad_started, ad_finished, ad_redirected]
+            property: true
       - name: network_code_of_additional_info_of_event_data
         data_type: string
         description: "Network-specific status/error code. Events: ad_loaded, ad_finished."
         meta:
           mcp:
-            events: [ad_loaded, ad_finished]
+            property: true
       - name: network_message_of_additional_info_of_event_data
         data_type: string
         description: "Network-specific status/error message. Events: ad_loaded, ad_finished."
         meta:
           mcp:
-            events: [ad_loaded, ad_finished]
+            property: true
       - name: test_name_of_additional_info_of_event_data
         data_type: string
         description: "Applovin split-tool A/B test name (monetization-side experiment, e.g. 2602_sw_gp_rv_aa_test); distinct from product-side A/B assignments tracked on the experiments source (role: experiments). Events: ad_loaded, ad_started, ad_finished, ad_redirected."
         meta:
           mcp:
-            events: [ad_loaded, ad_started, ad_finished, ad_redirected]
+            property: true
       - name: waterfall_latency_of_additional_info_of_event_data
         data_type: string
         description: "Mediation waterfall latency in milliseconds. Events: ad_loaded, ad_started, ad_finished, ad_redirected."
         meta:
           mcp:
             unit: milliseconds  # numeric-in-meaning but typed string -> cast before aggregating
-            events: [ad_loaded, ad_started, ad_finished, ad_redirected]
+            property: true
       - name: waterfall_name_of_additional_info_of_event_data
         data_type: string
         description: "Name of the mediation waterfall used. Events: ad_loaded, ad_started, ad_finished, ad_redirected."
         meta:
           mcp:
-            events: [ad_loaded, ad_started, ad_finished, ad_redirected]
+            property: true
       - name: max_code_of_additional_info_of_event_data
         data_type: string
         description: "Applovin MAX result/error code. Events: ad_loaded, ad_finished."
         meta:
           mcp:
-            events: [ad_loaded, ad_finished]
+            property: true
       - name: max_message_of_additional_info_of_event_data
         data_type: string
         description: "Applovin MAX result/error message. Events: ad_loaded, ad_finished."
         meta:
           mcp:
-            events: [ad_loaded, ad_finished]
+            property: true
       - name: response_message_of_additional_info_of_event_data
         data_type: string
         description: "Server/mediation response message. Events: ad_loaded, ad_finished."
         meta:
           mcp:
-            events: [ad_loaded, ad_finished]
+            property: true
       - name: response_type_of_additional_info_of_event_data
         data_type: string
         description: "Server/mediation response type. Events: ad_loaded, ad_finished."
         meta:
           mcp:
-            events: [ad_loaded, ad_finished]
+            property: true
       - name: should_load_new_ad_of_additional_info_of_event_data
         data_type: string
         description: "AppHarbr hint on whether to load a fresh ad after a block. Events: ad_blocked, ad_incident, ad_analyzed."
         meta:
           mcp:
-            events: [ad_blocked, ad_incident, ad_analyzed]
+            property: true
       - name: step_of_additional_info_of_event_data
         data_type: string
         description: "AppHarbr pipeline step where the block/analyze occurred: load / ready / show. Events: ad_blocked, ad_incident, ad_analyzed."
         meta:
           mcp:
-            events: [ad_blocked, ad_incident, ad_analyzed]
+            property: true
       - name: user_defined_application_of_additional_info_of_event_data
         data_type: string
         description: "AppHarbr user-defined application label. Events: ad_blocked, ad_incident, ad_analyzed."
         meta:
           mcp:
-            events: [ad_blocked, ad_incident, ad_analyzed]
+            property: true
       - name: user_defined_domain_of_additional_info_of_event_data
         data_type: string
         description: "AppHarbr user-defined domain label. Events: ad_blocked, ad_incident, ad_analyzed."
         meta:
           mcp:
-            events: [ad_blocked, ad_incident, ad_analyzed]
+            property: true
       - name: block_reasons_of_additional_info_of_event_data
         data_type: array
         description: "AppHarbr reasons the ad was blocked (string array). Events: ad_blocked, ad_incident, ad_analyzed."
         meta:
           mcp:
-            events: [ad_blocked, ad_incident, ad_analyzed]
             array: { items: string }
       - name: report_reasons_of_additional_info_of_event_data
         data_type: array
         description: "AppHarbr reasons the ad was reported (string array). Events: ad_blocked, ad_incident, ad_analyzed."
         meta:
           mcp:
-            events: [ad_blocked, ad_incident, ad_analyzed]
             array: { items: string }
       - name: analyze_results_of_additional_info_of_event_data
         data_type: array
         description: "AppHarbr ad-analysis results (string array). Events: ad_analyzed (schema shared with ad_blocked, ad_incident)."
         meta:
           mcp:
-            events: [ad_analyzed, ad_blocked, ad_incident]
             array: { items: string }
       - name: type_of_crash_info_of_event_data
         data_type: string
         description: "Crash type captured when an ad caused a crash. Events: ad_finished (status=crash)."
         meta:
           mcp:
-            events: [ad_finished]
+            property: true
       - name: date_of_crash_info_of_event_data
         data_type: string
         description: "Timestamp of the ad-related crash. Events: ad_finished (status=crash)."
         meta:
           mcp:
-            events: [ad_finished]
+            property: true
       - name: msg_of_crash_info_of_event_data
         data_type: string
         description: "Crash message for the ad-related crash. Events: ad_finished (status=crash)."
         meta:
           mcp:
-            events: [ad_finished]
+            property: true
 
       # ---- event_data: economy --------------------------------------------
       - name: amount_of_event_data
@@ -595,38 +588,37 @@ models:
         description: "Resource amount gained or spent. Events: currency_income, currency_outcome."
         meta:
           mcp:
-            events: [currency_income, currency_outcome]
+            property: true
       - name: currency_of_event_data
         data_type: string
         description: "Currency/resource name. Events: currency_income, currency_outcome (economy) and iap_started, iap_purchase_failed, iap_purchase_completed (ISO 4217 for IAPs)."
         meta:
           mcp:
-            events: [currency_income, currency_outcome, iap_started, iap_purchase_failed, iap_purchase_completed]
+            property: true
       - name: value_in_coins_of_event_data
         data_type: numeric
         description: "Transaction value expressed in soft-currency (coins) equivalent. Events: currency_income, currency_outcome."
         meta:
           mcp:
-            events: [currency_income, currency_outcome]
+            property: true
       - name: monetization_type_of_event_data
         data_type: string
         description: "How the resource was obtained/spent (added in v1). Events: currency_income, currency_outcome."
         meta:
           mcp:
-            values: [free, rewarded, iap]
-            events: [currency_income, currency_outcome]
+            property: true
       - name: source_type_of_event_data
         data_type: string
         description: "Economy source/sink category (e.g. level_reward, hint_spend). Events: currency_income, currency_outcome."
         meta:
           mcp:
-            events: [currency_income, currency_outcome]
+            property: true
       - name: source_name_of_event_data
         data_type: string
         description: "Specific economy source/sink name within source_type. Events: currency_income, currency_outcome."
         meta:
           mcp:
-            events: [currency_income, currency_outcome]
+            property: true
 
       # ---- event_data: in-app purchases -----------------------------------
       - name: price_in_usd_of_event_data
@@ -635,79 +627,79 @@ models:
         meta:
           mcp:
             unit: usd
-            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+            property: true
       - name: price_in_currency_of_event_data
         data_type: numeric
         description: "IAP price in the player's local currency. Events: iap_started, iap_purchase_failed, iap_purchase_completed."
         meta:
           mcp:
-            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+            property: true
       - name: product_id_of_event_data
         data_type: string
         description: "IAP product id (without the bundle_id prefix). Events: iap_started, iap_purchase_failed, iap_purchase_completed."
         meta:
           mcp:
-            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+            property: true
       - name: order_id_of_event_data
         data_type: string
         description: "Android purchase order id. Events: iap_purchase_completed."
         meta:
           mcp:
-            events: [iap_purchase_completed]
+            property: true
       - name: transaction_id_of_event_data
         data_type: string
         description: "iOS transaction id. Events: iap_purchase_completed."
         meta:
           mcp:
-            events: [iap_purchase_completed]
+            property: true
       - name: discount_of_event_data
         data_type: numeric
         description: "Discount percent applied to the IAP offer. Events: iap_started, iap_purchase_failed, iap_purchase_completed."
         meta:
           mcp:
-            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+            property: true
       - name: location_of_event_data
         data_type: string
         description: "Where the purchase was initiated (e.g. main_shop). Events: iap_started, iap_purchase_failed, iap_purchase_completed."
         meta:
           mcp:
-            events: [iap_started, iap_purchase_failed, iap_purchase_completed]
+            property: true
       - name: location_from_of_event_data
         data_type: string
         description: "Where the shop was opened from (e.g. button_on_main_screen, upper_panel_on_level). Events: shop_opened."
         meta:
           mcp:
-            events: [shop_opened]
+            property: true
       - name: reason_of_event_data
         data_type: string
         description: "Reason a purchase did not complete. Events: iap_purchase_failed."
         meta:
           mcp:
-            events: [iap_purchase_failed]
+            property: true
       - name: with_elements_of_event_data
         data_type: string
         description: "Which shop elements/offers were shown when the shop opened. Events: shop_opened."
         meta:
           mcp:
-            events: [shop_opened]
+            property: true
       - name: coins_in_bank_of_event_data
         data_type: numeric
         description: "Coins accumulated in the piggy bank when opened. Events: piggy_bank_opened."
         meta:
           mcp:
-            events: [piggy_bank_opened]
+            property: true
       - name: coins_limit_of_event_data
         data_type: numeric
         description: "Piggy-bank capacity. Events: piggy_bank_opened."
         meta:
           mcp:
-            events: [piggy_bank_opened]
+            property: true
       - name: purchase_number_of_event_data
         data_type: integer
         description: "Sequential piggy-bank purchase number. Events: piggy_bank_opened."
         meta:
           mcp:
-            events: [piggy_bank_opened]
+            property: true
 
       # ---- event_data: levels / puzzles / games ---------------------------
       - name: level_id_of_event_data
@@ -715,223 +707,218 @@ models:
         description: "Level identifier. Events: level_started, level_completed, fragment_started, fragment_finished, word_selected, battle_of_wits_started, battle_of_wits_finished, puzzle_started, puzzle_completed."
         meta:
           mcp:
-            events: [level_started, level_completed, fragment_started, fragment_finished, word_selected, battle_of_wits_started, battle_of_wits_finished, puzzle_started, puzzle_completed]
+            property: true
       - name: line_levels_id_of_event_data
         data_type: string
         description: "Level-pack id (MD5 hash of the level set). Events: level_started, level_completed."
         meta:
           mcp:
-            events: [level_started, level_completed]
+            property: true
       - name: level_size_of_event_data
         data_type: string
         description: "Level size, e.g. number of letters in Fillwords. Events: level_started, level_completed, battle_of_wits_started, battle_of_wits_finished."
         meta:
           mcp:
-            events: [level_started, level_completed, battle_of_wits_started, battle_of_wits_finished]
+            property: true
       - name: level_seed_id_of_event_data
         data_type: string
         description: "Seed id used to generate the level board. Events: level_started, level_completed."
         meta:
           mcp:
-            events: [level_started, level_completed]
+            property: true
       - name: chain_of_event_data
         data_type: string
         description: "Which progression track the level/tutorial belongs to. Events: level_started, fragment_started, fragment_finished, level_completed, word_selected, tutorial."
         meta:
           mcp:
-            values: [common, daily, repeated, battle]
-            events: [level_started, fragment_started, fragment_finished, level_completed, word_selected, tutorial]
+            property: true
       - name: chain_level_number_of_event_data
         data_type: string
         description: "Level number within its chain (from 1). Events: level_started, fragment_started, fragment_finished, level_completed, word_selected, battle_of_wits_started, battle_of_wits_finished."
         meta:
           mcp:
-            events: [level_started, fragment_started, fragment_finished, level_completed, word_selected, battle_of_wits_started, battle_of_wits_finished]
+            property: true
       - name: mechanics_of_event_data
         data_type: string
         description: "Gameplay mechanic of the level. Events: level_started, fragment_started, fragment_finished, level_completed."
         meta:
           mcp:
-            events: [level_started, fragment_started, fragment_finished, level_completed]
+            property: true
       - name: method_of_event_data
         data_type: string
         description: "How the level/puzzle/action was opened or paid for. Events: level_started, fragment_started, level_completed, puzzle_started, battle_of_wits_started (free/ad/coins); piggy_bank_opened (ad/iap); wheel_spin (ad/free)."
         meta:
           mcp:
-            values: [free, ad, coins, iap]
-            events: [level_started, fragment_started, level_completed, puzzle_started, battle_of_wits_started, piggy_bank_opened, wheel_spin]
+            property: true
       - name: result_of_event_data
         data_type: string
         description: "Outcome of a completed level/puzzle/battle. Events: fragment_finished, level_completed (win/lose/exit), battle_of_wits_finished (win/lose), puzzle_completed (win/restart/new_game)."
         meta:
           mcp:
-            values: [win, lose, exit, restart, new_game]
-            events: [fragment_finished, level_completed, battle_of_wits_finished, puzzle_completed]
+            property: true
       - name: difficulty_of_event_data
         data_type: string
         description: "Difficulty of the puzzle. Events: puzzle_started, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_completed]
+            property: true
       - name: game_mode_of_event_data
         data_type: string
         description: "Puzzle game mode. Events: puzzle_started, puzzle_completed."
         meta:
           mcp:
-            values: [common, daily]
-            events: [puzzle_started, puzzle_completed]
+            property: true
       - name: complete_time_of_event_data
         data_type: string
         description: "Clean seconds taken to complete (excludes pauses). Events: fragment_finished, level_completed, puzzle_part_completed, puzzle_completed, battle_of_wits_finished."
         meta:
           mcp:
             unit: seconds  # numeric-in-meaning but typed string -> cast before aggregating
-            events: [fragment_finished, level_completed, puzzle_part_completed, puzzle_completed, battle_of_wits_finished]
+            property: true
       - name: open_number_of_event_data
         data_type: integer
         description: "How many times this level/puzzle has been opened (from 1; increments on each (re)open). Events: level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_completed."
         meta:
           mcp:
-            events: [level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_completed]
+            property: true
       - name: start_number_of_event_data
         data_type: integer
         description: "Sequential start counter (from 1). Events: level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_part_completed, puzzle_completed."
         meta:
           mcp:
-            events: [level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_part_completed, puzzle_completed]
+            property: true
       - name: total_words_of_event_data
         data_type: integer
         description: "Total words to find on the level. Events: level_started, fragment_started, fragment_finished, level_completed, battle_of_wits_started, battle_of_wits_finished."
         meta:
           mcp:
-            events: [level_started, fragment_started, fragment_finished, level_completed, battle_of_wits_started, battle_of_wits_finished]
+            property: true
       - name: main_words_found_of_event_data
         data_type: integer
         description: "Number of main words found. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: additional_words_found_of_event_data
         data_type: integer
         description: "Number of additional words found. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: bonus_words_found_of_event_data
         data_type: numeric
         description: "Number of bonus words found. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: wrong_words_found_of_event_data
         data_type: integer
         description: "Number of wrong words attempted/found. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: word_number_of_event_data
         data_type: integer
         description: "Index of the collected word. Events: word_selected (also per-entry in words_selected on fragment_finished, level_completed)."
         meta:
           mcp:
-            events: [word_selected]
+            property: true
       - name: word_name_of_event_data
         data_type: string
         description: "The collected word. Events: word_selected (also per-entry in words_selected on fragment_finished, level_completed)."
         meta:
           mcp:
-            events: [word_selected]
+            property: true
       - name: word_dictionary_of_event_data
         data_type: string
         description: "Dictionary classification of the collected word. Events: word_selected (also per-entry in words_selected)."
         meta:
           mcp:
-            values: [main, already_found, wrong]
-            events: [word_selected]
+            property: true
       - name: selected_word_of_event_data
         data_type: string
         description: "Word the player selected during level gameplay. Events: level_completed, fragment_finished."
         meta:
           mcp:
-            events: [level_completed, fragment_finished]
+            property: true
       - name: pattern_of_event_data
         data_type: string
         description: "Sorted letters / board pattern of the level. Events: level_started, fragment_started, fragment_finished, level_completed, word_selected."
         meta:
           mcp:
-            events: [level_started, fragment_started, fragment_finished, level_completed, word_selected]
+            property: true
       - name: combo_points_earned_of_event_data
         data_type: numeric
         description: "Combo points earned. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: daily_level_score_of_event_data
         data_type: numeric
         description: "Score on a daily level. Events: level_completed (daily chain)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: score_of_event_data
         data_type: numeric
         description: "Score achieved in the match. Events: battle_of_wits_finished."
         meta:
           mcp:
-            events: [battle_of_wits_finished]
+            property: true
       - name: quest_progress_of_event_data
         data_type: string
         description: "Quest progress contributed by completing the level. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: active_event_of_event_data
         data_type: string
         description: "Name of the in-game timed event active when the level was played, if any. Events: level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_completed, battle_of_wits_started, battle_of_wits_finished."
         meta:
           mcp:
-            events: [level_started, fragment_started, fragment_finished, level_completed, puzzle_started, puzzle_completed, battle_of_wits_started, battle_of_wits_finished]
+            property: true
       - name: event_objects_of_event_data
         data_type: string
         description: "Event objects collected during the level. Events: level_started, fragment_started, fragment_finished, level_completed."
         meta:
           mcp:
-            events: [level_started, fragment_started, fragment_finished, level_completed]
+            property: true
       - name: found_after_any_hint_of_event_data
         data_type: boolean
         description: "Whether the word/level was solved after using any hint. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: fragment_number_of_event_data
         data_type: integer
         description: "Sub-level (fragment) index within a staged level. Events: fragment_started, fragment_finished."
         meta:
           mcp:
-            events: [fragment_started, fragment_finished]
+            property: true
       - name: fragments_count_of_event_data
         data_type: integer
         description: "Total fragments in the staged level (deprecated on newer events). Events: fragment_started, fragment_finished, level_started, level_completed."
         meta:
           mcp:
-            events: [fragment_started, fragment_finished, level_started, level_completed]
+            property: true
       - name: tiles_count_of_event_data
         data_type: integer
         description: "Total tiles on the board. Events: fragment_finished."
         meta:
           mcp:
-            events: [fragment_finished]
+            property: true
       - name: tiles_left_of_event_data
         data_type: integer
         description: "Tiles remaining when the fragment ended. Events: fragment_finished."
         meta:
           mcp:
-            events: [fragment_finished]
+            property: true
       - name: time_from_previous_of_event_data
         data_type: integer
         description: "Seconds since the previous word was collected. Events: word_selected (also per-entry in words_selected)."
         meta:
           mcp:
-            events: [word_selected]
+            property: true
       - name: words_selected_of_event_data
         data_type: json
         description: >
@@ -940,7 +927,6 @@ models:
           the array/struct prepare pipeline. Events: fragment_finished, level_completed.
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
             array:
               encoding: json
               fields: { word_number: int, word_name: string, time_from_previous: numeric, mistakes_from_previous: int, word_dictionary: string }
@@ -950,168 +936,167 @@ models:
         description: "Difficulty level of the bot opponent. Events: battle_of_wits_started, battle_of_wits_finished."
         meta:
           mcp:
-            events: [battle_of_wits_started, battle_of_wits_finished]
+            property: true
       - name: player_rating_of_event_data
         data_type: numeric
         description: "Player rating; on battle_of_wits_finished this is the new rating after the match. Events: battle_of_wits_started, battle_of_wits_finished."
         meta:
           mcp:
-            events: [battle_of_wits_started, battle_of_wits_finished]
+            property: true
       - name: cup_difference_of_event_data
         data_type: integer
         description: "Cup/trophy change from the battle (real-opponent matches only). Events: battle_of_wits_started, battle_of_wits_finished."
         meta:
           mcp:
-            events: [battle_of_wits_started, battle_of_wits_finished]
+            property: true
       - name: opponent_type_of_event_data
         data_type: string
         description: "Type of opponent. Events: battle_of_wits_started, battle_of_wits_finished."
         meta:
           mcp:
-            values: [bot, real_opponent]
-            events: [battle_of_wits_started, battle_of_wits_finished]
+            property: true
       - name: time_to_match_of_event_data
         data_type: integer
         description: "Matchmaking time in milliseconds. Events: battle_of_wits_started."
         meta:
           mcp:
             unit: milliseconds
-            events: [battle_of_wits_started]
+            property: true
       - name: stage_number_of_event_data
         data_type: integer
         description: "Stage number within a multi-stage competition/race. Events: competition/race level events (e.g. level_completed in race modes)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: stage_place_of_event_data
         data_type: string
         description: "Player's place/rank at the stage. Events: competition/race level events."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: climb_race_reward_of_event_data
         data_type: numeric
         description: "Reward earned in a climb-race style competition. Events: competition/race level events."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       # puzzles
       - name: puzzle_class_of_event_data
         data_type: string
         description: "Puzzle class/category. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+            property: true
       - name: puzzle_number_of_event_data
         data_type: string
         description: "Puzzle number/identifier. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+            property: true
       - name: puzzle_pack_of_event_data
         data_type: string
         description: "Puzzle pack the puzzle belongs to. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+            property: true
       - name: puzzle_size_of_event_data
         data_type: numeric
         description: "Puzzle size (e.g. piece count). Events: puzzle_started, puzzle_part_completed, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+            property: true
       - name: parts_count_of_event_data
         data_type: integer
         description: "Total parts in the puzzle. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+            property: true
       - name: part_number_of_event_data
         data_type: string
         description: "Part number being completed (from 1). Events: puzzle_part_completed."
         meta:
           mcp:
-            events: [puzzle_part_completed]
+            property: true
       - name: mistakes_count_of_event_data
         data_type: integer
         description: "Number of mistakes made. Events: puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_completed]
+            property: true
       - name: reward_coins_of_event_data
         data_type: numeric
         description: "Coins rewarded for the puzzle/part. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+            property: true
       - name: reward_relax_of_event_data
         data_type: numeric
         description: "Relax-progress rewarded for the puzzle/part. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+            property: true
       - name: reward_points_of_event_data
         data_type: numeric
         description: "Points rewarded. Events: puzzle_started, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_completed]
+            property: true
       - name: rotate_of_event_data
         data_type: boolean
         description: "Whether puzzle-piece rotation mode was enabled. Events: puzzle_started, puzzle_part_completed, puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_started, puzzle_part_completed, puzzle_completed]
+            property: true
       # match-3 / moves mechanics
       - name: moves_added_of_event_data
         data_type: integer
         description: "Total extra moves added on the level. Events: level_completed (moves-based games)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: moves_added_ad_of_event_data
         data_type: integer
         description: "Extra moves added by watching an ad. Events: level_completed (moves-based games)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: moves_added_coin_of_event_data
         data_type: integer
         description: "Extra moves bought with coins. Events: level_completed (moves-based games)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: moves_on_start_of_event_data
         data_type: integer
         description: "Moves available at level start. Events: level_completed (moves-based games)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: moves_left_of_event_data
         data_type: integer
         description: "Moves remaining when the level ended. Events: level_completed (moves-based games)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: level_continue_number_of_event_data
         data_type: integer
         description: "How many times the player continued the level after running out. Events: level_completed (moves-based games)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: out_of_moves_number_of_event_data
         data_type: integer
         description: "How many times the player ran out of moves on the level. Events: level_completed (moves-based games)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: total_complete_time_of_event_data
         data_type: integer
         description: "Total elapsed time to complete the level incl. pauses, in seconds. Events: level_completed (moves-based games)."
         meta:
           mcp:
             unit: seconds
-            events: [level_completed]
+            property: true
 
       # ---- event_data: hint usage -----------------------------------------
       - name: hint_open_first_letter_used_of_event_data
@@ -1119,115 +1104,115 @@ models:
         description: "Count of 'open first letter' hints used. Events: fragment_finished, level_completed, battle_of_wits_finished."
         meta:
           mcp:
-            events: [fragment_finished, level_completed, battle_of_wits_finished]
+            property: true
       - name: hint_open_any_letter_used_of_event_data
         data_type: string
         description: "Count of 'open any letter' hints used. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hint_open_several_letters_used_of_event_data
         data_type: string
         description: "Count of 'open several letters' hints used. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hint_open_cell_used_of_event_data
         data_type: string
         description: "Count of 'open cell' hints used. Events: puzzle_completed."
         meta:
           mcp:
-            events: [puzzle_completed]
+            property: true
       - name: hints_magnet_used_of_event_data
         data_type: string
         description: "Count of magnet hints used. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hints_cancel_used_of_event_data
         data_type: string
         description: "Count of cancel hints used. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hints_shuffle_used_of_event_data
         data_type: string
         description: "Count of shuffle hints used. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hints_clear_used_of_event_data
         data_type: string
         description: "Count of clear hints used (deprecated). Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hints_extra_slot_used_of_event_data
         data_type: string
         description: "Count of extra-slot hints used. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hints_for_ad_used_of_event_data
         data_type: numeric
         description: "Count of hints obtained by watching an ad. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hints_help_used_of_event_data
         data_type: integer
         description: "Count of generic 'help' hints used. Events: level_completed (moves-based games)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: hint_undo_used_of_event_data
         data_type: integer
         description: "Count of undo hints used. Events: level_completed (moves-based games)."
         meta:
           mcp:
-            events: [level_completed]
+            property: true
       - name: auto_openers_usage_free_of_event_data
         data_type: string
         description: "Count of free auto-opener usages. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hint_open_first_letter_multiplied_x2_of_event_data
         data_type: string
         description: "Count of 'open first letter' hints used with a x2 multiplier. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hint_open_several_letters_multiplied_x2_of_event_data
         data_type: string
         description: "Count of 'open several letters' hints used with a x2 multiplier. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hint_open_any_letter_multiplied_x2_of_event_data
         data_type: string
         description: "Count of 'open any letter' hints used with a x2 multiplier. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hint_open_first_letter_discount_50_of_event_data
         data_type: string
         description: "Count of 'open first letter' hints used at a 50% discount. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hint_open_several_letters_discount_50_of_event_data
         data_type: string
         description: "Count of 'open several letters' hints used at a 50% discount. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
       - name: hint_open_any_letter_discount_50_of_event_data
         data_type: string
         description: "Count of 'open any letter' hints used at a 50% discount. Events: fragment_finished, level_completed."
         meta:
           mcp:
-            events: [fragment_finished, level_completed]
+            property: true
 
       # ---- event_data: sessions / in-game events / interface / mechanics --
       - name: session_duration_of_event_data
@@ -1236,105 +1221,103 @@ models:
         meta:
           mcp:
             unit: seconds
-            events: [end_session]
+            property: true
       - name: state_of_event_data
         data_type: string
         description: "How the session began — default = fresh start, background = resumed from background. Events: new_session."
         meta:
           mcp:
-            values: [default, background]
-            events: [new_session]
+            property: true
       - name: event_number_of_event_data
         data_type: integer
         description: "Instance number of the in-game timed event. Events: event_start, event_prize, event_end."
         meta:
           mcp:
-            events: [event_start, event_prize, event_end]
+            property: true
       - name: event_duration_of_event_data
         data_type: numeric
         description: "Planned duration of the in-game timed event in hours. Events: event_start."
         meta:
           mcp:
-            events: [event_start]
+            property: true
       - name: prize_number_of_event_data
         data_type: integer
         description: "Index of the prize received during an in-game event. Events: event_prize."
         meta:
           mcp:
-            events: [event_prize]
+            property: true
       - name: goals_completed_of_event_data
         data_type: integer
         description: "Number of event goals completed when the event ended. Events: event_end."
         meta:
           mcp:
-            events: [event_end]
+            property: true
       - name: action_of_event_data
         data_type: string
         description: "Tutorial interaction type. Events: tutorial."
         meta:
           mcp:
-            values: [show, close]
-            events: [tutorial]
+            property: true
       - name: element_of_event_data
         data_type: string
         description: "Which tutorial element the player interacted with. Events: tutorial."
         meta:
           mcp:
-            events: [tutorial]
+            property: true
       - name: reward_item_of_event_data
         data_type: string
         description: "Item won on the wheel spin. Events: wheel_spin."
         meta:
           mcp:
-            events: [wheel_spin]
+            property: true
       - name: reward_amount_of_event_data
         data_type: numeric
         description: "Amount of the wheel-spin reward. Events: wheel_spin."
         meta:
           mcp:
-            events: [wheel_spin]
+            property: true
       - name: spin_number_of_event_data
         data_type: string
         description: "Sequential spin number. Events: wheel_spin."
         meta:
           mcp:
-            events: [wheel_spin]
+            property: true
       - name: screen_from_of_event_data
         data_type: string
         description: "Origin screen of a UI transition. Events: screen_changed."
         meta:
           mcp:
-            events: [screen_changed]
+            property: true
       - name: screen_to_of_event_data
         data_type: string
         description: "Destination screen of a UI transition. Events: screen_changed."
         meta:
           mcp:
-            events: [screen_changed]
+            property: true
       - name: name_of_event_data
         data_type: string
         description: "Generic name field (e.g. the in-game event name). Events: event_start, event_prize, event_end."
         meta:
           mcp:
-            events: [event_start, event_prize, event_end]
+            property: true
       - name: previous_appsflyer_id_of_event_data
         data_type: string
         description: "AppsFlyer id of the previously-linked account restored from cloud save. Events: progress_restored."
         meta:
           mcp:
-            events: [progress_restored]
+            property: true
       - name: previous_appmetrica_id_of_event_data
         data_type: string
         description: "AppMetrica id of the previously-linked account restored from cloud save. Events: progress_restored."
         meta:
           mcp:
-            events: [progress_restored]
+            property: true
       - name: progress_restoration_level_number_of_event_data
         data_type: integer
         description: "Level number reached in the restored progress. Events: progress_restored."
         meta:
           mcp:
-            events: [progress_restored]
+            property: true
 
   - name: dim_users
     description: >
@@ -1376,7 +1359,6 @@ models:
       - name: platform
         data_type: string
         description: "Device OS family the player installed on."
-        meta: { mcp: { values: [android, ios] } }
       - name: os_version
         data_type: string
         description: "Operating-system version at install time."
@@ -1395,7 +1377,6 @@ models:
       - name: acquisition_type
         data_type: string
         description: "Install lifecycle category from attribution (organic vs. reattributed vs. reinstalled)."
-        meta: { mcp: { values: [install, s-install, reinstall, reattribution] } }
       - name: campaign
         data_type: string
         description: "Attribution campaign name the player was acquired through."
@@ -1451,7 +1432,6 @@ models:
       - name: experiment_type
         data_type: string
         description: "Experiment category."
-        meta: { mcp: { values: [monetization, product, custom] } }
       - name: variant_group
         data_type: string
         description: "Variant/group the player was assigned (e.g. control, test, variant_b)."
@@ -1478,7 +1458,7 @@ models:
   #     build_native_model({ source: 'crashlytics' }), semantic_models[].from), and use the
   #     names as-is inside a pipeline or semantic model built from it.
   #   · column names use the `_of_` form, never `__` (MetricFlow reserves `__`).
-  #   · a payload column carries `events: [...]` — the event(s) it is populated on; it reads
+  #   · a payload column is marked `property: true`; WHICH events populate it is measured by the index; it reads
   #     NULL on every other event, so scope by event_name before using it.
   #
   # - name: fct_crashlytics_events            # TODO: the real dbt model / view name
@@ -1523,31 +1503,31 @@ models:
   #     - name: issue_title_of_event_data
   #       data_type: string
   #       description: "Crashlytics issue title (the grouping key of a crash). Events: all."
-  #       meta: { mcp: { events: [fatal_crash, non_fatal, anr] } }
+  #       meta: { mcp: { property: true } }
   #     - name: anr_duration_of_event_data
   #       data_type: numeric
   #       description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
-  #       meta: { mcp: { unit: seconds, events: [anr] } }
+  #       meta: { mcp: { unit: seconds, property: true } }
   #     # COMPLEX payload columns. A crash report is not flat: a breadcrumb trail, an exception
   #     # stack of frames, and whatever custom keys the app attached. Flattened, each is ONE
   #     # column holding JSON — declare the shape and the pipeline can explode or read it.
   #     - name: breadcrumbs_of_event_data          # ARRAY of scalars
   #       data_type: string
   #       description: "Breadcrumb trail leading up to the report — a JSON array of strings, in order."
-  #       meta: { mcp: { events: [fatal_crash, non_fatal, anr], array: { items: string, encoding: json } } }
+  #       meta: { mcp: { array: { items: string, encoding: json } } }
   #     - name: stack_frames_of_event_data         # ARRAY OF STRUCTS
   #       data_type: string
   #       description: "Exception stack, innermost frame first — a JSON array of { file, line, in_app }."
   #       meta:
   #         mcp:
-  #           events: [fatal_crash, non_fatal]     # NULL on anr: a blocked thread has no stack
+  #           property: true                       # NULL on anr: a blocked thread has no stack
   #           array:
   #             encoding: json                     # a STRING holding JSON (native = a real ARRAY column)
   #             fields: { file: string, line: int, in_app: boolean }
   #     - name: custom_keys_of_event_data          # a JSON OBJECT, not an array
   #       data_type: string
   #       description: "Custom keys attached to the report — a JSON object."
-  #       meta: { mcp: { events: [fatal_crash, non_fatal, anr] } }
+  #       meta: { mcp: { property: true } }
   #
   #   HOW A PIPELINE READS THEM:
   #     array, per element   unnest { source, as }                    -> one row per element

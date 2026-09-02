@@ -109,7 +109,7 @@ test('governed metrics on the crash fact: fatal = 6 from 3 distinct players', op
 // event-scoped PAYLOAD property of the crash fact, resolved against that fact only.
 test('fatal crashes grouped by an event-scoped payload property = NullPointer 4 / OutOfMemory 2', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: ['stab_issue_title_of_event_data'] });
+  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: [{ model: 'crashlytics', attribute: 'issue_title_of_event_data' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'stab_fatal'), 'stab_fatal');
   assert.equal(by.NullPointer, 4);
@@ -121,9 +121,9 @@ test('fatal crashes grouped by an event-scoped payload property = NullPointer 4 
 // SLOWLY-CHANGING, so the attribution is POINT-IN-TIME — the version valid when the crash was
 // reported. u1 moved US -> GB on 2026-01-03 and all three of its fatal crashes are later, so
 // they count as GB; u2 stays US (2), u3 is GB (1).
-test('fatal crashes by user__country are attributed point-in-time = US 2 / GB 4', opts, async (t) => {
+test('fatal crashes by users.country are attributed point-in-time = US 2 / GB 4', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: ['user__country'] });
+  const r = await q(crashCtx, { metrics: ['stab_fatal'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'stab_fatal'), 'stab_fatal');
   assert.equal(by.US, 2, 'u2 only — u1 had already moved to GB');
@@ -177,7 +177,7 @@ test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1
     metrics: [{ name: 'reports', type: 'simple', measure: { name: 'reports' } }],
   });
   assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
-  const r = await q(crashCtx, { metrics: ['ver_reports'], group_by: ['ver_app_version'] });
+  const r = await q(crashCtx, { metrics: ['ver_reports'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'ver_reports'), 'ver_reports');
   assert.equal(by['1.0.0'], 7);
@@ -290,7 +290,7 @@ test('a governed measure declared on an events source: anr_seconds = 26', opts, 
 
   // …and it slices like any other measure: only the ANR reports carry the column, and their
   // versions split 5.5 on 1.0.0 against 8.0 + 12.5 on 1.1.0 (SEED_DATA §10).
-  const g = await q(out.context_id, { metrics: ['gov_anr_seconds'], group_by: ['gov_app_version'] });
+  const g = await q(out.context_id, { metrics: ['gov_anr_seconds'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
   const by = mapCol(g.rows, groupCol(g, 'gov_anr_seconds'), 'gov_anr_seconds');
   assert.equal(by['1.0.0'], 5.5);

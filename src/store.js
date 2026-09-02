@@ -8,17 +8,20 @@
 // Repository contract (all backends implement it):
 //   jobs.init()                       -> rows[]  (ensure schema, reconcile running→error)
 //   jobs.upsert(job)
-//   values.replaceProperty(prop, { distinctCount, totalCount, nullCount, values:[{value,freq}], coverage:[{event,rowCount,nonNull}], bundleCoverage:[{bundle,…}], cellCoverage:[{bundle,event,rowCount,nonNull}] })
-//   values.cellCoverage(prop, { bundle, event }) -> { row_count, non_null, null_count } | null  (triple)
-//   values.top(prop, limit)           -> [{value,freq}]  (freq desc, value asc)
-//   values.page(prop, { limit, offset, col:'freq'|'value', direction:'asc'|'desc' })
-//   values.stats(prop)                -> { distinctCount, totalCount, nullCount, indexedAt } | null
-//   values.coverage(prop)             -> [{event_name, row_count, non_null, null_count}] (row_count desc)
-//   values.bundleCoverage(prop)       -> [{bundle, row_count, non_null, null_count}] (row_count desc)
-//   values.bundles(source?)           -> [{source, bundle, row_count}] (apps PER SOURCE; never merged)
-//   values.bundlePropertyCoverage(b)  -> [{property, row_count, non_null, null_count}] (non_null desc)
-//   values.search(query, limit)       -> [{property,value,freq}] (substring, freq desc)
-//   values.candidates(cap)            -> [{property,value,freq}] (top-freq pool for JS fuzzy rank)
+//   Every values.* row is keyed by (SOURCE, property): each catalog source owns its own index
+//   space, so two events sources may carry the same property name without sharing a row. The
+//   source is always the FIRST argument (null/undefined = every source, where a method allows it).
+//   values.replaceProperty(source, property, { distinctCount, totalCount, nullCount, values:[{value,freq}], coverage:[{event,rowCount,nonNull}], bundleCoverage:[{bundle,…}], cellCoverage:[{bundle,event,rowCount,nonNull}], highCardinality, dataWatermark })
+//   values.cellCoverage(source, property, { bundle, event }) -> { row_count, non_null, null_count } | null  (triple)
+//   values.top(source, property, limit)   -> [{value,freq}]  (freq desc, value asc)
+//   values.page(source, property, { limit, offset, col:'freq'|'value', direction:'asc'|'desc' })
+//   values.stats(source, property)        -> { distinctCount, totalCount, nullCount, indexedAt, highCardinality, dataWatermark } | null
+//   values.coverage(source, property)     -> [{event_name, row_count, non_null, null_count}] (row_count desc)
+//   values.bundleCoverage(source, property) -> [{bundle, row_count, non_null, null_count}] (row_count desc)
+//   values.bundles(source?)               -> [{source, bundle, row_count}] (apps PER SOURCE; never merged)
+//   values.bundlePropertyCoverage(source?, bundle) -> [{source, property, row_count, non_null, null_count}] (per source)
+//   values.search(query, limit)           -> [{source, property, value, freq}] (substring, freq desc)
+//   values.candidates(cap)                -> [{source, property, value, freq}] (top-freq pool for JS fuzzy rank)
 //   values.counts()                   -> { properties, values }
 //   values.valueCount(prop)           -> int (values STORED for prop; vs distinct_count → capped?)
 //   runs.reconcile()                  (mark running→interrupted)
@@ -135,7 +138,7 @@ export class MemoryBackend {
         return [...agg.values()].sort((a, b) => a.source.localeCompare(b.source) || b.row_count - a.row_count || a.bundle.localeCompare(b.bundle));
       },
       // For one app: each property's coverage (non_null=0 → empty for this app), per source.
-      bundlePropertyCoverage: (bundle, source) => {
+      bundlePropertyCoverage: (source, bundle) => {
         const out = [];
         for (const { source: src, property, e } of allEntries()) {
           if (source && src !== source) continue;
@@ -351,7 +354,7 @@ export class SqliteBackend {
           : s._all('SELECT source, bundle, MAX(row_count) AS row_count FROM prop_bundle_coverage GROUP BY source, bundle ORDER BY source ASC, row_count DESC, bundle ASC');
         return rows.map((r) => ({ source: r.source, bundle: r.bundle, row_count: Number(r.row_count) }));
       },
-      bundlePropertyCoverage(bundle, source) {
+      bundlePropertyCoverage(source, bundle) {
         const rows = source
           ? s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? AND source = ? ORDER BY source ASC, non_null DESC, property ASC', bundle, source)
           : s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? ORDER BY source ASC, non_null DESC, property ASC', bundle);
@@ -521,6 +524,9 @@ export class SqliteBackend {
   reset() {
     this._tx(() => {
       for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_runs', 'index_run_props', 'index_run_notes']) this._run(`DELETE FROM ${t}`);
+      // A reset is a clean slate: the v1 tables set aside by the constructor would otherwise be
+      // carried back in by migrateLegacyKeys right after, resurrecting what was just wiped.
+      for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_run_props']) this._db.exec(`DROP TABLE IF EXISTS ${t}_v1`);
     });
   }
 

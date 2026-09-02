@@ -33,6 +33,16 @@
 - **`description` колонки видно только при углублении** — `semantic_index({ model })`,
   `({ event })`, `({ property })`. Значит поле описывается так, чтобы текст был полезен
   тому, кто уже пришёл именно за этим полем.
+- **Агент никогда не пишет путь соединения.** Атрибут адресуется только тем, где он лежит:
+  `group_by: [{ model: 'users', attribute: 'country' }]`,
+  `where: { field: { kind: 'dimension', model: 'users', attribute: 'country' } }`,
+  `order_by: [{ key: { model: 'users', attribute: 'country' } }]`. Связь сервер выводит из объявленных
+  ключей сам; если к модели ведут несколько связей (варианты ключа), добавляется `via`. Строка вида
+  `user__country` **не принимается** — отказ с готовой заменой. Полный перечень доступного —
+  `groupable_attributes` в обзоре и `groupable` в ответе `create_semantic_model`. Колонки результата
+  тоже без внутреннего разделителя: `users_country`, `crashlytics_app_version`, `metric_time_day` —
+  ими же адресуются `order_by` и трансформации `get_query_result`; соответствие возвращается в
+  `group_by_resolved`; внутреннего написания MetricFlow агент не видит ни на входе, ни на выходе.
 - **Оба текста индексируются для поиска** (`semantic_index({ search })`), с меньшим весом,
   чем имя. Поэтому слова, которыми аналитик называет поле вслух, работают: попадут в
   описание — поле найдётся по ним.
@@ -141,7 +151,6 @@ measures:
 | `event_semantics` | `{ acquisition_event, session_event, session_end_event, purchase_event, ad_impression_event }` | **только источник событий.** Какое событие означает установку / сессию / покупку / показ рекламы. Идёт в обзор и в guide — retention и конверсии якорятся на правильные события, а не на догадку. |
 | `partition_column` | имя колонки | подсказка стоимости: `semantic_index({ model })` отдаёт `cost_hint` «всегда ограничивай запрос по этой колонке». Только текст, не запрет. |
 | `require_time_range` | `true` / `false` | **запрет.** Метрика или pipeline без ограничения по времени над этим источником отвергается с требованием `time_range`. Переопределяется на весь каталог переменной `MCP_REQUIRE_TIME_RANGE`. |
-| `anchor` | `true` | делает источник тем, к которому инструмент откатывается, когда в каталоге несколько источников событий, а вызывающий не назвал ни один. Не более одного. Ни на что другое не влияет — источники равноправны. |
 
 Источник событий распознаётся **структурно** — по колонке `is_event_name` или `is_event_data`, — а не по роли. Модель с осью времени, но без этих колонок — источник мер (`acquisition`), и её меры и атрибуты живут по правилам размерности.
 
@@ -154,9 +163,8 @@ measures:
 | `granularity` | рядом с `is_time` или в `dimension` | зерно времени (`day` по умолчанию): `hour`, `day`, `week`, `month`, `quarter`, `year`. |
 | `is_event_name: true` | одна колонка, источник событий | имя события — то, по чему фильтруется `event_scope` и строятся шаги воронки. Делает модель источником событий. |
 | `is_event_data: true` | одна колонка, источник событий | сырой JSON-payload. Нужен для (а) опознания источника событий и (б) размещения **сложных свойств**, у которых нет плоской колонки — см. `properties` ниже. Физически колонки может не быть, если payload полностью расплющен. |
-| `events: [..]` | плоская колонка источника событий | делает колонку **event-scoped свойством**: она осмысленна только на перечисленных событиях. Именно это, а не описание, говорит агенту, где искать поле; и ровно против этого списка индекс меряет фактическое покрытие. |
+| `property: true` | плоская колонка источника событий | делает колонку **свойством события** (payload). Всё остальное — на каких событиях оно заполнено, какие значения принимает, как часто пусто — **измеряет индекс**, по каждому источнику отдельно. Без маркера колонка факта — просто колонка. |
 | `unit` | величина или числовое свойство | машиночитаемая единица (`usd`, `usd_cents`, `seconds`). Показывается рядом с полем; для строковой колонки с единицей сервер подсказывает привести к числу перед суммой. Не смешивайте единицы в одной метрике — сервер этого не сделает за вас. |
-| `values: [..]` | категориальная колонка или свойство | закрытый словарь-контракт. Показывается как `declared_values` и подставляется, пока индекс ещё не прогонялся. Для 2–4 значений, от которых зависит логика; длинные списки — не сюда, их меряет индекс. |
 
 ### Уровень колонки — величины
 
@@ -224,7 +232,6 @@ models:
       mcp:                                         # ── уровень МОДЕЛИ ──
         role: events                               # идентичность источника
         primary_entity: event                      # строкой: у событий нет ключа-колонки
-        anchor: true                               # (опц.) fallback, когда источников событий > 1
         require_time_range: true                   # (опц.) запрет запросов без окна времени
         partition_column: event_date               # (опц.) подсказка стоимости
         known_events: [first_launch, new_session, level_completed, iap_purchase_completed, ad_finished]
@@ -253,14 +260,14 @@ models:
       - name: event_date
         meta: { mcp: { dimension: false } }                           # техническая, не атрибут
 
-      # плоские СКАЛЯРНЫЕ свойства payload — events: делает колонку event-scoped
+      # плоские СКАЛЯРНЫЕ свойства payload — property: true делает колонку свойством события
       - name: price_in_usd_of_event_data
         data_type: numeric
         description: "IAP price in USD as charged by the store, before tax."
-        meta: { mcp: { events: [iap_purchase_completed, iap_purchase_failed], unit: usd } }
+        meta: { mcp: { property: true, unit: usd } }
       - name: result_of_event_data
         data_type: string
-        meta: { mcp: { events: [level_completed], values: [win, lose] } }   # словарь-контракт
+        meta: { mcp: { property: true } }   # словарь-контракт
 
       # сырой JSON — нужен для СЛОЖНЫХ свойств без плоской колонки (см. §2c)
       - name: event_data
@@ -295,23 +302,23 @@ models:
       - name: event_name
         meta: { mcp: { is_event_name: true } }
       - name: app_version                          # атрибут ФАКТА — доступен через связь
-        meta: { mcp: { dimension: true } }         #   как ad_funnel__app_version у того, кто ссылается
+        meta: { mcp: { dimension: true } }         #   как { model: crashlytics, attribute: app_version } у того, кто ссылается
       - name: device_model
         meta: { mcp: { dimension: true } }
       - name: anr_duration_of_event_data
         data_type: numeric
-        meta: { mcp: { events: [anr], unit: seconds } }
+        meta: { mcp: { property: true, unit: seconds } }
       # сложные типы в ПЛОСКИХ колонках — полностью в §2c
       - name: breadcrumbs_of_event_data
         data_type: string
-        meta: { mcp: { events: [fatal_crash, non_fatal, anr], array: { items: string, encoding: json } } }
+        meta: { mcp: { array: { items: string, encoding: json } } }
       - name: stack_frames_of_event_data
         data_type: string
-        meta: { mcp: { events: [fatal_crash, non_fatal], array: { encoding: json, fields: { file: string, line: int, in_app: boolean } } } }
+        meta: { mcp: { array: { encoding: json, fields: { file: string, line: int, in_app: boolean } } } }
       - name: custom_keys_of_event_data
         data_type: string
         description: "Custom keys attached to the report — a JSON object { level, coins, network }."
-        meta: { mcp: { events: [fatal_crash, non_fatal, anr] } }
+        meta: { mcp: { property: true } }
 
   # ───────────────────── 3. РАЗМЕРНОСТЬ ПОЛЬЗОВАТЕЛЕЙ (SCD-2) ─────────────────────
   - name: dim_users
@@ -335,7 +342,6 @@ models:
         meta: { mcp: { is_time: true } }                              # ось времени размерности
       - name: platform
         data_type: string
-        meta: { mcp: { values: [ios, android] } }
       - name: country                              # без пометок: на размерности КАЖДАЯ колонка — атрибут
         data_type: string
       - name: media_source
@@ -394,7 +400,7 @@ models:
 | ключ связи из **нескольких** колонок, или несколько альтернативных колонок | на модель: `meta.mcp.entities` (`key: [...]` или `variants`) |
 | величина — **колонка** | на колонку: `meta.mcp.measure` |
 | величина — **выражение** над колонками | на модель: `meta.mcp.measures` |
-| свойство события с **плоской** колонкой | на колонку: `meta.mcp.events` (+ `array` для массива) |
+| свойство события с **плоской** колонкой | на колонку: `meta.mcp.property: true` (для массива — `meta.mcp.array`) |
 | свойство события **без** плоской колонки (в JSON-blob) | на колонку `is_event_data`: `meta.mcp.properties` |
 
 Это ровно фикстура `test/integration/fixtures/catalog.yml` — на ней гоняются все
@@ -423,7 +429,6 @@ models:
   description: "Breadcrumb trail leading up to the report — a JSON array of strings, in order."
   meta:
     mcp:
-      events: [fatal_crash, non_fatal, anr]
       array:
         items: string                      # тип элемента
         encoding: json                     # строка с JSON-массивом; для ARRAY-колонки — native
@@ -467,7 +472,6 @@ models:
   description: "Exception stack, innermost frame first — a JSON array of { file, line, in_app }."
   meta:
     mcp:
-      events: [fatal_crash, non_fatal]     # у anr стека нет — там NULL
       array:
         encoding: json
         fields:                            # форма элемента — делает тип array<struct>
@@ -512,7 +516,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
     network (wifi | cellular). Read a key with struct_field / json_field.
   meta:
     mcp:
-      events: [fatal_crash, non_fatal, anr]
+      property: true
 ```
 
 Специальной пометки у объекта **нет** — он остаётся обычным event-scoped свойством. Поэтому
@@ -584,7 +588,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | настоящий ARRAY / REPEATED (BigQuery) | `array: { …, encoding: native }` | те же стадии без парсинга |
 
 Что **нельзя**: объявить массив под `dimension` (сложное значение — не атрибут), группировать
-метрику по массиву напрямую, ставить `values` на массив (словарь — для скаляров).
+метрику по массиву напрямую.
 
 ---
 
@@ -671,11 +675,11 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
     ]
   },
   "example_queries": [
-    { "metrics": ["rev_segment_revenue"], "group_by": ["user__country"] },
-    { "metrics": ["rev_segment_arppu"],   "group_by": ["user__acquisition_type"] }
+    { "metrics": ["rev_segment_revenue"], "group_by": [{ "model": "users", "attribute": "country" }] },
+    { "metrics": ["rev_segment_arppu"],   "group_by": [{ "model": "users", "attribute": "acquisition_type" }] }
   ],
   "notes": "User attributes come through the declared events.user → users.user relationship; no join is written.",
-  "hack": "Any measure + group_by user__<attr> makes the semantic layer join the user dimension. Extrapolate: segment ANY metric by ANY user attribute the same way."
+  "hack": "Any measure + group_by { model: 'users', attribute: '<attr>' } makes the semantic layer join the user dimension. Extrapolate: segment ANY metric by ANY user attribute the same way."
 }
 ```
 
@@ -831,7 +835,7 @@ value-индекса и интроспекции склада. Дублиров�
 | список значений и их частоты, топ-N | value-индекс | «Возможные значения: wifi, cellular, …» |
 | число различных значений | value-индекс | «Около 200 уникальных кампаний» |
 | полнота: доля NULL, покрытие | склад | «Обычно пустое», «заполнено в 80% строк» |
-| на каких событиях свойство встречается | измеренное покрытие + `meta.mcp.events` | «Приходит на level_completed и level_started» |
+| на каких событиях свойство встречается | измеренное покрытие по событиям | «Приходит на level_completed» |
 | покрытие по приложениям | value-индекс по bundle | «В fillwords не собирается» |
 | свежесть данных | max по оси времени | «Данные до вчера» |
 | какие колонки реально есть | интроспекция | — (несуществующее просто не появится) |
@@ -860,9 +864,9 @@ value-индекса и интроспекции склада. Дублиров�
     and is NOT the store bundle_id. The axis for comparing games with each other."
 ```
 
-Исключение: если у поля **закрытый словарь-контракт** из 2-4 значений, от которых зависит
-логика (`win` / `lose`, `success` / `failed`), объявите его в `meta.mcp.values` — это ключ
-схемы, а не проза; агент увидит его и когда индекс ещё не прогонялся.
+Словаря значений в схеме **нет вовсе** — ни как ключа, ни как прозы. Значения, их частоты и
+то, на каких событиях поле заполнено, агент получает из индекса, по каждому источнику отдельно.
+В описание идёт только **смысл** особого значения («пустая строка — игрок отказался»), не список.
 
 ---
 
@@ -956,7 +960,7 @@ description: >
 ### Не пиши
 
 - значения и их частоты, кардинальность, доли NULL — **сервер измеряет** (см. §4);
-- на каких событиях встречается — это ключ `meta.mcp.events`;
+- на каких событиях встречается — индекс измеряет покрытие по событиям;
 - имя колонки другими словами: `device_model — "Device model."` не добавляет ничего;
 - тип данных и «может быть NULL»;
 - как соединять и по какой колонке — это `entities`;
@@ -1017,9 +1021,9 @@ BIRD-Bench), — но это про **смысл и ловушки**, а не п
 
 ## 7. Особые случаи
 
-**Свойства событий (payload).** Описание пишется на плоскую колонку `*_of_event_data`.
-Обязательно: на каких событиях поле имеет смысл — но через ключ `meta.mcp.events`, не прозой.
-В тексте — что это за величина и её единица.
+**Свойства событий (payload).** Колонка помечается `meta.mcp.property: true`; описание пишется
+на неё. На каких событиях поле заполнено — измеряет индекс; в тексте — что это за величина, её
+единица и ловушки.
 
 **Величины.** `unit` и `label` — ключи, не проза. В `description` — что именно входит в сумму
 и что не входит: "acquisition spend excluding VAT and agency fees".
@@ -1049,6 +1053,7 @@ frames, each `{ file, line, in_app }`; reach it in a pipeline via `unnest` / `st
 - [ ] `primary_entity` объявлена один раз — либо строкой на модели, либо на своей колонке;
 - [ ] у каждой связи ровно один владелец, и число частей ключа совпадает с обеих сторон;
 - [ ] `unique` проверен запросом на дубли (§2.2);
+- [ ] свойства payload помечены `property: true` (массивы — `array`); никаких списков событий или значений;
 - [ ] величины помечены `measure`, `agg` добавлен только там, где функция обязана быть одна;
 - [ ] технические поля — `dimension: false`, идентификаторы — `index: false`;
 - [ ] окна валидности — парой, только на размерности, и у такой модели один ключ соединения;

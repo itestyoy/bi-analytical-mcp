@@ -171,7 +171,10 @@
             "rev_segment_revenue"
           ],
           "group_by": [
-            "user__country"
+            {
+              "model": "users",
+              "attribute": "country"
+            }
           ]
         },
         {
@@ -179,7 +182,10 @@
             "rev_segment_revenue"
           ],
           "group_by": [
-            "user__platform"
+            {
+              "model": "users",
+              "attribute": "platform"
+            }
           ]
         },
         {
@@ -187,7 +193,10 @@
             "rev_segment_revenue"
           ],
           "group_by": [
-            "user__media_source"
+            {
+              "model": "users",
+              "attribute": "media_source"
+            }
           ]
         },
         {
@@ -195,7 +204,10 @@
             "rev_segment_arppu"
           ],
           "group_by": [
-            "user__acquisition_type"
+            {
+              "model": "users",
+              "attribute": "acquisition_type"
+            }
           ]
         },
         {
@@ -203,12 +215,15 @@
             "rev_segment_revenue"
           ],
           "group_by": [
-            "user__media_source"
+            {
+              "model": "users",
+              "attribute": "media_source"
+            }
           ]
         }
       ],
       "notes": "User attributes via the implicit events.user -> users.user join; campaign_id is a plain string attribute on dim_users (1-hop, like country/platform) — there is no separate campaigns table.",
-      "hack": "Any measure + group_by user__<attr> makes the semantic layer auto-join the user dimension — no join written. Extrapolate: segment ANY metric by ANY user attribute the same way."
+      "hack": "Any measure + group_by { model: 'users', attribute: '<attr>' } makes the semantic layer join the user dimension — no join written. Extrapolate: segment ANY metric by ANY user attribute the same way."
     },
     {
       "id": "step_conversion_funnel",
@@ -299,7 +314,10 @@
             "lvl_funnel_completion_rate"
           ],
           "group_by": [
-            "user__country"
+            {
+              "model": "users",
+              "attribute": "country"
+            }
           ]
         }
       ],
@@ -605,7 +623,10 @@
             "cohort_grid_revenue"
           ],
           "group_by": [
-            "user__install_date",
+            {
+              "model": "users",
+              "attribute": "install_date"
+            },
             {
               "time": "metric_time",
               "grain": "day"
@@ -617,7 +638,10 @@
             "cohort_grid_buyers"
           ],
           "group_by": [
-            "user__install_date"
+            {
+              "model": "users",
+              "attribute": "install_date"
+            }
           ]
         }
       ],
@@ -782,7 +806,10 @@
             "visit_purchase_conversion"
           ],
           "group_by": [
-            "user__country"
+            {
+              "model": "users",
+              "attribute": "country"
+            }
           ]
         }
       ],
@@ -888,7 +915,10 @@
             "progression_completes"
           ],
           "group_by": [
-            "progression_level_id_of_event_data"
+            {
+              "model": "events",
+              "attribute": "level_id_of_event_data"
+            }
           ]
         },
         {
@@ -896,7 +926,10 @@
             "progression_completion_rate"
           ],
           "group_by": [
-            "progression_level_id_of_event_data"
+            {
+              "model": "events",
+              "attribute": "level_id_of_event_data"
+            }
           ]
         }
       ],
@@ -1014,7 +1047,10 @@
             "monetization_revenue"
           ],
           "group_by": [
-            "monetization_product_id_of_event_data"
+            {
+              "model": "events",
+              "attribute": "product_id_of_event_data"
+            }
           ]
         },
         {
@@ -1022,7 +1058,10 @@
             "monetization_arppu"
           ],
           "group_by": [
-            "user__country"
+            {
+              "model": "users",
+              "attribute": "country"
+            }
           ]
         },
         {
@@ -1124,7 +1163,10 @@
             "ads_ad_revenue"
           ],
           "group_by": [
-            "ads_network_of_additional_info_of_event_data"
+            {
+              "model": "events",
+              "attribute": "network_of_additional_info_of_event_data"
+            }
           ]
         },
         {
@@ -1132,7 +1174,10 @@
             "ads_impressions"
           ],
           "group_by": [
-            "ads_placement_of_event_data"
+            {
+              "model": "events",
+              "attribute": "placement_of_event_data"
+            }
           ]
         },
         {
@@ -1140,7 +1185,10 @@
             "ads_rev_per_imp"
           ],
           "group_by": [
-            "ads_ad_type_of_event_data"
+            {
+              "model": "events",
+              "attribute": "ad_type_of_event_data"
+            }
           ]
         }
       ],
@@ -1249,7 +1297,10 @@
             "economy_coins_in"
           ],
           "group_by": [
-            "economy_source_type_of_event_data"
+            {
+              "model": "events",
+              "attribute": "source_type_of_event_data"
+            }
           ]
         }
       ],
@@ -2457,7 +2508,10 @@
             "retention_seg_d1"
           ],
           "group_by": [
-            "user__country"
+            {
+              "model": "users",
+              "attribute": "country"
+            }
           ]
         },
         {
@@ -2466,7 +2520,10 @@
             "retention_seg_d7"
           ],
           "group_by": [
-            "user__platform"
+            {
+              "model": "users",
+              "attribute": "platform"
+            }
           ]
         },
         {
@@ -2474,13 +2531,19 @@
             "retention_seg_d1"
           ],
           "group_by": [
-            "user__media_source",
-            "user__country"
+            {
+              "model": "users",
+              "attribute": "media_source"
+            },
+            {
+              "model": "users",
+              "attribute": "country"
+            }
           ]
         }
       ],
-      "notes": "Same conversion-window construction as nday_retention, plus use_base_models:['users'] so the user attributes are JOINABLE: group_by any user__<attr> path. Compare segments side by side to localize a retention change before investigating causes.",
-      "hack": "ANY metric becomes a per-segment diagnostic by adding use_base_models:['users'] + group_by user__<attr>. Localize first (which segment moved), then drill into that segment."
+      "notes": "Same conversion-window construction as nday_retention, plus use_base_models:['users'] so the user attributes are JOINABLE: group_by { model: 'users', attribute: '<attr>' }. Compare segments side by side to localize a retention change before investigating causes.",
+      "hack": "ANY metric becomes a per-segment diagnostic by adding use_base_models:['users'] + group_by { model: 'users', attribute: '<attr>' }. Localize first (which segment moved), then drill into that segment."
     },
     {
       "id": "dn_retention_exact",
@@ -2555,7 +2618,7 @@
           ]
         }
       },
-      "notes": "day_n = date_diff(install_date -> device_time) buckets every session by its exact day offset since install; returners at day_n=N over the cohort size = exact D-N retention. Divide by the cohort (day_n=0 row, or a separate first_launch count) to get rates. This is point-in-time retention \u2014 stricter than the conversion-window approximation in nday_retention. The join uses the declared 'user' relationship, so it needs no column names. If the install record is SLOWLY-CHANGING (semantic_index({ model }) shows a validity window), add between: { value: 'device_time', from: '<validity start>', to: '<validity end>' } to the join stage \u2014 otherwise every session matches every historical version of the player and the returner counts inflate.",
+      "notes": "day_n = date_diff(install_date -> device_time) buckets every session by its exact day offset since install; returners at day_n=N over the cohort size = exact D-N retention. Divide by the cohort (day_n=0 row, or a separate first_launch count) to get rates. This is point-in-time retention — stricter than the conversion-window approximation in nday_retention. The join uses the declared 'user' relationship, so it needs no column names. If the install record is SLOWLY-CHANGING (semantic_index({ model }) shows a validity window), add between: { value: 'device_time', from: '<validity start>', to: '<validity end>' } to the join stage — otherwise every session matches every historical version of the player and the returner counts inflate.",
       "hack": "Exact Dn = join the install date, date_diff it against the activity time, group by the offset. The same offset axis powers cohort heatmaps and lifetime curves."
     },
     {
@@ -2875,16 +2938,38 @@
           "tool": "ab_test",
           "args": {
             "metric": "mean",
-            "control": { "label": "group_a", "n": 1200, "mean": 42.5, "stddev": 18.3 },
-            "variants": [{ "label": "group_b", "n": 1180, "mean": 39.1, "stddev": 17.9 }]
+            "control": {
+              "label": "group_a",
+              "n": 1200,
+              "mean": 42.5,
+              "stddev": 18.3
+            },
+            "variants": [
+              {
+                "label": "group_b",
+                "n": 1180,
+                "mean": 39.1,
+                "stddev": 17.9
+              }
+            ]
           }
         },
         {
           "tool": "ab_test",
           "args": {
             "metric": "proportion",
-            "control": { "label": "group_a", "n": 4000, "conversions": 820 },
-            "variants": [{ "label": "group_b", "n": 4100, "conversions": 905 }]
+            "control": {
+              "label": "group_a",
+              "n": 4000,
+              "conversions": 820
+            },
+            "variants": [
+              {
+                "label": "group_b",
+                "n": 4100,
+                "conversions": 905
+              }
+            ]
           }
         }
       ]

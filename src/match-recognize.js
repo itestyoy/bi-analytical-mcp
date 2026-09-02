@@ -52,7 +52,7 @@ const factEventNames = (catalog, source, names) => (names || []).map((n) => cata
   hint: 'a funnel runs over ONE fact, so start the pipeline from the fact that owns the event',
 }));
 
-export function stepPredicate(catalog, step, dialect, col, prepCols = new Map(), source = catalog.anchor) {
+export function stepPredicate(catalog, step, dialect, col, prepCols = new Map(), source) {
   const m = catalog.getModel(source);
   const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
   const evCol = col ? `${col}.${m.event_name.column}` : m.event_name.column;
@@ -88,7 +88,7 @@ export function stepPredicate(catalog, step, dialect, col, prepCols = new Map(),
  * event_name allowlist, event_data property conditions. To filter by USER
  * attributes, add a `join` (users) + `where` stage before match_recognize.
  */
-export function buildPrefilter(catalog, spec, dialect, col, source = catalog.anchor) {
+export function buildPrefilter(catalog, spec, dialect, col, source) {
   const f = spec.filter;
   if (!f) return '';
   const m = catalog.getModel(source);
@@ -113,7 +113,7 @@ export function buildPrefilter(catalog, spec, dialect, col, source = catalog.anc
   return clauses.join(' AND ');
 }
 
-function resolve(catalog, spec, dialect, availableCols = null, source = catalog.anchor) {
+function resolve(catalog, spec, dialect, availableCols = null, source) {
   if (!spec || !Array.isArray(spec.steps) || spec.steps.length < 2) {
     throw new Error('sequence requires at least 2 ordered steps');
   }
@@ -412,7 +412,7 @@ registerStage('match_recognize', {
   schema: (catalog) => matchRecognizeSchema(catalog),
   build: ({ d, catalog, cols, source }, p) => {
     const spec = p._resolved ? p.spec : p; // accept a stage object OR a preresolved wrapper
-    const r = p._resolved || resolve(catalog, spec, d.name, cols, source || catalog.anchor);
+    const r = p._resolved || resolve(catalog, spec, d.name, cols, source);
     return {
       op: {
         op: 'match_recognize',

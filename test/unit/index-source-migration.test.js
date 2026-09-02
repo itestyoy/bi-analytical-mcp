@@ -94,3 +94,28 @@ test('a legacy key the catalog cannot place is dropped, not mis-filed', () => {
   assert.deepEqual(index.properties(), []);
   index.close();
 });
+
+// The per-run diagnostics table is keyed by (run, source, property) too. A v1 database keyed it by
+// (run, property) — and ADD COLUMN cannot widen a PRIMARY KEY, so the upsert's ON CONFLICT clause
+// was rejected by SQLite on the first write, which aborted the whole sync. The old table is set
+// aside and a correctly keyed one created.
+test('a v1 index_run_props table is replaced, so per-property run rows can be written', () => {
+  const path = dbFile();
+  const db = new DatabaseSync(path);
+  db.exec('CREATE TABLE index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
+  db.exec("INSERT INTO index_run_props VALUES (7, 'ad_type_of_event_data', 12, 3, 3, 24, 'ok', NULL)");
+  db.close();
+
+  const store = openStore({ dbPath: path });
+  // the write that used to throw 'ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint'
+  store.runs.recordProperty(8, { source: 'events', property: 'ad_type_of_event_data', ms: 5, valuesWritten: 2, status: 'ok' });
+  store.runs.recordProperty(8, { source: 'crashlytics', property: 'ad_type_of_event_data', ms: 6, valuesWritten: 1, status: 'ok' });
+  store.runs.recordProperty(8, { source: 'events', property: 'ad_type_of_event_data', ms: 9, valuesWritten: 4, status: 'ok' }); // the upsert path
+  const rows = store.runs.properties(8);
+  assert.equal(rows.length, 2, 'one row per (source, property)');
+  assert.equal(rows.find((r) => r.source === 'events').values_written, 4, 'the second write updated, not duplicated');
+  // the old rows are set aside, not silently mixed into the new key space
+  const v1 = new DatabaseSync(path).prepare('SELECT count(*) AS n FROM index_run_props_v1').get();
+  assert.equal(Number(v1.n), 1);
+  store.close?.();
+});

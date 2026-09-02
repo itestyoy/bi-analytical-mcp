@@ -87,7 +87,7 @@ const propEnum = (values, description) => (values.length ? { type: 'string', enu
 /** An event property as seen from the pipeline's SOURCE fact (Catalog.propertyFor owns the
  *  bare-vs-qualified rules); a property of another fact is rejected with the fix. */
 const sourceProp = (catalog, source, name) => (source
-  ? catalog.propertyFor(source, name, { hint: `start the pipeline from '${source === catalog.anchor ? 'that fact' : source}' that owns it` })
+  ? catalog.propertyFor(source, name, { hint: 'start the pipeline from the source that owns it' }) // the message names the owner
   : null);
 
 // SQL for one operand: a column reference, a literal constant, or `now`.
@@ -698,10 +698,9 @@ function sourceColumns(catalog, key, physicalCols = null) {
 }
 
 /** Starting columns for the events anchor (so prepare/funnel pipelines run over it). */
-export function anchorColumns(catalog) { return sourceColumns(catalog, catalog.anchor); }
 
 /** The scalar columns a `prepare` stage list adds (name -> { type }) — threads prep columns. */
-export function prepareColumns(catalog, dialectName, stages = [], source = catalog.anchor) {
+export function prepareColumns(catalog, dialectName, stages = [], source) {
   const d = getDialect(dialectName);
   let cols = new Map();
   for (const st of stages) {
@@ -722,7 +721,7 @@ export function pipelineStageSchema(catalog) {
 // is the catalog model the pipeline reads FROM: stages that name an event or an
 // event_data property resolve it against THAT fact, so a multi-fact catalog cannot
 // silently mix one fact's payload into another fact's pipeline.
-function buildOps(catalog, d, baseColumns, stages, source = catalog.anchor) {
+function buildOps(catalog, d, baseColumns, stages, source) {
   let cols = new Map(baseColumns);
   const ops = [];
   for (const st of stages) {
@@ -755,7 +754,7 @@ function assembleCteSql(d, dialectName, baseRelation, ops) {
  * Lower a pipeline over an explicit base relation to one SQL text (chained-CTE
  * form). Used by the funnel: [...prepare, match_recognize].
  */
-export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages, source = catalog.anchor) {
+export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages, source) {
   const d = getDialect(dialectName);
   const { ops } = buildOps(catalog, d, baseColumns, stages, source);
   return assembleCteSql(d, dialectName, baseRelation, ops);

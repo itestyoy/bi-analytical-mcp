@@ -84,7 +84,9 @@ export class BigQueryDialect extends Dialect {
   jsonColumnArrayLength(column) { return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$'))`; }
 
   jsonColumnArrayContains(column, value) {
-    return `${this.sqlLiteral(value)} IN UNNEST(JSON_EXTRACT_STRING_ARRAY(${column}, '$'))`;
+    // JSON_EXTRACT_STRING_ARRAY yields ARRAY<STRING>, so the membership literal is compared as a
+    // string too — a numeric or boolean `value` would otherwise be a type error in IN UNNEST.
+    return `CAST(${this.sqlLiteral(value)} AS STRING) IN UNNEST(JSON_EXTRACT_STRING_ARRAY(${column}, '$'))`;
   }
 
   arrayContains(column, value) { return `${this.sqlLiteral(value)} IN UNNEST(${column})`; }

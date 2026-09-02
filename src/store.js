@@ -15,7 +15,7 @@
 //   values.stats(prop)                -> { distinctCount, totalCount, nullCount, indexedAt } | null
 //   values.coverage(prop)             -> [{event_name, row_count, non_null, null_count}] (row_count desc)
 //   values.bundleCoverage(prop)       -> [{bundle, row_count, non_null, null_count}] (row_count desc)
-//   values.bundles()                  -> [{bundle, row_count}] (distinct apps; max events per app)
+//   values.bundles(source?)           -> [{source, bundle, row_count}] (apps PER SOURCE; never merged)
 //   values.bundlePropertyCoverage(b)  -> [{property, row_count, non_null, null_count}] (non_null desc)
 //   values.search(query, limit)       -> [{property,value,freq}] (substring, freq desc)
 //   values.candidates(cap)            -> [{property,value,freq}] (top-freq pool for JS fuzzy rank)
@@ -123,17 +123,25 @@ export class MemoryBackend {
         const e = entryOf(source, property);
         return e ? (e.bundleCoverage || []).map((c) => ({ bundle: c.bundle, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null })) : [];
       },
-      // Distinct apps seen (max events per app across properties) — the catalogue of bundles.
-      bundles: () => {
+      // Apps seen during indexing, PER SOURCE: the same bundle id emits events into every source
+      // that carries it, with a different row count in each, so an app is a (source, bundle) pair
+      // and is never summed or maxed across sources. `source` filters to one source.
+      bundles: (source) => {
         const agg = new Map();
-        for (const { e } of allEntries()) for (const c of e.bundleCoverage || []) agg.set(c.bundle, Math.max(agg.get(c.bundle) ?? 0, c.row_count));
-        return [...agg.entries()].map(([bundle, row_count]) => ({ bundle, row_count })).sort((a, b) => b.row_count - a.row_count || a.bundle.localeCompare(b.bundle));
+        for (const { source: src, e } of allEntries()) {
+          if (source && src !== source) continue;
+          for (const c of e.bundleCoverage || []) { const k = `${src}\u0000${c.bundle}`; agg.set(k, { source: src, bundle: c.bundle, row_count: Math.max(agg.get(k)?.row_count ?? 0, c.row_count) }); }
+        }
+        return [...agg.values()].sort((a, b) => a.source.localeCompare(b.source) || b.row_count - a.row_count || a.bundle.localeCompare(b.bundle));
       },
-      // For one app: each property's coverage (non_null=0 → empty for this app).
-      bundlePropertyCoverage: (bundle) => {
+      // For one app: each property's coverage (non_null=0 → empty for this app), per source.
+      bundlePropertyCoverage: (bundle, source) => {
         const out = [];
-        for (const { source, property, e } of allEntries()) for (const c of e.bundleCoverage || []) if (c.bundle === bundle) out.push({ source, property, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null });
-        return out.sort((a, b) => b.non_null - a.non_null || a.property.localeCompare(b.property));
+        for (const { source: src, property, e } of allEntries()) {
+          if (source && src !== source) continue;
+          for (const c of e.bundleCoverage || []) if (c.bundle === bundle) out.push({ source: src, property, row_count: c.row_count, non_null: c.non_null, null_count: c.row_count - c.non_null });
+        }
+        return out.sort((a, b) => a.source.localeCompare(b.source) || b.non_null - a.non_null || a.property.localeCompare(b.property));
       },
       // ── triple (property × bundle × event) cell: is the field filled at this exact combo? ──
       cellCoverage: (source, property, { bundle, event } = {}) => {
@@ -255,9 +263,18 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_event_coverage (source TEXT, property TEXT, bundle TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle, event_name))');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
+    // Per-property run rows are keyed by (run, SOURCE, property) like every other index table. A
+    // v1 database keyed them by (run, property) alone — and ADD COLUMN cannot widen a PRIMARY KEY,
+    // so the upsert's ON CONFLICT(run_id, source, property) would be rejected by SQLite on every
+    // write and abort the sync. Rename the old table aside (history is per-run diagnostics, not
+    // data worth carrying) and let the CREATE below make the correctly keyed one.
+    {
+      const cols = db.prepare('PRAGMA table_info(index_run_props)').all();
+      if (cols.length && !cols.some((c) => c.name === 'source')) {
+        try { db.exec('DROP TABLE IF EXISTS index_run_props_v1'); db.exec('ALTER TABLE index_run_props RENAME TO index_run_props_v1'); } catch { /* leave as-is */ }
+      }
+    }
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, source TEXT, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, source, property))');
-    // per-property run rows predate the source column; an older DB just starts a fresh history.
-    try { db.exec('ALTER TABLE index_run_props ADD COLUMN source TEXT'); } catch { /* already present */ }
     // Run-level events surfaced in semantic_index({ status })/({ run }), e.g. "a batch fell
     // back to per-property because the combined scan failed: <reason>".
     db.exec('CREATE TABLE IF NOT EXISTS index_run_notes (run_id INTEGER, note TEXT, at INTEGER)');
@@ -327,13 +344,18 @@ export class SqliteBackend {
         return s._all('SELECT bundle, row_count, non_null FROM prop_bundle_coverage WHERE source = ? AND property = ? ORDER BY row_count DESC, bundle ASC', source, property)
           .map((r) => ({ bundle: r.bundle, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
       },
-      bundles() {
-        return s._all('SELECT bundle, MAX(row_count) AS row_count FROM prop_bundle_coverage GROUP BY bundle ORDER BY row_count DESC, bundle ASC')
-          .map((r) => ({ bundle: r.bundle, row_count: Number(r.row_count) }));
+      // An app is a (source, bundle) pair — never aggregated across sources (see the memory backend).
+      bundles(source) {
+        const rows = source
+          ? s._all('SELECT source, bundle, MAX(row_count) AS row_count FROM prop_bundle_coverage WHERE source = ? GROUP BY source, bundle ORDER BY source ASC, row_count DESC, bundle ASC', source)
+          : s._all('SELECT source, bundle, MAX(row_count) AS row_count FROM prop_bundle_coverage GROUP BY source, bundle ORDER BY source ASC, row_count DESC, bundle ASC');
+        return rows.map((r) => ({ source: r.source, bundle: r.bundle, row_count: Number(r.row_count) }));
       },
-      bundlePropertyCoverage(bundle) {
-        return s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? ORDER BY non_null DESC, source ASC, property ASC', bundle)
-          .map((r) => ({ source: r.source, property: r.property, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
+      bundlePropertyCoverage(bundle, source) {
+        const rows = source
+          ? s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? AND source = ? ORDER BY source ASC, non_null DESC, property ASC', bundle, source)
+          : s._all('SELECT source, property, row_count, non_null FROM prop_bundle_coverage WHERE bundle = ? ORDER BY source ASC, non_null DESC, property ASC', bundle);
+        return rows.map((r) => ({ source: r.source, property: r.property, row_count: Number(r.row_count), non_null: Number(r.non_null), null_count: Number(r.row_count) - Number(r.non_null) }));
       },
       // ── triple (property × bundle × event) cell lookup: the field's fill at one combo ──
       cellCoverage(source, property, { bundle, event } = {}) {

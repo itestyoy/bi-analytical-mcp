@@ -192,3 +192,20 @@ test('a validity mark on a column that is not a dimension is rejected', () => {
     '{ name: seen_at, data_type: timestamp, meta: { mcp: { is_time: true, dimension: { validity: end } } } }');
   assert.throws(() => load(EVENTS + onAxis), /is the model's time axis \(meta\.mcp\.is_time\), so it never becomes a groupable time dimension/);
 });
+
+// THE SOURCE IS ALWAYS A SEPARATE ARGUMENT. With several events sources an accessor asked without
+// one has nothing to fall back to — there is no "default" fact — so it refuses instead of silently
+// answering for another source. With exactly one source the argument may be omitted.
+test('event accessors refuse an omitted source when the catalog has several', () => {
+  const two = load(EVENTS + CRASH + USERS());
+  assert.equal(two.facts.length, 2);
+  assert.throws(() => two.eventNames(), /a source is required: this catalog has 2 events sources/);
+  assert.throws(() => two.scalarEventProps(), /a source is required/);
+  assert.throws(() => two.bundleColumn(), /a source is required/);
+  assert.throws(() => two.eventNames('users'), /'users' is not an events source/);
+  assert.deepEqual(two.eventNames('crashlytics'), ['boom']);
+
+  const one = load(EVENTS + USERS());
+  assert.equal(one.facts.length, 1);
+  assert.deepEqual(one.eventNames(), ['login'], 'a single source resolves without being named');
+});

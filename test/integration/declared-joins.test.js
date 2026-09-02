@@ -33,7 +33,9 @@
 //               on metric_time without joining each other;
 //   J   (44-49) `attrs` is the contract: exactly the listed columns arrive — any column of the
 //               joined model, amounts and event-scoped payload included — nothing implicit, and
-//               a name that would be used twice REJECTS the step with the rename to apply.
+//               a name that would be used twice REJECTS the step with the rename to apply;
+//   K   (50-51) a FACT as the join target: owning a key with `type: unique` gives its attributes
+//               a governed path — and `unique` is a claim about the data that nothing verifies.
 //
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
@@ -66,6 +68,9 @@ let pg; let engine; let backend; let acqCtx; let evCtx; let seq = 0;
 // A second catalog over the SAME warehouse, declaring things the tables do not actually have —
 // see section E. `phantom` is that catalog AFTER real introspection has grounded it.
 let phantom; let phantomEngine; let phantomPruned; let phantomCostCtx;
+// A third catalog over the SAME warehouse, in which the CRASH source OWNS the ad funnel
+// (type: unique) instead of both sides pointing at nobody — see section K.
+let ownerCatalog; let ownerEngine; let ownerCtx;
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -148,6 +153,26 @@ before(async () => {
   });
   assert.equal(pc.parse.ok, true, `the grounded phantom catalog must still parse: ${JSON.stringify(pc.parse)}`);
   phantomCostCtx = pc.context_id;
+
+  // ── the OWNED-FUNNEL catalog: the crash source declares itself the owner ─────────────
+  // Same warehouse, one declaration changed: `ad_funnel` becomes `unique` on the crash
+  // source, so it is the join TARGET and its attributes get a governed path. See section K.
+  const od = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
+  const OM = Object.fromEntries(od.models.map((x) => [x.name, x]));
+  OM.fct_crashlytics_events.meta.mcp.entities = { ad_funnel: { type: 'unique', key: ['rewarded_tracking_id', 'player_id_of_internal'] } };
+  OM.fct_analytics_events.meta.mcp.entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
+  const ownerPath = join(mkdtempSync(join(tmpdir(), 'owner-')), 'catalog.yml');
+  writeFileSync(ownerPath, yaml.dump(od));
+  ownerCatalog = loadCatalog(ownerPath, { profilesDir: BASE, projectDir: BASE });
+  ownerEngine = new Engine({ catalog: ownerCatalog, contextManager: ctxs, runner: backend });
+  const oc = await ownerEngine.create_semantic_model({
+    name: 'jown',
+    use_base_models: ['crashlytics'],
+    semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
+  });
+  assert.equal(oc.parse.ok, true, JSON.stringify(oc.parse));
+  ownerCtx = oc.context_id;
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
@@ -1235,4 +1260,55 @@ test('49. a pipeline passed whole obeys the same contract', opts, async (t) => {
   assert.ok(num(rows[0].crash_versions) >= 1, 'the crash side stayed the base column');
   assert.ok(num(rows[0].install_versions) >= 1, 'and the install side arrived renamed');
   assert.equal(num(rows[0].countries), 4);
+});
+
+// ═══════════ K. A FACT THAT OWNS A RELATIONSHIP ═══════════
+//
+// So far the ad funnel has had no owner: several events share one id, so neither side is
+// unique on it and it is a pipeline join. A warehouse can model it the other way round — ONE
+// row per funnel on the crash side, many events pointing at it. Then the crash source is the
+// join TARGET and says so: `ad_funnel: { type: unique, ... }`, and a measure on events can be
+// grouped by the crash source's ATTRIBUTES through the governed path.
+//
+// Two things pinned here. First that the path resolves at all: a governed
+// `<relationship>__<attribute>` can only reach a dimension the manifest carries, so a fact used
+// as a join target has to emit its own declared attributes — it used to emit only its time axis,
+// and every ad_funnel__<attr> the catalog advertised was refused by MetricFlow as "no valid join
+// path exists". Second that `unique` is a CLAIM ABOUT THE DATA and nothing verifies it: in THIS
+// warehouse it is false (four reports of u1 name the same funnel), and the numbers below are the
+// honest consequence.
+
+// 50. The governed path reaches the owning fact's attributes: 176 events matched no report,
+//     14 matched one — split by the app version the crash was reported from.
+test('50. a fact that owns a key exposes its attributes to a governed group-by', opts, async (t) => {
+  if (skip(t)) return;
+  assert.equal(ownerCatalog.joinTargetFor('ad_funnel'), 'crashlytics', 'the crash source is the target');
+  const r = await ownerEngine.query_semantic_model({
+    context_id: ownerCtx, metrics: ['jown_evts'], group_by: ['ad_funnel__app_version'],
+  });
+  assert.equal(r.ok, true, JSON.stringify(r.error));
+  const key = r.columns.map((c) => c.name).find((n) => n.includes('app_version'));
+  const by = Object.fromEntries(r.rows.map((x) => [x[key] == null ? 'none' : String(x[key]), num(x.jown_evts)]));
+  assert.deepEqual(by, { none: 176, '1.0.0': 6, '1.1.0': 8 });
+});
+
+// 51. …and the total says what the claim cost: 190 against an honest 184. u1's two funnel
+//     events match FOUR of its crash reports, so they are counted four times. Where the owning
+//     side really does hold one row per key, the same query totals exactly.
+test('51. `unique` is a claim nobody checks: a false one inflates 184 to 190', opts, async (t) => {
+  if (skip(t)) return;
+  const flat = await ownerEngine.query_semantic_model({ context_id: ownerCtx, metrics: ['jown_evts'] });
+  assert.equal(flat.ok, true, JSON.stringify(flat.error));
+  assert.equal(num(flat.rows[0].jown_evts), 184, 'ungrouped, nothing is joined and the count is honest');
+
+  const grouped = await ownerEngine.query_semantic_model({
+    context_id: ownerCtx, metrics: ['jown_evts'], group_by: ['ad_funnel__device_model'],
+  });
+  assert.equal(grouped.ok, true, JSON.stringify(grouped.error));
+  assert.equal(sumCol(grouped.rows, 'jown_evts'), 190, 'the join added 6 rows: 2 events x 4 reports of one funnel');
+  // the same key is genuinely NOT unique on the owning side — which is why.
+  const dup = await pg.db.query(`SELECT count(*) AS n FROM (
+    SELECT rewarded_tracking_id, player_id_of_internal FROM public.fct_crashlytics_events
+    WHERE rewarded_tracking_id IS NOT NULL GROUP BY 1, 2 HAVING count(*) > 1) d`);
+  assert.equal(num(dup.rows[0].n), 1, 'one duplicated (funnel, player) pair — u1 with fnl_01, four times');
 });

@@ -52,6 +52,17 @@ export function renderBaseModel(catalog, key) {
     sm.dimensions = [
       { name: EVENT_TIME_DIM, type: 'time', type_params: { time_granularity: m.time.granularity || 'day' }, expr: m.time.column },
     ];
+    // …and its own declared ATTRIBUTES. A fact is not only a measure carrier: when another
+    // source points at it through a declared relationship, these are what that relationship is
+    // FOR — `<relationship>__<attribute>` can only resolve to a dimension the manifest actually
+    // carries, so a fact whose attributes were left out advertised join paths nothing could
+    // serve. They cost nothing when unused.
+    for (const [name, d] of Object.entries(m.dimensions || {})) {
+      if (name === EVENT_TIME_DIM) continue;
+      sm.dimensions.push(d.type === 'time'
+        ? { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } }
+        : { name, type: 'categorical' });
+    }
     sm.measures = [];
     return sm;
   }
@@ -137,7 +148,11 @@ export function renderContext(catalog, state) {
     const scd = isScdModel(catalog.getModel(key));
     const add = state.additions?.[key];
     if (add) {
-      for (const d of add.dimensions || []) sm.dimensions.push(d);
+      // A task may re-declare an attribute the base model already carries (it is offered in the
+      // schema either way). Two dimensions with one name is a manifest dbt rejects, so the base
+      // one stands and the duplicate is dropped.
+      const have = new Set(sm.dimensions.map((d) => d.name));
+      for (const d of add.dimensions || []) { if (have.has(d.name)) continue; have.add(d.name); sm.dimensions.push(d); }
       for (const me of add.measures || []) {
         // MetricFlow forbids measures on an SCD (validity_params) model — drop them so the manifest
         // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.

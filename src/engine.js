@@ -1348,7 +1348,6 @@ export class Engine {
     const beforeNames = new Set(before.map((c) => c.name));
     const afterNames = new Set(after.map((c) => c.name));
     const removed = before.filter((c) => !afterNames.has(c.name)).map((c) => c.name);
-    const shadowed = changedStage ? this._joinShadowed(changedStage, draft.source, before) : [];
     const allSteps = this._draftSteps(draft);
     // add_step is APPEND-ONLY: the AI already saw every prior step in earlier responses, so echoing
     // the whole (growing) steps list each call is O(n²) waste across a build. Return only the applied
@@ -1362,9 +1361,6 @@ export class Engine {
         : { steps: allSteps }),
       column_count: after.length,
       columns_added: after.filter((c) => !beforeNames.has(c.name)),
-      // A join leaves out a column whose name the pipeline already carries. Report it with the
-      // reason and the exact attrs entry that brings it in, so nothing looks like it vanished.
-      ...(shadowed.length ? { columns_not_added: shadowed } : {}),
       // Compact by default: a step that drops 200 columns must not reprint 200 names every call.
       // Always give the count; include the full list only when it is short or include_columns is set.
       columns_removed_count: removed.length,
@@ -1375,7 +1371,7 @@ export class Engine {
       recommendations: [
         ...filterWarnings,
         ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
-        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._joinShadowNote(shadowed, changedStage.with), ...this._draftStepRecommendations(changedStage, after)] : []),
+        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;
@@ -1395,60 +1391,6 @@ export class Engine {
    * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
    * add the window (and fix it) instead of trusting a silently wrong join.
    */
-  /**
-   * A join brings in EVERY column of the joined model by default; one whose name the pipeline
-   * already carries cannot come in under that name (two columns with one name are not
-   * addressable downstream). Rather than let a field look like it vanished, report each one
-   * with WHY it was left out and the exact `attrs` entry that brings it in.
-   *
-   * After the build-time guard only two cases can reach here, and both are the caller's OWN
-   * choice, not a silent skip:
-   *   · a JOIN KEY column holds the same value on both sides by construction — always left out,
-   *     nothing is lost, and there is normally no reason to ask for it;
-   *   · a name shared with a column the pipeline already carries, where the caller answered
-   *     on_name_clash: 'skip'. Those hold DIFFERENT data, so record that the joined side is
-   *     absent BY REQUEST, with the entry that would bring it in after all.
-   * A clash with no answer never becomes a step at all: the stage is rejected at build.
-   * @returns [{ column, reason, add_with, join_key? }] — chosen drops first, key columns after.
-   */
-  _joinShadowed(stage, source, before) {
-    if (!stage || stage.stage !== 'join' || stage.attrs?.length) return [];
-    let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
-    const names = new Set(this.catalog.modelColumns(stage.with).map((c) => c.name));
-    if (m.event_data_column) names.add(m.event_data_column);
-    const taken = new Set(before.map((c) => c.name));
-    // Key columns ON THE JOINED SIDE: `via` reads them from the schema, `on` means both sides
-    // name them identically.
-    const keyCols = new Set();
-    if (stage.via) for (const part of (this.catalog.entityKey(stage.with, stage.via) || [])) keyCols.add(part.column);
-    else for (const c of (Array.isArray(stage.on) ? stage.on : [stage.on]).filter(Boolean)) keyCols.add(c);
-    const out = [];
-    for (const column of names) {
-      if (!taken.has(column)) continue;
-      const isKey = keyCols.has(column);
-      // 'prefix' renamed it in, and an unanswered clash never got here — so the only non-key
-      // entry left to report is one the caller explicitly chose to drop.
-      if (!isKey && stage.on_name_clash !== 'skip') continue;
-      out.push({
-        column,
-        reason: isKey
-          ? `join key — '${column}' matched on both sides, so the joined value is identical to the one the pipeline already has. Nothing is lost.`
-          : `left out by on_name_clash: 'skip' — '${source}' and '${stage.with}' both have a column named '${column}' holding DIFFERENT data, and the pipeline kept '${source}'.${column}.`,
-        add_with: { column, as: `${stage.with}_${column}` },
-        ...(isKey ? { join_key: true } : {}),
-      });
-    }
-    return out.sort((a, b) => (a.join_key ? 1 : 0) - (b.join_key ? 1 : 0));
-  }
-
-  /** One recommendation, only when a clash was resolved by dropping data on purpose. */
-  _joinShadowNote(shadowed, joined) {
-    const real = shadowed.filter((x) => !x.join_key);
-    if (!real.length) return [];
-    const fix = real.map((x) => `{ column: '${x.column}', as: '${x.add_with.as}' }`).join(', ');
-    return [`on_name_clash: 'skip' left ${real.map((x) => `'${x.column}'`).join(', ')} out of '${joined}' — the pipeline kept its own column of that name. If you meant to have BOTH sides, re-run this step with on_name_clash: 'prefix', or with attrs: [${fix}] plus whatever else you need.`];
-  }
-
   _joinCompletenessWarnings(stage, draft = null) {
     if (!stage || stage.stage !== 'join' || stage.between) return [];
     let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }

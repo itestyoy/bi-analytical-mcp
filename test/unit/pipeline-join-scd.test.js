@@ -56,7 +56,7 @@ const hasIncompleteJoin = (recs) => (recs || []).some((r) => /INCOMPLETE JOIN/.t
 test('key-only join to an SCD-2 dimension → response warns the join is incomplete (fan-out)', async () => {
   const e = engine();
   const s = await e.build_native_model({ action: 'start', name: 'jtest', source: 'events' });
-  const r = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: 'player_id' } });
+  const r = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: 'player_id', attrs: ['country'] } });
   assert.ok(hasIncompleteJoin(r.recommendations), `expected an incomplete-join warning, got: ${JSON.stringify(r.recommendations)}`);
   // the warning names the exact fix (event time + the validity columns)
   const w = r.recommendations.find((x) => /INCOMPLETE JOIN/.test(x));
@@ -71,7 +71,7 @@ test('SCD-2 join WITH a point-in-time between window → no incomplete-join warn
   const s = await e.build_native_model({ action: 'start', name: 'jtest', source: 'events' });
   const r = await e.build_native_model({
     action: 'add_step', draft_id: s.draft_id,
-    stage: { stage: 'join', with: 'users', on: 'player_id', between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
+    stage: { stage: 'join', with: 'users', on: 'player_id', attrs: ['country'], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
   });
   assert.ok(!hasIncompleteJoin(r.recommendations), `no warning expected once between is present, got: ${JSON.stringify(r.recommendations)}`);
 });

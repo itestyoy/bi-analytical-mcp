@@ -162,7 +162,7 @@ test('build_native_model: join between (temporal window) validates and exposes j
   const s2 = await e.build_native_model({ action: 'start', name: 'pit2', source: 'events' });
   await assert.rejects(
     () => e.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: {
-      stage: 'join', with: 'users', on: 'player_id_of_internal',
+      stage: 'join', with: 'users', on: 'player_id_of_internal', attrs: ['country'],
       between: { value: 'device_time', from: 'no_such_col', to: 'install_date' },
     } }),
     /not a column of/,

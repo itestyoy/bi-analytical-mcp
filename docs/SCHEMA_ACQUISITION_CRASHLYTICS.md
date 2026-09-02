@@ -317,46 +317,50 @@
 
 ### Что join отдаёт из присоединённой модели
 
-По умолчанию — **все её колонки**: идентификаторы, ось времени, событийные свойства
-`*_of_event_data` и **суммы**. Это важно именно для источника мер: сумма намеренно не
-является группируемым атрибутом, поэтому «отдать размерности» означало бы потерять
-`cost`, `impressions` и `clicks` — то есть всё, ради чего источник и присоединяли.
+Ровно то, что перечислено в `attrs`, и ничего больше. Поле **обязательное**: неявного
+набора нет, поэтому следующая стадия видит именно то, о чём попросили, а колонка, которой
+не просили, честно падает как «unknown column».
 
-Исключение одно — колонка, чьё имя в конвейере уже занято: две колонки под одним именем
-ниже по цепочке не адресуются. Дальше важно, ЧТО именно совпало, потому что два случая
-означают противоположное:
+Перечислить можно **любую** колонку присоединённой модели, а не только группируемые
+атрибуты: идентификаторы, ось времени, событийные свойства `*_of_event_data` и — что для
+источника мер и есть главное — **суммы**. Сумма намеренно не является группируемым
+атрибутом, так что join, отдающий «размерности», оставлял бы позади `cost`, `impressions`
+и `clicks`, то есть всё, ради чего источник и присоединяли.
 
-| случай | что делает шаг |
+Если `attrs` не передать, ошибка сразу показывает, из чего выбирать:
+
+```
+join 'acquisition': `attrs` is required — list the columns you want from it; nothing is
+added implicitly. Columns of 'acquisition': acquisition_id, player_id_of_internal,
+spend_date, cost, impressions, clicks, media_source, campaign, campaign_id,
+ingest_batch_id. Use { column, as } to expose one under a different name.
+semantic_index({ model: 'acquisition' }) describes them.
+```
+
+### Одно имя не может адресовать две колонки
+
+Дубль имён — ошибка шага с причиной и готовым переименованием. Три случая:
+
+| что случилось | что говорит ошибка |
 |---|---|
-| колонка **ключа связи** | значение на обеих сторонах одинаковое по построению. Присоединённая копия не нужна: она остаётся за бортом, это записано в `columns_not_added` с `join_key: true`, и решать тут нечего |
-| любое **другое** совпавшее имя | на сторонах **разные данные** (в строке падения `app_version` — версия, которая упала; в записи об установке — версия на момент установки). Одно имя не может адресовать две колонки, поэтому **шаг отвергается с ошибкой** — молча оставить одну из сторон значило бы потерять данные, о которых никто не просил |
+| имя уже есть в конвейере, а данные **разные** | `the pipeline already has a column named 'event_name' … The two hold different data, so rename the joined one: { column: 'event_name', as: 'events_event_name' }` |
+| имя уже есть, и это **колонка ключа связи** | `'player_id_of_internal' is the join key: it matched on both sides, so the column the pipeline already has holds the same value — drop it from attrs` |
+| два элемента `attrs` дают одно имя | `'event_id' and 'tracking_id' would both be named 'x'. Give each its own \`as\`` |
 
-Ошибка не абстрактная: она называет колонку, обе стороны и все три выхода.
+Про ключ сказано отдельно намеренно: там переименовывать нечего — значение на обеих
+сторонах одинаковое, копию просто не надо просить.
 
+С переименованием обе стороны живут рядом: в строке падения `app_version` — версия,
+которая упала, а `users_app_version` — версия на момент установки.
+
+```json
+{ "stage": "join", "with": "users", "via": "user",
+  "between": { "value": "event_time", "from": "install_time_valid_from", "to": "install_time_valid_until" },
+  "attrs": [{ "column": "app_version", "as": "users_app_version" }, "country"] }
 ```
-join 'users': 'app_version', 'device_model' are columns of BOTH 'crashlytics' and 'users',
-holding different data — one name cannot address two columns, so this join is ambiguous
-as written. Say which you mean:
-  · on_name_clash: 'prefix' — bring the joined one(s) in as users_app_version,
-                              users_device_model, keeping both sides;
-  · on_name_clash: 'skip'   — leave them out and keep 'crashlytics'’s own;
-  · attrs: [...]            — list exactly what you want from 'users', renaming with
-                              { column: 'app_version', as: 'users_app_version' } where needed.
-The join key is not the problem here (player_id_of_internal matches on both sides, so its
-value is identical and it is left out either way).
-```
-
-- `on_name_clash: "prefix"` — обе стороны в одном конвейере: своя под своим именем,
-  присоединённая как `<модель>_<колонка>`.
-- `on_name_clash: "skip"` — присоединённая не приходит, своя остаётся. Это уже осознанный
-  выбор, и он записан в `columns_not_added` с причиной и готовой вставкой на случай, если
-  передумаете.
-- `attrs: [...]` — полный контроль: перечислить нужное, переименовав через `{ column, as }`.
 
 Так же ведёт себя и путь «конвейер целиком» — `register_native_model`, в том числе
-`dry_run`: тот же отказ, а не тихо собранная модель без поля. И `attrs` сверяется с
-реальными колонками присоединённой модели, так что опечатка падает здесь со списком
-доступного, а не ошибкой базы.
+`dry_run`: тот же отказ, а не тихо собранная модель без поля.
 
 ### Несколько соединений подряд
 

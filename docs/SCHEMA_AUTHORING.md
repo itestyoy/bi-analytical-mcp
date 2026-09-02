@@ -588,6 +588,218 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 
 ---
 
+## 2d. Рецепты: спецификация и правила оформления
+
+Рецепт — это **готовый, проверенный на складе шаблон решения одной задачи**: полезная нагрузка
+инструмента, которую можно выполнить как есть, плюс приём, по которому агент адаптирует её к
+похожему вопросу. Рецепты лежат в `config/recipes.json` (`{ "recipes": [ … ] }`; другой путь — переменной
+`RECIPES_PATH`) и доступны
+агенту через `semantic_index`: обзор перечисляет их id, `{ guide }` группирует по семействам
+задач, `{ search }` находит по словам, `{ recipe: id }` отдаёт один целиком. Отдельных
+инструментов для рецептов нет — намеренно.
+
+### Что рецепт даёт агенту
+
+`semantic_index({ recipe })` возвращает рецепт как есть плюс две рамки: имена метрик
+**намеспейсятся именем задачи** (`<name>_<metric>` — в `example_queries` уже полные имена), и
+рецепт — **строительный блок**: взять `hack`, адаптировать payload под точный вопрос, отдать
+`create_payload` в `create_semantic_model`, а pipeline — в `build_native_model`.
+
+Поэтому самое ценное поле — не payload, а **`hack`**: обобщённый приём, из которого агент
+собирает решение задачи, для которой рецепта нет. Payload — доказательство, что приём работает.
+
+### Поля
+
+| поле | обяз. | что это | как писать |
+|---|---|---|---|
+| `id` | да | идентификатор, `snake_case` | по задаче, не по метрике: `nday_retention`, не `retention_metric_v2`. Попадает в enum инструмента — переименование ломает вызовы |
+| `task_type` | да | семейство задач | одно из уже существующих (см. ниже) — по нему `{ guide }` группирует. Новое семейство заводите осознанно |
+| `title` | да | заголовок | что считаем, по-английски, одна строка |
+| `when_to_use` | да | когда брать | **формулировками вопроса, как его задаёт человек**: «How many unique users over time» — это то, по чему рецепт находится поиском |
+| `required_events` | да | события, без которых рецепт не работает | реальные имена из `known_events`; пустой список — если рецепт не про события |
+| `required_properties` | да | свойства payload | имена свойств; пустой список допустим |
+| `required_user_attrs` | да | атрибуты размерности | имена колонок `dim_users` |
+| `required_roles` | нет | роли, которые должны быть в каталоге | `[experiments]` для A/B, `[acquisition]` для расходов |
+| `metric_types` | да | какого рода результат | из словаря ниже |
+| `create_payload` | одно из | payload `create_semantic_model` | управляемый путь: `name`, `use_base_models?`, `semantic_models`, `metrics` |
+| `register_payload` | одно из | payload с `pipeline` | для того, что метрикой не выразить: воронки, сессии, окна, A/B-агрегаты |
+| `tool_calls` | одно из | `[{ tool, args }]` | рецепт без склада — чистый расчёт (`experiment({ action: 'plan' })`) |
+| `example_queries` | для `create_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
+| `ab_test` | для A/B | сопоставление колонок результата → аргументы `experiment({ action: 'analyze' })` | см. таблицу ниже |
+| `srm_check` | для SRM | `{ group_field, n_field, expected_ratio? }` | → `experiment({ action: 'check_split' })` |
+| `notes` | да | что учесть при чтении результата | оговорки, определения, что НЕ значит цифра |
+| `hack` | да | обобщённый приём | формула: *что сделать → чем это является → как расширить* («Extrapolate: …») |
+
+Семейства `task_type`, которые уже есть: `trends`, `segmentation`, `funnel`, `retention`,
+`cohort`, `behavioral`, `conversion`, `progression`, `monetization`, `ads`, `economy`,
+`stickiness`, `ab_test`, `engagement`, `data_quality`.
+
+Словарь `metric_types`: `simple`, `ratio`, `derived`, `cumulative`, `conversion` — типы
+управляемых метрик; `proportion`, `mean`, `cuped`, `ratio` — статистические тесты A/B; `srm`,
+`power` — сопутствующие расчёты.
+
+### Три формы рецепта
+
+**Управляемая метрика** — `create_payload` + `example_queries`. Самая частая форма. Агент
+может не только выполнить пример, но и **переспросить** тот же контекст любым другим срезом.
+
+```json
+{
+  "id": "metric_by_user_segment",
+  "task_type": "segmentation",
+  "title": "Metric sliced by a user attribute",
+  "when_to_use": "Revenue / payers / ARPPU broken down by country, platform, media_source or acquisition_type.",
+  "required_events": ["iap_purchase_completed"],
+  "required_properties": ["price_in_usd"],
+  "required_user_attrs": ["country", "platform", "media_source", "acquisition_type"],
+  "metric_types": ["simple", "ratio"],
+  "create_payload": {
+    "name": "rev_segment",
+    "use_base_models": ["users"],
+    "semantic_models": [{
+      "from": "events",
+      "event_scope": { "event_name": ["iap_purchase_completed"] },
+      "measures": [
+        { "name": "revenue", "agg": "sum",            "field": "price_in_usd_of_event_data" },
+        { "name": "payers",  "agg": "count_distinct", "field": "player_id_of_internal" }
+      ]
+    }],
+    "metrics": [
+      { "name": "revenue", "type": "simple", "measure": { "name": "revenue" } },
+      { "name": "payers",  "type": "simple", "measure": { "name": "payers" } },
+      { "name": "arppu",   "type": "ratio",  "numerator": { "name": "revenue" }, "denominator": { "name": "payers" } }
+    ]
+  },
+  "example_queries": [
+    { "metrics": ["rev_segment_revenue"], "group_by": ["user__country"] },
+    { "metrics": ["rev_segment_arppu"],   "group_by": ["user__acquisition_type"] }
+  ],
+  "notes": "User attributes come through the declared events.user → users.user relationship; no join is written.",
+  "hack": "Any measure + group_by user__<attr> makes the semantic layer join the user dimension. Extrapolate: segment ANY metric by ANY user attribute the same way."
+}
+```
+
+**Pipeline** — `register_payload` c `pipeline`, часто с `ab_test` / `srm_check`. Для того, чего
+управляемая метрика не выражает. Результат — таблица; тест требует **не меньше двух строк**.
+
+```json
+{
+  "id": "ab_test_conversion",
+  "task_type": "ab_test",
+  "required_roles": ["experiments"],
+  "metric_types": ["proportion"],
+  "register_payload": {
+    "name": "ab_checkout_conversion",
+    "pipeline": {
+      "source": "events",
+      "stages": [
+        { "stage": "join", "with": "experiments", "via": "user",
+          "attrs": ["experiment_name", "variant_group", "assigned_at", "ended_at"] },
+        { "stage": "where", "conditions": [
+          { "left": { "column": "device_time" }, "op": "gte", "right": { "column": "assigned_at" } },
+          { "left": { "column": "device_time" }, "op": "lte", "right": { "column": "ended_at" } } ] },
+        { "stage": "compute", "name": "is_conv", "op": "case", "type": "int",
+          "cases": [{ "when": [{ "column": "event_name", "op": "eq", "value": "iap_purchase_completed" }], "then": { "value": 1 } }],
+          "else": { "value": 0 } },
+        { "stage": "aggregate", "group_by": ["experiment_name", "variant_group", "player_id_of_internal"],
+          "measures": [{ "name": "converted", "fn": "max", "column": "is_conv" }] },
+        { "stage": "aggregate", "group_by": ["experiment_name", "variant_group"],
+          "measures": [{ "name": "n", "fn": "count" }, { "name": "conversions", "fn": "sum", "column": "converted" }] },
+        { "stage": "order_by", "keys": [{ "key": "variant_group", "direction": "asc" }] }
+      ]
+    }
+  },
+  "ab_test": { "metric": "proportion", "group_field": "variant_group", "n_field": "n", "conversions_field": "conversions" },
+  "notes": "Rows are n + conversions per variant (exposed = users with in-window events). Control = the control variant_group row, variants = the rest.",
+  "hack": "Join experiments, window events to [assigned_at, ended_at], flag conversion per user (case → max), aggregate n + conversions per variant, call experiment({ action: 'analyze' }). Extrapolate: any per-variant rate."
+}
+```
+
+Сопоставление `ab_test` — какие колонки результата нужны для какого теста:
+
+| `metric` | обязательные поля сопоставления | что должен отдать pipeline на каждую группу |
+|---|---|---|
+| `proportion` | `group_field`, `n_field`, `conversions_field` | число пользователей и число сконвертировавшихся |
+| `mean` | `group_field`, `n_field`, `mean_field`, `stddev_field` | n, среднее, стандартное отклонение (сначала агрегируйте на пользователя) |
+| `cuped` | … + `sumY_field`, `sumY2_field`, `sumX_field`, `sumX2_field`, `sumXY_field` | суммы метрики и ковариаты (до-экспериментальной) и их произведений |
+| `ratio` | … + `sumNum_field`, `sumDen_field`, `sumNum2_field`, `sumDen2_field`, `sumNumDen_field` | суммы числителя, знаменателя, квадратов и произведения |
+
+Первая строка результата — контроль, остальные — варианты; поэтому `order_by` по группе
+в конце pipeline обязателен: порядок строк — часть контракта.
+
+**Только инструмент** — `tool_calls`, без склада. Каждый вызов должен вернуть `ok: true`.
+
+```json
+{
+  "id": "ab_test_power",
+  "task_type": "ab_test",
+  "metric_types": ["power"],
+  "required_events": [], "required_properties": [], "required_user_attrs": [], "required_roles": [],
+  "tool_calls": [
+    { "tool": "experiment", "args": { "action": "plan", "metric": "proportion", "baseline": 0.2, "mde": 0.02 } },
+    { "tool": "experiment", "args": { "action": "plan", "metric": "mean", "stddev": 12, "mde": 1.5 } }
+  ],
+  "notes": "Pure calculation. Provide baseline (proportion) or stddev (mean) plus EXACTLY ONE of mde or n.",
+  "hack": "Up-front power analysis: baseline + target effect → required n per group; or n → MDE. Run before the test and after an inconclusive one."
+}
+```
+
+### Что рецепт обязан выдержать
+
+Рецепт **не валидируется по структуре** при загрузке — он валидируется **исполнением**.
+`test/integration/recipes-parse.test.js` прогоняет каждый рецепт на складе фикстуры:
+
+| форма | что проверяется |
+|---|---|
+| `create_payload` | `create_semantic_model` парсится (dbt parse), **первый** `example_queries` исполняется и возвращает строки |
+| `register_payload` | pipeline собирается и выполняется, результат ≥ 2 строк; если есть `ab_test` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `srm_check` — то же для `check_split` |
+| `tool_calls` | каждый вызов возвращает `ok: true` |
+
+Следствия для автора: имена событий, свойств и атрибутов в payload должны существовать **в
+фикстуре** (`test/integration/fixtures/catalog.yml`), а не только в проде — иначе рецепт не
+проходит тест и не попадает в поставку. `required_*` при этом **никем не проверяются** — это
+подсказка агенту, что нужно иметь в каталоге, чтобы приём был применим; заполняйте честно.
+
+### Как писать `when_to_use`, `notes`, `hack`
+
+Три текстовых поля работают по-разному, и путать их — главная ошибка.
+
+- **`when_to_use` — для поиска.** Индексируется вместе с `id`, `title`, `task_type` и `hack`.
+  Пишите словами вопроса, а не словами реализации: «how many users came back on day 7», а не
+  «conversion metric with a 7-day window». Несколько формулировок через запятую — нормально.
+- **`notes` — для чтения результата.** Что цифра значит и чего не значит, какие определения
+  приняты («cohort = users with a first_launch»), какой шаг обязателен перед выводом («run
+  check_split first»). Не пересказывайте payload — он рядом.
+- **`hack` — для переноса.** Формула из трёх частей: *что сделали → чем это является в терминах
+  семантического слоя → как расширить.* Обязательная третья часть начинается со слова
+  «Extrapolate:» — так агент отличает приём от описания. Пример: «Retention = a conversion
+  metric (base = install event, conversion = a later activity event) with window = 'N day'.
+  Extrapolate: change N or the base/return events for any Dn.»
+
+Все три — на английском, как и описания в схеме (см. «Язык описаний»).
+
+### Чего в рецепте не должно быть
+
+- значений, которые агент возьмёт из индекса: «top countries are US, GB» — он спросит сам;
+- payload, который работает только на проде: рецепт без прохождения теста не рецепт;
+- нескольких задач в одном рецепте — одна задача, один `hack`; вторая задача — второй рецепт;
+- `example_queries` с одними и теми же срезами: каждый пример должен показывать новый способ
+  спросить тот же контекст (по времени, по атрибуту, через связь);
+- имён метрик без префикса задачи в `example_queries` — запрос не найдёт метрику.
+
+### Чек-лист нового рецепта
+
+- [ ] `id` по задаче, `task_type` из существующих семейств (или осознанно новое);
+- [ ] `when_to_use` — формулировками вопроса; `title` — что считаем;
+- [ ] ровно одна форма: `create_payload` + `example_queries` / `register_payload` (+ `ab_test`/`srm_check`) / `tool_calls`;
+- [ ] все имена в payload существуют в фикстуре; первый пример возвращает строки;
+- [ ] для A/B: результат отсортирован по группе, контроль первой строкой, сопоставление полей полное;
+- [ ] `required_*` заполнены честно, `required_roles` — если нужна роль кроме событий и пользователей;
+- [ ] `hack` заканчивается «Extrapolate: …»; `notes` — про чтение результата, не про payload;
+- [ ] `npm run test:integration -- test/integration/recipes-parse.test.js` зелёный.
+
+---
+
 ## 3. Конфиги, которые загрузка отвергает
 
 Каждый из них раньше загружался и собирал модель по **одному** из двух объявлений — какое

@@ -394,7 +394,7 @@ const STAGES = {
   join: {
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'with'],
-      description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
+      description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. By default the join exposes EVERY column of the joined model; if one of them shares a name with a column the pipeline already carries (and it is not the join key) the stage is REJECTED until you resolve it with `on_name_clash` or an explicit `attrs` list — the two columns hold different data and one name cannot address both. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
       anyOf: [{ required: ['via'] }, { required: ['on'] }],
       properties: {
         stage: { const: 'join' },
@@ -406,7 +406,7 @@ const STAGES = {
         },
         attrs: {
           type: 'array',
-          description: 'Columns of the joined model to expose. DEFAULT: ALL of them — every column the joined model has, minus any whose name the pipeline already carries (two columns with one name are not addressable downstream). Those are NOT lost silently: the step response lists them under `columns_not_added`, each with the reason and the exact entry that brings it in — a JOIN KEY column is the same value on both sides so nothing is lost, while any OTHER shared name holds DIFFERENT data on the two sides and the pipeline keeps its own. Pass a list to narrow the set, and { column, as } to bring a colliding column in under a name of your own.',
+          description: 'Columns of the joined model to expose. DEFAULT: ALL of them, except the JOIN KEY (it matches on both sides, so the joined copy is the same value — it is reported under `columns_not_added` and costs nothing). Any OTHER name shared with a column the pipeline already carries holds DIFFERENT data, and one name cannot address two columns: the stage is REJECTED and the error names the ways out (`on_name_clash`, or this list). Pass a list to take exactly what you want, using { column, as } to rename anything that would collide.',
           items: {
             oneOf: [
               { type: 'string', description: 'A column of the joined model, exposed under its own name.' },
@@ -431,6 +431,10 @@ const STAGES = {
           },
         },
         kind: { enum: ['left', 'inner'], default: 'left' },
+        on_name_clash: {
+          enum: ['prefix', 'skip'],
+          description: 'How to resolve a column the JOINED model has under a name the pipeline ALREADY carries, when `attrs` is not given. Required only when such a clash exists and is NOT the join key: the two columns hold different data, and one name cannot address both, so the join is ambiguous until you say which you mean. \'prefix\' brings the joined one in as <joined model>_<column>, keeping BOTH sides; \'skip\' leaves it out and keeps the pipeline\'s own. The join key is never affected — it matches on both sides, so its value is the same either way and it is left out regardless.',
+        },
       },
     }),
     build: ({ catalog, cols, source }, p) => {
@@ -473,13 +477,40 @@ const STAGES = {
           if (cols.has(a.as)) throw new Error(`join attrs: '${a.as}' already exists in the pipeline, so exposing '${p.with}'.${a.column} under that name would be ambiguous — rename it with { column: '${a.column}', as: '<new name>' }`);
         }
       } else {
-        // DEFAULT: bring EVERYTHING the joined model has. A column whose name the pipeline
-        // already carries is skipped rather than duplicated (two columns with one name cannot be
-        // referenced downstream); name it explicitly with { column, as } to bring it in too.
+        // DEFAULT: bring EVERYTHING the joined model has. Two columns cannot share one name, so a
+        // name the pipeline already carries has to be resolved — and the two ways it can happen
+        // mean opposite things:
+        //   · the JOIN KEY matches on both sides, so the joined copy is the same value. Leaving
+        //     it out loses nothing and needs no decision.
+        //   · any OTHER shared name holds DIFFERENT data on the two sides. Silently keeping one
+        //     of them is a data loss the caller never asked for, so the stage is REJECTED until
+        //     they say which they mean (on_name_clash, or an explicit attrs list).
+        const keyCols = new Set(onKeys ? onKeys.right.map((k) => k.column) : on);
         attrs = [];
+        const clashes = [];
         for (const [name, type] of joined) {
-          if (cols.has(name)) { shadowed.push(name); continue; }
-          attrs.push({ column: name, as: name, type });
+          if (!cols.has(name)) { attrs.push({ column: name, as: name, type }); continue; }
+          (keyCols.has(name) ? shadowed : clashes).push(name);
+        }
+        if (clashes.length && !p.on_name_clash) {
+          const pre = clashes.map((c) => `${p.with}_${c}`);
+          throw new Error(
+            `join '${p.with}': ${clashes.map((c) => `'${c}'`).join(', ')} ${clashes.length === 1 ? 'is a column' : 'are columns'} of BOTH `
+            + `'${source}' and '${p.with}', holding different data — one name cannot address two columns, so this join is ambiguous as written. Say which you mean:\n`
+            + `  · on_name_clash: 'prefix' — bring the joined one(s) in as ${pre.join(', ')}, keeping both sides;\n`
+            + `  · on_name_clash: 'skip'   — leave them out and keep '${source}'\u2019s own;\n`
+            + `  · attrs: [...]            — list exactly what you want from '${p.with}', renaming with { column: '${clashes[0]}', as: '${pre[0]}' } where needed.\n`
+            + `The join key is not the problem here${shadowed.length ? ` (${shadowed.join(', ')} matches on both sides, so its value is identical and it is left out either way)` : ''}.`,
+          );
+        }
+        if (p.on_name_clash === 'prefix') {
+          for (const name of clashes) {
+            const as = `${p.with}_${name}`;
+            if (cols.has(as)) throw new Error(`join '${p.with}': on_name_clash 'prefix' would expose '${name}' as '${as}', which the pipeline already has — narrow the join with an explicit attrs list and pick free names with { column, as }`);
+            attrs.push({ column: name, as, type: joined.get(name) });
+          }
+        } else if (p.on_name_clash === 'skip') {
+          shadowed.push(...clashes);
         }
       }
       const relation = `{{ ref('${m.dbt_model}') }}`;

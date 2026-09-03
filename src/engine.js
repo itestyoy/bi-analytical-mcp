@@ -111,16 +111,27 @@ export class Engine {
     const s = String(t).trim();
     const dot = s.indexOf('.');
     if (dot > 0) {
+      // The qualified '<source>.<name>' form — the one this tool emits back in linked_to — names
+      // an attribute, an event or an event property of that source exactly.
       const mk = s.slice(0, dot); const col = s.slice(dot + 1);
-      if (c.models[mk] && (c.getModel(mk).dimensions || {})[col]) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
+      if (c.models[mk]) {
+        if ((c.getModel(mk).dimensions || {})[col]) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
+        if (c.isFact(mk) && c.eventNames(mk).includes(col)) return { kind: 'event', key: `${mk}.${col}`, canon: `event:${mk}.${col}` };
+        if (c.isFact(mk) && c.eventProps(mk).includes(col)) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
+      }
     }
     if (c.models[s]) return { kind: 'model', key: s, canon: `model:${s}` };
-    // A bare name is attributed to the source that declares it, so a note recorded before
-    // sources were explicit still links to the same entity.
+    // A bare name is attributed to the source that declares it — when exactly one does. Two
+    // sources carrying the same name is reported, never guessed (the rule every other resolver
+    // here follows).
+    const owners = [];
     for (const f of c.facts) {
-      if (c.eventNames(f).includes(s)) return { kind: 'event', key: `${f}.${s}`, canon: `event:${f}.${s}` };
-      if (c.eventProps(f).includes(s)) return { kind: 'property', key: `${f}.${s}`, canon: `property:${f}.${s}` };
+      if (c.eventNames(f).includes(s)) owners.push({ kind: 'event', key: `${f}.${s}`, canon: `event:${f}.${s}` });
+      if (c.eventProps(f).includes(s)) owners.push({ kind: 'property', key: `${f}.${s}`, canon: `property:${f}.${s}` });
     }
+    for (const mk of c.modelKeys()) if ((c.getModel(mk).dimensions || {})[s]) owners.push({ kind: 'property', key: `${mk}.${s}`, canon: `property:${mk}.${s}` });
+    if (owners.length === 1) return owners[0];
+    if (owners.length > 1) throw new ToolError(`memory target '${s}' is ambiguous — it exists as ${owners.map((o) => `'${o.key}'`).join(', ')}. Qualify it as '<source>.<name>'.`, { stage: 'validate', field: 'targets' });
     // Fuzzy fallback: a near-miss entity name links to the real entity (marked fuzzy) rather
     // than becoming an orphan term. High threshold so only a confident match auto-links.
     const [best] = rankFuzzy(s, this._memoryTargetCandidates(), { fields: (x) => [x.key], threshold: 0.82, limit: 1 });
@@ -231,6 +242,21 @@ export class Engine {
     return map;
   }
 
+  /** What a context can group / filter by, in the form the tools accept: [{ model, attribute, via? }] —
+   *  the catalog's reachable attributes plus the dimensions the task declared (by their bare name). */
+  _groupableRefs(ctx) {
+    const out = [...this.catalog.reachableAttributes()];
+    const tasks = ctx.state.tasks || [];
+    for (const [model, add] of Object.entries(ctx.state.additions || {})) {
+      for (const d of add.dimensions || []) {
+        const t = tasks.find((tk) => d.name.startsWith(`${tk}_`));
+        const attribute = t ? d.name.slice(t.length + 1) : d.name;
+        if (!out.some((r) => r.model === model && r.attribute === attribute && !r.via)) out.push({ model, attribute });
+      }
+    }
+    return out;
+  }
+
   /** All group-by/where dimension paths allowed for a context (bare + qualified). */
   _allowedPaths(ctx) {
     const set = new Set(this.catalog.reachableGroupByPaths());
@@ -241,6 +267,76 @@ export class Engine {
   /** Resolve a bare task-dim name to its entity-qualified MetricFlow path. */
   _resolvePath(ctx, path) {
     return this._taskDimMap(ctx).get(path) || path;
+  }
+
+  /**
+   * An attribute may be addressed WITHOUT knowing MetricFlow's `<entity>__<attribute>` spelling:
+   * { model, attribute, via? } names the model that carries the attribute and the attribute
+   * itself, and this resolves the path — the relationship the task's source declares towards
+   * that model, or the model's own identity when the attribute is the source's own. `via` picks
+   * the relationship when the source carries several to the same model (key variants). A string
+   * is returned unchanged, so both spellings flow through the same validation.
+   */
+  /** The structured spelling of a legacy `<entity>__<attribute>` / task-dimension path, for error messages. */
+  _suggestRef(ctx, path) {
+    const c = this.catalog;
+    const p = String(path);
+    if (p === 'metric_time') return "{ time: 'metric_time', grain: 'day' }";
+    const i = p.indexOf('__');
+    if (i > 0) {
+      const ent = p.slice(0, i); const attr = p.slice(i + 2);
+      const model = c.joinTargetFor(ent);
+      if (model) { const identity = c.primaryEntityName(model); return `{ model: '${model}', attribute: '${attr}'${ent !== identity ? `, via: '${ent}'` : ''} }`; }
+      return `{ model: '<the model that owns ${ent}>', attribute: '${attr}' }`;
+    }
+    for (const [model, add] of Object.entries(ctx.state.additions || {})) {
+      const d = (add.dimensions || []).find((x) => x.name === p);
+      if (d) { const t = (ctx.state.tasks || []).find((tk) => p.startsWith(`${tk}_`)); return `{ model: '${model}', attribute: '${t ? p.slice(t.length + 1) : p}' }`; }
+    }
+    return `{ model: '<model>', attribute: '${p}' }`;
+  }
+
+  _normalizeRef(ctx, ref, where = 'group_by') {
+    if (typeof ref === 'string') {
+      throw new ToolError(`${where}: an attribute is addressed by where it lives — { model, attribute } (plus via when several relationships lead there) — never by a path string. '${ref}' → ${this._suggestRef(ctx, ref)}.`, { stage: 'validate', field: where });
+    }
+    if (ref == null || typeof ref !== 'object' || !('attribute' in ref)) return ref;
+    const c = this.catalog;
+    const { model, attribute, via } = ref;
+    if (!c.models[model]) throw new ToolError(`${where}: unknown model '${model}'. Models: ${c.modelKeys().join(', ')}${c.unavailableHint(model)}`, { stage: 'validate', field: 'model' });
+    const target = c.getModel(model);
+    // 1. a dimension the TASK declared on this model (a payload property or a model column named
+    //    in create/update_semantic_model) → its task-namespaced name
+    const tasks = ctx.state.tasks || [];
+    for (const d of (ctx.state.additions?.[model]?.dimensions || [])) {
+      if (tasks.some((t) => d.name === `${t}_${attribute}`)) return this._taskDimMap(ctx).get(d.name) || d.name;
+    }
+    if (!(target.dimensions || {})[attribute]) {
+      const known = Object.keys(target.dimensions || {});
+      throw new ToolError(`${where}: '${attribute}' is not an attribute of '${model}'. Its attributes: ${known.slice(0, 20).join(', ') || '(none — a payload property is declared as a task dimension first)'}`, { stage: 'validate', field: 'attribute' });
+    }
+    // The sources whose MEASURES this task reads: a path starts from one of them. A model loaded
+    // only to be joined to (use_base_models) — even another events source — is a join TARGET
+    // here, reached through the relationship a measure source declares towards it.
+    const own = c.primaryEntityName(model);
+    const measureSources = Object.entries(ctx.state.additions || {}).filter(([, a]) => (a.measures || []).length).map(([k]) => k);
+    const baseOwners = (ctx.state.metrics || []).flatMap((m) => [m?.type_params?.measure?.name].filter(Boolean)).map((ref) => c.modelOwningMeasure(ref)).filter(Boolean);
+    const sources = [...new Set([...measureSources, ...baseOwners])].filter((k) => ctx.state.usedModels?.includes(k));
+    // 2. the attribute of a model whose measures this task reads → under that model's identity
+    if (sources.includes(model) && own) return `${own}__${attribute}`;
+    // 3. a relationship from a measure source to the model that owns it
+    const candidates = new Set();
+    for (const src of sources) {
+      for (const [ent] of Object.entries(c.entitiesOf(src))) if (c.joinTargetFor(ent) === model) candidates.add(ent);
+    }
+    if (!candidates.size && own && c.joinTargetFor(own) === model) candidates.add(own); // reached under its identity
+    if (via) {
+      if (!candidates.has(via)) throw new ToolError(`${where}: '${via}' is not a relationship from this task's source(s) to '${model}'. Available: ${[...candidates].join(', ') || '(none)'}`, { stage: 'validate', field: 'via' });
+      return `${via}__${attribute}`;
+    }
+    if (candidates.size === 1) return `${[...candidates][0]}__${attribute}`;
+    if (candidates.size > 1) throw new ToolError(`${where}: '${model}' is reachable through several relationships (${[...candidates].join(', ')}) — add via: '<relationship>' to say which key to join on.`, { stage: 'validate', field: 'via' });
+    throw new ToolError(`${where}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it with use_base_models and check semantic_index({ model: '${model}' }).relationships.`, { stage: 'validate', field: 'model' });
   }
 
   /**
@@ -298,6 +394,12 @@ export class Engine {
     // ── { model }: one model in depth (incl. live warehouse introspection) ──
     if (input.model) {
       const k = input.model;
+      if (c.unavailableModels()[k]) {
+        // Declared, but the warehouse cannot back it: say exactly why instead of describing a
+        // model no tool will accept.
+        const u = c.unavailableModels()[k];
+        return { key: k, role: u.role, dbt_model: u.dbt_model, unavailable: true, reason: u.reason, missing_columns: u.missing, note: `'${k}' is excluded from every tool until its table carries the structural column(s) above (or exists). Fix the warehouse table or the dbt schema, then restart the server.` };
+      }
       if (!c.models[k]) throw new ToolError(`unknown model '${k}'. Known models: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'model' });
       const m = c.getModel(k);
       const descs = c.columnDescriptions(k);
@@ -316,8 +418,8 @@ export class Engine {
       const rels = Object.entries(c.entitiesOf(k)).map(([entity, e]) => {
         const target = c.joinTargetFor(entity);
         const use = (target && target !== k) ? 'metric query + pipeline'
-          : shared.has(entity) ? 'pipeline only'
-            : target === k ? (shared.has(entity) ? 'owned here — other models point at it' : "owned here (this model's identity; nothing points at it yet)") : 'no counterpart declares it (not joinable)';
+          : target === k ? (shared.has(entity) ? 'owned here — other models point at it (their governed path ends here)' : "owned here (this model's identity; nothing points at it yet)")
+            : shared.has(entity) ? 'pipeline only' : 'no counterpart declares it (not joinable)';
         return {
           entity, type: e.type,
           key: e.key.map((part) => part.column),
@@ -331,7 +433,7 @@ export class Engine {
         const viaable = rels.filter((r) => r.joins);
         const pipeOnly = rels.filter((r) => r.use === 'pipeline only').map((r) => r.entity);
         const notes = [];
-        if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_native_model add_step { stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}' }. In a metric query, group by <entity>__<attribute> (e.g. ${viaable[0].entity}__<attr>) with use_base_models: ['${viaable[0].joins}'].`);
+        if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_native_model add_step { stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}' }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>'${viaable[0].entity !== c.primaryEntityName(viaable[0].joins) ? `, via: '${viaable[0].entity}'` : ''} } with use_base_models: ['${viaable[0].joins}'].`);
         // A relationship NO model owns cannot be a governed group-by path (MetricFlow joins only
         // onto a unique key) — say so here, or it looks like a missing feature at query time.
         if (pipeOnly.length) notes.push(`No model owns ${pipeOnly.map((n) => `'${n}'`).join(', ')}, so ${pipeOnly.length === 1 ? 'it has' : 'they have'} NO governed group-by path — join ${pipeOnly.length === 1 ? 'it' : 'them'} in a pipeline (via: '${pipeOnly[0]}'). That is by nature: several rows share the key, so neither side is unique on it.`);
@@ -363,6 +465,7 @@ export class Engine {
       // compute/group_by/order_by/match_recognize). `time` above is the default order axis.
       // It is silently grounded to the physical table below — only real columns appear.
       out.columns = c.modelColumns(k);
+      const apps = c.isFact(k) && c.bundleColumn(k) ? this.valueIndex.bundles(k) : []; // the apps seen in THIS source, once
       if (c.isFact(k)) {
         out.kind = 'events_fact';
         out.event_count = c.eventNames(k).length;
@@ -379,7 +482,6 @@ export class Engine {
         }
         // The app/bundle dimension: groupable per event AND the axis for per-app coverage.
         if (c.bundleColumn(k)) {
-          const apps = this.valueIndex.bundles(k); // the apps seen in THIS source
           out.bundle_column = c.bundleColumn(k);
           out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ bundle: '${apps[0].bundle}' }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
         }
@@ -395,14 +497,12 @@ export class Engine {
       }
       const base = this.ctxs.baseProjectDir;
       if (this.runner && base) {
-        const cols = await this.runner.relationColumns(base, m.dbt_model);
-        // Silent internal guard: keep ONLY columns that physically exist, so a name that
-        // is not really in the table never surfaces anywhere. One list, grounded to truth.
-        // Best-effort — if introspection fails (table not built yet) keep the declared set.
-        if (cols.ok) {
-          const physSet = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
-          out.columns = out.columns.filter((col) => physSet.has(col.name.toLowerCase()));
-        }
+        // Silent internal guard: keep ONLY columns that physically exist, so a name that is not
+        // really in the table never surfaces anywhere. The physical set is cached per source
+        // (_physicalCols) — this view is the AI's most frequent call and must not spawn a dbt
+        // run-operation each time. Best-effort: if introspection fails, keep the declared set.
+        const physSet = await this._physicalCols(k);
+        if (physSet) out.columns = out.columns.filter((col) => physSet.has(col.name.toLowerCase()));
         // Data freshness: latest value of the time column (how up-to-date the data is).
         if (m.time?.column) { const fresh = await this._dataFreshness(k); if (fresh) out.data_freshness = fresh; }
       }
@@ -410,7 +510,7 @@ export class Engine {
         ? [
           `Drill into an event to see the properties it carries: semantic_index({ source: '${k}', event: '${c.eventNames(k)[0] || '<event_name>'}' }).`,
           `Then inspect a property's real values + frequency distribution: semantic_index({ property: '<name>' }).`,
-          ...(c.bundleColumn(k) && this.valueIndex.bundles(k).length ? [`Scoping to one app? semantic_index({ source: '${k}', bundle: '${this.valueIndex.bundles(k)[0].bundle}' }) lists which properties carry data for it vs are EMPTY.`] : []),
+          ...(apps.length ? [`Scoping to one app? semantic_index({ source: '${k}', bundle: '${apps[0].bundle}' }) lists which properties carry data for it vs are EMPTY.`] : []),
           `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ search: '<value>' }).`,
         ]
         : [
@@ -421,7 +521,7 @@ export class Engine {
       out.next_actions = c.isFact(k)
         ? [
           { call: `semantic_index({ source: '${k}', event: '${c.eventNames(k)[0] || '<event_name>'}' })`, why: 'see the properties an event carries (what you can measure/group/filter)' },
-          ...(c.bundleColumn(k) && this.valueIndex.bundles(k).length ? [{ call: `semantic_index({ source: '${k}', bundle: '${this.valueIndex.bundles(k)[0].bundle}' })`, why: 'for one app — which properties carry data vs are EMPTY' }] : []),
+          ...(apps.length ? [{ call: `semantic_index({ source: '${k}', bundle: '${apps[0].bundle}' })`, why: 'for one app — which properties carry data vs are EMPTY' }] : []),
           { call: "semantic_index({ search: '<value>' })", why: 'trace a value to the property/event that carries it' },
         ]
         : [
@@ -457,7 +557,7 @@ export class Engine {
       const recommendations = [];
       const withValues = rows.filter((r) => !r.complex && r.sample_values.length);
       const pick = (withValues.length ? withValues : rows.filter((r) => !r.complex)).slice(0, 3);
-      if (pick.length) recommendations.push(`Drill into a property's real values + full frequency distribution: ${pick.map((r) => `semantic_index({ property: '${r.name}' })`).join(', ')}.`);
+      if (pick.length) recommendations.push(`Drill into a property's real values + full frequency distribution: ${pick.map((r) => `semantic_index({ source: '${fact}', property: '${r.name}' })`).join(', ')}.`);
       if (withValues.length) recommendations.push(`Spot a value you recognise in the samples above? Find every property/event it occurs in: semantic_index({ search: '<value>' }).`);
       if (rows.some((r) => r.complex)) recommendations.push(`Complex (array/struct) properties carry nested values — semantic_index({ property }) shows the shape before you explore inside them.`);
       if (!props.length) {
@@ -471,7 +571,7 @@ export class Engine {
       // Per-app helper: these properties may be empty for some apps — point at the bundle view.
       if (c.bundleColumn(fact) && this.valueIndex.bundles(fact).length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ bundle: '<app>' }) shows the populated-vs-empty split per app.`);
       const nextActions = [
-        ...(pick.length ? [{ call: `semantic_index({ property: '${pick[0].name}' })`, why: "drill this property's real value distribution + completeness" }] : []),
+        ...(pick.length ? [{ call: `semantic_index({ source: '${fact}', property: '${pick[0].name}' })`, why: "drill this property's real value distribution + completeness" }] : []),
         { call: "semantic_index({ search: '<value>' })", why: 'trace a value seen above to every property/event carrying it' },
         ...(c.bundleColumn(fact) && this.valueIndex.bundles(fact).length > 1 ? [{ call: `semantic_index({ source: '${fact}', bundle: '<app>' })`, why: 'a property here may be EMPTY for some apps — see the per-app split' }] : []),
       ];
@@ -509,7 +609,7 @@ export class Engine {
         const ent = c.primaryEntityName(mk);
         const recommendations = [];
         if (samples.length) recommendations.push(`${value_stats.distinct_count != null ? `${value_stats.distinct_count} distinct values; ` : ''}top: ${samples.slice(0, 5).map((s) => `'${s.value}' (${s.freq})`).join(', ')}.`);
-        else recommendations.push(`No values indexed yet (the background value index may not have run).${dim.values ? ` Declared values: ${dim.values.join(', ')}.` : ''}`);
+        else recommendations.push('No values indexed yet (the background value index may not have run).');
         if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
         recommendations.push(...nullRecs);
         recommendations.push(ent
@@ -517,7 +617,6 @@ export class Engine {
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
         const attrOut = {
           property: col, source: mk, model: mk, column: col, type: dim.type,
-          ...(dim.values ? { declared_values: dim.values } : {}),
           description: dDescs[col],
           sample_values: samples, distinct_count: value_stats.distinct_count, total_count: value_stats.total_count,
           indexed: value_stats.indexed, value_stats, event_coverage: attrCoverage,
@@ -650,7 +749,7 @@ export class Engine {
         throw new ToolError(`unknown app '${bundleId}'${input.source ? ` on source '${input.source}'` : ''}. Indexed apps: ${list(known)}`, { stage: 'validate', field: 'bundle' });
       }
       const block = (hit) => {
-        const cov = this.valueIndex.bundlePropertyCoverage(bundleId, hit.source);
+        const cov = this.valueIndex.bundlePropertyCoverage(hit.source, bundleId);
         const populated = cov.filter((r) => r.non_null > 0).map((r) => ({ property: r.property, non_null: r.non_null }));
         const empty = cov.filter((r) => r.non_null === 0).map((r) => r.property);
         return {
@@ -756,22 +855,28 @@ export class Engine {
     return {
       dialect: c.dialect,
       models,
-      // The events FACTS, in the order the tools default to (the first is the primary one:
-      // the default pipeline source and the fact whose event/property names are unqualified).
+      // The events FACTS — independent and equal; none is a default. Every tool takes the
+      // source as its own argument (optional only when there is exactly one).
       facts: c.facts,
+      // Declared models the warehouse cannot back (a structural column or the table is missing):
+      // excluded from every tool; the reason is here so the analyst can be told what to fix.
+      ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ model }) on one shows what is missing.' } : {}),
       ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ source, event }), build_native_model({ source }), semantic_models[].from; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
       // Each events source lists its OWN event names — they are never merged into one list,
       // because two sources may legitimately carry the same event name.
       event_names: Object.fromEntries(c.facts.map((f) => [f, c.eventNames(f)])),
-      groupable_paths: c.reachableGroupByPaths(),
+      // Every attribute a metric query can group/filter by, addressed by where it lives:
+      // group_by: [{ model, attribute }] — the join is resolved from the schema, never spelled.
+      groupable_attributes: c.reachableAttributes(),
       // Saved analyst findings (the memory tool): how many are stored + how to reach them.
       // They also surface inline on the entity views/{ search } they were linked to.
       ...(memCount ? { memory: { notes: memCount, note: 'Saved findings (resolved vague terms, gotchas, sources). They surface on the linked semantic_index views and via { search }; list/manage with the memory tool.' } } : {}),
-      // How attributes are REACHED: entity-qualified paths in metric queries (semantic
-      // layer auto-joins), or an explicit join stage in native pipelines. The fact holds
-      // only per-event columns — user/experiment attributes always come via their model.
+      // How attributes are REACHED: addressed by the model that carries them in metric queries
+      // (the semantic layer resolves the declared key and joins), or an explicit join stage in
+      // native pipelines. The fact holds only per-event columns — user/experiment attributes
+      // always come via their model.
       join_note: userModel
-        ? `Paths like '${c.primaryEntityName(userModel) || 'user'}__${exAttr || 'country'}' join the '${userModel}' model by the user entity at query time (declare use_base_models: ['${userModel}'] in create_semantic_model). In native pipelines, reach the same attributes with a join stage (with: '${userModel}').`
+        ? `Group or filter by { model: '${userModel}', attribute: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (declare use_base_models: ['${userModel}'] in create_semantic_model) — never spell a join path. In native pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
         : null,
       value_index_status: sync ? {
         ready: (sync.indexed_properties || 0) > 0,
@@ -878,7 +983,7 @@ export class Engine {
     const c = this.catalog;
     const raw = String(input.property);
     if (input.source) {
-      if (!c.models[input.source]) throw new ToolError(`unknown source '${input.source}'. Known sources: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'source' });
+      if (!c.models[input.source]) throw new ToolError(`unknown source '${input.source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(input.source)}`, { stage: 'validate', field: 'source' });
       return { source: input.source, property: raw };
     }
     const dot = raw.indexOf('.');
@@ -932,14 +1037,14 @@ export class Engine {
 
   /** Compact row for a property's per-run indexing record. */
   _indexPropRow(r) {
-    return { property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) };
+    return { ...(r.source ? { source: r.source } : {}), property: r.property, ms: r.ms, values: r.values_written, distinct_count: r.distinct_count, total_count: r.total_count, status: r.status, ...(r.error ? { error: r.error } : {}) };
   }
 
   /**
    * NULL coverage of one indexed key (from the latest sync): overall null counts +
    * a per-event_name breakdown. A property is NULL on events it does not apply to —
-   * each event is annotated with `applies` (from meta.mcp.events) so EXPECTED nulls
-   * are distinguishable from real data gaps. Returns null fields when not indexed.
+   * each event is annotated with `applies` (OBSERVED: non-null on at least one of that event's
+   * rows) so EXPECTED nulls are distinguishable from real data gaps. Nothing is declared.
    */
   _nullCoverage(source, key, { eventScoped = false } = {}) {
     const st = this.valueIndex.stats(source, key);
@@ -983,7 +1088,7 @@ export class Engine {
       // NB: per-property `ms` is only meaningful for properties scanned individually (~0 when batched).
       ...(fallbacks.length ? { fallbacks } : {}),
       recommendations: [
-        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`,
+        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ source: '${props[0].source || '<source>'}', property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`,
         ...(fallbacks.length ? [`${fallbacks.length} batch(es) fell back to per-property — full reason in fallbacks[].`] : []),
       ],
     };
@@ -1490,7 +1595,9 @@ export class Engine {
     const i = String(path).indexOf('__');
     if (i > 0) {
       const entity = path.slice(0, i); const col = path.slice(i + 2);
-      const mk = c.modelKeys().find((k) => c.primaryEntityName(k) === entity || (c.getModel(k).entities || {})[entity]);
+      // A path resolves on the model that OWNS the entity (the join target), never on a model
+      // that merely points at it with a foreign key — that one has no such attribute.
+      const mk = c.joinTargetFor(entity);
       return mk && (c.getModel(mk).dimensions || {})[col] ? { source: mk, property: col } : null;
     }
     for (const fact of c.facts) {
@@ -1857,7 +1964,9 @@ export class Engine {
     this.ctxs.touch(ctx.id);
 
     const parse = await this._parse(ctx.id);
-    const groupable = [...this._allowedPaths(ctx)];
+    const groupable = this._groupableRefs(ctx);
+    const exRef = groupable.find((g) => g.model !== compiled.usedModels?.[0]) || groupable[0];
+    const exText = exRef ? `{ model: '${exRef.model}', attribute: '${exRef.attribute}'${exRef.via ? `, via: '${exRef.via}'` : ''} }` : "{ time: 'metric_time', grain: 'day' }";
     return {
       context_id: ctx.id,
       task: compiled.task,
@@ -1871,9 +1980,9 @@ export class Engine {
       assumptions: this._assumptions(ctx),
       warnings: render.warnings || [],
       // Never a dead end: name the exact next call with real metric/path names.
-      next: `Query it: query_semantic_model({ context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end } }) — optionally group_by one of: ${groupable.slice(0, 5).join(', ')}${groupable.length > 5 ? ', …' : ''}.`,
+      next: `Query it: query_semantic_model({ context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end }, group_by: [${exText}] }).`,
       recommendations: [
-        `Bound every query with time_range and group by a path from \`groupable\` (e.g. ${groupable.find((g) => g.includes('__')) || groupable[0] || 'metric_time'}).`,
+        `Bound every query with time_range. Group or filter by an attribute from \`groupable\`, addressed as { model, attribute } (e.g. ${exText}), or by { time: 'metric_time', grain }.`,
         `Extend this task later with update_semantic_model({ context_id: '${ctx.id}', ... }); inspect it anytime with context({ action: 'describe', context_id: '${ctx.id}' }).`,
       ],
     };
@@ -1915,7 +2024,7 @@ export class Engine {
     const parse = await this._parse(ctx.id);
     return {
       context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
-      metrics: render.metricNames, groupable: [...this._allowedPaths(ctx)], parse, warnings: render.warnings || [],
+      metrics: render.metricNames, groupable: this._groupableRefs(ctx), parse, warnings: render.warnings || [],
       next: `Query the updated task: query_semantic_model({ context_id: '${ctx.id}', metrics: [...] }) — \`metrics\` above is the current full list.`,
     };
   }
@@ -2137,7 +2246,7 @@ export class Engine {
       semantic_models: Object.keys(additions),
       measures: Object.values(additions).flatMap((a) => a.measures.map((m) => m.name)),
       metrics: (ctx.state.metrics || []).map((m) => m.name),
-      groupable: [...this._allowedPaths(ctx)],
+      groupable: this._groupableRefs(ctx),
       files: this.ctxs.generatedFiles(ctx.id),
     };
   }
@@ -2158,15 +2267,28 @@ export class Engine {
 
     const allowed = this._allowedPaths(ctx);
     const groupBy = [];
-    for (const g of input.group_by || []) {
-      if (typeof g === 'object' && g.time === 'metric_time') groupBy.push(`metric_time__${g.grain || 'day'}`);
-      else if (typeof g === 'string') {
-        if (g !== 'metric_time' && !allowed.has(g)) throw new ToolError(`group_by path not reachable in context: ${g}. Known paths: ${[...allowed].slice(0, 30).join(', ')}`, { stage: 'validate', field: g });
-        const resolved = this._resolvePath(ctx, g);
-        this._checkPathLoaded(ctx, resolved);
-        groupBy.push(resolved);
+    // Result columns are named after the reference the caller made — `<model>_<attribute>` and
+    // `metric_time_<grain>` — so nothing the caller reads back or addresses later (order_by, a
+    // get_query_result transform) ever carries MetricFlow's internal `__` spelling.
+    const rename = new Map(); // MetricFlow output name → the column name the caller sees
+    const groupByResolved = {}; // "<model>.<attribute>" → the result column
+    for (const gRaw of input.group_by || []) {
+      const g = this._normalizeRef(ctx, gRaw, 'group_by'); // a string is refused here with the fix
+      if (typeof g === 'object' && g.time === 'metric_time') {
+        const tok = `metric_time__${g.grain || 'day'}`;
+        groupBy.push(tok); rename.set(tok, `metric_time_${g.grain || 'day'}`); continue;
       }
+      if (!allowed.has(g)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' is not reachable in this context. Reachable: ${this._groupableRefs(ctx).slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ')}`, { stage: 'validate', field: 'group_by' });
+      this._checkPathLoaded(ctx, g);
+      const friendly = `${gRaw.model}_${gRaw.attribute}`;
+      if (input.metrics.includes(friendly) || [...rename.values()].includes(friendly)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' would produce a result column '${friendly}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'group_by' });
+      groupBy.push(g); rename.set(g, friendly); groupByResolved[`${gRaw.model}.${gRaw.attribute}`] = friendly;
     }
+    /** Apply the friendly names to a result (columns + row keys). */
+    const friendlyResult = (columns, rows) => ({
+      columns: (columns || []).map((c) => (rename.has(c.name) ? { ...c, name: rename.get(c.name) } : c)),
+      rows: (rows || []).map((r) => { const o = {}; for (const [k, v] of Object.entries(r)) o[rename.get(k) || k] = v; return o; }),
+    });
     let where = [];
     let filterWarnings = [];
     if (input.where) {
@@ -2174,8 +2296,11 @@ export class Engine {
       const specs = [];
       walkPredicates(translated, (p) => {
         if (p.field?.kind === 'dimension') {
-          if (!allowed.has(p.field.path)) throw new ToolError(`where path not reachable in context: ${p.field.path}`, { stage: 'validate', field: p.field.path });
-          p.field.path = this._resolvePath(ctx, p.field.path); // bare task dim -> entity-qualified
+          if (p.field.path != null) throw new ToolError(`where: a dimension is addressed by where it lives — { kind: 'dimension', model, attribute } — never by a path string. '${p.field.path}' → ${this._suggestRef(ctx, p.field.path)}.`, { stage: 'validate', field: 'where' });
+          const label = `${p.field.model}.${p.field.attribute}`;
+          p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
+          delete p.field.model; delete p.field.attribute; delete p.field.via;
+          if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. Reachable: ${this._groupableRefs(ctx).slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ')}`, { stage: 'validate', field: 'where' });
           this._checkPathLoaded(ctx, p.field.path);
           // Verify the filter literal against the column's REAL values (source-scoped):
           // reject a wrong-cased/non-existent value instead of filtering to nothing.
@@ -2188,11 +2313,19 @@ export class Engine {
     // order_by keys must be a requested metric or group-by token. `metric_time` is a
     // convenience alias that resolves to the GRAINED token a time group_by actually
     // produces (e.g. metric_time__day), so callers don't have to guess the suffix.
+    // A string key is a RESULT COLUMN name (a metric, or the friendly `<model>_<attribute>` /
+    // `metric_time_<grain>` a group_by produces) — never MetricFlow's internal `__` token.
     const orderable = new Set([...input.metrics, ...groupBy]);
+    const orderableKeys = [...orderable].map((k) => rename.get(k) || k); // what the caller may name
+    const byFriendly = new Map([...rename].map(([tok, friendly]) => [friendly, tok]));
     const metricTimeTok = groupBy.find((g) => g.startsWith('metric_time__'));
     const orderBy = (input.order_by || []).map((o) => {
-      const key = (o.key === 'metric_time' && metricTimeTok) ? metricTimeTok : o.key;
-      if (!orderable.has(key)) throw new ToolError(`order_by key '${o.key}' is not a requested metric or group_by token. Orderable: ${[...orderable].join(', ')}`, { stage: 'validate', field: o.key });
+      let key = o.key;
+      if (typeof key === 'object' && key) key = this._normalizeRef(ctx, key, 'order_by'); // { model, attribute } → the group-by token
+      else if (key === 'metric_time' && metricTimeTok) key = metricTimeTok;
+      else if (typeof key === 'string' && key.includes('__')) throw new ToolError(`order_by: an attribute is addressed as { model, attribute }, not by a path string. '${key}' → ${this._suggestRef(ctx, key)}.`, { stage: 'validate', field: 'order_by' });
+      else if (typeof key === 'string' && byFriendly.has(key)) key = byFriendly.get(key); // a result column name
+      if (!orderable.has(key)) throw new ToolError(`order_by key '${typeof o.key === 'object' ? `${o.key.model}.${o.key.attribute}` : o.key}' is not a requested metric or group_by attribute. Orderable: ${orderableKeys.join(', ')}${metricTimeTok ? ' (metric_time is an alias of the time column)' : ''}`, { stage: 'validate', field: 'order_by' });
       return `${o.direction === 'desc' ? '-' : ''}${key}`;
     });
 
@@ -2224,13 +2357,14 @@ export class Engine {
     // res.rows is capped at limit+offset and has_more can never be true.
     const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: limit + offset + 1 };
     const explain = !!(input.dry_run || input.explain);
-    if (input.materialize && !explain) return this._materialize(ctx, qopts, input);
-    const res = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
+    if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename);
+    const raw = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
     this.ctxs.touch(ctx.id);
+    const res = raw.ok && !explain ? { ...raw, ...friendlyResult(raw.columns, raw.rows) } : raw;
 
     if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
     if (explain) {
-      const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: [...orderable] };
+      const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: orderableKeys };
       if (input.dry_run) out.dry_run = true;
       if (input.explain) { out.explain = true; out.plan = res.plan; }
       if (filterWarnings.length) out.warnings = filterWarnings;
@@ -2242,8 +2376,12 @@ export class Engine {
     // A context can span several facts (e.g. crashes vs sessions compared over metric_time):
     // report the freshness of each one it reads, and headline the STALEST — that is the date
     // the combined result is actually complete through.
-    const usedFacts = (ctx.state.usedModels || []).filter((k) => this.catalog.isFact(k));
-    const factsRead = usedFacts.length ? usedFacts : (ctx.state.usedModels || []);
+    // Freshness is a property of the sources whose MEASURES the query reads: every events source
+    // in the context, plus a non-events source (a spend table) only when the task aggregates it.
+    // A dimension joined for its attributes (installs) has a time axis too, but its latest install
+    // says nothing about how complete a spend or events result is.
+    const contributes = (k) => this.catalog.isFact(k) || ((ctx.state.additions?.[k]?.measures || []).length > 0) || Object.keys(this.catalog.getModel(k).measures || {}).length > 0;
+    const factsRead = (ctx.state.usedModels || []).filter((k) => this.catalog.getModel(k).time?.column && contributes(k));
     const freshByFact = {};
     await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this._dataFreshness(f); }));
     const knownFresh = Object.values(freshByFact).filter(Boolean);
@@ -2276,6 +2414,7 @@ export class Engine {
       page,
       // Provenance so the result is self-trustable: which tier produced it, the source,
       // and how fresh the underlying data is (latest event time).
+      ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
       provenance: {
         tier: 'governed_metric',
         metrics: input.metrics,
@@ -2295,17 +2434,22 @@ export class Engine {
    * crash-resilient. If the build exceeds queryTimeoutMs, it continues in the
    * BACKGROUND and a query_id is returned; poll get_query_result.
    */
-  async _materialize(ctx, qopts, input) {
+  async _materialize(ctx, qopts, input, rename = new Map()) {
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     const dir = this.ctxs.dir(ctx.id);
     const explain = await this.runner.query(dir, { ...qopts, explain: true });
     if (!explain.ok) return { ok: false, error: { stage: 'query', message: formatDbtError(explain.stdout, explain.stderr) } };
+    // The persisted table is what get_query_result transforms address later, so its columns get
+    // the caller-facing names (`<model>_<attribute>`, `metric_time_<grain>`), never `__`.
+    const projected = rename.size
+      ? `select ${[...(qopts.groupBy || []).map((g) => (rename.has(g) ? `${g} as ${rename.get(g)}` : g)), ...qopts.metrics].join(', ')} from (\n${explain.sql}\n) _q`
+      : explain.sql;
 
     const id = this.jobs.create({ contextId: ctx.id });
     const table = `qr_${id}`;
     this.jobs.setTable(id, table);
     const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, order_by: input.order_by, time_range: input.time_range });
-    this.ctxs.writeModel(ctx.id, table, `{{ config(materialized='table') }}\n${header}${explain.sql}\n`);
+    this.ctxs.writeModel(ctx.id, table, `{{ config(materialized='table') }}\n${header}${projected}\n`);
 
     // Hold a lease on the context for the lifetime of the (possibly detached)
     // build so drop_context can't tear down the overlay mid-run (Reliability C1).

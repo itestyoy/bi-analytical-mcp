@@ -130,7 +130,7 @@ test('a ratio metric over two task measures: CPC = 17.50/64', opts, async (t) =>
 // SEED_DATA §11: cost by channel — meta 5.75, applovin 8.25, google 3.50, organic 0.
 test('grouped by an attribute of the same source: cost by media_source', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cost'], group_by: ['acquisition__media_source'] });
+  const r = await q({ metrics: ['uacq_cost'], group_by: [{ model: 'acquisition', attribute: 'media_source' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'uacq_cost'), 'uacq_cost');
   assert.ok(near(by.meta, 5.75), `meta=${by.meta}`);
@@ -144,9 +144,9 @@ test('grouped by an attribute of the same source: cost by media_source', opts, a
 // POINT-IN-TIME — to the install version valid on the SPEND DAY. u1 spent 1.50 on 01-01 (still
 // US) and 0.50 on 01-03 (already GB), so that 0.50 lands in GB, not US.
 // SEED_DATA §11 + §13: US 6.75 / GB 5.00 / DE 4.00 / BR 1.75, total still 17.50.
-test('cost by user__country is attributed to the install version valid on the spend day', opts, async (t) => {
+test('cost by users.country is attributed to the install version valid on the spend day', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['uacq_cost'], group_by: ['user__country'] });
+  const r = await q({ metrics: ['uacq_cost'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   const by = mapCol(r.rows, groupCol(r, 'uacq_cost'), 'uacq_cost');
   assert.ok(near(by.US, 6.75), `US=${by.US}`);
@@ -247,7 +247,7 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   assert.ok(near(num(r.rows[0].gov_total_spend), 17.5), `total_spend=${r.rows[0].gov_total_spend}`);
 
   // it groups like any other measure — by the source's own attribute…
-  const g = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: ['gov_media_source'] });
+  const g = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: [{ model: 'acquisition', attribute: 'media_source' }] });
   assert.equal(g.ok, true, JSON.stringify(g.error));
   const by = mapCol(g.rows, groupCol(g, 'gov_total_spend'), 'gov_total_spend');
   assert.ok(near(by.applovin, 8.25), `applovin=${by.applovin}`);
@@ -256,7 +256,7 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   assert.ok(near(sumCol(g.rows, 'gov_total_spend'), 17.5));
 
   // …and through a declared relationship, exactly as a task measure does.
-  const byCountry = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: ['user__country'] });
+  const byCountry = await engine.query_semantic_model({ context_id: out.context_id, metrics: ['gov_total_spend'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(byCountry.ok, true, JSON.stringify(byCountry.error));
   assert.ok(near(sumCol(byCountry.rows, 'gov_total_spend'), 17.5), 'the point-in-time join keeps the total');
 });

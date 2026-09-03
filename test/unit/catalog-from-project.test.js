@@ -38,7 +38,7 @@ test('loadCatalogFromProject: discovers MCP models from the dbt project schema Y
   const dir = project({ 'events.yml': eventsYml, 'users.yml': usersYml });
   try {
     const c = loadCatalogFromProject(dir, { dialect: 'postgres' });
-    assert.equal(c.anchor, 'events');
+    assert.deepEqual(c.facts, ['events']);
     assert.equal(c.getModel('events').dbt_model, 'fct_events');
     assert.equal(c.getModel('users').dbt_model, 'dim_users');
     assert.deepEqual(c.eventNames().sort(), ['login', 'purchase']);

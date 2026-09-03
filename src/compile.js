@@ -36,12 +36,9 @@ export function scopeExpr(catalog, modelKey, eventScope) {
   return namesToScope(catalog, modelKey, eventScope?.event_name);
 }
 
-/**
- * SQL expression for an event property: a REAL column reference when the payload
- * is flattened upstream (spec.column set), else extraction from the JSON blob.
- */
-function propExpr(catalog, modelKey, name, spec) {
-  return spec.column ? spec.column : jsonExtract(catalog.dialect, catalog.eventDataColumn(modelKey), name, spec.type);
+/** SQL expression for an event property — the catalog's one rule (flat column or JSON extract). */
+function propExpr(catalog, modelKey, name, _spec) {
+  return catalog.propertyExpr(modelKey, name, catalog.dialect);
 }
 
 /** SQL for a single event_data property condition (used for funnel-step scoping). */
@@ -121,7 +118,15 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     }
     valueExpr = amount.expr;
   } else {
-    // a physical column (entity key like user_id/session_id, or model column)
+    // a physical column of THIS model (an entity key like the player id, or any real column).
+    // Anything else would compile into SQL the warehouse rejects — refuse it here, with the fix.
+    const columns = new Set((catalog.modelColumns(modelKey) || []).map((col) => col.name));
+    for (const parts of Object.values(catalog.entitiesOf(modelKey) || {})) for (const part of parts.key || []) columns.add(part.column);
+    const pe = catalog.getModel(modelKey).primary_entity;
+    if (pe && typeof pe === 'object') for (const part of pe.key || []) columns.add(part.column);
+    if (!columns.has(field)) {
+      fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ model: '${modelKey}' }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
+    }
     valueExpr = field;
   }
   if (decl.cast) valueExpr = castExpr(catalog.dialect, valueExpr, decl.cast);
@@ -169,13 +174,13 @@ export function compileDeclaration(catalog, decl) {
   // the sources it was asked for, so a task on one events source does not drag in another.
   const usedModels = new Set();
   for (const k of decl.use_base_models || []) {
-    if (!catalog.models[k]) fail(`use_base_models: unknown model '${k}'. Known models: ${Object.keys(catalog.models).join(', ')}`, 'use_base_models');
+    if (!catalog.models[k]) fail(`use_base_models: unknown model '${k}'. Known models: ${Object.keys(catalog.models).join(', ')}${catalog.unavailableHint?.(k) || ''}`, 'use_base_models');
     usedModels.add(k);
   }
 
   for (const sm of decl.semantic_models || []) {
     const modelKey = sm.from;
-    if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}`, 'semantic_models.from');
+    if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.from');
     usedModels.add(modelKey);
     // Each fact scopes its OWN measures: the scope is baked into every measure expr below.
     const scope = scopeExpr(catalog, modelKey, sm.event_scope);

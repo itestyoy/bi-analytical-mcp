@@ -27,13 +27,13 @@ and the integration tests.
 | Analytics family | How | Status |
 |---|---|---|
 | **Active-user trends (DAU/WAU/MAU), event volume** | `count_distinct(user)` scoped to `new_session`, grouped by `metric_time` (day/week/month) | **PROVEN** (`active_users_trend`; DAU=12, 7 active days, peak=6, MAU=12) |
-| **Segmentation by user attribute** (1-hop join) | `use_base_models:["users"]` → `events.user → dim_users.user`; group_by `user__country/platform/media_source/acquisition_type/…` | **PROVEN** (revenue US35/GB25/BR25, ios65/android20, paid55/organic30, ARPPU per segment) |
+| **Segmentation by user attribute** (1-hop join) | `use_base_models:["users"]` → `events.user → dim_users.user`; group_by `{ model: 'users', attribute: 'country' | 'platform' | 'media_source' | 'acquisition_type/…` | **PROVEN** (revenue US35/GB25/BR25, ios65/android20, paid55/organic30, ARPPU per segment) |
 | **Nested `where` filters (AND/OR)** | typed predicate tree on dimensions / metric_time | **PROVEN** (US∧paid=50, US∨BR=60, time_range=45) |
 | **2-step conversion funnel** | `conversion` metric (count_distinct base/conversion, entity=user, window) | **PROVEN** (`step_conversion_funnel`) |
 | **Multi-step funnel (step = event + property value)** | per-step measures (`event_name` + `where` on event_data), chained as 2-step conversions | **PROVEN** (`multistep_funnel`; tutorial 8/5/3, conv≈5/8, 3/5; level_id 12/6/3) |
 | **Ordered sequence funnel (row-pattern)** | `register_native_model`: per-user sequence model + semantic model over it; metrics `reached`/`completed`/`conversion`; user-attribute join at the semantic layer; `time_range` / `event_name` / `user_segment` pre-filter | **PROVEN** (12/8/5/3; conv 8/12; group by local dim **and** joined `dim_users` attr in one query; US-segment slice → 4) |
 | **N-day retention (D1/D7)** | `conversion` metric, cohort=`first_launch`, returned=`new_session`, window=N days | **PROVEN as window approximation** (see §2) |
-| **Acquisition-cohort grid** | group by `user__install_date` × `metric_time` | **PROVEN** (`cohort_retention_grid`) |
+| **Acquisition-cohort grid** | group by `{ model: 'users', attribute: 'install_date' }` × `metric_time` | **PROVEN** (`cohort_retention_grid`) |
 | **Behavioral cohort (did / didn't do X)** | `sum_boolean` measure + `Metric()`-in-`where` split | **PROVEN** (purchases=8, sessions=21, 7+5 partition) |
 | **Visit→purchase conversion** | native `conversion` metric within a window | **PROVEN** (visits=12, rate≈7/12, sliceable) |
 | **Level progression / difficulty** | `event_property` dim `level_id` + ratio completes/starts + `average` time | **PROVEN** (starts=28, completes=25, rate=25/28, L1=1.0, L6=0.0) |

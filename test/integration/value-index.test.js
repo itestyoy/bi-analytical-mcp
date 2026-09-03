@@ -111,7 +111,7 @@ test('semantic_index({ property }) returns sample_values + counts matching the i
 });
 
 // Applicability (which events carry a property) is DATA-DERIVED from the scan's per-event coverage,
-// NOT the declared meta.mcp.events — prove the reported `events` == the observed non-null carriers.
+// the schema declares no event list at all — prove the reported `events` == the observed non-null carriers.
 test('semantic_index({ property }).events is derived from per-event coverage (not a declared list)', opts, async (t) => {
   if (skip(t)) return;
   const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
@@ -264,7 +264,7 @@ test('semantic_index({ property }) reports null_count + per-event coverage from 
   assert.equal(out.value_stats.row_count, 184);
   assert.equal(out.value_stats.null_count, 160);
   assert.equal(out.value_stats.null_fraction, Math.round((160 / 184) * 10000) / 10000);
-  // declared applicability comes from the catalog (meta.mcp.events).
+  // applicability is OBSERVED per event (the schema declares no list).
   assert.deepEqual(new Set(out.events), new Set(['ad_started', 'ad_finished']));
   // per-event_name coverage: the two ad events are fully populated (null_count 0, applies);
   const cov = Object.fromEntries(out.event_coverage.map((e) => [e.event_name, e]));
@@ -339,7 +339,7 @@ test('semantic_index({ property: "users.country" }) returns the attribute value 
   const maxFreq = Math.max(...out.sample_values.map((v) => v.freq));
   assert.equal(valOf(out.sample_values, out.value_stats.top_value).freq, maxFreq);
   // the guidance names the JOIN path (user attributes are reached via the users join).
-  assert.ok(out.recommendations.some((r) => r.includes('user__country') || r.includes("join with:'users'")), JSON.stringify(out.recommendations));
+  assert.ok(out.recommendations.some((r) => r.includes('users_country') || r.includes("join with:'users'")), JSON.stringify(out.recommendations));
   // unknown attribute → clear error, not a silent empty result.
   await assert.rejects(() => engine.semantic_index({ source: 'users', property: 'nope' }), /is not a property or dimension of 'users'/);
 });

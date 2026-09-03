@@ -119,3 +119,21 @@ test('a v1 index_run_props table is replaced, so per-property run rows can be wr
   assert.equal(Number(v1.n), 1);
   store.close?.();
 });
+
+// MCP_DB_RESET must not resurrect: the v1 tables set aside by the constructor are dropped by
+// reset(), so the legacy carry-over that follows has nothing to bring back.
+test('reset() drops the set-aside v1 tables, so nothing is carried back after a reset', () => {
+  const path = dbFile();
+  const db = new DatabaseSync(path);
+  db.exec('CREATE TABLE prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, high_cardinality INTEGER, data_watermark INTEGER)');
+  db.exec('CREATE TABLE prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
+  db.exec("INSERT INTO prop_stats VALUES ('users.country', 2, 20, 0, 111, 0, NULL)");
+  db.exec("INSERT INTO prop_values VALUES ('users.country', 'US', 12), ('users.country', 'GB', 8)");
+  db.close();
+
+  const store = openStore({ dbPath: path, reset: true });
+  const migrated = store.values.migrateLegacyKeys(() => ({ source: 'users', property: 'country' }));
+  assert.equal(migrated.migrated ?? 0, 0, 'nothing legacy is left to migrate after a reset');
+  assert.deepEqual(store.values.top('users', 'country', 10), [], 'the reset store is empty');
+  store.close?.();
+});

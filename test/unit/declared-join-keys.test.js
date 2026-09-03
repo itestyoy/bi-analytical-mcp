@@ -209,3 +209,62 @@ test('event accessors refuse an omitted source when the catalog has several', ()
   assert.equal(one.facts.length, 1);
   assert.deepEqual(one.eventNames(), ['login'], 'a single source resolves without being named');
 });
+
+// ── THE SCHEMA MARKS A PROPERTY; THE INDEX MEASURES THE REST ───────────────────────────────
+// Which events carry a property and which values it takes are observed by the value index, per
+// source. The former meta.mcp.events / meta.mcp.values lists only went stale in silence, so they
+// are refused with the replacement; a scalar payload column is marked meta.mcp.property: true.
+const withCol = (base, colLine) => base.replace('      - { name: tracking_id, data_type: string }', `      - { name: tracking_id, data_type: string }\n${colLine}`);
+
+test('meta.mcp.property marks a flat column as an event property; the index measures its events', () => {
+  const c = load(withCol(EVENTS, '      - { name: price_usd, data_type: numeric, meta: { mcp: { property: true, unit: usd } } }') + USERS());
+  assert.ok(c.eventProps('events').includes('price_usd'));
+  assert.equal(c.eventPropertySpec('price_usd', 'events').type, 'numeric');
+  assert.equal(c.eventPropertySpec('price_usd', 'events').events, undefined, 'no declared event list exists any more');
+  // an unmarked column of a fact is a plain column, not a property
+  assert.ok(!c.eventProps('events').includes('tracking_id'));
+});
+
+test('meta.mcp.events is refused, naming the property marker', () => {
+  assert.throws(() => load(withCol(EVENTS, '      - { name: price_usd, data_type: numeric, meta: { mcp: { events: [login] } } }') + USERS()),
+    /meta\.mcp\.events is no longer a schema key.*measured by the value index.*meta\.mcp\.property: true/s);
+});
+
+test('meta.mcp.values is refused on a property and on an attribute', () => {
+  assert.throws(() => load(withCol(EVENTS, '      - { name: result, data_type: string, meta: { mcp: { property: true, values: [win, lose] } } }') + USERS()),
+    /meta\.mcp\.values is no longer a schema key.*semantic_index\(\{ property \}\)/s);
+  const dimVals = USERS().replace('- { name: country, data_type: string }', '- { name: country, data_type: string, meta: { mcp: { values: [US, GB] } } }');
+  assert.throws(() => load(EVENTS + dimVals), /meta\.mcp\.values is no longer a schema key/);
+  const blobVals = EVENTS.replace('      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }',
+    "      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }\n      - { name: payload, data_type: jsonb, meta: { mcp: { is_event_data: true, properties: { mode: { type: string, values: [a, b] } } } } }");
+  assert.throws(() => load(blobVals + USERS()), /'values' \/ 'events' are no longer schema keys/);
+});
+
+test('meta.mcp.property on a dimension model is refused (every attribute is already groupable there)', () => {
+  const bad = USERS().replace('- { name: country, data_type: string }', '- { name: country, data_type: string, meta: { mcp: { property: true } } }');
+  assert.throws(() => load(EVENTS + bad), /marks an EVENT-PAYLOAD property, which only an events source has/);
+});
+
+test('meta.mcp.anchor is refused: there is no default source', () => {
+  const bad = EVENTS.replace('        role: events\n', '        role: events\n        anchor: true\n');
+  assert.throws(() => load(bad + USERS()), /meta\.mcp\.anchor is no longer a schema key.*no default source/s);
+});
+
+// A column that is BOTH an amount and an attribute keeps both roles — the measure marking used
+// to be dropped in silence when `dimension` was present as well.
+test('a column marked measure AND dimension is aggregatable and groupable', () => {
+  const both = USERS().replace('- { name: country, data_type: string }',
+    '- { name: country, data_type: string }\n      - { name: level, data_type: integer, meta: { mcp: { measure: { unit: level }, dimension: {} } } }');
+  const c = load(EVENTS + both);
+  assert.ok(c.aggregatableFields('users').some((a) => a.name === 'level'), 'aggregatable');
+  assert.ok(Object.keys(c.getModel('users').dimensions).includes('level'), 'and a groupable attribute');
+});
+
+// No join key is singled out by NAME as a groupable column of a fact: the general mechanism
+// (meta.mcp.dimension) is the only way a key becomes an attribute.
+test('a session-named key is not a fact attribute unless marked dimension like any column', () => {
+  const withSession = EVENTS.replace('      - { name: tracking_id, data_type: string }',
+    '      - { name: tracking_id, data_type: string }\n      - { name: sess, data_type: integer, meta: { mcp: { entity: { name: session, type: foreign } } } }');
+  const c = load(withSession + USERS());
+  assert.ok(!c.modelDimensionColumns('events').includes('sess'));
+});

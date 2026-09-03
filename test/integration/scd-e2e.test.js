@@ -53,7 +53,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 // 1) GOVERNED SCD point-in-time join: revenue by (versioned) country attributes each purchase to
 //    the user version valid AT the event time. Proves no fan-out (total 100, not 130).
-test('governed SCD join: revenue by user__country is point-in-time (US 50 / GB 20 / DE 30, total 100)', opts, async (t) => {
+test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 20 / DE 30, total 100)', opts, async (t) => {
   if (skip(t)) return;
   const created = await engine.create_semantic_model({
     name: 'scd_rev', use_base_models: ['users'],
@@ -71,9 +71,9 @@ test('governed SCD join: revenue by user__country is point-in-time (US 50 / GB 2
   const totalR = await engine.get_query_result({ context_id: ctx, table: total.table, transform: { aggregations: [{ fn: 'sum', column: 'scd_rev_revenue', as: 't' }] } });
   assert.equal(num(totalR.rows[0].t), 100, 'point-in-time total revenue = 100 (a fan-out join would give 130)');
 
-  const seg = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: ['user__country'], materialize: true });
+  const seg = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
   const rows = await engine.get_query_result({ context_id: ctx, table: seg.table });
-  const by = mapOf(rows.rows, 'user__country', 'scd_rev_revenue');
+  const by = mapOf(rows.rows, 'users_country', 'scd_rev_revenue');
   assert.equal(by.US, 50, `US = u1's pre-move $10 + u3 $40 = 50 (got ${JSON.stringify(by)})`);
   assert.equal(by.GB, 20, "GB = u1's post-move $20");
   assert.equal(by.DE, 30, 'DE = u2 $30');

@@ -49,8 +49,9 @@ export class CatalogSearch {
     // Dimension attributes of the non-fact models (users/experiments): { source, column } —
     // the same pair the { property } drill-down takes.
     const dimItems = [];
+    // EVERY model's attributes, events sources included: a dimension that lives only on a fact
+    // (the app column, a crash source's app_version) is as searchable as a users attribute.
     for (const mk of c.modelKeys()) {
-      if (c.isFact(mk)) continue;
       const dDescs = c.columnDescriptions(mk);
       for (const [col, dspec] of Object.entries(c.getModel(mk).dimensions || {})) {
         dimItems.push({ source: mk, column: col, type: dspec.type, description: dDescs[col] || '' });

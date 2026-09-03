@@ -97,11 +97,11 @@ test('payers = 7, purchases = 8, arppu = 85/7', opts, async (t) => {
 });
 
 // SEED_DATA: revenue by country -> US=35, GB=25, BR=25, DE=0 (no rows).
-test('revenue by user__country (1-hop join) = US 35 / GB 25 / BR 25', opts, async (t) => {
+test('revenue by users.country (1-hop join) = US 35 / GB 25 / BR 25', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['mon_revenue'], group_by: ['user__country'] });
+  const r = await q({ metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'user__country', 'mon_revenue');
+  const by = mapCol(r.rows, 'users_country', 'mon_revenue');
   assert.equal(by.US, 35);
   assert.equal(by.GB, 25);
   assert.equal(by.BR, 25);
@@ -112,10 +112,10 @@ test('revenue by user__country (1-hop join) = US 35 / GB 25 / BR 25', opts, asyn
 });
 
 // SEED_DATA: revenue by acquisition_type -> paid=55, organic=30.
-test('revenue filtered by user__acquisition_type: paid 55 / organic 30', opts, async (t) => {
+test('revenue filtered by users.acquisition_type: paid 55 / organic 30', opts, async (t) => {
   if (skip(t)) return;
-  const paid = await q({ metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'user__acquisition_type' }, op: 'eq', value: 'paid' }] } });
-  const org = await q({ metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', path: 'user__acquisition_type' }, op: 'eq', value: 'organic' }] } });
+  const paid = await q({ metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'acquisition_type' }, op: 'eq', value: 'paid' }] } });
+  const org = await q({ metrics: ['mon_revenue'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'acquisition_type' }, op: 'eq', value: 'organic' }] } });
   assert.equal(paid.ok, true, JSON.stringify(paid.error));
   assert.equal(org.ok, true, JSON.stringify(org.error));
   assert.equal(sumCol(paid.rows, 'mon_revenue'), 55);
@@ -125,9 +125,9 @@ test('revenue filtered by user__acquisition_type: paid 55 / organic 30', opts, a
 // SEED_DATA: revenue by product -> p1=15, p2=30, p3=40 (local event-property dim).
 test('revenue by product_id = p1 15 / p2 30 / p3 40', opts, async (t) => {
   if (skip(t)) return;
-  const r = await q({ metrics: ['mon_revenue'], group_by: ['mon_product_id_of_event_data'] });
+  const r = await q({ metrics: ['mon_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }] });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  const by = mapCol(r.rows, 'event__mon_product_id_of_event_data', 'mon_revenue');
+  const by = mapCol(r.rows, 'events_product_id_of_event_data', 'mon_revenue');
   assert.equal(by.p1, 15);
   assert.equal(by.p2, 30);
   assert.equal(by.p3, 40);

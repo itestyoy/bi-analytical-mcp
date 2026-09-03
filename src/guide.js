@@ -18,8 +18,8 @@ export function buildGuide(catalog, recipes, { task } = {}) {
   const multi = facts.length > 1;
   // A catalog may also carry NON-events sources that declare MEASURES (acquisition spend, say):
   // no event vocabulary, but their own time axis and their own aggregatable amounts.
-  // Relationships the schema declares between two models — what a `via` join and a
-  // <relationship>__<attribute> group-by can name.
+  // Relationships the schema declares between two models — what a `via` join names, and what a
+  // { model, attribute, via } group-by resolves through.
   const joinNames = catalog.joinEntityNames();
   const measureSources = catalog.modelKeys()
     .filter((k) => !catalog.isFact(k) && catalog.aggregatableFields(k).length)
@@ -40,11 +40,16 @@ export function buildGuide(catalog, recipes, { task } = {}) {
     { if: 'an ordered multi-step funnel / path / time-between-steps', do: 'a build_native_model pipeline with a match_recognize stage (funnels are events-only).' },
     { if: 'an A/B question ("is variant B better")', do: `compute per-variant aggregates first (a pipeline joining '${experimentsModel}'), then experiment({ action: 'analyze' }); run experiment({ action: 'check_split' }) BEFORE trusting any lift.` },
     { if: 'comparing TWO groups for significance that are NOT an experiment (first vs last, before vs after, cohort A vs B, organic vs paid)', do: 'do NOT hand-roll a t-test. Aggregate per group in one pipeline (mean: n+mean+stddev; rate: conversions+n), then ab_test({ metric: "mean" | "proportion" }) — "control"/"variants" are just group A vs B; no experiments table needed. See semantic_index({ recipe: "two_sample_significance" }).' },
-    { if: 'segmenting by a user attribute (country / platform / source)', do: `join/group by the '${usersModel}' model (user__<attr>) — it is NOT on the event payload.` },
+    { if: 'segmenting by a user attribute (country / platform / source)', do: `group/filter by { model: '${usersModel}', attribute: '<attr>' } with use_base_models: ['${usersModel}'] — user attributes are NOT on the event payload.` },
     ...(joinNames.length ? [
-      { if: 'combining two sources (events with spend, an events source with another, a source with the install record)', do: `use the RELATIONSHIP the schema declares — ${joinNames.join(', ')} — never hand-picked columns. In a metric query: group by <relationship>__<attribute> and declare the other model in use_base_models. In a pipeline: add_step { stage: 'join', with: '<model>', via: '<relationship>' }. semantic_index({ model }) lists each model's relationships, their key columns and what they point at. A key may span several columns and the two sides may name their columns differently. Join stages STACK, so one pipeline can chain several relationships and reach four sources at once; via always resolves its left-hand key on the pipeline's OWN source.` },
+      { if: 'combining two sources (events with spend, an events source with another, a source with the install record)', do: `use the RELATIONSHIP the schema declares — ${joinNames.join(', ')} — never hand-picked columns. In a metric query: group by { model: '<the other model>', attribute } (add via when several relationships lead there) and declare that model in use_base_models. In a pipeline: add_step { stage: 'join', with: '<model>', via: '<relationship>' }. semantic_index({ model }) lists each model's relationships, their key columns and what they point at. A key may span several columns and the two sides may name their columns differently. Join stages STACK, so one pipeline can chain several relationships and reach four sources at once; via always resolves its left-hand key on the pipeline's OWN source.` },
       { if: 'a join returns far MORE rows than the base table (or a sum is suspiciously large)', do: 'you probably joined a SLOWLY-CHANGING model on its key alone, so every row matched every historical version. Add the point-in-time window to the join stage: between: { value: <this source\'s time column>, from: <validity start column>, to: <validity end column> } — semantic_index({ model }) names them. In a metric query MetricFlow applies the window for you.' },
-      { if: 'you want to know what advertising was running when the app crashed', do: 'the crash source records the last ad-funnel id per ad format; join it to the events source with the matching variant (via: <relationship>_<format>) to get that funnel\'s events. Several events share one funnel id, so this is a pipeline join — there is no governed path for it.' },
+      // Only when the catalog actually carries a relationship in VARIANTS (one relationship, several
+      // alternative key columns on a side) — and phrased from those names, not from a domain.
+      ...Object.entries(catalog.variantRelationships()).map(([rel, names]) => ({
+        if: `joining on '${rel}' when one side carries it in several alternative columns`,
+        do: `pick the variant the question is about — via: ${names.map((n) => `'${n}'`).join(' | ')} — each is the same relationship through a different key column. When several rows share one key value neither side is unique on it, so this is a pipeline join with no governed path.`,
+      })),
     ] : []),
     ...(multi ? [
       { if: 'choosing WHERE to look', do: `there are ${facts.length} independent events sources — ${facts.join(', ')} — each with its OWN events and payload properties, never mixed. Decide which one records the thing being asked about, then name it: semantic_index({ source, event }), build_native_model({ source }), create_semantic_model({ semantic_models: [{ from: <source> }] }). Inside a pipeline or semantic model built from a source, its event/property names are used as-is.` },

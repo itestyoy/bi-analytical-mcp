@@ -196,7 +196,57 @@ test('a group-by path onto an unloaded FACT is refused with the use_base_models 
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
   });
   await assert.rejects(
-    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: ['crash__app_version'] }),
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),
     /needs model 'crashlytics'.*use_base_models/s,
   );
+});
+
+// The relationship a model OWNS is reported as owned — its governed path ends here — not as
+// "pipeline only" (the two conditions used to be tested in the wrong order).
+test('semantic_index({ model }) reports an owned relationship as owned, with a governed path', async () => {
+  const e = engine();
+  const users = await e.semantic_index({ model: 'users' });
+  const rel = users.relationships.find((r) => r.entity === 'user');
+  assert.equal(rel.owned_here, true);
+  assert.match(rel.use, /^owned here — other models point at it/);
+  assert.ok(!/No model owns 'user'/.test(users.join_note || ''), users.join_note);
+  const events = await e.semantic_index({ model: 'events' });
+  assert.equal(events.relationships.find((r) => r.entity === 'user').use, 'metric query + pipeline');
+});
+
+// The qualified '<source>.<name>' form — the one the tool itself emits — resolves; a bare name
+// carried by several sources is reported, never guessed.
+test('memory targets: qualified names resolve, ambiguous bare names are refused', async () => {
+  const e = engine();
+  const saved = await e.memory({ action: 'record', note: 'ad_finished fires once per completed impression', targets: ['events.ad_finished', 'crashlytics.anr_duration_of_event_data', 'users.country'] });
+  assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event', 'property', 'property'], JSON.stringify(saved.linked_to));
+  assert.deepEqual(saved.unresolved_terms || [], []);
+  const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
+  assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
+  // app_version is an attribute of BOTH users and crashlytics
+  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /ambiguous.*users\.app_version.*crashlytics\.app_version|ambiguous.*crashlytics\.app_version.*users\.app_version/s);
+});
+
+// Attributes that live only on an events source are searchable by name like any other.
+test('semantic_index({ search }) finds a dimension that exists only on an events source', async () => {
+  const e = engine();
+  const r = await e.semantic_index({ search: 'bundle_id' });
+  assert.ok(r.dimension_matches.some((d) => d.source === 'events' && d.column === 'bundle_id'), JSON.stringify(r.dimension_matches));
+  const r2 = await e.semantic_index({ search: 'device_model' });
+  assert.ok(r2.dimension_matches.some((d) => d.source === 'crashlytics'), 'the crash source copy is found too');
+});
+
+// The guide speaks only about what the catalog declares: its variant trigger names the real
+// expanded relationships, and is absent on a catalog without variants.
+test('the guide derives its variant-join trigger from the catalog, or omits it', async () => {
+  const e = engine();
+  const g = await e.semantic_index({ guide: true });
+  const t = g.routing_triggers.find((x) => /alternative columns/.test(x.if));
+  assert.ok(t && /ad_funnel_rewarded/.test(t.do) && /ad_funnel_banner/.test(t.do), JSON.stringify(t));
+  assert.ok(!g.routing_triggers.some((x) => /crash/.test(x.if)), 'no domain-specific crash trigger');
+  const catalog = loadCatalog(CATALOG, {});
+  for (const m of Object.values(catalog.models)) for (const [n, en] of Object.entries(m.entities || {})) if (en.variant_of) delete m.entities[n];
+  const plain = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) });
+  const g2 = await plain.semantic_index({ guide: true });
+  assert.ok(!g2.routing_triggers.some((x) => /alternative columns/.test(x.if)), 'no variants → no trigger');
 });

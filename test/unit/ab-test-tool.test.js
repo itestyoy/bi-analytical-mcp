@@ -14,7 +14,7 @@ test('experiments role is a joinable model with its dimensions + time columns', 
   assert.ok(catalog.joinableModelKeys().includes('experiments'), 'experiments is joinable');
   const dims = catalog.modelDimensionColumns('experiments');
   for (const c of ['experiment_name', 'variant_group', 'assigned_at', 'ended_at']) assert.ok(dims.includes(c), `dim ${c}`);
-  assert.equal(catalog.anchor, 'events'); // unchanged: events is still the fact
+  assert.ok(catalog.facts.includes('events')); // unchanged: events is still an events source
 });
 
 test('ab_test proportion: control vs two variants, per-variant verdicts', () => {

@@ -86,5 +86,5 @@ test('views carry structured next_actions (call + why), not just prose', async (
   assert.ok(ov.next_actions.every((a) => typeof a.call === 'string' && /semantic_index\(/.test(a.call) && a.why), 'each next_action is a runnable call + why');
   // a drill view carries them too, with the entity name filled in.
   const ev = await e.semantic_index({ event: 'ad_finished' });
-  assert.ok(ev.next_actions.some((a) => /\{ property:/.test(a.call)), JSON.stringify(ev.next_actions));
+  assert.ok(ev.next_actions.some((a) => /source: 'events', property:/.test(a.call)), JSON.stringify(ev.next_actions));
 });

@@ -148,19 +148,19 @@
       - name: issue_title_of_event_data
         data_type: string
         description: "Crashlytics issue title (the grouping key of a crash). Events: all."
-        meta: { mcp: { events: [fatal_crash, non_fatal, anr] } }
+        meta: { mcp: { property: true } }
       - name: is_fatal_of_event_data
         data_type: boolean
         description: "Whether the report crashed the app. Events: fatal_crash, non_fatal."
-        meta: { mcp: { events: [fatal_crash, non_fatal] } }
+        meta: { mcp: { property: true } }
       - name: anr_duration_of_event_data
         data_type: numeric
         description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
-        meta: { mcp: { unit: seconds, events: [anr] } }
+        meta: { mcp: { unit: seconds, property: true } }
       - name: crash_message_of_event_data
         data_type: string
         description: "Exception message of the crash. Events: fatal_crash ONLY."
-        meta: { mcp: { events: [fatal_crash] } }
+        meta: { mcp: { property: true } }
 
       # ── COMPLEX payload: a crash report is not flat. Flattened, each of these is ONE
       #    column holding JSON — declare the shape and the pipeline can explode or read it.
@@ -171,7 +171,6 @@
           Events: all crash events.
         meta:
           mcp:
-            events: [fatal_crash, non_fatal, anr]
             array: { items: string, encoding: json }
       - name: stack_frames_of_event_data          # ARRAY OF STRUCTS
         data_type: string
@@ -180,14 +179,13 @@
           Events: fatal_crash, non_fatal (NULL on anr).
         meta:
           mcp:
-            events: [fatal_crash, non_fatal]
             array:
               encoding: json                      # a STRING holding JSON; `native` = a real ARRAY column
               fields: { file: string, line: int, in_app: boolean }
       - name: custom_keys_of_event_data           # a JSON OBJECT, not an array
         data_type: string
         description: "Custom keys attached to the report — a JSON object."
-        meta: { mcp: { events: [fatal_crash, non_fatal, anr] } }
+        meta: { mcp: { property: true } }
 ```
 
 ### Как конвейер это читает
@@ -209,8 +207,8 @@
 **На что смотреть при заполнении**
 
 - `primary_entity: crash` — не `event`. Иначе правило 5.
-- `events: [...]` на каждой payload-колонке — это её область: на остальных событиях она
-  читается NULL. Индекс значений использует это, чтобы отличать «ожидаемый NULL» от дыры
+- `property: true` на каждой payload-колонке — это маркер свойства события. На каких событиях
+  оно заполнено, какие значения принимает и как часто пусто — измеряет индекс, не схема.
   в данных.
 - Формат `<имя>_of_event_data` — не `event_data__<имя>` (правило 15).
 - Варианты `ad_funnel` — если у вас один столбец tracking id, а не три, объявляйте его
@@ -441,7 +439,7 @@ acquisition × events: строки расходов размножаются п
 — то на игрока приходится **несколько версий**, и соединение по одному ключу совпадёт с
 каждой исторической версией и раздует любой счёт.
 
-- **governed** — MetricFlow применяет окно сам: просто группируйте по `user__country`.
+- **governed** — MetricFlow применяет окно сам: просто группируйте по `{ model: 'users', attribute: 'country' }`.
 - **pipeline** — окно указывается явно, в стадии соединения. Намеренно явно: время, о
   котором спрашивают, видно прямо в месте вызова.
 
@@ -494,7 +492,7 @@ entities:
 ```
 
 Так появляется управляемый путь: мера на событиях группируется по **атрибутам** источника
-падений — `ad_funnel__app_version`, `ad_funnel__device_model`. Работает и составной ключ, и
+падений — `{ model: 'crashlytics', attribute: 'app_version', via: 'ad_funnel' }`. Работает и составной ключ, и
 разные имена колонок на сторонах.
 
 > **`unique` — это утверждение о ДАННЫХ, и никто его не проверяет.** Если ключ на стороне
@@ -523,7 +521,7 @@ MetricFlow умеет соединять только по уникальном�
 Расход по стране установки на день расхода — управляемый путь, окно применяется само:
 
 ```json
-{ "metrics": ["ua_cost"], "group_by": ["user__country"] }
+{ "metrics": ["ua_cost"], "group_by": [{ "model": "users", "attribute": "country" }] }
 ```
 
 То же самое через pipeline, с явным окном:
@@ -564,7 +562,7 @@ MetricFlow умеет соединять только по уникальном�
 - [ ] `primary_entity` не совпадает ни с одной другой моделью.
 - [ ] У источника событий есть `is_event_name` и `is_time`; `known_events` перечислены полностью.
 - [ ] У источника мер есть `is_time`, и `event_name` нет вовсе.
-- [ ] Каждая payload-колонка несёт `events: [...]` — список событий, на которых она заполнена.
+- [ ] Каждая payload-колонка помечена `property: true` (массив — `array`); списков событий и значений в схеме нет.
 - [ ] Ни в одном имени колонки нет `__`.
 - [ ] Суммы помечены `measure`, атрибуты — нет; `agg` стоит только там, где функцию действительно хотят зафиксировать для всех.
 - [ ] Ключи связей объявлены в схеме, а не передаются в вызове.

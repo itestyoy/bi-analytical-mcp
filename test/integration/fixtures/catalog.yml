@@ -104,106 +104,106 @@ models:
       - name: level_id_of_event_data
         data_type: int
         description: "Level identifier. Events: level_started, level_completed."
-        meta: { mcp: { events: [level_started, level_completed] } }
+        meta: { mcp: { property: true } }
       - name: result_of_event_data
         data_type: string
         description: "Outcome of a completed level. Events: level_completed."
-        meta: { mcp: { values: [win, lose], events: [level_completed] } }
+        meta: { mcp: { property: true } }
       - name: daily_level_score_of_event_data
         data_type: numeric
         description: "Numeric score recorded on level completion. Events: level_completed."
-        meta: { mcp: { events: [level_completed] } }
+        meta: { mcp: { property: true } }
       - name: attempt_of_event_data
         data_type: numeric
         description: "Attempt number for the level. Events: level_started, level_completed."
-        meta: { mcp: { events: [level_started, level_completed] } }
+        meta: { mcp: { property: true } }
       - name: amount_of_event_data
         data_type: numeric
         description: "Coin amount earned (currency_income) or spent (currency_outcome)."
-        meta: { mcp: { events: [currency_income, currency_outcome] } }
+        meta: { mcp: { property: true } }
       - name: currency_of_event_data
         data_type: string
         description: "Currency code. Events: currency_*, iap_*."
-        meta: { mcp: { events: [currency_income, currency_outcome, iap_purchase_completed, iap_purchase_failed] } }
+        meta: { mcp: { property: true } }
       - name: value_in_coins_of_event_data
         data_type: numeric
         description: "Value of the transaction in soft currency. Events: currency_income, currency_outcome."
-        meta: { mcp: { events: [currency_income, currency_outcome] } }
+        meta: { mcp: { property: true } }
       - name: source_type_of_event_data
         data_type: string
         description: "Economy source/sink category (e.g. level_reward, hint_spend). Events: currency_income, currency_outcome."
-        meta: { mcp: { events: [currency_income, currency_outcome] } }
+        meta: { mcp: { property: true } }
       - name: source_name_of_event_data
         data_type: string
         description: "Economy source/sink name. Events: currency_income, currency_outcome."
-        meta: { mcp: { events: [currency_income, currency_outcome] } }
+        meta: { mcp: { property: true } }
       - name: monetization_type_of_event_data
         data_type: string
         description: "Monetization category. Events: currency_income, currency_outcome."
-        meta: { mcp: { events: [currency_income, currency_outcome] } }
+        meta: { mcp: { property: true } }
       - name: price_in_usd_of_event_data
         data_type: numeric
         description: "IAP purchase price in USD. Events: iap_purchase_completed, iap_purchase_failed."
-        meta: { mcp: { events: [iap_purchase_completed, iap_purchase_failed] } }
+        meta: { mcp: { property: true } }
       - name: product_id_of_event_data
         data_type: string
         description: "IAP product identifier. Events: iap_*."
-        meta: { mcp: { events: [iap_purchase_completed, iap_purchase_failed] } }
+        meta: { mcp: { property: true } }
       - name: order_id_of_event_data
         data_type: string
         description: "IAP order id. Events: iap_purchase_completed."
-        meta: { mcp: { events: [iap_purchase_completed] } }
+        meta: { mcp: { property: true } }
       - name: status_of_event_data
         data_type: string
         description: "Result status. Events: iap_*, ad_*."
-        meta: { mcp: { values: [success, failed, closed], events: [iap_purchase_completed, iap_purchase_failed, ad_finished] } }
+        meta: { mcp: { property: true } }
       - name: ad_type_of_event_data
         data_type: string
         description: "Ad format. Events: ad_started, ad_finished."
-        meta: { mcp: { values: [rewarded, interstitial, banner], events: [ad_started, ad_finished] } }
+        meta: { mcp: { property: true } }
       - name: network_of_additional_info_of_event_data
         data_type: string
         description: "Ad mediation network. Events: ad_started, ad_finished."
-        meta: { mcp: { values: [admob, unity, applovin, ironsource], events: [ad_started, ad_finished] } }
+        meta: { mcp: { property: true } }
       - name: placement_of_event_data
         data_type: string
         description: "In-app ad placement (e.g. store, level_fail, main_menu). Events: ad_started, ad_finished."
-        meta: { mcp: { events: [ad_started, ad_finished] } }
+        meta: { mcp: { property: true } }
       - name: revenue_of_event_data
         data_type: numeric
         description: "Ad revenue for the impression. Events: ad_finished."
-        meta: { mcp: { unit: usd_cents, events: [ad_finished] } }
+        meta: { mcp: { unit: usd_cents, property: true } }
       - name: is_reward_received_of_event_data
         data_type: string
         description: "Whether the rewarded-ad reward was granted. Events: ad_finished."
-        meta: { mcp: { events: [ad_finished] } }
+        meta: { mcp: { property: true } }
       - name: is_clicked_of_event_data
         data_type: string
         description: "Whether the ad was clicked. Events: ad_finished."
-        meta: { mcp: { events: [ad_finished] } }
+        meta: { mcp: { property: true } }
       - name: screen_from_of_event_data
         data_type: string
         description: "Origin screen. Events: screen_changed."
-        meta: { mcp: { events: [screen_changed] } }
+        meta: { mcp: { property: true } }
       - name: screen_to_of_event_data
         data_type: string
         description: "Destination screen. Events: screen_changed."
-        meta: { mcp: { events: [screen_changed] } }
+        meta: { mcp: { property: true } }
       - name: element_of_event_data
         data_type: string
         description: "Which tutorial element/step the player interacted with (the funnel step id, e.g. step_1). Events: tutorial."
-        meta: { mcp: { events: [tutorial] } }
+        meta: { mcp: { property: true } }
       # Array payload stored as a JSON-encoded STRING — declare how to read it via
       # meta.mcp.array (encoding: json → parse before unnest). Events: level_completed.
       - name: words_selected_of_event_data
         data_type: string
         description: "Words collected on a completed level (JSON array). Events: level_completed."
-        meta: { mcp: { events: [level_completed], array: { items: string, encoding: json } } }
+        meta: { mcp: { array: { items: string, encoding: json } } }
       # numeric value that physically arrives as STRING — aggregating it needs a cast
       - name: complete_time_of_event_data
         data_type: string
         description: "Seconds to complete the level (STRING upstream). Events: level_completed."
-        meta: { mcp: { unit: seconds, events: [level_completed] } }
+        meta: { mcp: { unit: seconds, property: true } }
 
   - name: dim_users
     description: >
@@ -238,7 +238,6 @@ models:
       - name: platform
         data_type: string
         description: "Device platform (ios/android)."
-        meta: { mcp: { values: [ios, android] } }
       - name: os_version
         data_type: string
         description: "OS version."
@@ -260,7 +259,6 @@ models:
       - name: acquisition_type
         data_type: string
         description: "Organic vs paid acquisition."
-        meta: { mcp: { values: [organic, paid] } }
       - name: app_id
         data_type: string
         description: "App identifier."
@@ -394,26 +392,26 @@ models:
         description: "Crashlytics issue title (the grouping key of a crash). Events: fatal_crash, non_fatal, anr."
         meta:
           mcp:
-            events: [fatal_crash, non_fatal, anr]
+            property: true
       - name: is_fatal_of_event_data
         data_type: boolean
         description: "Whether the report crashed the app. Events: fatal_crash, non_fatal (NULL on anr)."
         meta:
           mcp:
-            events: [fatal_crash, non_fatal]
+            property: true
       - name: anr_duration_of_event_data
         data_type: numeric
         description: "How long the main thread was blocked, in seconds. Events: anr ONLY."
         meta:
           mcp:
             unit: seconds
-            events: [anr]
+            property: true
       - name: crash_message_of_event_data
         data_type: string
         description: "Exception message of the crash. Events: fatal_crash ONLY."
         meta:
           mcp:
-            events: [fatal_crash]
+            property: true
       # A COMPLEX (array) payload property — the crash fact carries the same kind of
       # nested payload the analytics fact does, so the unnest pipeline + the complex
       # coverage/example pass of the value index must work here too.
@@ -424,7 +422,6 @@ models:
           Explode it with an unnest stage for per-step frequency. Events: all crash events.
         meta:
           mcp:
-            events: [fatal_crash, non_fatal, anr]
             array: { items: string, encoding: json }
       # An ARRAY OF STRUCTS, flattened into one column holding JSON: the exception stack. Unnest
       # it with `field` for one field per row, or without `field` to bind the whole frame and
@@ -437,7 +434,6 @@ models:
           Events: fatal_crash, non_fatal (NULL on anr).
         meta:
           mcp:
-            events: [fatal_crash, non_fatal]
             array:
               encoding: json
               fields: { file: string, line: int, in_app: boolean }
@@ -451,7 +447,7 @@ models:
           Present on every crash row.
         meta:
           mcp:
-            events: [fatal_crash, non_fatal, anr]
+            property: true
 
   # A NON-EVENTS source with its own MEASURES, declared entirely in this schema. It has no
   # event_name, so it is not an events fact — but it does have a time axis (is_time) and a

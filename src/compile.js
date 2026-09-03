@@ -174,13 +174,13 @@ export function compileDeclaration(catalog, decl) {
   // the sources it was asked for, so a task on one events source does not drag in another.
   const usedModels = new Set();
   for (const k of decl.use_base_models || []) {
-    if (!catalog.models[k]) fail(`use_base_models: unknown model '${k}'. Known models: ${Object.keys(catalog.models).join(', ')}`, 'use_base_models');
+    if (!catalog.models[k]) fail(`use_base_models: unknown model '${k}'. Known models: ${Object.keys(catalog.models).join(', ')}${catalog.unavailableHint?.(k) || ''}`, 'use_base_models');
     usedModels.add(k);
   }
 
   for (const sm of decl.semantic_models || []) {
     const modelKey = sm.from;
-    if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}`, 'semantic_models.from');
+    if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.from');
     usedModels.add(modelKey);
     // Each fact scopes its OWN measures: the scope is baked into every measure expr below.
     const scope = scopeExpr(catalog, modelKey, sm.event_scope);

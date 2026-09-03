@@ -303,7 +303,7 @@ export class Engine {
     if (ref == null || typeof ref !== 'object' || !('attribute' in ref)) return ref;
     const c = this.catalog;
     const { model, attribute, via } = ref;
-    if (!c.models[model]) throw new ToolError(`${where}: unknown model '${model}'. Models: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'model' });
+    if (!c.models[model]) throw new ToolError(`${where}: unknown model '${model}'. Models: ${c.modelKeys().join(', ')}${c.unavailableHint(model)}`, { stage: 'validate', field: 'model' });
     const target = c.getModel(model);
     // 1. a dimension the TASK declared on this model (a payload property or a model column named
     //    in create/update_semantic_model) → its task-namespaced name
@@ -394,6 +394,12 @@ export class Engine {
     // ── { model }: one model in depth (incl. live warehouse introspection) ──
     if (input.model) {
       const k = input.model;
+      if (c.unavailableModels()[k]) {
+        // Declared, but the warehouse cannot back it: say exactly why instead of describing a
+        // model no tool will accept.
+        const u = c.unavailableModels()[k];
+        return { key: k, role: u.role, dbt_model: u.dbt_model, unavailable: true, reason: u.reason, missing_columns: u.missing, note: `'${k}' is excluded from every tool until its table carries the structural column(s) above (or exists). Fix the warehouse table or the dbt schema, then restart the server.` };
+      }
       if (!c.models[k]) throw new ToolError(`unknown model '${k}'. Known models: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'model' });
       const m = c.getModel(k);
       const descs = c.columnDescriptions(k);
@@ -852,6 +858,9 @@ export class Engine {
       // The events FACTS — independent and equal; none is a default. Every tool takes the
       // source as its own argument (optional only when there is exactly one).
       facts: c.facts,
+      // Declared models the warehouse cannot back (a structural column or the table is missing):
+      // excluded from every tool; the reason is here so the analyst can be told what to fix.
+      ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ model }) on one shows what is missing.' } : {}),
       ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ source, event }), build_native_model({ source }), semantic_models[].from; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
       // Each events source lists its OWN event names — they are never merged into one list,
       // because two sources may legitimately carry the same event name.
@@ -974,7 +983,7 @@ export class Engine {
     const c = this.catalog;
     const raw = String(input.property);
     if (input.source) {
-      if (!c.models[input.source]) throw new ToolError(`unknown source '${input.source}'. Known sources: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'source' });
+      if (!c.models[input.source]) throw new ToolError(`unknown source '${input.source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(input.source)}`, { stage: 'validate', field: 'source' });
       return { source: input.source, property: raw };
     }
     const dot = raw.indexOf('.');

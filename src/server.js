@@ -216,11 +216,20 @@ export async function makeEngine(opts = {}) {
   // opt-out via MCP_GROUND_CATALOG=0 (e.g. offline/catalog-only dev).
   if (runner && baseProjectDir && !/^(0|false|no|off)$/i.test(String(process.env.MCP_GROUND_CATALOG ?? 'true').trim())) {
     try {
-      const { pruned } = await groundCatalogToPhysical(catalog, runner, baseProjectDir);
+      const { pruned, unavailable } = await groundCatalogToPhysical(catalog, runner, baseProjectDir);
       // The report lists columns the table lacks, plus anything that had to go with them —
       // a join key built on a missing column, or a validity window that is no longer one.
       for (const [k, names] of Object.entries(pruned)) console.error(`[mcp] ${new Date().toISOString()} catalog grounding: '${k}' — dropped ${names.length} declaration(s) the physical table does not back: ${names.slice(0, 12).join(', ')}${names.length > 12 ? ', …' : ''}`);
-    } catch (e) { console.error(`[mcp] ${new Date().toISOString()} catalog grounding skipped: ${e?.message || e}`); }
+      // A model whose STRUCTURAL column (event name, event time, payload blob, identity key) or
+      // whole table is missing is excluded from every tool, with the reason — like a contradictory
+      // declaration is refused at load.
+      for (const [k, u] of Object.entries(unavailable || {})) console.error(`[mcp] ${new Date().toISOString()} catalog grounding: '${k}' (${u.dbt_model}) is UNAVAILABLE — ${u.reason}`);
+    } catch (e) {
+      // No events source left (or introspection itself broke): the server cannot serve a catalog
+      // with nothing to query — fail loudly rather than start half-blind.
+      if (/no events source is available/.test(String(e?.message))) throw e;
+      console.error(`[mcp] ${new Date().toISOString()} catalog grounding skipped: ${e?.message || e}`);
+    }
   }
   // Optional semantic memory search: an embedder is built ONLY when MEMORY_EMBEDDINGS is
   // configured (+ a key); otherwise null and memory({ search }) stays purely fuzzy.

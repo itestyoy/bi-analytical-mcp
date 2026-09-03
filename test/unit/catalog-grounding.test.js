@@ -118,3 +118,145 @@ test('grounding prunes amounts, governed measures and the time axis with their c
   // the impressions amount, whose column IS there, stays
   assert.ok(catalog.aggregatableFields('acquisition').some((a) => a.name === 'impressions'));
 });
+
+// ── STRUCTURAL columns: a missing one makes the model UNAVAILABLE (not silently degraded) ──
+// The event name, the event time axis, the payload blob that properties are read from, and the
+// identity key are what the machinery of a model rests on. Without one of them there is no useful
+// degraded model, so grounding excludes the model with the reason — the same posture as refusing a
+// contradictory declaration at load — while every ORDINARY column still just drops on its own.
+
+/** Physical sets with `omit` removed from ONE model (all other models complete). */
+function physWithout(catalog, model, omit) {
+  const phys = physicalSets(catalog);
+  phys[model] = new Set([...phys[model]].filter((n) => !omit.includes(n)));
+  return phys;
+}
+
+test('grounding: an events source without its event_name column is UNAVAILABLE, not half-working', () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const { pruned, unavailable } = catalog.groundToPhysical(physWithout(catalog, 'crashlytics', ['event_name']));
+  assert.ok(unavailable.crashlytics, 'crashlytics must be reported unavailable');
+  assert.match(unavailable.crashlytics.reason, /event_name/);
+  assert.match(unavailable.crashlytics.reason, /is_event_name/);
+  assert.deepEqual(unavailable.crashlytics.missing, ['event_name']);
+  assert.equal(unavailable.crashlytics.role, 'crashlytics');
+  // gone from every surface the tools derive from
+  assert.ok(!catalog.modelKeys().includes('crashlytics'));
+  assert.ok(!catalog.facts.includes('crashlytics'));
+  assert.ok(!('crashlytics' in pruned), 'an unavailable model is not also listed as pruned');
+  assert.deepEqual(catalog.unavailableModels().crashlytics.missing, ['event_name']);
+  // the other events source is untouched
+  assert.ok(catalog.facts.includes('events'));
+  assert.ok(catalog.eventNames('events').length > 0);
+  // the "unknown model" path names the reason instead of pretending the model never existed
+  assert.throws(() => catalog.getModel('crashlytics'), /UNAVAILABLE.*event_name/);
+});
+
+test('grounding: an events source without its time column is UNAVAILABLE (no TypeError on render)', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const { unavailable } = catalog.groundToPhysical(physWithout(catalog, 'crashlytics', ['event_time']));
+  assert.match(unavailable.crashlytics.reason, /event_time/);
+  assert.match(unavailable.crashlytics.reason, /is_time/);
+  assert.ok(!catalog.modelKeys().includes('crashlytics'));
+  // rendering the remaining catalog never touches the excluded model
+  const { renderBaseModel } = await import('../../src/yaml-render.js');
+  for (const k of catalog.modelKeys().filter((k) => catalog.isFact(k) || catalog.primaryEntityName(k))) assert.ok(renderBaseModel(catalog, k));
+});
+
+test('grounding: the payload blob is structural ONLY while properties are read from it', () => {
+  // The fixture reads `words_collected` / `rewards` from the events blob → structural.
+  let catalog = loadCatalog(CATALOG, {});
+  const blob = catalog.getModel('events').event_data_column;
+  assert.ok(blob, 'fixture events source must declare an event_data column');
+  let r = catalog.groundToPhysical(physWithout(catalog, 'events', [blob]));
+  assert.ok(r.unavailable.events, 'events must be unavailable when its blob (with properties in it) is missing');
+  assert.match(r.unavailable.events.reason, /is_event_data/);
+  assert.match(r.unavailable.events.reason, /words_collected|rewards/);
+  // crashlytics declares no blob-only properties: a missing blob column is an ORDINARY drop there.
+  catalog = loadCatalog(CATALOG, {});
+  const cblob = catalog.getModel('crashlytics').event_data_column;
+  const inBlob = Object.values(catalog.getModel('crashlytics').properties || {}).filter((p) => !p.column);
+  if (cblob && !inBlob.length) {
+    r = catalog.groundToPhysical(physWithout(catalog, 'crashlytics', [cblob]));
+    assert.ok(!r.unavailable.crashlytics);
+    assert.ok(catalog.facts.includes('crashlytics'));
+    assert.equal(catalog.getModel('crashlytics').event_data_column, undefined);
+    assert.ok(r.pruned.crashlytics.includes('(event_data column)'));
+  }
+});
+
+test('grounding: a model without its identity key column is UNAVAILABLE and stops being a join target', () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const keyCol = catalog.getModel('users').primary_entity.key[0].column;
+  // before: facts point at users through `user`
+  assert.equal(catalog.joinTargetFor('user'), 'users');
+  assert.ok(catalog.entitiesOf('events').user, 'fixture events must declare the user relationship');
+  const { pruned, unavailable } = catalog.groundToPhysical(physWithout(catalog, 'users', [keyCol]));
+  assert.match(unavailable.users.reason, new RegExp(`${keyCol}.*primary entity 'user'`));
+  assert.ok(!catalog.modelKeys().includes('users'));
+  // the relationship that pointed at the vanished owner is gone from every remaining model, with the reason
+  assert.equal(catalog.joinTargetFor('user'), undefined);
+  for (const k of catalog.modelKeys()) {
+    assert.ok(!catalog.entitiesOf(k).user, `${k} must no longer offer the 'user' relationship`);
+  }
+  assert.ok(pruned.events.some((x) => /entity:user \(owner 'users' unavailable\)/.test(x)), JSON.stringify(pruned.events));
+  // nothing reachable through users any more
+  assert.ok(!catalog.reachableAttributes().some((a) => a.model === 'users'));
+});
+
+test('grounding: a table that cannot be introspected makes its model UNAVAILABLE (relation not found)', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const full = physicalSets(catalog);
+  const runner = { relationColumns: async (_dir, model) => {
+    const key = catalog.modelKeys().find((k) => catalog.getModel(k).dbt_model === model);
+    if (key === 'experiments') return { ok: false, stderr: 'Database Error\n  relation "fct_experiment_assignments" does not exist' };
+    return { ok: true, columns: [...full[key]].map((name) => ({ name })) };
+  } };
+  const { unavailable } = await groundCatalogToPhysical(catalog, runner, '/tmp/x');
+  assert.ok(unavailable.experiments);
+  assert.match(unavailable.experiments.reason, /cannot be introspected/);
+  assert.match(unavailable.experiments.reason, /does not exist/);
+  assert.ok(!catalog.modelKeys().includes('experiments'));
+  assert.ok(catalog.modelKeys().includes('events') && catalog.modelKeys().includes('users'));
+});
+
+test('grounding: losing EVERY events source is a load failure, not a silent empty catalog', () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const phys = physicalSets(catalog);
+  for (const f of catalog.facts) phys[f] = new Set([...phys[f]].filter((n) => n !== catalog.getModel(f).event_name.column));
+  assert.throws(() => catalog.groundToPhysical(phys), /no events source is available.*event_name/);
+});
+
+test('grounding: ordinary columns still drop one by one — the model stays available', () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const bundle = catalog.bundleColumn('events');
+  const { pruned, unavailable } = catalog.groundToPhysical(physWithout(catalog, 'events', [bundle, 'complete_time_of_event_data']));
+  assert.deepEqual(unavailable, {});
+  assert.ok(catalog.facts.includes('events'));
+  assert.equal(catalog.bundleColumn('events'), null);
+  assert.ok(pruned.events.includes('(bundle column)'), 'a dropped bundle column is reported, not silent');
+  assert.ok(pruned.events.includes('complete_time_of_event_data'));
+});
+
+test('grounding: tools explain an unavailable model instead of "unknown model"', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.groundToPhysical(physWithout(catalog, 'crashlytics', ['event_name']));
+  const engine = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) });
+  // { model } view: the status with the missing columns, not an error and not a half model
+  const view = await engine.semantic_index({ model: 'crashlytics' });
+  assert.equal(view.unavailable, true);
+  assert.deepEqual(view.missing_columns, ['event_name']);
+  assert.match(view.reason, /is_event_name/);
+  // a task on it is refused at validation with the reason (schema enum excludes it; the engine names why)
+  const { compileDeclaration } = await import('../../src/compile.js');
+  assert.throws(() => compileDeclaration(catalog, { name: 't', semantic_models: [{ from: 'crashlytics', measures: [{ name: 'n', agg: 'count' }] }], metrics: [] }), /UNAVAILABLE.*event_name/);
+  // the tool schema no longer offers it as a source, but the { model } view still accepts it to explain
+  const { buildSchemas } = await import('../../src/schema.js');
+  const schemas = buildSchemas(catalog);
+  const enums = (node, out = []) => { if (Array.isArray(node)) node.forEach((n) => enums(n, out)); else if (node && typeof node === 'object') { if (Array.isArray(node.enum)) out.push(node.enum); for (const v of Object.values(node)) enums(v, out); } return out; };
+  const offers = (schema, key) => enums(schema).some((e) => e.includes(key));
+  assert.ok(!offers(schemas.create_semantic_model, 'crashlytics'), 'create_semantic_model must not offer the unavailable source');
+  assert.ok(!offers(schemas.build_native_model, 'crashlytics'), 'build_native_model must not offer the unavailable source');
+  assert.ok(offers(schemas.create_semantic_model, 'events'));
+  assert.ok(schemas.semantic_index.properties.model.enum.includes('crashlytics'), 'the { model } view still accepts it, to explain');
+});

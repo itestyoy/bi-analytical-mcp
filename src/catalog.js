@@ -135,7 +135,11 @@ export async function groundCatalogToPhysical(catalog, runner, baseProjectDir) {
     try {
       const r = await runner.relationColumns(baseProjectDir, catalog.getModel(key).dbt_model);
       if (r && r.ok && Array.isArray(r.columns)) phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
-    } catch { /* relation not built / introspection failed → keep declared for this model */ }
+      // The relation cannot be introspected (not built, dropped, renamed, or dbt failed on it):
+      // the model is UNAVAILABLE — declared, but nothing in the warehouse backs it. Working on
+      // as declared would only move the failure to the first query.
+      else phys[key] = { unavailable: String(r?.stderr || r?.stdout || 'relation not found').replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').filter(Boolean).slice(-2).join(' ') || 'relation not found' };
+    } catch (e) { phys[key] = { unavailable: e?.message || 'introspection failed' }; }
   }
   return catalog.groundToPhysical(phys);
 }
@@ -741,6 +745,9 @@ export class Catalog {
     // meta.mcp.require_time_range. A partitioned source can demand a bounded window even when
     // another source does not (see requireTimeRangeFor).
     this._requireTimeRangeAll = raw.require_time_range;
+    // Models the warehouse cannot back (a STRUCTURAL column or the table itself is missing):
+    // removed from `models` by grounding, kept here with the reason so the overview can say why.
+    this.unavailable = {};
     this._indexOwners();
   }
 
@@ -775,25 +782,63 @@ export class Catalog {
   groundToPhysical(physByModel) {
     const get = (k) => (physByModel instanceof Map ? physByModel.get(k) : physByModel?.[k]);
     const pruned = {};
+    const unavailable = {};
+    // Who owned each relationship BEFORE anything is removed: a foreign key pointing at an owner
+    // that turns out to be unavailable has to go with it (the join has no target any more).
+    this._indexOwners();
+    const ownerBefore = { ...this.primaryByEntity };
     for (const [key, m] of Object.entries(this.models)) {
       const raw = get(key);
       if (!raw) continue; // unknown physical shape → keep declared as-is
+      if (raw && !(raw instanceof Set) && !Array.isArray(raw) && typeof raw === 'object' && 'unavailable' in raw) {
+        unavailable[key] = { reason: `the table cannot be introspected: ${raw.unavailable}`, missing: [] };
+        continue;
+      }
       const phys = raw instanceof Set ? raw : new Set([...raw].map((n) => String(n).toLowerCase()));
       const has = (n) => phys.has(String(n).toLowerCase());
       const gone = new Set();
+      const isFact = this.facts.includes(key);
+
+      // ── STRUCTURAL columns: the ones the whole machinery of the model rests on. Missing one of
+      // them there is no useful degraded model — an events source without its event_name column
+      // has no scopes, funnels or coverage scan; a model without its identity key cannot be a
+      // join target. Such a model is not pruned but marked UNAVAILABLE with the reason, exactly
+      // like a contradictory declaration is refused at load: nothing downstream may see it.
+      const missing = [];
+      if (isFact) {
+        if (m.event_name?.column && !has(m.event_name.column)) missing.push(`${m.event_name.column} (meta.mcp.is_event_name — the event name)`);
+        if (m.time?.column && !has(m.time.column)) missing.push(`${m.time.column} (meta.mcp.is_time — the event time axis)`);
+        if (m.event_data_column && !has(m.event_data_column)) {
+          // The raw payload blob is structural only while properties are READ from it; otherwise it
+          // is just a column the pipeline offered, and can be dropped like any other.
+          const inBlob = Object.keys(m.properties || {}).filter((n) => !m.properties[n].column);
+          if (inBlob.length) missing.push(`${m.event_data_column} (meta.mcp.is_event_data — ${inBlob.length} payload propert${inBlob.length === 1 ? 'y' : 'ies'} live in it: ${inBlob.slice(0, 5).join(', ')})`);
+          else { delete m.event_data_column; gone.add('(event_data column)'); }
+        }
+      } else if (m.time?.column && !has(m.time.column)) {
+        // A dimension / measures source is still groupable without its time axis — just not
+        // over time. Rendered as agg_time_dimension, a missing column would break the manifest.
+        delete m.time; gone.add('(time axis)');
+      }
+      const pe = m.primary_entity;
+      if (pe && typeof pe === 'object') {
+        const parts = pe.key || (pe.column ? [{ column: pe.column }] : []);
+        for (const part of parts) if (!has(part.column)) missing.push(`${part.column} (key of the primary entity '${pe.name}')`);
+      }
+      if (missing.length) { unavailable[key] = { reason: `the table lacks structural column(s): ${missing.join('; ')}`, missing: missing.map((x) => x.split(' ')[0]) }; continue; }
+
+      // ── Ordinary declarations: each one is a single capability, dropped on its own.
       // Physical columns referenceable in a pipeline.
       if (Array.isArray(m.columns)) m.columns = m.columns.filter((c) => { if (has(c.name)) return true; gone.add(c.name); return false; });
-      // Event-payload properties: a flattened property is pruned by its physical column;
-      // a property read from the JSON blob survives iff the event_data column is physical.
+      // Event-payload properties: a flattened property is pruned by its physical column.
       if (m.properties) for (const [name, spec] of Object.entries(m.properties)) {
-        const col = spec.column || m.event_data_column;
-        if (col && !has(col)) { delete m.properties[name]; gone.add(name); }
+        if (spec.column && !has(spec.column)) { delete m.properties[name]; gone.add(name); }
       }
       // Groupable dimensions (semantic-layer group-by + schema enums).
       if (m.dimensions) for (const name of Object.keys(m.dimensions)) if (!has(name)) { delete m.dimensions[name]; gone.add(name); }
       // The designated app/bundle column: drop it if it is not physically present, so the
       // indexer never groups by a missing column (per-app coverage is simply unavailable).
-      if (m.bundle_column && !has(m.bundle_column)) delete m.bundle_column;
+      if (m.bundle_column && !has(m.bundle_column)) { delete m.bundle_column; gone.add('(bundle column)'); }
       if (m.column_descriptions) for (const name of Object.keys(m.column_descriptions)) if (!has(name)) delete m.column_descriptions[name];
       // AMOUNTS and GOVERNED MEASURES declared on a column the table lacks: offered, they would be
       // accepted by the tool schema and compiled into SQL that fails in the warehouse. A column-
@@ -803,13 +848,10 @@ export class Catalog {
       const bareColumn = (d) => d.column || (/^[A-Za-z_][A-Za-z0-9_]*$/.test(String(d.expr || '')) ? d.expr : null);
       if (m.aggregatable) for (const [name, a] of Object.entries(m.aggregatable)) { const col = bareColumn(a); if (col && !has(col)) { delete m.aggregatable[name]; gone.add(`amount:${name}`); } }
       if (m.measures) for (const [name, mm] of Object.entries(m.measures)) { const col = bareColumn(mm); if (col && !has(col)) { delete m.measures[name]; gone.add(`measure:${name}`); } }
-      // The TIME AXIS: rendered as agg_time_dimension, so a missing column would produce a
-      // manifest dbt rejects. Without its axis a source is still queryable, just not over time.
-      if (m.time?.column && !has(m.time.column)) { delete m.time; gone.add('(time axis)'); }
       // A DECLARED JOIN KEY whose column is not physically there cannot be executed, so it must
       // stop being offered: `via` would otherwise build SQL against a missing column and fail in
-      // the warehouse instead of here. The model's PRIMARY entity is left alone — it is the
-      // model's identity, and dropping it would leave a model that cannot render at all.
+      // the warehouse instead of here. A relationship is one capability among several, so it is
+      // dropped alone (unlike the primary key above, which is the model's identity).
       if (m.entities) for (const [name, e] of Object.entries(m.entities)) {
         const parts = e.key || (e.column ? [{ column: e.column }] : []);
         if (parts.some((p) => !has(p.column))) { delete m.entities[name]; gone.add(`entity:${name}`); }
@@ -828,10 +870,31 @@ export class Catalog {
       }
       if (gone.size) pruned[key] = [...gone];
     }
+
+    // ── Remove the unavailable models from the live catalog. Everything downstream (tool enums,
+    // facts, the indexer worklist, reachable attributes) derives from `models`, so they vanish
+    // from every surface at once; the reason stays in `unavailable` for the overview.
+    for (const [key, info] of Object.entries(unavailable)) {
+      const m = this.models[key];
+      this.unavailable[key] = { role: m.role, dbt_model: m.dbt_model, ...info };
+      delete this.models[key];
+    }
+    this.facts = this.facts.filter((k) => this.models[k]);
+    if (!this.facts.length) {
+      const why = Object.entries(this.unavailable).map(([k, u]) => `'${k}': ${u.reason}`).join('; ');
+      throw new Error(`no events source is available: ${why}`);
+    }
+    // Relationships whose OWNER became unavailable have no join target any more.
+    for (const [key, m] of Object.entries(this.models)) {
+      for (const name of Object.keys(m.entities || {})) {
+        const owner = ownerBefore[name];
+        if (owner && owner !== key && unavailable[owner]) { delete m.entities[name]; (pruned[key] ||= []).push(`entity:${name} (owner '${owner}' unavailable)`); }
+      }
+    }
     // Grounding may have dropped a key that OWNED a relationship — re-index so nothing points at
     // a target that no longer declares it.
     this._indexOwners();
-    return { pruned };
+    return { pruned, unavailable: Object.fromEntries(Object.keys(unavailable).map((k) => [k, this.unavailable[k]])) };
   }
 
   modelKeys() {
@@ -840,8 +903,19 @@ export class Catalog {
 
   getModel(key) {
     const m = this.models[key];
-    if (!m) throw new Error(`Unknown model: ${key}`);
+    if (!m) throw new Error(`Unknown model: ${key}${this.unavailableHint(key)}`);
     return m;
+  }
+
+  /** Models grounding found the warehouse cannot back: { <key>: { role, dbt_model, reason, missing } }. */
+  unavailableModels() {
+    return this.unavailable || {};
+  }
+
+  /** For an "unknown model" message: the reason when the name IS declared but unavailable, else ''. */
+  unavailableHint(key) {
+    const u = this.unavailable?.[key];
+    return u ? ` — '${key}' is declared in the catalog but UNAVAILABLE: ${u.reason}. Fix the warehouse table or the schema and restart the server.` : '';
   }
 
   primaryEntityName(key) {

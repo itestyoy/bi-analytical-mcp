@@ -4,7 +4,7 @@
 // backend (see store.js) — this class holds NO SQL, just the domain operations. The
 // BackgroundIndexer populates it NON-BLOCKING from the warehouse at startup + on a schedule.
 
-import { jsonExtract, jsonArrayLength, arrayLength, recentSince, sinceTimestampMs, approxCountDistinct, approxTopK, parseApproxTopK } from './dialect.js';
+import { jsonExtract, jsonArrayLength, arrayLength, jsonColumnArrayLength, recentSince, sinceTimestampMs, approxCountDistinct, approxTopK, parseApproxTopK } from './dialect.js';
 import { openStore } from './store.js';
 import { rankFuzzy } from './fuzzy.js';
 
@@ -302,17 +302,36 @@ export class BackgroundIndexer {
   }
 
   /**
+   * Write one per-property diagnostics row for a run. Diagnostics never abort indexing, but a
+   * failure to write them is not silent either: the FIRST failure per run lands in the run's
+   * notes (once — 200 identical notes would bury the real events), so an empty per-property
+   * breakdown next to a non-zero properties_indexed has a visible cause.
+   */
+  _recordTiming(runId, fields) {
+    try { this.index.recordPropertyTiming?.(runId, fields); } catch (e) {
+      if (this._timingFailedRun !== runId) {
+        this._timingFailedRun = runId;
+        try { this.index.recordRunNote?.(runId, `per-property timing could not be recorded (first at [${fields?.property}]): ${e?.message || e}`); } catch { /* nothing left to report to */ }
+        this.logger?.(`sync #${runId} per-property timing could not be recorded: ${e?.message || e}`);
+      }
+    }
+  }
+
+  /**
    * Boolean SQL: a COMPLEX (array / array<struct>) property is "present" on a row = the array
-   * exists AND is non-empty. Encoding decides the shape (a native REPEATED column is never NULL —
-   * only its LENGTH tells presence; a json-string column can be NULL or the literal '[]'; a blob
-   * key uses the dialect's JSON-array length). Used for per-event applicability coverage, so
-   * COUNT(CASE WHEN <this> THEN 1 END) never runs COUNT() over an ARRAY (which BigQuery rejects).
+   * exists AND is non-empty. Encoding decides the shape: a native REPEATED column is never NULL —
+   * only its LENGTH tells presence; an `encoding: json` column holds a whole JSON array and is
+   * measured by the dialect's JSON-array length, which accepts a STRING with JSON text AND a native
+   * JSON / jsonb column alike (data_type: json) — never by comparing the column to a string literal,
+   * an operator BigQuery does not define for JSON; a blob key uses the keyed JSON-array length.
+   * Used for per-event applicability coverage, so COUNT(CASE WHEN <this> THEN 1 END) never runs
+   * COUNT() over an ARRAY (which BigQuery rejects). NULL → NULL → not counted, on every path.
    */
   _complexPresence(name, spec, fact) {
     const d = this.catalog.dialect;
     if (spec.column) {
       if (spec.encoding === 'native') return `${arrayLength(d, spec.column)} > 0`;
-      return `${spec.column} IS NOT NULL AND ${spec.column} <> '[]'`; // json-encoded string array
+      return `${jsonColumnArrayLength(d, spec.column)} > 0`; // JSON array in a STRING or a JSON-typed column
     }
     return `${jsonArrayLength(d, this.catalog.eventDataColumn(fact), name)} > 0`; // inside the event_data blob
   }
@@ -341,9 +360,12 @@ export class BackgroundIndexer {
     const wmOf = (rows) => rows.reduce((mx, r) => { const v = r.wm == null ? null : (Number.isFinite(Number(r.wm)) ? Number(r.wm) : Date.parse(r.wm)); return (v != null && (mx == null || v > mx)) ? v : mx; }, null);
     let done = 0;
     let written = 0; // example value rows stored — counted into the run's values_written
+    // Per-property run diagnostics, same rows the scalar pass writes (semantic_index({ run })).
+    const timing = (fields) => this._recordTiming(runId, fields);
     for (const name of names) {
       const spec = c.eventPropertySpec(name, fact);
       if (!spec) continue;
+      const tProp = Date.now();
       const presence = this._complexPresence(name, spec, fact);
       const expr = this._valueExpr(name, spec, fact);
       try {
@@ -364,6 +386,7 @@ export class BackgroundIndexer {
 
         if (since && deltaMax == null) { // delta merge with no new rows → keep what is stored
           done += 1;
+          timing({ source: fact, property: name, ms: Date.now() - tProp, valuesWritten: 0, status: 'ok' });
           this.logger?.(`sync #${runId} complex-coverage '${fact}.${name}': no new rows since watermark — kept stored`);
           continue;
         }
@@ -393,15 +416,18 @@ export class BackgroundIndexer {
           const keepExamples = examples.length ? examples : stored.values; // keep prior examples if the delta had none
           written += keepExamples.length;
           this.index.upsertProperty(fact, name, { values: keepExamples, distinctCount: null, totalCount: merged.total, nullCount: merged.nullCount, coverage: merged.coverage, bundleCoverage: merged.bundleCoverage, cellCoverage: merged.cellCoverage, dataWatermark: Math.max(prior.dataWatermark || 0, deltaMax ?? prior.dataWatermark) });
+          timing({ source: fact, property: name, ms: Date.now() - tProp, valuesWritten: keepExamples.length, totalCount: merged.total, status: 'ok' });
           this.logger?.(`sync #${runId} complex-coverage '${fact}.${name}': merged delta, ${merged.coverage.length} event(s) carry it`);
         } else { // FULL (or first) scan → replace
           written += examples.length;
           this.index.upsertProperty(fact, name, { values: examples, distinctCount: null, totalCount: total, nullCount: rowsTotal - total, coverage: roll.coverage, bundleCoverage: roll.bundleCoverage, cellCoverage: roll.cellCoverage, ...(deltaMax != null ? { dataWatermark: deltaMax } : {}) });
+          timing({ source: fact, property: name, ms: Date.now() - tProp, valuesWritten: examples.length, totalCount: total, status: 'ok' });
           this.logger?.(`sync #${runId} complex-coverage '${fact}.${name}': ${roll.coverage.length} event(s) carry it, ${examples.length} example(s)`);
         }
         done += 1;
       } catch (e) {
         const why = e?.message || String(e);
+        timing({ source: fact, property: name, ms: Date.now() - tProp, status: 'error', error: why });
         this.index.recordRunNote?.(runId, `complex-coverage scan failed [${name}]: ${why}`);
         this.logger?.(`sync #${runId} complex-coverage '${fact}.${name}' FAILED: ${why}`);
       }
@@ -750,7 +776,7 @@ export class BackgroundIndexer {
     // one source's pass is recorded against that source and the next source still runs.
     const groups = new Map();
     for (const t of targets) { if (!groups.has(t.source)) groups.set(t.source, []); groups.get(t.source).push(t); }
-    const timing = (fields) => { try { this.index.recordPropertyTiming?.(runId, fields); } catch { /* run diagnostics never abort indexing */ } };
+    const timing = (fields) => this._recordTiming(runId, fields);
     try {
       let i = 0;
       for (const [source, groupTargets] of groups) {

@@ -137,3 +137,60 @@ test('reset() drops the set-aside v1 tables, so nothing is carried back after a 
   assert.deepEqual(store.values.top('users', 'country', 10), [], 'the reset store is empty');
   store.close?.();
 });
+
+// ── The shape a LIVE database actually had: `source` appended through ADD COLUMN, the PRIMARY KEY
+// left as it was. An "is the column there" test skips exactly this table, while every
+// ON CONFLICT(run_id, source, property) write against it is rejected — silently, because run
+// diagnostics never abort indexing. The migration must decide by the KEY, not by the column.
+test('index_run_props with `source` added by ALTER but the old PRIMARY KEY is replaced (the live-DB shape)', () => {
+  const path = dbFile();
+  const db = new DatabaseSync(path);
+  db.exec('CREATE TABLE index_run_props (run_id INTEGER, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, property))');
+  db.exec('ALTER TABLE index_run_props ADD COLUMN source TEXT'); // what 56e3a4c did to an existing DB
+  db.exec("INSERT INTO index_run_props (run_id, property, ms, values_written, status, source) VALUES (103, 'ad_type_of_event_data', 12, 3, 'ok', 'events')");
+  // precondition: this exact shape rejects the three-column conflict target
+  assert.throws(() => db.exec("INSERT INTO index_run_props (run_id, source, property, ms) VALUES (104, 'events', 'x', 1) ON CONFLICT(run_id, source, property) DO UPDATE SET ms = excluded.ms"), /ON CONFLICT clause does not match/);
+  db.close();
+
+  const store = openStore({ dbPath: path });
+  store.runs.recordProperty(104, { source: 'events', property: 'ad_type_of_event_data', ms: 5, valuesWritten: 2, status: 'ok' });
+  store.runs.recordProperty(104, { source: 'crashlytics', property: 'ad_type_of_event_data', ms: 6, valuesWritten: 1, status: 'ok' });
+  store.runs.recordProperty(104, { source: 'events', property: 'ad_type_of_event_data', ms: 9, valuesWritten: 4, status: 'ok' });
+  const rows = store.runs.properties(104);
+  assert.equal(rows.length, 2, 'per-property rows are written again (one per source × property)');
+  assert.equal(rows.find((r) => r.source === 'events').values_written, 4, 'the upsert updates, not duplicates');
+  const raw = new DatabaseSync(path);
+  const pk = raw.prepare('PRAGMA table_info(index_run_props)').all().filter((c) => c.pk > 0).map((c) => c.name).sort();
+  assert.deepEqual(pk, ['property', 'run_id', 'source'], 'the live table is now keyed by (run, source, property)');
+  assert.equal(Number(raw.prepare('SELECT count(*) AS n FROM index_run_props_v1').get().n), 1, 'the old rows are set aside, not lost into the new key space');
+  raw.close();
+  store.close?.();
+});
+
+test('prop tables with `source` added by ALTER but the old key are re-keyed and their rows carried by the stored source', () => {
+  const path = dbFile();
+  const db = new DatabaseSync(path);
+  db.exec('CREATE TABLE prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, high_cardinality INTEGER, data_watermark INTEGER)');
+  db.exec('ALTER TABLE prop_stats ADD COLUMN source TEXT');
+  db.exec('CREATE TABLE prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
+  db.exec('ALTER TABLE prop_values ADD COLUMN source TEXT');
+  db.exec("INSERT INTO prop_stats (property, distinct_count, total_count, null_count, indexed_at, high_cardinality, data_watermark, source) VALUES ('status_of_event_data', 2, 10, 0, 111, 0, 500, 'crashlytics')");
+  db.exec("INSERT INTO prop_values (property, value, freq, source) VALUES ('status_of_event_data', 'fatal', 7, 'crashlytics')");
+  db.close();
+
+  const store = openStore({ dbPath: path });
+  const index = new ValueIndex({ store });
+  // The stored source wins: the resolver is NOT what places these rows (it would file them wrongly).
+  const res = index.migrateLegacyKeys(() => ({ source: 'events', property: 'wrong' }));
+  assert.equal(res.migrated, 2);
+  assert.equal(res.dropped, 0);
+  assert.equal(index.stats('crashlytics', 'status_of_event_data').totalCount, 10);
+  assert.equal(index.stats('crashlytics', 'status_of_event_data').dataWatermark, 500);
+  assert.deepEqual(index.sampleValues('crashlytics', 'status_of_event_data', 5), [{ value: 'fatal', freq: 7 }]);
+  assert.equal(index.stats('events', 'wrong'), null);
+  // and the re-keyed table accepts the (source, property) upsert that the old key rejected
+  index.upsertProperty('events', 'status_of_event_data', { distinctCount: 1, totalCount: 3, nullCount: 0, values: [{ value: 'success', freq: 3 }] });
+  assert.equal(index.stats('events', 'status_of_event_data').totalCount, 3);
+  assert.equal(index.stats('crashlytics', 'status_of_event_data').totalCount, 10, 'same name on another source untouched');
+  index.close();
+});

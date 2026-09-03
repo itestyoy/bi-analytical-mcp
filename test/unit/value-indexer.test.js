@@ -472,3 +472,38 @@ test('per-run diagnostics failing for one source never abort the scan of any sou
   assert.equal(index.stats('crashlytics', catalog.scalarEventProps('crashlytics')[0]).totalCount, 3, 'and so is the crash source');
   index.close();
 });
+
+// ── Per-property run diagnostics for the COMPLEX pass, and a visible cause when they cannot be
+// written. The scalar pass has always left one row per property in the run's breakdown; the
+// complex pass left none, so a run whose scalars were skipped showed property_count: 0 next to a
+// non-zero properties_indexed. And a failure to write those rows was swallowed silently.
+test('complex-coverage pass leaves a diagnostics row per property; a write failure is noted once per run', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const index = new ValueIndex();
+  const runner = { show: async (_d, sql) => {
+    if (/AS v\b/.test(sql) && !/GROUP BY/.test(sql)) return { ok: true, rows: [{ v: '["cat","dog"]' }] };
+    if (/GROUP BY/.test(sql) && /AS ev\b/.test(sql)) return { ok: true, rows: [{ ev: 'level_completed', row_count: 5, nn: 5, wm: 1000 }] };
+    return { ok: true, rows: [] };
+  } };
+  const bi = new BackgroundIndexer({ catalog, runner, index, baseProjectDir: '/tmp/none', intervalMs: 0, logger: () => {} });
+  const complexN = catalog.complexEventProps('events').length;
+  assert.ok(complexN >= 2, 'fixture has the string AND the json-typed array columns');
+
+  const r = await bi._indexComplexCoverage(11, 'events');
+  assert.equal(r.props, complexN);
+  const rows = index.runProperties(11, { limit: 1000 }).filter((x) => x.source === 'events');
+  assert.equal(rows.length, complexN, 'one diagnostics row per complex property');
+  assert.ok(rows.every((x) => x.status === 'ok' && x.ms != null));
+  assert.ok(rows.some((x) => x.property === 'words_selected_json_of_event_data'));
+
+  // Diagnostics that cannot be written: indexing continues, and the run carries ONE note.
+  const notes = [];
+  index.recordPropertyTiming = () => { throw new Error('index_run_props is read-only'); };
+  index.recordRunNote = (_id, note) => notes.push(note);
+  const r2 = await bi._indexComplexCoverage(12, 'events');
+  assert.equal(r2.props, complexN, 'indexing itself is unaffected');
+  const timingNotes = notes.filter((n) => /per-property timing could not be recorded/.test(n));
+  assert.equal(timingNotes.length, 1, `exactly one note per run, got ${notes.length}: ${notes.join(' | ')}`);
+  assert.match(timingNotes[0], /read-only/);
+  index.close();
+});

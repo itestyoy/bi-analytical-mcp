@@ -199,6 +199,13 @@ models:
         data_type: string
         description: "Words collected on a completed level (JSON array). Events: level_completed."
         meta: { mcp: { array: { items: string, encoding: json } } }
+      # The same array in a NATIVE JSON-typed column (data_type json / jsonb) — as a BigQuery JSON
+      # column is declared. Same encoding: json; the value index must measure it without a
+      # JSON-vs-STRING comparison.
+      - name: words_selected_json_of_event_data
+        data_type: json
+        description: "Words collected on a completed level, as a native JSON array column. Events: level_completed."
+        meta: { mcp: { array: { items: string, encoding: json } } }
       # numeric value that physically arrives as STRING — aggregating it needs a cast
       - name: complete_time_of_event_data
         data_type: string

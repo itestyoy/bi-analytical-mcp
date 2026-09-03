@@ -192,7 +192,7 @@ measures:
 
 | объявление | что меняет |
 |---|---|
-| `array: { items: <тип>, encoding? }` | плоская колонка — **массив скаляров**. `encoding: native` (настоящий ARRAY/REPEATED) или `json` (строка с JSON-массивом; по умолчанию для `data_type: string`). Открывает `array_length`, `contains`, `element_at`, `unnest` в pipeline. |
+| `array: { items: <тип>, encoding? }` | плоская колонка — **массив скаляров**. `encoding: native` (настоящий ARRAY/REPEATED) или `json` (JSON-массив в колонке — как STRING с текстом JSON, так и настоящая JSON/jsonb-колонка с `data_type: json`; по умолчанию для `data_type: string`). Открывает `array_length`, `contains`, `element_at`, `unnest` в pipeline. |
 | `array: { fields: { <поле>: <тип> }, encoding? }` | **массив структур**: `unnest` с выбором поля, `struct_field`. |
 | `properties:` под `is_event_data` | свойства, живущие **в JSON-blob без плоской колонки**: `{ <имя>: { type, items?, fields?, values?, description? } }`. Скалярные типы: `string` (по умолчанию), `int` / `bigint`, `numeric`, `float` / `double` — числовые приводятся при извлечении; сложные: `array`, `array<struct>`. Читаются извлечением из JSON. |
 | JSON-объект в колонке | не объявляется отдельно; читается `struct_field` / `compute json_field`. Индекс профилирует скаляры, вложенные поля — нет, поэтому форму объекта описывают в `description` (§7). |
@@ -435,7 +435,10 @@ models:
 ```
 
 `encoding` можно не писать: для `data_type: string` подразумевается `json`, для остального —
-`native`. `semantic_index({ event })` покажет свойство с `type: array`, `complex: true`.
+`native`. Исключение — колонка настоящего типа JSON/jsonb (`data_type: json`, как JSON-колонка
+BigQuery): по умолчанию она получила бы `native`, поэтому `encoding: json` там пишется явно. Сервер
+читает такую колонку теми же JSON-функциями, что и строку, и никогда не сравнивает её со строковым
+литералом. `semantic_index({ event })` покажет свойство с `type: array`, `complex: true`.
 
 Что с ним делать в pipeline — и что это даёт на фикстуре (13 отчётов, 20 элементов):
 

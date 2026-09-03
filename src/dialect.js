@@ -30,6 +30,15 @@ export function arrayLength(dialect, column) {
   return getDialect(dialect).arrayLength(column);
 }
 
+/**
+ * Element count of a COLUMN that holds a whole JSON array — whatever its physical type: a STRING
+ * with JSON text, or a native JSON / jsonb column. Both dialects' functions accept either, so no
+ * string literal is ever compared against the column (BigQuery defines no JSON = STRING operator).
+ */
+export function jsonColumnArrayLength(dialect, column) {
+  return getDialect(dialect).jsonColumnArrayLength(column);
+}
+
 export function jsonArrayContains(dialect, column, key, value) {
   return getDialect(dialect).jsonArrayContains(column, key, value);
 }

@@ -154,6 +154,40 @@ test('complex array property gets DATA-DERIVED per-event coverage (no leak onto 
   assert.ok(/example|shape/i.test(out.sample_note || ''), 'B: examples are labelled as shape, not frequency');
 });
 
+// The SAME array in a NATIVE JSON-typed column (data_type: json, as a BigQuery JSON column is
+// declared). Its presence must be measured by the JSON-array length, never by comparing the column
+// to a string literal — BigQuery has no JSON = STRING operator, so the old `<> '[]'` check failed
+// the whole scan of such a property. Proven on data: the json column's coverage equals the string
+// column's (they hold the same array), and the run keeps a per-property diagnostics row for it.
+test('complex array in a JSON-typed column: coverage counted from data (no JSON-vs-STRING comparison)', opts, async (t) => {
+  if (skip(t)) return;
+  const asString = 'words_selected_of_event_data';
+  const asJson = 'words_selected_json_of_event_data';
+  assert.ok(engine.catalog.complexEventProps('events').includes(asJson), 'precondition: the json column is a complex property');
+  assert.equal(engine.catalog.eventPropertySpec(asJson, 'events').encoding, 'json');
+  const covJson = index.coverage('events', asJson);
+  const covStr = index.coverage('events', asString);
+  assert.ok(covJson.length > 0, 'the json-typed column was scanned (a failed scan leaves no coverage)');
+  const rows = (cov) => cov.map((e) => [e.event_name, e.row_count, e.non_null]).sort((a, b) => a[0].localeCompare(b[0]));
+  assert.deepEqual(rows(covJson), rows(covStr), 'same array, same per-event presence counts on both physical types');
+  const carriers = covJson.filter((e) => e.non_null > 0).map((e) => e.event_name);
+  assert.deepEqual(carriers, ['level_completed']);
+  // the count is REAL: every level_completed row in the seed carries a non-empty words array
+  const lc = covJson.find((e) => e.event_name === 'level_completed');
+  assert.ok(lc.non_null > 0 && lc.non_null === lc.row_count, `non_null ${lc.non_null} of ${lc.row_count} level_completed rows`);
+  // examples are the real JSON arrays
+  const view = await engine.semantic_index({ property: asJson });
+  assert.equal(view.complex, true);
+  assert.ok(view.sample_values.length > 0 && view.sample_values.every((s) => /^\s*\[/.test(s.value)), 'examples are JSON arrays');
+  // the complex pass now leaves per-property diagnostics rows, like the scalar pass
+  const runId = index.syncStatus({ recent: 1 }).last_run.id;
+  const props = index.runProperties(runId, { limit: 10000 });
+  const row = props.find((r) => r.source === 'events' && r.property === asJson);
+  assert.ok(row, `run ${runId} has a diagnostics row for the json-typed complex property`);
+  assert.equal(row.status, 'ok');
+  assert.ok(props.some((r) => r.source === 'events' && r.property === asString && r.status === 'ok'));
+});
+
 // semantic_index({ property }) value listing is pageable + orderable (limit/offset/order_by/direction).
 test('semantic_index({ property }) pages + orders the indexed values', opts, async (t) => {
   if (skip(t)) return;

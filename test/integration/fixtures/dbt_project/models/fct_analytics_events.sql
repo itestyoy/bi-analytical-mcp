@@ -37,6 +37,10 @@ select
     -- payload array stored as a JSON-encoded STRING (mirrors the real warehouse,
     -- where words_selected lands as text like '["cat","dog"]' and must be parsed)
     (event_data->>'words_collected')                       as words_selected_of_event_data,
+    -- the SAME array as a native JSON-typed column (mirrors a BigQuery JSON column declared
+    -- data_type: json + array.encoding: json): presence/coverage must be measured without
+    -- comparing the column to a string literal
+    (event_data->'words_collected')                        as words_selected_json_of_event_data,
     -- a numeric value that arrives as STRING upstream (needs a cast to aggregate)
     (event_data->>'complete_time')                         as complete_time_of_event_data
 from {{ ref('seed_events') }}

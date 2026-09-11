@@ -39,18 +39,18 @@ export function frameProfile(rt, config = {}) {
   const runtime = String(rt?.runtime || '').toLowerCase();
   const method = String(config.submission_method || rt?.method || '').toLowerCase();
   if (runtime === 'bigquery' && (method === 'bigframes' || !method)) {
-    return { key: 'bigframes', native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API computed inside BigQuery (import bigframes.pandas as bpd for constructors); .to_pandas() would pull it into the notebook runtime', packages: ['bigframes'] };
+    return { key: 'bigframes', native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API computed inside BigQuery (import bigframes.pandas as bpd for constructors)', pandas: 'df.to_pandas()', packages: ['bigframes'] };
   }
   if (runtime === 'bigquery' || runtime === 'databricks') {
-    return { key: 'pyspark', native: 'a PySpark DataFrame — pyspark.sql (.filter / .withColumn / .groupBy / .select, functions via pyspark.sql.functions); .pandas_api() gives pandas-on-Spark, still distributed', packages: ['pyspark'] };
+    return { key: 'pyspark', native: 'a PySpark DataFrame — pyspark.sql (.filter / .withColumn / .groupBy / .select, functions via pyspark.sql.functions)', pandas: 'df.pandas_api() (pandas-on-Spark: the pandas API, still distributed) or df.toPandas() (a local pandas frame on the driver)', packages: ['pyspark'] };
   }
   if (runtime === 'snowflake') {
-    return { key: 'snowpark', native: 'a Snowpark DataFrame — .filter / .with_column / .group_by / .select, functions via snowflake.snowpark.functions; .to_pandas() would pull it into the Python runtime', packages: ['snowflake'] };
+    return { key: 'snowpark', native: 'a Snowpark DataFrame — .filter / .with_column / .group_by / .select, functions via snowflake.snowpark.functions', pandas: 'df.to_pandas()', packages: ['snowflake'] };
   }
   if (runtime === 'duckdb') {
-    return { key: 'duckdb', native: 'a DuckDBPyRelation — .filter / .aggregate / .project / .select with SQL expressions; .df() gives an in-memory pandas frame', packages: ['duckdb', 'pyarrow'] };
+    return { key: 'duckdb', native: 'a DuckDBPyRelation — .filter / .aggregate / .project / .select with SQL expressions', pandas: 'df.df()', packages: ['duckdb', 'pyarrow'] };
   }
-  return { key: 'unknown', native: 'whatever dbt.ref() returns on this adapter', packages: [] };
+  return { key: 'unknown', native: 'whatever dbt.ref() returns on this adapter', pandas: null, packages: [] };
 }
 
 /**
@@ -298,7 +298,7 @@ export function pythonStageDefs() {
 function bodySchema(profile = frameProfile(null)) {
   return {
     $ref: '#/$defs/py_block',
-    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. Nothing is converted for you: if a body truly needs pandas (scikit-learn, scipy), it calls the platform's own conversion itself (e.g. .to_pandas() / .pandas_api() / .df()) and owns the cost — single-node, the whole table in memory — so do it only on an already-aggregated table. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. No imports inside (declare them in \`imports\`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.`,
+    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. Nothing is converted for you${profile.pandas ? `: if a body truly needs pandas (scikit-learn, scipy), it converts itself with ${profile.pandas} and owns the cost — single-node, the whole table in memory — so do it only on an already-aggregated table` : ''}. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. No imports inside (declare them in \`imports\`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.`,
   };
 }
 

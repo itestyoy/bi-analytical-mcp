@@ -51,14 +51,16 @@ const Z = { p1: (30 - 100 / 3) / Math.sqrt(1816.6666667 / 3), p2: (5 - 100 / 3) 
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }, { name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
 const PY = {
   stage: 'python',
-  frame: 'pandas', // the functions below are pandas/numpy code → the explicit opt-in (on DuckDB: dbt.ref(...).df())
   imports: [{ package: 'numpy' }],
   functions: [
+    // pandas is the author's explicit, single-node choice — written in the platform's own call (DuckDB: .df())
+    { name: 'to_pandas', params: ['df'], body: ['return df.df()'] },
     { name: 'zscore', params: ['df', 'column', 'as_'], body: ['df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)', 'return df'] },
     // a nested block: the tier is assigned only when the column exists — structure IS the indentation
     { name: 'tier', params: ['df', 'column', 'threshold'], body: ['if column in df.columns:', ["df['tier'] = numpy.where(df[column] > threshold, 'high', 'low')"], 'else:', ["df['tier'] = 'low'"], 'return df'] },
   ],
   steps: [
+    { call: 'to_pandas' },
     { call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } },
     { call: 'tier', args: { column: 'revenue_z', threshold: 0 } },
   ],
@@ -96,7 +98,8 @@ test('python stage: the incremental builder materializes the same split and retu
   if (skip(t)) return;
   const s = await engine.build_native_model({ action: 'start', name: 'seg2', source: 'events' });
   await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
-  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { ...PY, steps: [PY.steps[0]], output: { columns: ['player_id_of_internal', 'revenue_z'] } } });
+  const keep = { name: 'keep', params: ['df', 'columns'], body: ['return df[columns]'] };
+  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { ...PY, functions: [...PY.functions, keep], steps: [PY.steps[0], PY.steps[1], { call: 'keep', args: { columns: ['player_id_of_internal', 'revenue_z'] } }], output: { columns: ['player_id_of_internal', 'revenue_z'] } } });
   const m = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(m.build?.executed, true, JSON.stringify(m.error || m));
   assert.equal(m.row_count, 4);
@@ -109,7 +112,7 @@ test('python stage: the incremental builder materializes the same split and retu
 // dbt error, not as a silent empty table.
 test('python stage: a runtime error in the Python model is reported from dbt, nothing is materialized as the result', opts, async (t) => {
   if (skip(t)) return;
-  const bad = { ...PY, steps: [{ call: 'zscore', args: { column: 'no_such_column', as_: 'z' } }], output: { columns: ['player_id_of_internal', 'z'] } };
+  const bad = { ...PY, steps: [PY.steps[0], { call: 'zscore', args: { column: 'no_such_column', as_: 'z' } }], output: { columns: ['player_id_of_internal', 'z'] } };
   const r = await engine.register_native_model({ name: 'seg3', pipeline: { source: 'events', stages: [AGG, bad] } });
   assert.equal(r.ok, false);
   assert.equal(r.error.stage, 'run');
@@ -117,9 +120,9 @@ test('python stage: a runtime error in the Python model is reported from dbt, no
   await assert.rejects(() => engine.get_query_result({ context_id: r.context_id, table: r.model }).then((x) => { if (x.ok === false) throw new Error(x.error?.message || 'not ok'); }));
 });
 
-// NATIVE frame (the default): the steps work on what dbt.ref() returns on this warehouse — a
-// DuckDBPyRelation here (BigFrames / Snowpark / PySpark elsewhere) — and the work stays in the engine.
-test('python stage: native frame — steps run on the relation dbt.ref() returns, no pandas anywhere', opts, async (t) => {
+// The steps work on what dbt.ref() returns on this warehouse — a DuckDBPyRelation here (BigFrames /
+// Snowpark / PySpark elsewhere) — and the work stays in the engine.
+test('python stage: steps run on the relation dbt.ref() returns — no pandas anywhere', opts, async (t) => {
   if (skip(t)) return;
   const native = {
     stage: 'python',
@@ -132,9 +135,9 @@ test('python stage: native frame — steps run on the relation dbt.ref() returns
   };
   const r = await engine.register_native_model({ name: 'seg4', pipeline: { source: 'events', stages: [AGG, native] } });
   assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
-  assert.equal(r.python.frame, 'native');
   assert.equal(r.python.runtime, 'duckdb');
-  assert.ok(!r.python.code.includes('pandas') && !r.python.code.includes('.df()'), 'no pandas in the native path');
+  assert.ok(!r.python.code.includes('pandas') && !r.python.code.includes('.df()'), 'no pandas anywhere in the native path');
+  assert.deepEqual(Object.keys(r.rows[0]).sort(), ['player_id_of_internal', 'revenue', 'revenue_x2'], 'the last step\'s projection IS the result — nothing re-projected');
   const rows = r.rows.map((x) => [x.player_id_of_internal, num(x.revenue_x2)]).sort((a, b) => a[0].localeCompare(b[0]));
   assert.deepEqual(rows, [['p1', 60], ['p2', 10], ['p3', 130]], 'the player without purchases is filtered out; revenue doubled');
 });

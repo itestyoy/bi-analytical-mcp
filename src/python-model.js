@@ -28,29 +28,29 @@ const KEYWORDS = new Set(['False', 'None', 'True', 'and', 'as', 'assert', 'async
 const RESERVED = new Set([...KEYWORDS, 'model', 'dbt', 'session', 'pd', 'df']);
 
 /**
- * What `dbt.ref()` hands the model on THIS warehouse, and how the two frame modes are spelled —
- * exactly as dbt's own docs do per platform. `native` (the default) keeps the platform's
- * DataFrame: BigFrames (the pandas API, computed inside BigQuery), Snowpark, PySpark, a DuckDB
- * relation. `pandas` is the explicit opt-in the docs describe: `.to_pandas()` on Snowpark and
- * BigFrames, pandas-on-Spark (`.pandas_api()`, still distributed) on PySpark, `.df()` on DuckDB.
- * The submission method may also come from the operator's per-model config.
+ * What `dbt.ref()` hands the model on THIS warehouse — the frame the steps work on, as dbt's own
+ * docs describe per platform: BigFrames (the pandas API, computed inside BigQuery), Snowpark,
+ * PySpark, a DuckDB relation. The server never converts it: the work stays in the warehouse
+ * engine. Whoever truly needs pandas writes the platform's conversion inside a function
+ * (`.to_pandas()`, `.pandas_api()`, `.df()`) and owns that cost. The submission method may also
+ * come from the operator's per-model config.
  */
 export function frameProfile(rt, config = {}) {
   const runtime = String(rt?.runtime || '').toLowerCase();
   const method = String(config.submission_method || rt?.method || '').toLowerCase();
   if (runtime === 'bigquery' && (method === 'bigframes' || !method)) {
-    return { key: 'bigframes', native: 'a BigFrames DataFrame (bigframes.pandas — the pandas API, computed inside BigQuery; import bigframes.pandas as bpd for constructors)', toPandas: '.to_pandas()', pandasNote: 'pulls the table into the notebook runtime as an in-memory pandas frame', select: 'pandas', packages: ['bigframes'] };
+    return { key: 'bigframes', native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API computed inside BigQuery (import bigframes.pandas as bpd for constructors); .to_pandas() would pull it into the notebook runtime', packages: ['bigframes'] };
   }
   if (runtime === 'bigquery' || runtime === 'databricks') {
-    return { key: 'pyspark', native: 'a PySpark DataFrame (pyspark.sql: .filter / .withColumn / .groupBy, functions via pyspark.sql.functions)', toPandas: '.pandas_api()', pandasNote: 'pandas-on-Spark — the pandas API, still distributed', select: 'select', packages: ['pyspark'] };
+    return { key: 'pyspark', native: 'a PySpark DataFrame — pyspark.sql (.filter / .withColumn / .groupBy / .select, functions via pyspark.sql.functions); .pandas_api() gives pandas-on-Spark, still distributed', packages: ['pyspark'] };
   }
   if (runtime === 'snowflake') {
-    return { key: 'snowpark', native: 'a Snowpark DataFrame (.filter / .with_column / .group_by, functions via snowflake.snowpark.functions)', toPandas: '.to_pandas()', pandasNote: 'pulls the table into the warehouse\'s Python runtime as an in-memory pandas frame', select: 'select', packages: ['snowflake'] };
+    return { key: 'snowpark', native: 'a Snowpark DataFrame — .filter / .with_column / .group_by / .select, functions via snowflake.snowpark.functions; .to_pandas() would pull it into the Python runtime', packages: ['snowflake'] };
   }
   if (runtime === 'duckdb') {
-    return { key: 'duckdb', native: 'a DuckDBPyRelation (.filter / .aggregate / .project with SQL expressions)', toPandas: '.df()', pandasNote: 'an in-memory pandas frame', select: 'select', packages: ['duckdb', 'pyarrow'] };
+    return { key: 'duckdb', native: 'a DuckDBPyRelation — .filter / .aggregate / .project / .select with SQL expressions; .df() gives an in-memory pandas frame', packages: ['duckdb', 'pyarrow'] };
   }
-  return { key: 'unknown', native: 'whatever dbt.ref() returns on this adapter', toPandas: null, pandasNote: null, select: 'pandas', packages: [] };
+  return { key: 'unknown', native: 'whatever dbt.ref() returns on this adapter', packages: [] };
 }
 
 /**
@@ -159,13 +159,9 @@ function importLine(spec, i, allow) {
  * structural problem (imports, names, arguments) — the static gate over the bodies is separate.
  */
 export function compilePythonStage(stage, { modelName, prepModel, allow, config = {}, pipeline = null, profile = frameProfile(null) }) {
-  // The frame the steps work on: the platform's native DataFrame (default) or, on explicit
-  // request, pandas — spelled per platform as dbt's docs do (frameProfile).
-  const frame = stage.frame || 'native';
-  if (frame === 'pandas' && !profile.toPandas) fail(`frame: 'pandas' is not available — the runtime is unknown here, so the conversion cannot be written. Configure the dbt profile (or use frame: 'native').`);
-  const importLines = frame === 'pandas' ? ['import pandas as pd'] : [];
+  const importLines = [];
   const packages = new Set();
-  const bound = new Set(frame === 'pandas' ? ['pd'] : []);
+  const bound = new Set();
   (stage.imports || []).forEach((spec, i) => {
     const { line, top, binds } = importLine(spec, i, allow);
     if (allow.get(top)) packages.add(allow.get(top));
@@ -217,15 +213,15 @@ export function compilePythonStage(stage, { modelName, prepModel, allow, config 
   // operator's runtime extras (submission method etc.) — never the caller's.
   const cfg = { materialized: 'table', ...(packages.size ? { packages: [...packages].sort() } : {}), ...config };
   const cfgArgs = Object.entries(cfg).map(([k, v]) => `${k}=${pyLiteral(v)}`).join(', ');
-  const header = yaml.dump({ pipeline: pipeline?.name || null, source: pipeline?.pipeline?.source || null, runtime: profile.key, python: { frame, imports: stage.imports || [], steps, output: stage.output || null } }, { lineWidth: 100, noRefs: true, skipInvalid: true })
+  const header = yaml.dump({ pipeline: pipeline?.name || null, source: pipeline?.pipeline?.source || null, runtime: profile.key, python: { imports: stage.imports || [], steps, output: stage.output || null } }, { lineWidth: 100, noRefs: true, skipInvalid: true })
     .split('\n').filter(Boolean).map((l) => `#   ${l}`).join('\n');
   const fnSrc = [...byName.values()].map((f) => `def ${f.name}(${f.params.join(', ')}):\n${f.body.split('\n').map((l) => (l.trim() ? `    ${l}` : '')).join('\n')}\n`);
 
-  // dbt.ref() IS the frame: native stays as the platform returns it; pandas converts as the
-  // platform's docs spell it. The final projection follows the frame's API.
-  const refLine = `    df = dbt.ref(${pyLiteral(prepModel)})${frame === 'pandas' ? profile.toPandas : ''}`;
-  const pandasStyle = frame === 'pandas' || profile.select === 'pandas';
-  const returnLine = !outCols ? '    return df' : (pandasStyle ? `    return df[${pyLiteral(outCols)}]` : `    return df.select(${outCols.map(pyLiteral).join(', ')})`);
+  // dbt.ref() IS the frame the first step receives — as the platform returns it, untouched — and
+  // what the last step returns IS the model's result. Nothing is converted or projected here:
+  // that is the functions' business, in the platform's own API.
+  const refLine = `    df = dbt.ref(${pyLiteral(prepModel)})`;
+  const returnLine = '    return df';
   const code = [
     '# Generated by bi-analytical-mcp (python stage) from config:',
     header,
@@ -249,7 +245,7 @@ export function compilePythonStage(stage, { modelName, prepModel, allow, config 
     }],
   }, { lineWidth: 100, noRefs: true });
 
-  return { code, yml, packages: [...packages].sort(), functions: [...byName.values()], outputColumns: outCols, config: cfg, frame, runtime: profile.key };
+  return { code, yml, packages: [...packages].sort(), functions: [...byName.values()], outputColumns: outCols, config: cfg, runtime: profile.key };
 }
 
 /** The operator's literal dbt.config extras (MCP_PYTHON_MODEL_CONFIG) — also decide the frame profile. */
@@ -313,14 +309,10 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   const installed = [...allow].filter(([, pip]) => pip).map(([k, pip]) => `${k} (dbt installs ${pip})`);
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
-    description: 'PYTHON stage — must be the LAST stage. Everything before it lands as a table in the warehouse; this stage becomes a dbt PYTHON model that reads that table and runs on the warehouse\'s Python runtime (BigQuery BigFrames/Dataproc, Snowpark, PySpark) — never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. Declare imports (allowlisted), your own functions (plain Python over a pandas frame: def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies are statically gated first. The pipeline\'s model is the result table — read it with get_query_result as usual.',
+    description: `PYTHON stage — must be the LAST stage. Everything before it lands as a table in the warehouse; this stage becomes a dbt PYTHON model that reads that table and runs on the warehouse's Python runtime — never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. The first step receives dbt.ref() of that table exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you. The last step's return value IS the result table. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies are statically gated first. Read the result with get_query_result as usual.`,
     properties: {
       stage: { const: 'python' },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
-      frame: {
-        enum: profile.toPandas ? ['native', 'pandas'] : ['native'], default: 'native',
-        description: `What the first step receives. native (default): dbt.ref() as this warehouse returns it — ${profile.native}; write the functions against THAT API, the work stays in the warehouse engine. pandas: the explicit opt-in dbt's docs describe — the server appends ${profile.toPandas || '(unavailable here)'} to dbt.ref()${profile.pandasNote ? ` (${profile.pandasNote})` : ''}; use it for scikit-learn / scipy / statsmodels over an already-aggregated table, and mind that it is single-node.`,
-      },
       imports: {
         type: 'array', maxItems: 20,
         items: {
@@ -332,7 +324,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
             names: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID }, description: 'from … import <names>. Not together with `as`.' },
           },
         },
-        description: 'Modules the functions use — each names one allowlisted `package` (the enum is the whole allowlist). With frame: pandas, pandas is imported as pd for you. Packages the runtime lacks go to dbt\'s `packages` config for dbt to install.',
+        description: 'Modules the functions use — each names one allowlisted `package` (the enum is the whole allowlist; the platform\'s own DataFrame package is in it). Packages the runtime lacks go to dbt\'s `packages` config for dbt to install.',
       },
       functions: {
         type: 'array', minItems: 1, maxItems: 30,
@@ -351,7 +343,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
         } },
         description: 'Ordered calls: df = f1(df, …); df = f2(df, …), starting from the table the SQL stages produced.',
       },
-      output: { type: 'object', additionalProperties: false, properties: { columns: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID }, description: 'Columns the model returns (the result table\'s columns); omitted → whatever the last step produced.' } } },
+      output: { type: 'object', additionalProperties: false, properties: { columns: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID }, description: 'The columns the LAST step returns — documentation of the result (the dbt YAML sidecar, the tool response). Make the last function return exactly these; nothing is projected for you.' } } },
     },
   };
 }

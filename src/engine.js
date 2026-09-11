@@ -1903,7 +1903,7 @@ export class Engine {
       this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);
       for (const f of [`${modelName}.py`, `${modelName}.yml`, `${prepModel}.sql`]) this.ctxs.removeGeneratedFile(ctx.id, f); // a rebuild that REMOVED the stage
     }
-    const pyInfo = py ? { prep_model: prepModel, runtime: py.runtime, frame: py.frame, packages: py.packages, steps: out.python.stage.steps.map((st) => st.call), code: py.code } : null;
+    const pyInfo = py ? { prep_model: prepModel, runtime: py.runtime, packages: py.packages, steps: out.python.stage.steps.map((st) => st.call), code: py.code } : null;
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
     ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(py ? { python: { prep_model: prepModel, packages: py.packages, steps: pyInfo.steps } } : {}) };

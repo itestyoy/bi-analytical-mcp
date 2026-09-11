@@ -725,14 +725,20 @@ export function pipelineStageSchema(catalog) {
 function buildOps(catalog, d, baseColumns, stages, source) {
   let cols = new Map(baseColumns);
   const ops = [];
+  let sqlCols = cols; // the column set the SQL part hands to a terminal (python) stage
   for (const st of stages) {
     const def = STAGES[st.stage];
     if (!def) throw new Error(`unknown pipeline stage: ${st.stage}`);
+    // A TERMINAL stage (python) closes the SQL part: nothing may follow it — the result of the
+    // Python model is the pipeline's result, and a later SQL stage would have nothing to run on.
+    const last = ops[ops.length - 1];
+    if (last && STAGES[stages[ops.length - 1].stage]?.terminal) throw new Error(`the '${stages[ops.length - 1].stage}' stage must be the LAST stage — put '${st.stage}' before it`);
+    if (def.terminal) sqlCols = cols;
     const res = def.build({ d, catalog, cols, source }, st);
     ops.push(res.op);
     cols = res.cols;
   }
-  return { ops, cols };
+  return { ops, cols, sqlCols };
 }
 
 // Chained-CTE assembly (works for both dialects). A stage that renders itself
@@ -758,6 +764,7 @@ function assembleCteSql(d, dialectName, baseRelation, ops) {
 export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages, source) {
   const d = getDialect(dialectName);
   const { ops } = buildOps(catalog, d, baseColumns, stages, source);
+  if (ops.some((o) => o.python)) throw new Error('a python stage cannot be part of a funnel prepare list — it is the last stage of a pipeline');
   return assembleCteSql(d, dialectName, baseRelation, ops);
 }
 
@@ -773,7 +780,11 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
   const baseRelation = `{{ ref('${m.dbt_model}') }}`;
-  const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source, physicalCols), stages, source);
-  const sql = ops.some((o) => o.requiresCte) ? assembleCteSql(d, dialectName, baseRelation, ops) : d.renderPipeline(baseRelation, ops);
-  return { sql, columns: cols };
+  const { ops, cols, sqlCols } = buildOps(catalog, d, sourceColumns(catalog, source, physicalCols), stages, source);
+  // A python stage is not SQL: the SQL text covers the stages before it (the table the Python
+  // model reads), and the stage itself is handed back for the engine to compile into the model.
+  const py = ops.find((o) => o.python) || null;
+  const sqlOps = py ? ops.filter((o) => !o.python) : ops;
+  const sql = sqlOps.some((o) => o.requiresCte) ? assembleCteSql(d, dialectName, baseRelation, sqlOps) : d.renderPipeline(baseRelation, sqlOps);
+  return { sql, columns: cols, python: py ? { stage: py.stage, sqlColumns: sqlCols } : null };
 }

@@ -245,6 +245,14 @@ export class ContextManager {
     return file;
   }
 
+  /** Write any generated file (a Python model, its YAML sidecar) into the context overlay. */
+  writeFile(id, filename, text) {
+    mkdirSync(this.generatedDir(id), { recursive: true });
+    const file = join(this.generatedDir(id), filename);
+    writeFileSync(file, text);
+    return file;
+  }
+
   /** Remove a generated file (model or yaml) from the context overlay. */
   removeGeneratedFile(id, filename) {
     const file = join(this.generatedDir(id), filename);

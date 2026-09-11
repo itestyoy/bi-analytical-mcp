@@ -21,7 +21,7 @@ Design docs:
 |---|---|
 | `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
 | `create_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table) |
-| `build_native_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result |
+| `build_native_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result; a final `python` stage turns the pipeline into a dbt **Python model** run on the warehouse's Python runtime |
 | `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
 | `update_semantic_model` | add/remove task measures, dimensions, metrics in a context |
 | `context` | manage contexts: `{ action: list \| describe \| drop \| delete_model \| delete_semantic_model }` |
@@ -87,6 +87,15 @@ npm start            # streamable-HTTP MCP on :3000/mcp
 ```bash
 npm test                 # unit tests (pure JS, no dbt needed)
 npm run test:integration # end-to-end: dbt Core + MetricFlow against PGlite (auto-skips if dbt/mf absent)
+```
+
+The `python` pipeline stage is proven on **dbt-duckdb** — the one adapter that runs dbt Python
+models locally (dbt-postgres cannot). It lives in its own venv so it never touches the
+MetricFlow one:
+
+```bash
+python3 -m venv .duckvenv && .duckvenv/bin/pip install "dbt-duckdb>=1.9" pandas pyarrow
+node --test test/integration/python-stage.test.js   # auto-skips when .duckvenv is absent
 ```
 
 The integration suite boots an in-process **PGlite** database exposed over a TCP

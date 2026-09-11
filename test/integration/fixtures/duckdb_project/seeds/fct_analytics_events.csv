@@ -1,0 +1,8 @@
+player_id_of_internal,event_name,device_time,price_in_usd_of_event_data,session_number
+p1,iap_purchase_completed,2025-01-01 10:00:00,10,1
+p1,iap_purchase_completed,2025-01-02 10:00:00,20,2
+p2,iap_purchase_completed,2025-01-01 11:00:00,5,1
+p3,iap_purchase_completed,2025-01-03 09:00:00,40,1
+p3,iap_purchase_completed,2025-01-04 09:00:00,25,2
+p3,level_completed,2025-01-04 09:30:00,,2
+p4,level_completed,2025-01-05 12:00:00,,1

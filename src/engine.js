@@ -10,6 +10,7 @@ import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
+import { compilePythonStage, importAllowlist, runAstGate } from './python-model.js'; // registers the python pipeline stage
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
@@ -24,7 +25,7 @@ import { buildProjection } from './projection.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -58,6 +59,12 @@ export class Engine {
     this.validators = makeValidators(this.schemas);
     this.ctxs = contextManager || new ContextManager({});
     this.runner = runner; // optional; required for non-dry_run parse/query
+    // The interpreter that runs the static gate over a python stage's functions (a local syntax /
+    // safety check; the model itself runs where dbt sends it). The MetricFlow sidecar's Python.
+    this.pythonBin = pythonBin || process.env.PYTHON_BIN || runner?.pythonBin || 'python3';
+    // Literal dbt.config extras the OPERATOR pins for every generated Python model (e.g.
+    // {"submission_method":"bigframes"}); the caller never decides where the compute runs.
+    this.pythonModelConfig = pythonModelConfig || (() => { try { return JSON.parse(process.env.MCP_PYTHON_MODEL_CONFIG || '{}'); } catch { return {}; } })();
   }
 
   // Internal helpers (no longer standalone tools — reached via semantic_index({ recipe })
@@ -1469,6 +1476,8 @@ export class Engine {
     // Verify filter literals on the changed stage against the SOURCE's real values BEFORE persisting
     // — a wrong-cased/non-existent value ('organic' vs 'Organic') is flagged with the correct value.
     let filterWarnings = [];
+    // A python stage's bodies pass the static gate BEFORE the draft persists them.
+    if (changedStage && changedStage.stage === 'python') await this._gatePythonStage(changedStage);
     if (changedStage && changedStage.stage === 'where' && Array.isArray(changedStage.conditions)) {
       filterWarnings = this._guardFilterValues(changedStage.conditions
         .filter((cd) => cd && cd.column != null && Object.prototype.hasOwnProperty.call(cd, 'value'))
@@ -1742,7 +1751,61 @@ export class Engine {
     // Render ONLY the active warehouse dialect, so every response is consistent with where
     // the pipeline actually runs (bigquery → `|>`, postgres → CTEs). Grounded to physical.
     const rendered = renderPipeline(this.catalog, dialect, draft.source, stages, { physicalCols: physSet });
-    return { ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql };
+    const modelName = `pipe_${draft.name}_${ctx.id}`;
+    const py = rendered.python ? this._compilePythonStage(rendered.python.stage, { modelName, prepModel: `${modelName}_prep`, pipeline: { name: draft.name, pipeline: { source: draft.source } } }) : null;
+    return {
+      ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql,
+      ...(py ? { python: { prep_model: `${modelName}_prep`, model: modelName, packages: py.packages, code: py.code, note: 'The SQL above lands as the prep TABLE; this Python model reads it via dbt.ref and runs on the warehouse runtime at materialize.' } } : {}),
+    };
+  }
+
+  /** Compile a python stage into its dbt model (structure only — the gate is separate). */
+  _compilePythonStage(stage, { modelName, prepModel, pipeline }) {
+    try {
+      return compilePythonStage(stage, { modelName, prepModel, allow: importAllowlist(), config: this.pythonModelConfig, pipeline });
+    } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
+  }
+
+  /** The static gate over a python stage's function bodies (syntax, no imports/dbt/session/eval…). */
+  async _gatePythonStage(stage) {
+    const compiled = this._compilePythonStage(stage, { modelName: 'm', prepModel: 'm_prep', pipeline: null });
+    const gate = await runAstGate(this.pythonBin, compiled.functions);
+    if (!gate.ok) {
+      const lines = gate.errors.map((e) => `${e.function} line ${e.line}: ${e.message}`);
+      throw new ToolError(`python stage: functions rejected by the static gate:\n${lines.join('\n')}`, { stage: 'validate', field: 'functions', details: gate.errors });
+    }
+    return compiled;
+  }
+
+  /**
+   * Run `dbt run --select <select>` detached, with a lease on the context, as a background job:
+   * past queryTimeoutMs the caller gets a query_id to poll (get_query_result), otherwise the
+   * finished result. Used where a build is a cold start of minutes (a Python model).
+   */
+  async _runDetached(ctx, select, table) {
+    const dir = this.ctxs.dir(ctx.id);
+    const id = this.jobs.create({ contextId: ctx.id });
+    this.jobs.setTable(id, table);
+    this.ctxs.acquire(ctx.id);
+    let result = null;
+    const build = (async () => {
+      try {
+        result = await this.runner.run(dir, select);
+        if (!result.ok) this.jobs.fail(id, formatDbtError(result.stdout, result.stderr));
+        else this.jobs.ready(id);
+      } catch (e) {
+        result = { ok: false, stdout: '', stderr: e?.message || String(e) };
+        this.jobs.fail(id, e?.message || String(e));
+      } finally {
+        this.ctxs.release(ctx.id);
+      }
+    })().catch(() => {});
+    let timer;
+    const timed = new Promise((res) => { timer = setTimeout(() => res('timeout'), this.queryTimeoutMs); });
+    const winner = await Promise.race([build.then(() => 'done'), timed]);
+    clearTimeout(timer); // a finished build must not keep the process alive for the rest of the window
+    if (winner === 'timeout') return { status: 'running', query_id: id };
+    return { status: 'done', query_id: id, result };
   }
 
   async _draftMaterialize(ctx, draft) {
@@ -1798,11 +1861,13 @@ export class Engine {
     const render = () => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet });
     if (input.dry_run) {
       const out = render();
+      const py = out.python ? await this._gatePythonStage(out.python.stage) && this._compilePythonStage(out.python.stage, { modelName: `pipe_${input.name}`, prepModel: `pipe_${input.name}_prep`, pipeline: input }) : null;
       const resp = {
-        kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect,
+        kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: py ? 'table' : (input.materialized || 'table'), dialect,
         columns: [...out.columns.keys()],
         output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
         model_sql: out.sql,
+        ...(py ? { python: { prep_model: `pipe_${input.name}_prep`, packages: py.packages, code: py.code } } : {}),
       };
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before materializing.
@@ -1810,15 +1875,32 @@ export class Engine {
       if (est != null) resp.estimated_source_rows = est;
       return resp;
     }
+    const out = render();
+    // Gate a python stage BEFORE a context exists for it: a refused declaration leaves nothing behind.
+    if (out.python) await this._gatePythonStage(out.python.stage);
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
-    const out = render();
-    const materialized = input.materialized || 'table';
+    // A python stage splits the pipeline into TWO dbt models under one name: the SQL stages land
+    // as the prep TABLE (`<model>_prep` — always a table: the Python side reads a relation, a view
+    // would re-run the SQL through the runtime), and the stage becomes the Python model `<model>`
+    // that refs it. dbt orders them from the ref; the caller keeps addressing `<model>`.
+    const prepModel = `${modelName}_prep`;
+    const py = out.python ? this._compilePythonStage(out.python.stage, { modelName, prepModel, pipeline: input }) : null;
+    const materialized = py ? 'table' : (input.materialized || 'table');
     const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
-    this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);
+    if (py) {
+      this.ctxs.writeModel(ctx.id, prepModel, `{{ config(materialized='table') }}\n${header}${out.sql}\n`);
+      this.ctxs.writeFile(ctx.id, `${modelName}.py`, py.code);
+      this.ctxs.writeFile(ctx.id, `${modelName}.yml`, py.yml);
+      this.ctxs.removeGeneratedFile(ctx.id, `${modelName}.sql`); // a rebuild that ADDED the stage: dbt allows one model per name
+    } else {
+      this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);
+      for (const f of [`${modelName}.py`, `${modelName}.yml`, `${prepModel}.sql`]) this.ctxs.removeGeneratedFile(ctx.id, f); // a rebuild that REMOVED the stage
+    }
+    const pyInfo = py ? { prep_model: prepModel, packages: py.packages, steps: out.python.stage.steps.map((st) => st.call), code: py.code } : null;
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
-    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()] };
+    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(py ? { python: { prep_model: prepModel, packages: py.packages, steps: pyInfo.steps } } : {}) };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);
     // Honest status: `executed` makes it unambiguous whether the model was actually built
@@ -1826,8 +1908,21 @@ export class Engine {
     let build = { ok: true, executed: false, reason: 'no runner configured — model written but not built/executed (dry/unit mode)' };
     let rows = []; let columns = [...out.columns.keys()];
     if (this.runner) {
-      const r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
-      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) } };
+      let r;
+      if (py) {
+        // `+model`: dbt builds the prep table first, then sends the Python model to the warehouse
+        // runtime — a cold start of minutes, so it runs detached and may hand back a query_id.
+        const bg = await this._runDetached(ctx, `+${modelName}`, modelName);
+        if (bg.status === 'running') {
+          return {
+            context_id: ctx.id, kind: 'pipeline', ok: true, status: 'running', query_id: bg.query_id, model: modelName, materialized, dialect, python: pyInfo,
+            message: `dbt is building the prep table and running the Python model on the warehouse runtime (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}`,
+            read_with: { tool: 'get_query_result', query_id: bg.query_id, table: modelName },
+          };
+        }
+        r = bg.result;
+      } else r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
+      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) }, ...(py ? { python: pyInfo } : {}) };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };
@@ -1837,6 +1932,7 @@ export class Engine {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
       columns, output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
       row_count: rows.length, rows, model_sql: out.sql, build,
+      ...(py ? { python: pyInfo } : {}),
       // Provenance: a custom pipeline (not a governed metric), its source, and how fresh
       // the underlying data is — so the rows are self-trustable. A sample stage makes the
       // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
@@ -1846,7 +1942,9 @@ export class Engine {
       // with get_query_result (NOT query_semantic_model, which is for metric queries).
       read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
       assumptions: [
-        `Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`,
+        ...(py
+          ? [`The SQL stages landed as the prep table ${prepModel}; the python stage is the dbt Python model ${modelName} (run by dbt on the warehouse's Python runtime, never here), and ITS rows are the result.${input.materialized === 'view' ? ' materialized: view was requested, but a Python model reads a TABLE, so both are tables.' : ''}`]
+          : [`Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`]),
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
       ],
       warnings: [

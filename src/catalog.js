@@ -161,6 +161,7 @@ export function loadCatalog(path, opts = {}) {
   // The warehouse dialect is runtime config, NOT catalog data: resolve it from
   // the environment / the dbt profile dbt actually runs with — never the YAML.
   raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, fallback: raw.warehouse_dialect });
+  raw.python_runtime = resolvePythonRuntime({ profilesDir: opts.profilesDir, projectDir: opts.projectDir });
   if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
 }
@@ -184,6 +185,7 @@ export function loadCatalogFromProject(projectDir, opts = {}) {
   }
   const raw = dbtSchemaToCatalog({ models: mcpModels });
   raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir || projectDir, projectDir, fallback: raw.warehouse_dialect });
+  raw.python_runtime = resolvePythonRuntime({ profilesDir: opts.profilesDir || projectDir, projectDir });
   if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
 }
@@ -294,8 +296,8 @@ export function resolveDialect({ dialect, profilesDir, projectDir, fallback } = 
   return d;
 }
 
-/** Read the adapter `type` from the dbt profile (the dialect dbt runs with). */
-function dialectFromProfile(profilesDir, projectDir) {
+/** The ACTIVE output of the dbt profile (the connection dbt runs with), or undefined. */
+export function profileOutput(profilesDir, projectDir) {
   try {
     let profileName;
     if (projectDir) {
@@ -309,11 +311,43 @@ function dialectFromProfile(profilesDir, projectDir) {
     const prof = (profileName && profiles[profileName]) || profiles[Object.keys(profiles).filter((k) => k !== 'config')[0]];
     if (!prof) return undefined;
     const target = process.env.DBT_TARGET || prof.target || Object.keys(prof.outputs || {})[0];
-    const type = prof.outputs?.[target]?.type;
-    return type && SUPPORTED_DIALECTS.has(type) ? type : undefined;
+    return prof.outputs?.[target] || undefined;
   } catch {
-    return undefined; // best-effort: fall back to env/default
+    return undefined; // best-effort
   }
+}
+
+/** Read the adapter `type` from the dbt profile (the dialect dbt runs with). */
+function dialectFromProfile(profilesDir, projectDir) {
+  const type = profileOutput(profilesDir, projectDir)?.type;
+  return type && SUPPORTED_DIALECTS.has(type) ? type : undefined;
+}
+
+/**
+ * Can dbt run PYTHON models on this profile? Decided the way dbt itself would decide — from the
+ * adapter and its settings in the active profile output — so the `python` pipeline stage is
+ * offered only where it can actually run:
+ *   - duckdb / snowflake / databricks: the adapter runs Python models as such;
+ *   - bigquery: only with a submission set up — `submission_method`, or a Dataproc/BigFrames region
+ *     (`dataproc_region` / `compute_region`) or cluster (`dataproc_cluster_name`);
+ *   - postgres and everything else: no Python models at all.
+ * MCP_PYTHON_MODELS=on|off overrides (on: the operator sets the submission per model via
+ * MCP_PYTHON_MODEL_CONFIG; off: hide the stage regardless). Returns { available, runtime?, reason? }.
+ */
+export function resolvePythonRuntime({ profilesDir, projectDir, env = process.env } = {}) {
+  const force = String(env.MCP_PYTHON_MODELS || '').trim().toLowerCase();
+  if (/^(off|0|false|no)$/.test(force)) return { available: false, reason: 'disabled by MCP_PYTHON_MODELS=off' };
+  const out = profileOutput(profilesDir, projectDir);
+  const type = String(out?.type || '').toLowerCase();
+  if (/^(on|1|true|yes)$/.test(force)) return { available: true, runtime: type || 'unknown', forced: true };
+  if (!out) return { available: false, reason: 'no dbt profile found — dbt Python models need an adapter that runs them (BigQuery with a submission set up, Snowflake, Databricks, DuckDB)' };
+  if (['duckdb', 'snowflake', 'databricks'].includes(type)) return { available: true, runtime: type };
+  if (type === 'bigquery') {
+    const method = out.submission_method || (out.dataproc_cluster_name ? 'cluster' : (out.dataproc_region ? 'serverless' : (out.compute_region ? 'bigframes' : null)));
+    if (method) return { available: true, runtime: 'bigquery', method };
+    return { available: false, reason: 'the BigQuery profile has no Python submission set up: add submission_method (bigframes | serverless | cluster) with gcs_bucket and dataproc_region / compute_region to the profile output' };
+  }
+  return { available: false, reason: `the '${type || 'unknown'}' adapter runs no dbt Python models` };
 }
 
 /**
@@ -735,6 +769,10 @@ export class Catalog {
   constructor(raw) {
     this.raw = raw;
     this.dialect = raw.warehouse_dialect;
+    // Whether dbt can run PYTHON models on the active profile (resolvePythonRuntime): the `python`
+    // pipeline stage exists in the tool schemas only when it can. A plain registry object without
+    // a profile is treated as "no runtime" unless it says otherwise.
+    this.pythonRuntime = raw.python_runtime || { available: false, reason: 'no dbt profile — Python models unavailable' };
     this.models = raw.models || {};
     // `facts` = every events source; they are equal, each is addressed by name, and none is a
     // default. Declared by the schema converter, or derived here for a plain registry object:

@@ -328,6 +328,10 @@ function pythonStageSchema(allow = importAllowlist()) {
 registerStage('python', {
   schema: () => pythonStageSchema(importAllowlist()),
   defs: () => pythonStageDefs(), // hoisted to the root of every tool schema embedding stages
+  // Offered only where dbt can run Python models (the profile's adapter + its submission settings,
+  // see resolvePythonRuntime); elsewhere the stage is absent from the schemas and refused here.
+  available: (catalog) => catalog?.pythonRuntime?.available !== false,
+  unavailableReason: (catalog) => `the python stage is not available: ${catalog?.pythonRuntime?.reason || 'dbt cannot run Python models on this profile'}. Fix the dbt profile (or set MCP_PYTHON_MODELS=on when the submission is configured per model) and restart the server.`,
   terminal: true,
   build: ({ cols }, st) => {
     compilePythonStage(st, { modelName: 'm', prepModel: 'm_prep', allow: importAllowlist(), config: {} });

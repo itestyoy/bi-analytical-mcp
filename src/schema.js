@@ -434,8 +434,8 @@ export function buildSchemas(catalog) {
   return {
     create_semantic_model: create,
     // Stage schemas may reference root-level definitions (the recursive python body): hoist them.
-    register_native_model: withStageDefs(registerModel),
-    build_native_model: withStageDefs(buildModel),
+    register_native_model: withStageDefs(registerModel, catalog),
+    build_native_model: withStageDefs(buildModel, catalog),
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     context: contextTool,
     query_semantic_model: query,
@@ -757,7 +757,7 @@ function experimentSchema() {
 
 
 /** Attach the stages' `$defs` at a tool schema's root (where `#/$defs/…` references resolve). */
-function withStageDefs(toolSchema) {
-  const defs = stageDefs();
+function withStageDefs(toolSchema, catalog) {
+  const defs = stageDefs(catalog);
   return Object.keys(defs).length ? { ...toolSchema, $defs: { ...(toolSchema.$defs || {}), ...defs } } : toolSchema;
 }

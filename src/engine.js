@@ -865,6 +865,11 @@ export class Engine {
       // The events FACTS — independent and equal; none is a default. Every tool takes the
       // source as its own argument (optional only when there is exactly one).
       facts: c.facts,
+      // Whether a pipeline may end in a `python` stage (a dbt Python model on the warehouse runtime):
+      // decided from the dbt profile, so the stage is in the tool schemas only where it can run.
+      python_models: c.pythonRuntime?.available
+        ? { available: true, runtime: c.pythonRuntime.runtime, ...(c.pythonRuntime.method ? { submission_method: c.pythonRuntime.method } : {}), note: 'A pipeline may end in a `python` stage (build_native_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.' }
+        : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
       // Declared models the warehouse cannot back (a structural column or the table is missing):
       // excluded from every tool; the reason is here so the analyst can be told what to fix.
       ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ model }) on one shows what is missing.' } : {}),

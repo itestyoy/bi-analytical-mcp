@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, readdirSync } from 'node:fs';
+import { existsSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -17,6 +17,10 @@ import { Engine } from '../../src/engine.js';
 import { pyLiteral, importAllowlist } from '../../src/python-model.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
+// The fixture catalog is loaded without a dbt profile here → no Python runtime → the stage would be
+// hidden. Force it on for these tests, exactly as an operator does when the submission is set per
+// model; the availability rules themselves are tested at the end of this file.
+process.env.MCP_PYTHON_MODELS = 'on';
 const VENV_PY = join(process.cwd(), '.dbtvenv', 'bin', 'python');
 const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
 const HAS_PY = spawnSync(PY, ['--version']).status === 0;
@@ -194,4 +198,47 @@ test('python stage: the body schema is a recursive $ref to $defs.py_block hoiste
   const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body: deep(12) }], steps: [{ call: 'f', args: { k: 1 } }] }] } }));
   assert.equal(r.dry_run, true);
   assert.ok(r.python.code.includes(`${'    '.repeat(13)}return df`), 'level 12 rendered with 13 indents (function body = 1)');
+});
+
+// ── Availability: the stage exists only where dbt can run Python models — decided from the profile ──
+test('python stage: offered only where the dbt profile can run Python models; refused elsewhere with the reason', async () => {
+  const { resolvePythonRuntime } = await import('../../src/catalog.js');
+  const PG = fileURLToPath(new URL('../integration/fixtures/dbt_project', import.meta.url));      // postgres profile
+  const DUCK = fileURLToPath(new URL('../integration/fixtures/duckdb_project', import.meta.url)); // duckdb profile
+  const noEnv = { };
+  // the decision itself
+  assert.equal(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: noEnv }).available, false);
+  assert.match(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: noEnv }).reason, /postgres.*runs no dbt Python models/);
+  assert.deepEqual(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: noEnv }), { available: true, runtime: 'duckdb' });
+  assert.equal(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: { MCP_PYTHON_MODELS: 'on' } }).available, true, 'the operator may force it on');
+  assert.equal(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: { MCP_PYTHON_MODELS: 'off' } }).available, false, '…or off');
+  assert.equal(resolvePythonRuntime({ profilesDir: '/nonexistent', env: noEnv }).available, false);
+  // a BigQuery profile: only with a submission set up
+  const bq = (out) => { const dir = mkdtempSync(join(tmpdir(), 'bqprof-')); writeFileSync(join(dir, 'profiles.yml'), `p:\n  target: dev\n  outputs:\n    dev:\n      type: bigquery\n${Object.entries(out).map(([k, v]) => `      ${k}: ${v}`).join('\n')}\n`); return resolvePythonRuntime({ profilesDir: dir, env: noEnv }); };
+  assert.equal(bq({ project: 'x' }).available, false);
+  assert.match(bq({ project: 'x' }).reason, /submission_method \(bigframes \| serverless \| cluster\)/);
+  assert.deepEqual(bq({ project: 'x', submission_method: 'bigframes', gcs_bucket: 'b', compute_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'bigframes' });
+  assert.deepEqual(bq({ project: 'x', gcs_bucket: 'b', dataproc_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'serverless' });
+  // and what the tools show: with the postgres profile the stage is ABSENT from the schemas…
+  const saved = process.env.MCP_PYTHON_MODELS; delete process.env.MCP_PYTHON_MODELS;
+  try {
+    const cPg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
+    assert.equal(cPg.pythonRuntime.available, false);
+    const ePg = new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
+    const stagesPg = ePg.schemas.build_native_model.properties.stage.oneOf.map((st) => st.properties.stage.const);
+    assert.ok(!stagesPg.includes('python'), `no python stage on postgres: ${stagesPg.join(', ')}`);
+    assert.ok(!ePg.schemas.build_native_model.$defs?.py_block, 'and no py_block definition either');
+    // …and a declaration naming it is refused with the reason, not with a warehouse error later
+    await assert.rejects(() => ePg.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] } }), /python stage is not available: .*postgres.*runs no dbt Python models|must be equal to one of the allowed values|stage/);
+    // the overview says so
+    const ov = await ePg.semantic_index({});
+    assert.equal(ov.python_models.available, false);
+    assert.match(ov.python_models.reason, /postgres/);
+    // with the duckdb profile it is there, and the overview names the runtime
+    const cDuck = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
+    const eDuck = new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
+    assert.ok(eDuck.schemas.build_native_model.properties.stage.oneOf.some((st) => st.properties.stage.const === 'python'));
+    assert.ok(eDuck.schemas.build_native_model.$defs.py_block);
+    assert.deepEqual((await eDuck.semantic_index({})).python_models.runtime, 'duckdb');
+  } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });

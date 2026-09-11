@@ -89,6 +89,11 @@ npm test                 # unit tests (pure JS, no dbt needed)
 npm run test:integration # end-to-end: dbt Core + MetricFlow against PGlite (auto-skips if dbt/mf absent)
 ```
 
+The `python` stage exists in the tool schemas only where dbt can run Python models — decided
+from the active dbt profile (BigQuery with `submission_method` / a Dataproc or BigFrames region,
+Snowflake, Databricks, DuckDB); on Postgres it is absent and `semantic_index()` says why under
+`python_models`. `MCP_PYTHON_MODELS=on|off` overrides the decision.
+
 The `python` pipeline stage is proven on **dbt-duckdb** — the one adapter that runs dbt Python
 models locally (dbt-postgres cannot). It lives in its own venv so it never touches the
 MetricFlow one:

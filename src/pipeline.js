@@ -673,8 +673,13 @@ export function registerStage(name, def) { STAGES[name] = def; }
  * pipelineStageSchema() / stageSchemas() must carry these at ITS root — `$ref` resolves against
  * the document it is embedded in, so the definitions cannot travel inside the stage fragment.
  */
-export function stageDefs() {
-  return Object.assign({}, ...Object.values(STAGES).map((s) => (typeof s.defs === 'function' ? s.defs() : {})));
+export function stageDefs(catalog) {
+  return Object.assign({}, ...availableStages(catalog).map((s) => (typeof s.defs === 'function' ? s.defs() : {})));
+}
+
+/** A stage may declare `available(catalog)`: false hides it from the schemas and refuses it in a build. */
+function availableStages(catalog) {
+  return Object.values(STAGES).filter((s) => typeof s.available !== 'function' || s.available(catalog));
 }
 
 /** JSON-Schema oneOf for a named subset of stages (e.g. the funnel `prepare` field). */
@@ -724,7 +729,7 @@ export function prepareColumns(catalog, dialectName, stages = [], source) {
 export function pipelineStageSchema(catalog) {
   // discriminator on `stage` → a bad stage reports only THAT stage's requirements, not every
   // stage's (each stage schema pins stage:{const} + requires it), so errors stay actionable.
-  return { discriminator: { propertyName: 'stage' }, oneOf: Object.values(STAGES).map((s) => s.schema(catalog)) };
+  return { discriminator: { propertyName: 'stage' }, oneOf: availableStages(catalog).map((s) => s.schema(catalog)) };
 }
 
 // Fold stages -> { ops, cols } (validating column references along the way). `source`
@@ -738,6 +743,7 @@ function buildOps(catalog, d, baseColumns, stages, source) {
   for (const st of stages) {
     const def = STAGES[st.stage];
     if (!def) throw new Error(`unknown pipeline stage: ${st.stage}`);
+    if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
     // A TERMINAL stage (python) closes the SQL part: nothing may follow it — the result of the
     // Python model is the pipeline's result, and a later SQL stage would have nothing to run on.
     const last = ops[ops.length - 1];

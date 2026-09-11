@@ -283,3 +283,24 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
     assert.ok(py.properties.imports.items.properties.package.enum.includes('duckdb'));
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
+
+// A python stage reads the table the SQL stages produce — with nothing before it that table would
+// be the whole source. Refused; a pipeline time_range (a leading where at build) counts as a stage.
+test('python stage: needs at least one SQL stage before it — a pipeline time_range counts', async (t) => {
+  if (skipNoPy(t)) return;
+  const e = engine();
+  await assert.rejects(() => e.register_native_model({ name: 'gaps', dry_run: true, pipeline: { source: 'events', stages: [PY_STAGE] } }), /needs at least one SQL stage before it/);
+  const ok = await e.register_native_model({ name: 'gaps', dry_run: true, pipeline: { source: 'events', time_range: { start: '2025-01-01', end: '2025-01-31' }, stages: [PY_STAGE] } });
+  assert.equal(ok.dry_run, true);
+  // the incremental builder agrees, and its step numbering stays the caller's (time_range is not a step)
+  const bare = await e.build_native_model({ action: 'start', name: 'gaps2', source: 'events' });
+  await assert.rejects(() => e.build_native_model({ action: 'add_step', draft_id: bare.draft_id, stage: PY_STAGE }), /step 1: .*needs at least one SQL stage before it/);
+  const windowed = await e.build_native_model({ action: 'start', name: 'gaps3', source: 'events', time_range: { start: '2025-01-01', end: '2025-01-31' } });
+  const r = await e.build_native_model({ action: 'add_step', draft_id: windowed.draft_id, stage: PY_STAGE });
+  assert.equal(r.step_index, 1);
+  // and every other placement stays closed: two python stages, python in the middle, SQL after python
+  await assert.rejects(() => e.register_native_model({ name: 'gaps', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_STAGE, PY_STAGE] } }), /must be the LAST stage/);
+  await assert.rejects(() => e.register_native_model({ name: 'gaps', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_STAGE, { stage: 'limit', n: 5 }] } }), /must be the LAST stage/);
+  await assert.rejects(() => e.build_native_model({ action: 'add_steps', draft_id: bare.draft_id, stages: [AGG, PY_STAGE, { stage: 'limit', n: 5 }] }), /must be the LAST stage.*NO steps applied/);
+  assert.deepEqual((await e.build_native_model({ action: 'preview', draft_id: bare.draft_id })).steps, [], 'the failed batch left the draft untouched');
+});

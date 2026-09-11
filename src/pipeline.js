@@ -748,6 +748,9 @@ function buildOps(catalog, d, baseColumns, stages, source) {
     // Python model is the pipeline's result, and a later SQL stage would have nothing to run on.
     const last = ops[ops.length - 1];
     if (last && STAGES[stages[ops.length - 1].stage]?.terminal) throw new Error(`the '${stages[ops.length - 1].stage}' stage must be the LAST stage — put '${st.stage}' before it`);
+    // A terminal stage READS the table the SQL stages produce: with nothing before it, that table
+    // would be the whole source — refuse, and say what has to come first.
+    if (def.terminal && !ops.length) throw new Error(`the '${st.stage}' stage needs at least one SQL stage before it — the table it reads is what the SQL stages produce: filter / aggregate first (a pipeline time_range counts as one)`);
     if (def.terminal) sqlCols = cols;
     const res = def.build({ d, catalog, cols, source }, st);
     ops.push(res.op);

@@ -1263,7 +1263,7 @@ export class Engine {
    *  grounded to the physical relation (phantom catalog columns excluded). */
   _draftColumns(draft, physSet) {
     if (!draft.stages.length) return this._groundedDeclared(draft.source, physSet).cols;
-    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, draft.stages, { physicalCols: physSet });
+    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, this._draftEffectiveStages(draft), { physicalCols: physSet });
     return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   }
 
@@ -1471,12 +1471,17 @@ export class Engine {
   async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, includeSteps = false, action = 'add_step', stepIndex = null } = {}) {
     const physSet = await this._physicalCols(draft.source);
     const before = this._draftColumns(draft, physSet); // columns BEFORE the change
+    // Validate what will actually be built: the draft's time_range becomes a leading where at
+    // materialize (as preview shows), so it counts here too — e.g. as the SQL stage a python stage needs.
+    const effective = this._draftEffectiveStages({ ...draft, stages: newStages });
+    const offset = effective.length - newStages.length;
     try {
-      if (newStages.length) renderPipeline(this.catalog, this.catalog.dialect, draft.source, newStages, { physicalCols: physSet });
+      if (newStages.length) renderPipeline(this.catalog, this.catalog.dialect, draft.source, effective, { physicalCols: physSet });
     } catch (e) {
       // Reject WITHOUT persisting; pinpoint which step broke so an edit in the middle is actionable.
-      const at = this._failingStepIndex(draft.source, newStages, physSet);
-      throw new ToolError(at ? `step ${at}: ${e.message}` : e.message, { stage: 'compile', field: 'stage' });
+      const at = this._failingStepIndex(draft.source, effective, physSet);
+      const step = at != null ? at - offset : null;
+      throw new ToolError(step ? `step ${step}: ${e.message}` : e.message, { stage: 'compile', field: 'stage' });
     }
     // Verify filter literals on the changed stage against the SOURCE's real values BEFORE persisting
     // — a wrong-cased/non-existent value ('organic' vs 'Organic') is flagged with the correct value.

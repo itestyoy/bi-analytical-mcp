@@ -5,7 +5,7 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
-import { pipelineStageSchema } from './pipeline.js';
+import { pipelineStageSchema, stageDefs } from './pipeline.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
@@ -433,8 +433,9 @@ export function buildSchemas(catalog) {
 
   return {
     create_semantic_model: create,
-    register_native_model: registerModel,
-    build_native_model: buildModel,
+    // Stage schemas may reference root-level definitions (the recursive python body): hoist them.
+    register_native_model: withStageDefs(registerModel),
+    build_native_model: withStageDefs(buildModel),
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     context: contextTool,
     query_semantic_model: query,
@@ -754,3 +755,9 @@ function experimentSchema() {
   };
 }
 
+
+/** Attach the stages' `$defs` at a tool schema's root (where `#/$defs/…` references resolve). */
+function withStageDefs(toolSchema) {
+  const defs = stageDefs();
+  return Object.keys(defs).length ? { ...toolSchema, $defs: { ...(toolSchema.$defs || {}), ...defs } } : toolSchema;
+}

@@ -668,6 +668,15 @@ function requireArrayCol(cols, name, op) {
 /** Register an additional stage from another module (e.g. match_recognize). */
 export function registerStage(name, def) { STAGES[name] = def; }
 
+/**
+ * Root-level `$defs` the stage schemas reference (`#/$defs/<name>`). A tool schema that embeds
+ * pipelineStageSchema() / stageSchemas() must carry these at ITS root — `$ref` resolves against
+ * the document it is embedded in, so the definitions cannot travel inside the stage fragment.
+ */
+export function stageDefs() {
+  return Object.assign({}, ...Object.values(STAGES).map((s) => (typeof s.defs === 'function' ? s.defs() : {})));
+}
+
 /** JSON-Schema oneOf for a named subset of stages (e.g. the funnel `prepare` field). */
 export function stageSchemas(catalog, names) {
   return { discriminator: { propertyName: 'stage' }, oneOf: names.map((n) => { if (!STAGES[n]) throw new Error(`no such stage: ${n}`); return STAGES[n].schema(catalog); }) };

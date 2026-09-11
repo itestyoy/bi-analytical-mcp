@@ -53,9 +53,9 @@ const PY = {
   stage: 'python',
   imports: [{ package: 'numpy' }],
   functions: [
-    { name: 'zscore', params: ['df', 'column', 'as_'], body: [[0, 'df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)'], [0, 'return df']] },
-    // a nested block: the tier is assigned only when the column exists — the indent is the number
-    { name: 'tier', params: ['df', 'column', 'threshold'], body: [[0, 'if column in df.columns:'], [1, "df['tier'] = numpy.where(df[column] > threshold, 'high', 'low')"], [0, 'else:'], [1, "df['tier'] = 'low'"], [0, 'return df']] },
+    { name: 'zscore', params: ['df', 'column', 'as_'], body: ['df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)', 'return df'] },
+    // a nested block: the tier is assigned only when the column exists — structure IS the indentation
+    { name: 'tier', params: ['df', 'column', 'threshold'], body: ['if column in df.columns:', ["df['tier'] = numpy.where(df[column] > threshold, 'high', 'low')"], 'else:', ["df['tier'] = 'low'"], 'return df'] },
   ],
   steps: [
     { call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } },

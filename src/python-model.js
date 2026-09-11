@@ -59,36 +59,37 @@ export function pyLiteral(v) {
 const fail = (message) => { throw new Error(`python stage: ${message}`); };
 
 /**
- * A function body is STRUCTURED, not a text blob: a flat list of lines, each a pair
- * [indent, code] — the indentation LEVEL as a number and one line of Python with no leading
- * whitespace and no newline. Indentation is therefore a field, never spaces counted inside a
- * string, and the depth is unbounded:
- *   [[0, "if k > 1:"], [1, "df['seg'] = 1"], [0, "else:"], [1, "df['seg'] = 0"], [0, "return df"]]
- * The rules Python's grammar would enforce later are enforced here, with the line's position:
- * the first line is at level 0; a level may rise by exactly one, and only after a header line
- * (one ending with ':'); a header must be followed by a deeper line; a level may drop by any
- * amount. Returns the rendered lines (4 spaces per level).
+ * A function body is STRUCTURED, not a text blob: an array whose items are either one line of
+ * code (a string, no leading whitespace, no newline) or a nested array — the block indented one
+ * level under the line before it. Indentation is therefore expressed by nesting, exactly as
+ * Python's grammar requires, and never by counting spaces inside strings:
+ *   ["if k > 1:", ["df['segment'] = km.fit_predict(df[features])"], "else:", ["df['segment'] = 0"], "return df"]
+ * Rules a Python parser would enforce later are enforced here, with the item's position:
+ * a nested block must follow a header line (one ending with ':'), a header must be followed by a
+ * nested block, a block is never empty. Returns the rendered lines (4 spaces per level).
  */
 export function renderBody(body, at = 'body') {
-  if (!Array.isArray(body) || !body.length) fail(`${at}: a function body is a non-empty list of [indent, code] pairs`);
+  if (!Array.isArray(body) || !body.length) fail(`${at}: a function body is a non-empty array of lines and nested blocks`);
   const out = [];
-  let prevIndent = 0; let prevHeader = false;
-  body.forEach((item, i) => {
-    const here = `${at}[${i}]`;
-    if (!Array.isArray(item) || item.length !== 2) fail(`${here}: a line is a pair [indent, code]`);
-    const [indent, code] = item;
-    if (!Number.isInteger(indent) || indent < 0) fail(`${here}: indent must be a non-negative integer (levels, not spaces)`);
-    if (typeof code !== 'string' || !code.trim()) fail(`${here}: code must be a non-empty line of Python`);
-    if (/[\r\n]/.test(code)) fail(`${here}: a line must not contain a newline — one pair per line`);
-    if (/^\s/.test(code)) fail(`${here}: code must not start with whitespace — the indent is the number, not spaces`);
-    if (i === 0 && indent !== 0) fail(`${here}: the first line is at indent 0`);
-    if (indent > prevIndent + 1) fail(`${here}: indent jumps from ${prevIndent} to ${indent} — a level rises by one at a time`);
-    if (indent === prevIndent + 1 && !prevHeader) fail(`${here}: indent ${indent} after ${JSON.stringify(body[i - 1][1])} — a deeper line must follow a line that opens a block (ending with ':' — if/for/while/with/def/try/else…)`);
-    if (i > 0 && prevHeader && indent <= prevIndent) fail(`${here}: ${JSON.stringify(body[i - 1][1])} opens a block, so the next line must be at indent ${prevIndent + 1}`);
-    out.push(`${'    '.repeat(indent)}${code}`);
-    prevIndent = indent; prevHeader = isHeader(code);
-  });
-  if (prevHeader) fail(`${at}[${body.length - 1}]: ${JSON.stringify(body[body.length - 1][1])} opens a block that has no body`);
+  const walk = (items, depth, path) => {
+    items.forEach((item, i) => {
+      const here = `${path}[${i}]`;
+      const prev = items[i - 1];
+      if (Array.isArray(item)) {
+        if (!item.length) fail(`${here}: an empty block — a nested array must hold at least one line`);
+        if (typeof prev !== 'string' || !isHeader(prev)) fail(`${here}: a nested block must follow a line that opens it (ending with ':' — if/for/while/with/def/try/else…); the line before is ${prev === undefined ? 'missing' : JSON.stringify(prev)}`);
+        walk(item, depth + 1, here);
+        return;
+      }
+      if (typeof item !== 'string') fail(`${here}: a body item is a line of code (string) or a nested block (array)`);
+      if (/[\r\n]/.test(item)) fail(`${here}: a line must not contain a newline — one array item per line`);
+      if (/^\s/.test(item)) fail(`${here}: a line must not start with whitespace — indentation is expressed by nesting, not by spaces`);
+      if (!item.trim()) fail(`${here}: an empty line — drop it`);
+      if (isHeader(item) && !Array.isArray(items[i + 1])) fail(`${here}: ${JSON.stringify(item)} opens a block, so the next item must be a nested array with its body`);
+      out.push(`${'    '.repeat(depth)}${item}`);
+    });
+  };
+  walk(body, 0, at);
   return out;
 }
 
@@ -250,19 +251,27 @@ export function pythonStageColumns(cols, stage) {
   return new Map(out.map((c) => [c, cols.get(c) || { type: 'unknown' }]));
 }
 
-/** The structured body: a flat list of [indent, code] pairs — no recursion, no depth limit. */
+/**
+ * The structured body in the tool schema: ONE recursive definition — a block is an array whose
+ * items are a line (string) or another block — referenced as `#/$defs/py_block`. The definition
+ * itself lives at the ROOT of every tool schema that embeds a pipeline stage (schema.js hoists
+ * `stageDefs()` there), because `$ref` resolves against the root of the document it sits in.
+ * Recursion means no depth limit and no unrolled copies.
+ */
+const PY_LINE = { type: 'string', minLength: 1, maxLength: 500, pattern: '^\\S.*$', description: 'ONE line of Python — no leading whitespace and no newline; indentation comes from nesting.' };
+export function pythonStageDefs() {
+  return {
+    py_block: {
+      type: 'array', minItems: 1, maxItems: 400,
+      description: 'A block of Python: an array where a string is one line of code and a nested array is the block indented one level under the line before it (which must end with ":").',
+      items: { anyOf: [PY_LINE, { $ref: '#/$defs/py_block' }] },
+    },
+  };
+}
 function bodySchema() {
   return {
-    type: 'array', minItems: 1, maxItems: 400,
-    items: {
-      type: 'array', minItems: 2, maxItems: 2, additionalItems: false,
-      items: [
-        { type: 'integer', minimum: 0, description: 'Indentation LEVEL of this line (0 = the function body itself, 1 = inside the block opened by the previous ":" line, …). A number, never spaces.' },
-        { type: 'string', minLength: 1, maxLength: 500, pattern: '^\\S.*$', description: 'ONE line of Python — no leading whitespace, no newline.' },
-      ],
-      description: 'One line of the body as [indent, code].',
-    },
-    description: 'The function body as a flat list of [indent, code] pairs, read top to bottom like the code itself. Rules: the first line is at 0; a level rises by exactly one and only after a line ending with ":" (if/for/while/with/try/else/def…), which must be followed by that deeper line; a level may drop by any amount. Example: [[0, "if k > 1:"], [1, "df[\'seg\'] = 1"], [0, "else:"], [1, "df[\'seg\'] = 0"], [0, "return df"]]. Plain Python over pandas/numpy/… on the frame the first parameter receives; must return the frame. No imports inside (declare them in `imports`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.',
+    $ref: '#/$defs/py_block',
+    description: 'The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df[\'seg\'] = 1"], "else:", ["df[\'seg\'] = 0"], "return df"]. Plain Python over pandas/numpy/… on the frame the first parameter receives; must return the frame. No imports inside (declare them in `imports`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.',
   };
 }
 
@@ -318,6 +327,7 @@ function pythonStageSchema(allow = importAllowlist()) {
 // ref; the body gate and the real names are the engine's part.
 registerStage('python', {
   schema: () => pythonStageSchema(importAllowlist()),
+  defs: () => pythonStageDefs(), // hoisted to the root of every tool schema embedding stages
   terminal: true,
   build: ({ cols }, st) => {
     compilePythonStage(st, { modelName: 'm', prepModel: 'm_prep', allow: importAllowlist(), config: {} });

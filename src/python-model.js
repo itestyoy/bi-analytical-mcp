@@ -295,10 +295,10 @@ export function pythonStageDefs() {
     },
   };
 }
-function bodySchema() {
+function bodySchema(profile = frameProfile(null)) {
   return {
     $ref: '#/$defs/py_block',
-    description: 'The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df[\'seg\'] = 1"], "else:", ["df[\'seg\'] = 0"], "return df"]. Plain Python over pandas/numpy/… on the frame the first parameter receives; must return the frame. No imports inside (declare them in `imports`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.',
+    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. Nothing is converted for you: if a body truly needs pandas (scikit-learn, scipy), it calls the platform's own conversion itself (e.g. .to_pandas() / .pandas_api() / .df()) and owns the cost — single-node, the whole table in memory — so do it only on an already-aggregated table. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. No imports inside (declare them in \`imports\`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.`,
   };
 }
 
@@ -331,7 +331,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
         items: { type: 'object', additionalProperties: false, required: ['name', 'params', 'body'], properties: {
           name: { type: 'string', pattern: ID },
           params: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID }, description: 'The FIRST parameter is the frame the step receives; the rest are named arguments a step passes.' },
-          body: bodySchema(),
+          body: bodySchema(profile),
         } },
         description: 'Your step functions — they live in this model only (dbt cannot import helper .py files between models).',
       },

@@ -27,7 +27,7 @@ const engine = () => {
 };
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }, { name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
 const ZSCORE = { name: 'zscore', params: ['df', 'column', 'as_'], body: "df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)\nreturn df" };
-const PY_STAGE = { stage: 'python', imports: ['numpy'], functions: [ZSCORE], steps: [{ call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } }], output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
+const PY_STAGE = { stage: 'python', imports: [{ package: 'numpy' }], functions: [ZSCORE], steps: [{ call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } }], output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
 const decl = (over = {}) => ({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] }, ...over });
 const pipeFiles = (e, id) => readdirSync(e.ctxs.generatedDir(id)).filter((f) => f.startsWith('pipe_')).sort();
 const skipNoPy = (t) => { if (!HAS_PY) { t.skip('no python interpreter for the static gate'); return true; } return false; };
@@ -87,9 +87,14 @@ test('python stage must be the LAST stage', async () => {
   await assert.rejects(() => e.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE, { stage: 'limit', n: 10 }] } }), /python.*must be the LAST stage.*limit/);
 });
 
-test('python stage: a package outside the allowlist is refused with the allowed list', async () => {
+test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
   const e = engine();
-  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: ['requests'] }] } })), /'requests' is not an allowed package.*Allowed: pandas, numpy, sklearn/);
+  const items = e.schemas.register_native_model.properties.pipeline.properties.stages.items.oneOf.find((s) => s.properties.stage.const === 'python');
+  assert.deepEqual(items.properties.imports.items.properties.package.enum, [...importAllowlist().keys()], 'the enum IS the allowlist');
+  assert.ok(items.properties.imports.items.properties.package.enum.includes('sklearn'));
+  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels, bigframes/);
+  // a bare string is no longer an import declaration
+  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: ['numpy'] }] } })));
 });
 
 test('python stage: a step must call a declared function with exactly its parameters', async () => {
@@ -125,7 +130,7 @@ test('python stage: a package the runtime lacks goes to dbt\'s packages config; 
   if (skipNoPy(t)) return;
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   const e = new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'bigframes' } });
-  const st = { ...PY_STAGE, imports: [{ from: 'sklearn.cluster', names: ['KMeans'] }, 'scipy.stats'] };
+  const st = { ...PY_STAGE, imports: [{ package: 'sklearn', submodule: 'cluster', names: ['KMeans'] }, { package: 'scipy', submodule: 'stats' }, { package: 'numpy', as: 'np' }] };
   const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, st] } }));
   assert.equal(r.dry_run, true);
   assert.deepEqual(r.python.packages, ['scikit-learn', 'scipy']);

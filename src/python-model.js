@@ -58,27 +58,29 @@ export function pyLiteral(v) {
 
 const fail = (message) => { throw new Error(`python stage: ${message}`); };
 
-/** One import declaration → Python source line + the top-level package it needs. */
-function importLine(spec, i) {
+/**
+ * One import declaration → Python source line + the top-level package it needs.
+ *   { package }                          → import package
+ *   { package, submodule }               → import package.submodule
+ *   { package, submodule?, as }          → import package[.submodule] as alias
+ *   { package, submodule?, names: […] }  → from package[.submodule] import names
+ * `package` is an enum in the tool schema (the allowlist), so a package outside it is refused by
+ * the schema itself; this check only backs that up.
+ */
+function importLine(spec, i, allow) {
   const at = `imports[${i}]`;
-  if (typeof spec === 'string') {
-    if (!MODULE.test(spec)) fail(`${at}: '${spec}' is not a module path`);
-    return { line: `import ${spec}`, top: spec.split('.')[0], binds: [spec.split('.')[0]] };
+  if (!spec || typeof spec !== 'object' || typeof spec.package !== 'string') fail(`${at}: an import is { package, submodule?, as? | names? }`);
+  const { package: pkg, submodule, as, names } = spec;
+  if (!allow.has(pkg)) fail(`${at}: '${pkg}' is not an allowed package. Allowed: ${[...allow.keys()].join(', ')} (the operator extends the list with MCP_PYTHON_PACKAGES)`);
+  if (submodule != null && !MODULE.test(submodule)) fail(`${at}: submodule '${submodule}' is not a module path`);
+  if (as != null && !IDENT.test(as)) fail(`${at}: alias '${as}' is not an identifier`);
+  if (as != null && names) fail(`${at}: use either \`as\` (import … as) or \`names\` (from … import), not both`);
+  const path = submodule ? `${pkg}.${submodule}` : pkg;
+  if (names) {
+    if (!Array.isArray(names) || !names.length || !names.every((n) => IDENT.test(n))) fail(`${at}: \`names\` must be a non-empty list of identifiers`);
+    return { line: `from ${path} import ${names.join(', ')}`, top: pkg, binds: names };
   }
-  if (spec && typeof spec === 'object') {
-    if (spec.from) {
-      if (!MODULE.test(spec.from)) fail(`${at}: '${spec.from}' is not a module path`);
-      const names = Array.isArray(spec.names) ? spec.names : [];
-      if (!names.length || !names.every((n) => IDENT.test(n))) fail(`${at}: 'from ${spec.from} import …' needs identifiers in \`names\``);
-      return { line: `from ${spec.from} import ${names.join(', ')}`, top: spec.from.split('.')[0], binds: names };
-    }
-    if (spec.module) {
-      if (!MODULE.test(spec.module)) fail(`${at}: '${spec.module}' is not a module path`);
-      if (spec.as && !IDENT.test(spec.as)) fail(`${at}: alias '${spec.as}' is not an identifier`);
-      return { line: `import ${spec.module}${spec.as ? ` as ${spec.as}` : ''}`, top: spec.module.split('.')[0], binds: [spec.as || spec.module.split('.')[0]] };
-    }
-  }
-  return fail(`${at}: an import is "module.path", { module, as } or { from, names }`);
+  return { line: `import ${path}${as ? ` as ${as}` : ''}`, top: pkg, binds: [as || pkg] };
 }
 
 /**
@@ -93,8 +95,7 @@ export function compilePythonStage(stage, { modelName, prepModel, allow, config 
   const packages = new Set();
   const bound = new Set(['pd']);
   (stage.imports || []).forEach((spec, i) => {
-    const { line, top, binds } = importLine(spec, i);
-    if (!allow.has(top)) fail(`imports[${i}]: '${top}' is not an allowed package. Allowed: ${[...allow.keys()].join(', ')} (the operator extends the list with MCP_PYTHON_PACKAGES)`);
+    const { line, top, binds } = importLine(spec, i, allow);
     if (allow.get(top)) packages.add(allow.get(top));
     if (!importLines.includes(line)) importLines.push(line);
     binds.forEach((b) => bound.add(b));
@@ -210,8 +211,11 @@ export function pythonStageColumns(cols, stage) {
   return new Map(out.map((c) => [c, cols.get(c) || { type: 'unknown' }]));
 }
 
-function pythonStageSchema() {
+function pythonStageSchema(allow = importAllowlist()) {
   const ID = '^[A-Za-z_][A-Za-z0-9_]*$';
+  const MOD = '^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$';
+  const preinstalled = [...allow].filter(([, pip]) => !pip).map(([k]) => k);
+  const installed = [...allow].filter(([, pip]) => pip).map(([k, pip]) => `${k} (dbt installs ${pip})`);
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
     description: 'PYTHON stage — must be the LAST stage. Everything before it lands as a table in the warehouse; this stage becomes a dbt PYTHON model that reads that table and runs on the warehouse\'s Python runtime (BigQuery BigFrames/Dataproc, Snowpark, PySpark) — never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. Declare imports (allowlisted), your own functions (plain Python over a pandas frame: def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies are statically gated first. The pipeline\'s model is the result table — read it with get_query_result as usual.',
@@ -220,12 +224,16 @@ function pythonStageSchema() {
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
       imports: {
         type: 'array', maxItems: 20,
-        items: { oneOf: [
-          { type: 'string', description: '"module.path" → import module.path' },
-          { type: 'object', additionalProperties: false, required: ['module'], properties: { module: { type: 'string' }, as: { type: 'string', pattern: ID } } },
-          { type: 'object', additionalProperties: false, required: ['from', 'names'], properties: { from: { type: 'string' }, names: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID } } } },
-        ] },
-        description: 'Modules the functions use. Only allowlisted top-level packages (pandas, numpy, sklearn, scipy, statsmodels, bigframes + the operator\'s MCP_PYTHON_PACKAGES); pandas is always imported as pd. Packages the runtime lacks go to dbt\'s `packages` config for dbt to install.',
+        items: {
+          type: 'object', additionalProperties: false, required: ['package'],
+          properties: {
+            package: { enum: [...allow.keys()], description: `The ONLY packages a function may use. Shipped by the runtime: ${preinstalled.join(', ')}.${installed.length ? ` Installed by dbt on demand: ${installed.join(', ')}.` : ''} The operator extends this list with MCP_PYTHON_PACKAGES.` },
+            submodule: { type: 'string', pattern: MOD, description: 'Optional dotted path inside the package: { package: "sklearn", submodule: "cluster" } → import sklearn.cluster.' },
+            as: { type: 'string', pattern: ID, description: 'Alias: import … as <as>. Not together with `names`.' },
+            names: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID }, description: 'from … import <names>. Not together with `as`.' },
+          },
+        },
+        description: 'Modules the functions use — each names one allowlisted `package` (the enum is the whole allowlist). pandas is always imported as pd. Packages the runtime lacks go to dbt\'s `packages` config for dbt to install.',
       },
       functions: {
         type: 'array', minItems: 1, maxItems: 30,
@@ -254,7 +262,7 @@ function pythonStageSchema() {
 // follow. `build` validates the structure (imports / names / arguments) against a placeholder
 // ref; the body gate and the real names are the engine's part.
 registerStage('python', {
-  schema: () => pythonStageSchema(),
+  schema: () => pythonStageSchema(importAllowlist()),
   terminal: true,
   build: ({ cols }, st) => {
     compilePythonStage(st, { modelName: 'm', prepModel: 'm_prep', allow: importAllowlist(), config: {} });

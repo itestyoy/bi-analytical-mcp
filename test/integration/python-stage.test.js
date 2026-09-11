@@ -51,7 +51,7 @@ const Z = { p1: (30 - 100 / 3) / Math.sqrt(1816.6666667 / 3), p2: (5 - 100 / 3) 
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }, { name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
 const PY = {
   stage: 'python',
-  imports: ['numpy'],
+  imports: [{ package: 'numpy' }],
   functions: [
     { name: 'zscore', params: ['df', 'column', 'as_'], body: "df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)\nreturn df" },
     { name: 'tier', params: ['df', 'column', 'threshold'], body: "df['tier'] = numpy.where(df[column] > threshold, 'high', 'low')\nreturn df" },

@@ -309,3 +309,33 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
     assert.ok(py.properties.imports.items.properties.package.enum.includes('duckdb'));
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
+
+// The stage's description carries the PLATFORM's own rules: the in-engine ML library and the
+// do/don't list that keeps the work in the warehouse — only the rules of THIS warehouse.
+test('python stage: descriptions name this platform\'s in-engine ML library and rules (BigFrames → bigframes.ml, never sklearn)', () => {
+  const bq = frameProfile({ runtime: 'bigquery', method: 'bigframes' });
+  assert.match(bq.ml, /bigframes\.ml\.cluster\.KMeans/);
+  assert.match(bq.guide, /NEVER sklearn/);
+  assert.match(bq.guide, /NO df\.apply/);
+  assert.match(bq.guide, /partial ordering/);
+  const spark = frameProfile({ runtime: 'databricks' });
+  assert.match(spark.ml, /pyspark\.ml/);
+  assert.ok(!spark.guide.includes('bigframes'), 'no BigFrames rules on Spark');
+  const snow = frameProfile({ runtime: 'snowflake' });
+  assert.match(snow.ml, /snowflake\.ml\.modeling/);
+  // and they land in the live schema for a BigQuery bigframes profile
+  const dir = mkdtempSync(join(tmpdir(), 'bqprof-'));
+  writeFileSync(join(dir, 'profiles.yml'), 'p:\n  target: dev\n  outputs:\n    dev:\n      type: bigquery\n      project: x\n      submission_method: bigframes\n      gcs_bucket: b\n      compute_region: us-central1\n');
+  const saved = process.env.MCP_PYTHON_MODELS; delete process.env.MCP_PYTHON_MODELS;
+  try {
+    const c = loadCatalog(CATALOG, { profilesDir: dir, dialect: 'bigquery' });
+    const e = new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
+    const py = e.schemas.build_native_model.properties.stage.oneOf.find((st) => st.properties.stage.const === 'python');
+    assert.match(py.description, /MODELLING: bigframes\.ml/);
+    assert.match(py.description, /RULES FOR BIGFRAMES/);
+    assert.match(py.properties.functions.items.properties.body.description, /Modelling: bigframes\.ml/);
+    assert.match(py.properties.functions.items.properties.body.description, /converts itself with df\.to_pandas\(\)/);
+    assert.match(py.properties.imports.items.properties.package.description, /prefer bigframes \(bigframes\.ml\) over sklearn/);
+    assert.ok(!py.description.includes('PYSPARK') && !py.description.includes('SNOWPARK'), 'only this platform\'s rules');
+  } finally { process.env.MCP_PYTHON_MODELS = saved; }
+});

@@ -40,19 +40,55 @@ const RESERVED = new Set([...KEYWORDS, 'model', 'dbt', 'session', 'pd', 'df']);
 export function frameProfile(rt, config = {}) {
   const runtime = String(rt?.runtime || '').toLowerCase();
   const method = String(config.submission_method || rt?.method || '').toLowerCase();
+  // Per platform: what the frame is, how pandas is spelled, the ML library that runs INSIDE the
+  // engine (`ml`), and the do/don't list that keeps the work there (`guide`) — from the platforms'
+  // own docs (BigQuery DataFrames: bigframes.ml = the scikit-learn API executed as BigQuery ML;
+  // Spark: pyspark.ml; Snowflake: snowflake.ml.modeling).
   if (runtime === 'bigquery' && (method === 'bigframes' || !method)) {
-    return { key: 'bigframes', native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API computed inside BigQuery (import bigframes.pandas as bpd for constructors)', pandas: 'df.to_pandas()', packages: ['bigframes'] };
+    return {
+      key: 'bigframes',
+      native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API compiled to BigQuery SQL and executed in BigQuery (import bigframes.pandas as bpd for constructors)',
+      pandas: 'df.to_pandas()',
+      ml: 'bigframes.ml — the scikit-learn API run as BigQuery ML (model.fit trains in BigQuery, model.predict returns a BigFrames frame): bigframes.ml.cluster.KMeans; linear_model.LinearRegression / LogisticRegression; ensemble.XGBRegressor / XGBClassifier / RandomForestRegressor / RandomForestClassifier; decomposition.PCA; forecasting.ARIMAPlus; preprocessing.StandardScaler / MinMaxScaler / MaxAbsScaler / OneHotEncoder / LabelEncoder / KBinsDiscretizer; compose.ColumnTransformer; pipeline.Pipeline; model_selection.train_test_split / KFold / cross_validate; metrics',
+      guide: 'RULES FOR BIGFRAMES: (1) modelling = bigframes.ml (import { package: "bigframes", submodule: "ml.cluster", names: ["KMeans"] } etc.) — NEVER sklearn here: it needs df.to_pandas() and runs single-node in the notebook; (2) stay vectorized — column expressions, groupby/agg, merge, rolling/window; NO iterrows, NO df.apply / Series.map with a Python function (that deploys a BigQuery remote function on Cloud Run: setup, latency, cost) — express it as column arithmetic or bpd.to_datetime / .str / .dt accessors; (3) execution is deferred — nothing runs until the frame the model returns is materialized; df.cache() only for an expensive intermediate used twice (it stores a temporary BigQuery table you pay for); (4) never rely on row order (partial ordering may be on) — sort_values() explicitly where order matters; (5) df.to_pandas() pulls the whole table into the notebook runtime — only for a small, already-aggregated frame.',
+      packagesNote: 'On BigFrames prefer bigframes (bigframes.ml) over sklearn / scipy / statsmodels: those run only after df.to_pandas(), single-node.',
+      packages: ['bigframes'],
+    };
   }
   if (runtime === 'bigquery' || runtime === 'databricks') {
-    return { key: 'pyspark', native: 'a PySpark DataFrame — pyspark.sql (.filter / .withColumn / .groupBy / .select, functions via pyspark.sql.functions)', pandas: 'df.pandas_api() (pandas-on-Spark: the pandas API, still distributed) or df.toPandas() (a local pandas frame on the driver)', packages: ['pyspark'] };
+    return {
+      key: 'pyspark',
+      native: 'a PySpark DataFrame — pyspark.sql (.filter / .withColumn / .groupBy / .select, functions via pyspark.sql.functions)',
+      pandas: 'df.pandas_api() (pandas-on-Spark: the pandas API, still distributed) or df.toPandas() (a local pandas frame on the driver)',
+      ml: 'pyspark.ml — distributed: feature.VectorAssembler / StandardScaler / StringIndexer, clustering.KMeans, regression.LinearRegression, classification.LogisticRegression / RandomForestClassifier, Pipeline',
+      guide: 'RULES FOR PYSPARK: modelling = pyspark.ml (distributed), not sklearn (needs toPandas(), single-node on the driver); stay in pyspark.sql column expressions (F.col / F.when / groupBy.agg / Window) — NO Python UDFs or row iteration, NO collect() / toPandas() on a large frame; df.pandas_api() keeps pandas syntax distributed.',
+      packagesNote: 'On PySpark prefer pyspark (pyspark.ml) over sklearn / scipy / statsmodels: those need toPandas(), single-node.',
+      packages: ['pyspark'],
+    };
   }
   if (runtime === 'snowflake') {
-    return { key: 'snowpark', native: 'a Snowpark DataFrame — .filter / .with_column / .group_by / .select, functions via snowflake.snowpark.functions', pandas: 'df.to_pandas()', packages: ['snowflake'] };
+    return {
+      key: 'snowpark',
+      native: 'a Snowpark DataFrame — .filter / .with_column / .group_by / .select, functions via snowflake.snowpark.functions',
+      pandas: 'df.to_pandas()',
+      ml: 'snowflake.ml.modeling — the scikit-learn API run inside Snowflake: modeling.cluster.KMeans, modeling.linear_model.*, modeling.preprocessing.StandardScaler / OneHotEncoder, modeling.pipeline.Pipeline',
+      guide: 'RULES FOR SNOWPARK: modelling = snowflake.ml.modeling (runs in the warehouse), not sklearn (needs to_pandas(), single-node); stay in Snowpark column expressions (F.col / F.when / group_by.agg / Window) — NO Python UDFs on rows, NO to_pandas() on a large frame.',
+      packagesNote: 'On Snowpark prefer snowflake (snowflake.ml.modeling) over sklearn / scipy / statsmodels: those need to_pandas(), single-node.',
+      packages: ['snowflake'],
+    };
   }
   if (runtime === 'duckdb') {
-    return { key: 'duckdb', native: 'a DuckDBPyRelation — .filter / .aggregate / .project / .select with SQL expressions', pandas: 'df.df()', packages: ['duckdb', 'pyarrow'] };
+    return {
+      key: 'duckdb',
+      native: 'a DuckDBPyRelation — .filter / .aggregate / .project / .select / .order with SQL expressions, executed by DuckDB',
+      pandas: 'df.df()',
+      ml: 'none in-engine — modelling goes through df.df() (pandas) and sklearn / scipy / statsmodels, fine for the local tables DuckDB holds',
+      guide: 'RULES FOR DUCKDB: keep filters / aggregates in relation ops (SQL expressions) and convert with df.df() only for the modelling step.',
+      packagesNote: '',
+      packages: ['duckdb', 'pyarrow'],
+    };
   }
-  return { key: 'unknown', native: 'whatever dbt.ref() returns on this adapter', pandas: null, packages: [] };
+  return { key: 'unknown', native: 'whatever dbt.ref() returns on this adapter', pandas: null, ml: null, guide: 'Use the platform\'s own DataFrame API and its in-engine ML library; avoid pulling the table into pandas.', packagesNote: '', packages: [] };
 }
 
 /**
@@ -300,7 +336,7 @@ export function pythonStageDefs() {
 function bodySchema(profile = frameProfile(null)) {
   return {
     $ref: '#/$defs/py_block',
-    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. Nothing is converted for you${profile.pandas ? `: if a body truly needs pandas (scikit-learn, scipy), it converts itself with ${profile.pandas} and owns the cost — single-node, the whole table in memory — so do it only on an already-aggregated table` : ''}. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. No imports inside (declare them in \`imports\`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.`,
+    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. ${profile.ml ? `Modelling: ${profile.ml.split(' — ')[0]} (see the stage description for the classes and the do/don't rules). ` : ''}${profile.guide} Nothing is converted for you${profile.pandas ? `: if a body truly needs pandas, it converts itself with ${profile.pandas} and owns the cost — single-node, the whole table in memory — so do it only on a small, already-aggregated table` : ''}. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. No imports inside (declare them in \`imports\`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.`,
   };
 }
 
@@ -311,7 +347,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   const installed = [...allow].filter(([, pip]) => pip).map(([k, pip]) => `${k} (dbt installs ${pip})`);
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
-    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you. The last step's return value IS this model's table: declare output.columns so the SQL stages that follow know its columns. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies are statically gated first. The pipeline's last model is the result — read it with get_query_result as usual.`,
+    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}.` : ''} ${profile.guide} The last step's return value IS this model's table: declare output.columns so the SQL stages that follow know its columns. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies are statically gated first. The pipeline's last model is the result — read it with get_query_result as usual.`,
     properties: {
       stage: { const: 'python' },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
@@ -320,7 +356,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
         items: {
           type: 'object', additionalProperties: false, required: ['package'],
           properties: {
-            package: { enum: [...allow.keys()], description: `The ONLY packages a function may use. Shipped by the runtime: ${preinstalled.join(', ')}.${installed.length ? ` Installed by dbt on demand: ${installed.join(', ')}.` : ''} The operator extends this list with MCP_PYTHON_PACKAGES.` },
+            package: { enum: [...allow.keys()], description: `The ONLY packages a function may use. Shipped by the runtime: ${preinstalled.join(', ')}.${installed.length ? ` Installed by dbt on demand: ${installed.join(', ')}.` : ''}${profile.packagesNote ? ` ${profile.packagesNote}` : ''} The operator extends this list with MCP_PYTHON_PACKAGES.` },
             submodule: { type: 'string', pattern: MOD, description: 'Optional dotted path inside the package: { package: "sklearn", submodule: "cluster" } → import sklearn.cluster.' },
             as: { type: 'string', pattern: ID, description: 'Alias: import … as <as>. Not together with `names`.' },
             names: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID }, description: 'from … import <names>. Not together with `as`.' },

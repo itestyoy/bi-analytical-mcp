@@ -316,7 +316,7 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   const bq = frameProfile({ runtime: 'bigquery', method: 'bigframes' });
   assert.match(bq.ml, /bigframes\.ml\.cluster\.KMeans/);
   assert.match(bq.guide, /NEVER sklearn/);
-  assert.match(bq.guide, /NO df\.apply/);
+  assert.match(bq.guide, /AVOID iterrows and df\.apply/);
   assert.match(bq.guide, /partial ordering/);
   const spark = frameProfile({ runtime: 'databricks' });
   assert.match(spark.ml, /pyspark\.ml/);

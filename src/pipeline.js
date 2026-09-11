@@ -739,24 +739,15 @@ export function pipelineStageSchema(catalog) {
 function buildOps(catalog, d, baseColumns, stages, source) {
   let cols = new Map(baseColumns);
   const ops = [];
-  let sqlCols = cols; // the column set the SQL part hands to a terminal (python) stage
   for (const st of stages) {
     const def = STAGES[st.stage];
     if (!def) throw new Error(`unknown pipeline stage: ${st.stage}`);
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
-    // A TERMINAL stage (python) closes the SQL part: nothing may follow it — the result of the
-    // Python model is the pipeline's result, and a later SQL stage would have nothing to run on.
-    const last = ops[ops.length - 1];
-    if (last && STAGES[stages[ops.length - 1].stage]?.terminal) throw new Error(`the '${stages[ops.length - 1].stage}' stage must be the LAST stage — put '${st.stage}' before it`);
-    // A terminal stage READS the table the SQL stages produce: with nothing before it, that table
-    // would be the whole source — refuse, and say what has to come first.
-    if (def.terminal && !ops.length) throw new Error(`the '${st.stage}' stage needs at least one SQL stage before it — the table it reads is what the SQL stages produce: filter / aggregate first (a pipeline time_range counts as one)`);
-    if (def.terminal) sqlCols = cols;
     const res = def.build({ d, catalog, cols, source }, st);
     ops.push(res.op);
     cols = res.cols;
   }
-  return { ops, cols, sqlCols };
+  return { ops, cols };
 }
 
 // Chained-CTE assembly (works for both dialects). A stage that renders itself
@@ -781,28 +772,51 @@ function assembleCteSql(d, dialectName, baseRelation, ops) {
  */
 export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages, source) {
   const d = getDialect(dialectName);
+  if (stages.some((st) => STAGES[st.stage]?.python)) throw new Error('a python stage cannot be part of a funnel prepare list — it is a model of its own in a pipeline');
   const { ops } = buildOps(catalog, d, baseColumns, stages, source);
-  if (ops.some((o) => o.python)) throw new Error('a python stage cannot be part of a funnel prepare list — it is the last stage of a pipeline');
   return assembleCteSql(d, dialectName, baseRelation, ops);
 }
 
 /**
- * Render a full pipeline over a catalog `source` to SQL for `dialectName`. The
- * dialect-native form is used (Postgres chained CTE, BigQuery `|>` pipe syntax)
- * unless a stage requires CTE form on THIS dialect (e.g. match_recognize on engines
- * without a native row-pattern operator — BigQuery DOES have `|> MATCH_RECOGNIZE`, so
- * it stays pipe; Postgres emulates it as a CTE, forcing chained-CTE assembly).
- * @returns { sql, columns } — columns is the final tracked column set (Map).
+ * Render a full pipeline over a catalog `source` as a CHAIN of dbt models. Stages run in one SQL
+ * model until a `python` stage: that stage is a dbt Python model of its own, the SQL stages after
+ * it another SQL model reading it through ref, and so on — any number of python stages, anywhere
+ * (a python stage FIRST reads the source directly). dbt orders the chain from the refs; the last
+ * model carries the pipeline's name (`modelName`), the ones before it `<modelName>_s1`, `_s2`, ….
+ * SQL uses the dialect-native form (Postgres chained CTE, BigQuery `|>` pipe syntax) for the first
+ * model unless a stage requires CTE form (match_recognize on Postgres); later SQL models read a
+ * ref, so they are plain CTE chains.
+ * @returns { chain: [{ kind: 'sql'|'python', model, input, stages|stage, sql?, columns }], columns, sql }
+ *   `columns` = the final tracked column set (Map); `sql` = the LAST SQL model's text (the whole
+ *   pipeline when there is no python stage).
  */
-export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null } = {}) {
+export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null, modelName = 'pipe' } = {}) {
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
-  const baseRelation = `{{ ref('${m.dbt_model}') }}`;
-  const { ops, cols, sqlCols } = buildOps(catalog, d, sourceColumns(catalog, source, physicalCols), stages, source);
-  // A python stage is not SQL: the SQL text covers the stages before it (the table the Python
-  // model reads), and the stage itself is handed back for the engine to compile into the model.
-  const py = ops.find((o) => o.python) || null;
-  const sqlOps = py ? ops.filter((o) => !o.python) : ops;
-  const sql = sqlOps.some((o) => o.requiresCte) ? assembleCteSql(d, dialectName, baseRelation, sqlOps) : d.renderPipeline(baseRelation, sqlOps);
-  return { sql, columns: cols, python: py ? { stage: py.stage, sqlColumns: sqlCols } : null };
+  // Cut the stage list at every python stage.
+  const segments = []; let cur = [];
+  for (const st of stages) {
+    if (STAGES[st.stage]?.python) { if (cur.length) segments.push({ kind: 'sql', stages: cur }); segments.push({ kind: 'python', stage: st }); cur = []; } else cur.push(st);
+  }
+  if (cur.length || !segments.length) segments.push({ kind: 'sql', stages: cur });
+  let cols = sourceColumns(catalog, source, physicalCols);
+  let input = m.dbt_model; // what the segment's dbt.ref() / FROM names: the source, then the previous model
+  segments.forEach((seg, i) => {
+    seg.model = i === segments.length - 1 ? modelName : `${modelName}_s${i + 1}`;
+    seg.input = input;
+    const baseRelation = `{{ ref('${input}') }}`;
+    if (seg.kind === 'sql') {
+      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source);
+      seg.sql = (i === 0 && !ops.some((o) => o.requiresCte)) ? d.renderPipeline(baseRelation, ops) : assembleCteSql(d, dialectName, baseRelation, ops);
+      cols = next;
+    } else {
+      const def = STAGES[seg.stage.stage];
+      if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : 'the python stage is not available on this warehouse');
+      cols = def.build({ d, catalog, cols, source }, seg.stage).cols;
+    }
+    seg.columns = cols;
+    input = seg.model;
+  });
+  const lastSql = [...segments].reverse().find((seg) => seg.kind === 'sql');
+  return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null };
 }

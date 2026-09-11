@@ -253,6 +253,15 @@ export class ContextManager {
     return file;
   }
 
+  /** Remove every generated file whose name satisfies `pred` (a rebuilt chain leaves no stale model behind). */
+  removeGeneratedWhere(id, pred) {
+    const d = this.generatedDir(id);
+    if (!existsSync(d)) return [];
+    const gone = readdirSync(d).filter(pred);
+    for (const f of gone) rmSync(join(d, f), { force: true });
+    return gone;
+  }
+
   /** Remove a generated file (model or yaml) from the context overlay. */
   removeGeneratedFile(id, filename) {
     const file = join(this.generatedDir(id), filename);

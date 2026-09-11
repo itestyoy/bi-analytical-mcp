@@ -1760,26 +1760,37 @@ export class Engine {
     const stages = this._draftEffectiveStages(draft);
     // Render ONLY the active warehouse dialect, so every response is consistent with where
     // the pipeline actually runs (bigquery → `|>`, postgres → CTEs). Grounded to physical.
-    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages, { physicalCols: physSet });
     const modelName = `pipe_${draft.name}_${ctx.id}`;
-    const py = rendered.python ? this._compilePythonStage(rendered.python.stage, { modelName, prepModel: `${modelName}_prep`, pipeline: { name: draft.name, pipeline: { source: draft.source } } }) : null;
+    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages, { physicalCols: physSet, modelName });
+    const models = this._chainModels(rendered.chain, { name: draft.name, pipeline: { source: draft.source } });
     return {
       ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql,
-      ...(py ? { python: { prep_model: `${modelName}_prep`, model: modelName, packages: py.packages, code: py.code, note: 'The SQL above lands as the prep TABLE; this Python model reads it via dbt.ref and runs on the warehouse runtime at materialize.' } } : {}),
+      ...(models.length > 1 ? { models: models.map(({ yml, ...m }) => m), note: `The pipeline builds as a chain of ${models.length} dbt models (each python stage is a model of its own, reading the previous one via dbt.ref); ${modelName} — the last — is the result.` } : {}),
     };
   }
 
+  /**
+   * The chain a pipeline renders to, as the caller sees it: one entry per dbt model, in build
+   * order, each with its input and — for a python model — the compiled code. `pipeline` is the
+   * declaration the file headers record.
+   */
+  _chainModels(chain, pipeline) {
+    return chain.map((seg) => (seg.kind === 'sql'
+      ? { model: seg.model, kind: 'sql', input: seg.input, stages: seg.stages.map((st) => st.stage), sql: seg.sql, columns: [...seg.columns.keys()] }
+      : (() => { const py = this._compilePythonStage(seg.stage, { modelName: seg.model, inputModel: seg.input, pipeline }); return { model: seg.model, kind: 'python', input: seg.input, runtime: py.runtime, packages: py.packages, steps: seg.stage.steps.map((st) => st.call), code: py.code, yml: py.yml, columns: [...seg.columns.keys()] }; })()));
+  }
+
   /** Compile a python stage into its dbt model (structure only — the gate is separate). */
-  _compilePythonStage(stage, { modelName, prepModel, pipeline }) {
+  _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
-      return compilePythonStage(stage, { modelName, prepModel, allow: importAllowlist(process.env, profile), config: this.pythonModelConfig, pipeline, profile });
+      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(process.env, profile), config: this.pythonModelConfig, pipeline, profile });
     } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
   }
 
   /** The static gate over a python stage's function bodies (syntax, no imports/dbt/session/eval…). */
   async _gatePythonStage(stage) {
-    const compiled = this._compilePythonStage(stage, { modelName: 'm', prepModel: 'm_prep', pipeline: null });
+    const compiled = this._compilePythonStage(stage, { modelName: 'm', inputModel: 'm_in', pipeline: null });
     const gate = await runAstGate(this.pythonBin, compiled.functions);
     if (!gate.ok) {
       const lines = gate.errors.map((e) => `${e.function} line ${e.line}${e.text ? ` (${e.text})` : ''}: ${e.message}`);
@@ -1869,16 +1880,24 @@ export class Engine {
     // phantom catalog column is rejected as "unknown column" here, not as a raw
     // warehouse error after the build.
     const physSet = await this._physicalCols(source);
-    const render = () => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet });
+    const render = (modelName) => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet, modelName });
+    // A pipeline renders as a CHAIN of dbt models: SQL stages until a python stage, that stage as a
+    // Python model reading the previous one (or the source), and so on; the last model carries
+    // the pipeline's name and is the result. Every python stage's bodies pass the static gate
+    // BEFORE anything else happens, so a refused declaration leaves nothing behind.
+    const gateAll = async (chain) => { for (const seg of chain) if (seg.kind === 'python') await this._gatePythonStage(seg.stage); };
     if (input.dry_run) {
-      const out = render();
-      const py = out.python ? await this._gatePythonStage(out.python.stage) && this._compilePythonStage(out.python.stage, { modelName: `pipe_${input.name}`, prepModel: `pipe_${input.name}_prep`, pipeline: input }) : null;
+      const out = render(`pipe_${input.name}`);
+      await gateAll(out.chain);
+      const models = this._chainModels(out.chain, input).map(({ yml, ...m }) => m);
+      const last = out.chain[out.chain.length - 1];
       const resp = {
-        kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: py ? 'table' : (input.materialized || 'table'), dialect,
+        kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: last.kind === 'python' ? 'table' : (input.materialized || 'table'), dialect,
         columns: [...out.columns.keys()],
         output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
         model_sql: out.sql,
-        ...(py ? { python: { prep_model: `pipe_${input.name}_prep`, packages: py.packages, code: py.code } } : {}),
+        ...(models.length > 1 ? { models } : {}),
+        ...(models.some((m) => m.kind === 'python') ? { python: models.filter((m) => m.kind === 'python') } : {}),
       };
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before materializing.
@@ -1886,32 +1905,31 @@ export class Engine {
       if (est != null) resp.estimated_source_rows = est;
       return resp;
     }
-    const out = render();
-    // Gate a python stage BEFORE a context exists for it: a refused declaration leaves nothing behind.
-    if (out.python) await this._gatePythonStage(out.python.stage);
+    const probe = render('pipe');
+    await gateAll(probe.chain);
     const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
-    // A python stage splits the pipeline into TWO dbt models under one name: the SQL stages land
-    // as the prep TABLE (`<model>_prep` — always a table: the Python side reads a relation, a view
-    // would re-run the SQL through the runtime), and the stage becomes the Python model `<model>`
-    // that refs it. dbt orders them from the ref; the caller keeps addressing `<model>`.
-    const prepModel = `${modelName}_prep`;
-    const py = out.python ? this._compilePythonStage(out.python.stage, { modelName, prepModel, pipeline: input }) : null;
-    const materialized = py ? 'table' : (input.materialized || 'table');
+    const out = render(modelName);
+    const models = this._chainModels(out.chain, input);
+    const last = models[models.length - 1];
+    const hasPython = models.some((m) => m.kind === 'python');
+    // The last model takes the requested materialization when it is SQL; a Python model, and every
+    // model something else reads, is a table (a Python model reads a relation, a view would re-run
+    // the SQL through the runtime).
+    const materialized = last.kind === 'python' ? 'table' : (input.materialized || 'table');
     const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
-    if (py) {
-      this.ctxs.writeModel(ctx.id, prepModel, `{{ config(materialized='table') }}\n${header}${out.sql}\n`);
-      this.ctxs.writeFile(ctx.id, `${modelName}.py`, py.code);
-      this.ctxs.writeFile(ctx.id, `${modelName}.yml`, py.yml);
-      this.ctxs.removeGeneratedFile(ctx.id, `${modelName}.sql`); // a rebuild that ADDED the stage: dbt allows one model per name
-    } else {
-      this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);
-      for (const f of [`${modelName}.py`, `${modelName}.yml`, `${prepModel}.sql`]) this.ctxs.removeGeneratedFile(ctx.id, f); // a rebuild that REMOVED the stage
+    // A rebuild under the same name must leave no stale model of the previous chain behind: dbt
+    // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
+    this.ctxs.removeGeneratedWhere(ctx.id, (f) => f === `${modelName}.sql` || f === `${modelName}.py` || f === `${modelName}.yml` || new RegExp(`^${modelName}_s\\d+\\.(sql|py|yml)$`).test(f));
+    for (const m of models) {
+      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `{{ config(materialized='${m === last ? materialized : 'table'}') }}\n${header}${m.sql}\n`);
+      else { this.ctxs.writeFile(ctx.id, `${m.model}.py`, m.code); this.ctxs.writeFile(ctx.id, `${m.model}.yml`, m.yml); }
     }
-    const pyInfo = py ? { prep_model: prepModel, runtime: py.runtime, packages: py.packages, steps: out.python.stage.steps.map((st) => st.call), code: py.code } : null;
+    const pyInfo = hasPython ? models.filter((m) => m.kind === 'python').map(({ yml, ...m }) => m) : null;
+    const chainInfo = models.map((m) => ({ model: m.model, kind: m.kind, input: m.input, materialized: m === last ? materialized : 'table' }));
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
-    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(py ? { python: { prep_model: prepModel, packages: py.packages, steps: pyInfo.steps } } : {}) };
+    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(models.length > 1 ? { chain: chainInfo } : {}), ...(hasPython ? { python: pyInfo.map(({ code, ...m }) => m) } : {}) };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);
     // Honest status: `executed` makes it unambiguous whether the model was actually built
@@ -1920,20 +1938,20 @@ export class Engine {
     let rows = []; let columns = [...out.columns.keys()];
     if (this.runner) {
       let r;
-      if (py) {
-        // `+model`: dbt builds the prep table first, then sends the Python model to the warehouse
-        // runtime — a cold start of minutes, so it runs detached and may hand back a query_id.
+      if (models.length > 1) {
+        // `+model`: dbt builds the whole chain in ref order; a Python model is a cold start of
+        // minutes on the warehouse runtime, so it runs detached and may hand back a query_id.
         const bg = await this._runDetached(ctx, `+${modelName}`, modelName);
         if (bg.status === 'running') {
           return {
-            context_id: ctx.id, kind: 'pipeline', ok: true, status: 'running', query_id: bg.query_id, model: modelName, materialized, dialect, python: pyInfo,
-            message: `dbt is building the prep table and running the Python model on the warehouse runtime (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}`,
+            context_id: ctx.id, kind: 'pipeline', ok: true, status: 'running', query_id: bg.query_id, model: modelName, materialized, dialect, models: chainInfo, ...(hasPython ? { python: pyInfo } : {}),
+            message: `dbt is building the chain of ${models.length} models (${hasPython ? 'the Python models run on the warehouse runtime — a cold start' : 'SQL'}) (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}`,
             read_with: { tool: 'get_query_result', query_id: bg.query_id, table: modelName },
           };
         }
         r = bg.result;
       } else r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
-      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) }, ...(py ? { python: pyInfo } : {}) };
+      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };
@@ -1943,7 +1961,8 @@ export class Engine {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
       columns, output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
       row_count: rows.length, rows, model_sql: out.sql, build,
-      ...(py ? { python: pyInfo } : {}),
+      ...(models.length > 1 ? { models: chainInfo } : {}),
+      ...(hasPython ? { python: pyInfo } : {}),
       // Provenance: a custom pipeline (not a governed metric), its source, and how fresh
       // the underlying data is — so the rows are self-trustable. A sample stage makes the
       // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
@@ -1953,8 +1972,8 @@ export class Engine {
       // with get_query_result (NOT query_semantic_model, which is for metric queries).
       read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
       assumptions: [
-        ...(py
-          ? [`The SQL stages landed as the prep table ${prepModel}; the python stage is the dbt Python model ${modelName} (run by dbt on the warehouse's Python runtime, never here), and ITS rows are the result.${input.materialized === 'view' ? ' materialized: view was requested, but a Python model reads a TABLE, so both are tables.' : ''}`]
+        ...(models.length > 1
+          ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
           : [`Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`]),
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
       ],

@@ -21,7 +21,7 @@ Design docs:
 |---|---|
 | `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
 | `create_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table) |
-| `build_native_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result; a final `python` stage turns the pipeline into a dbt **Python model** run on the warehouse's Python runtime — steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
+| `build_native_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
 | `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
 | `update_semantic_model` | add/remove task measures, dimensions, metrics in a context |
 | `context` | manage contexts: `{ action: list \| describe \| drop \| delete_model \| delete_semantic_model }` |
@@ -89,7 +89,10 @@ npm test                 # unit tests (pure JS, no dbt needed)
 npm run test:integration # end-to-end: dbt Core + MetricFlow against PGlite (auto-skips if dbt/mf absent)
 ```
 
-The `python` stage exists in the tool schemas only where dbt can run Python models — decided
+A `python` stage may sit anywhere in the pipeline (first: it reads the source itself) and repeat: the
+pipeline renders as a chain `pipe_<name>_s1 → _s2 → … → pipe_<name>` of SQL and Python dbt models,
+each reading the previous via `ref`; a python stage declares `output.columns` so SQL stages after it
+know its columns. The `python` stage exists in the tool schemas only where dbt can run Python models — decided
 from the active dbt profile (BigQuery with `submission_method` / a Dataproc or BigFrames region,
 Snowflake, Databricks, DuckDB); on Postgres it is absent and `semantic_index()` says why under
 `python_models`. `MCP_PYTHON_MODELS=on|off` overrides the decision.

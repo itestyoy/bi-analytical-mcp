@@ -73,7 +73,7 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
   const r = await engine.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY] } });
   assert.equal(r.ok ?? r.build?.ok, true, JSON.stringify(r.error || r));
   assert.equal(r.build.executed, true, 'dbt actually ran both models');
-  assert.equal(r.python.prep_model, `${r.model}_prep`);
+  assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [[`${r.model}_s1`, 'sql', 'fct_analytics_events'], [r.model, 'python', `${r.model}_s1`]]);
   assert.deepEqual(r.columns.map((c) => c.name ?? c), PY.output.columns);
   const rows = r.rows.map((x) => ({ ...x, n: num(x.n), revenue: num(x.revenue), revenue_z: num(x.revenue_z) })).sort((a, b) => a.player_id_of_internal.localeCompare(b.player_id_of_internal));
   assert.equal(rows.length, 4, 'one row per player, incl. the player with no purchases');
@@ -89,7 +89,7 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
   const byTier = await engine.get_query_result({ context_id: r.context_id, table: r.model, transform: { group_by: ['tier'], aggregations: [{ fn: 'count', as: 'players' }], order_by: [{ key: 'tier' }] } });
   assert.deepEqual(byTier.rows.map((x) => [x.tier, num(x.players)]), [['high', 1], ['low', 3]]);
   // and so is the prep table, under its own name
-  const prep = await engine.get_query_result({ context_id: r.context_id, table: r.python.prep_model });
+  const prep = await engine.get_query_result({ context_id: r.context_id, table: r.models[0].model });
   assert.equal(prep.rows.length, 4);
   assert.ok(!Object.keys(prep.rows[0]).includes('tier'), 'the prep table is the SQL part only');
 });
@@ -135,9 +135,35 @@ test('python stage: steps run on the relation dbt.ref() returns — no pandas an
   };
   const r = await engine.register_native_model({ name: 'seg4', pipeline: { source: 'events', stages: [AGG, native] } });
   assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
-  assert.equal(r.python.runtime, 'duckdb');
-  assert.ok(!r.python.code.includes('pandas') && !r.python.code.includes('.df()'), 'no pandas anywhere in the native path');
+  assert.equal(r.python[0].runtime, 'duckdb');
+  assert.ok(!r.python[0].code.includes('pandas') && !r.python[0].code.includes('.df()'), 'no pandas anywhere in the native path');
   assert.deepEqual(Object.keys(r.rows[0]).sort(), ['player_id_of_internal', 'revenue', 'revenue_x2'], 'the last step\'s projection IS the result — nothing re-projected');
   const rows = r.rows.map((x) => [x.player_id_of_internal, num(x.revenue_x2)]).sort((a, b) => a[0].localeCompare(b[0]));
   assert.deepEqual(rows, [['p1', 60], ['p2', 10], ['p3', 130]], 'the player without purchases is filtered out; revenue doubled');
+});
+
+// A CHAIN with python anywhere: python FIRST over the raw source (native relation), SQL aggregate
+// over the Python model, python again (pandas by explicit choice), SQL where over ITS columns.
+// Four dbt models, built by dbt in ref order; the numbers prove every hop read the previous one.
+test('python stage anywhere: python → SQL → python → SQL is a chain of four dbt models with the right rows', opts, async (t) => {
+  if (skip(t)) return;
+  const first = { stage: 'python', functions: [{ name: 'purchases', params: ['df'], body: ["return df.filter(\"event_name = 'iap_purchase_completed'\")"] }], steps: [{ call: 'purchases' }] };
+  const z = { ...PY, output: { columns: ['player_id_of_internal', 'n', 'revenue', 'revenue_z', 'tier'] } };
+  const r = await engine.register_native_model({ name: 'chain', pipeline: { source: 'events', stages: [
+    first,                                                                             // s1: python over the SOURCE (purchases only → p4 disappears here)
+    AGG,                                                                               // s2: SQL over the python model
+    z,                                                                                 // s3: python (pandas by choice) over s2
+    { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] },    // result: SQL over the python model's declared columns
+  ] } });
+  assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
+  assert.deepEqual(r.models.map((m) => m.kind), ['python', 'sql', 'python', 'sql']);
+  assert.equal(r.models[0].input, 'fct_analytics_events');
+  assert.equal(r.models[3].input, r.models[2].model);
+  const rows = r.rows.map((x) => ({ ...x, n: num(x.n), revenue: num(x.revenue), revenue_z: num(x.revenue_z) }));
+  assert.deepEqual(rows.map((x) => [x.player_id_of_internal, x.n, x.revenue, x.tier]), [['p3', 2, 65, 'high']], 'only p3 has a positive z-score; n counts purchases only (the first python model filtered the source)');
+  assert.ok(Math.abs(rows[0].revenue_z - Z.p3) < 1e-6);
+  // every hop is a real table
+  for (const m of r.models) assert.equal((await engine.get_query_result({ context_id: r.context_id, table: m.model })).ok !== false, true, m.model);
+  const s1 = await engine.get_query_result({ context_id: r.context_id, table: r.models[0].model });
+  assert.equal(s1.rows.length, 5, 'the first python model kept the 5 purchase rows of the source');
 });

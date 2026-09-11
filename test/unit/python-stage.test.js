@@ -59,18 +59,19 @@ test('python stage: one declaration lands as prep TABLE + Python model under the
   assert.equal(r.build.ok, true);
   assert.match(r.model, /^pipe_seg_[a-z0-9]+$/);
   assert.equal(r.materialized, 'table');
-  assert.equal(r.python.prep_model, `${r.model}_prep`);
-  assert.deepEqual(r.python.packages, [], 'numpy ships with the runtime → nothing for dbt to install');
-  assert.deepEqual(r.python.steps, ['zscore']);
+  assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [[`${r.model}_s1`, 'sql', 'fct_analytics_events'], [r.model, 'python', `${r.model}_s1`]], 'the chain: SQL model → Python model reading it');
+  assert.equal(r.python[0].model, r.model);
+  assert.deepEqual(r.python[0].packages, [], 'numpy ships with the runtime → nothing for dbt to install');
+  assert.deepEqual(r.python[0].steps, ['zscore']);
   assert.deepEqual(r.columns, ['player_id_of_internal', 'revenue', 'revenue_z'], 'the declared output columns are the pipeline\'s columns');
   assert.ok(r.assumptions.some((a) => /view was requested/.test(a)));
   // files: the SQL prep model, the Python model and its YAML sidecar — and NO pipe_seg_<ctx>.sql
   const files = pipeFiles(e, r.context_id);
-  assert.deepEqual(files, [`${r.model}.py`, `${r.model}.yml`, `${r.model}_prep.sql`]);
+  assert.deepEqual(files, [`${r.model}.py`, `${r.model}.yml`, `${r.model}_s1.sql`]);
   // the context records the split
   const n = e.ctxs.get(r.context_id).state.native;
   assert.equal(n.model, r.model);
-  assert.equal(n.python.prep_model, `${r.model}_prep`);
+  assert.deepEqual(n.chain.map((m) => m.model), [`${r.model}_s1`, r.model]);
   assert.equal(r.build.executed, false, 'no runner → written, not run');
   // the result is addressed like any pipeline model
   assert.equal(r.read_with.table, r.model);
@@ -86,9 +87,32 @@ test('python stage: a rebuild WITHOUT the stage removes the Python files (dbt al
   assert.equal(e.ctxs.get(r1.context_id).state.native.python, undefined);
 });
 
-test('python stage must be the LAST stage', async () => {
+// A python stage may sit ANYWHERE, any number of times: every one is a dbt model of its own, and
+// the SQL stages around it become SQL models reading the previous model — dbt builds the chain.
+test('python stage anywhere: first (reads the source), middle, twice — each a model in the chain', async (t) => {
+  if (skipNoPy(t)) return;
   const e = engine();
-  await assert.rejects(() => e.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE, { stage: 'limit', n: 10 }] } }), /python.*must be the LAST stage.*limit/);
+  const PY_OUT = { ...PY_STAGE, output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
+  const PY_FIRST = { stage: 'python', functions: [{ name: 'keep', params: ['df'], body: ['return df'] }], steps: [{ call: 'keep' }] }; // no output → the source's columns pass through
+  const r = await e.register_native_model({ name: 'chain', pipeline: { source: 'events', stages: [PY_FIRST, AGG, PY_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }, { stage: 'limit', n: 10 }] } });
+  assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [
+    [`${r.model}_s1`, 'python', 'fct_analytics_events'],   // python FIRST → dbt.ref of the source itself
+    [`${r.model}_s2`, 'sql', `${r.model}_s1`],              // the aggregate reads the Python model
+    [`${r.model}_s3`, 'python', `${r.model}_s2`],
+    [r.model, 'sql', `${r.model}_s3`],                      // SQL after python: where + limit over the Python model's columns
+  ]);
+  assert.equal(r.materialized, 'table');
+  assert.deepEqual(r.columns, ['player_id_of_internal', 'revenue', 'revenue_z'], 'the where stage saw revenue_z because the python stage declared output.columns');
+  assert.deepEqual(pipeFiles(e, r.context_id), [`${r.model}.sql`, `${r.model}_s1.py`, `${r.model}_s1.yml`, `${r.model}_s2.sql`, `${r.model}_s3.py`, `${r.model}_s3.yml`]);
+  assert.equal(r.python.length, 2);
+  assert.ok(r.python[0].code.includes('dbt.ref("fct_analytics_events")'), 'the first python model refs the source');
+  assert.ok(r.python[1].code.includes(`dbt.ref("${r.model}_s2")`));
+  // a SQL stage that names a column the python stage did not declare is refused at validation
+  const PY_NO_OUT = { ...PY_STAGE, output: undefined };
+  await assert.rejects(() => e.register_native_model({ name: 'chain2', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_NO_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }] } }), /unknown column 'revenue_z'/);
+  // a rebuild with a SHORTER chain leaves no orphaned _sN model behind
+  const r2 = await e.register_native_model({ name: 'chain', context_id: r.context_id, pipeline: { source: 'events', stages: [AGG, PY_OUT] } });
+  assert.deepEqual(pipeFiles(e, r.context_id), [`${r2.model}.py`, `${r2.model}.yml`, `${r2.model}_s1.sql`]);
 });
 
 test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
@@ -137,7 +161,7 @@ test('python stage: a package the runtime lacks goes to dbt\'s packages config; 
   const st = { ...PY_STAGE, imports: [{ package: 'sklearn', submodule: 'cluster', names: ['KMeans'] }, { package: 'scipy', submodule: 'stats' }, { package: 'numpy', as: 'np' }] };
   const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, st] } }));
   assert.equal(r.dry_run, true);
-  assert.deepEqual(r.python.packages, ['scikit-learn', 'scipy']);
+  assert.deepEqual(r.python[0].packages, ['scikit-learn', 'scipy']);
   assert.equal(r.materialized, 'table');
   assert.equal(ctxs.list().length, 0, 'dry_run writes nothing');
 });
@@ -149,14 +173,16 @@ test('incremental builder: add_step python → columns, nothing may follow, prev
   await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
   const p = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: PY_STAGE });
   assert.deepEqual(p.columns_added.map((c) => c.name), ['revenue_z']);
-  await assert.rejects(() => e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'limit', n: 5 } }), /must be the LAST stage/);
   const pv = await e.build_native_model({ action: 'preview', draft_id: s.draft_id });
-  assert.equal(pv.python.prep_model, `pipe_seg_${s.draft_id}_prep`);
-  assert.equal(pv.python.model, `pipe_seg_${s.draft_id}`);
+  assert.deepEqual(pv.models.map((m) => [m.model, m.kind]), [[`pipe_seg_${s.draft_id}_s1`, 'sql'], [`pipe_seg_${s.draft_id}`, 'python']]);
+  assert.ok(pv.models[1].code.includes(`dbt.ref("pipe_seg_${s.draft_id}_s1")`));
   assert.deepEqual(pv.available_columns.map((c) => c.name), ['player_id_of_internal', 'revenue', 'revenue_z']);
+  // SQL after the python stage is allowed — it becomes the next model in the chain
+  const after = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'limit', n: 5 } });
+  assert.equal(after.step_index, 3);
   const m = await e.build_native_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(m.model, `pipe_seg_${s.draft_id}`);
-  assert.deepEqual(pipeFiles(e, s.draft_id), [`${m.model}.py`, `${m.model}.yml`, `${m.model}_prep.sql`]);
+  assert.deepEqual(pipeFiles(e, s.draft_id), [`${m.model}.sql`, `${m.model}_s1.sql`, `${m.model}_s2.py`, `${m.model}_s2.yml`]);
 });
 
 // The body is STRUCTURE: nesting is indentation, so the shape itself has to be valid Python shape.
@@ -167,7 +193,7 @@ test('python stage: body structure — nesting is indentation, headers open bloc
   // a real nested body renders as indented Python the gate accepts
   const ok = await withBody(['if k > 1:', ["df['seg'] = 1", 'for c in df.columns:', ['df[c] = df[c]']], 'else:', ["df['seg'] = 0"], 'return df']);
   assert.equal(ok.dry_run, true);
-  assert.ok(ok.python.code.includes("\n    if k > 1:\n        df['seg'] = 1\n        for c in df.columns:\n            df[c] = df[c]\n    else:\n        df['seg'] = 0\n    return df\n"), 'each nesting level is one indentation level');
+  assert.ok(ok.python[0].code.includes("\n    if k > 1:\n        df['seg'] = 1\n        for c in df.columns:\n            df[c] = df[c]\n    else:\n        df['seg'] = 0\n    return df\n"), 'each nesting level is one indentation level');
   // a block with no header before it
   await assert.rejects(() => withBody(['x = 1', ["df['seg'] = 1"], 'return df']), /nested block must follow a line that opens it .*the line before is "x = 1"/);
   // a header with no block after it
@@ -197,7 +223,7 @@ test('python stage: the body schema is a recursive $ref to $defs.py_block hoiste
   const deep = (n) => (n === 0 ? ['return df'] : [`if k > ${n}:`, deep(n - 1), 'else:', ['return df']]);
   const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body: deep(12) }], steps: [{ call: 'f', args: { k: 1 } }] }] } }));
   assert.equal(r.dry_run, true);
-  assert.ok(r.python.code.includes(`${'    '.repeat(13)}return df`), 'level 12 rendered with 13 indents (function body = 1)');
+  assert.ok(r.python[0].code.includes(`${'    '.repeat(13)}return df`), 'level 12 rendered with 13 indents (function body = 1)');
 });
 
 // ── Availability: the stage exists only where dbt can run Python models — decided from the profile ──
@@ -248,7 +274,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
 // writes the platform's own call and owns the cost.
 test('python stage: steps receive dbt.ref() untouched and the last return is the model — nothing converted or projected for you', () => {
   const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }], output: { columns: ['a', 'b'] } };
-  const compile = (rt, over = {}, config = {}) => compilePythonStage({ ...stage, ...over }, { modelName: 'm', prepModel: 'm_prep', allow: importAllowlist({}, frameProfile(rt, config)), config, profile: frameProfile(rt, config) });
+  const compile = (rt, over = {}, config = {}) => compilePythonStage({ ...stage, ...over }, { modelName: 'm', inputModel: 'm_prep', allow: importAllowlist({}, frameProfile(rt, config)), config, profile: frameProfile(rt, config) });
   for (const rt of [{ runtime: 'bigquery', method: 'bigframes' }, { runtime: 'bigquery', method: 'serverless' }, { runtime: 'snowflake' }, { runtime: 'databricks' }, { runtime: 'duckdb' }, { runtime: 'unknown' }]) {
     const c = compile(rt);
     assert.ok(c.code.includes('\n    df = dbt.ref("m_prep")\n'), `${rt.runtime}: ref used as returned`);
@@ -282,25 +308,4 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
     assert.match(py.description, /converting to pandas is a deliberate, single-node choice you make inside a function, never done for you/);
     assert.ok(py.properties.imports.items.properties.package.enum.includes('duckdb'));
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
-});
-
-// A python stage reads the table the SQL stages produce — with nothing before it that table would
-// be the whole source. Refused; a pipeline time_range (a leading where at build) counts as a stage.
-test('python stage: needs at least one SQL stage before it — a pipeline time_range counts', async (t) => {
-  if (skipNoPy(t)) return;
-  const e = engine();
-  await assert.rejects(() => e.register_native_model({ name: 'gaps', dry_run: true, pipeline: { source: 'events', stages: [PY_STAGE] } }), /needs at least one SQL stage before it/);
-  const ok = await e.register_native_model({ name: 'gaps', dry_run: true, pipeline: { source: 'events', time_range: { start: '2025-01-01', end: '2025-01-31' }, stages: [PY_STAGE] } });
-  assert.equal(ok.dry_run, true);
-  // the incremental builder agrees, and its step numbering stays the caller's (time_range is not a step)
-  const bare = await e.build_native_model({ action: 'start', name: 'gaps2', source: 'events' });
-  await assert.rejects(() => e.build_native_model({ action: 'add_step', draft_id: bare.draft_id, stage: PY_STAGE }), /step 1: .*needs at least one SQL stage before it/);
-  const windowed = await e.build_native_model({ action: 'start', name: 'gaps3', source: 'events', time_range: { start: '2025-01-01', end: '2025-01-31' } });
-  const r = await e.build_native_model({ action: 'add_step', draft_id: windowed.draft_id, stage: PY_STAGE });
-  assert.equal(r.step_index, 1);
-  // and every other placement stays closed: two python stages, python in the middle, SQL after python
-  await assert.rejects(() => e.register_native_model({ name: 'gaps', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_STAGE, PY_STAGE] } }), /must be the LAST stage/);
-  await assert.rejects(() => e.register_native_model({ name: 'gaps', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_STAGE, { stage: 'limit', n: 5 }] } }), /must be the LAST stage/);
-  await assert.rejects(() => e.build_native_model({ action: 'add_steps', draft_id: bare.draft_id, stages: [AGG, PY_STAGE, { stage: 'limit', n: 5 }] }), /must be the LAST stage.*NO steps applied/);
-  assert.deepEqual((await e.build_native_model({ action: 'preview', draft_id: bare.draft_id })).steps, [], 'the failed batch left the draft untouched');
 });

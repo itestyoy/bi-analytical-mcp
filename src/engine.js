@@ -10,7 +10,7 @@ import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
-import { compilePythonStage, importAllowlist, runAstGate } from './python-model.js'; // registers the python pipeline stage
+import { compilePythonStage, importAllowlist, runAstGate, frameProfile } from './python-model.js'; // registers the python pipeline stage
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
@@ -1767,7 +1767,8 @@ export class Engine {
   /** Compile a python stage into its dbt model (structure only — the gate is separate). */
   _compilePythonStage(stage, { modelName, prepModel, pipeline }) {
     try {
-      return compilePythonStage(stage, { modelName, prepModel, allow: importAllowlist(), config: this.pythonModelConfig, pipeline });
+      const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
+      return compilePythonStage(stage, { modelName, prepModel, allow: importAllowlist(process.env, profile), config: this.pythonModelConfig, pipeline, profile });
     } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
   }
 
@@ -1902,7 +1903,7 @@ export class Engine {
       this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);
       for (const f of [`${modelName}.py`, `${modelName}.yml`, `${prepModel}.sql`]) this.ctxs.removeGeneratedFile(ctx.id, f); // a rebuild that REMOVED the stage
     }
-    const pyInfo = py ? { prep_model: prepModel, packages: py.packages, steps: out.python.stage.steps.map((st) => st.call), code: py.code } : null;
+    const pyInfo = py ? { prep_model: prepModel, runtime: py.runtime, frame: py.frame, packages: py.packages, steps: out.python.stage.steps.map((st) => st.call), code: py.code } : null;
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
     ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(py ? { python: { prep_model: prepModel, packages: py.packages, steps: pyInfo.steps } } : {}) };

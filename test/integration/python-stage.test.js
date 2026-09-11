@@ -51,6 +51,7 @@ const Z = { p1: (30 - 100 / 3) / Math.sqrt(1816.6666667 / 3), p2: (5 - 100 / 3) 
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }, { name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
 const PY = {
   stage: 'python',
+  frame: 'pandas', // the functions below are pandas/numpy code → the explicit opt-in (on DuckDB: dbt.ref(...).df())
   imports: [{ package: 'numpy' }],
   functions: [
     { name: 'zscore', params: ['df', 'column', 'as_'], body: ['df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)', 'return df'] },
@@ -114,4 +115,26 @@ test('python stage: a runtime error in the Python model is reported from dbt, no
   assert.equal(r.error.stage, 'run');
   assert.match(r.error.message, /no_such_column/);
   await assert.rejects(() => engine.get_query_result({ context_id: r.context_id, table: r.model }).then((x) => { if (x.ok === false) throw new Error(x.error?.message || 'not ok'); }));
+});
+
+// NATIVE frame (the default): the steps work on what dbt.ref() returns on this warehouse — a
+// DuckDBPyRelation here (BigFrames / Snowpark / PySpark elsewhere) — and the work stays in the engine.
+test('python stage: native frame — steps run on the relation dbt.ref() returns, no pandas anywhere', opts, async (t) => {
+  if (skip(t)) return;
+  const native = {
+    stage: 'python',
+    functions: [
+      { name: 'payers', params: ['df'], body: ["return df.filter('revenue IS NOT NULL')"] },
+      { name: 'doubled', params: ['df'], body: ["return df.project('player_id_of_internal, revenue, revenue * 2 AS revenue_x2')"] },
+    ],
+    steps: [{ call: 'payers' }, { call: 'doubled' }],
+    output: { columns: ['player_id_of_internal', 'revenue_x2'] },
+  };
+  const r = await engine.register_native_model({ name: 'seg4', pipeline: { source: 'events', stages: [AGG, native] } });
+  assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
+  assert.equal(r.python.frame, 'native');
+  assert.equal(r.python.runtime, 'duckdb');
+  assert.ok(!r.python.code.includes('pandas') && !r.python.code.includes('.df()'), 'no pandas in the native path');
+  const rows = r.rows.map((x) => [x.player_id_of_internal, num(x.revenue_x2)]).sort((a, b) => a[0].localeCompare(b[0]));
+  assert.deepEqual(rows, [['p1', 60], ['p2', 10], ['p3', 130]], 'the player without purchases is filtered out; revenue doubled');
 });

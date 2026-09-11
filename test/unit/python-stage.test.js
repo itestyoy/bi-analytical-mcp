@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { pyLiteral, importAllowlist } from '../../src/python-model.js';
+import { pyLiteral, importAllowlist, frameProfile, compilePythonStage } from '../../src/python-model.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 // The fixture catalog is loaded without a dbt profile here → no Python runtime → the stage would be
@@ -96,7 +96,7 @@ test('python stage: the allowed packages are an ENUM in the tool schema; anythin
   const items = e.schemas.register_native_model.properties.pipeline.properties.stages.items.oneOf.find((s) => s.properties.stage.const === 'python');
   assert.deepEqual(items.properties.imports.items.properties.package.enum, [...importAllowlist().keys()], 'the enum IS the allowlist');
   assert.ok(items.properties.imports.items.properties.package.enum.includes('sklearn'));
-  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels, bigframes/);
+  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels/);
   // a bare string is no longer an import declaration
   await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: ['numpy'] }] } })));
 });
@@ -241,4 +241,65 @@ test('python stage: offered only where the dbt profile can run Python models; re
     assert.ok(eDuck.schemas.build_native_model.$defs.py_block);
     assert.deepEqual((await eDuck.semantic_index({})).python_models.runtime, 'duckdb');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
+});
+
+// ── The frame: dbt.ref() as the platform returns it by default; pandas only on request, spelled
+// per platform exactly as dbt's docs do. No helper that probes for a conversion method.
+test('python stage: native frame by default — dbt.ref() is used as returned; pandas is an explicit per-platform conversion', () => {
+  const ALLOW = importAllowlist({});
+  const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }], output: { columns: ['a', 'b'] } };
+  const compile = (rt, over = {}, config = {}) => compilePythonStage({ ...stage, ...over }, { modelName: 'm', prepModel: 'm_prep', allow: importAllowlist({}, frameProfile(rt, config)), config, profile: frameProfile(rt, config) });
+  // BigFrames: native = the pandas API inside BigQuery → pandas-style projection, no conversion
+  let c = compile({ runtime: 'bigquery', method: 'bigframes' });
+  assert.ok(c.code.includes('\n    df = dbt.ref("m_prep")\n'), 'ref used as is');
+  assert.ok(!c.code.includes('_frame') && !c.code.includes('import pandas'), 'no conversion helper, no pandas import');
+  assert.ok(c.code.includes('    return df[["a", "b"]]'));
+  assert.equal(c.runtime, 'bigframes');
+  // …and pandas on request → .to_pandas()
+  c = compile({ runtime: 'bigquery', method: 'bigframes' }, { frame: 'pandas' });
+  assert.ok(c.code.includes('\n    df = dbt.ref("m_prep").to_pandas()\n'));
+  assert.ok(c.code.includes('import pandas as pd'));
+  // Dataproc / Databricks: PySpark — .select() for native, pandas-on-Spark for pandas
+  c = compile({ runtime: 'bigquery', method: 'serverless' });
+  assert.ok(c.code.includes('    return df.select("a", "b")'));
+  c = compile({ runtime: 'databricks' }, { frame: 'pandas' });
+  assert.ok(c.code.includes('.pandas_api()'));
+  // Snowpark
+  c = compile({ runtime: 'snowflake' }, { frame: 'pandas' });
+  assert.ok(c.code.includes('dbt.ref("m_prep").to_pandas()'));
+  assert.ok(c.code.includes('return df[["a", "b"]]'), 'a pandas frame is projected pandas-style');
+  c = compile({ runtime: 'snowflake' });
+  assert.ok(c.code.includes('return df.select("a", "b")'));
+  // DuckDB
+  c = compile({ runtime: 'duckdb' }, { frame: 'pandas' });
+  assert.ok(c.code.includes('dbt.ref("m_prep").df()'));
+  // the operator's per-model submission method decides the BigQuery profile too
+  assert.equal(frameProfile({ runtime: 'bigquery', method: 'bigframes' }, { submission_method: 'serverless' }).key, 'pyspark');
+  // the platform's own package is importable only where it exists
+  assert.ok(importAllowlist({}, frameProfile({ runtime: 'bigquery', method: 'bigframes' })).has('bigframes'));
+  assert.ok(importAllowlist({}, frameProfile({ runtime: 'databricks' })).has('pyspark'));
+  assert.ok(!importAllowlist({}, frameProfile({ runtime: 'databricks' })).has('bigframes'));
+  assert.ok(importAllowlist({}, frameProfile({ runtime: 'snowflake' })).has('snowflake'));
+  // an unknown runtime cannot write a pandas conversion → refused, native still works
+  assert.throws(() => compile({ runtime: 'unknown' }, { frame: 'pandas' }), /frame: 'pandas' is not available/);
+  assert.ok(compile({ runtime: 'unknown' }).code.includes('df = dbt.ref("m_prep")\n'));
+  assert.deepEqual(ALLOW.has('bigframes'), false, 'no platform package without a runtime');
+});
+
+test('python stage: the schema describes THIS warehouse\'s frame and offers pandas only where it can be written', () => {
+  const DUCK = fileURLToPath(new URL('../integration/fixtures/duckdb_project', import.meta.url));
+  const saved = process.env.MCP_PYTHON_MODELS; delete process.env.MCP_PYTHON_MODELS;
+  try {
+    const c = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
+    const e = new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
+    const py = e.schemas.build_native_model.properties.stage.oneOf.find((st) => st.properties.stage.const === 'python');
+    assert.deepEqual(py.properties.frame.enum, ['native', 'pandas']);
+    assert.match(py.properties.frame.description, /DuckDBPyRelation/);
+    assert.match(py.properties.frame.description, /\.df\(\)/);
+    assert.ok(py.properties.imports.items.properties.package.enum.includes('duckdb'));
+  } finally { process.env.MCP_PYTHON_MODELS = saved; }
+  // forced on with no profile: the runtime is unknown → native only
+  const e2 = engine();
+  const py2 = e2.schemas.build_native_model.properties.stage.oneOf.find((st) => st.properties.stage.const === 'python');
+  assert.deepEqual(py2.properties.frame.enum, ['native']);
 });

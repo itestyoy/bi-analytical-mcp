@@ -25,16 +25,44 @@ const MODULE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
 // Python keywords (no identifier may be one) + the names the generated file reserves for its own
 // top level (a FUNCTION may not take them; a parameter is local to its function and may be `df`).
 const KEYWORDS = new Set(['False', 'None', 'True', 'and', 'as', 'assert', 'async', 'await', 'break', 'class', 'continue', 'def', 'del', 'elif', 'else', 'except', 'finally', 'for', 'from', 'global', 'if', 'import', 'in', 'is', 'lambda', 'nonlocal', 'not', 'or', 'pass', 'raise', 'return', 'try', 'while', 'with', 'yield']);
-const RESERVED = new Set([...KEYWORDS, 'model', 'dbt', 'session', 'pd', '_frame', 'df']);
+const RESERVED = new Set([...KEYWORDS, 'model', 'dbt', 'session', 'pd', 'df']);
+
+/**
+ * What `dbt.ref()` hands the model on THIS warehouse, and how the two frame modes are spelled —
+ * exactly as dbt's own docs do per platform. `native` (the default) keeps the platform's
+ * DataFrame: BigFrames (the pandas API, computed inside BigQuery), Snowpark, PySpark, a DuckDB
+ * relation. `pandas` is the explicit opt-in the docs describe: `.to_pandas()` on Snowpark and
+ * BigFrames, pandas-on-Spark (`.pandas_api()`, still distributed) on PySpark, `.df()` on DuckDB.
+ * The submission method may also come from the operator's per-model config.
+ */
+export function frameProfile(rt, config = {}) {
+  const runtime = String(rt?.runtime || '').toLowerCase();
+  const method = String(config.submission_method || rt?.method || '').toLowerCase();
+  if (runtime === 'bigquery' && (method === 'bigframes' || !method)) {
+    return { key: 'bigframes', native: 'a BigFrames DataFrame (bigframes.pandas — the pandas API, computed inside BigQuery; import bigframes.pandas as bpd for constructors)', toPandas: '.to_pandas()', pandasNote: 'pulls the table into the notebook runtime as an in-memory pandas frame', select: 'pandas', packages: ['bigframes'] };
+  }
+  if (runtime === 'bigquery' || runtime === 'databricks') {
+    return { key: 'pyspark', native: 'a PySpark DataFrame (pyspark.sql: .filter / .withColumn / .groupBy, functions via pyspark.sql.functions)', toPandas: '.pandas_api()', pandasNote: 'pandas-on-Spark — the pandas API, still distributed', select: 'select', packages: ['pyspark'] };
+  }
+  if (runtime === 'snowflake') {
+    return { key: 'snowpark', native: 'a Snowpark DataFrame (.filter / .with_column / .group_by, functions via snowflake.snowpark.functions)', toPandas: '.to_pandas()', pandasNote: 'pulls the table into the warehouse\'s Python runtime as an in-memory pandas frame', select: 'select', packages: ['snowflake'] };
+  }
+  if (runtime === 'duckdb') {
+    return { key: 'duckdb', native: 'a DuckDBPyRelation (.filter / .aggregate / .project with SQL expressions)', toPandas: '.df()', pandasNote: 'an in-memory pandas frame', select: 'select', packages: ['duckdb', 'pyarrow'] };
+  }
+  return { key: 'unknown', native: 'whatever dbt.ref() returns on this adapter', toPandas: null, pandasNote: null, select: 'pandas', packages: [] };
+}
 
 /**
  * Importable top-level packages → the pip name dbt must install (`packages` config), or null when
  * the runtime ships it (BigFrames / Dataproc / Snowpark runtimes carry pandas, numpy and
- * scikit-learn). The operator extends the list with MCP_PYTHON_PACKAGES: comma-separated
- * `import_name` (preinstalled) or `import_name=pip-name` (installed by dbt).
+ * scikit-learn), plus the platform's own DataFrame package (from frameProfile). The operator
+ * extends the list with MCP_PYTHON_PACKAGES: comma-separated `import_name` (preinstalled) or
+ * `import_name=pip-name` (installed by dbt).
  */
-export function importAllowlist(env = process.env) {
-  const allow = new Map([['pandas', null], ['numpy', null], ['sklearn', 'scikit-learn'], ['scipy', 'scipy'], ['statsmodels', 'statsmodels'], ['bigframes', null]]);
+export function importAllowlist(env = process.env, profile = null) {
+  const allow = new Map([['pandas', null], ['numpy', null], ['sklearn', 'scikit-learn'], ['scipy', 'scipy'], ['statsmodels', 'statsmodels']]);
+  for (const pkg of profile?.packages || []) allow.set(pkg, null);
   for (const raw of String(env.MCP_PYTHON_PACKAGES || '').split(',')) {
     const item = raw.trim();
     if (!item) continue;
@@ -130,10 +158,14 @@ function importLine(spec, i, allow) {
  * Returns { code, yml, packages, functions (for the gate), outputColumns, config }. Throws on a
  * structural problem (imports, names, arguments) — the static gate over the bodies is separate.
  */
-export function compilePythonStage(stage, { modelName, prepModel, allow, config = {}, pipeline = null }) {
-  const importLines = ['import pandas as pd'];
+export function compilePythonStage(stage, { modelName, prepModel, allow, config = {}, pipeline = null, profile = frameProfile(null) }) {
+  // The frame the steps work on: the platform's native DataFrame (default) or, on explicit
+  // request, pandas — spelled per platform as dbt's docs do (frameProfile).
+  const frame = stage.frame || 'native';
+  if (frame === 'pandas' && !profile.toPandas) fail(`frame: 'pandas' is not available — the runtime is unknown here, so the conversion cannot be written. Configure the dbt profile (or use frame: 'native').`);
+  const importLines = frame === 'pandas' ? ['import pandas as pd'] : [];
   const packages = new Set();
-  const bound = new Set(['pd']);
+  const bound = new Set(frame === 'pandas' ? ['pd'] : []);
   (stage.imports || []).forEach((spec, i) => {
     const { line, top, binds } = importLine(spec, i, allow);
     if (allow.get(top)) packages.add(allow.get(top));
@@ -185,32 +217,26 @@ export function compilePythonStage(stage, { modelName, prepModel, allow, config 
   // operator's runtime extras (submission method etc.) — never the caller's.
   const cfg = { materialized: 'table', ...(packages.size ? { packages: [...packages].sort() } : {}), ...config };
   const cfgArgs = Object.entries(cfg).map(([k, v]) => `${k}=${pyLiteral(v)}`).join(', ');
-  const header = yaml.dump({ pipeline: pipeline?.name || null, source: pipeline?.pipeline?.source || null, python: { imports: stage.imports || [], steps, output: stage.output || null } }, { lineWidth: 100, noRefs: true, skipInvalid: true })
+  const header = yaml.dump({ pipeline: pipeline?.name || null, source: pipeline?.pipeline?.source || null, runtime: profile.key, python: { frame, imports: stage.imports || [], steps, output: stage.output || null } }, { lineWidth: 100, noRefs: true, skipInvalid: true })
     .split('\n').filter(Boolean).map((l) => `#   ${l}`).join('\n');
   const fnSrc = [...byName.values()].map((f) => `def ${f.name}(${f.params.join(', ')}):\n${f.body.split('\n').map((l) => (l.trim() ? `    ${l}` : '')).join('\n')}\n`);
 
+  // dbt.ref() IS the frame: native stays as the platform returns it; pandas converts as the
+  // platform's docs spell it. The final projection follows the frame's API.
+  const refLine = `    df = dbt.ref(${pyLiteral(prepModel)})${frame === 'pandas' ? profile.toPandas : ''}`;
+  const pandasStyle = frame === 'pandas' || profile.select === 'pandas';
+  const returnLine = !outCols ? '    return df' : (pandasStyle ? `    return df[${pyLiteral(outCols)}]` : `    return df.select(${outCols.map(pyLiteral).join(', ')})`);
   const code = [
     '# Generated by bi-analytical-mcp (python stage) from config:',
     header,
     '',
-    ...importLines,
-    '',
-    '',
-    'def _frame(rel):',
-    '    """Whatever this runtime returns from dbt.ref() → a pandas frame (BigFrames / Snowpark .to_pandas, PySpark .toPandas, DuckDB .df)."""',
-    "    for m in ('to_pandas', 'toPandas', 'df', 'to_df'):",
-    '        f = getattr(rel, m, None)',
-    '        if callable(f):',
-    '            return f()',
-    '    return rel',
-    '',
-    '',
+    ...(importLines.length ? [...importLines, '', ''] : ['']),
     ...fnSrc.map((s) => `${s}\n`),
     'def model(dbt, session):',
     `    dbt.config(${cfgArgs})`,
-    `    df = _frame(dbt.ref(${pyLiteral(prepModel)}))`,
+    refLine,
     ...stepLines,
-    outCols ? `    return df[${pyLiteral(outCols)}]` : '    return df',
+    returnLine,
     '',
   ].join('\n');
 
@@ -223,7 +249,12 @@ export function compilePythonStage(stage, { modelName, prepModel, allow, config 
     }],
   }, { lineWidth: 100, noRefs: true });
 
-  return { code, yml, packages: [...packages].sort(), functions: [...byName.values()], outputColumns: outCols, config: cfg };
+  return { code, yml, packages: [...packages].sort(), functions: [...byName.values()], outputColumns: outCols, config: cfg, frame, runtime: profile.key };
+}
+
+/** The operator's literal dbt.config extras (MCP_PYTHON_MODEL_CONFIG) — also decide the frame profile. */
+export function pythonModelConfigFromEnv(env = process.env) {
+  try { return JSON.parse(env.MCP_PYTHON_MODEL_CONFIG || '{}'); } catch { return {}; }
 }
 
 /** Run the static gate over the declared functions with the given Python interpreter. */
@@ -275,7 +306,7 @@ function bodySchema() {
   };
 }
 
-function pythonStageSchema(allow = importAllowlist()) {
+function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(null)) {
   const ID = '^[A-Za-z_][A-Za-z0-9_]*$';
   const MOD = '^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$';
   const preinstalled = [...allow].filter(([, pip]) => !pip).map(([k]) => k);
@@ -286,6 +317,10 @@ function pythonStageSchema(allow = importAllowlist()) {
     properties: {
       stage: { const: 'python' },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
+      frame: {
+        enum: profile.toPandas ? ['native', 'pandas'] : ['native'], default: 'native',
+        description: `What the first step receives. native (default): dbt.ref() as this warehouse returns it — ${profile.native}; write the functions against THAT API, the work stays in the warehouse engine. pandas: the explicit opt-in dbt's docs describe — the server appends ${profile.toPandas || '(unavailable here)'} to dbt.ref()${profile.pandasNote ? ` (${profile.pandasNote})` : ''}; use it for scikit-learn / scipy / statsmodels over an already-aggregated table, and mind that it is single-node.`,
+      },
       imports: {
         type: 'array', maxItems: 20,
         items: {
@@ -297,7 +332,7 @@ function pythonStageSchema(allow = importAllowlist()) {
             names: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID }, description: 'from … import <names>. Not together with `as`.' },
           },
         },
-        description: 'Modules the functions use — each names one allowlisted `package` (the enum is the whole allowlist). pandas is always imported as pd. Packages the runtime lacks go to dbt\'s `packages` config for dbt to install.',
+        description: 'Modules the functions use — each names one allowlisted `package` (the enum is the whole allowlist). With frame: pandas, pandas is imported as pd for you. Packages the runtime lacks go to dbt\'s `packages` config for dbt to install.',
       },
       functions: {
         type: 'array', minItems: 1, maxItems: 30,
@@ -326,15 +361,16 @@ function pythonStageSchema(allow = importAllowlist()) {
 // follow. `build` validates the structure (imports / names / arguments) against a placeholder
 // ref; the body gate and the real names are the engine's part.
 registerStage('python', {
-  schema: () => pythonStageSchema(importAllowlist()),
+  schema: (catalog) => { const pr = frameProfile(catalog?.pythonRuntime, pythonModelConfigFromEnv()); return pythonStageSchema(importAllowlist(process.env, pr), pr); },
   defs: () => pythonStageDefs(), // hoisted to the root of every tool schema embedding stages
   // Offered only where dbt can run Python models (the profile's adapter + its submission settings,
   // see resolvePythonRuntime); elsewhere the stage is absent from the schemas and refused here.
   available: (catalog) => catalog?.pythonRuntime?.available !== false,
   unavailableReason: (catalog) => `the python stage is not available: ${catalog?.pythonRuntime?.reason || 'dbt cannot run Python models on this profile'}. Fix the dbt profile (or set MCP_PYTHON_MODELS=on when the submission is configured per model) and restart the server.`,
   terminal: true,
-  build: ({ cols }, st) => {
-    compilePythonStage(st, { modelName: 'm', prepModel: 'm_prep', allow: importAllowlist(), config: {} });
+  build: ({ cols, catalog }, st) => {
+    const pr = frameProfile(catalog?.pythonRuntime, pythonModelConfigFromEnv());
+    compilePythonStage(st, { modelName: 'm', prepModel: 'm_prep', allow: importAllowlist(process.env, pr), config: {}, profile: pr });
     return { op: { op: 'python', python: true, stage: st }, cols: pythonStageColumns(cols, st) };
   },
 });

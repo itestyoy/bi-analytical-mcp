@@ -21,7 +21,7 @@ Design docs:
 |---|---|
 | `semantic_index` | registry + discovery: models, events, properties, attributes, real values, recipes (`{ recipe: id }`), index status |
 | `create_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table) |
-| `build_native_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result; a final `python` stage turns the pipeline into a dbt **Python model** run on the warehouse's Python runtime |
+| `build_native_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result; a final `python` stage turns the pipeline into a dbt **Python model** run on the warehouse's Python runtime — steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), pandas only on explicit `frame: pandas` |
 | `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
 | `update_semantic_model` | add/remove task measures, dimensions, metrics in a context |
 | `context` | manage contexts: `{ action: list \| describe \| drop \| delete_model \| delete_semantic_model }` |

@@ -26,7 +26,7 @@ const engine = () => {
   return new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY });
 };
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }, { name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
-const ZSCORE = { name: 'zscore', params: ['df', 'column', 'as_'], body: "df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)\nreturn df" };
+const ZSCORE = { name: 'zscore', params: ['df', 'column', 'as_'], body: ['df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)', 'return df'] };
 const PY_STAGE = { stage: 'python', imports: [{ package: 'numpy' }], functions: [ZSCORE], steps: [{ call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } }], output: { columns: ['player_id_of_internal', 'revenue', 'revenue_z'] } };
 const decl = (over = {}) => ({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] }, ...over });
 const pipeFiles = (e, id) => readdirSync(e.ctxs.generatedDir(id)).filter((f) => f.startsWith('pipe_')).sort();
@@ -109,18 +109,18 @@ test('python stage: a step must call a declared function with exactly its parame
 test('python stage: the static gate refuses imports in bodies, dbt/session access, eval and dunders — naming function and line', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  const bad = { name: 'bad', params: ['df'], body: "import os\nx = eval('1')\ndf['t'] = dbt.this\nreturn df.__class__" };
+  const bad = { name: 'bad', params: ['df'], body: ['import os', "x = eval('1')", "df['t'] = dbt.this", 'return df.__class__'] };
   const err = await e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [bad], steps: [{ call: 'bad' }] }] } })).catch((x) => x);
   assert.ok(err instanceof Error);
-  assert.match(err.message, /bad line 1: an import inside a function body/);
-  assert.match(err.message, /bad line 2: call to 'eval\(\)'/);
-  assert.match(err.message, /bad line 3: 'dbt' is not reachable/);
-  assert.match(err.message, /bad line 4: dunder attribute '__class__'/);
+  assert.match(err.message, /bad line 1 \(import os\): an import inside a function body/);
+  assert.match(err.message, /bad line 2 \(x = eval\('1'\)\): call to 'eval\(\)'/);
+  assert.match(err.message, /bad line 3 .*: 'dbt' is not reachable/);
+  assert.match(err.message, /bad line 4 .*: dunder attribute '__class__'/);
   // a syntax error is caught here, not on the warehouse runtime
-  const syn = { name: 'syn', params: ['df'], body: 'return df[' };
-  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [syn], steps: [{ call: 'syn' }] }] } })), /syn line 1: syntax error/);
+  const syn = { name: 'syn', params: ['df'], body: ['return df['] };
+  await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [syn], steps: [{ call: 'syn' }] }] } })), /syn line 1 \(return df\[\): syntax error/);
   // a function that never returns the frame is refused too
-  const noret = { name: 'noret', params: ['df'], body: "df['x'] = 1" };
+  const noret = { name: 'noret', params: ['df'], body: ["df['x'] = 1"] };
   await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [noret], steps: [{ call: 'noret' }] }] } })), /must `return` the frame/);
   // nothing was written by a refused declaration
   assert.equal(e.ctxs.list().length, 0);
@@ -153,4 +153,26 @@ test('incremental builder: add_step python → columns, nothing may follow, prev
   const m = await e.build_native_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(m.model, `pipe_seg_${s.draft_id}`);
   assert.deepEqual(pipeFiles(e, s.draft_id), [`${m.model}.py`, `${m.model}.yml`, `${m.model}_prep.sql`]);
+});
+
+// The body is STRUCTURE: nesting is indentation, so the shape itself has to be valid Python shape.
+test('python stage: body structure — nesting is indentation, headers open blocks, no spaces-as-indent', async (t) => {
+  if (skipNoPy(t)) return;
+  const e = engine();
+  const withBody = (body) => e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body }], steps: [{ call: 'f', args: { k: 2 } }] }] } }));
+  // a real nested body renders as indented Python the gate accepts
+  const ok = await withBody(['if k > 1:', ["df['seg'] = 1", 'for c in df.columns:', ['df[c] = df[c]']], 'else:', ["df['seg'] = 0"], 'return df']);
+  assert.equal(ok.dry_run, true);
+  assert.ok(ok.python.code.includes("\n    if k > 1:\n        df['seg'] = 1\n        for c in df.columns:\n            df[c] = df[c]\n    else:\n        df['seg'] = 0\n    return df\n"), 'each nesting level is one indentation level');
+  // a block with no header before it
+  await assert.rejects(() => withBody(['x = 1', ["df['seg'] = 1"], 'return df']), /nested block must follow a line that opens it .*the line before is "x = 1"/);
+  // a header with no block after it
+  await assert.rejects(() => withBody(['if k > 1:', 'return df']), /"if k > 1:" opens a block, so the next item must be a nested array/);
+  // indentation by spaces is refused — nesting is the only way
+  await assert.rejects(() => withBody(['if k > 1:', ['    return df']]), /must not start with whitespace|must match pattern/);
+  // an empty block, a newline inside a line, a text blob instead of an array
+  await assert.rejects(() => withBody(['if k > 1:', [], 'return df']), /empty block|at least 1 item/);
+  await assert.rejects(() => withBody(['x = 1\nreturn df']), /must not contain a newline|pattern/);
+  await assert.rejects(() => withBody('return df'), /body/);
+  assert.equal(e.ctxs.list().length, 0);
 });

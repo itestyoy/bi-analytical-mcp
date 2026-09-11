@@ -1771,7 +1771,7 @@ export class Engine {
     const compiled = this._compilePythonStage(stage, { modelName: 'm', prepModel: 'm_prep', pipeline: null });
     const gate = await runAstGate(this.pythonBin, compiled.functions);
     if (!gate.ok) {
-      const lines = gate.errors.map((e) => `${e.function} line ${e.line}: ${e.message}`);
+      const lines = gate.errors.map((e) => `${e.function} line ${e.line}${e.text ? ` (${e.text})` : ''}: ${e.message}`);
       throw new ToolError(`python stage: functions rejected by the static gate:\n${lines.join('\n')}`, { stage: 'validate', field: 'functions', details: gate.errors });
     }
     return compiled;

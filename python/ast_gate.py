@@ -31,21 +31,25 @@ def _check(fn):
     try:
         tree = ast.parse(src)
     except SyntaxError as e:  # line 1 of `src` is the def line
-        errors.append({"function": name, "line": max(1, (e.lineno or 2) - 1), "message": f"syntax error: {e.msg}"})
+        ln = max(1, (e.lineno or 2) - 1)
+        lines = body.splitlines()
+        errors.append({"function": name, "line": ln, "text": lines[ln - 1].strip() if 0 < ln <= len(lines) else "", "message": f"syntax error: {e.msg}"})
         return errors
     fdef = tree.body[0]
+    body_lines = body.splitlines()
     at = lambda node: max(1, getattr(node, "lineno", 2) - 1)  # noqa: E731
+    text = lambda node: (body_lines[at(node) - 1].strip() if 0 < at(node) <= len(body_lines) else "")  # noqa: E731
     for node in ast.walk(fdef):
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            errors.append({"function": name, "line": at(node), "message": "an import inside a function body is not allowed — list the module in the declaration's `imports`"})
+            errors.append({"function": name, "line": at(node), "text": text(node), "message": "an import inside a function body is not allowed — list the module in the declaration's `imports`"})
         elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            errors.append({"function": name, "line": at(node), "message": "global / nonlocal are not allowed — a step function works only on the frame it receives"})
+            errors.append({"function": name, "line": at(node), "text": text(node), "message": "global / nonlocal are not allowed — a step function works only on the frame it receives"})
         elif isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
-            errors.append({"function": name, "line": at(node), "message": f"'{node.id}' is not reachable from a step function — inputs come through the declaration's `inputs`"})
+            errors.append({"function": name, "line": at(node), "text": text(node), "message": f"'{node.id}' is not reachable from a step function — inputs come through the declaration's `inputs`"})
         elif isinstance(node, ast.Attribute) and node.attr.startswith("__"):
-            errors.append({"function": name, "line": at(node), "message": f"dunder attribute '{node.attr}' is not allowed"})
+            errors.append({"function": name, "line": at(node), "text": text(node), "message": f"dunder attribute '{node.attr}' is not allowed"})
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
-            errors.append({"function": name, "line": at(node), "message": f"call to '{node.func.id}()' is not allowed"})
+            errors.append({"function": name, "line": at(node), "text": text(node), "message": f"call to '{node.func.id}()' is not allowed"})
     if not any(isinstance(n, ast.Return) and n.value is not None for n in ast.walk(fdef)):
         errors.append({"function": name, "line": 1, "message": "a step function must `return` the frame it produced"})
     return errors

@@ -59,6 +59,46 @@ export function pyLiteral(v) {
 const fail = (message) => { throw new Error(`python stage: ${message}`); };
 
 /**
+ * A function body is STRUCTURED, not a text blob: an array whose items are either one line of
+ * code (a string, no leading whitespace, no newline) or a nested array — the block indented one
+ * level under the line before it. Indentation is therefore expressed by nesting, exactly as
+ * Python's grammar requires, and never by counting spaces inside strings:
+ *   ["if k > 1:", ["df['segment'] = km.fit_predict(df[features])"], "else:", ["df['segment'] = 0"], "return df"]
+ * Rules a Python parser would enforce later are enforced here, with the item's position:
+ * a nested block must follow a header line (one ending with ':'), a header must be followed by a
+ * nested block, a block is never empty. Returns the rendered lines (4 spaces per level).
+ */
+export function renderBody(body, at = 'body') {
+  if (!Array.isArray(body) || !body.length) fail(`${at}: a function body is a non-empty array of lines and nested blocks`);
+  const out = [];
+  const walk = (items, depth, path) => {
+    items.forEach((item, i) => {
+      const here = `${path}[${i}]`;
+      const prev = items[i - 1];
+      if (Array.isArray(item)) {
+        if (!item.length) fail(`${here}: an empty block — a nested array must hold at least one line`);
+        if (typeof prev !== 'string' || !isHeader(prev)) fail(`${here}: a nested block must follow a line that opens it (ending with ':' — if/for/while/with/def/try/else…); the line before is ${prev === undefined ? 'missing' : JSON.stringify(prev)}`);
+        walk(item, depth + 1, here);
+        return;
+      }
+      if (typeof item !== 'string') fail(`${here}: a body item is a line of code (string) or a nested block (array)`);
+      if (/[\r\n]/.test(item)) fail(`${here}: a line must not contain a newline — one array item per line`);
+      if (/^\s/.test(item)) fail(`${here}: a line must not start with whitespace — indentation is expressed by nesting, not by spaces`);
+      if (!item.trim()) fail(`${here}: an empty line — drop it`);
+      if (isHeader(item) && !Array.isArray(items[i + 1])) fail(`${here}: ${JSON.stringify(item)} opens a block, so the next item must be a nested array with its body`);
+      out.push(`${'    '.repeat(depth)}${item}`);
+    });
+  };
+  walk(body, 0, at);
+  return out;
+}
+
+/** Does this line open a block (ends with ':' before an optional trailing comment)? */
+function isHeader(line) {
+  return /:\s*(#.*)?$/.test(line) && !/^\s*#/.test(line);
+}
+
+/**
  * One import declaration → Python source line + the top-level package it needs.
  *   { package }                          → import package
  *   { package, submodule }               → import package.submodule
@@ -113,8 +153,8 @@ export function compilePythonStage(stage, { modelName, prepModel, allow, config 
     if (!params.length) fail(`${at}: '${f.name}' needs at least one parameter — the frame it receives`);
     if (!params.every((p) => IDENT.test(p) && !KEYWORDS.has(p) && !['dbt', 'session'].includes(p) && p !== f.name)) fail(`${at}: parameters must be identifiers, not keywords or dbt/session (${params.join(', ')})`);
     if (new Set(params).size !== params.length) fail(`${at}: duplicate parameter`);
-    if (typeof f.body !== 'string' || !f.body.trim()) fail(`${at}: '${f.name}' has an empty body`);
-    byName.set(f.name, { name: f.name, params, body: f.body });
+    const lines = renderBody(f.body, `${at}.body`);
+    byName.set(f.name, { name: f.name, params, body: lines.join('\n') });
   });
 
   const steps = stage.steps || [];
@@ -211,6 +251,21 @@ export function pythonStageColumns(cols, stage) {
   return new Map(out.map((c) => [c, cols.get(c) || { type: 'unknown' }]));
 }
 
+/**
+ * The structured body: an array of lines (strings) and nested blocks (arrays), nesting = one
+ * indentation level. Spelled out to a fixed depth (JSON Schema recursion through $ref does not
+ * survive being embedded in several tool schemas); eight levels is deeper than readable Python.
+ */
+function bodySchema(depth = 8) {
+  const line = { type: 'string', minLength: 1, maxLength: 500, pattern: '^\\S.*$', description: 'ONE line of Python, no leading whitespace and no newline — indentation comes from nesting.' };
+  let block = { type: 'array', minItems: 1, items: line };
+  for (let d = 1; d < depth; d += 1) block = { type: 'array', minItems: 1, items: { anyOf: [line, block] } };
+  return {
+    ...block,
+    description: 'The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…). Example: ["if k > 1:", ["df[\'seg\'] = 1"], "else:", ["df[\'seg\'] = 0"], "return df"]. Plain Python over pandas/numpy/… on the frame the first parameter receives; must return the frame. No imports inside (declare them in `imports`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.',
+  };
+}
+
 function pythonStageSchema(allow = importAllowlist()) {
   const ID = '^[A-Za-z_][A-Za-z0-9_]*$';
   const MOD = '^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$';
@@ -240,7 +295,7 @@ function pythonStageSchema(allow = importAllowlist()) {
         items: { type: 'object', additionalProperties: false, required: ['name', 'params', 'body'], properties: {
           name: { type: 'string', pattern: ID },
           params: { type: 'array', minItems: 1, items: { type: 'string', pattern: ID }, description: 'The FIRST parameter is the frame the step receives; the rest are named arguments a step passes.' },
-          body: { type: 'string', minLength: 1, maxLength: 20000, description: 'The function body (plain Python over pandas/numpy/…; must return the frame). No imports inside (declare them in `imports`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.' },
+          body: bodySchema(),
         } },
         description: 'Your step functions — they live in this model only (dbt cannot import helper .py files between models).',
       },

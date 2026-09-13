@@ -413,8 +413,10 @@ export class SqliteBackend {
         if (!legacy.length || typeof resolve !== 'function') return { migrated: 0, dropped: 0 };
         let migrated = 0; let dropped = 0;
         const placed = new Map(); // oldKey -> { source, property } | null (resolved once)
+        // A resolver that THROWS on a key is treated like one that cannot place it: the key is
+        // dropped, and the rest of the carry-over still lands — one stale key never rolls it back.
         const place = (key) => {
-          if (!placed.has(key)) placed.set(key, resolve(key) || null);
+          if (!placed.has(key)) { let at = null; try { at = resolve(key) || null; } catch { at = null; } placed.set(key, at); }
           return placed.get(key);
         };
         const copy = (table, cols) => {

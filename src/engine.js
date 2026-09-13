@@ -953,7 +953,9 @@ export class Engine {
     const dot = String(key).indexOf('.');
     if (dot > 0) {
       const mk = key.slice(0, dot); const col = key.slice(dot + 1);
-      if (c.models[mk] && ((c.getModel(mk).dimensions || {})[col] || c.eventProps(mk).includes(col))) return { source: mk, property: col };
+      // Only an events source has payload properties; asking a dimension for them throws, and one
+      // stale key must never take the whole carry-over down with it.
+      if (c.models[mk] && ((c.getModel(mk).dimensions || {})[col] || (c.isFact(mk) && c.eventProps(mk).includes(col)))) return { source: mk, property: col };
     }
     for (const f of c.facts) if (c.eventProps(f).includes(key)) return { source: f, property: key };
     const owner = c.modelKeys().find((k) => (c.getModel(k).dimensions || {})[key]);

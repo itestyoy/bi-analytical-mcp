@@ -194,3 +194,59 @@ test('prop tables with `source` added by ALTER but the old key are re-keyed and 
   assert.equal(index.stats('crashlytics', 'status_of_event_data').totalCount, 10, 'same name on another source untouched');
   index.close();
 });
+
+// The REAL owner resolver over the fixture catalog. A v1 key naming a users column that is no
+// longer a dimension used to make the resolver ask the users model for its payload properties —
+// which throws for a non-events source, inside the carry-over transaction, so every row was rolled
+// back and the *_v1 tables survived to fail the same way on the next start.
+test('a stale <model>.<column> key for a non-events model is dropped and the rest of the v1 index still lands', async () => {
+  const { loadCatalog } = await import('../../src/catalog.js');
+  const { Engine } = await import('../../src/engine.js');
+  const catalog = await loadCatalog('test/integration/fixtures/catalog.yml');
+  const resolve = (key) => Engine.prototype._legacyIndexKeyOwner.call({ catalog }, key);
+
+  const path = dbFile();
+  const db = new DatabaseSync(path);
+  db.exec('CREATE TABLE prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, high_cardinality INTEGER, data_watermark INTEGER)');
+  db.exec('CREATE TABLE prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
+  db.exec("INSERT INTO prop_stats VALUES ('users.old_column', 1, 1, 0, 111, 0, NULL)"); // no longer a dimension
+  db.exec("INSERT INTO prop_stats VALUES ('users.platform', 2, 12, 0, 111, 0, NULL)");
+  db.exec("INSERT INTO prop_stats VALUES ('result_of_event_data', 3, 24, 6, 111, 0, 900)");
+  db.exec("INSERT INTO prop_values VALUES ('users.platform', 'ios', 7)");
+  db.exec("INSERT INTO prop_values VALUES ('result_of_event_data', 'win', 10)");
+  db.close();
+
+  const store = openStore({ dbPath: path });
+  const index = new ValueIndex({ store });
+  const res = index.migrateLegacyKeys(resolve);
+  assert.equal(res.dropped, 1, 'the stale users key is dropped');
+  assert.equal(res.migrated, 4, 'the two placeable stats rows and their two value rows land');
+  assert.equal(index.stats('users', 'platform').totalCount, 12);
+  assert.deepEqual(index.sampleValues('users', 'platform', 5), [{ value: 'ios', freq: 7 }]);
+  assert.equal(index.stats('events', 'result_of_event_data').totalCount, 24);
+  assert.deepEqual(index.sampleValues('events', 'result_of_event_data', 5), [{ value: 'win', freq: 10 }]);
+  assert.equal(index.stats('users', 'old_column'), null);
+  // the set-aside v1 tables are gone, so the carry-over does not repeat on the next start
+  const check = new DatabaseSync(path);
+  assert.deepEqual(check.prepare("SELECT name FROM sqlite_master WHERE name LIKE '%_v1'").all(), []);
+  check.close();
+  index.close();
+});
+
+// The store's own contract, independent of the resolver: a resolver that throws on one key drops
+// that key and still carries the others.
+test('a resolver that throws on one key drops it without rolling back the carry-over', () => {
+  const path = dbFile();
+  const db = new DatabaseSync(path);
+  db.exec('CREATE TABLE prop_stats (property TEXT PRIMARY KEY, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, high_cardinality INTEGER, data_watermark INTEGER)');
+  db.exec("INSERT INTO prop_stats VALUES ('bad', 1, 1, 0, 111, 0, NULL)");
+  db.exec("INSERT INTO prop_stats VALUES ('good', 5, 50, 0, 111, 0, NULL)");
+  db.close();
+  const store = openStore({ dbPath: path });
+  const index = new ValueIndex({ store });
+  const res = index.migrateLegacyKeys((key) => { if (key === 'bad') throw new Error('boom'); return { source: 'events', property: key }; });
+  assert.deepEqual(res, { migrated: 1, dropped: 1 });
+  assert.equal(index.stats('events', 'good').totalCount, 50);
+  assert.equal(index.stats('events', 'bad'), null);
+  index.close();
+});

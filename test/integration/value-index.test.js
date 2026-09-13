@@ -358,10 +358,10 @@ test('semantic_index({ model: "users" }) lists dimensions with sample_values + c
   assert.equal(ms.distinct_count, 4); // meta/organic/google/applovin
 });
 
-// semantic_index({ property: 'users.country' }) drills a namespaced attribute like a property.
-test('semantic_index({ property: "users.country" }) returns the attribute value distribution', opts, async (t) => {
+// semantic_index({ source: 'users', property: 'country' }) drills an attribute like a property.
+test('semantic_index({ source: "users", property: "country" }) returns the attribute value distribution', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ property: 'users.country' });
+  const out = await engine.semantic_index({ source: 'users', property: 'country' });
   assert.equal(out.model, 'users');
   assert.equal(out.column, 'country');
   assert.equal(out.distinct_count, 4);

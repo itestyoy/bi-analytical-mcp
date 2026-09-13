@@ -1100,6 +1100,27 @@ export class Catalog {
     return Object.keys(this.models[fact]?.properties || {});
   }
 
+  /**
+   * What `name` is on `source`: 'property' for an events source's payload property, 'dimension'
+   * for a groupable attribute of any model, null when the source does not carry it. THE one place
+   * that answers "does this source have this attribute" — every resolver in the engine (value-index
+   * keys, the { property } view, memory targets) asks here, so a dimension is never asked for
+   * payload properties and no caller re-implements the rule.
+   */
+  attributeKind(source, name) {
+    const m = this.models[source];
+    if (!m || !name) return null;
+    if (this.facts.includes(source) && (m.properties || {})[name]) return 'property';
+    return (m.dimensions || {})[name] ? 'dimension' : null;
+  }
+
+  /** Every source that carries `name` as a payload property or a dimension: [{ source, kind }].
+   *  A bare name is attributed to a source only when exactly ONE owner comes back; several owners
+   *  are the caller's to report, never to guess between. */
+  ownersOf(name) {
+    return this.modelKeys().flatMap((k) => { const kind = this.attributeKind(k, name); return kind ? [{ source: k, kind }] : []; });
+  }
+
   /** Full spec for one event_data property ({ type, items?, fields?, values?, description? }). */
   eventPropertySpec(name, fact) {
     fact = this._fact(fact);

@@ -35,15 +35,6 @@ export class Engine {
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
-    // A value index written before sources were explicit keyed rows by one flat name; carry it
-    // over to (source, property) using the catalog to say who owns each old key. Idempotent and
-    // best-effort: the index is a rebuildable cache, so a failure here just means a re-scan.
-    try {
-      const moved = this.valueIndex.migrateLegacyKeys((key) => this._legacyIndexKeyOwner(key));
-      if (moved?.migrated || moved?.dropped) {
-        console.error(`[mcp] value index carried over to (source, property): ${moved.migrated} row(s) moved, ${moved.dropped} unplaceable row(s) dropped`);
-      }
-    } catch (e) { console.error(`[mcp] value-index carry-over skipped: ${e?.message || e}`); }
     // Memory is curated, non-re-derivable knowledge. By default it shares the store (and
     // survives reset). Point MCP_MEMORY_DB at a PERSISTENT volume to keep findings across
     // container restarts — then it lives in its own store, isolated from the value index.
@@ -121,22 +112,17 @@ export class Engine {
       // The qualified '<source>.<name>' form — the one this tool emits back in linked_to — names
       // an attribute, an event or an event property of that source exactly.
       const mk = s.slice(0, dot); const col = s.slice(dot + 1);
-      if (c.models[mk]) {
-        if ((c.getModel(mk).dimensions || {})[col]) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
-        if (c.isFact(mk) && c.eventNames(mk).includes(col)) return { kind: 'event', key: `${mk}.${col}`, canon: `event:${mk}.${col}` };
-        if (c.isFact(mk) && c.eventProps(mk).includes(col)) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
-      }
+      if (c.attributeKind(mk, col)) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
+      if (c.isFact(mk) && c.eventNames(mk).includes(col)) return { kind: 'event', key: `${mk}.${col}`, canon: `event:${mk}.${col}` };
     }
     if (c.models[s]) return { kind: 'model', key: s, canon: `model:${s}` };
     // A bare name is attributed to the source that declares it — when exactly one does. Two
     // sources carrying the same name is reported, never guessed (the rule every other resolver
     // here follows).
-    const owners = [];
-    for (const f of c.facts) {
-      if (c.eventNames(f).includes(s)) owners.push({ kind: 'event', key: `${f}.${s}`, canon: `event:${f}.${s}` });
-      if (c.eventProps(f).includes(s)) owners.push({ kind: 'property', key: `${f}.${s}`, canon: `property:${f}.${s}` });
-    }
-    for (const mk of c.modelKeys()) if ((c.getModel(mk).dimensions || {})[s]) owners.push({ kind: 'property', key: `${mk}.${s}`, canon: `property:${mk}.${s}` });
+    const owners = [
+      ...c.facts.filter((f) => c.eventNames(f).includes(s)).map((f) => ({ kind: 'event', key: `${f}.${s}`, canon: `event:${f}.${s}` })),
+      ...c.ownersOf(s).map(({ source }) => ({ kind: 'property', key: `${source}.${s}`, canon: `property:${source}.${s}` })),
+    ];
     if (owners.length === 1) return owners[0];
     if (owners.length > 1) throw new ToolError(`memory target '${s}' is ambiguous — it exists as ${owners.map((o) => `'${o.key}'`).join(', ')}. Qualify it as '<source>.<name>'.`, { stage: 'validate', field: 'targets' });
     // Fuzzy fallback: a near-miss entity name links to the real entity (marked fuzzy) rather
@@ -148,8 +134,9 @@ export class Engine {
 
   /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
   _memorySurfaceHint({ kind, key }) {
-    if (kind === 'property') return `semantic_index({ property: '${key}' })`;
-    if (kind === 'event') return `semantic_index({ event: '${key}' })`;
+    const [source, name] = String(key).split('.');
+    if (kind === 'property') return `semantic_index({ source: '${source}', property: '${name}' })`;
+    if (kind === 'event') return `semantic_index({ source: '${source}', event: '${name}' })`;
     if (kind === 'model') return `semantic_index({ model: '${key}' })`;
     return `semantic_index({ search: '${key}' })`; // term
   }
@@ -596,12 +583,10 @@ export class Engine {
 
     // ── { property }: one property's full spec ──
     if (input.property) {
-      // The SOURCE is a separate argument, so a name never has to carry it. For convenience the
-      // '<model>.<column>' form is still accepted and split here, and a bare name is resolved to
-      // the source that declares it (ambiguity is reported, never guessed).
+      // The SOURCE is a separate argument, so a name never carries it. A bare name is resolved to
+      // the one source that declares it (ambiguity is reported, never guessed).
       const { source: pSource, property: p } = this._resolvePropertyRef(input);
-      const isEventProp = c.isFact(pSource) && c.eventProps(pSource).includes(p);
-      if (!isEventProp) {
+      if (c.attributeKind(pSource, p) !== 'property') {
         const mk = pSource; const col = p;
         const dim = (c.getModel(mk).dimensions || {})[col];
         if (!dim) throw new ToolError(`'${col}' is not a property or dimension of '${mk}'. See semantic_index({ model: '${mk}' }) for what it carries.`, { stage: 'validate', field: 'property' });
@@ -911,7 +896,7 @@ export class Engine {
       views: [
         { view: 'model', arg: 'model key', when: "one model's columns/entities/time + dimension attributes with real sample values" },
         { view: 'event', arg: 'event name', when: 'the properties POPULATED on that event (what you can measure/group/filter)' },
-        { view: 'property', arg: 'property or "<model>.<column>"', when: "one column's full passport: real value distribution (paged), NULL coverage, per-app split, freshness" },
+        { view: 'property', arg: 'source + property', when: "one column's full passport: real value distribution (paged), NULL coverage, per-app split, freshness" },
         { view: 'search', arg: 'word/value', when: 'fuzzy find an event/property/attribute/VALUE/recipe/app by name or value' },
         ...(bundleList.length ? [{ view: 'bundle', arg: 'bundle id', when: 'which event properties are populated vs EMPTY for ONE app (skip the empty ones)' }] : []),
         ...(this.recipes ? [{ view: 'recipe', arg: 'recipe id', when: 'one ready-made task template in full (payload + example_queries + hack)' }] : []),
@@ -937,37 +922,20 @@ export class Engine {
     };
   }
 
-  /**
-   * Resolve the { source?, event } arguments into an explicit (source, event) pair — the mirror
-   * of _resolvePropertyRef. Accepts the legacy '<source>.<event>' form too.
-   *
-   * _defaultSource(field) above answers the other half: which source to read when the caller
-   * omitted it — allowed only when the catalog has ONE events source, since with several every
-   * source is equal and the caller must name the one the question is about.
-   */
-  /** Who owns a value-index key written by the pre-source layout: a '<model>.<column>' name
-   *  belongs to that model, and a bare name to the source that declares it (an events source's
-   *  payload property, or a model's dimension). null when nothing in the catalog claims it. */
-  _legacyIndexKeyOwner(key) {
-    const c = this.catalog;
-    const dot = String(key).indexOf('.');
-    if (dot > 0) {
-      const mk = key.slice(0, dot); const col = key.slice(dot + 1);
-      // Only an events source has payload properties; asking a dimension for them throws, and one
-      // stale key must never take the whole carry-over down with it.
-      if (c.models[mk] && ((c.getModel(mk).dimensions || {})[col] || (c.isFact(mk) && c.eventProps(mk).includes(col)))) return { source: mk, property: col };
-    }
-    for (const f of c.facts) if (c.eventProps(f).includes(key)) return { source: f, property: key };
-    const owner = c.modelKeys().find((k) => (c.getModel(k).dimensions || {})[key]);
-    return owner ? { source: owner, property: key } : null;
-  }
-
   _defaultSource(field) {
     const only = this.catalog.defaultSource();
     if (only) return only;
     throw new ToolError(`this catalog has several events sources (${this.catalog.facts.join(', ')}) — pass ${field} to say which one to read`, { stage: 'validate', field });
   }
 
+  /**
+   * Resolve the { source?, event } arguments into an explicit (source, event) pair — the mirror
+   * of _resolvePropertyRef. A bare event name is attributed to the ONE source that declares it.
+   *
+   * _defaultSource(field) answers the other half: which source to read when the caller omitted
+   * it — allowed only when the catalog has ONE events source, since with several every source is
+   * equal and the caller must name the one the question is about.
+   */
   _resolveEventRef(input) {
     const c = this.catalog;
     const raw = String(input.event);
@@ -975,11 +943,6 @@ export class Engine {
       if (!c.isFact(input.source)) throw new ToolError(`'${input.source}' is not an events source. Events sources: ${c.facts.join(', ')}`, { stage: 'validate', field: 'source' });
       if (!c.eventNames(input.source).includes(raw)) throw new ToolError(`unknown event '${raw}' on '${input.source}'. See semantic_index({ model: '${input.source}' }).known_events`, { stage: 'validate', field: 'event' });
       return { fact: input.source, name: raw };
-    }
-    const dot = raw.indexOf('.');
-    if (dot > 0 && c.isFact(raw.slice(0, dot))) {
-      const fact = raw.slice(0, dot); const name = raw.slice(dot + 1);
-      if (c.eventNames(fact).includes(name)) return { fact, name };
     }
     const owners = c.facts.filter((f) => c.eventNames(f).includes(raw));
     if (owners.length === 1) return { fact: owners[0], name: raw };
@@ -989,9 +952,8 @@ export class Engine {
 
   /**
    * Resolve the { source?, property } arguments of the { property } view into an explicit
-   * (source, property) pair. `source` given → used as-is. Otherwise '<model>.<column>' is split
-   * (the form used before sources became explicit), and a bare name is attributed to the ONE
-   * source that declares it — an ambiguous name is reported, never guessed.
+   * (source, property) pair. `source` given → used as-is. Otherwise a bare name is attributed to
+   * the ONE source that declares it — an ambiguous name is reported, never guessed.
    */
   _resolvePropertyRef(input) {
     const c = this.catalog;
@@ -1000,12 +962,7 @@ export class Engine {
       if (!c.models[input.source]) throw new ToolError(`unknown source '${input.source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(input.source)}`, { stage: 'validate', field: 'source' });
       return { source: input.source, property: raw };
     }
-    const dot = raw.indexOf('.');
-    if (dot > 0 && c.models[raw.slice(0, dot)]) return { source: raw.slice(0, dot), property: raw.slice(dot + 1) };
-    const owners = [...new Set([
-      ...c.facts.filter((f) => c.eventProps(f).includes(raw)),
-      ...c.modelKeys().filter((k) => (c.getModel(k).dimensions || {})[raw]),
-    ])];
+    const owners = c.ownersOf(raw).map((o) => o.source);
     if (owners.length === 1) return { source: owners[0], property: raw };
     if (owners.length > 1) {
       throw new ToolError(`'${raw}' exists on ${owners.join(' and ')} — pass source to say which one (each source keeps its own values).`, { stage: 'validate', field: 'source' });
@@ -1601,12 +1558,7 @@ export class Engine {
   _valueKeyForColumn(sourceKey, column) {
     const c = this.catalog;
     if (!column) return null;
-    const at = { source: sourceKey, property: column };
-    if (c.isFact(sourceKey)) {
-      if (c.eventProps(sourceKey).includes(column)) return at; // event payload property
-      return (c.getModel(sourceKey).dimensions || {})[column] ? at : null; // envelope/app dimension
-    }
-    return (c.getModel(sourceKey)?.dimensions || {})[column] ? at : null;
+    return c.attributeKind(sourceKey, column) ? { source: sourceKey, property: column } : null;
   }
 
   /** Where a query_semantic_model dimension PATH (e.g. user__country) lives in the value index:
@@ -1621,11 +1573,10 @@ export class Engine {
       const mk = c.joinTargetFor(entity);
       return mk && (c.getModel(mk).dimensions || {})[col] ? { source: mk, property: col } : null;
     }
-    for (const fact of c.facts) {
-      if (c.eventProps(fact).includes(path)) return { source: fact, property: path };
-      if ((c.getModel(fact).dimensions || {})[path]) return { source: fact, property: path };
-    }
-    return null;
+    // A bare path is an attribute of the events source the metric reads; with several sources
+    // carrying the name there is nothing to verify against, so no guard rather than a guess.
+    const owners = c.ownersOf(path).filter((o) => c.isFact(o.source));
+    return owners.length === 1 ? { source: owners[0].source, property: path } : null;
   }
 
   /**

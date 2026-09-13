@@ -45,6 +45,7 @@ export function mergeCompiled(state, compiled) {
   state.metrics ||= [];
   state.usedModels ||= [];
   state.tasks ||= [];
+  for (const k of Object.keys(state.additions)) if (!state.usedModels.includes(k)) state.usedModels.push(k);
 
   for (const [modelKey, add] of Object.entries(compiled.additions || {})) {
     const cur = (state.additions[modelKey] ||= { measures: [], dimensions: [] });
@@ -101,7 +102,13 @@ export class ContextManager {
       const data = JSON.parse(readFileSync(this.registryPath, 'utf8'));
       for (const c of data.contexts || []) {
         // reconcile: keep only contexts whose workspace still exists on disk
-        if (existsSync(this.dir(c.id))) this.contexts.set(c.id, c);
+        if (!existsSync(this.dir(c.id))) continue;
+        // usedModels drives the require_time_range guard and rendering; a registry written before
+        // it existed lists the models only under additions — rebuild it so the guard sees them.
+        const st = (c.state ||= {});
+        st.usedModels ||= [];
+        for (const k of Object.keys(st.additions || {})) if (!st.usedModels.includes(k)) st.usedModels.push(k);
+        this.contexts.set(c.id, c);
       }
     } catch {
       /* corrupt registry -> start clean */

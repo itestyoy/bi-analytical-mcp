@@ -83,3 +83,19 @@ test('mergeCompiled accumulates additions and dedups metrics', () => {
   assert.deepEqual(state.usedModels.sort(), ['events', 'users']);
   assert.deepEqual(state.tasks, ['t1', 't2']);
 });
+
+// A registry written before `usedModels` existed lists a context's models only under `additions`.
+// usedModels drives rendering and the require_time_range guard, so it is rebuilt on load.
+test('a context loaded without usedModels gets them back from its additions', () => {
+  const root = tmpRoot();
+  const cm1 = new ContextManager({ workspaceRoot: root });
+  const ctx = cm1.create();
+  ctx.state.additions = { events: { measures: [], dimensions: [] }, users: { measures: [], dimensions: [] } };
+  delete ctx.state.usedModels;
+  cm1._persist();
+  const cm2 = new ContextManager({ workspaceRoot: root });
+  assert.deepEqual([...cm2.get(ctx.id).state.usedModels].sort(), ['events', 'users']);
+  // and merging a declaration onto such a state keeps them
+  const merged = mergeCompiled({ additions: { events: { measures: [], dimensions: [] } } }, { usedModels: ['experiments'] });
+  assert.deepEqual([...merged.usedModels].sort(), ['events', 'experiments']);
+});

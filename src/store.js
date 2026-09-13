@@ -177,8 +177,6 @@ export class MemoryBackend {
       properties: () => [...allEntries()].map(({ source, property }) => ({ source, property })),
       // Drop everything stored for one property (a column gone from the table) — no full reindex.
       removeProperty: (source, property) => !!bySource.get(source)?.delete(property),
-      // Nothing persisted here, so there is no legacy schema to carry over.
-      migrateLegacyKeys: () => ({ migrated: 0, dropped: 0 }),
     };
 
     // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
@@ -236,23 +234,19 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
     // Every index table is keyed by (SOURCE, property): each catalog source — an events fact,
     // the users dimension — owns its own index space, so two facts may carry the same property
-    // name without sharing a row. A v1 database keyed rows by a single `property` text and
-    // encoded the source inside it ('users.country'); such tables are renamed aside here and
-    // carried over by values.migrateLegacyKeys(), which needs the catalog to say who owns a key.
-    // The test is the PRIMARY KEY, not the column list: a database that once received `source`
+    // name without sharing a row. A table keyed any other way is DROPPED and recreated: the value
+    // index is a rebuildable cache the background scan repopulates, so nothing is carried over.
+    // The test is the PRIMARY KEY, not the column list: a table that once received `source`
     // through ADD COLUMN still has the old key (SQLite cannot widen a key in place), and every
-    // ON CONFLICT(source, …) upsert against it is rejected. Such a table is as legacy as one
-    // without the column at all.
+    // ON CONFLICT(source, …) upsert against it is rejected.
     const keyedBySource = (table) => {
       const cols = db.prepare(`PRAGMA table_info(${table})`).all();
       if (!cols.length) return null; // no table yet
       const src = cols.find((c) => c.name === 'source');
       return !!(src && src.pk > 0); // pk = 1-based position within the PRIMARY KEY, 0 = not part of it
     };
-    for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage']) {
-      if (keyedBySource(t) === false) {
-        try { db.exec(`DROP TABLE IF EXISTS ${t}_v1`); db.exec(`ALTER TABLE ${t} RENAME TO ${t}_v1`); } catch { /* leave as-is; the scan repopulates */ }
-      }
+    for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_run_props']) {
+      if (keyedBySource(t) === false) db.exec(`DROP TABLE ${t}`);
     }
     db.exec('CREATE TABLE IF NOT EXISTS prop_values (source TEXT, property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(source, property, value))');
     db.exec('CREATE TABLE IF NOT EXISTS prop_stats (source TEXT, property TEXT, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, PRIMARY KEY(source, property))');
@@ -275,16 +269,7 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_event_coverage (source TEXT, property TEXT, bundle TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle, event_name))');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
-    // Per-property run rows are keyed by (run, SOURCE, property) like every other index table. A
-    // v1 database keyed them by (run, property) alone — and ADD COLUMN cannot widen a PRIMARY KEY,
-    // so the upsert's ON CONFLICT(run_id, source, property) would be rejected by SQLite on every
-    // write. Rename the old table aside (history is per-run diagnostics, not data worth carrying)
-    // and let the CREATE below make the correctly keyed one. Decided by the KEY, not by the
-    // column: a table that got `source` via ADD COLUMN but kept PRIMARY KEY(run_id, property) is
-    // exactly the one that rejects every write — and the one an "is the column there" test skips.
-    if (keyedBySource('index_run_props') === false) {
-      try { db.exec('DROP TABLE IF EXISTS index_run_props_v1'); db.exec('ALTER TABLE index_run_props RENAME TO index_run_props_v1'); } catch { /* leave as-is */ }
-    }
+    // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, source TEXT, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, source, property))');
     // Run-level events surfaced in semantic_index({ status })/({ run }), e.g. "a batch fell
     // back to per-property because the combined scan failed: <reason>".
@@ -400,48 +385,6 @@ export class SqliteBackend {
           }
         });
       },
-      /**
-       * Carry a v1 index (one flat `property` namespace) into the (source, property) schema.
-       * `resolve(oldKey)` -> { source, property } | null; the caller supplies it because only the
-       * catalog knows which source owns a key. A key it cannot place is DROPPED: the value index
-       * is a rebuildable cache, and the next scan repopulates it under the right source.
-       * Idempotent — the renamed v1 tables are dropped once their rows are moved.
-       */
-      migrateLegacyKeys(resolve) {
-        const legacy = ['prop_stats_v1', 'prop_values_v1', 'prop_coverage_v1', 'prop_bundle_coverage_v1', 'prop_bundle_event_coverage_v1']
-          .filter((t) => s._all(`PRAGMA table_info(${t})`).length);
-        if (!legacy.length || typeof resolve !== 'function') return { migrated: 0, dropped: 0 };
-        let migrated = 0; let dropped = 0;
-        const placed = new Map(); // oldKey -> { source, property } | null (resolved once)
-        // A resolver that THROWS on a key is treated like one that cannot place it: the key is
-        // dropped, and the rest of the carry-over still lands — one stale key never rolls it back.
-        const place = (key) => {
-          if (!placed.has(key)) { let at = null; try { at = resolve(key) || null; } catch { at = null; } placed.set(key, at); }
-          return placed.get(key);
-        };
-        const copy = (table, cols) => {
-          if (!s._all(`PRAGMA table_info(${table}_v1)`).length) return;
-          for (const r of s._all(`SELECT * FROM ${table}_v1`)) {
-            // A row that already names its source (the table got the column through ADD COLUMN
-            // but kept the old key) is placed by that source; only a bare v1 key is resolved.
-            const at = r.source ? { source: r.source, property: r.property } : place(r.property);
-            if (!at) { dropped += 1; continue; }
-            const names = ['source', 'property', ...cols];
-            const vals = [at.source, at.property, ...cols.map((c) => r[c] ?? null)];
-            s._run(`INSERT OR REPLACE INTO ${table} (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`, ...vals);
-            migrated += 1;
-          }
-        };
-        s._tx(() => {
-          copy('prop_stats', ['distinct_count', 'total_count', 'null_count', 'indexed_at', 'high_cardinality', 'data_watermark']);
-          copy('prop_values', ['value', 'freq']);
-          copy('prop_coverage', ['event_name', 'row_count', 'non_null']);
-          copy('prop_bundle_coverage', ['bundle', 'row_count', 'non_null']);
-          copy('prop_bundle_event_coverage', ['bundle', 'event_name', 'row_count', 'non_null']);
-          for (const t of legacy) s._run(`DROP TABLE IF EXISTS ${t}`);
-        });
-        return { migrated, dropped };
-      },
     };
 
     this.runs = {
@@ -536,9 +479,6 @@ export class SqliteBackend {
   reset() {
     this._tx(() => {
       for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_runs', 'index_run_props', 'index_run_notes']) this._run(`DELETE FROM ${t}`);
-      // A reset is a clean slate: the v1 tables set aside by the constructor would otherwise be
-      // carried back in by migrateLegacyKeys right after, resurrecting what was just wiped.
-      for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_run_props']) this._db.exec(`DROP TABLE IF EXISTS ${t}_v1`);
     });
   }
 

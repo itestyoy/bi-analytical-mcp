@@ -537,11 +537,10 @@ const STAGES = {
         }
         between = { value: p.between.value, from: p.between.from, to: p.between.to };
       }
-      // A `between` predicate cannot be expressed with the BigQuery pipe `USING (...)` form, so it
-      // forces the chained-CTE `ON ...` assembly (both dialects render the same ON clause there).
-      // A per-side key expression cannot be written as the BigQuery pipe `USING (...)` form, so a
-      // `via` join takes the chained-CTE `ON ...` assembly — as a `between` predicate already does.
-      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys, requiresCte: true } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
+      // A join is ALWAYS assembled as a CTE: `attrs` is its projection (`j.col AS alias`), and the
+      // pipe-syntax `|> JOIN … USING` has no projection — it would pull every column of the joined
+      // model in and lose the aliases the pipeline's column set already promised the next stage.
+      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between } : {}), requiresCte: true }, cols: out };
     },
   },
 

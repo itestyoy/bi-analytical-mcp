@@ -419,7 +419,7 @@ test('30. the model view lists clicks both as an attribute and as an amount', op
 
 // ═══════════ G. RESET IS A CLEAN SLATE ═══════════
 
-test('31. after a reset over a v1 database the indexer rebuilds from the warehouse: US 4 / GB 4 / DE 3 / BR 2', opts, async (t) => {
+test('31. over a database keyed the old way the indexer rebuilds from the warehouse: US 4 / GB 4 / DE 3 / BR 2', opts, async (t) => {
   if (skip(t)) return;
   const path = join(mkdtempSync(join(tmpdir(), 'aud-v1-')), 'vi.sqlite');
   const db = new DatabaseSync(path);
@@ -428,10 +428,9 @@ test('31. after a reset over a v1 database the indexer rebuilds from the warehou
   db.exec("INSERT INTO prop_stats VALUES ('users.country', 1, 99, 0, 1, 0, NULL)");
   db.exec("INSERT INTO prop_values VALUES ('users.country', 'ATLANTIS', 99)");
   db.close();
-  const store = openStore({ dbPath: path, reset: true });
+  const store = openStore({ dbPath: path });
   const index = new ValueIndex({ store });
-  index.migrateLegacyKeys(() => ({ source: 'users', property: 'country' }));
-  assert.equal(index.stats('users', 'country'), null, 'nothing resurrected');
+  assert.equal(index.stats('users', 'country'), null, 'the old rows are dropped, never mis-filed');
   const bi = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   await bi.refresh();
   const vals = Object.fromEntries(index.sampleValues('users', 'country', 10).map((v) => [v.value, v.freq]));
@@ -440,16 +439,19 @@ test('31. after a reset over a v1 database the indexer rebuilds from the warehou
   index.close();
 });
 
-test('32. the set-aside v1 tables are gone after the reset', opts, async (t) => {
+test('32. reset() over a fresh store leaves an empty index that the scan then fills', opts, async (t) => {
   if (skip(t)) return;
-  const path = join(mkdtempSync(join(tmpdir(), 'aud-v1b-')), 'vi.sqlite');
-  const db = new DatabaseSync(path);
-  db.exec('CREATE TABLE prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
-  db.exec("INSERT INTO prop_values VALUES ('users.country', 'X', 1)");
-  db.close();
-  openStore({ dbPath: path, reset: true }).close?.();
-  const tables = new DatabaseSync(path).prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_v1'").all();
-  assert.deepEqual(tables, []);
+  const path = join(mkdtempSync(join(tmpdir(), 'aud-reset-')), 'vi.sqlite');
+  let index = new ValueIndex({ store: openStore({ dbPath: path }) });
+  index.upsertProperty('users', 'country', { distinctCount: 1, totalCount: 99, nullCount: 0, values: [{ value: 'ATLANTIS', freq: 99 }] });
+  index.close();
+  index = new ValueIndex({ store: openStore({ dbPath: path, reset: true }) });
+  assert.equal(index.stats('users', 'country'), null, 'wiped');
+  const bi = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
+  await bi.refresh();
+  const vals = Object.fromEntries(index.sampleValues('users', 'country', 10).map((v) => [v.value, v.freq]));
+  assert.deepEqual(vals, { US: 4, GB: 4, DE: 3, BR: 2 });
+  index.close();
 });
 
 // ═══════════ H. NO ANCHOR ═══════════

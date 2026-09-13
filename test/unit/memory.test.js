@@ -99,10 +99,10 @@ test('a recorded finding surfaces through semantic_index (views + search) by its
 });
 
 // A "<model>.<column>" attribute finding surfaces on that attribute's view.
-test('memory linked to a "<model>.<column>" attribute surfaces on its property view', async () => {
+test('memory linked to a users attribute surfaces on its property view', async () => {
   const e = engine();
   const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2 on dim_users.', targets: ['users.country'] });
-  const attr = await e.semantic_index({ property: 'users.country' });
+  const attr = await e.semantic_index({ source: 'users', property: 'country' });
   assert.ok(attr.memory?.some((m) => m.id === rec.id), 'attribute view carries the note');
 });
 

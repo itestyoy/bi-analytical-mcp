@@ -218,13 +218,10 @@ export class BigQueryDialect extends Dialect {
         // bind the element to `as` (already so for the scalar form)
         return op.field ? `|> ${join}\n|> EXTEND ${element} AS ${this.ident(op.as)}` : `|> ${join}`;
       }
-      case 'join': {
-        // A per-side key expression has no `USING (...)` form; such a join is flagged
-        // requiresCte at build and assembled as chained CTEs instead of reaching this path.
-        if (op.onKeys) throw new Error('bigquery: a join on a declared relationship renders as a CTE, not a pipe step');
-        const onCond = op.on.map((c) => this.ident(c)).join(', ');
-        return `|> ${op.kind === 'INNER' ? 'INNER ' : 'LEFT '}JOIN ${op.relation} ${op.alias} USING (${onCond})`;
-      }
+      case 'join':
+        // Pipe syntax has no projection for a join (`USING` brings every column in), so a join is
+        // flagged requiresCte at build and assembled as chained CTEs instead of reaching this path.
+        throw new Error('bigquery: a join renders as a CTE, not a pipe step');
       case 'aggregate':
         return `|> AGGREGATE ${op.aggs.map((a) => `${a.expr} AS ${this.ident(a.as)}`).join(', ')}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;
       case 'pivot':

@@ -260,3 +260,44 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   assert.ok(offers(schemas.create_semantic_model, 'events'));
   assert.ok(schemas.semantic_index.properties.model.enum.includes('crashlytics'), 'the { model } view still accepts it, to explain');
 });
+
+// Grounding reads the WAREHOUSE's answer. When dbt never got to ask — its own timeout, a signal, a
+// spawn failure — that is not evidence of an absent table, and freezing it into the catalog would
+// outlive the outage (the catalog is grounded once, at startup).
+test('a model dbt could not ask about stays as declared, and is not marked unavailable', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const asked = [];
+  const runner = {
+    relationColumns: async (_dir, model) => {
+      asked.push(model);
+      // the users table answers; the analytics fact times out mid-introspection
+      if (/users/.test(model)) return { ok: true, columns: [{ name: 'player_id_of_internal' }, { name: 'country' }] };
+      if (/analytics/.test(model)) return { ok: false, killed: true, signal: 'SIGTERM', error: 'dbt killed by SIGTERM — hit the 600000ms runner timeout' };
+      return { ok: true, columns: (catalog.modelColumns(catalog.modelKeys().find((k) => catalog.getModel(k).dbt_model === model)) || []).map((c) => ({ name: c.name })) };
+    },
+  };
+  const logs = [];
+  await groundCatalogToPhysical(catalog, runner, '/tmp/base', (m) => logs.push(m));
+  assert.ok(asked.length > 1);
+  assert.equal(catalog.unavailableModels().events, undefined, 'the timed-out fact is NOT unavailable');
+  assert.ok(catalog.facts.includes('events'), 'it is still an events source');
+  assert.ok(catalog.eventNames('events').length > 0, 'and still carries its declared vocabulary');
+  assert.ok(logs.some((l) => /was NOT checked/.test(l)), `the skip is reported: ${JSON.stringify(logs)}`);
+  // the table that DID answer is still ground down to its real columns
+  assert.deepEqual(Object.keys(catalog.getModel('users').dimensions || {}), ['country']);
+});
+
+// If NOTHING could be introspected, the unavailable thing is dbt or the warehouse, not every table
+// at once — the catalog is served as declared instead of the server refusing to start.
+test('when no model can be introspected the catalog is served as declared', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const before = catalog.modelKeys().length;
+  const logs = [];
+  const runner = { relationColumns: async () => ({ ok: false, stderr: 'Could not connect to the warehouse: connection refused' }) };
+  const out = await groundCatalogToPhysical(catalog, runner, '/tmp/base', (m) => logs.push(m));
+  assert.deepEqual(out.pruned, {});
+  assert.equal(catalog.modelKeys().length, before, 'every model survives');
+  assert.deepEqual(catalog.unavailableModels(), {});
+  assert.ok(catalog.facts.length > 0, 'the server has events sources to serve');
+  assert.ok(logs.some((l) => /grounding SKIPPED/.test(l)), `the state is reported: ${JSON.stringify(logs)}`);
+});

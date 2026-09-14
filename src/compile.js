@@ -141,16 +141,23 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
 }
 
 /** Resolve a dimension declaration to a dbt dimension object. */
+/**
+ * One declared dimension → its manifest form. `_task` / `_attribute` record what the caller
+ * DECLARED (the task it belongs to, the attribute name it was given) next to the namespaced name
+ * the manifest uses: they are read back when the tools describe or resolve the dimension, and are
+ * stripped before the manifest is written (see yaml-render). Recovering them from the generated
+ * identifier instead would mis-split the moment one task name is a prefix of another.
+ */
 function compileDimension(catalog, task, modelKey, decl) {
   if (decl.source === 'event_property') {
     if (!catalog.isFact(modelKey)) fail(`event_property dimensions are only valid on an events fact (${catalog.facts.join(', ')}), not on '${modelKey}'`, 'dimensions.source');
     const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
     if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ event })`, 'dimensions.property');
     if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
-    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name, found.spec) };
+    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name, found.spec), _task: task, _attribute: found.name };
   }
   if (decl.source === 'model_column') {
-    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column };
+    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column, _task: task, _attribute: decl.column };
     if (dim.type === 'time') dim.type_params = { time_granularity: decl.grain || 'day' };
     return dim;
   }

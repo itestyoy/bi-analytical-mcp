@@ -217,7 +217,7 @@ export async function makeEngine(opts = {}) {
   // opt-out via MCP_GROUND_CATALOG=0 (e.g. offline/catalog-only dev).
   if (runner && baseProjectDir && !/^(0|false|no|off)$/i.test(String(process.env.MCP_GROUND_CATALOG ?? 'true').trim())) {
     try {
-      const { pruned, unavailable } = await groundCatalogToPhysical(catalog, runner, baseProjectDir);
+      const { pruned, unavailable } = await groundCatalogToPhysical(catalog, runner, baseProjectDir, (m) => console.error(`[mcp] ${new Date().toISOString()} ${m}`));
       // The report lists columns the table lacks, plus anything that had to go with them —
       // a join key built on a missing column, or a validity window that is no longer one.
       for (const [k, names] of Object.entries(pruned)) console.error(`[mcp] ${new Date().toISOString()} catalog grounding: '${k}' — dropped ${names.length} declaration(s) the physical table does not back: ${names.slice(0, 12).join(', ')}${names.length > 12 ? ', …' : ''}`);

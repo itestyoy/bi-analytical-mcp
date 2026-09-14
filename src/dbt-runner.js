@@ -57,7 +57,9 @@ export class DbtRunner {
   async relationColumns(projectDir, modelName) {
     const args = ['run-operation', 'mcp_relation_columns', '--args', JSON.stringify({ model_name: modelName })];
     const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
-    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr };
+    // Preserve the process-level facts (killed/signal/error = timeout, spawn failure): the caller
+    // has to tell "dbt could not run" from "dbt ran and this relation is not there".
+    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, killed: r.killed, signal: r.signal };
     const m = (r.stdout || '').replace(/\x1b\[[0-9;]*m/g, '').match(/MCP_COLS:(\[[^\n]*\])/);
     if (!m) return { ok: false, stdout: r.stdout };
     try { return { ok: true, columns: JSON.parse(m[1]) }; } catch { return { ok: false, stdout: r.stdout }; }

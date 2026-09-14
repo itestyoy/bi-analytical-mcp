@@ -147,6 +147,12 @@ export function renderBaseModel(catalog, key) {
  * @param state { additions: {modelKey:{measures,dimensions}}, metrics: [], usedModels: [] }
  * @returns { yaml, semanticModels: string[], metricNames: string[] }
  */
+/** A compiled declaration as the MANIFEST takes it: our own `_`-prefixed annotations are for the
+ *  tools that describe and resolve it, and dbt rejects a key it does not know. */
+function manifestOnly(decl) {
+  return Object.fromEntries(Object.entries(decl).filter(([k]) => !k.startsWith('_')));
+}
+
 export function renderContext(catalog, state) {
   const modelsToRender = new Set(state.usedModels || []);
   // always include any model that received additions
@@ -163,7 +169,7 @@ export function renderContext(catalog, state) {
       // schema either way). Two dimensions with one name is a manifest dbt rejects, so the base
       // one stands and the duplicate is dropped.
       const have = new Set(sm.dimensions.map((d) => d.name));
-      for (const d of add.dimensions || []) { if (have.has(d.name)) continue; have.add(d.name); sm.dimensions.push(d); }
+      for (const d of add.dimensions || []) { if (have.has(d.name)) continue; have.add(d.name); sm.dimensions.push(manifestOnly(d)); }
       for (const me of add.measures || []) {
         // MetricFlow forbids measures on an SCD (validity_params) model — drop them so the manifest
         // is valid; the point-in-time JOIN still works (it uses the dimensions), only measures move.

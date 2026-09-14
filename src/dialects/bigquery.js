@@ -81,7 +81,11 @@ export class BigQueryDialect extends Dialect {
   }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
-  jsonColumnArrayLength(column) { return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$'))`; }
+  jsonColumnArrayLength(column) {
+    // SAFE.PARSE_JSON turns text that is not JSON into NULL instead of failing the whole scan; a
+    // JSON-typed column passes through it unchanged. NULL then counts as absent, like an empty one.
+    return `ARRAY_LENGTH(JSON_QUERY_ARRAY(SAFE.PARSE_JSON(${column}), '$'))`;
+  }
 
   jsonColumnArrayContains(column, value) {
     // JSON_EXTRACT_STRING_ARRAY yields ARRAY<STRING>, so the membership literal is compared as a

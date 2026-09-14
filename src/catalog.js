@@ -128,19 +128,33 @@ function pipelineColumnType(cm, col) {
  * physical table lacks") can never surface anywhere downstream. Best-effort: a model
  * whose relation can't be introspected is left as declared. Returns { pruned }.
  */
-export async function groundCatalogToPhysical(catalog, runner, baseProjectDir) {
+export async function groundCatalogToPhysical(catalog, runner, baseProjectDir, log = () => {}) {
   if (!runner || !baseProjectDir || typeof runner.relationColumns !== 'function') return { pruned: {} };
   const phys = {};
-  for (const key of catalog.modelKeys()) {
+  const transient = [];
+  const keys = catalog.modelKeys();
+  for (const key of keys) {
     try {
       const r = await runner.relationColumns(baseProjectDir, catalog.getModel(key).dbt_model);
-      if (r && r.ok && Array.isArray(r.columns)) phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
-      // The relation cannot be introspected (not built, dropped, renamed, or dbt failed on it):
-      // the model is UNAVAILABLE — declared, but nothing in the warehouse backs it. Working on
-      // as declared would only move the failure to the first query.
-      else phys[key] = { unavailable: String(r?.stderr || r?.stdout || 'relation not found').replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').filter(Boolean).slice(-2).join(' ') || 'relation not found' };
-    } catch (e) { phys[key] = { unavailable: e?.message || 'introspection failed' }; }
+      if (r && r.ok && Array.isArray(r.columns)) { phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase())); continue; }
+      // dbt never got to ASK the warehouse (its own timeout, a signal, a spawn failure). That says
+      // nothing about the table, so it is not evidence of an absent one.
+      if (r?.killed || r?.signal || (r?.error && !r?.stderr)) { transient.push([key, r.error || `dbt was killed by ${r.signal}`]); continue; }
+      // dbt ran and could not introspect the relation (not built, dropped, renamed): the model is
+      // UNAVAILABLE — declared, but nothing in the warehouse backs it. Working on as declared would
+      // only move the failure to the first query.
+      phys[key] = { unavailable: String(r?.stderr || r?.stdout || 'relation not found').replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').filter(Boolean).slice(-2).join(' ') || 'relation not found' };
+    } catch (e) { transient.push([key, e?.message || 'introspection failed']); }
   }
+  // When NOT ONE model could be introspected, the thing that is unavailable is the warehouse (or
+  // dbt), not every table at once — a transient state a restart of the server cannot fix and must
+  // not be frozen into the catalog for its lifetime. Keep the catalog as declared and say so.
+  const failed = transient.length + Object.values(phys).filter((p) => p && p.unavailable).length;
+  if (keys.length && failed === keys.length) {
+    log(`catalog grounding SKIPPED: not one of the ${keys.length} models could be introspected — dbt or the warehouse is unreachable, so the catalog is served AS DECLARED and nothing is marked unavailable. First reason: ${transient[0]?.[1] || Object.values(phys)[0]?.unavailable}`);
+    return { pruned: {} };
+  }
+  for (const [key, why] of transient) log(`catalog grounding: '${key}' was NOT checked (dbt could not run: ${why}) — it stays as declared`);
   return catalog.groundToPhysical(phys);
 }
 
@@ -335,19 +349,26 @@ function dialectFromProfile(profilesDir, projectDir) {
  * MCP_PYTHON_MODEL_CONFIG; off: hide the stage regardless). Returns { available, runtime?, reason? }.
  */
 export function resolvePythonRuntime({ profilesDir, projectDir, env = process.env } = {}) {
+  // The operator's settings are read ONCE, here, and travel on the runtime: the tool schema, the
+  // stage's own validation and the compiled model then describe and do the same thing. (An embedder
+  // may override `config` on the catalog before the schemas are built — see Engine.)
+  let config = {};
+  try { config = JSON.parse(env.MCP_PYTHON_MODEL_CONFIG || '{}'); } catch { /* an unparseable pin is no pin */ }
+  const packages = String(env.MCP_PYTHON_PACKAGES || '');
+  const decided = (r) => ({ ...r, config, packages });
   const force = String(env.MCP_PYTHON_MODELS || '').trim().toLowerCase();
-  if (/^(off|0|false|no)$/.test(force)) return { available: false, reason: 'disabled by MCP_PYTHON_MODELS=off' };
+  if (/^(off|0|false|no)$/.test(force)) return decided({ available: false, reason: 'disabled by MCP_PYTHON_MODELS=off' });
   const out = profileOutput(profilesDir, projectDir);
   const type = String(out?.type || '').toLowerCase();
-  if (/^(on|1|true|yes)$/.test(force)) return { available: true, runtime: type || 'unknown', forced: true };
-  if (!out) return { available: false, reason: 'no dbt profile found — dbt Python models need an adapter that runs them (BigQuery with a submission set up, Snowflake, Databricks, DuckDB)' };
-  if (['duckdb', 'snowflake', 'databricks'].includes(type)) return { available: true, runtime: type };
+  if (/^(on|1|true|yes)$/.test(force)) return decided({ available: true, runtime: type || 'unknown', forced: true });
+  if (!out) return decided({ available: false, reason: 'no dbt profile found — dbt Python models need an adapter that runs them (BigQuery with a submission set up, Snowflake, Databricks, DuckDB)' });
+  if (['duckdb', 'snowflake', 'databricks'].includes(type)) return decided({ available: true, runtime: type });
   if (type === 'bigquery') {
     const method = out.submission_method || (out.dataproc_cluster_name ? 'cluster' : (out.dataproc_region ? 'serverless' : (out.compute_region ? 'bigframes' : null)));
-    if (method) return { available: true, runtime: 'bigquery', method };
-    return { available: false, reason: 'the BigQuery profile has no Python submission set up: add submission_method (bigframes | serverless | cluster) with gcs_bucket and dataproc_region / compute_region to the profile output' };
+    if (method) return decided({ available: true, runtime: 'bigquery', method });
+    return decided({ available: false, reason: 'the BigQuery profile has no Python submission set up: add submission_method (bigframes | serverless | cluster) with gcs_bucket and dataproc_region / compute_region to the profile output' });
   }
-  return { available: false, reason: `the '${type || 'unknown'}' adapter runs no dbt Python models` };
+  return decided({ available: false, reason: `the '${type || 'unknown'}' adapter runs no dbt Python models` });
 }
 
 /**

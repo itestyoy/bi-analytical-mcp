@@ -609,7 +609,12 @@ over `rewarded_tracking_id` — where the claim is false — totals **190** inst
 ## Notes for test authors
 
 - All `event_data` values are valid JSON objects; inner double quotes are
-  CSV-escaped by doubling. Empty payloads (`first_launch`) are `{}`.
+  CSV-escaped by doubling. Empty payloads (`first_launch`) are `{}` — except `e2`,
+  whose `words_collected` holds the STRING `oops-not-an-array` where every other row
+  holds an array. It is the deliberately ragged payload: `words_selected_of_event_data`
+  (`->>`) is then text that is not JSON at all, and `words_selected_json_of_event_data`
+  (`->`) is JSON that is not an array, so a scan that parses either column must count
+  that row as absent instead of failing over it.
 - `appsflyer_id` joins events to users. `campaign_id` is a plain string attribute
   on `dim_users` (no separate campaigns table).
 - All monetary fields are integers: `price_in_usd` (whole USD),

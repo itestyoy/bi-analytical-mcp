@@ -40,8 +40,23 @@ export class Engine {
     // container restarts — then it lives in its own store, isolated from the value index.
     this._memoryStore = memoryDbPath ? openStore({ dbPath: memoryDbPath }) : null;
     this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
+    // Target keys written before a target carried its source ('property:ad_type_of_event_data')
+    // name an entity no source owns: with several sources such a key surfaces a note on the wrong
+    // one. Rewrite each ONCE to its owner, or demote it to a searchable term when no single source
+    // claims it — after this, every stored key is (kind, source, name) and is read one way.
+    try {
+      const moved = this.memoryStore.retarget((canon) => this._memoryCanonForward(canon));
+      if (moved.targets) console.error(`[mcp] memory targets scoped to their source: ${moved.targets} target(s) on ${moved.notes} note(s)`);
+    } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
+    // Literal dbt.config extras the OPERATOR pins for every generated Python model (e.g.
+    // {"submission_method":"bigframes"}); the caller never decides where the compute runs. The
+    // catalog resolved them from the environment already — an injected value replaces them THERE,
+    // before the schemas are built, so the stage schema, its validation and the compiled model all
+    // describe the same runtime.
+    if (pythonModelConfig) catalog.pythonRuntime = { ...catalog.pythonRuntime, config: pythonModelConfig };
+    this.pythonModelConfig = catalog.pythonRuntime?.config || {};
     this.schemas = buildSchemas(catalog);
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
@@ -53,9 +68,6 @@ export class Engine {
     // The interpreter that runs the static gate over a python stage's functions (a local syntax /
     // safety check; the model itself runs where dbt sends it). The MetricFlow sidecar's Python.
     this.pythonBin = pythonBin || process.env.PYTHON_BIN || runner?.pythonBin || 'python3';
-    // Literal dbt.config extras the OPERATOR pins for every generated Python model (e.g.
-    // {"submission_method":"bigframes"}); the caller never decides where the compute runs.
-    this.pythonModelConfig = pythonModelConfig || (() => { try { return JSON.parse(process.env.MCP_PYTHON_MODEL_CONFIG || '{}'); } catch { return {}; } })();
   }
 
   // Internal helpers (no longer standalone tools — reached via semantic_index({ recipe })
@@ -80,6 +92,23 @@ export class Engine {
   _validate(tool, input) {
     const res = validateInput(this.validators[tool], input || {});
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
+  }
+
+  /**
+   * One stored memory-target key brought onto the current form: a property/event key with no
+   * source is attributed to the ONE source that declares it, and demoted to a searchable term when
+   * none or several do. Returns null when the key is already canonical.
+   */
+  _memoryCanonForward(canon) {
+    const c = this.catalog;
+    const i = String(canon).indexOf(':');
+    if (i <= 0) return null;
+    const kind = canon.slice(0, i); const key = canon.slice(i + 1);
+    if ((kind !== 'property' && kind !== 'event') || key.includes('.')) return null; // model:, term:, already scoped
+    const owners = kind === 'event'
+      ? c.facts.filter((f) => c.eventNames(f).includes(key))
+      : c.ownersOf(key).map((o) => o.source);
+    return owners.length === 1 ? `${kind}:${owners[0]}.${key}` : `term:${key.toLowerCase()}`;
   }
 
   /** Every linkable catalog entity as a typed target candidate (events/props/attrs/models). */
@@ -117,6 +146,11 @@ export class Engine {
     }
     const s = String(t).trim();
     if (c.models[s]) return memoryTarget('model', s);
+    // The glued '<source>.<name>' spelling is not a name — it is two arguments written as one.
+    const dot = s.indexOf('.');
+    if (dot > 0 && c.models[s.slice(0, dot)]) {
+      throw new ToolError(`memory target '${s}': the source is a separate field — pass { source: '${s.slice(0, dot)}', name: '${s.slice(dot + 1)}' }.`, { stage: 'validate', field: 'targets' });
+    }
     // A bare name is attributed to the source that declares it — when exactly one does. Two
     // sources carrying the same name is reported, never guessed (the rule every other resolver
     // here follows).
@@ -226,6 +260,22 @@ export class Engine {
     throw new ToolError(`unknown action '${action}'`, { stage: 'validate', field: 'action' });
   }
 
+  /**
+   * The context by id, checked against the catalog AS IT IS NOW. A context is a set of declarations
+   * over models, and a later grounding pass may have found that the warehouse no longer backs one
+   * of them — reported here with the grounding reason, not as a bare 'Unknown model' thrown from
+   * inside the renderer.
+   */
+  _ctx(id) {
+    let ctx;
+    try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'context_id' }); }
+    const gone = [...new Set([...(ctx.state.usedModels || []), ...Object.keys(ctx.state.additions || {})])].filter((k) => !this.catalog.models[k]);
+    if (gone.length) {
+      throw new ToolError(`context '${id}' was built over ${gone.map((k) => `'${k}'`).join(', ')}, which the catalog no longer serves${this.catalog.unavailableHint(gone[0])} Start a new context over the sources that are available (semantic_index() lists them).`, { stage: 'validate', field: 'context_id' });
+    }
+    return ctx;
+  }
+
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
   _taskDimMap(ctx) {
     const map = new Map();
@@ -243,8 +293,7 @@ export class Engine {
     const tasks = ctx.state.tasks || [];
     for (const [model, add] of Object.entries(ctx.state.additions || {})) {
       for (const d of add.dimensions || []) {
-        const t = tasks.find((tk) => d.name.startsWith(`${tk}_`));
-        const attribute = t ? d.name.slice(t.length + 1) : d.name;
+        const attribute = declaredAttribute(d, tasks);
         if (!out.some((r) => r.model === model && r.attribute === attribute && !r.via)) out.push({ model, attribute });
       }
     }
@@ -285,7 +334,7 @@ export class Engine {
     }
     for (const [model, add] of Object.entries(ctx.state.additions || {})) {
       const d = (add.dimensions || []).find((x) => x.name === p);
-      if (d) { const t = (ctx.state.tasks || []).find((tk) => p.startsWith(`${tk}_`)); return `{ model: '${model}', attribute: '${t ? p.slice(t.length + 1) : p}' }`; }
+      if (d) return `{ model: '${model}', attribute: '${declaredAttribute(d, ctx.state.tasks || [])}' }`;
     }
     return `{ model: '<model>', attribute: '${p}' }`;
   }
@@ -503,12 +552,12 @@ export class Engine {
       out.recommendations = c.isFact(k)
         ? [
           `Drill into an event to see the properties it carries: semantic_index({ source: '${k}', event: '${c.eventNames(k)[0] || '<event_name>'}' }).`,
-          `Then inspect a property's real values + frequency distribution: semantic_index({ property: '<name>' }).`,
+          `Then inspect a property's real values + frequency distribution: semantic_index({ source: '${k}', property: '<name>' }).`,
           ...(apps.length ? [`Scoping to one app? semantic_index({ source: '${k}', bundle: '${apps[0].bundle}' }) lists which properties carry data for it vs are EMPTY.`] : []),
           `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ search: '<value>' }).`,
         ]
         : [
-          `Drill into an attribute's full value/frequency distribution: semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
+          `Drill into an attribute's full value/frequency distribution: semantic_index({ source: '${k}', property: '${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
           `Looking for a known attribute value? semantic_index({ search: '<value>' }) tells you where it occurs.`,
         ];
       // Concrete next calls (structured) for this model.
@@ -519,7 +568,7 @@ export class Engine {
           { call: "semantic_index({ search: '<value>' })", why: 'trace a value to the property/event that carries it' },
         ]
         : [
-          { call: `semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' })`, why: "drill an attribute's full value/frequency distribution" },
+          { call: `semantic_index({ source: '${k}', property: '${Object.keys(m.dimensions || {})[0] || '<column>'}' })`, why: "drill an attribute's full value/frequency distribution" },
           { call: "semantic_index({ search: '<value>' })", why: 'find where a known attribute value occurs' },
         ];
       // Saved findings about this model (memory tool) — surface them where they belong (compact).
@@ -577,7 +626,7 @@ export class Engine {
         next_actions: nextActions,
         recommendations: recommendations.slice(0, 4),
       };
-      this._attachMemory(eventOut, [`event:${fact}.${eventName}`, `event:${eventName}`], { source: fact, name: eventName });
+      this._attachMemory(eventOut, [`event:${fact}.${eventName}`], { source: fact, name: eventName });
       return eventOut;
     }
 
@@ -615,7 +664,7 @@ export class Engine {
           indexing: this._indexHistory(mk, col, input.recent ?? 3),
           recommendations: recommendations.slice(0, 3),
         };
-        this._attachMemory(attrOut, [`property:${mk}.${col}`, `property:${col}`], { source: mk, name: col });
+        this._attachMemory(attrOut, [`property:${mk}.${col}`], { source: mk, name: col });
         return attrOut;
       }
       const propFact = pSource; const propName = p;
@@ -710,7 +759,7 @@ export class Engine {
           if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ bundle: '<app>' }) or include_coverage:true.`];
         }
       }
-      this._attachMemory(out, [`property:${propFact}.${p}`, `property:${p}`], { source: propFact, name: p });
+      this._attachMemory(out, [`property:${propFact}.${p}`], { source: propFact, name: p });
       return out;
     }
 
@@ -915,7 +964,7 @@ export class Engine {
       recommendations: [
         `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
         `Start by inspecting an event's properties: semantic_index({ source: '${exFact}', event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
-        `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
+        `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ source: '${userModel || 'users'}', property: '${exAttr || 'country'}' }).`,
         ...(bundleList.length ? [`Working with ONE app? semantic_index({ source: '${bundleList[0].source}', bundle: '${bundleList[0].bundle}' }) lists which event properties carry data for it vs are EMPTY in that source (skip the empty ones); ${bundleList.length} app(s) are in the data.`] : []),
         `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,
       ],
@@ -1174,7 +1223,7 @@ export class Engine {
     this._validate('build_native_model', input);
     if (input.action === 'start') return this._draftStart(input);
     if (input.action === 'fork') return this._draftFork(input); // branches a NEW draft (no live draft required)
-    const ctx = this.ctxs.get(input.draft_id);
+    const ctx = this._ctx(input.draft_id);
     const draft = ctx.state.draft;
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
@@ -1264,7 +1313,7 @@ export class Engine {
   }
 
   async _draftStart(input) {
-    const ctx = input.draft_id ? this.ctxs.get(input.draft_id) : this.ctxs.create();
+    const ctx = input.draft_id ? this._ctx(input.draft_id) : this.ctxs.create();
     const source = input.source || this._defaultSource('source');
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
@@ -1383,7 +1432,7 @@ export class Engine {
    * WITHOUT touching the original. after omitted → copy every step.
    */
   async _draftFork(input) {
-    const src = this.ctxs.get(input.draft_id);
+    const src = this._ctx(input.draft_id);
     const origin = src.state.draft || src.state.pipeline_origin; // live draft, or the snapshot a materialize left behind
     if (!origin) throw new ToolError(`context '${input.draft_id}' has no draft or built pipeline to fork — start one, or fork a context whose pipeline was materialized`, { stage: 'validate', field: 'draft_id' });
     const total = origin.stages.length;
@@ -1561,24 +1610,6 @@ export class Engine {
     return c.attributeKind(sourceKey, column) ? { source: sourceKey, property: column } : null;
   }
 
-  /** Where a query_semantic_model dimension PATH (e.g. user__country) lives in the value index:
-   *  { source, property } or null. */
-  _valueKeyForPath(path) {
-    const c = this.catalog;
-    const i = String(path).indexOf('__');
-    if (i > 0) {
-      const entity = path.slice(0, i); const col = path.slice(i + 2);
-      // A path resolves on the model that OWNS the entity (the join target), never on a model
-      // that merely points at it with a foreign key — that one has no such attribute.
-      const mk = c.joinTargetFor(entity);
-      return mk && (c.getModel(mk).dimensions || {})[col] ? { source: mk, property: col } : null;
-    }
-    // A bare path is an attribute of the events source the metric reads; with several sources
-    // carrying the name there is nothing to verify against, so no guard rather than a guess.
-    const owners = c.ownersOf(path).filter((o) => c.isFact(o.source));
-    return owners.length === 1 ? { source: owners[0].source, property: path } : null;
-  }
-
   /**
    * HARD guard: given resolved filter specs [{ key, op, value, where }] (op ∈ equality ops,
    * value scalar or array), reject any literal that is a case/typo/absent mismatch of the
@@ -1737,14 +1768,14 @@ export class Engine {
   _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
-      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(process.env, profile), config: this.pythonModelConfig, pipeline, profile });
+      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, pipeline, profile });
     } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
   }
 
   /** The static gate over a python stage's function bodies (syntax, no imports/dbt/session/eval…). */
   async _gatePythonStage(stage) {
     const compiled = this._compilePythonStage(stage, { modelName: 'm', inputModel: 'm_in', pipeline: null });
-    const gate = await runAstGate(this.pythonBin, compiled.functions);
+    const gate = await runAstGate(this.pythonBin, compiled.functions, compiled.bindings);
     if (!gate.ok) {
       const lines = gate.errors.map((e) => `${e.function} line ${e.line}${e.text ? ` (${e.text})` : ''}: ${e.message}`);
       throw new ToolError(`python stage: functions rejected by the static gate:\n${lines.join('\n')}`, { stage: 'validate', field: 'functions', details: gate.errors });
@@ -1860,7 +1891,7 @@ export class Engine {
     }
     const probe = render('pipe');
     await gateAll(probe.chain);
-    const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
+    const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
     const out = render(modelName);
     const models = this._chainModels(out.chain, input);
@@ -1892,9 +1923,11 @@ export class Engine {
     if (this.runner) {
       let r;
       if (models.length > 1) {
-        // `+model`: dbt builds the whole chain in ref order; a Python model is a cold start of
-        // minutes on the warehouse runtime, so it runs detached and may hand back a query_id.
-        const bg = await this._runDetached(ctx, `+${modelName}`, modelName);
+        // Select the chain's OWN models by name (space = dbt's union operator), in ref order —
+        // never `+model`, whose ancestor operator would also select the catalog's base tables and
+        // REBUILD them. A Python model is a cold start of minutes on the warehouse runtime, so the
+        // build runs detached and may hand back a query_id.
+        const bg = await this._runDetached(ctx, models.map((m) => m.model).join(' '), modelName);
         if (bg.status === 'running') {
           return {
             context_id: ctx.id, kind: 'pipeline', ok: true, status: 'running', query_id: bg.query_id, model: modelName, materialized, dialect, models: chainInfo, ...(hasPython ? { python: pyInfo } : {}),
@@ -2012,7 +2045,7 @@ export class Engine {
   /** Delete a registered native model: remove its files + state and re-parse. */
   async delete_native_model(input) {
     this._validate('delete_native_model', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
     if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native (pipeline) model registered in this context' };
     const model = ctx.state.model;
     this.ctxs.removeGeneratedFile(ctx.id, `${model}.sql`);
@@ -2030,7 +2063,7 @@ export class Engine {
     if (input.dry_run) {
       const draft = { tasks: [], additions: {}, metrics: [], usedModels: [] };
       if (input.context_id && this.ctxs.has(input.context_id)) {
-        const cur = this.ctxs.get(input.context_id).state;
+        const cur = this._ctx(input.context_id).state;
         mergeCompiled(draft, { additions: clone(cur.additions), metrics: clone(cur.metrics), usedModels: [...cur.usedModels], task: null });
       }
       mergeCompiled(draft, compiled);
@@ -2038,7 +2071,7 @@ export class Engine {
       return { context_id: input.context_id || null, task: compiled.task, dry_run: true, yaml: render.yaml, semantic_models: render.semanticModels, metrics: render.metricNames, warnings: render.warnings || [] };
     }
 
-    const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
+    const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
     mergeCompiled(ctx.state, compiled);
     const render = renderContext(this.catalog, ctx.state);
     const file = this.ctxs.writeYaml(ctx.id, render.yaml);
@@ -2071,7 +2104,7 @@ export class Engine {
 
   async update_semantic_model(input) {
     this._validate('update_semantic_model', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
     const modelKey = input.semantic_model;
     // dry_run must NOT mutate the context (state or files): work on a clone.
     const state = input.dry_run ? clone(ctx.state) : ctx.state;
@@ -2112,7 +2145,7 @@ export class Engine {
 
   async delete_semantic_model(input) {
     this._validate('delete_semantic_model', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
     const modelKey = input.semantic_model;
     const add = ctx.state.additions[modelKey];
     if (!add) return { context_id: ctx.id, removed: false, reason: 'no task additions for this model' };
@@ -2294,7 +2327,7 @@ export class Engine {
 
   async describe_context(input) {
     this._validate('describe_context', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
     // A pipeline-registered model is a normal dbt model whose rows are the result.
     // Report its model name and the output columns you can read. Read it via
     // get_query_result. The columns are grounded to the real relation below.
@@ -2334,7 +2367,7 @@ export class Engine {
 
   async query_semantic_model(input) {
     this._validate('query_semantic_model', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
 
     // A pipeline-registered model has no MetricFlow semantic model — its rows ARE
     // the result. Read/slice/sample them with get_query_result instead.
@@ -2379,13 +2412,17 @@ export class Engine {
         if (p.field?.kind === 'dimension') {
           if (p.field.path != null) throw new ToolError(`where: a dimension is addressed by where it lives — { kind: 'dimension', model, attribute } — never by a path string. '${p.field.path}' → ${this._suggestRef(ctx, p.field.path)}.`, { stage: 'validate', field: 'where' });
           const label = `${p.field.model}.${p.field.attribute}`;
+          // The value-index key comes from the model the caller NAMED, while it is still here: a
+          // path carries no source, so recovering it afterwards loses the guard on any name two
+          // sources happen to share.
+          const at = this._valueKeyForColumn(p.field.model, p.field.attribute);
           p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
           delete p.field.model; delete p.field.attribute; delete p.field.via;
           if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. Reachable: ${this._groupableRefs(ctx).slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ')}`, { stage: 'validate', field: 'where' });
           this._checkPathLoaded(ctx, p.field.path);
           // Verify the filter literal against the column's REAL values (source-scoped):
           // reject a wrong-cased/non-existent value instead of filtering to nothing.
-          specs.push({ at: this._valueKeyForPath(p.field.path), op: p.op, value: p.value, where: `where ${p.field.path}` });
+          specs.push({ at, op: p.op, value: p.value, where: `where ${label}` });
         }
       });
       filterWarnings = this._guardFilterValues(specs); // throws on a case/typo/absent mismatch
@@ -2518,12 +2555,17 @@ export class Engine {
   async _materialize(ctx, qopts, input, rename = new Map()) {
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     const dir = this.ctxs.dir(ctx.id);
-    const explain = await this.runner.query(dir, { ...qopts, explain: true });
+    // The TABLE is the deliverable here — get_query_result pages it and runs transforms OVER it —
+    // so it holds the whole result. `limit` is the caller's page size for reading rows back below,
+    // and baking it into the query would persist one page and let every later total be read off it
+    // as if it were the full answer.
+    const { limit: _page, ...full } = qopts;
+    const explain = await this.runner.query(dir, { ...full, explain: true });
     if (!explain.ok) return { ok: false, error: { stage: 'query', message: formatDbtError(explain.stdout, explain.stderr) } };
     // The persisted table is what get_query_result transforms address later, so its columns get
     // the caller-facing names (`<model>_<attribute>`, `metric_time_<grain>`), never `__`.
     const projected = rename.size
-      ? `select ${[...(qopts.groupBy || []).map((g) => (rename.has(g) ? `${g} as ${rename.get(g)}` : g)), ...qopts.metrics].join(', ')} from (\n${explain.sql}\n) _q`
+      ? `select ${[...(full.groupBy || []).map((g) => (rename.has(g) ? `${g} as ${rename.get(g)}` : g)), ...full.metrics].join(', ')} from (\n${explain.sql}\n) _q`
       : explain.sql;
 
     const id = this.jobs.create({ contextId: ctx.id });
@@ -2617,7 +2659,7 @@ export class Engine {
     // direct fetch by table (crash-resilient: works even if the job is gone).
     // Accepts a query-result table (qr_*) or a registered pipeline model (pipe_*).
     if (input.table) {
-      this.ctxs.get(input.context_id); // validate the context exists (throws otherwise)
+      this._ctx(input.context_id); // validate the context exists (throws otherwise)
       if (!/^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$/.test(input.table)) throw new ToolError(`invalid result table name: ${input.table}`, { stage: 'validate', field: 'table' });
       return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, transform, {}, offset, sample, samplePercent);
     }
@@ -2707,6 +2749,18 @@ function clone(x) {
  * for a free phrase — plus the stored canonical key "<kind>:<source>.<name>" and the flat `key`
  * the fuzzy matcher scores.
  */
+/**
+ * The attribute a compiled dimension was DECLARED as. `_attribute` records it at compile time; a
+ * context persisted before that falls back to the longest task name the identifier starts with —
+ * longest, because one task name may be a prefix of another ('ret' and 'ret_v2') and the shorter
+ * one would leave part of the task name inside the attribute.
+ */
+function declaredAttribute(dim, tasks = []) {
+  if (dim._attribute) return dim._attribute;
+  const t = [...tasks].filter((tk) => dim.name.startsWith(`${tk}_`)).sort((a, b) => b.length - a.length)[0];
+  return t ? dim.name.slice(t.length + 1) : dim.name;
+}
+
 function memoryTarget(kind, source, name = null) {
   const key = name == null ? source : `${source}.${name}`;
   return { kind, key, canon: `${kind}:${key}`, target: name == null ? { source } : { source, name } };
@@ -2717,10 +2771,11 @@ function memoryTargetFromCanon(canon) {
   const s = String(canon); const i = s.indexOf(':');
   if (i <= 0) return { kind: 'term', term: s };
   const kind = s.slice(0, i); const key = s.slice(i + 1);
-  if (kind === 'term') return { kind, term: key };
   if (kind === 'model') return { kind, source: key };
-  const dot = key.indexOf('.');
-  return dot > 0 ? { kind, source: key.slice(0, dot), name: key.slice(dot + 1) } : { kind, name: key };
+  const dot = kind === 'term' ? -1 : key.indexOf('.');
+  // A property/event key always carries its source (the engine scopes stored keys at open), so a
+  // bare one can only be a phrase — which is what a term is.
+  return dot > 0 ? { kind, source: key.slice(0, dot), name: key.slice(dot + 1) } : { kind: 'term', term: key };
 }
 
 /**

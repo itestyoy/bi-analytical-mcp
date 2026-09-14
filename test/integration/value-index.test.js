@@ -188,6 +188,25 @@ test('complex array in a JSON-typed column: coverage counted from data (no JSON-
   assert.ok(props.some((r) => r.source === 'events' && r.property === asString && r.status === 'ok'));
 });
 
+// A warehouse column is DATA, not a promise: seed row e2 carries `words_collected` as a string
+// where every other row carries an array, so the text column holds something that is not JSON and
+// the json column something that is not an array. Parsing it must count that row as absent — the
+// whole per-event coverage scan of the property used to fail on it, and a property with no coverage
+// is then reported as carried by EVERY event.
+test('a row whose array payload is not an array is counted as absent, not fatal to the scan', opts, async (t) => {
+  if (skip(t)) return;
+  for (const prop of ['words_selected_of_event_data', 'words_selected_json_of_event_data']) {
+    const cov = index.coverage('events', prop);
+    assert.ok(cov.length > 0, `${prop}: the scan completed (a failed scan leaves no coverage at all)`);
+    const fl = cov.find((e) => e.event_name === 'first_launch');
+    assert.ok(fl, `${prop}: first_launch was scanned`);
+    assert.equal(Number(fl.non_null), 0, `${prop}: the ragged row counts as absent, like an empty one`);
+    assert.ok(Number(fl.row_count) > 0, `${prop}: and its rows were counted`);
+    assert.deepEqual(cov.filter((e) => e.non_null > 0).map((e) => e.event_name), ['level_completed'], `${prop}: only the real carrier`);
+    assert.deepEqual([...index.appliesEvents('events', prop)], ['level_completed'], `${prop}: applicability stays data-derived`);
+  }
+});
+
 // semantic_index({ property }) value listing is pageable + orderable (limit/offset/order_by/direction).
 test('semantic_index({ property }) pages + orders the indexed values', opts, async (t) => {
   if (skip(t)) return;

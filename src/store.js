@@ -185,6 +185,7 @@ export class MemoryBackend {
       add: (e) => { memory.set(e.id, { id: e.id, note: String(e.note), question: e.question ?? null, targets: [...(e.targets || [])], aliases: [...(e.aliases || [])], links: [...(e.links || [])], created_at: e.created_at ?? Date.now() }); return e.id; },
       get: (id) => { const e = memory.get(id); return e ? { ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] } : null; },
       remove: (id) => { vectors.delete(id); return memory.delete(id); },
+      setTargets: (id, targets) => { const e = memory.get(id); if (!e) return false; e.targets = [...targets]; return true; },
       all: ({ limit = 200 } = {}) => [...memory.values()].sort((a, b) => b.created_at - a.created_at || String(b.id).localeCompare(a.id)).slice(0, limit).map((e) => ({ ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] })),
       counts: () => ({ notes: memory.size }),
       // ── semantic (vector) search: JS cosine over stored embeddings (no native dep) ──
@@ -411,6 +412,7 @@ export class SqliteBackend {
       add(e) { s._run('INSERT INTO memory (id, note, question, targets, aliases, links, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', e.id, String(e.note), e.question ?? null, JSON.stringify(e.targets || []), JSON.stringify(e.aliases || []), JSON.stringify(e.links || []), e.created_at ?? Date.now()); return e.id; },
       get(id) { return memRow(s._get('SELECT * FROM memory WHERE id = ?', id)); },
       remove(id) { if (s._vec) try { s._run('DELETE FROM memory_vec WHERE id = ?', id); } catch { /* no vec table */ } return s._run('DELETE FROM memory WHERE id = ?', id).changes > 0; },
+      setTargets(id, targets) { return s._run('UPDATE memory SET targets = ? WHERE id = ?', JSON.stringify(targets || []), id).changes > 0; },
       all({ limit = 200 } = {}) { return s._all('SELECT id, note, question, targets, aliases, links, created_at FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
       counts() { return { notes: Number(s._get('SELECT COUNT(*) AS n FROM memory').n) }; },
 

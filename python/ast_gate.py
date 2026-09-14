@@ -1,30 +1,99 @@
 #!/usr/bin/env python
-"""Static gate for the function bodies of a declared dbt Python model.
+"""Static structural gate for the function bodies of a declared dbt Python model.
 
 The server assembles each declared function as `def <name>(<params>):` + the body the caller
 wrote, and asks this script whether it is admissible BEFORE anything is sent to the warehouse's
-Python runtime (where `print` is invisible and a failure costs a cold start). A body may compute
-over the frame it is given; it may not import, reach the dbt/session objects, touch the
-interpreter or the host, or use dunder attributes.
+Python runtime (where `print` is invisible and a failure costs a cold start).
 
-Protocol: one JSON object on stdin — {"functions": [{"name","params","body"}]} — one JSON object
-on stdout — {"ok": bool, "errors": [{"function","line","message"}]}. Lines are 1-based within
-the BODY as the caller wrote it.
+The check is an ALLOWLIST, not a blocklist: a body may use only the statement/expression forms a
+frame transform needs, may name only its own parameters and locals, the names the declaration's
+`imports` bound, the other declared functions, and a small set of builtins — and may touch only
+public attributes. Everything else (imports, `global`, dunder attributes, `getattr`/`eval`/`open`
+and friends, the dbt/session objects) has no spelling that reaches it, so a body cannot be written
+to reach the interpreter or the host through a name the author did not declare.
+
+This is a structural guard over what the caller declares, not a sandbox: the code still runs in
+the warehouse's Python runtime, and what it may touch THERE is decided by that runtime and the
+credentials dbt runs with.
+
+Protocol: one JSON object on stdin — {"functions": [{"name","params","body"}], "bindings": [...]}
+— one JSON object on stdout — {"ok": bool, "errors": [{"function","line","text","message"}]}.
+Lines are 1-based within the BODY as the caller wrote it.
 """
 import ast
 import json
 import sys
 
-FORBIDDEN_CALLS = {
-    "exec", "eval", "compile", "open", "__import__", "globals", "locals", "vars", "dir",
-    "setattr", "delattr", "breakpoint", "input", "exit", "quit", "help", "memoryview",
+# Builtins a frame transform legitimately needs. Anything that reaches the interpreter, the host,
+# or an attribute by NAME (getattr/setattr/vars/dir/type/super/object/eval/exec/compile/open/
+# __import__/globals/locals/input/breakpoint/memoryview) is deliberately absent.
+SAFE_BUILTINS = frozenset({
+    "abs", "all", "any", "bool", "dict", "divmod", "enumerate", "filter", "float", "format",
+    "frozenset", "int", "isinstance", "len", "list", "map", "max", "min", "pow", "print", "range",
+    "repr", "reversed", "round", "set", "slice", "sorted", "str", "sum", "tuple", "zip",
+})
+
+# Exception classes a body may catch or raise. Names only — they reach nothing on their own.
+SAFE_BUILTINS = SAFE_BUILTINS | frozenset({
+    "ArithmeticError", "AttributeError", "Exception", "FloatingPointError", "IndexError",
+    "KeyError", "LookupError", "NotImplementedError", "OverflowError", "RuntimeError",
+    "StopIteration", "TypeError", "ValueError", "ZeroDivisionError",
+})
+
+# Statement / expression forms a body may use. Node classes absent here have no legal spelling:
+# Import, ImportFrom, Global, Nonlocal, ClassDef, Delete, Await/Yield and the async forms.
+ALLOWED_NODES = (
+    ast.Module, ast.FunctionDef, ast.arguments, ast.arg,
+    ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr, ast.Return, ast.Pass,
+    ast.If, ast.For, ast.While, ast.Break, ast.Continue, ast.With, ast.withitem,
+    ast.Try, ast.ExceptHandler, ast.Raise, ast.Assert,
+    ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Lambda, ast.IfExp, ast.NamedExpr,
+    ast.Dict, ast.Set, ast.List, ast.Tuple, ast.ListComp, ast.SetComp, ast.DictComp,
+    ast.GeneratorExp, ast.comprehension, ast.Compare, ast.Call, ast.keyword, ast.Starred,
+    ast.Constant, ast.JoinedStr, ast.FormattedValue,
+    ast.Attribute, ast.Subscript, ast.Slice, ast.Name,
+    # operator / context marker nodes (Add, Lt, And, Load, …)
+    ast.operator, ast.cmpop, ast.boolop, ast.unaryop, ast.expr_context,
+)
+
+NODE_LABEL = {
+    "Import": "an import inside a function body is not allowed — list the module in the declaration's `imports`",
+    "ImportFrom": "an import inside a function body is not allowed — list the module in the declaration's `imports`",
+    "Global": "global / nonlocal are not allowed — a step function works only on the frame it receives",
+    "Nonlocal": "global / nonlocal are not allowed — a step function works only on the frame it receives",
+    "ClassDef": "a class definition is not allowed in a step function",
+    "Delete": "`del` is not allowed in a step function",
 }
-FORBIDDEN_NAMES = {"dbt", "session", "__builtins__", "__loader__", "__spec__", "__file__", "__name__"}
 
 
-def _check(fn):
+def _bound_names(fdef):
+    """Every name the function itself introduces: parameters, assignment targets, loop and
+    comprehension targets, `with ... as`, `except ... as`, walrus. Over-approximates Python's
+    scoping on purpose — it only ever widens which of the AUTHOR'S OWN names are readable."""
+    names = set()
+
+    def add_args(a):
+        for group in (getattr(a, "posonlyargs", []), a.args, a.kwonlyargs):
+            for arg in group:
+                names.add(arg.arg)
+        for arg in (a.vararg, a.kwarg):
+            if arg:
+                names.add(arg.arg)
+
+    add_args(fdef.args)
+    for node in ast.walk(fdef):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            names.add(node.id)
+        elif isinstance(node, ast.Lambda):
+            add_args(node.args)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            names.add(node.name)
+    return names
+
+
+def _check(fn, bindings):
     name, params, body = fn["name"], fn.get("params") or [], fn.get("body") or ""
-    header = f"def {name}({', '.join(params)}):\n"
+    header = "def %s(%s):\n" % (name, ", ".join(params))
     indented = "".join("    " + line + "\n" for line in body.splitlines()) or "    pass\n"
     src = header + indented
     errors = []
@@ -33,33 +102,54 @@ def _check(fn):
     except SyntaxError as e:  # line 1 of `src` is the def line
         ln = max(1, (e.lineno or 2) - 1)
         lines = body.splitlines()
-        errors.append({"function": name, "line": ln, "text": lines[ln - 1].strip() if 0 < ln <= len(lines) else "", "message": f"syntax error: {e.msg}"})
+        errors.append({"function": name, "line": ln, "text": lines[ln - 1].strip() if 0 < ln <= len(lines) else "", "message": "syntax error: %s" % e.msg})
         return errors
     fdef = tree.body[0]
     body_lines = body.splitlines()
-    at = lambda node: max(1, getattr(node, "lineno", 2) - 1)  # noqa: E731
-    text = lambda node: (body_lines[at(node) - 1].strip() if 0 < at(node) <= len(body_lines) else "")  # noqa: E731
+
+    def at(node):
+        return max(1, getattr(node, "lineno", 2) - 1)
+
+    def text(node):
+        i = at(node)
+        return body_lines[i - 1].strip() if 0 < i <= len(body_lines) else ""
+
+    def err(node, message):
+        errors.append({"function": name, "line": at(node), "text": text(node), "message": message})
+
+    readable = _bound_names(fdef) | set(bindings) | SAFE_BUILTINS
     for node in ast.walk(fdef):
-        if isinstance(node, (ast.Import, ast.ImportFrom)):
-            errors.append({"function": name, "line": at(node), "text": text(node), "message": "an import inside a function body is not allowed — list the module in the declaration's `imports`"})
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            errors.append({"function": name, "line": at(node), "text": text(node), "message": "global / nonlocal are not allowed — a step function works only on the frame it receives"})
-        elif isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
-            errors.append({"function": name, "line": at(node), "text": text(node), "message": f"'{node.id}' is not reachable from a step function — inputs come through the declaration's `inputs`"})
-        elif isinstance(node, ast.Attribute) and node.attr.startswith("__"):
-            errors.append({"function": name, "line": at(node), "text": text(node), "message": f"dunder attribute '{node.attr}' is not allowed"})
-        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_CALLS:
-            errors.append({"function": name, "line": at(node), "text": text(node), "message": f"call to '{node.func.id}()' is not allowed"})
+        if node is fdef:
+            continue
+        kind = type(node).__name__
+        if not isinstance(node, ALLOWED_NODES):
+            err(node, NODE_LABEL.get(kind, "`%s` is not allowed in a step function" % kind))
+            continue
+        if isinstance(node, ast.FunctionDef):
+            err(node, "a nested function definition is not allowed — declare it as its own step function")
+        elif isinstance(node, ast.Attribute) and node.attr.startswith("_"):
+            err(node, "attribute '%s' is private — a step function uses the public API of the frame it receives" % node.attr)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in readable:
+            err(node, "'%s' is not available here — a step function sees its parameters, its own locals, the declaration's `imports` and the other declared functions" % node.id)
     if not any(isinstance(n, ast.Return) and n.value is not None for n in ast.walk(fdef)):
-        errors.append({"function": name, "line": 1, "message": "a step function must `return` the frame it produced"})
-    return errors
+        errors.append({"function": name, "line": 1, "text": body_lines[0].strip() if body_lines else "", "message": "a step function must `return` the frame it produced"})
+    # one error per line is enough to act on; keep the first few in source order
+    seen = set()
+    unique = []
+    for e in sorted(errors, key=lambda x: x["line"]):
+        key = (e["line"], e["message"])
+        if key not in seen:
+            seen.add(key)
+            unique.append(e)
+    return unique
 
 
 def main():
     req = json.loads(sys.stdin.read() or "{}")
+    bindings = req.get("bindings") or []
     errors = []
     for fn in req.get("functions") or []:
-        errors.extend(_check(fn))
+        errors.extend(_check(fn, bindings))
     sys.stdout.write(json.dumps({"ok": not errors, "errors": errors}))
 
 

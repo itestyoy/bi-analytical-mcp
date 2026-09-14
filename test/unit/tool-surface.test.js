@@ -9,6 +9,7 @@ import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildToolDefs } from '../../src/server.js';
+import { renderContext } from '../../src/yaml-render.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -249,4 +250,40 @@ test('the guide derives its variant-join trigger from the catalog, or omits it',
   const plain = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) });
   const g2 = await plain.semantic_index({ guide: true });
   assert.ok(!g2.routing_triggers.some((x) => /alternative columns/.test(x.if)), 'no variants → no trigger');
+});
+
+// A task's dimensions are namespaced `<task>_<attribute>` in the manifest. What the tools report
+// back (and accept again) is the attribute the caller DECLARED — recovered from the compiled
+// declaration, never by stripping whatever task name the identifier happens to start with: with
+// tasks 'ret' and 'ret_v2' the prefix 'ret_' also matches 'ret_v2_country'.
+test('a task dimension is reported under its declared attribute even when one task name prefixes another', async () => {
+  const e = engine();
+  const first = await e.create_semantic_model({
+    name: 'ret',
+    semantic_models: [
+      { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
+      { from: 'users', dimensions: [{ source: 'model_column', column: 'country' }] },
+    ],
+    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+  });
+  const out = await e.update_semantic_model({
+    context_id: first.context_id,
+    semantic_model: 'users',
+    task: 'ret_v2',
+    add_dimensions: [{ source: 'model_column', column: 'country' }],
+  });
+  const ctx = e.ctxs.get(first.context_id);
+  assert.deepEqual([...(ctx.state.tasks || [])].sort(), ['ret', 'ret_v2'], JSON.stringify(ctx.state.tasks));
+  const names = (ctx.state.additions.users.dimensions || []).map((d) => d.name).sort();
+  assert.deepEqual(names, ['ret_country', 'ret_v2_country'], 'both tasks namespaced their own copy');
+  // every declared dimension is offered under 'country' — never under 'v2_country'
+  const groupable = out.groupable || [];
+  assert.ok(groupable.some((r) => r.model === 'users' && r.attribute === 'country'), JSON.stringify(groupable));
+  assert.ok(!groupable.some((r) => String(r.attribute).startsWith('v2_')), `no half-stripped attribute: ${JSON.stringify(groupable)}`);
+  // and the offered ref is accepted back by the query path (it resolves to a real manifest path)
+  assert.equal(typeof e._normalizeRef(ctx, { model: 'users', attribute: 'country' }, 'group_by'), 'string');
+  // the manifest itself carries no internal annotation — dbt rejects a key it does not know
+  const { yaml } = renderContext(e.catalog, ctx.state);
+  assert.ok(/ret_v2_country/.test(yaml), 'the namespaced dimension IS in the manifest');
+  assert.ok(!/_attribute|_task/.test(yaml), 'but our own annotations are not');
 });

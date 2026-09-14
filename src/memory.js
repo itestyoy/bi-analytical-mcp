@@ -51,6 +51,26 @@ export class MemoryStore {
     return entry;
   }
 
+  /**
+   * Rewrite stored target keys in place. `rule(canon)` -> a replacement key, or null to keep it.
+   * Used ONCE at open to bring keys written by an older layout onto the current canonical form —
+   * the caller supplies the rule because only it holds the catalog. Returns { notes, targets }.
+   */
+  retarget(rule) {
+    let notes = 0; let targets = 0;
+    for (const e of this.all({ limit: 100000 })) {
+      let changed = false;
+      const next = [];
+      for (const t of e.targets || []) {
+        const to = rule(t);
+        if (to && to !== t) { changed = true; targets += 1; }
+        if (!next.includes(to || t)) next.push(to || t);
+      }
+      if (changed && this.store.memory.setTargets(e.id, next)) notes += 1;
+    }
+    return { notes, targets };
+  }
+
   get(id) { return this.store.memory.get(id); }
 
   /** Delete one note by id. Returns whether a row existed. */

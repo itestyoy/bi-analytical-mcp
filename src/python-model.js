@@ -99,6 +99,8 @@ export function frameProfile(rt, config = {}) {
  * `import_name=pip-name` (installed by dbt).
  */
 export function importAllowlist(env = process.env, profile = null) {
+  // `env` may be the resolved runtime (its `packages` string) or a real environment — one shape.
+  if (env && typeof env.packages === 'string' && env.MCP_PYTHON_PACKAGES === undefined) env = { MCP_PYTHON_PACKAGES: env.packages };
   const allow = new Map([['pandas', null], ['numpy', null], ['sklearn', 'scikit-learn'], ['scipy', 'scipy'], ['statsmodels', 'statsmodels']]);
   for (const pkg of profile?.packages || []) allow.set(pkg, null);
   for (const raw of String(env.MCP_PYTHON_PACKAGES || '').split(',')) {
@@ -193,7 +195,7 @@ function importLine(spec, i, allow) {
  * Compile the python stage into the dbt Python model file + YAML sidecar.
  *   stage — { stage: 'python', imports?, functions, steps, output?, description? }
  *   opts  — { modelName, prepModel, allow (Map), config? (operator's literal dbt.config extras), pipeline? (for the header) }
- * Returns { code, yml, packages, functions (for the gate), outputColumns, config }. Throws on a
+ * Returns { code, yml, packages, functions + bindings (for the gate), outputColumns, config }. Throws on a
  * structural problem (imports, names, arguments) — the static gate over the bodies is separate.
  */
 export function compilePythonStage(stage, { modelName, inputModel, allow, config = {}, pipeline = null, profile = frameProfile(null) }) {
@@ -283,7 +285,7 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
     }],
   }, { lineWidth: 100, noRefs: true });
 
-  return { code, yml, packages: [...packages].sort(), functions: [...byName.values()], outputColumns: outCols, config: cfg, runtime: profile.key };
+  return { code, yml, packages: [...packages].sort(), functions: [...byName.values()], bindings: [...bound, ...byName.keys()], outputColumns: outCols, config: cfg, runtime: profile.key };
 }
 
 /** The operator's literal dbt.config extras (MCP_PYTHON_MODEL_CONFIG) — also decide the frame profile. */
@@ -291,8 +293,13 @@ export function pythonModelConfigFromEnv(env = process.env) {
   try { return JSON.parse(env.MCP_PYTHON_MODEL_CONFIG || '{}'); } catch { return {}; }
 }
 
-/** Run the static gate over the declared functions with the given Python interpreter. */
-export function runAstGate(pythonBin, functions, { timeoutMs = 20000 } = {}) {
+/**
+ * Run the static gate over the declared functions with the given Python interpreter.
+ * `bindings` are the names the declaration itself introduces — what its `imports` bound plus the
+ * other declared functions — so the gate can allowlist the names a body may read instead of
+ * chasing an open-ended list of the ones it may not.
+ */
+export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20000 } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(pythonBin, [GATE], { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = ''; let err = '';
@@ -305,7 +312,7 @@ export function runAstGate(pythonBin, functions, { timeoutMs = 20000 } = {}) {
       if (code !== 0 && !out) return reject(new Error(`ast gate failed (${pythonBin} exit ${code}): ${err.trim()}`));
       try { resolve(JSON.parse(out)); } catch { reject(new Error(`ast gate returned no JSON: ${(out || err).slice(0, 300)}`)); }
     });
-    proc.stdin.end(JSON.stringify({ functions }));
+    proc.stdin.end(JSON.stringify({ functions, bindings: [...bindings] }));
   });
 }
 
@@ -336,7 +343,7 @@ export function pythonStageDefs() {
 function bodySchema(profile = frameProfile(null)) {
   return {
     $ref: '#/$defs/py_block',
-    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. ${profile.ml ? `Modelling: ${profile.ml.split(' — ')[0]} (see the stage description for the classes and the do/don't rules). ` : ''}${profile.guide} Nothing is converted for you${profile.pandas ? `: if a body truly needs pandas, it converts itself with ${profile.pandas} and owns the cost — single-node, the whole table in memory — so do it only on a small, already-aggregated table` : ''}. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. No imports inside (declare them in \`imports\`), no dbt/session access, no exec/eval/open/dunder access — checked before anything runs.`,
+    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. ${profile.ml ? `Modelling: ${profile.ml.split(' — ')[0]} (see the stage description for the classes and the do/don't rules). ` : ''}${profile.guide} Nothing is converted for you${profile.pandas ? `: if a body truly needs pandas, it converts itself with ${profile.pandas} and owns the cost — single-node, the whole table in memory — so do it only on a small, already-aggregated table` : ''}. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. A body may name only its own parameters and locals, what \`imports\` bound and the other declared functions, and may touch only public attributes — checked before anything runs, so an import inside, dbt/session, or a private/dunder attribute is refused with the line.`,
   };
 }
 
@@ -347,7 +354,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   const installed = [...allow].filter(([, pip]) => pip).map(([k, pip]) => `${k} (dbt installs ${pip})`);
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
-    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}.` : ''} ${profile.guide} The last step's return value IS this model's table: declare output.columns so the SQL stages that follow know its columns. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies are statically gated first. The pipeline's last model is the result — read it with get_query_result as usual.`,
+    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}.` : ''} ${profile.guide} The last step's return value IS this model's table: declare output.columns so the SQL stages that follow know its columns. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies pass a static allowlist first (own names + declared imports + public attributes); what the code may reach ON the warehouse is decided by that runtime and dbt's own credentials. The pipeline's last model is the result — read it with get_query_result as usual.`,
     properties: {
       stage: { const: 'python' },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
@@ -391,7 +398,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
 // follow. `build` validates the structure (imports / names / arguments) against a placeholder
 // ref; the body gate and the real names are the engine's part.
 registerStage('python', {
-  schema: (catalog) => { const pr = frameProfile(catalog?.pythonRuntime, pythonModelConfigFromEnv()); return pythonStageSchema(importAllowlist(process.env, pr), pr); },
+  schema: (catalog) => { const rt = catalog?.pythonRuntime; const pr = frameProfile(rt, rt?.config || {}); return pythonStageSchema(importAllowlist(rt || process.env, pr), pr); },
   defs: () => pythonStageDefs(), // hoisted to the root of every tool schema embedding stages
   // Offered only where dbt can run Python models (the profile's adapter + its submission settings,
   // see resolvePythonRuntime); elsewhere the stage is absent from the schemas and refused here.
@@ -399,8 +406,9 @@ registerStage('python', {
   unavailableReason: (catalog) => `the python stage is not available: ${catalog?.pythonRuntime?.reason || 'dbt cannot run Python models on this profile'}. Fix the dbt profile (or set MCP_PYTHON_MODELS=on when the submission is configured per model) and restart the server.`,
   python: true, // the renderer cuts the chain here: this stage is a dbt model of its own
   build: ({ cols, catalog }, st) => {
-    const pr = frameProfile(catalog?.pythonRuntime, pythonModelConfigFromEnv());
-    compilePythonStage(st, { modelName: 'm', inputModel: 'm_in', allow: importAllowlist(process.env, pr), config: {}, profile: pr });
+    const rt = catalog?.pythonRuntime;
+    const pr = frameProfile(rt, rt?.config || {});
+    compilePythonStage(st, { modelName: 'm', inputModel: 'm_in', allow: importAllowlist(rt || process.env, pr), config: rt?.config || {}, profile: pr });
     return { op: { op: 'python', python: true, stage: st }, cols: pythonStageColumns(cols, st) };
   },
 });

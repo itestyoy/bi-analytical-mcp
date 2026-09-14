@@ -141,9 +141,22 @@ test('python stage: the static gate refuses imports in bodies, dbt/session acces
   const err = await e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [bad], steps: [{ call: 'bad' }] }] } })).catch((x) => x);
   assert.ok(err instanceof Error);
   assert.match(err.message, /bad line 1 \(import os\): an import inside a function body/);
-  assert.match(err.message, /bad line 2 \(x = eval\('1'\)\): call to 'eval\(\)'/);
-  assert.match(err.message, /bad line 3 .*: 'dbt' is not reachable/);
-  assert.match(err.message, /bad line 4 .*: dunder attribute '__class__'/);
+  assert.match(err.message, /bad line 2 .*: 'eval' is not available here/);
+  assert.match(err.message, /bad line 3 .*: 'dbt' is not available here/);
+  assert.match(err.message, /bad line 4 .*: attribute '__class__' is private/);
+  // The gate allowlists NAMES, so a dunder spelled through getattr (or any other builtin that
+  // fetches by name) has no spelling either — the hole a blocklist of literal dunders leaves open.
+  const sneaky = { name: 'sneaky', params: ['df'], body: ['sess = getattr(getattr(df, "__class__"), "__init__")', 'return df'] };
+  await assert.rejects(
+    () => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [sneaky], steps: [{ call: 'sneaky' }] }] } })),
+    /sneaky line 1 .*: 'getattr' is not available here/,
+  );
+  // …and so does a name the declaration never bound (no `imports` entry for it).
+  const undeclared = { name: 'undeclared', params: ['df'], body: ["df['c'] = os.getcwd()", 'return df'] };
+  await assert.rejects(
+    () => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [undeclared], steps: [{ call: 'undeclared' }] }] } })),
+    /undeclared line 1 .*: 'os' is not available here/,
+  );
   // a syntax error is caught here, not on the warehouse runtime
   const syn = { name: 'syn', params: ['df'], body: ['return df['] };
   await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [syn], steps: [{ call: 'syn' }] }] } })), /syn line 1 \(return df\[\): syntax error/);
@@ -164,6 +177,25 @@ test('python stage: a package the runtime lacks goes to dbt\'s packages config; 
   assert.deepEqual(r.python[0].packages, ['scikit-learn', 'scipy']);
   assert.equal(r.materialized, 'table');
   assert.equal(ctxs.list().length, 0, 'dry_run writes nothing');
+});
+
+// The operator's pin decides ONE runtime, so the tool SCHEMA and the compiled model must describe
+// the same one. A BigQuery profile submits through BigFrames by default; pinning `serverless` makes
+// it PySpark — and the schema used to keep offering the default's packages (it re-read the
+// environment) while the model was compiled for the pin, so an import the schema accepted could be
+// refused at compile.
+test('python stage: the pinned submission decides BOTH the offered packages and the compiled model', async (t) => {
+  if (skipNoPy(t)) return;
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
+  const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
+  const e = new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } });
+  const pkgEnum = () => e.schemas.register_native_model.properties.pipeline.properties.stages.items.oneOf
+    .find((x) => x.properties?.stage?.const === 'python').properties.imports.items.properties.package.enum;
+  assert.ok(pkgEnum().includes('pyspark'), `the schema offers the pinned runtime's packages: ${pkgEnum().join(', ')}`);
+  assert.ok(!pkgEnum().includes('bigframes'), 'and not the default submission\'s');
+  const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'pyspark', submodule: 'sql.functions', as: 'F' }] }] } }));
+  assert.equal(r.python[0].runtime, 'pyspark', 'the model is compiled for the same runtime the schema described');
 });
 
 test('incremental builder: add_step python → columns, nothing may follow, preview carries the model, materialize writes the split', async (t) => {
@@ -235,7 +267,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
   // the decision itself
   assert.equal(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: noEnv }).available, false);
   assert.match(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: noEnv }).reason, /postgres.*runs no dbt Python models/);
-  assert.deepEqual(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: noEnv }), { available: true, runtime: 'duckdb' });
+  assert.deepEqual(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: noEnv }), { available: true, runtime: 'duckdb', config: {}, packages: '' });
   assert.equal(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: { MCP_PYTHON_MODELS: 'on' } }).available, true, 'the operator may force it on');
   assert.equal(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: { MCP_PYTHON_MODELS: 'off' } }).available, false, '…or off');
   assert.equal(resolvePythonRuntime({ profilesDir: '/nonexistent', env: noEnv }).available, false);
@@ -243,8 +275,14 @@ test('python stage: offered only where the dbt profile can run Python models; re
   const bq = (out) => { const dir = mkdtempSync(join(tmpdir(), 'bqprof-')); writeFileSync(join(dir, 'profiles.yml'), `p:\n  target: dev\n  outputs:\n    dev:\n      type: bigquery\n${Object.entries(out).map(([k, v]) => `      ${k}: ${v}`).join('\n')}\n`); return resolvePythonRuntime({ profilesDir: dir, env: noEnv }); };
   assert.equal(bq({ project: 'x' }).available, false);
   assert.match(bq({ project: 'x' }).reason, /submission_method \(bigframes \| serverless \| cluster\)/);
-  assert.deepEqual(bq({ project: 'x', submission_method: 'bigframes', gcs_bucket: 'b', compute_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'bigframes' });
-  assert.deepEqual(bq({ project: 'x', gcs_bucket: 'b', dataproc_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'serverless' });
+  assert.deepEqual(bq({ project: 'x', submission_method: 'bigframes', gcs_bucket: 'b', compute_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'bigframes', config: {}, packages: '' });
+  assert.deepEqual(bq({ project: 'x', gcs_bucket: 'b', dataproc_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'serverless', config: {}, packages: '' });
+  // the operator's settings are resolved ONCE, here, and travel with the runtime — so the schema,
+  // the stage's validation and the compiled model cannot describe different runtimes.
+  const pinned = resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: { MCP_PYTHON_MODEL_CONFIG: '{"submission_method":"serverless"}', MCP_PYTHON_PACKAGES: 'shap=shap' } });
+  assert.deepEqual(pinned.config, { submission_method: 'serverless' });
+  assert.equal(pinned.packages, 'shap=shap');
+  assert.deepEqual(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: { MCP_PYTHON_MODEL_CONFIG: 'not json' } }).config, {}, 'an unparseable pin is no pin');
   // and what the tools show: with the postgres profile the stage is ABSENT from the schemas…
   const saved = process.env.MCP_PYTHON_MODELS; delete process.env.MCP_PYTHON_MODELS;
   try {

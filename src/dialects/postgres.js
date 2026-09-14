@@ -80,7 +80,12 @@ export class PostgresDialect extends Dialect {
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
   // A TEXT column holding JSON must be cast before the jsonb operators apply.
-  jsonColumnArrayLength(column) { return `jsonb_array_length((${column})::jsonb)`; }
+  jsonColumnArrayLength(column) {
+    // The cast RAISES on text that is not JSON, and one such row would fail the whole scan (a
+    // coverage pass over every row of the fact), so the value is tested first: not an array → NULL,
+    // which counts as absent everywhere this is used. (`IS JSON` is Postgres 16+.)
+    return `(CASE WHEN ${column} IS JSON ARRAY THEN jsonb_array_length((${column})::jsonb) END)`;
+  }
 
   jsonColumnArrayContains(column, value) {
     return `(((${column})::jsonb) @> ${this.sqlLiteral(JSON.stringify([value]))}::jsonb)`;

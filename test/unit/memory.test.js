@@ -9,13 +9,15 @@ import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildToolDefs } from '../../src/server.js';
+import { openStore } from '../../src/store.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
-function engineWith(embedder) {
+function engineWith(embedder, store) {
   const catalog = loadCatalog(CATALOG, {});
-  return new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), embedder });
+  return new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), embedder, store });
 }
+function engineWithStore(store) { return engineWith(undefined, store); }
 function engine() { return engineWith(undefined); }
 
 // A deterministic, offline stub embedder: maps text to a 3-axis "concept" vector by keyword
@@ -230,4 +232,45 @@ test('memory strict input validation', async () => {
   await assert.rejects(() => e.memory({ action: 'list', fuzzy: true }), /invalid input/, 'fuzzy is search-only');
   await assert.rejects(() => e.memory({ action: 'bogus' }), /invalid input/, 'unknown action rejected by enum');
   await assert.rejects(() => e.memory({ action: 'forget', id: 'nope_missing' }), /no memory note/, 'forgetting a missing id errors');
+});
+
+// A store written before a target carried its source keys a property/event by BARE name, which no
+// source owns: the note then surfaces on every source that happens to use the name. Opening an
+// Engine scopes those keys once — to the one owner, or to a searchable term when nobody owns it.
+test('memory targets written without a source are scoped to their owner at open', async () => {
+  const store = openStore({});
+  const e0 = engineWithStore(store);
+  // three legacy keys: one owned by exactly one source, one owned by two, one gone from the catalog
+  store.memory.add({ id: 'legacy1', note: 'ad format lives in ad_type', targets: ['property:ad_type_of_event_data', 'event:ad_finished'], aliases: [], links: [], created_at: Date.now() });
+  store.memory.add({ id: 'legacy2', note: 'app_version is on both sources', targets: ['property:app_version'], aliases: [], links: [], created_at: Date.now() });
+  store.memory.add({ id: 'legacy3', note: 'a column that no longer exists', targets: ['property:dropped_column'], aliases: [], links: [], created_at: Date.now() });
+  assert.ok(e0);
+
+  const e = engineWithStore(store); // a fresh Engine over the same store runs the migration
+  const targetsOf = (id) => store.memory.get(id).targets;
+  assert.deepEqual(targetsOf('legacy1'), ['property:events.ad_type_of_event_data', 'event:events.ad_finished'], 'scoped to the one source that declares them');
+  assert.deepEqual(targetsOf('legacy2'), ['term:app_version'], 'owned by two sources → a searchable term, never a guess');
+  assert.deepEqual(targetsOf('legacy3'), ['term:dropped_column'], 'owned by nobody → a searchable term');
+
+  // and the scoped note is reachable through the tool's own drill, not just through the view
+  const listed = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });
+  assert.ok(listed.notes.some((n) => n.id === 'legacy1'), JSON.stringify(listed));
+  const view = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
+  assert.ok((view.memory || []).some((m) => m.id === 'legacy1'), 'and on the property view');
+  // the note that could not be placed is still findable by its words
+  const found = await e.memory({ action: 'search', query: 'app_version' });
+  assert.ok(found.notes.some((n) => n.id === 'legacy2'));
+});
+
+// The glued '<source>.<name>' spelling is two arguments written as one: it is refused by name,
+// never silently kept as a free phrase (which would link the finding to nothing).
+test('memory target: the glued <source>.<name> string is refused, naming the structured form', async () => {
+  const e = engine();
+  await assert.rejects(
+    () => e.memory({ action: 'record', note: 'x', targets: ['users.country'] }),
+    /the source is a separate field — pass \{ source: 'users', name: 'country' \}/,
+  );
+  // a phrase that merely contains a dot is still a plain term
+  const ok = await e.memory({ action: 'record', note: 'crashes spiked in 2.4.0', targets: ['v2.4 rollout'] });
+  assert.deepEqual(ok.linked_to.map((l) => l.kind), ['term']);
 });

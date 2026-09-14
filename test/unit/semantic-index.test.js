@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -88,4 +88,57 @@ test('semantic_index: strict view contract (exactly one view, scoped params)', a
   // valid scoped params are accepted.
   assert.ok((await e.semantic_index({ status: true, recent: 5 })).value_index);
   assert.ok((await e.semantic_index({ search: 'tutorial', limit: 5 })).query);
+});
+
+// The SOURCE is a separate argument, and it may be left out only where there is nothing to
+// choose between. Input-validation guard: the source-less { event } spelling exists in a
+// one-source catalog and does not exist at all once a second events source is declared.
+const SINGLE_SOURCE = `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp:
+        role: events
+        primary_entity: event
+        known_events: [login, purchase]
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+`;
+
+const SECOND_SOURCE = `  - name: fct_crash
+    meta:
+      mcp:
+        role: crashlytics
+        primary_entity: crash
+        known_events: [boom]
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+`;
+
+function engineFor(yaml) {
+  const dir = mkdtempSync(join(tmpdir(), 'srcarg-'));
+  const file = join(dir, 'catalog.yml');
+  writeFileSync(file, yaml);
+  return new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) });
+}
+
+test('semantic_index: the event source may be omitted only when the catalog has exactly one', async () => {
+  // ONE events source — the name alone is unambiguous, so the source-less spelling is accepted.
+  const one = engineFor(SINGLE_SOURCE);
+  assert.equal((await one.semantic_index({ event: 'login' })).event, 'login');
+  assert.equal((await one.semantic_index({ source: 'events', event: 'login' })).event, 'login');
+
+  // TWO events sources — every source is equal, so there is no source-less spelling to submit and
+  // the refusal names the mode that exists rather than guessing a source.
+  const two = engineFor(SINGLE_SOURCE + SECOND_SOURCE);
+  await assert.rejects(() => two.semantic_index({ event: 'login' }), /must be exactly one of: .*\{ source, event \}/);
+  await assert.rejects(() => two.semantic_index({ event: 'login' }), /unexpected property 'event'/);
+  assert.equal((await two.semantic_index({ source: 'events', event: 'login' })).event, 'login');
+  assert.equal((await two.semantic_index({ source: 'crashlytics', event: 'boom' })).event, 'boom');
+  // an event of the OTHER source is not in this source's vocabulary.
+  await assert.rejects(() => two.semantic_index({ source: 'crashlytics', event: 'login' }), /`event` must be one of: boom/);
 });

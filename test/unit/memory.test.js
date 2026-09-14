@@ -86,7 +86,7 @@ test('a recorded finding surfaces through semantic_index (views + search) by its
   assert.ok(attached.about.some((a) => a.kind === 'property' && a.source === 'events' && a.name === 'ad_type_of_event_data'));
 
   // { event } — the carrying event.
-  const ev = await e.semantic_index({ event: 'ad_finished' });
+  const ev = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok(ev.memory?.some((m) => m.id === rec.id), 'note attached to the event view');
 
   // { model } — a model-level link.

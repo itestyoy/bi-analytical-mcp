@@ -510,9 +510,20 @@ function semanticIndexSchema(catalog) {
   };
   const view = (title, description, required, properties) => ({ title, type: 'object', additionalProperties: false, description, ...(required.length ? { required } : {}), properties });
   const eventsOf = (k) => (catalog.isFact(k) ? catalog.eventNames(k) : []);
-  const uniqueEvents = catalog.uniqueAcross(eventsOf);
   const uniqueProps = catalog.uniqueAcross((k) => catalog.propertyEnumFor(k));
   const bundleSources = models.filter((k) => catalog.getModel(k).bundle_column);
+
+  // Each vocabulary is written ONCE and referenced: a source's events appear in that source's
+  // branch and, where the catalog has a single events source, in the source-less one too. Writing
+  // the list twice would say the same thing twice and grow with every source.
+  const defs = {};
+  const ref = (name, values, description) => {
+    if (!values.length) return { type: 'string', description };
+    defs[name] = { type: 'string', enum: values, description };
+    return { $ref: `#/$defs/${name}` };
+  };
+  const eventRef = (f) => ref(`events_of_${f}`, eventsOf(f), `An event '${f}' declares.`);
+  const propRef = (k) => ref(`columns_of_${k}`, catalog.propertyEnumFor(k), `A payload property or attribute of '${k}'.`);
 
   const branches = [
     view('overview (no arguments)', 'OVERVIEW (no arguments): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
@@ -523,19 +534,21 @@ function semanticIndexSchema(catalog) {
     // that source does not have cannot be written down.
     ...catalog.facts.map((f) => view('{ source, event }', `VIEW { source: '${f}', event }: the properties POPULATED on that event of '${f}'.`, ['source', 'event'], {
       source: { const: f, description: `The events source '${f}'.` },
-      event: strEnum(eventsOf(f), `An event '${f}' declares.`),
+      event: eventRef(f),
     })),
-    ...(uniqueEvents.length ? [view('{ event }', 'VIEW { event }: an event exactly ONE source declares — no need to name it. An event several sources share has no spelling here: name the source.', ['event'], {
-      event: { type: 'string', enum: uniqueEvents, description: 'An event carried by exactly one source.' },
+    // The source may be left out only where there is nothing to choose between — ONE events
+    // source. With several, every source is equal and the caller names the one they mean.
+    ...(catalog.facts.length === 1 ? [view('{ event }', 'VIEW { event }: an event of the catalog\'s single events source.', ['event'], {
+      event: eventRef(catalog.facts[0]),
     })] : []),
     // …and the same for a column: its passport is asked for within the source that carries it.
     ...models.map((k) => view('{ source, property }', `VIEW { source: '${k}', property }: one column of '${k}' — its meaning, real value distribution (pageable), NULL coverage and indexing freshness.`, ['source', 'property'], {
       source: { const: k, description: `The source '${k}'.` },
-      property: strEnum(catalog.propertyEnumFor(k), `A payload property or attribute of '${k}'.`),
+      property: propRef(k),
       ...paging,
     })),
     ...(uniqueProps.length ? [view('{ property }', 'VIEW { property }: a column exactly ONE source carries. A name several sources share has no spelling here: pass source too.', ['property'], {
-      property: { type: 'string', enum: uniqueProps, description: 'A property or attribute carried by exactly one source.' },
+      property: ref('columns_carried_by_one_source', uniqueProps, 'A property or attribute carried by exactly one source.'),
       ...paging,
     })] : []),
     view('{ search }', 'VIEW { search }: find events, properties, attributes, indexed VALUES and recipes by word — typo- and paraphrase-tolerant.', ['search'], {
@@ -563,6 +576,7 @@ function semanticIndexSchema(catalog) {
     }),
   ];
   return {
+    ...(Object.keys(defs).length ? { $defs: defs } : {}),
     description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass NO arguments for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
     oneOf: branches,
   };

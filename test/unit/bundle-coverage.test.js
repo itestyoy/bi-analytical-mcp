@@ -106,7 +106,7 @@ test('bundle is integrated as a helper across the index views', async () => {
   assert.ok(ev.recommendations.some((r) => /source: 'events', bundle:/.test(r)), 'events model view points at ITS bundle view');
 
   // { event }: with >1 app, flags that a property may be empty for some apps.
-  const evt = await e.semantic_index({ event: 'ad_finished' });
+  const evt = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok(evt.recommendations.some((r) => /bundle/.test(r)), JSON.stringify(evt.recommendations));
 
   // { search }: a query matching an app routes to its bundle view.

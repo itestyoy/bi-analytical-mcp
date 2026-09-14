@@ -60,7 +60,7 @@ test('grounded catalog: phantom field is absent from the tool SCHEMAS (enums)', 
 test('grounded catalog: phantom field is absent from semantic_index everywhere', async () => {
   const e = groundedEngine();
   // { event } — the property list for an event that declared it.
-  const ev = await e.semantic_index({ event: 'level_completed' });
+  const ev = await e.semantic_index({ source: 'events', event: 'level_completed' });
   assert.ok(!ev.properties.some((p) => p.name === 'complete_time_of_event_data'));
   // { property } — drilling the pruned field is an unknown-property error, not a page.
   // the pruned column is not in the view's vocabulary at all — the schema, not a check

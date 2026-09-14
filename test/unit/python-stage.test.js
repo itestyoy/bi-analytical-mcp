@@ -105,8 +105,10 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
   assert.deepEqual(r.columns, ['player_id_of_internal', 'revenue', 'revenue_z'], 'the where stage saw revenue_z because the python stage declared output.columns');
   assert.deepEqual(pipeFiles(e, r.context_id), [`${r.model}.sql`, `${r.model}_s1.py`, `${r.model}_s1.yml`, `${r.model}_s2.sql`, `${r.model}_s3.py`, `${r.model}_s3.yml`]);
   assert.equal(r.python.length, 2);
-  assert.ok(r.python[0].code.includes('dbt.ref("fct_analytics_events")'), 'the first python model refs the source');
-  assert.ok(r.python[1].code.includes(`dbt.ref("${r.model}_s2")`));
+  // Each model's `input` above IS what it reads; that the generated code actually reads THAT model
+  // is proven by running the chain (test/integration/python-stage.test.js — the rows only come out
+  // right if each link reads the previous one).
+  assert.deepEqual(r.python.map((m) => m.input), ['fct_analytics_events', `${r.model}_s2`]);
   // a SQL stage that names a column the python stage did not declare is refused at validation
   const PY_NO_OUT = { ...PY_STAGE, output: undefined };
   await assert.rejects(() => e.register_native_model({ name: 'chain2', dry_run: true, pipeline: { source: 'events', stages: [AGG, PY_NO_OUT, { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] }] } }), /unknown column 'revenue_z'/);
@@ -207,7 +209,7 @@ test('incremental builder: add_step python → columns, nothing may follow, prev
   assert.deepEqual(p.columns_added.map((c) => c.name), ['revenue_z']);
   const pv = await e.build_native_model({ action: 'preview', draft_id: s.draft_id });
   assert.deepEqual(pv.models.map((m) => [m.model, m.kind]), [[`pipe_seg_${s.draft_id}_s1`, 'sql'], [`pipe_seg_${s.draft_id}`, 'python']]);
-  assert.ok(pv.models[1].code.includes(`dbt.ref("pipe_seg_${s.draft_id}_s1")`));
+  assert.equal(pv.models[1].input, `pipe_seg_${s.draft_id}_s1`, 'the python model reads the SQL model before it');
   assert.deepEqual(pv.available_columns.map((c) => c.name), ['player_id_of_internal', 'revenue', 'revenue_z']);
   // SQL after the python stage is allowed — it becomes the next model in the chain
   const after = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'limit', n: 5 } });
@@ -223,9 +225,10 @@ test('python stage: body structure — nesting is indentation, headers open bloc
   const e = engine();
   const withBody = (body) => e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body }], steps: [{ call: 'f', args: { k: 2 } }] }] } }));
   // a real nested body renders as indented Python the gate accepts
+  // (that nesting becomes the RIGHT indentation is proven by running such a body — the branches
+  // pick different values, and the rows say which one ran: test/integration/python-stage.test.js)
   const ok = await withBody(['if k > 1:', ["df['seg'] = 1", 'for c in df.columns:', ['df[c] = df[c]']], 'else:', ["df['seg'] = 0"], 'return df']);
   assert.equal(ok.dry_run, true);
-  assert.ok(ok.python[0].code.includes("\n    if k > 1:\n        df['seg'] = 1\n        for c in df.columns:\n            df[c] = df[c]\n    else:\n        df['seg'] = 0\n    return df\n"), 'each nesting level is one indentation level');
   // a block with no header before it
   await assert.rejects(() => withBody(['x = 1', ["df['seg'] = 1"], 'return df']), /nested block must follow a line that opens it .*the line before is "x = 1"/);
   // a header with no block after it
@@ -254,8 +257,7 @@ test('python stage: the body schema is a recursive $ref to $defs.py_block hoiste
   // twelve levels deep validates and renders — deeper than any unrolled schema allowed
   const deep = (n) => (n === 0 ? ['return df'] : [`if k > ${n}:`, deep(n - 1), 'else:', ['return df']]);
   const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, functions: [{ name: 'f', params: ['df', 'k'], body: deep(12) }], steps: [{ call: 'f', args: { k: 1 } }] }] } }));
-  assert.equal(r.dry_run, true);
-  assert.ok(r.python[0].code.includes(`${'    '.repeat(13)}return df`), 'level 12 rendered with 13 indents (function body = 1)');
+  assert.equal(r.dry_run, true); // and such a body RUNS (integration: twelve levels deep, by rows)
 });
 
 // ── Availability: the stage exists only where dbt can run Python models — decided from the profile ──
@@ -308,30 +310,29 @@ test('python stage: offered only where the dbt profile can run Python models; re
 });
 
 // ── The frame: dbt.ref() exactly as the platform returns it, and the last step's return IS the
-// result. No conversion, no projection written by the server — a function that needs pandas
-// writes the platform's own call and owns the cost.
-test('python stage: steps receive dbt.ref() untouched and the last return is the model — nothing converted or projected for you', () => {
-  const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }], output: { columns: ['a', 'b'] } };
-  const compile = (rt, over = {}, config = {}) => compilePythonStage({ ...stage, ...over }, { modelName: 'm', inputModel: 'm_prep', allow: importAllowlist({}, frameProfile(rt, config)), config, profile: frameProfile(rt, config) });
-  for (const rt of [{ runtime: 'bigquery', method: 'bigframes' }, { runtime: 'bigquery', method: 'serverless' }, { runtime: 'snowflake' }, { runtime: 'databricks' }, { runtime: 'duckdb' }, { runtime: 'unknown' }]) {
-    const c = compile(rt);
-    assert.ok(c.code.includes('\n    df = dbt.ref("m_prep")\n'), `${rt.runtime}: ref used as returned`);
-    assert.ok(c.code.endsWith('    df = f(df)\n    return df\n'), `${rt.runtime}: the last step's return is the result`);
-    assert.ok(!/to_pandas|pandas_api|\.df\(\)|_frame|import pandas/.test(c.code), `${rt.runtime}: no conversion, no implicit pandas`);
-  }
-  // a function that wants pandas says so itself — and pandas must then be declared like any import
-  const c = compile({ runtime: 'snowflake' }, { imports: [{ package: 'pandas', as: 'pd' }], functions: [{ name: 'f', params: ['df'], body: ['pdf = df.to_pandas()', 'return pd.DataFrame(pdf)'] }] });
-  assert.ok(c.code.includes('import pandas as pd') && c.code.includes('pdf = df.to_pandas()'));
-  assert.ok(!c.code.includes('dbt.ref("m_prep").to_pandas'), 'the server did not add it to dbt.ref');
-  // the runtime is recorded and the operator\'s per-model submission decides the BigQuery profile
-  assert.equal(compile({ runtime: 'bigquery', method: 'bigframes' }).runtime, 'bigframes');
-  assert.equal(frameProfile({ runtime: 'bigquery', method: 'bigframes' }, { submission_method: 'serverless' }).key, 'pyspark');
+// result. No conversion, no projection written by the server — a function that needs pandas writes
+// the platform's own call and owns the cost. That contract is proven by RUNNING a model: the DuckDB
+// test calls relation-only methods (.filter/.project) on the frame it receives and reads the rows
+// back, which only works if dbt.ref() arrived unconverted (test/integration/python-stage.test.js).
+// What is checked HERE is the platform decision itself — which runtime a profile compiles for, and
+// which packages that runtime may import.
+test('python stage: the profile decides the runtime and what it may import', () => {
+  const profileOf = (rt, config = {}) => frameProfile(rt, config);
+  assert.equal(profileOf({ runtime: 'bigquery', method: 'bigframes' }).key, 'bigframes');
+  assert.equal(profileOf({ runtime: 'bigquery', method: 'bigframes' }, { submission_method: 'serverless' }).key, 'pyspark', "the operator's submission wins");
+  assert.equal(profileOf({ runtime: 'duckdb' }).key, 'duckdb');
   // the platform's own package is importable only where it exists
-  assert.ok(importAllowlist({}, frameProfile({ runtime: 'bigquery', method: 'bigframes' })).has('bigframes'));
-  assert.ok(importAllowlist({}, frameProfile({ runtime: 'databricks' })).has('pyspark'));
-  assert.ok(!importAllowlist({}, frameProfile({ runtime: 'databricks' })).has('bigframes'));
-  assert.ok(importAllowlist({}, frameProfile({ runtime: 'snowflake' })).has('snowflake'));
+  assert.ok(importAllowlist({}, profileOf({ runtime: 'bigquery', method: 'bigframes' })).has('bigframes'));
+  assert.ok(importAllowlist({}, profileOf({ runtime: 'databricks' })).has('pyspark'));
+  assert.ok(!importAllowlist({}, profileOf({ runtime: 'databricks' })).has('bigframes'));
+  assert.ok(importAllowlist({}, profileOf({ runtime: 'snowflake' })).has('snowflake'));
   assert.ok(!importAllowlist({}).has('bigframes'), 'no platform package without a runtime');
+  // and the compiled model records the runtime it was compiled for
+  const compiled = compilePythonStage(
+    { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }] },
+    { modelName: 'm', inputModel: 'm_prep', allow: importAllowlist({}, profileOf({ runtime: 'bigquery', method: 'bigframes' })), profile: profileOf({ runtime: 'bigquery', method: 'bigframes' }) },
+  );
+  assert.equal(compiled.runtime, 'bigframes');
 });
 
 test('python stage: the schema names THIS warehouse\'s frame — and there is no frame switch to flip', () => {

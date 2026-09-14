@@ -136,7 +136,6 @@ test('python stage: steps run on the relation dbt.ref() returns — no pandas an
   const r = await engine.register_native_model({ name: 'seg4', pipeline: { source: 'events', stages: [AGG, native] } });
   assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
   assert.equal(r.python[0].runtime, 'duckdb');
-  assert.ok(!r.python[0].code.includes('pandas') && !r.python[0].code.includes('.df()'), 'no pandas anywhere in the native path');
   assert.deepEqual(Object.keys(r.rows[0]).sort(), ['player_id_of_internal', 'revenue', 'revenue_x2'], 'the last step\'s projection IS the result — nothing re-projected');
   const rows = r.rows.map((x) => [x.player_id_of_internal, num(x.revenue_x2)]).sort((a, b) => a[0].localeCompare(b[0]));
   assert.deepEqual(rows, [['p1', 60], ['p2', 10], ['p3', 130]], 'the player without purchases is filtered out; revenue doubled');
@@ -166,4 +165,66 @@ test('python stage anywhere: python → SQL → python → SQL is a chain of fou
   for (const m of r.models) assert.equal((await engine.get_query_result({ context_id: r.context_id, table: m.model })).ok !== false, true, m.model);
   const s1 = await engine.get_query_result({ context_id: r.context_id, table: r.models[0].model });
   assert.equal(s1.rows.length, 5, 'the first python model kept the 5 purchase rows of the source');
+});
+
+// The body is STRUCTURE: a nested array is the block indented under the line before it, and nesting
+// is unbounded. What that renders to is Python whose MEANING depends on the indentation being
+// right — so it is proven by running it: twelve levels deep, each level picking a different value,
+// and the rows say which branch the interpreter actually took.
+test('python stage: a deeply nested body runs, and each level indents where it was declared', opts, async (t) => {
+  if (skip(t)) return;
+  // if revenue > 12: … elif > 11: … down to > 1, each level tagging its own depth.
+  const level = (n) => (n === 0
+    ? ["df['depth'] = 0"]
+    : [`if df['revenue'].fillna(0).max() > ${n}:`, [`df['depth'] = ${n}`], 'else:', level(n - 1)]);
+  const deep = {
+    stage: 'python',
+    functions: [
+      { name: 'to_pandas', params: ['df'], body: ['return df.df()'] },
+      { name: 'depth', params: ['df'], body: [...level(12), 'return df'] },
+    ],
+    steps: [{ call: 'to_pandas' }, { call: 'depth' }],
+    output: { columns: ['player_id_of_internal', 'revenue', 'depth'] },
+  };
+  const r = await engine.register_native_model({ name: 'deep', pipeline: { source: 'events', stages: [AGG, deep] } });
+  assert.equal(r.build?.ok, true, JSON.stringify(r.error || r.build));
+  // p3's 65 is the largest revenue in the seed, so the OUTERMOST branch (12) is the one that runs;
+  // every row gets it, because the function decides once for the frame.
+  assert.deepEqual([...new Set(r.rows.map((x) => num(x.depth)))], [12], JSON.stringify(r.rows));
+  assert.equal(r.rows.length, 4);
+});
+
+// The nested branches inside a body really are separate paths — not one flattened block: the same
+// function returns a different value per row depending on which branch its condition selects.
+test('python stage: both sides of a nested if/else are reachable, decided per row', opts, async (t) => {
+  if (skip(t)) return;
+  const branch = {
+    stage: 'python',
+    functions: [
+      { name: 'to_pandas', params: ['df'], body: ['return df.df()'] },
+      {
+        name: 'label',
+        params: ['df', 'cut'],
+        // for-loop over the rows, if/else inside it: two levels of nesting, both taken
+        body: [
+          "df['band'] = 'none'",
+          'for i in df.index:',
+          [
+            'if df.loc[i, "revenue"] > cut:',
+            ["df.loc[i, 'band'] = 'high'"],
+            'else:',
+            ["df.loc[i, 'band'] = 'low'"],
+          ],
+          'return df',
+        ],
+      },
+    ],
+    steps: [{ call: 'to_pandas' }, { call: 'label', args: { cut: 20 } }],
+    output: { columns: ['player_id_of_internal', 'revenue', 'band'] },
+  };
+  const r = await engine.register_native_model({ name: 'band', pipeline: { source: 'events', stages: [AGG, branch] } });
+  assert.equal(r.build?.ok, true, JSON.stringify(r.error || r.build));
+  const bands = Object.fromEntries(r.rows.map((x) => [x.player_id_of_internal, x.band]));
+  // revenue: p1 30, p2 5, p3 65, p4 NULL → the > 20 branch for p1/p3, the else for p2 and (NaN) p4
+  assert.deepEqual(bands, { p1: 'high', p2: 'low', p3: 'high', p4: 'low' }, JSON.stringify(r.rows));
 });

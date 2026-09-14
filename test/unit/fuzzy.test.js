@@ -93,9 +93,10 @@ test('semantic_index({ search, fuzzy: false }) restricts to exact substring', as
   assert.ok(none.recommendations.some((r) => /no catalog match/i.test(r)));
 });
 
-test('semantic_index: fuzzy only applies to { search }', async () => {
+test('semantic_index: fuzzy belongs to { search } and nowhere else', async () => {
   const e = engine();
-  await assert.rejects(() => e.semantic_index({ model: 'events', fuzzy: true }), /fuzzy only applies/);
+  // the { model } view does not take `fuzzy` — that is the SCHEMA's statement, not a check
+  await assert.rejects(() => e.semantic_index({ model: 'events', fuzzy: true }), /unexpected property 'fuzzy'/);
 });
 
 test('semantic_index({ search }) flags fuzzy-only results as did-you-mean', async () => {

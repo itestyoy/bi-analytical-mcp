@@ -418,9 +418,9 @@ function matchRecognizeSchema(catalog) {
         type: 'array',
         items: {
           oneOf: [
-            { type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream derive/compute/join added).' },
+            { title: 'a column', type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream derive/compute/join added).' },
             {
-              type: 'object', additionalProperties: false, required: ['entity'],
+              title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
               description: 'A relationship the source DECLARES — its key column is used, so you do not have to know which physical column carries it.',
               properties: { entity: { type: 'string', enum: relationshipNames(catalog), description: 'Name of a relationship declared by the pipeline\'s source (semantic_index({ model }) lists them).' } },
             },

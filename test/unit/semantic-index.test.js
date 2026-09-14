@@ -79,11 +79,12 @@ test('semantic_index: per-property timing + drill-down by run and via the proper
 test('semantic_index: strict view contract (exactly one view, scoped params)', async () => {
   const e = engine();
   await assert.rejects(() => e.semantic_index({ bogus: 1 }), /invalid input/);
-  await assert.rejects(() => e.semantic_index({ event: 'tutorial', property: 'ad_type_of_event_data' }), /at most ONE view/);
-  await assert.rejects(() => e.semantic_index({ status: true, run: 1 }), /at most ONE view/);
-  await assert.rejects(() => e.semantic_index({ model: 'events', limit: 5 }), /limit only applies/);
-  await assert.rejects(() => e.semantic_index({ search: 'x', offset: 2 }), /offset only applies/);
-  await assert.rejects(() => e.semantic_index({ event: 'tutorial', recent: 3 }), /recent only applies/);
+  await assert.rejects(() => e.semantic_index({ event: 'tutorial', property: 'ad_type_of_event_data' }), /must be exactly one of: .*\{ source, property \}/);
+  await assert.rejects(() => e.semantic_index({ status: true, run: 1 }), /must be exactly one of: .*\{ status \}/);
+  // a paging field on a view that does not page is simply not a field of that view
+  await assert.rejects(() => e.semantic_index({ model: 'events', limit: 5 }), /unexpected property 'limit'/);
+  await assert.rejects(() => e.semantic_index({ search: 'x', offset: 2 }), /unexpected property 'offset'/);
+  await assert.rejects(() => e.semantic_index({ event: 'tutorial', recent: 3 }), /unexpected property 'recent'/);
   // valid scoped params are accepted.
   assert.ok((await e.semantic_index({ status: true, recent: 5 })).value_index);
   assert.ok((await e.semantic_index({ search: 'tutorial', limit: 5 })).query);

@@ -62,7 +62,11 @@ export class Engine {
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
     // Constrain the recipe view to real ids when recipes are configured.
-    if (recipes && this.schemas.semantic_index?.properties?.recipe) this.schemas.semantic_index.properties.recipe.enum = recipes.ids();
+    // The recipe view offers the ids this server actually has — the schema says what exists.
+    if (recipes) {
+      const branch = (this.schemas.semantic_index?.oneOf || []).find((b) => b.properties?.recipe);
+      if (branch) branch.properties.recipe = { type: 'string', enum: recipes.ids(), description: branch.properties.recipe.description };
+    }
     this.validators = makeValidators(this.schemas);
     this.ctxs = contextManager || new ContextManager({});
     this.runner = runner; // optional; required for non-dry_run parse/query
@@ -404,19 +408,10 @@ export class Engine {
    */
   async semantic_index(input = {}) {
     this._validate('semantic_index', input);
-    // STRICT view contract (nothing is ever silently ignored): at most ONE view key,
-    // and paging/ordering/recency params only on the views they apply to.
-    const views = ['run', 'status', 'guide', 'model', 'event', 'property', 'search', 'recipe', 'bundle'].filter((k) => input[k] !== undefined && input[k] !== false);
-    if (views.length > 1) {
-      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { guide } | { bundle } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
-    }
-    if (input.limit !== undefined && !(input.property || input.search)) throw new ToolError('limit only applies to the { property } and { search } views', { stage: 'validate', field: 'limit' });
-    for (const k of ['offset', 'order_by', 'direction']) {
-      if (input[k] !== undefined && !input.property) throw new ToolError(`${k} only applies to the { property } view`, { stage: 'validate', field: k });
-    }
-    if (input.recent !== undefined && !(input.status || input.run != null || input.property)) throw new ToolError('recent only applies to the { status }, { run } and { property } views', { stage: 'validate', field: 'recent' });
-    if (input.fuzzy !== undefined && !input.search) throw new ToolError('fuzzy only applies to the { search } view', { stage: 'validate', field: 'fuzzy' });
-
+    // The view contract IS the schema: one branch per view, each listing exactly the fields it
+    // takes and the vocabulary it accepts. Two views at once, a paging field on a view that does
+    // not page, a name a source does not carry — none of it can be written down, so none of it is
+    // re-checked here.
     const c = this.catalog;
     const AGG = ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'];
 
@@ -445,7 +440,6 @@ export class Engine {
         const u = c.unavailableModels()[k];
         return { key: k, role: u.role, dbt_model: u.dbt_model, unavailable: true, reason: u.reason, missing_columns: u.missing, note: `'${k}' is excluded from every tool until its table carries the structural column(s) above (or exists). Fix the warehouse table or the dbt schema, then restart the server.` };
       }
-      if (!c.models[k]) throw new ToolError(`unknown model '${k}'. Known models: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'model' });
       const m = c.getModel(k);
       const descs = c.columnDescriptions(k);
       const out = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description, primary_entity: c.primaryEntityName(k), entities: m.entities, time: m.time?.column };
@@ -634,13 +628,12 @@ export class Engine {
 
     // ── { property }: one property's full spec ──
     if (input.property) {
-      // The SOURCE is a separate argument, so a name never carries it. A bare name is resolved to
-      // the one source that declares it (ambiguity is reported, never guessed).
+      // The SOURCE is a separate argument, so a name never carries it; the schema enumerates each
+      // source's columns, so whatever arrives here is one of them.
       const { source: pSource, property: p } = this._resolvePropertyRef(input);
       if (c.attributeKind(pSource, p) !== 'property') {
         const mk = pSource; const col = p;
         const dim = (c.getModel(mk).dimensions || {})[col];
-        if (!dim) throw new ToolError(`'${col}' is not a property or dimension of '${mk}'. See semantic_index({ model: '${mk}' }) for what it carries.`, { stage: 'validate', field: 'property' });
         const dDescs = c.columnDescriptions(mk);
         const { samples, value_stats } = this._valueListing(mk, col, input);
         // NULL coverage + indexing freshness make this ONE page the full truth about the
@@ -671,7 +664,6 @@ export class Engine {
       }
       const propFact = pSource; const propName = p;
       const spec = c.eventPropertySpec(propName, propFact);
-      if (!spec) throw new ToolError(`unknown event property '${propName}' on '${propFact}'. Discover properties via semantic_index({ source, event }) or ({ search }).`, { stage: 'validate', field: 'property' });
       const numeric = c.eventNumericProps(propFact).includes(propName);
       const complex = c.isComplexEventProp(propName, propFact);
       // Applicability is DATA-DERIVED from the value index (which events actually carry this
@@ -994,35 +986,24 @@ export class Engine {
   _resolveEventRef(input) {
     const c = this.catalog;
     const raw = String(input.event);
-    if (input.source) {
-      if (!c.isFact(input.source)) throw new ToolError(`'${input.source}' is not an events source. Events sources: ${c.facts.join(', ')}`, { stage: 'validate', field: 'source' });
-      if (!c.eventNames(input.source).includes(raw)) throw new ToolError(`unknown event '${raw}' on '${input.source}'. See semantic_index({ model: '${input.source}' }).known_events`, { stage: 'validate', field: 'event' });
-      return { fact: input.source, name: raw };
-    }
-    const owners = c.facts.filter((f) => c.eventNames(f).includes(raw));
-    if (owners.length === 1) return { fact: owners[0], name: raw };
-    if (owners.length > 1) throw new ToolError(`event '${raw}' exists on ${owners.join(' and ')} — pass source to say which one.`, { stage: 'validate', field: 'source' });
-    throw new ToolError(`unknown event '${raw}'. semantic_index() lists each source's events under models[].known_events.`, { stage: 'validate', field: 'event' });
+    // The schema pairs an event with the source that declares it (one branch per source) and offers
+    // a source-less spelling only for an event exactly one source has — so there is nothing to
+    // check here, only the source to fill in.
+    return { fact: input.source || c.facts.find((f) => c.eventNames(f).includes(raw)), name: raw };
   }
 
   /**
    * Resolve the { source?, property } arguments of the { property } view into an explicit
-   * (source, property) pair. `source` given → used as-is. Otherwise a bare name is attributed to
-   * the ONE source that declares it — an ambiguous name is reported, never guessed.
+   * (source, property) pair. The SCHEMA decides what is askable — each source's columns are
+   * enumerated per source, and a name may be asked without a source only when exactly one source
+   * carries it — so this fills in that source and nothing else.
    */
   _resolvePropertyRef(input) {
     const c = this.catalog;
     const raw = String(input.property);
-    if (input.source) {
-      if (!c.models[input.source]) throw new ToolError(`unknown source '${input.source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(input.source)}`, { stage: 'validate', field: 'source' });
-      return { source: input.source, property: raw };
-    }
-    const owners = c.ownersOf(raw).map((o) => o.source);
-    if (owners.length === 1) return { source: owners[0], property: raw };
-    if (owners.length > 1) {
-      throw new ToolError(`'${raw}' exists on ${owners.join(' and ')} — pass source to say which one (each source keeps its own values).`, { stage: 'validate', field: 'source' });
-    }
-    throw new ToolError(`unknown property '${raw}'. Pass source + a property of it (semantic_index({ model }) lists what a source carries), or find it with semantic_index({ search }).`, { stage: 'validate', field: 'property' });
+    // As above: the schema enumerates each source's columns, and the source-less spelling exists
+    // only for a name exactly one source carries. Filling in that source is all that is left.
+    return { source: input.source || c.ownersOf(raw)[0]?.source, property: raw };
   }
 
   /**

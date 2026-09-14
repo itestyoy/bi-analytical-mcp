@@ -1109,6 +1109,22 @@ export class Catalog {
     return [...new Set(this.facts.flatMap((f) => this.eventNames(f)))];
   }
 
+  /** Every name a source can be asked about in the { property } view: its payload properties and
+   *  its groupable attributes. The schema enumerates these PER SOURCE, so a name that source does
+   *  not carry is not expressible. */
+  propertyEnumFor(key) {
+    const m = this.getModel(key);
+    return [...new Set([...(this.facts.includes(key) ? this.eventProps(key) : []), ...Object.keys(m.dimensions || {})])];
+  }
+
+  /** Names exactly ONE source carries — what may be asked for without naming a source. Ambiguity is
+   *  then not a runtime refusal but an unrepresentable input. `of(key)` picks the vocabulary. */
+  uniqueAcross(of) {
+    const seen = new Map();
+    for (const key of this.modelKeys()) for (const n of of(key)) seen.set(n, (seen.get(n) || 0) + 1);
+    return [...seen].filter(([, n]) => n === 1).map(([name]) => name);
+  }
+
   eventPropEnum() {
     return [...new Set(this.facts.flatMap((f) => this.eventProps(f)))];
   }

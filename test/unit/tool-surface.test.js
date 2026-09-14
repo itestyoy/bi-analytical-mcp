@@ -101,7 +101,7 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
   assert.ok(r.hack && (r.create_payload || r.register_payload), 'recipe payload + hack returned');
   assert.ok(r.naming_note.includes('namespaced'), 'carries the task-namespacing note');
   // recipe is a mutually-exclusive view; an unknown id is rejected by the enum.
-  await assert.rejects(() => e.semantic_index({ recipe: 'nday_retention', event: 'tutorial' }), /at most ONE view/);
+  await assert.rejects(() => e.semantic_index({ recipe: 'nday_retention', event: 'tutorial' }), /must be exactly one of: .*\{ recipe \}/);
   await assert.rejects(() => e.semantic_index({ recipe: 'no_such_recipe' }), /invalid input/);
 });
 
@@ -174,7 +174,7 @@ test('semantic_index({ guide }) serves the workflow + routing triggers + per-tas
   // overview points at the guide; guide is a mutually-exclusive view.
   const ov = await e.semantic_index();
   assert.ok(typeof ov.guide === 'string' && /guide/.test(ov.guide));
-  await assert.rejects(() => e.semantic_index({ guide: true, model: 'events' }), /at most ONE view/);
+  await assert.rejects(() => e.semantic_index({ guide: true, model: 'events' }), /must be exactly one of: .*\{ guide \}/);
 });
 
 // Without recipes configured, the recipe view + overview list are simply absent.

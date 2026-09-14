@@ -121,7 +121,7 @@ test('bundle is integrated as a helper across the index views', async () => {
 // { bundle } is a mutually-exclusive view + a guard when no app dimension is configured.
 test('semantic_index({ bundle }) view contract', async () => {
   const e = engine();
-  await assert.rejects(() => e.semantic_index({ bundle: 'x', property: 'ad_type_of_event_data' }), /at most ONE view/);
+  await assert.rejects(() => e.semantic_index({ bundle: 'x', property: 'ad_type_of_event_data' }), /must be exactly one of: .*\{ bundle \}/);
   // before any indexing, asking for a bundle returns the "not indexed yet" note (no apps).
   const none = await e.semantic_index({ bundle: 'whatever' });
   assert.ok(none.note && Array.isArray(none.bundles) && none.bundles.length === 0);
@@ -170,8 +170,8 @@ test('the same app in two sources is two apps: nothing is merged across sources'
   assert.equal(crashOnly.event_rows, 7);
   assert.equal(crashOnly.by_source, undefined);
 
-  // a source that declares no app column is refused with the ones that do
-  await assert.rejects(() => e.semantic_index({ source: 'users', bundle: 'com.omg.words' }), /not an events source/);
+  // a source that declares no app column is not in the view's `source` enum at all
+  await assert.rejects(() => e.semantic_index({ source: 'users', bundle: 'com.omg.words' }), /`source` must be one of: events/);
   // an app unknown on the named source is refused naming the source
   await assert.rejects(() => e.semantic_index({ source: 'crashlytics', bundle: 'com.omg.relax' }), /unknown app 'com.omg.relax' on source 'crashlytics'/);
 
@@ -183,5 +183,5 @@ test('the same app in two sources is two apps: nothing is merged across sources'
 test('naming a source that declares no app column is refused, listing the ones that do', async () => {
   const e = engine();
   await assert.rejects(() => e.semantic_index({ source: 'crashlytics', bundle: 'com.omg.words' }),
-    /source 'crashlytics' declares no app\/bundle column .* Sources with one: events/);
+    /`source` must be one of: events/);
 });

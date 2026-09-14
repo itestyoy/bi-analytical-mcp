@@ -473,29 +473,7 @@ export function buildSchemas(catalog) {
     drop_context: { ...ctxRef, description: 'Tear down an entire isolated context (delete its files + artifacts).' },
     describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
     list_contexts: empty,
-    semantic_index: {
-      type: 'object', additionalProperties: false,
-      description: 'THE entry point for exploring the data: one progressive index over what every event/property/attribute MEANS, the REAL values it carries, how complete it is (NULL coverage), and how fresh the profiling is. Call with NO arguments for a compact overview (models, event names, event_semantics, group-by paths, value-index freshness). Then pass EXACTLY ONE view key: model → that model\'s entities/time/dimension attributes (with real sample values) + physical columns; event → only the properties populated on that event; property → ONE COLUMN\'S FULL PASSPORT (spec + unit, real value distribution paged by limit/offset/order_by/direction, NULL coverage per event with expected-vs-gap annotation, indexing history) — pass source + property (a bare name is accepted only when exactly one source carries it); search → events, properties, attributes, indexed VALUES and recipes by substring; bundle → for ONE app (bundle id), which event properties are populated vs EMPTY (the overview lists apps under `bundles`); status:true → operational state (value-index sync runs + background query jobs); run → one sync run\'s per-property breakdown. Views are mutually exclusive; paging params apply only to property/search.',
-      properties: {
-        model: { enum: [...catalog.modelKeys(), ...Object.keys(catalog.unavailableModels?.() || {})], description: 'VIEW: one model — its entities, time axis, dimension attributes (with indexed sample values) and REAL physical columns.' },
-        source: { enum: catalog.modelKeys(), description: 'Which SOURCE the `event` / `property` / `bundle` below belongs to. Every source owns its own events, payload properties and indexed values, so two sources may carry the same name — pass this to say which one. Optional when a name is unique across sources (then it is resolved for you; an ambiguous one is reported).' },
-        event: strEnum(catalog.eventNameEnum(), 'VIEW: one event of `source` — the event_data properties POPULATED on it (what you can measure/group/filter), each with real sample values + units.'),
-        property: { type: 'string', description: 'VIEW: one column\'s full passport, within `source`: an event property (e.g. "ad_type_of_event_data") or a dimension attribute (e.g. "country" on the users model): type/unit, where it applies, real value distribution (paged), NULL coverage per event, indexing history.' },
-        search: { type: 'string', description: 'VIEW: find across event names, event properties, dimension attributes (users/experiments columns), indexed VALUES, and recipes. FUZZY by default — typo- and paraphrase-tolerant (e.g. "retenton"→retention, "germny"→Germany); exact substring hits rank first, each match carries a score + match:"exact"|"fuzzy". Set fuzzy:false for substring-only.' },
-        fuzzy: { type: 'boolean', description: 'For { search }: enable typo/approximate matching (default true). false = exact substring only.' },
-        status: { type: 'boolean', description: 'VIEW: operational state — value-index sync runs (freshness, errors, slowest properties) + background query jobs.' },
-        run: { type: 'integer', minimum: 1, description: 'VIEW: one sync run by id (from the status view\'s value_index.recent_runs[].id): per-property timing/coverage, slowest first.' },
-        bundle: { type: 'string', description: 'VIEW: per-app coverage for ONE app, identified by its bundle id (e.g. "com.omg.wordsearch"). Returns which event properties are POPULATED for that app vs EMPTY (always NULL) — so you skip the empty ones instead of querying them blindly. The overview lists available apps under `bundles`; a property that is empty for one app may be populated for another. Requires the events fact to designate an app/bundle column.' },
-        recipe: { type: 'string', description: 'VIEW: get ONE ready-made recipe by id — its payload (create_semantic_model or a native-model pipeline + experiment mapping), example_queries, notes and `hack`. The overview lists available recipe ids; { search } finds them by keyword. (enum injected when recipes are configured.)' },
-        guide: { type: ['boolean', 'string'], description: 'VIEW: the analyst PROCEDURE for this server — guide:true returns the workflow (clarify → discover → prefer governed → review → report), IF/DO routing triggers (which tool to use when), and the per-task recipe families. Pass a task family name (e.g. "retention", "funnel", "ab_test") to narrow to that family. Read it to know HOW to approach a question.' },
-        limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'For { property }/{ search }: how many indexed values to return (default 10 for property, 20 for search). Page further with offset.' },
-        offset: { type: 'integer', minimum: 0, description: 'For { property }: skip this many values first — page through the value list.' },
-        order_by: { enum: ['freq', 'value'], description: 'For { property }: order the returned values by frequency (default) or alphabetically by value.' },
-        direction: { enum: ['asc', 'desc'], description: 'For { property }: sort direction (default desc for freq → most common first; asc for value → A→Z).' },
-        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'For { status }/{ run }/{ property }: how many recent runs / jobs / history rows to include (default 3 for { property }).' },
-        include_coverage: { type: 'boolean', description: 'For { property }: return the FULL per-event and per-app coverage — every event and app, INCLUDING the ones where the property is always NULL. Default false: only the carriers (events/apps that actually populate it) are returned, with a count of the omitted ones. Set true when you need the complete NULL breakdown.' },
-      },
-    },
+    semantic_index: semanticIndexSchema(catalog),
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
       description: 'Wait for `seconds` (capped at 60), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.',
@@ -509,6 +487,84 @@ export function buildSchemas(catalog) {
     ab_test: abTestSchema(),
     srm_check: srmCheckSchema(),
     sample_size: sampleSizeSchema(),
+  };
+}
+
+/**
+ * THE exploration tool, as ONE BRANCH PER VIEW. Each view lists exactly the fields it takes and the
+ * vocabulary it accepts, so "two views at once", "limit does not apply here" and "this source has
+ * no such property" are not refusals the engine has to write — they are inputs the schema cannot
+ * express. Names are enumerated PER SOURCE; a name only one source carries may be asked for without
+ * naming it, and an ambiguous one simply has no source-less spelling.
+ */
+function semanticIndexSchema(catalog) {
+  const models = catalog.modelKeys();
+  const unavailable = Object.keys(catalog.unavailableModels?.() || {});
+  const paging = {
+    limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'How many indexed values to return (default 10).' },
+    offset: { type: 'integer', minimum: 0, description: 'Skip this many values first — page through a long tail.' },
+    order_by: { enum: ['freq', 'value'], description: 'Order the values by frequency (default) or alphabetically.' },
+    direction: { enum: ['asc', 'desc'], description: 'Sort direction (default desc for freq, asc for value).' },
+    recent: { type: 'integer', minimum: 1, maximum: 100, description: 'How many recent indexing runs to include.' },
+    include_coverage: { type: 'boolean', description: 'Return the FULL per-event and per-app coverage instead of the summary.' },
+  };
+  const view = (title, description, required, properties) => ({ title, type: 'object', additionalProperties: false, description, ...(required.length ? { required } : {}), properties });
+  const eventsOf = (k) => (catalog.isFact(k) ? catalog.eventNames(k) : []);
+  const uniqueEvents = catalog.uniqueAcross(eventsOf);
+  const uniqueProps = catalog.uniqueAcross((k) => catalog.propertyEnumFor(k));
+  const bundleSources = models.filter((k) => catalog.getModel(k).bundle_column);
+
+  const branches = [
+    view('overview (no arguments)', 'OVERVIEW (no arguments): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
+    view('{ model }', 'VIEW { model }: one model — its entities, time axis, dimension attributes with real sample values, physical columns, declared relationships and aggregatable amounts.', ['model'], {
+      model: { enum: [...models, ...unavailable], description: 'The model to describe.' },
+    }),
+    // one branch per source: an event name belongs to the source that declares it, so a pairing
+    // that source does not have cannot be written down.
+    ...catalog.facts.map((f) => view('{ source, event }', `VIEW { source: '${f}', event }: the properties POPULATED on that event of '${f}'.`, ['source', 'event'], {
+      source: { const: f, description: `The events source '${f}'.` },
+      event: strEnum(eventsOf(f), `An event '${f}' declares.`),
+    })),
+    ...(uniqueEvents.length ? [view('{ event }', 'VIEW { event }: an event exactly ONE source declares — no need to name it. An event several sources share has no spelling here: name the source.', ['event'], {
+      event: { type: 'string', enum: uniqueEvents, description: 'An event carried by exactly one source.' },
+    })] : []),
+    // …and the same for a column: its passport is asked for within the source that carries it.
+    ...models.map((k) => view('{ source, property }', `VIEW { source: '${k}', property }: one column of '${k}' — its meaning, real value distribution (pageable), NULL coverage and indexing freshness.`, ['source', 'property'], {
+      source: { const: k, description: `The source '${k}'.` },
+      property: strEnum(catalog.propertyEnumFor(k), `A payload property or attribute of '${k}'.`),
+      ...paging,
+    })),
+    ...(uniqueProps.length ? [view('{ property }', 'VIEW { property }: a column exactly ONE source carries. A name several sources share has no spelling here: pass source too.', ['property'], {
+      property: { type: 'string', enum: uniqueProps, description: 'A property or attribute carried by exactly one source.' },
+      ...paging,
+    })] : []),
+    view('{ search }', 'VIEW { search }: find events, properties, attributes, indexed VALUES and recipes by word — typo- and paraphrase-tolerant.', ['search'], {
+      search: { type: 'string', description: 'The word or phrase to look for.' },
+      fuzzy: { type: 'boolean', description: 'Enable typo/approximate matching (default true); false = exact substring only.' },
+      limit: paging.limit,
+    }),
+    view('{ status }', 'VIEW { status }: operational state — value-index sync runs (freshness, errors, slowest properties) and background query jobs.', ['status'], {
+      status: { const: true, description: 'Ask for the operational state.' },
+      recent: paging.recent,
+    }),
+    view('{ run }', 'VIEW { run }: one sync run by id — its per-property breakdown, slowest first.', ['run'], {
+      run: { type: 'integer', minimum: 1, description: 'Run id, from the status view.' },
+      recent: paging.recent,
+    }),
+    ...(bundleSources.length ? [view('{ bundle }', 'VIEW { bundle }: for ONE app — which properties carry data for it vs are EMPTY.', ['bundle'], {
+      bundle: { type: 'string', description: 'The app/bundle id; the overview lists them.' },
+      source: { enum: bundleSources, description: 'Which source to read the per-app coverage of (needed when several declare an app column).' },
+    })] : []),
+    view('{ recipe }', 'VIEW { recipe }: ONE ready-made recipe by id — its payload, example queries and the reusable hack.', ['recipe'], {
+      recipe: { type: 'string', description: 'Recipe id, from the overview.' },
+    }),
+    view('{ guide }', 'VIEW { guide }: HOW to approach a question — the analyst workflow and IF/DO routing; pass a task family to narrow it.', ['guide'], {
+      guide: { type: ['boolean', 'string'], description: 'true for the whole guide, or a task family name.' },
+    }),
+  ];
+  return {
+    description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass NO arguments for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
+    oneOf: branches,
   };
 }
 

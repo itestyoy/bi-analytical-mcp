@@ -63,7 +63,8 @@ test('grounded catalog: phantom field is absent from semantic_index everywhere',
   const ev = await e.semantic_index({ event: 'level_completed' });
   assert.ok(!ev.properties.some((p) => p.name === 'complete_time_of_event_data'));
   // { property } — drilling the pruned field is an unknown-property error, not a page.
-  await assert.rejects(() => e.semantic_index({ property: 'complete_time_of_event_data' }), /unknown property/);
+  // the pruned column is not in the view's vocabulary at all — the schema, not a check
+  await assert.rejects(() => e.semantic_index({ property: 'complete_time_of_event_data' }), /must be one of:|unexpected property/);
   // { search } — searching its exact name returns no property match for it.
   const s = await e.semantic_index({ search: 'complete_time_of_event_data', fuzzy: false });
   assert.ok(!s.property_matches.some((p) => p.property === 'complete_time_of_event_data'));
@@ -258,7 +259,8 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   assert.ok(!offers(schemas.create_semantic_model, 'crashlytics'), 'create_semantic_model must not offer the unavailable source');
   assert.ok(!offers(schemas.build_native_model, 'crashlytics'), 'build_native_model must not offer the unavailable source');
   assert.ok(offers(schemas.create_semantic_model, 'events'));
-  assert.ok(schemas.semantic_index.properties.model.enum.includes('crashlytics'), 'the { model } view still accepts it, to explain');
+  const modelView = schemas.semantic_index.oneOf.find((b) => b.title === '{ model }');
+  assert.ok(modelView.properties.model.enum.includes('crashlytics'), 'the { model } view still accepts it, to explain');
 });
 
 // Grounding reads the WAREHOUSE's answer. When dbt never got to ask — its own timeout, a signal, a

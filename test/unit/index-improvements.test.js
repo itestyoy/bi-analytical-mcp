@@ -21,7 +21,7 @@ test('values_capped is flagged when distinct_count exceeds stored values', async
   const e = engine();
   // 100 distinct level ids but only 2 stored → the index is incomplete for this column.
   e.valueIndex.upsertProperty('events', 'level_id_of_event_data', { distinctCount: 100, totalCount: 900, values: [{ value: '1', freq: 10 }, { value: '2', freq: 5 }] });
-  const p = await e.semantic_index({ property: 'level_id_of_event_data' });
+  const p = await e.semantic_index({ source: 'events', property: 'level_id_of_event_data' });
   assert.equal(p.value_stats.values_capped, true);
   assert.equal(p.value_stats.indexed_value_count, 2);
   assert.ok(p.recommendations.some((r) => /RARE value may be absent|top 2 of 100/i.test(r)), JSON.stringify(p.recommendations));
@@ -34,23 +34,24 @@ test('a value search that finds nothing warns that rare values may be unindexed'
 });
 
 // п.5 FUZZY TARGETS: a near-miss target name links to the real catalog entity (not a term).
-test('memory record fuzzy-resolves a near-miss target to the real entity', async () => {
+test('memory record refuses a near-miss name inside its source, suggesting the real one', async () => {
   const e = engine();
-  // typo: missing a 't' in "event" → should still link to ad_type_of_event_data.
-  const out = await e.memory({ action: 'record', note: 'ad format lives here', targets: ['ad_type_of_even_data'] });
-  const link = out.linked_to[0];
-  assert.equal(link.kind, 'property');
-  assert.deepEqual(link.target, { source: 'events', name: 'ad_type_of_event_data' }, 'fuzzy-linked to the real property, named with its source');
-  assert.equal(link.fuzzy_resolved_from, 'ad_type_of_even_data');
-  assert.ok(out.fuzzy_links_note, 'flags that a fuzzy link was used');
-  // and it actually surfaces on the real property's view.
-  const prop = await e.semantic_index({ property: 'ad_type_of_event_data' });
-  assert.ok(prop.memory?.some((m) => m.id === out.id), 'note surfaces on the fuzzily-linked property');
+  // typo: missing a 't' in "event". The source is written down, so the miss is a misspelling
+  // WITHIN it — reported with the nearest real names, never silently linked to one of them.
+  await assert.rejects(
+    () => e.memory({ action: 'record', note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_even_data' }] }),
+    /is not a property, attribute or event of 'events'.*Did you mean.*'ad_type_of_event_data'/s,
+  );
+  // spelled correctly, it links — and surfaces on that property's view.
+  const out = await e.memory({ action: 'record', note: 'ad format lives here', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });
+  assert.deepEqual(out.linked_to[0].target, { source: 'events', name: 'ad_type_of_event_data' });
+  const prop = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
+  assert.ok(prop.memory?.some((m) => m.id === out.id), 'note surfaces on the linked property');
   // a phrase is written as one — and stays itself, searchable, linked to nothing
   const t = await e.memory({ action: 'record', note: 'x', targets: [{ term: 'totally unrelated phrase 123' }] });
   assert.equal(t.linked_to[0].kind, 'term');
-  // an identifier that resembles nothing in the catalog also stays a term (no false link)
-  const u = await e.memory({ action: 'record', note: 'y', targets: ['zzz_nothing_like_this'] });
+  // an identifier the catalog does not have is a phrase too, and says so
+  const u = await e.memory({ action: 'record', note: 'y', targets: [{ term: 'zzz_nothing_like_this' }] });
   assert.equal(u.linked_to[0].kind, 'term');
 });
 
@@ -62,7 +63,7 @@ test('memoryDbPath persists findings across engine instances', async () => {
   const cat = () => loadCatalog(CATALOG, {});
 
   const e1 = new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb });
-  const rec = await e1.memory({ action: 'record', note: 'durable finding about ads', targets: ['ad_type_of_event_data'] });
+  const rec = await e1.memory({ action: 'record', note: 'durable finding about ads', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });
   e1.close();
 
   const e2 = new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb });

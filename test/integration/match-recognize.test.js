@@ -384,7 +384,7 @@ test('semantic_index: overview lists models, then { model } drills into the usab
   assert.ok(pcNames.includes('device_time') && pcNames.includes('player_id_of_internal'), 'columns include time + key');
   assert.equal(events.time, 'device_time', 'time axis (default window/match_recognize order) is reported');
   // { event } returns only the properties carried by that event
-  const ev = await engine.semantic_index({ event: 'iap_purchase_completed' });
+  const ev = await engine.semantic_index({ source: 'events', event: 'iap_purchase_completed' });
   assert.ok(ev.property_count > 0 && ev.properties.some((p) => p.name === 'price_in_usd_of_event_data'), 'event lists its scoped properties');
 });
 

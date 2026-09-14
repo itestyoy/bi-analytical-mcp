@@ -59,9 +59,9 @@ after(async () => { backend?.close(); index?.close(); if (pg) await pg.stop(); }
 // Verify the EXACT property names against the fixture catalog via semantic_index.
 test('exact property names: ad_finished + level_completed carry the *_of_event_data props', opts, async (t) => {
   if (skip(t)) return;
-  const ad = await engine.semantic_index({ event: 'ad_finished' });
+  const ad = await engine.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok(ad.properties.some((p) => p.name === 'ad_type_of_event_data'), 'ad_finished carries ad_type_of_event_data');
-  const lvl = await engine.semantic_index({ event: 'level_completed' });
+  const lvl = await engine.semantic_index({ source: 'events', event: 'level_completed' });
   assert.ok(lvl.properties.some((p) => p.name === 'result_of_event_data'), 'level_completed carries result_of_event_data');
 });
 
@@ -93,10 +93,10 @@ test('result_of_event_data indexes win/lose with the seed counts (20 wins / 5 lo
   assert.equal(st.totalCount, 25); // 25 level_completed rows
 });
 
-// semantic_index({ property }) surfaces sample_values + distinct/total + indexed.
-test('semantic_index({ property }) returns sample_values + counts matching the index', opts, async (t) => {
+// semantic_index({ source, property }) surfaces sample_values + distinct/total + indexed.
+test('semantic_index({ source, property }) returns sample_values + counts matching the index', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  const out = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.equal(out.indexed, true);
   assert.equal(out.distinct_count, 3);
   assert.equal(out.total_count, 24);
@@ -112,9 +112,9 @@ test('semantic_index({ property }) returns sample_values + counts matching the i
 
 // Applicability (which events carry a property) is DATA-DERIVED from the scan's per-event coverage,
 // the schema declares no event list at all — prove the reported `events` == the observed non-null carriers.
-test('semantic_index({ property }).events is derived from per-event coverage (not a declared list)', opts, async (t) => {
+test('semantic_index({ source, property }).events is derived from per-event coverage (not a declared list)', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  const out = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   const cov = index.coverage('events', 'ad_type_of_event_data');
   const observed = cov.filter((e) => e.non_null > 0).map((e) => e.event_name).sort();
   assert.ok(observed.length > 0, 'the scan observed at least one carrier');
@@ -138,13 +138,13 @@ test('complex array property gets DATA-DERIVED per-event coverage (no leak onto 
   assert.deepEqual(carriers, ['level_completed'], `carried only on level_completed (got ${JSON.stringify(carriers)})`);
   assert.deepEqual([...index.appliesEvents('events', prop)].sort(), carriers, 'appliesEvents == observed carriers');
   // the leak we fixed: an unrelated event must NOT list this complex prop
-  const fl = await engine.semantic_index({ event: 'first_launch' });
+  const fl = await engine.semantic_index({ source: 'events', event: 'first_launch' });
   assert.ok(!fl.properties.some((p) => p.name === prop), 'complex prop does NOT leak onto first_launch');
   // its real carrier DOES list it
-  const lc = await engine.semantic_index({ event: 'level_completed' });
+  const lc = await engine.semantic_index({ source: 'events', event: 'level_completed' });
   assert.ok(lc.properties.some((p) => p.name === prop), 'complex prop shown on its real carrier (level_completed)');
   // A) declared STRUCTURE + B) raw EXAMPLES are surfaced on the property view.
-  const out = await engine.semantic_index({ property: prop });
+  const out = await engine.semantic_index({ source: 'events', property: prop });
   assert.equal(out.complex, true);
   assert.ok(out.fields || out.items, 'A: the array/struct shape is surfaced (fields/items) from the catalog');
   assert.equal(out.encoding, 'json', 'A: encoding surfaced');
@@ -176,7 +176,7 @@ test('complex array in a JSON-typed column: coverage counted from data (no JSON-
   const lc = covJson.find((e) => e.event_name === 'level_completed');
   assert.ok(lc.non_null > 0 && lc.non_null === lc.row_count, `non_null ${lc.non_null} of ${lc.row_count} level_completed rows`);
   // examples are the real JSON arrays
-  const view = await engine.semantic_index({ property: asJson });
+  const view = await engine.semantic_index({ source: 'events', property: asJson });
   assert.equal(view.complex, true);
   assert.ok(view.sample_values.length > 0 && view.sample_values.every((s) => /^\s*\[/.test(s.value)), 'examples are JSON arrays');
   // the complex pass now leaves per-property diagnostics rows, like the scalar pass
@@ -207,36 +207,36 @@ test('a row whose array payload is not an array is counted as absent, not fatal 
   }
 });
 
-// semantic_index({ property }) value listing is pageable + orderable (limit/offset/order_by/direction).
-test('semantic_index({ property }) pages + orders the indexed values', opts, async (t) => {
+// semantic_index({ source, property }) value listing is pageable + orderable (limit/offset/order_by/direction).
+test('semantic_index({ source, property }) pages + orders the indexed values', opts, async (t) => {
   if (skip(t)) return;
   // freq desc, top 1 → 'rewarded' (10); next page → 'interstitial' (8).
-  const p1 = await engine.semantic_index({ property: 'ad_type_of_event_data', limit: 1 });
+  const p1 = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', limit: 1 });
   assert.deepEqual(p1.sample_values.map((v) => v.value), ['rewarded']);
   assert.equal(p1.value_stats.has_more, true);
-  const p2 = await engine.semantic_index({ property: 'ad_type_of_event_data', limit: 1, offset: 1 });
+  const p2 = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', limit: 1, offset: 1 });
   assert.deepEqual(p2.sample_values.map((v) => v.value), ['interstitial']);
   // order_by value asc → alphabetical.
-  const alpha = await engine.semantic_index({ property: 'ad_type_of_event_data', order_by: 'value' });
+  const alpha = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', order_by: 'value' });
   assert.deepEqual(alpha.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   assert.equal(alpha.value_stats.order_by, 'value');
   assert.equal(alpha.value_stats.has_more, false);
   // freq asc → least common first.
-  const asc = await engine.semantic_index({ property: 'ad_type_of_event_data', order_by: 'freq', direction: 'asc' });
+  const asc = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', order_by: 'freq', direction: 'asc' });
   assert.deepEqual(asc.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   // has_more must be FALSE when the page covers all values (limit == distinct_count),
   // and TRUE only when a non-empty next page exists (no false positive at the boundary).
-  const exact = await engine.semantic_index({ property: 'ad_type_of_event_data', limit: 3 });
+  const exact = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', limit: 3 });
   assert.equal(exact.value_stats.returned, 3);
   assert.equal(exact.value_stats.has_more, false);
-  const boundary = await engine.semantic_index({ property: 'ad_type_of_event_data', limit: 2 });
+  const boundary = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', limit: 2 });
   assert.equal(boundary.value_stats.has_more, true); // a 3rd value exists
 });
 
-// semantic_index({ event }) adds a COMPACT distinct_count + top-3 sample_values per property.
-test('semantic_index({ event }) carries compact index hints per property', opts, async (t) => {
+// semantic_index({ source, event }) adds a COMPACT distinct_count + top-3 sample_values per property.
+test('semantic_index({ source, event }) carries compact index hints per property', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ event: 'ad_finished' });
+  const out = await engine.semantic_index({ source: 'events', event: 'ad_finished' });
   const p = out.properties.find((x) => x.name === 'ad_type_of_event_data');
   assert.equal(p.distinct_count, 3);
   assert.ok(p.sample_values.length <= 3, 'event view keeps sample_values compact (top 3)');
@@ -259,9 +259,9 @@ test('semantic_index({ search: "rewarded" }) returns a value_match with provenan
 });
 
 // Both drill-downs guide the AI's next exploration step.
-test('semantic_index({ property }) returns non-empty recommendations', opts, async (t) => {
+test('semantic_index({ source, property }) returns non-empty recommendations', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  const out = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.ok(Array.isArray(out.recommendations) && out.recommendations.length > 0 && out.recommendations.every((r) => typeof r === 'string' && r.length), 'property view recommends a concrete next move');
 });
 
@@ -298,20 +298,20 @@ test('semantic_index reports the value-index sync state + jobs', opts, async (t)
   const msList = byRun.properties.map((p) => p.ms);
   assert.deepEqual(msList, [...msList].sort((a, b) => b - a));
   // by PROPERTY: timing history for ad_type.
-  const byProp = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  const byProp = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.ok(byProp.indexing.runs >= 1 && byProp.indexing.history[0].run_id === runId);
   assert.equal(byProp.indexing.history[0].distinct_count, 3);
 });
 
-// semantic_index({ property }) reports null coverage from real seed counts: ad_type is
+// semantic_index({ source, property }) reports null coverage from real seed counts: ad_type is
 // populated ONLY on the 24 ad events; the other 160 of 184 rows are NULL. The per-event
 // breakdown marks which events the property applies to, so expected NULLs (non-ad events)
 // are distinguishable from real gaps (there are none here — both ad events are 100% filled).
-test('semantic_index({ property }) reports null_count + per-event coverage from the seed', opts, async (t) => {
+test('semantic_index({ source, property }) reports null_count + per-event coverage from the seed', opts, async (t) => {
   if (skip(t)) return;
   // include_coverage:true → the FULL per-event table (incl. always-NULL events), needed to assert
   // the whole-fact partition below. (Default is carriers-only; covered by property-view-lean.test.js.)
-  const out = await engine.semantic_index({ property: 'ad_type_of_event_data', include_coverage: true });
+  const out = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true });
   // overall: 24 non-null of 184 rows → 160 NULL.
   assert.equal(out.value_stats.non_null_count, 24);
   assert.equal(out.value_stats.row_count, 184);
@@ -446,9 +446,9 @@ test('semantic_index({ bundle }) splits populated vs empty event properties per 
 
   // the { property } view carries the same per-app split: by default a summary (empty_apps count),
   // and the full per-app list under include_coverage:true — ad_type is non_null=0 for colorfit.
-  const adSummary = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  const adSummary = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.ok(adSummary.bundle_coverage_summary.empty_apps >= 1, 'summary flags the empty app(s) by default');
-  const adProp = await engine.semantic_index({ property: 'ad_type_of_event_data', include_coverage: true });
+  const adProp = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true });
   const cf = (adProp.bundle_coverage || []).find((b) => b.bundle === 'com.omg.colorfit');
   assert.equal(cf?.non_null, 0, JSON.stringify(adProp.bundle_coverage));
 
@@ -504,7 +504,7 @@ test('per-event coverage on the crash fact is keyed by ITS event names', opts, a
   assert.equal(msg[0].non_null, 6);
 });
 
-test('semantic_index({ event }) on the crash fact lists only what THAT event carries', opts, async (t) => {
+test('semantic_index({ source, event }) on the crash fact lists only what THAT event carries', opts, async (t) => {
   if (skip(t)) return;
   const out = await engine.semantic_index({ source: 'crashlytics', event: 'anr' });
   assert.equal(out.source, 'crashlytics');
@@ -513,7 +513,7 @@ test('semantic_index({ event }) on the crash fact lists only what THAT event car
   assert.ok(!names.includes('crash_message_of_event_data'), 'a fatal-only property is not listed on anr');
 });
 
-test('semantic_index({ property }) resolves a qualified crash property', opts, async (t) => {
+test('semantic_index({ source, property }) resolves a qualified crash property', opts, async (t) => {
   if (skip(t)) return;
   const out = await engine.semantic_index({ source: 'crashlytics', property: 'issue_title_of_event_data' });
   assert.equal(out.source, 'crashlytics');

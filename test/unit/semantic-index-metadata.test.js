@@ -33,18 +33,18 @@ test('semantic_index({ model: events }) carries the static partition/cost hint',
 test('property drill-down surfaces unit; string-typed numeric gets a cast_hint', async () => {
   const e = engine();
   // numeric-typed with a declared unit → unit surfaced, NO cast needed.
-  const rev = await e.semantic_index({ property: 'revenue_of_event_data' });
+  const rev = await e.semantic_index({ source: 'events', property: 'revenue_of_event_data' });
   assert.equal(rev.unit, 'usd');
   assert.equal(rev.cast_hint, undefined);
   // string-typed but seconds-in-meaning → unit + cast_hint:'numeric'.
-  const ct = await e.semantic_index({ property: 'complete_time_of_event_data' });
+  const ct = await e.semantic_index({ source: 'events', property: 'complete_time_of_event_data' });
   assert.equal(ct.unit, 'seconds');
   assert.equal(ct.type, 'string');
   assert.equal(ct.cast_hint, 'numeric');
 });
 
 test('event drill-down rows carry the unit per property', async () => {
-  const out = await engine().semantic_index({ event: 'level_completed' });
+  const out = await engine().semantic_index({ source: 'events', event: 'level_completed' });
   const ct = out.properties.find((p) => p.name === 'complete_time_of_event_data');
   assert.equal(ct.unit, 'seconds');
   const noUnit = out.properties.find((p) => p.name === 'result_of_event_data');
@@ -93,7 +93,7 @@ test('overview carries join_note + value_index_status; payload-less event is not
     e.valueIndex.upsertProperty('events', p, { coverage: [{ event: 'level_completed', rowCount: 5, nonNull: 5 }, { event: 'first_launch', rowCount: 3, nonNull: 0 }] });
   }
   // first_launch carries no event-specific payload — the response says what it IS for.
-  const fl = await e.semantic_index({ event: 'first_launch' });
+  const fl = await e.semantic_index({ source: 'events', event: 'first_launch' });
   assert.equal(fl.properties.filter((p) => p.events?.includes?.('first_launch')).length, 0);
   assert.ok(fl.recommendations.some((r) => r.includes('acquisition') || r.includes('occurrence')), JSON.stringify(fl.recommendations));
 });

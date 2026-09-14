@@ -332,7 +332,7 @@ test('22. a finding on a qualified crash property surfaces on that property', op
 
 test('23. a bare name carried by two sources is refused, naming both', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /ambiguous.*app_version.*app_version/s);
+  await assert.rejects(() => engine.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source, name \} \| \{ term \}/);
 });
 
 // ═══════════ E. GROUNDING ═══════════
@@ -562,9 +562,9 @@ test('44. the run view tells users.app_version (1 distinct) from crashlytics.app
   assert.equal(rows.find((p) => p.source === 'crashlytics').distinct_count, 2);
 });
 
-test('45. the property view needs the source for a shared name, and answers per source', opts, async (t) => {
+test('45. the property view always takes the source, and answers per source', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.semantic_index({ property: 'app_version' }), /users.*crashlytics|crashlytics.*users/s);
+  await assert.rejects(() => engine.semantic_index({ property: 'app_version' }), /must be exactly one of: .*\{ source, property \}/);
   const u = await engine.semantic_index({ source: 'users', property: 'app_version' });
   // the seed writes '1.0'; dbt seed types the column numeric, so the warehouse value is 1
   assert.deepEqual(u.sample_values.map((v) => [String(v.value), v.freq]), [['1', 13]]);

@@ -30,7 +30,7 @@ test('event_coverage is carriers-only by default, with an omitted count + includ
     ],
   });
 
-  const lean = await e.semantic_index({ property: 'ad_type_of_event_data' });
+  const lean = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.deepEqual(lean.event_coverage.map((r) => r.event_name), ['ad_finished'], 'only the carrier is shown');
   assert.equal(lean.event_coverage_omitted, 2, 'the two always-NULL events are counted, not dumped');
   assert.ok(
@@ -39,7 +39,7 @@ test('event_coverage is carriers-only by default, with an omitted count + includ
   );
 
   // include_coverage:true → the FULL per-event table (nothing lost).
-  const full = await e.semantic_index({ property: 'ad_type_of_event_data', include_coverage: true });
+  const full = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true });
   assert.deepEqual(
     full.event_coverage.map((r) => r.event_name).sort(),
     ['ad_finished', 'first_launch', 'level_completed'],

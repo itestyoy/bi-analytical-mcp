@@ -306,10 +306,10 @@ export function buildSchemas(catalog) {
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored: table (precomputed snapshot, default) or view (always fresh).' },
       dry_run: { type: 'boolean', description: 'If true, return the generated model definition for preview WITHOUT building anything.' },
       pipeline: {
-        type: 'object', additionalProperties: false, required: ['stages'],
+        type: 'object', additionalProperties: false, required: ['source', 'stages'],
         description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
         properties: {
-          source: { type: 'string', enum: modelKeys, ...(catalog.defaultSource() ? { default: catalog.defaultSource() } : {}), description: `Source table the pipeline reads. ${catalog.defaultSource() ? 'Defaults to the only events source.' : `REQUIRED: this catalog has several events sources (${catalog.facts.join(', ')}), each with its own events and payload — name the one the question is about.`}` },
+          source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads. Always named: each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
           time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
           stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
         },
@@ -332,7 +332,7 @@ export function buildSchemas(catalog) {
     // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
     // belong to the action, so a stray param is an error rather than silently ignored.
     allOf: [
-      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'], ...forbid(['stage', 'stages', 'index', 'after']) } },
+      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name', 'source'], ...forbid(['stage', 'stages', 'index', 'after']) } },
       { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stages']) } },
       { if: { properties: { action: { const: 'add_steps' } }, required: ['action'] }, then: { required: ['draft_id', 'stages'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stage']) } },
       { if: { properties: { action: { enum: ['edit_step', 'insert_step'] } }, required: ['action'] }, then: { required: ['draft_id', 'index', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'after', 'stages']) } },
@@ -346,7 +346,7 @@ export function buildSchemas(catalog) {
       draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for everything except start. For fork it may also be a context whose pipeline was already materialized.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
-      source: { type: 'string', enum: modelKeys, ...(catalog.defaultSource() ? { default: catalog.defaultSource() } : {}), description: `Source table the pipeline reads (start only). ${catalog.defaultSource() ? 'Defaults to the only events source.' : `REQUIRED here: this catalog has several events sources (${catalog.facts.join(', ')}) — name the one the question is about.`}` },
+      source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads (start only, and REQUIRED there). Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
       time_range: trProp,
       stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
       stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
@@ -494,8 +494,9 @@ export function buildSchemas(catalog) {
  * THE exploration tool, as ONE BRANCH PER VIEW. Each view lists exactly the fields it takes and the
  * vocabulary it accepts, so "two views at once", "limit does not apply here" and "this source has
  * no such property" are not refusals the engine has to write — they are inputs the schema cannot
- * express. Names are enumerated PER SOURCE; a name only one source carries may be asked for without
- * naming it, and an ambiguous one simply has no source-less spelling.
+ * express. Names are enumerated PER SOURCE and a name is ALWAYS asked for within its source: there
+ * is no source-less spelling of an event or a column at all, in any catalog, so no name ever has to
+ * be traced back to an owner and no view ever has to guess which source was meant.
  */
 function semanticIndexSchema(catalog) {
   const models = catalog.modelKeys();
@@ -510,20 +511,14 @@ function semanticIndexSchema(catalog) {
   };
   const view = (title, description, required, properties) => ({ title, type: 'object', additionalProperties: false, description, ...(required.length ? { required } : {}), properties });
   const eventsOf = (k) => (catalog.isFact(k) ? catalog.eventNames(k) : []);
-  const uniqueProps = catalog.uniqueAcross((k) => catalog.propertyEnumFor(k));
   const bundleSources = models.filter((k) => catalog.getModel(k).bundle_column);
 
-  // Each vocabulary is written ONCE and referenced: a source's events appear in that source's
-  // branch and, where the catalog has a single events source, in the source-less one too. Writing
-  // the list twice would say the same thing twice and grow with every source.
-  const defs = {};
-  const ref = (name, values, description) => {
-    if (!values.length) return { type: 'string', description };
-    defs[name] = { type: 'string', enum: values, description };
-    return { $ref: `#/$defs/${name}` };
-  };
-  const eventRef = (f) => ref(`events_of_${f}`, eventsOf(f), `An event '${f}' declares.`);
-  const propRef = (k) => ref(`columns_of_${k}`, catalog.propertyEnumFor(k), `A payload property or attribute of '${k}'.`);
+  // Each vocabulary is written out where it is accepted, not hoisted into a $ref: a wrong name
+  // then fails INSIDE the branch that offered it, so the refusal can say which mode it was closest
+  // to and list that mode's names. Behind a $ref the failure belongs to the shared definition
+  // instead, and the reader is handed a vocabulary without being told whose it is.
+  const eventRef = (f) => strEnum(eventsOf(f), `An event '${f}' declares.`);
+  const propRef = (k) => strEnum(catalog.propertyEnumFor(k), `A payload property or attribute of '${k}'.`);
 
   const branches = [
     view('overview (no arguments)', 'OVERVIEW (no arguments): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
@@ -536,21 +531,12 @@ function semanticIndexSchema(catalog) {
       source: { const: f, description: `The events source '${f}'.` },
       event: eventRef(f),
     })),
-    // The source may be left out only where there is nothing to choose between — ONE events
-    // source. With several, every source is equal and the caller names the one they mean.
-    ...(catalog.facts.length === 1 ? [view('{ event }', 'VIEW { event }: an event of the catalog\'s single events source.', ['event'], {
-      event: eventRef(catalog.facts[0]),
-    })] : []),
-    // …and the same for a column: its passport is asked for within the source that carries it.
+    // A column is ALWAYS asked for within its source — one branch per model, no source-less form.
     ...models.map((k) => view('{ source, property }', `VIEW { source: '${k}', property }: one column of '${k}' — its meaning, real value distribution (pageable), NULL coverage and indexing freshness.`, ['source', 'property'], {
       source: { const: k, description: `The source '${k}'.` },
       property: propRef(k),
       ...paging,
     })),
-    ...(uniqueProps.length ? [view('{ property }', 'VIEW { property }: a column exactly ONE source carries. A name several sources share has no spelling here: pass source too.', ['property'], {
-      property: ref('columns_carried_by_one_source', uniqueProps, 'A property or attribute carried by exactly one source.'),
-      ...paging,
-    })] : []),
     view('{ search }', 'VIEW { search }: find events, properties, attributes, indexed VALUES and recipes by word — typo- and paraphrase-tolerant.', ['search'], {
       search: { type: 'string', description: 'The word or phrase to look for.' },
       fuzzy: { type: 'boolean', description: 'Enable typo/approximate matching (default true); false = exact substring only.' },
@@ -576,7 +562,6 @@ function semanticIndexSchema(catalog) {
     }),
   ];
   return {
-    ...(Object.keys(defs).length ? { $defs: defs } : {}),
     description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass NO arguments for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
     oneOf: branches,
   };
@@ -587,20 +572,15 @@ function semanticIndexSchema(catalog) {
 // the user's phrasings, and any source links); list/search/forget manage them. Strict
 // per-action fields so a param that does not belong to the action is rejected.
 /**
- * What a finding can be ABOUT. Three things, each written as itself: an entity of a source, an
- * entity named on its own when only one source has it, or a phrase the user used. A NAME and a
- * PHRASE are not the same thing, so they do not share a spelling — which also means the glued
- * '<source>.<name>' form has none: a name is an identifier, and `.` is not part of one.
+ * What a finding can be ABOUT. Two things, each written as itself: an entity OF A SOURCE — always
+ * the pair, never a name on its own — or a phrase the user used. A NAME and a PHRASE are not the
+ * same thing, so they do not share a spelling; and since the source is its own field, the glued
+ * '<source>.<name>' form has no spelling either.
  */
 function memoryTargetSchema(catalog, description) {
   return {
     ...(description ? { description } : {}),
     oneOf: [
-      {
-        title: 'a name',
-        type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
-        description: 'ONE name: a model key, or a property / attribute / event that exactly one source carries. The source is never glued on — when several sources carry the name, write { source, name }.',
-      },
       {
         title: '{ source, name }',
         type: 'object', additionalProperties: false, required: ['source'],
@@ -624,7 +604,7 @@ function memorySchema(catalog) {
   const F = {
     note: { type: 'string', minLength: 1, description: 'ONE ATOMIC finding, in plain words (e.g. "\'ad format\' = the event_data property ad_type_of_event_data, populated only on ad_started/ad_finished; values rewarded/interstitial/banner"). Keep it to a single fact — when studying a topic, make several small notes instead of one long one (atomic notes link and retrieve far better; an over-long note matches poorly and may fail to index).' },
     question: { type: 'string', description: 'The ORIGINAL business question / analytical goal this finding answers — why you looked it up, in the stakeholder\'s terms (e.g. "which ad format drives the most rewarded-video revenue?"). Embedded together with the note, so a future similarly-phrased business question retrieves this insight by meaning. Include it whenever the finding answers a real question.' },
-    targets: { type: 'array', items: memoryTargetSchema(catalog), description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is { source, name } — a property, user attribute or event of that source (e.g. { source: "events", name: "ad_type_of_event_data" }) — or { source } alone for the model itself, or a bare name when exactly ONE source carries it. A phrase the catalog has no entity for is written { term: "..." } and stays searchable as itself.' },
+    targets: { type: 'array', items: memoryTargetSchema(catalog), description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is { source, name } — a property, user attribute or event of that source (e.g. { source: "events", name: "ad_type_of_event_data" }) — or { source } alone for the model itself. A name is never written on its own: the source says which entity it is. A phrase the catalog has no entity for is written { term: "..." } and stays searchable as itself.' },
     aliases: { type: 'array', items: { type: 'string' }, description: 'The word(s)/phrasing for this finding — give them IN BOTH the user\'s language AND English (e.g. ["ad format", "формат рекламы", "тип рекламы"]). Bilingual aliases make retrieval work cross-language: the lexical/fuzzy match needs the literal words (it cannot bridge scripts on its own), and the aliases are also embedded with the note so a query in either language matches by meaning. Add the user\'s exact wording + synonyms in each language.' },
     links: { type: 'array', description: 'Associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { oneOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
     target: memoryTargetSchema(catalog, 'Return notes linked to this ONE entity (singular — the same forms as record\'s `targets`).'),

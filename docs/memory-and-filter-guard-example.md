@@ -17,7 +17,7 @@
   → resolve (нашли реальное поле/значение)
   → memory.record (note + question + bilingual aliases + targets)
   → в следующий раз: memory.search (RU/EN, лексика + семантика)
-                      ИЛИ инлайн в semantic_index({ property/event/model })
+                      ИЛИ инлайн в semantic_index({ source, property } / { source, event } / { model })
   → строим запрос
   → гард значений не даёт подставить непроверенное / не-то-регистра значение
 ```
@@ -49,7 +49,7 @@ memory({
   "saved": true,
   "id": "e72a2eccead4",
   "linked_to": [
-    { "kind": "property", "target": "ad_type_of_event_data", "surfaces_in": "semantic_index({ property: 'ad_type_of_event_data' })" },
+    { "kind": "property", "target": "ad_type_of_event_data", "surfaces_in": "semantic_index({ source: 'events', property: 'ad_type_of_event_data' })" },
     { "kind": "event",    "target": "ad_finished",          "surfaces_in": "semantic_index({ source: 'events', event: 'ad_finished' })" }
   ],
   "aliases": ["ad format", "формат рекламы", "тип рекламы"],
@@ -88,7 +88,7 @@ RU "низкая выручка" → semantic = true → нашёл EN-заме�
 
 ## 5. Та же находка сама всплывает в индексе
 
-`semantic_index({ property: "ad_type_of_event_data" })` возвращает поле `memory`:
+`semantic_index({ source: "events", property: "ad_type_of_event_data" })` возвращает поле `memory`:
 
 ```json
 "memory": [
@@ -110,7 +110,7 @@ RU "низкая выручка" → semantic = true → нашёл EN-заме�
 
 ```
 REJECTED: filter value(s) not verified against the real data — check the exact value
-via semantic_index({ property }) and use it as stored:
+via semantic_index({ source, property }) and use it as stored:
   where result_of_event_data: value 'organic' is not a real value —
   the column holds it with different casing. Did you mean: 'Organic'?
 ```
@@ -178,7 +178,7 @@ const e = new Engine({ catalog: loadCatalog(CAT, {}), contextManager: ctx(), emb
 const rec = await e.memory({ action: 'record',
   note: "'ad format' = ad_type_of_event_data (only on ad_started/ad_finished); rewarded/interstitial/banner",
   question: 'which ad format drives the most rewarded revenue?',
-  targets: ['ad_type_of_event_data', 'ad_finished'],
+  targets: [{ source: 'events', name: 'ad_type_of_event_data' }, { source: 'events', name: 'ad_finished' }],
   aliases: ['ad format', 'формат рекламы', 'тип рекламы'] });
 
 // 2-3) search EN + RU
@@ -186,11 +186,11 @@ await e.memory({ action: 'search', query: 'ad format' });
 await e.memory({ action: 'search', query: 'формат рекламы' });
 
 // 4) semantic cross-language
-await e.memory({ action: 'record', note: 'IAP purchases are failing for some payers', aliases: ['monetization'], targets: ['price_in_usd_of_event_data'] });
+await e.memory({ action: 'record', note: 'IAP purchases are failing for some payers', aliases: ['monetization'], targets: [{ source: 'events', name: 'price_in_usd_of_event_data' }] });
 await e.memory({ action: 'search', query: 'низкая выручка' });   // → находит EN-заметку
 
 // 5) surfaces in the property view
-await e.semantic_index({ property: 'ad_type_of_event_data' });   // .memory = [...]
+await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });   // .memory = [...]
 
 // 6) filter-value guard
 const e2 = new Engine({ catalog: loadCatalog(CAT, {}), contextManager: ctx() });

@@ -65,7 +65,7 @@ test('semantic_index: per-property timing + drill-down by run and via the proper
   assert.equal(byRun.properties[0].ms, 80);
 
   // the property PASSPORT carries the indexing history across runs + average.
-  const byProp = await e.semantic_index({ property: 'ad_type_of_event_data' });
+  const byProp = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.equal(byProp.indexing.runs, 2);
   assert.equal(byProp.indexing.history[0].run_id, r2); // most recent first
   assert.equal(byProp.indexing.avg_ms, 70); // (80 + 60) / 2
@@ -90,9 +90,9 @@ test('semantic_index: strict view contract (exactly one view, scoped params)', a
   assert.ok((await e.semantic_index({ search: 'tutorial', limit: 5 })).query);
 });
 
-// The SOURCE is a separate argument, and it may be left out only where there is nothing to
-// choose between. Input-validation guard: the source-less { event } spelling exists in a
-// one-source catalog and does not exist at all once a second events source is declared.
+// The SOURCE is ALWAYS a separate, named argument — in every catalog, however many sources it
+// has. Input-validation guard: no view accepts an event or a column on its own, so no name ever
+// has to be traced back to an owner.
 const SINGLE_SOURCE = `version: 2
 models:
   - name: fct_events
@@ -126,19 +126,24 @@ function engineFor(yaml) {
   return new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) });
 }
 
-test('semantic_index: the event source may be omitted only when the catalog has exactly one', async () => {
-  // ONE events source — the name alone is unambiguous, so the source-less spelling is accepted.
+test('semantic_index: an event or a column is never asked for without its source', async () => {
+  // ONE events source: being the only one earns it no shortcut — the pairing is still written out.
   const one = engineFor(SINGLE_SOURCE);
-  assert.equal((await one.semantic_index({ event: 'login' })).event, 'login');
+  await assert.rejects(() => one.semantic_index({ event: 'login' }), /unexpected property 'event'/);
   assert.equal((await one.semantic_index({ source: 'events', event: 'login' })).event, 'login');
 
-  // TWO events sources — every source is equal, so there is no source-less spelling to submit and
-  // the refusal names the mode that exists rather than guessing a source.
+  // SEVERAL events sources: same rule, same spelling — nothing about the catalog changes it.
   const two = engineFor(SINGLE_SOURCE + SECOND_SOURCE);
   await assert.rejects(() => two.semantic_index({ event: 'login' }), /must be exactly one of: .*\{ source, event \}/);
-  await assert.rejects(() => two.semantic_index({ event: 'login' }), /unexpected property 'event'/);
   assert.equal((await two.semantic_index({ source: 'events', event: 'login' })).event, 'login');
   assert.equal((await two.semantic_index({ source: 'crashlytics', event: 'boom' })).event, 'boom');
-  // an event of the OTHER source is not in this source's vocabulary.
-  await assert.rejects(() => two.semantic_index({ source: 'crashlytics', event: 'login' }), /`event` must be one of: boom/);
+  // An event of the OTHER source is not in this source's vocabulary, so the pairing matches no
+  // branch: the refusal names the one field that can be corrected — the source that declares the
+  // event, or that source's event vocabulary.
+  await assert.rejects(() => two.semantic_index({ source: 'crashlytics', event: 'login' }), /`source` must be "events"/);
+  await assert.rejects(() => two.semantic_index({ source: 'events', event: 'boom' }), /`event` must be one of: login, purchase/);
+
+  // A COLUMN is addressed the same way: a bare name has no spelling in either catalog.
+  await assert.rejects(() => one.semantic_index({ property: 'user_id' }), /unexpected property 'property'/);
+  await assert.rejects(() => two.semantic_index({ property: 'user_id' }), /unexpected property 'property'/);
 });

@@ -41,8 +41,8 @@ test('loadCatalogFromProject: discovers MCP models from the dbt project schema Y
     assert.deepEqual(c.facts, ['events']);
     assert.equal(c.getModel('events').dbt_model, 'fct_events');
     assert.equal(c.getModel('users').dbt_model, 'dim_users');
-    assert.deepEqual(c.eventNames().sort(), ['login', 'purchase']);
-    assert.ok(c.eventProps().includes('amount'));
+    assert.deepEqual(c.eventNames('events').sort(), ['login', 'purchase']);
+    assert.ok(c.eventProps('events').includes('amount'));
     assert.ok(c.modelDimensionColumns('users').includes('country'));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

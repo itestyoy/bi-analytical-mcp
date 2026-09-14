@@ -42,9 +42,9 @@ export class Engine {
     this._memoryStore = memoryDbPath ? openStore({ dbPath: memoryDbPath }) : null;
     this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
     // Target keys written before a target carried its source ('property:ad_type_of_event_data')
-    // name an entity no source owns: with several sources such a key surfaces a note on the wrong
-    // one. Rewrite each ONCE to its owner, or demote it to a searchable term when no single source
-    // claims it — after this, every stored key is (kind, source, name) and is read one way.
+    // name an entity no source owns. Attributing one to a source now would be guessing which
+    // entity was meant, so each is demoted ONCE to a searchable term instead: the note stays
+    // findable, and every stored key that addresses a view is (kind, source, name).
     try {
       const moved = this.memoryStore.retarget((canon) => this._memoryCanonForward(canon));
       if (moved.targets) console.error(`[mcp] memory targets stored structurally: ${moved.targets} target(s) on ${moved.notes} note(s)`);
@@ -100,72 +100,40 @@ export class Engine {
   }
 
   /**
-   * One stored memory-target key brought onto the current form: a property/event key with no
-   * source is attributed to the ONE source that declares it, and demoted to a searchable term when
-   * none or several do. Returns null when the key is already canonical.
+   * One stored memory-target key brought onto the current form: a property/event key written
+   * without a source names no entity this catalog can address, and which one was meant is not
+   * recoverable from the name — so it becomes a searchable term rather than a guess. Returns null
+   * when the key is already canonical.
    */
   _memoryCanonForward(canon) {
-    const c = this.catalog;
     const i = String(canon).indexOf(':');
     if (i <= 0) return null;
     const kind = canon.slice(0, i); const key = canon.slice(i + 1);
     if ((kind !== 'property' && kind !== 'event') || key.includes('.')) return null; // model:, term:, already scoped
-    const owners = kind === 'event'
-      ? c.facts.filter((f) => c.eventNames(f).includes(key))
-      : c.ownersOf(key).map((o) => o.source);
-    return owners.length === 1 ? `${kind}:${owners[0]}.${key}` : `term:${key.toLowerCase()}`;
-  }
-
-  /** Every linkable catalog entity as a typed target candidate (events/props/attrs/models). */
-  _memoryTargetCandidates() {
-    const c = this.catalog;
-    const out = [];
-    for (const k of c.modelKeys()) out.push(memoryTarget('model', k));
-    for (const f of c.facts) {
-      for (const ev of c.eventNames(f)) out.push(memoryTarget('event', f, ev));
-      for (const prop of c.eventProps(f)) out.push(memoryTarget('property', f, prop));
-    }
-    for (const k of c.modelKeys()) {
-      for (const col of Object.keys(c.getModel(k).dimensions || {})) out.push(memoryTarget('property', k, col));
-    }
-    return out;
+    return `term:${key.toLowerCase()}`;
   }
 
   /**
    * Resolve a memory TARGET to a canonical, typed key so a saved finding links to a real
    * semantic_index view. `{ source, name }` names an attribute, payload property or event of that
-   * source exactly; `{ source }` alone names the model. A bare STRING is a model key, or a name
-   * attributed to the ONE source that declares it; if none matches exactly, a FUZZY match against
-   * the catalog entities catches a near-miss (a slight typo still links instead of silently
-   * degrading), and only a genuinely unrecognised string is kept as a free `term` (searchable).
+   * source exactly; `{ source }` alone names the model; `{ term }` is a phrase the catalog has no
+   * entity for. There is no bare-name form: the source is always written, so nothing here has to
+   * be attributed to an owner, and a name that source does not carry is refused rather than
+   * fuzzily re-pointed at something else.
    */
   _resolveMemoryTarget(t) {
     const c = this.catalog;
     if (t && typeof t === 'object' && t.term !== undefined) return memoryTarget('term', String(t.term).trim());
-    if (t && typeof t === 'object') {
-      const source = String(t.source ?? '').trim(); const name = t.name == null ? null : String(t.name).trim();
-      if (!c.models[source]) throw new ToolError(`memory target: unknown source '${source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(source)}`, { stage: 'validate', field: 'targets' });
-      if (!name) return memoryTarget('model', source);
-      if (c.attributeKind(source, name)) return memoryTarget('property', source, name);
-      if (c.isFact(source) && c.eventNames(source).includes(name)) return memoryTarget('event', source, name);
-      throw new ToolError(`memory target: '${name}' is not a property, attribute or event of '${source}'. semantic_index({ model: '${source}' }) lists what it carries.`, { stage: 'validate', field: 'targets' });
-    }
-    const s = String(t).trim();
-    if (c.models[s]) return memoryTarget('model', s);
-    // A bare name is attributed to the source that declares it — when exactly one does. Two
-    // sources carrying the same name is reported, never guessed (the rule every other resolver
-    // here follows).
-    const owners = [
-      ...c.facts.filter((f) => c.eventNames(f).includes(s)).map((f) => memoryTarget('event', f, s)),
-      ...c.ownersOf(s).map(({ source }) => memoryTarget('property', source, s)),
-    ];
-    if (owners.length === 1) return owners[0];
-    if (owners.length > 1) throw new ToolError(`memory target '${s}' is ambiguous — it exists as ${owners.map((o) => `'${o.label}'`).join(', ')}. Pass { source, name } to say which one.`, { stage: 'validate', field: 'targets' });
-    // Fuzzy fallback: a near-miss entity name links to the real entity (marked fuzzy) rather
-    // than becoming an orphan term. High threshold so only a confident match auto-links.
-    const [best] = rankFuzzy(s, this._memoryTargetCandidates(), { fields: (x) => [x.label], threshold: 0.82, limit: 1 });
-    if (best && best.item.label.toLowerCase() !== s.toLowerCase()) return { ...best.item, fuzzy: true, from: s };
-    return memoryTarget('term', s);
+    const source = String(t?.source ?? '').trim(); const name = t?.name == null ? null : String(t.name).trim();
+    if (!c.models[source]) throw new ToolError(`memory target: unknown source '${source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(source)}`, { stage: 'validate', field: 'targets' });
+    if (!name) return memoryTarget('model', source);
+    if (c.attributeKind(source, name)) return memoryTarget('property', source, name);
+    if (c.isFact(source) && c.eventNames(source).includes(name)) return memoryTarget('event', source, name);
+    // The source is known, so a miss is a misspelling WITHIN it: suggest its own nearest names
+    // rather than linking to something the caller did not write.
+    const own = [...c.propertyEnumFor(source), ...(c.isFact(source) ? c.eventNames(source) : [])];
+    const near = rankFuzzy(name, own, { fields: (x) => [x], threshold: 0.7, limit: 3 }).map((m) => `'${m.item}'`);
+    throw new ToolError(`memory target: '${name}' is not a property, attribute or event of '${source}'.${near.length ? ` Did you mean: ${near.join(', ')}?` : ''} semantic_index({ model: '${source}' }) lists what it carries.`, { stage: 'validate', field: 'targets' });
   }
 
   /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
@@ -209,7 +177,7 @@ export class Engine {
    * THE analyst memory tool. Save a FINDING the AI made (a vague phrasing tracked down to a
    * real field, a non-obvious gotcha, an associated source/link) and LINK it to the catalog
    * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { model }/
-   * { event }/{ property } views and { search }) next time the same word/field comes up.
+   * { source, event }/{ source, property } views and { search }) next time the same word/field comes up.
    *   action:'record' → save a note (+ targets it is about, + aliases the user used, + links)
    *   action:'list'   → all notes, or those linked to one { target }
    *   action:'search' → notes matching a word (text / alias / target)
@@ -390,8 +358,8 @@ export class Engine {
    * dumping everything at once is wasteful. Call with NO arguments for a compact
    * OVERVIEW, then drill down:
    *   { model }    → one model's entities/time/dimensions (with real values) + physical columns
-   *   { event }    → only the properties POPULATED on that event (what you can use)
-   *   { property } → one property/attribute: spec + real value distribution + NULL
+   *   { source, event } → only the properties POPULATED on that event (what you can use)
+   *   { source, property } → one property/attribute: spec + real value distribution + NULL
    *                  coverage per event + indexing history (one page per column)
    *   { search }   → events/properties/attributes/VALUES/recipes matching a substring
    *   { recipe }   → one ready-made recipe by id (payload + example_queries + hack)
@@ -568,12 +536,12 @@ export class Engine {
       return out;
     }
 
-    // ── { event }: the properties populated on this event (NULL on others) ──
+    // ── { source, event }: the properties populated on this event (NULL on others) ──
     if (input.event) {
       // The event belongs to ONE source; everything below (payload, coverage, indexed values)
-      // comes from that source only. `source` says which; a bare name that only one source
-      // declares resolves on its own, and an ambiguous one is reported rather than guessed.
-      const { fact, name: eventName } = this._resolveEventRef(input);
+      // comes from that source only. The schema pairs the two in one branch per source, so both
+      // arrive named and there is nothing to resolve.
+      const fact = input.source; const eventName = String(input.event);
       const numeric = new Set(c.eventNumericProps(fact));
       // DATA-DERIVED applicability: which properties are actually populated on this event (from the
       // value index), not the declared meta.mcp.events. A property with no coverage yet (unknown)
@@ -622,11 +590,11 @@ export class Engine {
       return eventOut;
     }
 
-    // ── { property }: one property's full spec ──
+    // ── { source, property }: one property's full spec ──
     if (input.property) {
-      // The SOURCE is a separate argument, so a name never carries it; the schema enumerates each
-      // source's columns, so whatever arrives here is one of them.
-      const { source: pSource, property: p } = this._resolvePropertyRef(input);
+      // The SOURCE is a separate argument and the view has no source-less spelling: the schema
+      // pairs each column with the model that carries it, so both arrive named.
+      const pSource = input.source; const p = String(input.property);
       if (c.attributeKind(pSource, p) !== 'property') {
         const mk = pSource; const col = p;
         const dim = (c.getModel(mk).dimensions || {})[col];
@@ -965,42 +933,7 @@ export class Engine {
     };
   }
 
-  _defaultSource(field) {
-    const only = this.catalog.defaultSource();
-    if (only) return only;
-    throw new ToolError(`this catalog has several events sources (${this.catalog.facts.join(', ')}) — pass ${field} to say which one to read`, { stage: 'validate', field });
-  }
 
-  /**
-   * Resolve the { source?, event } arguments into an explicit (source, event) pair — the mirror
-   * of _resolvePropertyRef. A bare event name is attributed to the ONE source that declares it.
-   *
-   * _defaultSource(field) answers the other half: which source to read when the caller omitted
-   * it — allowed only when the catalog has ONE events source, since with several every source is
-   * equal and the caller must name the one the question is about.
-   */
-  _resolveEventRef(input) {
-    const c = this.catalog;
-    const raw = String(input.event);
-    // The schema pairs an event with the source that declares it (one branch per source) and offers
-    // a source-less spelling only for an event exactly one source has — so there is nothing to
-    // check here, only the source to fill in.
-    return { fact: input.source || c.facts.find((f) => c.eventNames(f).includes(raw)), name: raw };
-  }
-
-  /**
-   * Resolve the { source?, property } arguments of the { property } view into an explicit
-   * (source, property) pair. The SCHEMA decides what is askable — each source's columns are
-   * enumerated per source, and a name may be asked without a source only when exactly one source
-   * carries it — so this fills in that source and nothing else.
-   */
-  _resolvePropertyRef(input) {
-    const c = this.catalog;
-    const raw = String(input.property);
-    // As above: the schema enumerates each source's columns, and the source-less spelling exists
-    // only for a name exactly one source carries. Filling in that source is all that is left.
-    return { source: input.source || c.ownersOf(raw)[0]?.source, property: raw };
-  }
 
   /**
    * Pageable/orderable view of one indexed key's VALUES (limit/offset/order_by/direction)
@@ -1120,11 +1053,11 @@ export class Engine {
 
     const recommendations = [];
     if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in semantic_index may still be filling in.`);
-    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ property }) will show no sample_values until the first sync (it runs in the background at startup).`);
+    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ source, property }) will show no sample_values until the first sync (it runs in the background at startup).`);
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
-    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ property }).`);
+    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ source, property }).`);
     if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }); semantic_index({ status }) lists them.`);
-    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
+    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ source: '${slowest[0].source}', property: '${slowest[0].property}' }) for one property across syncs.`);
     if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property — combined scan failed. Full reason in value_index.last_run_fallbacks[] (also semantic_index({ run: ${last.id} }).fallbacks).`);
     if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
 
@@ -1295,7 +1228,7 @@ export class Engine {
 
   async _draftStart(input) {
     const ctx = input.draft_id ? this._ctx(input.draft_id) : this.ctxs.create();
-    const source = input.source || this._defaultSource('source');
+    const source = input.source;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
@@ -1622,7 +1555,7 @@ export class Engine {
       }
     }
     if (errors.length) {
-      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ property }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
+      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ source, property }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
     }
     return warnings;
   }
@@ -1646,7 +1579,7 @@ export class Engine {
     const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !evs.every((e) => scoped.has(e)); });
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
-    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ property: '${p}' }).event_coverage).`];
+    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ source: '${fact}', property: '${p}' }).event_coverage).`];
   }
 
   /**
@@ -1686,7 +1619,7 @@ export class Engine {
           if (!cell || cell.non_null === 0) empty.push(`${b} + ${ev}`); // missing cell = no rows for that combo
         }
         const total = scopedBundles.size * scopedEvents.size;
-        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ bundle: '${[...scopedBundles][0]}' }) or semantic_index({ property: '${p}' }).bundle_coverage / event_coverage.`);
+        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ bundle: '${[...scopedBundles][0]}' }) or semantic_index({ source: '${fact}', property: '${p}' }).bundle_coverage / event_coverage.`);
         else if (empty.length) warns.push(`'${p}' is empty for app+event ${fmt(empty)} (present for the other scoped pairs) — those rows contribute no '${p}'.`);
       } else if (scopedBundles.size) {
         const byB = new Map(this.valueIndex.bundleCoverage(fact, p).map((x) => [x.bundle, x]));
@@ -1696,7 +1629,7 @@ export class Engine {
       } else {
         const byE = new Map(this.valueIndex.coverage(fact, p).map((x) => [x.event_name, x]));
         const empty = [...scopedEvents].filter((ev) => byE.get(ev) && byE.get(ev).non_null === 0);
-        if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ property: '${p}' }).event_coverage).`);
+        if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ source: '${fact}', property: '${p}' }).event_coverage).`);
         else if (empty.length) warns.push(`'${p}' is empty on event(s) ${fmt(empty)} (populated on the other scoped event(s)).`);
       }
     }
@@ -1841,7 +1774,7 @@ export class Engine {
    */
   async _registerPipeline(input) {
     const dialect = this.catalog.dialect;
-    const source = input.pipeline.source || this._defaultSource('pipeline.source');
+    const source = input.pipeline.source;
     // A pipeline-level time_range is applied as a leading WHERE on the source's time
     // column — one place to bound the window (parity with query_semantic_model).
     // Timezone-aware via _timeRangeConditions (boundaries are wall-clock in tr.timezone).
@@ -2517,7 +2450,7 @@ export class Engine {
       if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (latest event time)${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
     }
     // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
-    if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ property }).');
+    if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ source, property }).');
     // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
     const distinctMeasures = new Set();
     for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);

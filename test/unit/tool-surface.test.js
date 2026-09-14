@@ -215,17 +215,19 @@ test('semantic_index({ model }) reports an owned relationship as owned, with a g
   assert.equal(events.relationships.find((r) => r.entity === 'user').use, 'metric query + pipeline');
 });
 
-// The qualified '<source>.<name>' form — the one the tool itself emits — resolves; a bare name
-// carried by several sources is reported, never guessed.
-test('memory targets: { source, name } resolves, ambiguous bare names are refused', async () => {
+// A target is the PAIR the tool itself emits. A name on its own has no spelling at all — so a name
+// two sources carry can never be attached to the wrong one, and never has to be disambiguated.
+test('memory targets: { source, name } resolves; a bare name is not a target', async () => {
   const e = engine();
   const saved = await e.memory({ action: 'record', note: 'ad_finished fires once per completed impression', targets: [{ source: 'events', name: 'ad_finished' }, { source: 'crashlytics', name: 'anr_duration_of_event_data' }, { source: 'users', name: 'country' }] });
   assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event', 'property', 'property'], JSON.stringify(saved.linked_to));
   assert.deepEqual(saved.unresolved_terms || [], []);
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
-  // app_version is an attribute of BOTH users and crashlytics
-  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /ambiguous.*users\.app_version.*crashlytics\.app_version|ambiguous.*crashlytics\.app_version.*users\.app_version/s);
+  // app_version is an attribute of BOTH users and crashlytics — each is written as its own target
+  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source, name \} \| \{ term \}/);
+  const both = await e.memory({ action: 'record', note: 'app_version means the build, on either source', targets: [{ source: 'users', name: 'app_version' }, { source: 'crashlytics', name: 'app_version' }] });
+  assert.deepEqual(both.linked_to.map((l) => l.target.source), ['users', 'crashlytics']);
 });
 
 // Attributes that live only on an events source are searchable by name like any other.

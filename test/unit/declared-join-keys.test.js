@@ -193,13 +193,14 @@ test('a validity mark on a column that is not a dimension is rejected', () => {
   assert.throws(() => load(EVENTS + onAxis), /is the model's time axis \(meta\.mcp\.is_time\), so it never becomes a groupable time dimension/);
 });
 
-// THE SOURCE IS ALWAYS A SEPARATE ARGUMENT. With several events sources an accessor asked without
-// one has nothing to fall back to — there is no "default" fact — so it refuses instead of silently
-// answering for another source. With exactly one source the argument may be omitted.
-test('event accessors refuse an omitted source when the catalog has several', () => {
+// THE SOURCE IS ALWAYS A SEPARATE ARGUMENT, AND IS ALWAYS PASSED. There is no "default" fact in any
+// catalog, so an accessor asked without a source refuses instead of silently answering for one —
+// being the only source earns no exception, or the single-source case would quietly train callers
+// into a spelling that breaks the day a second source is declared.
+test('event accessors refuse an omitted source, whatever the catalog holds', () => {
   const two = load(EVENTS + CRASH + USERS());
   assert.equal(two.facts.length, 2);
-  assert.throws(() => two.eventNames(), /a source is required: this catalog has 2 events sources/);
+  assert.throws(() => two.eventNames(), /a source is required/);
   assert.throws(() => two.scalarEventProps(), /a source is required/);
   assert.throws(() => two.bundleColumn(), /a source is required/);
   assert.throws(() => two.eventNames('users'), /'users' is not an events source/);
@@ -207,7 +208,8 @@ test('event accessors refuse an omitted source when the catalog has several', ()
 
   const one = load(EVENTS + USERS());
   assert.equal(one.facts.length, 1);
-  assert.deepEqual(one.eventNames(), ['login'], 'a single source resolves without being named');
+  assert.throws(() => one.eventNames(), /a source is required/, 'being the only source is not a licence to omit it');
+  assert.deepEqual(one.eventNames('events'), ['login']);
 });
 
 // ── THE SCHEMA MARKS A PROPERTY; THE INDEX MEASURES THE REST ───────────────────────────────
@@ -232,7 +234,7 @@ test('meta.mcp.events is refused, naming the property marker', () => {
 
 test('meta.mcp.values is refused on a property and on an attribute', () => {
   assert.throws(() => load(withCol(EVENTS, '      - { name: result, data_type: string, meta: { mcp: { property: true, values: [win, lose] } } }') + USERS()),
-    /meta\.mcp\.values is no longer a schema key.*semantic_index\(\{ property \}\)/s);
+    /meta\.mcp\.values is no longer a schema key.*semantic_index\(\{ source, property \}\)/s);
   const dimVals = USERS().replace('- { name: country, data_type: string }', '- { name: country, data_type: string, meta: { mcp: { values: [US, GB] } } }');
   assert.throws(() => load(EVENTS + dimVals), /meta\.mcp\.values is no longer a schema key/);
   const blobVals = EVENTS.replace('      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }',

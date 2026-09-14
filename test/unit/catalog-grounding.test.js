@@ -64,7 +64,7 @@ test('grounded catalog: phantom field is absent from semantic_index everywhere',
   assert.ok(!ev.properties.some((p) => p.name === 'complete_time_of_event_data'));
   // { property } — drilling the pruned field is an unknown-property error, not a page.
   // the pruned column is not in the view's vocabulary at all — the schema, not a check
-  await assert.rejects(() => e.semantic_index({ property: 'complete_time_of_event_data' }), /must be one of:|unexpected property/);
+  await assert.rejects(() => e.semantic_index({ source: 'events', property: 'complete_time_of_event_data' }), /must be one of:|unexpected property/);
   // { search } — searching its exact name returns no property match for it.
   const s = await e.semantic_index({ search: 'complete_time_of_event_data', fuzzy: false });
   assert.ok(!s.property_matches.some((p) => p.property === 'complete_time_of_event_data'));

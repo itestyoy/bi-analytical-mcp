@@ -461,7 +461,7 @@
           ]
         }
       ],
-      "notes": "A funnel step is a measure scoped by event_name + a property `where` (event_data value). Steps chain as 2-step conversion metrics (s1->s2, s2->s3); multiply/compose for end-to-end. IMPORTANT: the step VALUES here (step_1..step_3) are an example — discover the real step values of your data first via semantic_index({ property: 'element_of_event_data' }) and substitute them. Could also key the step on level_id, screen_to, placement, etc.",
+      "notes": "A funnel step is a measure scoped by event_name + a property `where` (event_data value). Steps chain as 2-step conversion metrics (s1->s2, s2->s3); multiply/compose for end-to-end. IMPORTANT: the step VALUES here (step_1..step_3) are an example — discover the real step values of your data first via semantic_index({ source, property: 'element_of_event_data' }) and substitute them. Could also key the step on level_id, screen_to, placement, etc.",
       "hack": "Chain one count_distinct(user) measure per step (event + property value) and ratio metrics between consecutive steps. Extrapolate to any ordered N-step sequence."
     },
     {
@@ -2915,7 +2915,7 @@
           ]
         }
       },
-      "notes": "Compare volumes and per-event user counts against expectation/history; a vanished or collapsed event usually means broken tracking, not changed behavior. Drill NULL coverage of a suspicious property with semantic_index({ property }) — it separates expected NULLs (property not applicable to the event) from real gaps. Add a time_range to audit a specific release window, or group_by a user attribute (join 'users') to localize a client-side break.",
+      "notes": "Compare volumes and per-event user counts against expectation/history; a vanished or collapsed event usually means broken tracking, not changed behavior. Drill NULL coverage of a suspicious property with semantic_index({ source, property }) — it separates expected NULLs (property not applicable to the event) from real gaps. Add a time_range to audit a specific release window, or group_by a user attribute (join 'users') to localize a client-side break.",
       "hack": "Anomaly triage order: (1) event volumes, (2) property NULL coverage, (3) only then the metric itself. Most 'metric drops' are tracking changes."
     },
     {

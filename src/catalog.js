@@ -553,14 +553,14 @@ export function dbtSchemaToCatalog(doc) {
       }
       // WHICH EVENTS CARRY A PROPERTY AND WHICH VALUES IT TAKES ARE MEASURED, NOT DECLARED. The
       // value index observes both per source and serves them everywhere (the { event },
-      // { property } and { search } views, the filter-value guard, the event-scope warnings). A
+      // { source, property } and { search } views, the filter-value guard, the event-scope warnings). A
       // declared list would only go stale in silence, so the schema no longer carries one: the
       // former meta.mcp.events / meta.mcp.values keys are refused with the replacement.
       if (cm.events !== undefined) {
         throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.events is no longer a schema key — which events carry a property is measured by the value index. To mark the column as an event-payload PROPERTY use meta.mcp.property: true (an array column needs only meta.mcp.array).`);
       }
       if (cm.values !== undefined || (cm.dimension && typeof cm.dimension === 'object' && cm.dimension.values !== undefined)) {
-        throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.values is no longer a schema key — a column's real values and their frequencies come from the value index (semantic_index({ property })). Remove it; put the MEANING of special values in the description instead.`);
+        throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.values is no longer a schema key — a column's real values and their frequencies come from the value index (semantic_index({ source, property })). Remove it; put the MEANING of special values in the description instead.`);
       }
       // Flattened event payload: on a FACT, a column marked meta.mcp.property (scalar) or
       // meta.mcp.array (array / array<struct>) is a per-event PROPERTY. These are REAL physical
@@ -1013,26 +1013,16 @@ export class Catalog {
     return !!(this._requireTimeRangeAll ?? this.models[source]?.require_time_range);
   }
 
-  /** The source a tool may assume when the caller omits it: the only one, else null (with
-   *  several events sources there is no default — the caller says which). */
-  defaultSource() {
-    return this.facts.length === 1 ? this.facts[0] : null;
-  }
-
   /**
-   * Resolve the SOURCE an event accessor is asked about. The source is always a separate
-   * argument; it may be omitted only when the catalog has exactly one events source. With
-   * several, an omitted source is a programming error — there is no "default" fact to fall back
-   * to, and silently reading one source's vocabulary for another is exactly the mix-up the
-   * per-source design exists to prevent — so it is refused here, at the accessor.
+   * Resolve the SOURCE an event accessor is asked about. The source is ALWAYS a separate argument
+   * and is always passed: there is no "default" fact to fall back to, in any catalog, and silently
+   * reading one source's vocabulary for another is exactly the mix-up the per-source design exists
+   * to prevent. An omitted source is a programming error, refused here at the accessor.
    */
   _fact(fact) {
-    if (fact) {
-      if (!this.facts.includes(fact)) throw new Error(`'${fact}' is not an events source. Events sources: ${this.facts.join(', ')}`);
-      return fact;
-    }
-    if (this.facts.length === 1) return this.facts[0];
-    throw new Error(`a source is required: this catalog has ${this.facts.length} events sources (${this.facts.join(', ')}) and they are never mixed — name the one you mean`);
+    if (!fact) throw new Error(`a source is required: sources are never mixed, so name the one you mean (${this.facts.join(', ')})`);
+    if (!this.facts.includes(fact)) throw new Error(`'${fact}' is not an events source. Events sources: ${this.facts.join(', ')}`);
+    return fact;
   }
 
   /**
@@ -1109,20 +1099,12 @@ export class Catalog {
     return [...new Set(this.facts.flatMap((f) => this.eventNames(f)))];
   }
 
-  /** Every name a source can be asked about in the { property } view: its payload properties and
-   *  its groupable attributes. The schema enumerates these PER SOURCE, so a name that source does
-   *  not carry is not expressible. */
+  /** Every name a source can be asked about in the { source, property } view: its payload
+   *  properties and its groupable attributes. The schema enumerates these PER SOURCE, so a name
+   *  that source does not carry is not expressible. */
   propertyEnumFor(key) {
     const m = this.getModel(key);
     return [...new Set([...(this.facts.includes(key) ? this.eventProps(key) : []), ...Object.keys(m.dimensions || {})])];
-  }
-
-  /** Names exactly ONE source carries — what may be asked for without naming a source. Ambiguity is
-   *  then not a runtime refusal but an unrepresentable input. `of(key)` picks the vocabulary. */
-  uniqueAcross(of) {
-    const seen = new Map();
-    for (const key of this.modelKeys()) for (const n of of(key)) seen.set(n, (seen.get(n) || 0) + 1);
-    return [...seen].filter(([, n]) => n === 1).map(([name]) => name);
   }
 
   eventPropEnum() {
@@ -1183,7 +1165,7 @@ export class Catalog {
    * What `name` is on `source`: 'property' for an events source's payload property, 'dimension'
    * for a groupable attribute of any model, null when the source does not carry it. THE one place
    * that answers "does this source have this attribute" — every resolver in the engine (value-index
-   * keys, the { property } view, memory targets) asks here, so a dimension is never asked for
+   * keys, the { source, property } view, memory targets) asks here, so a dimension is never asked for
    * payload properties and no caller re-implements the rule.
    */
   attributeKind(source, name) {
@@ -1191,13 +1173,6 @@ export class Catalog {
     if (!m || !name) return null;
     if (this.facts.includes(source) && (m.properties || {})[name]) return 'property';
     return (m.dimensions || {})[name] ? 'dimension' : null;
-  }
-
-  /** Every source that carries `name` as a payload property or a dimension: [{ source, kind }].
-   *  A bare name is attributed to a source only when exactly ONE owner comes back; several owners
-   *  are the caller's to report, never to guess between. */
-  ownersOf(name) {
-    return this.modelKeys().flatMap((k) => { const kind = this.attributeKind(k, name); return kind ? [{ source: k, kind }] : []; });
   }
 
   /** Full spec for one event_data property ({ type, items?, fields?, values?, description? }). */

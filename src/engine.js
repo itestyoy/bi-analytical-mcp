@@ -733,10 +733,6 @@ export class Engine {
       // events into every source that carries it, with its own row count and its own populated /
       // empty split in each — so the view NEVER merges sources: named, it answers for that one;
       // omitted, it answers for every source that saw the app, each in its own block.
-      if (input.source) {
-        if (!c.isFact(input.source)) throw new ToolError(`'${input.source}' is not an events source. Events sources: ${c.facts.join(', ')}`, { stage: 'validate', field: 'source' });
-        if (!c.bundleColumn(input.source)) throw new ToolError(`source '${input.source}' declares no app/bundle column (meta.mcp.dimension:{ bundle: true }). Sources with one: ${withBundle.join(', ')}`, { stage: 'validate', field: 'source' });
-      }
       // What was MEASURED is the truth here: every (source, app) the indexer recorded coverage for.
       const known = this.valueIndex.bundles(input.source || undefined);
       if (!known.length) {

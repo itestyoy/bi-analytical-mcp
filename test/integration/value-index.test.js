@@ -394,7 +394,7 @@ test('semantic_index({ source: "users", property: "country" }) returns the attri
   // the guidance names the JOIN path (user attributes are reached via the users join).
   assert.ok(out.recommendations.some((r) => r.includes('users_country') || r.includes("join with:'users'")), JSON.stringify(out.recommendations));
   // unknown attribute → clear error, not a silent empty result.
-  await assert.rejects(() => engine.semantic_index({ source: 'users', property: 'nope' }), /is not a property or dimension of 'users'/);
+  await assert.rejects(() => engine.semantic_index({ source: 'users', property: 'nope' }), /`property` must be one of: .*country/s);
 });
 
 // search now finds: attribute VALUES (a country code), dimension attributes by name,

@@ -562,6 +562,9 @@ function semanticIndexSchema(catalog) {
     }),
   ];
   return {
+    // Every tool's input is an OBJECT; the MCP handshake validates that on the root schema,
+    // so `oneOf` narrows the shape but never replaces it.
+    type: 'object',
     description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass NO arguments for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
     oneOf: branches,
   };

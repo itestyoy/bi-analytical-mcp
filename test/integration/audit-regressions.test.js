@@ -470,9 +470,9 @@ test('34. meta.mcp.anchor is refused at load: there is no default source', opts,
   assert.throws(() => variant((M) => { M.fct_analytics_events.meta.mcp.anchor = true; }), /meta\.mcp\.anchor is no longer a schema key/);
 });
 
-test('35. an event accessor without a source is refused on a two-source catalog; named, it answers', opts, async (t) => {
+test('35. an event accessor without a source is refused; named, it answers', opts, async (t) => {
   if (skip(t)) return;
-  assert.throws(() => catalog.eventNames(), /a source is required: this catalog has 2 events sources/);
+  assert.throws(() => catalog.eventNames(), /a source is required/);
   assert.deepEqual([...catalog.eventNames('crashlytics')].sort(), ['anr', 'fatal_crash', 'non_fatal']);
 });
 
@@ -630,9 +630,11 @@ test('51. { source: events, bundle: colorfit }: level_id populated (53), ad_type
   assert.ok(v.empty.includes('ad_type_of_event_data'));
 });
 
-test('52. naming a source without an app column is refused, pointing at the one that has it', opts, async (t) => {
+test('52. the app view offers only the sources that declare an app column', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.semantic_index({ source: 'crashlytics', bundle: 'com.omg.colorfit' }), /declares no app\/bundle column.*events/s);
+  // not a refusal the engine writes: the view's `source` is enumerated from the sources that
+  // carry an app column, so naming one without it has no spelling.
+  await assert.rejects(() => engine.semantic_index({ source: 'crashlytics', bundle: 'com.omg.colorfit' }), /`source` must be one of: events/);
 });
 
 // ═══════════ P. NOTHING DECLARED — THE INDEX IS THE TRUTH ═══════════

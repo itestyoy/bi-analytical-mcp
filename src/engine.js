@@ -141,6 +141,7 @@ export class Engine {
    */
   _resolveMemoryTarget(t) {
     const c = this.catalog;
+    if (t && typeof t === 'object' && t.term !== undefined) return memoryTarget('term', String(t.term).trim());
     if (t && typeof t === 'object') {
       const source = String(t.source ?? '').trim(); const name = t.name == null ? null : String(t.name).trim();
       if (!c.models[source]) throw new ToolError(`memory target: unknown source '${source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(source)}`, { stage: 'validate', field: 'targets' });
@@ -151,11 +152,6 @@ export class Engine {
     }
     const s = String(t).trim();
     if (c.models[s]) return memoryTarget('model', s);
-    // The glued '<source>.<name>' spelling is not a name — it is two arguments written as one.
-    const dot = s.indexOf('.');
-    if (dot > 0 && c.models[s.slice(0, dot)]) {
-      throw new ToolError(`memory target '${s}': the source is a separate field — pass { source: '${s.slice(0, dot)}', name: '${s.slice(dot + 1)}' }.`, { stage: 'validate', field: 'targets' });
-    }
     // A bare name is attributed to the source that declares it — when exactly one does. Two
     // sources carrying the same name is reported, never guessed (the rule every other resolver
     // here follows).

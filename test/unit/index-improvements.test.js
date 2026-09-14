@@ -46,9 +46,12 @@ test('memory record fuzzy-resolves a near-miss target to the real entity', async
   // and it actually surfaces on the real property's view.
   const prop = await e.semantic_index({ property: 'ad_type_of_event_data' });
   assert.ok(prop.memory?.some((m) => m.id === out.id), 'note surfaces on the fuzzily-linked property');
-  // a genuinely unrecognised string still stays a free term.
-  const t = await e.memory({ action: 'record', note: 'x', targets: ['totally unrelated phrase 123'] });
+  // a phrase is written as one — and stays itself, searchable, linked to nothing
+  const t = await e.memory({ action: 'record', note: 'x', targets: [{ term: 'totally unrelated phrase 123' }] });
   assert.equal(t.linked_to[0].kind, 'term');
+  // an identifier that resembles nothing in the catalog also stays a term (no false link)
+  const u = await e.memory({ action: 'record', note: 'y', targets: ['zzz_nothing_like_this'] });
+  assert.equal(u.linked_to[0].kind, 'term');
 });
 
 // п.5 DURABILITY: a dedicated memory db keeps findings across engine instances (the

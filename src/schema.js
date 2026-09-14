@@ -483,7 +483,7 @@ export function buildSchemas(catalog) {
       },
     },
     experiment: experimentSchema(),
-    memory: memorySchema(),
+    memory: memorySchema(catalog),
     ab_test: abTestSchema(),
     srm_check: srmCheckSchema(),
     sample_size: sampleSizeSchema(),
@@ -572,30 +572,48 @@ function semanticIndexSchema(catalog) {
 // A single action-driven tool. `record` saves a finding (+ the entities it is about,
 // the user's phrasings, and any source links); list/search/forget manage them. Strict
 // per-action fields so a param that does not belong to the action is rejected.
-/** One memory target: { source, name } / { source } — or a bare string (a name one source carries, a model key, or a free term). */
-function memoryTargetSchema(description) {
+/**
+ * What a finding can be ABOUT. Three things, each written as itself: an entity of a source, an
+ * entity named on its own when only one source has it, or a phrase the user used. A NAME and a
+ * PHRASE are not the same thing, so they do not share a spelling — which also means the glued
+ * '<source>.<name>' form has none: a name is an identifier, and `.` is not part of one.
+ */
+function memoryTargetSchema(catalog, description) {
   return {
     ...(description ? { description } : {}),
     oneOf: [
-      { type: 'string', description: 'A bare name: a model key, or a property / attribute / event that exactly one source carries; anything else becomes a free term.' },
-      { type: 'object', additionalProperties: false, required: ['source'], properties: {
-        source: { type: 'string', description: 'The catalog source (model key) the entity belongs to.' },
-        name: { type: 'string', description: 'A property, user attribute or event of that source. Omit to link the model itself.' },
-      } },
+      {
+        title: 'a name',
+        type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$',
+        description: 'ONE name: a model key, or a property / attribute / event that exactly one source carries. The source is never glued on — when several sources carry the name, write { source, name }.',
+      },
+      {
+        title: '{ source, name }',
+        type: 'object', additionalProperties: false, required: ['source'],
+        properties: {
+          source: { enum: catalog.modelKeys(), description: 'The source the entity belongs to.' },
+          name: { type: 'string', description: 'A property, user attribute or event of that source. Omit to link the model itself.' },
+        },
+      },
+      {
+        title: '{ term }',
+        type: 'object', additionalProperties: false, required: ['term'],
+        properties: { term: { type: 'string', minLength: 1, description: 'A phrase the user actually used, kept searchable as itself — for what the catalog has no entity for.' } },
+      },
     ],
   };
 }
 
-function memorySchema() {
+function memorySchema(catalog) {
   // Per-action field definitions (shared between the client-facing union `properties` and
   // the strict per-action branches, so the two never drift).
   const F = {
     note: { type: 'string', minLength: 1, description: 'ONE ATOMIC finding, in plain words (e.g. "\'ad format\' = the event_data property ad_type_of_event_data, populated only on ad_started/ad_finished; values rewarded/interstitial/banner"). Keep it to a single fact — when studying a topic, make several small notes instead of one long one (atomic notes link and retrieve far better; an over-long note matches poorly and may fail to index).' },
     question: { type: 'string', description: 'The ORIGINAL business question / analytical goal this finding answers — why you looked it up, in the stakeholder\'s terms (e.g. "which ad format drives the most rewarded-video revenue?"). Embedded together with the note, so a future similarly-phrased business question retrieves this insight by meaning. Include it whenever the finding answers a real question.' },
-    targets: { type: 'array', items: memoryTargetSchema(), description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is { source, name } — a property, user attribute or event of that source (e.g. { source: "events", name: "ad_type_of_event_data" }, { source: "users", name: "country" }, { source: "events", name: "ad_finished" }) — or { source } alone for the model itself. A bare string is accepted for a name exactly ONE source carries (or a model key); a string that matches nothing is kept as a searchable free term.' },
+    targets: { type: 'array', items: memoryTargetSchema(catalog), description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is { source, name } — a property, user attribute or event of that source (e.g. { source: "events", name: "ad_type_of_event_data" }) — or { source } alone for the model itself, or a bare name when exactly ONE source carries it. A phrase the catalog has no entity for is written { term: "..." } and stays searchable as itself.' },
     aliases: { type: 'array', items: { type: 'string' }, description: 'The word(s)/phrasing for this finding — give them IN BOTH the user\'s language AND English (e.g. ["ad format", "формат рекламы", "тип рекламы"]). Bilingual aliases make retrieval work cross-language: the lexical/fuzzy match needs the literal words (it cannot bridge scripts on its own), and the aliases are also embedded with the note so a query in either language matches by meaning. Add the user\'s exact wording + synonyms in each language.' },
     links: { type: 'array', description: 'Associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { oneOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
-    target: memoryTargetSchema('Return notes linked to this ONE entity (singular — same forms as record\'s `targets`: { source, name }, { source }, or a bare name).'),
+    target: memoryTargetSchema(catalog, 'Return notes linked to this ONE entity (singular — the same forms as record\'s `targets`).'),
     query: { type: 'string', description: 'A word/phrase to match against note text, the business question, aliases and linked targets. Token-aware + typo-tolerant fuzzy by default; when embeddings are enabled it ALSO matches by MEANING (a same-sense note with no shared words still surfaces).' },
     fuzzy: { type: 'boolean', description: 'Enable typo/approximate lexical matching (default true). false = exact word/substring only (semantic matching, if enabled, still runs).' },
     id: { type: 'string', description: 'Id of the note to delete (as returned by record / list / search).' },

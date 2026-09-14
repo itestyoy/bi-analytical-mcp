@@ -53,7 +53,7 @@ test('memory record resolves targets to catalog entities (property/attr/event/mo
   const out = await e.memory({
     action: 'record',
     note: "'ad format' = the event_data property ad_type_of_event_data, only on ad_started/ad_finished; values rewarded/interstitial/banner.",
-    targets: ['ad_type_of_event_data', { source: 'users', name: 'country' }, 'ad_finished', { source: 'users' }, 'ad format'],
+    targets: ['ad_type_of_event_data', { source: 'users', name: 'country' }, 'ad_finished', { source: 'users' }, { term: 'ad format' }],
     aliases: ['ad format', 'ad type'],
     links: ['https://confluence/ads', { url: 'https://dash/ads', title: 'Ads dashboard' }],
   });
@@ -264,15 +264,18 @@ test('memory targets written without a source are scoped to their owner at open'
 
 // The glued '<source>.<name>' spelling is two arguments written as one: it is refused by name,
 // never silently kept as a free phrase (which would link the finding to nothing).
-test('memory target: the glued <source>.<name> string is refused, naming the structured form', async () => {
+// A NAME and a PHRASE are different things, so they have different spellings — and the glued
+// '<source>.<name>' form has none at all: a name is an identifier, and '.' is not part of one.
+test('memory target: a name is an identifier, a phrase is { term }, and the glued form has no spelling', async () => {
   const e = engine();
   await assert.rejects(
     () => e.memory({ action: 'record', note: 'x', targets: ['users.country'] }),
-    /the source is a separate field — pass \{ source: 'users', name: 'country' \}/,
+    /must be exactly one of: a name \| \{ source, name \} \| \{ term \}/,
   );
-  // a phrase that merely contains a dot is still a plain term
-  const ok = await e.memory({ action: 'record', note: 'crashes spiked in 2.4.0', targets: ['v2.4 rollout'] });
+  // …and a phrase says it is one
+  const ok = await e.memory({ action: 'record', note: 'crashes spiked in 2.4.0', targets: [{ term: 'v2.4 rollout' }] });
   assert.deepEqual(ok.linked_to.map((l) => l.kind), ['term']);
+  assert.deepEqual(ok.unresolved_terms, ['v2.4 rollout']);
 });
 
 // A target is STORED as what it names, not as a key that has to be taken apart to read it back.
@@ -283,7 +286,7 @@ test('a memory target is stored structurally and read back without decoding', as
   const rec = await e.memory({
     action: 'record',
     note: 'ad_type carries the format',
-    targets: [{ source: 'events', name: 'ad_type_of_event_data' }, { source: 'users' }, 'совсем свободная фраза'],
+    targets: [{ source: 'events', name: 'ad_type_of_event_data' }, { source: 'users' }, { term: 'совсем свободная фраза' }],
   });
   const stored = store.memory.get(rec.id).targets;
   assert.deepEqual(stored, [

@@ -415,10 +415,9 @@ registerStage('match_recognize', {
     return {
       op: {
         op: 'match_recognize',
-        // BigQuery has a native `|> MATCH_RECOGNIZE` pipe operator, so the funnel stays
-        // pipe-form (bqPipe below). Other engines have no MATCH_RECOGNIZE → emulate it as
-        // a self-contained CTE (render), which forces the whole pipeline to CTE-form.
-        requiresCte: d.name !== 'bigquery',
+        // BigQuery has a native `|> MATCH_RECOGNIZE` pipe operator, so the funnel is a pipe step
+        // (bqPipe below). Other engines have no MATCH_RECOGNIZE → emulated as a self-contained
+        // SELECT (render), which the dialect places as one CTE of its chain.
         bqPipe: d.name === 'bigquery' ? matchStepBigQueryPipe(r, spec, catalog) : null,
         render: (prev, dn) => {
           const pre = buildPrefilter(catalog, spec, dn, null, r.fact);

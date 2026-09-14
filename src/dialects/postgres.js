@@ -170,7 +170,8 @@ export class PostgresDialect extends Dialect {
     const ctes = [];
     ops.forEach((op, i) => {
       const name = `p${i}`;
-      ctes.push(`${name} AS (\n  ${this._step(prev, op)}\n)`);
+      // A stage that renders itself (match_recognize) contributes its own self-contained SELECT.
+      ctes.push(`${name} AS (\n  ${op.render ? op.render(prev, this.name) : this._step(prev, op)}\n)`);
       prev = name;
     });
     return `WITH ${ctes.join(',\n')}\nSELECT * FROM ${prev}`;

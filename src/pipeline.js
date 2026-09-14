@@ -806,9 +806,9 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
     const baseRelation = `{{ ref('${input}') }}`;
     if (seg.kind === 'sql') {
       const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source);
-      // Every SQL segment renders the same way, whether it reads the source or the model a python
-      // stage produced: the dialect's native form unless an op can only be said as a CTE.
-      seg.sql = ops.some((o) => o.requiresCte) ? assembleCteSql(d, dialectName, baseRelation, ops) : d.renderPipeline(baseRelation, ops);
+      // Every SQL segment renders in the dialect's native form — BigQuery pipe syntax, a chain of
+      // CTEs on Postgres — whether it reads the source or the model a python stage produced.
+      seg.sql = d.renderPipeline(baseRelation, ops);
       cols = next;
     } else {
       const def = STAGES[seg.stage.stage];

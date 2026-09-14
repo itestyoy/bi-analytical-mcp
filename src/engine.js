@@ -520,7 +520,7 @@ export class Engine {
           out.bundle_column = c.bundleColumn(k);
           out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ bundle: '${apps[0].bundle}' }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
         }
-        out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The `columns` above are what you can reference in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
+        out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ source: '${k}', event })). The \`columns\` above are what you can reference in a native pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
       } else {
         // Dimension attributes WITH their real indexed values (cardinality + top 3) — the index
         // keys them by (this model, column), so each source has its own value space.
@@ -594,7 +594,7 @@ export class Engine {
       const pick = (withValues.length ? withValues : rows.filter((r) => !r.complex)).slice(0, 3);
       if (pick.length) recommendations.push(`Drill into a property's real values + full frequency distribution: ${pick.map((r) => `semantic_index({ source: '${fact}', property: '${r.name}' })`).join(', ')}.`);
       if (withValues.length) recommendations.push(`Spot a value you recognise in the samples above? Find every property/event it occurs in: semantic_index({ search: '<value>' }).`);
-      if (rows.some((r) => r.complex)) recommendations.push(`Complex (array/struct) properties carry nested values — semantic_index({ property }) shows the shape before you explore inside them.`);
+      if (rows.some((r) => r.complex)) recommendations.push(`Complex (array/struct) properties carry nested values — semantic_index({ source: '${fact}', property }) shows the shape before you explore inside them.`);
       if (!props.length) {
         // No payload at all (e.g. first_launch) is NOT a dead end: the event's value is
         // its OCCURRENCE — say what it is good for instead of returning an empty page.
@@ -602,9 +602,9 @@ export class Engine {
         const role = Object.entries(sem).find(([, ev]) => ev === eventName)?.[0];
         recommendations.push(`'${input.event}' carries no event-specific payload — its value is the occurrence itself${role ? ` (it is the ${role.replace(/_/g, ' ')})` : ''}: use it as a measure base (count / count_distinct of the user key, event_name: ['${input.event}']) for retention, conversion or funnel metrics.`);
       }
-      if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ property }).`);
+      if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ source: '${fact}', property }).`);
       // Per-app helper: these properties may be empty for some apps — point at the bundle view.
-      if (c.bundleColumn(fact) && this.valueIndex.bundles(fact).length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ bundle: '<app>' }) shows the populated-vs-empty split per app.`);
+      if (c.bundleColumn(fact) && this.valueIndex.bundles(fact).length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ source: '${fact}', bundle: '<app>' }) shows the populated-vs-empty split per app.`);
       const nextActions = [
         ...(pick.length ? [{ call: `semantic_index({ source: '${fact}', property: '${pick[0].name}' })`, why: "drill this property's real value distribution + completeness" }] : []),
         { call: "semantic_index({ search: '<value>' })", why: 'trace a value seen above to every property/event carrying it' },

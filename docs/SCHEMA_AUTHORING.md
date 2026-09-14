@@ -439,7 +439,7 @@ models:
 `native`. Исключение — колонка настоящего типа JSON/jsonb (`data_type: json`, как JSON-колонка
 BigQuery): по умолчанию она получила бы `native`, поэтому `encoding: json` там пишется явно. Сервер
 читает такую колонку теми же JSON-функциями, что и строку, и никогда не сравнивает её со строковым
-литералом. `semantic_index({ event })` покажет свойство с `type: array`, `complex: true`.
+литералом. `semantic_index({ source, event })` покажет свойство с `type: array`, `complex: true`.
 
 Что с ним делать в pipeline — и что это даёт на фикстуре (13 отчётов, 20 элементов):
 

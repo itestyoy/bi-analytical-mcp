@@ -50,7 +50,7 @@ memory({
   "id": "e72a2eccead4",
   "linked_to": [
     { "kind": "property", "target": "ad_type_of_event_data", "surfaces_in": "semantic_index({ property: 'ad_type_of_event_data' })" },
-    { "kind": "event",    "target": "ad_finished",          "surfaces_in": "semantic_index({ event: 'ad_finished' })" }
+    { "kind": "event",    "target": "ad_finished",          "surfaces_in": "semantic_index({ source: 'events', event: 'ad_finished' })" }
   ],
   "aliases": ["ad format", "формат рекламы", "тип рекламы"],
   "next": "Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search })…"

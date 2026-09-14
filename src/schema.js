@@ -36,7 +36,7 @@ function whereItemSchema(catalog, modelKey) {
     type: 'object', additionalProperties: false, required: ['property', 'op'],
     description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
     properties: {
-      property: strEnum(catalog.scalarEventProps(modelKey), 'Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ event })); scope the measure to those event_name(s) or it reads NULL.'),
+      property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ source: '${modelKey}', event })); scope the measure to those event_name(s) or it reads NULL.`),
       op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator. Use in/not_in with an array value; the rest take a scalar.' },
       value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in.' },
     },
@@ -86,7 +86,7 @@ function dimensionItemSchema(catalog, modelKey) {
       description: 'A dimension taken from an event_data property (e.g. level_id, product_id) so you can group/filter by it.',
       properties: {
         source: { const: 'event_property', description: 'Take the dimension from an event_data property.' },
-        property: strEnum(catalog.scalarEventProps(modelKey), 'Scalar event_data property to expose as a dimension. NB: only populated on specific events (see semantic_index({ event })); NULL on others.'),
+        property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to expose as a dimension. NB: only populated on specific events (see semantic_index({ source: '${modelKey}', event })); NULL on others.`),
         as_type: { const: 'categorical', default: 'categorical', description: 'event_data dimensions are always categorical.' },
         label: { type: 'string', description: D.label },
       },

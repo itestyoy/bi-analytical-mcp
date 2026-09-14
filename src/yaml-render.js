@@ -15,8 +15,12 @@ const EVENT_TIME_DIM = 'event_time';
 function entityExpr(catalog, ent) {
   const parts = ent.key || (ent.column ? [{ column: ent.column }] : []);
   if (!parts.length) return undefined;
-  if (parts.length === 1) return parts[0].column;
-  return getDialect(catalog.dialect).compositeKeyExpr(parts);
+  // One plain column stays the column itself (what MetricFlow has always seen) — and needs no
+  // dialect to say so. A grain makes it an expression like any composite key, because the
+  // truncation is part of what the key IS.
+  if (parts.length === 1 && !parts[0].grain) return parts[0].column;
+  const d = getDialect(catalog.dialect);
+  return parts.length === 1 ? d.keyPartExpr(parts[0]) : d.compositeKeyExpr(parts);
 }
 
 /** A model is treated as SCD-2 (validity_params emitted) when the catalog marked validity columns

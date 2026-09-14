@@ -22,6 +22,7 @@ import { ValueIndex } from './value-index.js';
 import { MemoryStore } from './memory.js';
 import { openStore } from './store.js';
 import { buildProjection } from './projection.js';
+import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
@@ -904,6 +905,10 @@ export class Engine {
       python_models: c.pythonRuntime?.available
         ? { available: true, runtime: c.pythonRuntime.runtime, ...(c.pythonRuntime.method ? { submission_method: c.pythonRuntime.method } : {}), note: 'A pipeline may end in a `python` stage (build_native_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.' }
         : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
+      // dbt connects with an adapter this server writes no SQL for, so the SQL is rendered in
+      // another dialect's syntax against it — true of this deployment, and worth knowing when SQL
+      // a pipeline generated is rejected by the engine that runs it.
+      ...(c.dialectFallback ? { dialect_note: `dbt connects with the '${c.dialectFallback.profile_type}' adapter, which this server writes no SQL for: pipelines are rendered as ${c.dialectFallback.rendering_as} SQL${c.dialectFallback.explicit ? ' (set explicitly)' : ''}. Supported natively: ${[...SUPPORTED_DIALECTS].join(', ')}.` } : {}),
       // Declared models the warehouse cannot back (a structural column or the table is missing):
       // excluded from every tool; the reason is here so the analyst can be told what to fix.
       ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ model }) on one shows what is missing.' } : {}),

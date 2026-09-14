@@ -36,9 +36,14 @@ export class Dialect {
     return name;
   }
 
-  /** SQL for one part of a join key: the column, qualified for the side it belongs to. */
+  /**
+   * SQL for one part of a join key: the column, qualified for the side it belongs to, TRUNCATED to
+   * the part's declared grain when it has one — so the two sides are compared at the unit the
+   * schema says they join on, whatever each side's column type is.
+   */
   keyPartExpr(part, qualify = (c) => c) {
-    return qualify(this.ident(part.column));
+    const col = qualify(this.ident(part.column));
+    return part.grain ? this.dateTrunc(part.grain, col) : col;
   }
 
   /**

@@ -1444,3 +1444,72 @@ test('54. a truthful `unique` never duplicates: 184 stays 184', opts, async (t) 
     { none: 160, iphone: 12, pixel: 8, galaxy: 4 });
   assert.equal(sumCol(dev.rows, 'jtrue_evts'), 184);
 });
+
+// ═══════════ L. A KEY PART'S GRAIN ═══════════
+//
+// A measures source is one row per player×DAY, so it joins to events on the pair (player, day) —
+// and the two sides store that day differently: the spend row at midnight, the event at the moment
+// it happened. The grain is what makes them the same key: BOTH sides render truncated to it. The
+// contrast is the proof — the same relationship declared without the grain compares raw timestamps
+// and matches nothing at all.
+const perDayCatalog = (grain) => {
+  const d = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
+  const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
+  const day = (column) => (grain ? { column, grain } : column);
+  M.fct_player_acquisition.meta.mcp.entities = {
+    ...(M.fct_player_acquisition.meta.mcp.entities || {}),
+    player_day: { type: 'unique', key: ['player_id_of_internal', day('spend_date')] },
+  };
+  M.fct_analytics_events.meta.mcp.entities.player_day = { type: 'foreign', key: ['player_id_of_internal', day('device_time')] };
+  const at = join(mkdtempSync(join(tmpdir(), `perday-${grain || 'raw'}-`)), 'catalog.yml');
+  writeFileSync(at, yaml.dump(d));
+  return loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
+};
+
+/** Join events → acquisition through `player_day` on the given catalog and count what matched. */
+async function perDayMatches(catalog) {
+  const eng = new Engine({ catalog, contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'perday-ctx-')), timeSpineDialect: 'postgres' }), runner: backend });
+  const s = await eng.build_native_model({ action: 'start', name: `pd_${seq++}`, source: 'events' });
+  const j = await eng.build_native_model({
+    action: 'add_step',
+    draft_id: s.draft_id,
+    stage: { stage: 'join', with: 'acquisition', via: 'player_day', kind: 'inner', attrs: ['cost'] },
+  });
+  assert.ok(!j.error, `add_step join: ${JSON.stringify(j.error)}`);
+  await eng.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'spend', fn: 'sum', column: 'cost' }] } });
+  const c = await eng.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+  return { n: num(c.rows[0].n), spend: num(c.rows[0].spend) };
+}
+
+test('34. a key part declared at day grain joins the day, not the instant', opts, async (t) => {
+  if (skip(t)) return;
+  const withGrain = await perDayMatches(perDayCatalog('day'));
+  const raw = await perDayMatches(perDayCatalog(null));
+  // Same declaration, same warehouse: only the grain differs. Without it the event's timestamp is
+  // compared to the spend row's midnight and nothing matches; with it every event that happened on
+  // a day the player has a spend row finds exactly that row.
+  assert.equal(raw.n, 0, 'without a grain the raw timestamps never meet');
+  assert.ok(withGrain.n > 0, 'with the grain the day matches');
+  // 150 = the events whose (player, day) appears in the 13 acquisition rows; 203.25 = each of
+  // those events carrying its own day's cost (the seed has exactly one spend row per player-day,
+  // so a per-day join cannot fan out).
+  assert.equal(withGrain.n, 150, 'events on a player-day that has a spend row');
+  assert.equal(withGrain.spend, 203.25, 'each matched event carries its day\'s spend');
+});
+
+// A grain is part of the key, so it is checked like one: an unknown unit, or a field that is not a
+// key part at all, is refused at LOAD — not silently dropped, leaving a join that compares raw.
+test('35. a key part takes column + grain, and nothing else', opts, async (t) => {
+  if (skip(t)) return;
+  const bad = (part) => () => {
+    const d = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
+    const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
+    M.fct_analytics_events.meta.mcp.entities.player_day = { type: 'foreign', key: ['player_id_of_internal', part] };
+    const at = join(mkdtempSync(join(tmpdir(), 'badpart-')), 'catalog.yml');
+    writeFileSync(at, yaml.dump(d));
+    return loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
+  };
+  assert.throws(bad({ column: 'device_time', grain: 'fortnight' }), /grain 'fortnight' is not one of day, week, month, quarter, year/);
+  assert.throws(bad({ column: 'device_time', truncate: 'day' }), /'truncate' is not a key-part field/);
+});

@@ -60,9 +60,27 @@ function normalizeAggregatable(name, decl, { model, column, type } = {}) {
 // that entity; `foreign` points at whichever model owns it; `natural` is the SCD-2 form.
 export const ENTITY_TYPES = new Set(['primary', 'unique', 'foreign', 'natural']);
 
-/** Normalise the PARTS of one key: a column name, or a list of them for a composite key. */
+// The grains a key part may be joined on — the ones both dialects can truncate to.
+export const KEY_PART_GRAINS = new Set(['day', 'week', 'month', 'quarter', 'year']);
+
+/**
+ * Normalise the PARTS of one key: a column name, or a list of them for a composite key. A part may
+ * be written as `{ column, grain }` — the grain is the unit the two sides are compared at, and BOTH
+ * sides render as the column TRUNCATED to it. That is what makes a per-day join a per-day join: a
+ * timestamp on one side and a date on the other otherwise compare raw and match (almost) nothing.
+ * A key part carries nothing else, so an unknown field is a mistake, not decoration.
+ */
 function normalizeKeyParts(raw, { where, columns }) {
-  const parts = (Array.isArray(raw) ? raw : [raw]).map((p) => (typeof p === 'string' ? { column: p } : { column: p?.column }));
+  const parts = (Array.isArray(raw) ? raw : [raw]).map((p) => {
+    if (typeof p === 'string') return { column: p };
+    for (const k of Object.keys(p || {})) {
+      if (k !== 'column' && k !== 'grain') throw new Error(`${where}: a key part takes 'column' and optionally 'grain' — '${k}' is not a key-part field`);
+    }
+    if (p?.grain !== undefined && !KEY_PART_GRAINS.has(p.grain)) {
+      throw new Error(`${where}: grain '${p.grain}' is not one of ${[...KEY_PART_GRAINS].join(', ')}`);
+    }
+    return { column: p?.column, ...(p?.grain ? { grain: p.grain } : {}) };
+  });
   if (!parts.length || parts.some((p) => !p.column)) {
     throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key`);
   }
@@ -174,7 +192,7 @@ export function loadCatalog(path, opts = {}) {
   }
   // The warehouse dialect is runtime config, NOT catalog data: resolve it from
   // the environment / the dbt profile dbt actually runs with — never the YAML.
-  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, fallback: raw.warehouse_dialect });
+  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, fallback: raw.warehouse_dialect, report: (r) => { raw.dialect_fallback = r; } });
   raw.python_runtime = resolvePythonRuntime({ profilesDir: opts.profilesDir, projectDir: opts.projectDir });
   if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
@@ -198,7 +216,7 @@ export function loadCatalogFromProject(projectDir, opts = {}) {
     byRole.set(role, m.name);
   }
   const raw = dbtSchemaToCatalog({ models: mcpModels });
-  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir || projectDir, projectDir, fallback: raw.warehouse_dialect });
+  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir || projectDir, projectDir, fallback: raw.warehouse_dialect, report: (r) => { raw.dialect_fallback = r; } });
   raw.python_runtime = resolvePythonRuntime({ profilesDir: opts.profilesDir || projectDir, projectDir });
   if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
@@ -302,11 +320,17 @@ function collectSchemaModels(dir, acc) {
  *   3. the active dbt profile's output `type` (what dbt actually connects with)
  *   4. `fallback` (legacy catalogs) / 'postgres'
  */
-export function resolveDialect({ dialect, profilesDir, projectDir, fallback } = {}) {
-  const d = dialect || process.env.WAREHOUSE_DIALECT || dialectFromProfile(profilesDir, projectDir) || fallback || 'postgres';
+export function resolveDialect({ dialect, profilesDir, projectDir, fallback, report } = {}) {
+  const fromProfile = dialectFromProfile(profilesDir, projectDir);
+  const d = dialect || process.env.WAREHOUSE_DIALECT || fromProfile || fallback || 'postgres';
   if (!SUPPORTED_DIALECTS.has(d)) {
     throw new Error(`unsupported warehouse dialect '${d}' (supported: ${[...SUPPORTED_DIALECTS].join(', ')}). Set WAREHOUSE_DIALECT or fix the dbt profile output type.`);
   }
+  // dbt connects with an adapter this server writes no SQL for (duckdb, snowflake…), and nothing
+  // said otherwise: the SQL is then written in `d`'s dialect against that engine. It may well work
+  // — but it is a fact about this deployment, not a detail, so it is reported rather than assumed.
+  const profileType = String(profileOutput(profilesDir, projectDir)?.type || '').toLowerCase();
+  if (report && profileType && !fromProfile) report({ profile_type: profileType, rendering_as: d, explicit: !!(dialect || process.env.WAREHOUSE_DIALECT) });
   return d;
 }
 
@@ -794,6 +818,9 @@ export class Catalog {
     // pipeline stage exists in the tool schemas only when it can. A plain registry object without
     // a profile is treated as "no runtime" unless it says otherwise.
     this.pythonRuntime = raw.python_runtime || { available: false, reason: 'no dbt profile — Python models unavailable' };
+    // Set when dbt's adapter is one this server writes no SQL for, so the SQL is rendered in
+    // another dialect's syntax against it: { profile_type, rendering_as, explicit }.
+    this.dialectFallback = raw.dialect_fallback || null;
     this.models = raw.models || {};
     // `facts` = every events source; they are equal, each is addressed by name, and none is a
     // default. Declared by the schema converter, or derived here for a plain registry object:

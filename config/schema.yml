@@ -1575,6 +1575,11 @@ models:
   #       type: primary | unique | foreign | natural
   #       key:  [<column>, ...]        # ONE column, or SEVERAL for a composite key
   #
+  # A part may also be written { column: <column>, grain: day|week|month|quarter|year } — the unit
+  # the two sides are compared at. BOTH sides are then rendered truncated to it, which is what makes
+  # a per-day join a per-day join: a spend row stamped at midnight and an event stamped at the
+  # moment it happened are otherwise compared raw and match nothing.
+  #
   # The two sides may name their columns differently; only the relationship name and the number
   # of key parts have to agree (both checked at catalog load).
   #

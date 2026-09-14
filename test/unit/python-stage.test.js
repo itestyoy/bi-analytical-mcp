@@ -377,3 +377,25 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
     assert.ok(!py.description.includes('PYSPARK') && !py.description.includes('SNOWPARK'), 'only this platform\'s rules');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
+
+// dbt's adapter and this server's SQL writer read the SAME profile and can disagree: dbt connects
+// with duckdb (and runs Python models there) while no SQL dialect is written for it, so pipelines
+// are rendered in another dialect's syntax against it. That is a fact about the deployment — it is
+// reported, not assumed away.
+test('an adapter with no SQL dialect of its own is reported, not silently rendered as another', async () => {
+  const DUCK = fileURLToPath(new URL('../integration/fixtures/duckdb_project', import.meta.url));
+  const saved = process.env.WAREHOUSE_DIALECT; delete process.env.WAREHOUSE_DIALECT;
+  try {
+    const catalog = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
+    assert.equal(catalog.dialect, 'postgres', 'SQL is written in a dialect this server knows');
+    assert.deepEqual(catalog.dialectFallback, { profile_type: 'duckdb', rendering_as: 'postgres', explicit: false });
+    const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }), pythonBin: PY });
+    const overview = await e.semantic_index({});
+    assert.match(overview.dialect_note || '', /duckdb.*rendered as postgres SQL/);
+    // and a profile the server DOES write SQL for says nothing
+    const PG = fileURLToPath(new URL('../integration/fixtures/dbt_project', import.meta.url));
+    const pg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
+    assert.equal(pg.dialectFallback, null);
+    assert.equal((await new Engine({ catalog: pg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }) }).semantic_index({})).dialect_note, undefined);
+  } finally { if (saved === undefined) delete process.env.WAREHOUSE_DIALECT; else process.env.WAREHOUSE_DIALECT = saved; }
+});

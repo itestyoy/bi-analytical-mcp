@@ -120,22 +120,40 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
     throw new Error(`match_recognize needs an events fact as the pipeline source; '${source}' is not one (facts: ${catalog.facts.join(', ')})`);
   }
   const m = catalog.getModel(source);
-  // Partition key is FLEXIBLE: the caller chooses any column(s) available at this
-  // point in the pipeline (event columns, or columns added by upstream derive/
-  // compute/join stages). Convenience aliases 'user'/'session' resolve to the
-  // catalog entity columns. Default = the user entity column.
-  // A partition column is ONE real column of the row, so the alias resolves only when that
-  // entity's key is a single plain column — a composite key, or a part truncated to a grain, is an
-  // expression, not a column, and the caller partitions by the columns it wants instead.
-  const entityCol = (name) => {
-    const parts = m.entities?.[name]?.key || [];
-    return parts.length === 1 && !parts[0].grain ? parts[0].column : undefined;
+  // Partition key is FLEXIBLE: the caller chooses any column(s) available at this point in the
+  // pipeline (event columns, or ones added by upstream derive/compute/join), or names a
+  // RELATIONSHIP the source declares — { entity: 'user' } — and its key column is used. A
+  // relationship is named, never spelled as a bare magic word: nothing in here knows what any
+  // particular relationship is called.
+  const declared = Object.keys(m.entities || {});
+  const entityCol = (name, where) => {
+    const e = m.entities?.[name];
+    if (!e) throw new Error(`${where}: '${source}' declares no relationship '${name}' (declared: ${declared.join(', ') || 'none'})`);
+    const parts = e.key || [];
+    // A partition column is ONE real column of the row. A composite key, or a part truncated to a
+    // grain, is an expression — the caller partitions by the columns it means instead.
+    if (parts.length !== 1 || parts[0].grain) {
+      throw new Error(`${where}: relationship '${name}' of '${source}' is keyed by ${parts.map((x) => x.column).join(' + ') || 'nothing'}${parts.some((x) => x.grain) ? ' (truncated to a grain)' : ''}, which is an expression, not a column — partition by the column(s) you mean`);
+    }
+    return parts[0].column;
   };
-  const resolvePart = (p) => (p === 'user' || p === 'session') ? (entityCol(p) || p) : p;
+  const resolvePart = (p, i) => {
+    const where = `partition_by[${i}]`;
+    if (p && typeof p === 'object') return entityCol(p.entity, where);
+    const s = String(p);
+    if (m.entities?.[s]) throw new Error(`${where}: '${s}' is a RELATIONSHIP of '${source}', not a column — write { entity: '${s}' } to partition by its key column`);
+    return s;
+  };
+  const asList = (v) => (Array.isArray(v) ? v : [v]);
   let partCols;
-  if (Array.isArray(spec.partition_by) && spec.partition_by.length) partCols = spec.partition_by.map(resolvePart);
-  else if (typeof spec.partition_by === 'string') partCols = [resolvePart(spec.partition_by)];
-  else { const u = entityCol('user'); if (!u) throw new Error('no default partition column; specify partition_by'); partCols = [u]; }
+  if (spec.partition_by != null && asList(spec.partition_by).length) partCols = asList(spec.partition_by).map(resolvePart);
+  else {
+    // Default: one sequence per USER — found through the role the catalog assigns the model the
+    // relationship points at, not through what that relationship happens to be called.
+    const ent = catalog.entityTowardRole(source, 'users');
+    if (!ent) throw new Error(`partition_by is required: '${source}' declares no relationship toward a users model to default to (declared: ${declared.join(', ') || 'none'})`);
+    partCols = [entityCol(ent, 'partition_by (default)')];
+  }
   if (availableCols) for (const c of partCols) if (!availableCols.has(c)) throw new Error(`partition_by column '${c}' is not available at the match_recognize stage`);
   // Order key (the sequence axis): caller may override; defaults to the event time.
   const timeCol = spec.order_by || m.time.column;
@@ -381,6 +399,11 @@ function matchOutputColumns(r) {
 }
 
 /** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
+/** Every relationship name the events sources declare — what `partition_by: { entity }` may name. */
+function relationshipNames(catalog) {
+  return [...new Set(catalog.facts.flatMap((f) => Object.keys(catalog.getModel(f).entities || {})))].sort();
+}
+
 function matchRecognizeSchema(catalog) {
   const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
   const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: CMP }, value: {} } };
@@ -392,8 +415,19 @@ function matchRecognizeSchema(catalog) {
     properties: {
       stage: { const: 'match_recognize' },
       partition_by: {
-        type: 'array', items: { type: 'string', pattern: NAME }, minItems: 1,
-        description: 'Column(s) that define one independent sequence — choose them per the task from columns available at this point (event columns or ones added by upstream derive/compute/join), e.g. ["appsflyer_id"] per user, ["session_id"] per session, or a composite like ["appsflyer_id","level_id"] per user-per-level. The shorthand strings "user"/"session" resolve to the corresponding entity column. Defaults to the user column.',
+        type: 'array',
+        items: {
+          oneOf: [
+            { type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream derive/compute/join added).' },
+            {
+              type: 'object', additionalProperties: false, required: ['entity'],
+              description: 'A relationship the source DECLARES — its key column is used, so you do not have to know which physical column carries it.',
+              properties: { entity: { type: 'string', enum: relationshipNames(catalog), description: 'Name of a relationship declared by the pipeline\'s source (semantic_index({ model }) lists them).' } },
+            },
+          ],
+        },
+        minItems: 1,
+        description: 'What defines ONE independent sequence — per the task. Either column(s) available at this point, e.g. ["level_id"], or a declared relationship as { entity: "<name>" } whose key column is used, or a composite like [{ entity: "user" }, "level_id"] for one sequence per user-per-level. Defaults to the relationship this source declares toward the users model.',
       },
       order_by: { type: 'string', pattern: NAME, description: 'Column that orders events within each partition (the sequence axis). Defaults to the event time.' },
       mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order, other events may occur between them; strict = each step must be the immediately next event.' },

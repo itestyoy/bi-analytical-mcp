@@ -1035,6 +1035,21 @@ export class Catalog {
     throw new Error(`a source is required: this catalog has ${this.facts.length} events sources (${this.facts.join(', ')}) and they are never mixed — name the one you mean`);
   }
 
+  /**
+   * The relationship `source` declares toward a model with the given ROLE — the structural way to
+   * ask "which key means per-user here", instead of assuming a relationship is literally named
+   * 'user'. Roles are the catalog's own vocabulary; relationship names are the author's.
+   */
+  entityTowardRole(source, role) {
+    const m = this.models[source];
+    if (!m) return undefined;
+    for (const name of Object.keys(m.entities || {})) {
+      const target = this.joinTargetFor(name);
+      if (target && this.models[target]?.role === role) return name;
+    }
+    return undefined;
+  }
+
   /** True when `key` is an events fact (has its own event vocabulary). */
   isFact(key) {
     return this.facts.includes(key);

@@ -19,7 +19,7 @@ import { rankFuzzy } from './fuzzy.js';
 import { buildGuide } from './guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
-import { MemoryStore } from './memory.js';
+import { MemoryStore, targetKey, targetWords } from './memory.js';
 import { openStore } from './store.js';
 import { buildProjection } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
@@ -47,7 +47,7 @@ export class Engine {
     // claims it — after this, every stored key is (kind, source, name) and is read one way.
     try {
       const moved = this.memoryStore.retarget((canon) => this._memoryCanonForward(canon));
-      if (moved.targets) console.error(`[mcp] memory targets scoped to their source: ${moved.targets} target(s) on ${moved.notes} note(s)`);
+      if (moved.targets) console.error(`[mcp] memory targets stored structurally: ${moved.targets} target(s) on ${moved.notes} note(s)`);
     } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
@@ -160,25 +160,25 @@ export class Engine {
       ...c.ownersOf(s).map(({ source }) => memoryTarget('property', source, s)),
     ];
     if (owners.length === 1) return owners[0];
-    if (owners.length > 1) throw new ToolError(`memory target '${s}' is ambiguous — it exists as ${owners.map((o) => `'${o.key}'`).join(', ')}. Pass { source, name } to say which one.`, { stage: 'validate', field: 'targets' });
+    if (owners.length > 1) throw new ToolError(`memory target '${s}' is ambiguous — it exists as ${owners.map((o) => `'${o.label}'`).join(', ')}. Pass { source, name } to say which one.`, { stage: 'validate', field: 'targets' });
     // Fuzzy fallback: a near-miss entity name links to the real entity (marked fuzzy) rather
     // than becoming an orphan term. High threshold so only a confident match auto-links.
-    const [best] = rankFuzzy(s, this._memoryTargetCandidates(), { fields: (x) => [x.key], threshold: 0.82, limit: 1 });
-    if (best && best.item.key.toLowerCase() !== s.toLowerCase()) return { ...best.item, fuzzy: true, from: s };
-    return { kind: 'term', key: s, canon: `term:${s.toLowerCase()}`, target: { term: s } };
+    const [best] = rankFuzzy(s, this._memoryTargetCandidates(), { fields: (x) => [x.label], threshold: 0.82, limit: 1 });
+    if (best && best.item.label.toLowerCase() !== s.toLowerCase()) return { ...best.item, fuzzy: true, from: s };
+    return memoryTarget('term', s);
   }
 
   /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
-  _memorySurfaceHint({ kind, target }) {
+  _memorySurfaceHint({ kind, addressable: target }) {
     if (kind === 'property') return `semantic_index({ source: '${target.source}', property: '${target.name}' })`;
     if (kind === 'event') return `semantic_index({ source: '${target.source}', event: '${target.name}' })`;
     if (kind === 'model') return `semantic_index({ model: '${target.source}' })`;
     return `semantic_index({ search: '${target.term}' })`;
   }
 
-  /** Compact notes linked to any of `canonKeys`, for attaching to a semantic_index view. */
-  _memoryFor(canonKeys) {
-    return this.memoryStore.forTargets(canonKeys).map(memoryView);
+  /** Compact notes linked to any of these TARGETS, for attaching to a semantic_index view. */
+  _memoryFor(targets) {
+    return this.memoryStore.forTargets(targets.map(targetKey)).map(memoryView);
   }
 
   /**
@@ -187,8 +187,8 @@ export class Engine {
    * 'list', target }) returns EVERY linked finding in full. `drillTarget` is the singular target
    * that view is about — { source, name } for a property/attribute/event, { source } for a model.
    */
-  _attachMemory(out, canonKeys, drillTarget, { cap = 3 } = {}) {
-    const all = this.memoryStore.forTargets(canonKeys);
+  _attachMemory(out, targets, drillTarget, { cap = 3 } = {}) {
+    const all = this.memoryStore.forTargets(targets.map(targetKey));
     if (!all.length) return;
     const shown = all.slice(0, cap).map((e) => memoryCompact(e));
     out.memory = shown.map((s) => s.view);
@@ -226,14 +226,14 @@ export class Engine {
       const resolved = (input.targets || []).map((t) => this._resolveMemoryTarget(t));
       const aliases = [...new Set((input.aliases || []).map((a) => String(a).trim()).filter(Boolean))];
       const links = (input.links || []).map((l) => (typeof l === 'string' ? { url: l } : { url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) }));
-      const entry = this.memoryStore.record({ note, question, targets: resolved.map((r) => r.canon), aliases, links });
+      const entry = this.memoryStore.record({ note, question, targets: resolved.map((r) => r.target), aliases, links });
       return {
         saved: true,
         id: entry.id,
         note: entry.note,
         ...(question ? { question } : {}),
-        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.target, ...(r.fuzzy ? { fuzzy_resolved_from: r.from } : {}), surfaces_in: this._memorySurfaceHint(r) })),
-        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.target.term) } : {}),
+        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, ...(r.fuzzy ? { fuzzy_resolved_from: r.from } : {}), surfaces_in: this._memorySurfaceHint(r) })),
+        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.addressable.term) } : {}),
         ...(resolved.some((r) => r.fuzzy) ? { fuzzy_links_note: 'Some targets were not exact and were fuzzy-matched to the closest catalog entity (see fuzzy_resolved_from) — pass the exact name if a match is wrong.' } : {}),
         aliases, links,
         next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
@@ -243,7 +243,7 @@ export class Engine {
     if (action === 'list') {
       if (input.target !== undefined) {
         const r = this._resolveMemoryTarget(input.target);
-        return { target: r.target, kind: r.kind, notes: this.memoryStore.forTargets([r.canon]).map(memoryView) };
+        return { target: r.addressable, kind: r.kind, notes: this.memoryStore.forTargets([targetKey(r.target)]).map(memoryView) };
       }
       return { total: this.memoryStore.counts().notes, notes: this.memoryStore.all({ limit: input.limit ?? 50 }).map(memoryView) };
     }
@@ -313,12 +313,18 @@ export class Engine {
     const c = this.catalog;
     const p = String(path);
     if (p === 'metric_time') return "{ time: 'metric_time', grain: 'day' }";
-    const i = p.indexOf('__');
-    if (i > 0) {
-      const ent = p.slice(0, i); const attr = p.slice(i + 2);
-      const model = c.joinTargetFor(ent);
-      if (model) { const identity = c.primaryEntityName(model); return `{ model: '${model}', attribute: '${attr}'${ent !== identity ? `, via: '${ent}'` : ''} }`; }
-      return `{ model: '<the model that owns ${ent}>', attribute: '${attr}' }`;
+    // A PATH is a caller-typed legacy spelling, so reading it apart here is reading INPUT, not
+    // recovering something we discarded. Every segment but the last is a relationship hop: follow
+    // them to the model that actually carries the attribute, instead of assuming one hop.
+    if (p.includes('__')) {
+      const segs = p.split('__');
+      const attr = segs[segs.length - 1];
+      const hops = segs.slice(0, -1);
+      const model = c.joinTargetFor(hops[hops.length - 1]);
+      if (!model) return `{ model: '<the model that owns ${hops[hops.length - 1]}>', attribute: '${attr}' }`;
+      if (hops.length > 1) return `{ model: '${model}', attribute: '${attr}' } (reached through ${hops.join(' → ')})`;
+      const identity = c.primaryEntityName(model);
+      return `{ model: '${model}', attribute: '${attr}'${hops[0] !== identity ? `, via: '${hops[0]}'` : ''} }`;
     }
     for (const [model, add] of Object.entries(ctx.state.additions || {})) {
       const d = (add.dimensions || []).find((x) => x.name === p);
@@ -348,7 +354,7 @@ export class Engine {
     //    in create/update_semantic_model) → its task-namespaced name
     const tasks = ctx.state.tasks || [];
     for (const d of (ctx.state.additions?.[model]?.dimensions || [])) {
-      if (tasks.some((t) => d.name === `${t}_${attribute}`)) return this._taskDimMap(ctx).get(d.name) || d.name;
+      if (declaredAttribute(d, tasks) === attribute) return this._taskDimMap(ctx).get(d.name) || d.name;
     }
     if (!(target.dimensions || {})[attribute]) {
       const known = Object.keys(target.dimensions || {});
@@ -568,7 +574,7 @@ export class Engine {
           { call: "semantic_index({ search: '<value>' })", why: 'find where a known attribute value occurs' },
         ];
       // Saved findings about this model (memory tool) — surface them where they belong (compact).
-      this._attachMemory(out, [`model:${k}`], { source: k });
+      this._attachMemory(out, [{ kind: 'model', source: k }], { source: k });
       return out;
     }
 
@@ -622,7 +628,7 @@ export class Engine {
         next_actions: nextActions,
         recommendations: recommendations.slice(0, 4),
       };
-      this._attachMemory(eventOut, [`event:${fact}.${eventName}`], { source: fact, name: eventName });
+      this._attachMemory(eventOut, [{ kind: 'event', source: fact, name: eventName }], { source: fact, name: eventName });
       return eventOut;
     }
 
@@ -660,7 +666,7 @@ export class Engine {
           indexing: this._indexHistory(mk, col, input.recent ?? 3),
           recommendations: recommendations.slice(0, 3),
         };
-        this._attachMemory(attrOut, [`property:${mk}.${col}`], { source: mk, name: col });
+        this._attachMemory(attrOut, [{ kind: 'property', source: mk, name: col }], { source: mk, name: col });
         return attrOut;
       }
       const propFact = pSource; const propName = p;
@@ -755,7 +761,7 @@ export class Engine {
           if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ bundle: '<app>' }) or include_coverage:true.`];
         }
       }
-      this._attachMemory(out, [`property:${propFact}.${p}`], { source: propFact, name: p });
+      this._attachMemory(out, [{ kind: 'property', source: propFact, name: p }], { source: propFact, name: p });
       return out;
     }
 
@@ -1181,25 +1187,23 @@ export class Engine {
     }
   }
 
-  /** Check that a group-by/where path's entity hops map to models loaded in the context. */
-  _checkPathLoaded(ctx, path) {
-    if (typeof path !== 'string' || !path.includes('__')) return; // local task dim or metric_time
-    const segs = path.split('__');
-    for (const entity of segs.slice(0, -1)) {
-      const model = this.catalog.primaryByEntity[entity];
-      if (!model) continue; // already pruned/validated elsewhere
-      // A fact is a hop like any other: a task built from one source does not load another
-      // source's semantic model, so a path onto that fact's attributes must be refused here
-      // with the fix, not left for MetricFlow to reject as an unknown entity.
-      if (!ctx.state.usedModels.includes(model)) {
-        throw new ToolError(
-          `path '${path}' needs model '${model}', which is not loaded in this context. ` +
-            `Recreate/update the task with use_base_models including '${model}'.`,
-          { stage: 'validate', field: path },
-        );
-      }
-    }
+  /**
+   * The model a reference resolves onto must be LOADED in this context: a task built from one
+   * source does not load another's semantic model, so MetricFlow would reject the entity. The
+   * model is taken from the reference the caller wrote — the compiled path is not read back.
+   */
+  _checkModelLoaded(ctx, ref) {
+    const model = ref?.model;
+    if (!model || !this.catalog.models[model]) return; // metric_time, a bare token, or already refused
+    if (ctx.state.usedModels?.includes(model)) return;
+    throw new ToolError(
+      `'${model}.${ref.attribute}' needs model '${model}', which is not loaded in this context. `
+        + `Recreate/update the task with use_base_models including '${model}'.`,
+      { stage: 'validate', field: 'model' },
+    );
   }
+
+
 
   /**
    * Register a derived dbt model from a declarative PIPELINE (source + ordered
@@ -2415,7 +2419,7 @@ export class Engine {
         groupBy.push(tok); rename.set(tok, `metric_time_${g.grain || 'day'}`); continue;
       }
       if (!allowed.has(g)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' is not reachable in this context. Reachable: ${this._groupableRefs(ctx).slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ')}`, { stage: 'validate', field: 'group_by' });
-      this._checkPathLoaded(ctx, g);
+      this._checkModelLoaded(ctx, gRaw);
       const friendly = `${gRaw.model}_${gRaw.attribute}`;
       if (input.metrics.includes(friendly) || [...rename.values()].includes(friendly)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' would produce a result column '${friendly}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'group_by' });
       groupBy.push(g); rename.set(g, friendly); groupByResolved[`${gRaw.model}.${gRaw.attribute}`] = friendly;
@@ -2434,6 +2438,7 @@ export class Engine {
         if (p.field?.kind === 'dimension') {
           if (p.field.path != null) throw new ToolError(`where: a dimension is addressed by where it lives — { kind: 'dimension', model, attribute } — never by a path string. '${p.field.path}' → ${this._suggestRef(ctx, p.field.path)}.`, { stage: 'validate', field: 'where' });
           const label = `${p.field.model}.${p.field.attribute}`;
+          const refModel = p.field.model; const refAttr = p.field.attribute;
           // The value-index key comes from the model the caller NAMED, while it is still here: a
           // path carries no source, so recovering it afterwards loses the guard on any name two
           // sources happen to share.
@@ -2441,7 +2446,7 @@ export class Engine {
           p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
           delete p.field.model; delete p.field.attribute; delete p.field.via;
           if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. Reachable: ${this._groupableRefs(ctx).slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ')}`, { stage: 'validate', field: 'where' });
-          this._checkPathLoaded(ctx, p.field.path);
+          this._checkModelLoaded(ctx, { model: refModel, attribute: refAttr });
           // Verify the filter literal against the column's REAL values (source-scoped):
           // reject a wrong-cased/non-existent value instead of filtering to nothing.
           specs.push({ at, op: p.op, value: p.value, where: `where ${label}` });
@@ -2783,22 +2788,16 @@ function declaredAttribute(dim, tasks = []) {
   return t ? dim.name.slice(t.length + 1) : dim.name;
 }
 
+/**
+ * A resolved memory target: `target` is what gets STORED (the kind and its parts), `addressable` is
+ * the same thing as the tool speaks it back — what you hand to memory({ action: 'list', target })
+ * — and `label` is its words, for fuzzy matching and messages. Nothing here is ever re-parsed.
+ */
 function memoryTarget(kind, source, name = null) {
-  const key = name == null ? source : `${source}.${name}`;
-  return { kind, key, canon: `${kind}:${key}`, target: name == null ? { source } : { source, name } };
+  const addressable = kind === 'term' ? { term: source } : (name == null ? { source } : { source, name });
+  return { kind, target: { kind, ...addressable }, addressable, label: targetWords({ kind, ...addressable }) };
 }
 
-/** The stored canonical key back to its public { kind, ...target } form. */
-function memoryTargetFromCanon(canon) {
-  const s = String(canon); const i = s.indexOf(':');
-  if (i <= 0) return { kind: 'term', term: s };
-  const kind = s.slice(0, i); const key = s.slice(i + 1);
-  if (kind === 'model') return { kind, source: key };
-  const dot = kind === 'term' ? -1 : key.indexOf('.');
-  // A property/event key always carries its source (the engine scopes stored keys at open), so a
-  // bare one can only be a phrase — which is what a term is.
-  return dot > 0 ? { kind, source: key.slice(0, dot), name: key.slice(dot + 1) } : { kind: 'term', term: key };
-}
 
 /**
  * Presentation shape for a stored memory note: decode the canonical "<kind>:<key>" targets
@@ -2814,7 +2813,7 @@ function memoryCompact(e, maxLen = 220) {
   // Keep the semantically useful, usually-short parts inline (note/question/about); drop the long
   // search-metadata (aliases/links). The full untruncated note + aliases/links is one drill away
   // via memory({ action: 'list', target }).
-  const targets = (e.targets || []).map(memoryTargetFromCanon);
+  const targets = [...(e.targets || [])];
   return {
     view: {
       id: e.id,
@@ -2828,7 +2827,7 @@ function memoryCompact(e, maxLen = 220) {
 }
 
 function memoryView(e) {
-  const targets = (e.targets || []).map(memoryTargetFromCanon);
+  const targets = [...(e.targets || [])];
   return {
     id: e.id,
     note: e.note,

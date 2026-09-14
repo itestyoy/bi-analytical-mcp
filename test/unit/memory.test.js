@@ -274,3 +274,27 @@ test('memory target: the glued <source>.<name> string is refused, naming the str
   const ok = await e.memory({ action: 'record', note: 'crashes spiked in 2.4.0', targets: ['v2.4 rollout'] });
   assert.deepEqual(ok.linked_to.map((l) => l.kind), ['term']);
 });
+
+// A target is STORED as what it names, not as a key that has to be taken apart to read it back.
+// (The key exists only to look the note up, and nothing ever parses it.)
+test('a memory target is stored structurally and read back without decoding', async () => {
+  const store = openStore({});
+  const e = engineWithStore(store);
+  const rec = await e.memory({
+    action: 'record',
+    note: 'ad_type carries the format',
+    targets: [{ source: 'events', name: 'ad_type_of_event_data' }, { source: 'users' }, 'совсем свободная фраза'],
+  });
+  const stored = store.memory.get(rec.id).targets;
+  assert.deepEqual(stored, [
+    { kind: 'property', source: 'events', name: 'ad_type_of_event_data' },
+    { kind: 'model', source: 'users' },
+    { kind: 'term', term: 'совсем свободная фраза' },
+  ], 'each target keeps its parts');
+  // what comes back out is the same parts — on the note, and as the thing you can pass back in
+  const listed = await e.memory({ action: 'list' });
+  assert.deepEqual(listed.notes.find((n) => n.id === rec.id).about, stored);
+  const again = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });
+  assert.deepEqual(again.target, { source: 'events', name: 'ad_type_of_event_data' });
+  assert.ok(again.notes.some((n) => n.id === rec.id));
+});

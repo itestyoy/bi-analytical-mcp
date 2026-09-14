@@ -287,3 +287,25 @@ test('a task dimension is reported under its declared attribute even when one ta
   assert.ok(/ret_v2_country/.test(yaml), 'the namespaced dimension IS in the manifest');
   assert.ok(!/_attribute|_task/.test(yaml), 'but our own annotations are not');
 });
+
+// A funnel partitions by COLUMNS, or by a relationship the source DECLARES — named as one. No bare
+// magic word means a relationship, and nothing in the engine knows what any relationship is called.
+test('match_recognize partition_by: a column, or { entity } from the declared relationships', async () => {
+  const e = engine();
+  const st = e.schemas.build_native_model.properties.stage.oneOf.find((s) => s.properties?.stage?.const === 'match_recognize');
+  const branches = st.properties.partition_by.items.oneOf;
+  const entityBranch = branches.find((b) => b.type === 'object');
+  assert.ok(entityBranch, 'the entity form is in the schema, not only in prose');
+  assert.deepEqual(entityBranch.properties.entity.enum, ['ad_funnel', 'ad_funnel_banner', 'ad_funnel_interstitial', 'ad_funnel_rewarded', 'session', 'user'], 'the enum is what the catalog declares');
+  assert.ok(branches.some((b) => b.type === 'string'), 'a plain column is still a column');
+
+  const steps = [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['new_session'] }];
+  const start = await e.build_native_model({ action: 'start', name: 'fnl_part', source: 'events' });
+  const add = (partition_by) => e.build_native_model({ action: 'add_step', draft_id: start.draft_id, stage: { stage: 'match_recognize', steps, ...(partition_by ? { partition_by } : {}) } });
+  // a relationship written as a bare word is not a column — and the message says what to write
+  await assert.rejects(() => add(['user']), /'user' is a RELATIONSHIP of 'events', not a column — write \{ entity: 'user' \}/);
+  // a relationship keyed by several columns cannot be a partition column at all
+  await assert.rejects(() => add([{ entity: 'ad_funnel' }]), /is keyed by .*, which is an expression, not a column/);
+  // a relationship no source declares never gets past the SCHEMA — the enum is the contract
+  await assert.rejects(() => add([{ entity: 'nope' }]), /entity` must be one of: ad_funnel, .*, user/);
+});

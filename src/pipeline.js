@@ -537,10 +537,10 @@ const STAGES = {
         }
         between = { value: p.between.value, from: p.between.from, to: p.between.to };
       }
-      // A join is ALWAYS assembled as a CTE: `attrs` is its projection (`j.col AS alias`), and the
-      // pipe-syntax `|> JOIN … USING` has no projection — it would pull every column of the joined
-      // model in and lose the aliases the pipeline's column set already promised the next stage.
-      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between } : {}), requiresCte: true }, cols: out };
+      // Each dialect renders the projection `attrs` itself (a `j.col AS alias` list in the CTE
+      // form, a projecting subquery on the right side of a pipe JOIN), so the column set promised
+      // here is exactly what the next stage sees on either path.
+      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between } : {}) }, cols: out };
     },
   },
 

@@ -6,6 +6,7 @@
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
 import { pipelineStageSchema, stageDefs } from './pipeline.js';
+import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
@@ -22,14 +23,6 @@ const D = {
   event_name: 'Event scope for THIS measure: only rows whose event_name is in this list are aggregated. This is how a funnel/conversion step is pinned to a specific event. Overrides the semantic model\'s event_scope.',
   where_measure: 'Per-measure conditions on event_data JSON properties, ANDed with the event scope. Used to define a funnel step as event + property value (e.g. event_name=tutorial AND step_id=step_1).',
 };
-
-// A string property constrained to `values` — but NEVER an empty enum (JSON
-// Schema forbids `enum: []`, and ajv rejects such a schema at compile time). When
-// the catalog yields no candidates the field stays an open string (there is
-// nothing valid to pick anyway, and compile-time checks still reject bad names).
-function strEnum(values, description) {
-  return values.length ? { type: 'string', enum: values, description } : { type: 'string', description };
-}
 
 function whereItemSchema(catalog, modelKey) {
   return {
@@ -92,7 +85,9 @@ function dimensionItemSchema(catalog, modelKey) {
       },
     });
   }
-  return { type: 'object', description: 'A dimension to add to the semantic model (a column or an event_data property) for grouping/filtering.', oneOf: branches };
+  // A model with no groupable column and no payload has NO dimension to add: the field is left
+  // out of its branch rather than offered as a choice with no options.
+  return oneOfOr(branches, { type: 'object', description: 'A dimension to add to the semantic model (a column or an event_data property) for grouping/filtering.' });
 }
 
 // Generic (model-agnostic) item schemas for `update`, where the target model is
@@ -178,11 +173,12 @@ function measureItemSchema(catalog, modelKey) {
 }
 
 function semanticModelBranch(catalog, modelKey) {
-  const props = {
+  const dimItem = dimensionItemSchema(catalog, modelKey);
+  const props = withoutEmpty({
     from: { const: modelKey, description: `Source model this semantic model is built from ("${modelKey}").` },
-    dimensions: { type: 'array', items: dimensionItemSchema(catalog, modelKey), description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
+    dimensions: dimItem && { type: 'array', items: dimItem, description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
     measures: { type: 'array', items: measureItemSchema(catalog, modelKey), description: 'Measures (aggregations) defined on this model; metrics reference these by name.' },
-  };
+  });
   if (catalog.isFact(modelKey)) {
     props.event_scope = {
       type: 'object',

@@ -17,6 +17,7 @@
 
 import { jsonExtract, sqlLiteral } from './dialect.js';
 import { registerStage, prepareColumns } from './pipeline.js';
+import { oneOfOr, strEnum } from './schema-kit.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
@@ -416,16 +417,16 @@ function matchRecognizeSchema(catalog) {
       stage: { const: 'match_recognize' },
       partition_by: {
         type: 'array',
-        items: {
-          oneOf: [
-            { title: 'a column', type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream derive/compute/join added).' },
-            {
-              title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
-              description: 'A relationship the source DECLARES — its key column is used, so you do not have to know which physical column carries it.',
-              properties: { entity: { type: 'string', enum: relationshipNames(catalog), description: 'Name of a relationship declared by the pipeline\'s source (semantic_index({ model }) lists them).' } },
-            },
-          ],
-        },
+        // A catalog whose sources declare no relationship offers only the column form — the
+        // { entity } branch is left out rather than carrying an empty vocabulary.
+        items: oneOfOr([
+          { title: 'a column', type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream derive/compute/join added).' },
+          ...(relationshipNames(catalog).length ? [{
+            title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
+            description: 'A relationship the source DECLARES — its key column is used, so you do not have to know which physical column carries it.',
+            properties: { entity: strEnum(relationshipNames(catalog), 'Name of a relationship declared by the pipeline\'s source (semantic_index({ model }) lists them).') },
+          }] : []),
+        ]),
         minItems: 1,
         description: 'What defines ONE independent sequence — per the task. Either column(s) available at this point, e.g. ["level_id"], or a declared relationship as { entity: "<name>" } whose key column is used, or a composite like [{ entity: "user" }, "level_id"] for one sequence per user-per-level. Defaults to the relationship this source declares toward the users model.',
       },

@@ -82,9 +82,10 @@ export class BigQueryDialect extends Dialect {
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
   jsonColumnArrayLength(column) {
-    // SAFE.PARSE_JSON turns text that is not JSON into NULL instead of failing the whole scan; a
-    // JSON-typed column passes through it unchanged. NULL then counts as absent, like an empty one.
-    return `ARRAY_LENGTH(JSON_QUERY_ARRAY(SAFE.PARSE_JSON(${column}), '$'))`;
+    // JSON_QUERY_ARRAY reads a JSON-typed column and a STRING holding JSON alike, and yields NULL
+    // when the value is not an array — so a row whose value is a scalar counts as absent instead of
+    // failing the query. (Postgres needs an explicit guard for the same thing; see its dialect.)
+    return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$'))`;
   }
 
   jsonColumnArrayContains(column, value) {

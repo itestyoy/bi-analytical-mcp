@@ -18,7 +18,10 @@ export class PostgresDialect extends Dialect {
 
   jsonArrayLength(column, key) {
     this.ident(key);
-    return `jsonb_array_length(${column}->'${key}')`;
+    // A payload key is not typed: on some rows it may hold a scalar where others hold an array, and
+    // asking a scalar for its length RAISES — failing the whole query over the column. Not an array
+    // → NULL, which reads as "no array here" everywhere this is used. (`IS JSON` is Postgres 16+.)
+    return `(CASE WHEN (${column}->'${key}') IS JSON ARRAY THEN jsonb_array_length(${column}->'${key}') END)`;
   }
 
   // Element count of a native array column (array_length returns NULL for an empty array → 0).

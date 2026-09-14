@@ -124,7 +124,13 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
   // point in the pipeline (event columns, or columns added by upstream derive/
   // compute/join stages). Convenience aliases 'user'/'session' resolve to the
   // catalog entity columns. Default = the user entity column.
-  const entityCol = (name) => m.entities?.[name]?.column;
+  // A partition column is ONE real column of the row, so the alias resolves only when that
+  // entity's key is a single plain column — a composite key, or a part truncated to a grain, is an
+  // expression, not a column, and the caller partitions by the columns it wants instead.
+  const entityCol = (name) => {
+    const parts = m.entities?.[name]?.key || [];
+    return parts.length === 1 && !parts[0].grain ? parts[0].column : undefined;
+  };
   const resolvePart = (p) => (p === 'user' || p === 'session') ? (entityCol(p) || p) : p;
   let partCols;
   if (Array.isArray(spec.partition_by) && spec.partition_by.length) partCols = spec.partition_by.map(resolvePart);

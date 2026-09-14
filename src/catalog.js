@@ -712,7 +712,7 @@ export function dbtSchemaToCatalog(doc) {
           if (m.entities[name]) continue; // an explicit declaration wins over the expansion
           const parts = e.variants?.[v] || e.key;
           if (!parts) continue; // this side carries neither that variant nor a plain key
-          m.entities[name] = { type: e.type, key: parts, variant_of: rel, ...(parts.length === 1 ? { column: parts[0].column } : {}) };
+          m.entities[name] = { type: e.type, key: parts, variant_of: rel };
         }
         // A side declared ONLY as variants has no canonical key of its own.
         if (!e.key) delete m.entities[rel];

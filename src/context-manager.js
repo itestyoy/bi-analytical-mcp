@@ -269,6 +269,18 @@ export class ContextManager {
     return gone;
   }
 
+  /**
+   * Remove EVERY file a pipeline model generated. A pipeline is not one file: a python stage
+   * renders `<model>.py` + `<model>.yml`, and a chain renders `<model>_s1.sql`, `<model>_s2.py`, …
+   * Deleting only `<model>.sql` leaves the rest behind — dbt keeps compiling them, and with the
+   * context's state already cleared nothing can name them again. One definition of "the files of
+   * this model", used by both the rebuild and the delete.
+   */
+  removePipelineFiles(id, model) {
+    const chain = new RegExp(`^${model}_s\\d+\\.(sql|py|yml)$`);
+    return this.removeGeneratedWhere(id, (f) => f === `${model}.sql` || f === `${model}.py` || f === `${model}.yml` || chain.test(f));
+  }
+
   /** Remove a generated file (model or yaml) from the context overlay. */
   removeGeneratedFile(id, filename) {
     const file = join(this.generatedDir(id), filename);

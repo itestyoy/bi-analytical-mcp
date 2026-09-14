@@ -249,9 +249,10 @@ test('memory targets written without a source become searchable terms at open', 
 
   const e = engineWithStore(store); // a fresh Engine over the same store runs the migration
   const targetsOf = (id) => store.memory.get(id).targets;
-  assert.deepEqual(targetsOf('legacy1'), ['term:ad_type_of_event_data', 'term:ad_finished'], 'a name with no source names no entity — it becomes a term');
-  assert.deepEqual(targetsOf('legacy2'), ['term:app_version'], 'and so does a name two sources carry');
-  assert.deepEqual(targetsOf('legacy3'), ['term:dropped_column'], 'and one the catalog no longer has');
+  // rewritten INTO THE SAME SHAPE a recorded target has — a structure, not a folded key string
+  assert.deepEqual(targetsOf('legacy1'), [{ kind: 'term', term: 'ad_type_of_event_data' }, { kind: 'term', term: 'ad_finished' }], 'a name with no source names no entity — it becomes a term');
+  assert.deepEqual(targetsOf('legacy2'), [{ kind: 'term', term: 'app_version' }], 'and so does a name two sources carry');
+  assert.deepEqual(targetsOf('legacy3'), [{ kind: 'term', term: 'dropped_column' }], 'and one the catalog no longer has');
 
   // nothing is attached to a source that was never written down
   const listed = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });

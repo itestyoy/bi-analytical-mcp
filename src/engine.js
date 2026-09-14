@@ -100,17 +100,31 @@ export class Engine {
   }
 
   /**
-   * One stored memory-target key brought onto the current form: a property/event key written
-   * without a source names no entity this catalog can address, and which one was meant is not
-   * recoverable from the name — so it becomes a searchable term rather than a guess. Returns null
-   * when the key is already canonical.
+   * One stored memory target brought onto the current form. Older stores kept a target as a STRING
+   * key ('property:ad_type', 'model:users'); a target is now the STRUCTURE it names, so the rewrite
+   * returns an OBJECT — otherwise one note ends up holding both shapes and the key's own prefix
+   * leaks into the text that is searched and embedded.
+   *
+   * A property/event key written without a source names no entity this catalog can address, and
+   * which one was meant is not recoverable from the name — so it becomes a searchable term rather
+   * than a guess. Returns null when the target is already structural.
    */
-  _memoryCanonForward(canon) {
-    const i = String(canon).indexOf(':');
-    if (i <= 0) return null;
-    const kind = canon.slice(0, i); const key = canon.slice(i + 1);
-    if ((kind !== 'property' && kind !== 'event') || key.includes('.')) return null; // model:, term:, already scoped
-    return `term:${key.toLowerCase()}`;
+  _memoryCanonForward(stored) {
+    if (stored && typeof stored === 'object') return null; // already a target, not a legacy key
+    const raw = String(stored);
+    const i = raw.indexOf(':');
+    const kind = i > 0 ? raw.slice(0, i) : '';
+    const key = i > 0 ? raw.slice(i + 1) : raw;
+    if (kind === 'term') return memoryTarget('term', key).target;
+    const dot = key.indexOf('.');
+    // 'model:<source>' and the scoped 'property:<source>.<name>' name a real entity — keep what
+    // they name, as the structure.
+    if (kind === 'model' && this.catalog.models[key]) return memoryTarget('model', key).target;
+    if ((kind === 'property' || kind === 'event') && dot > 0) {
+      const source = key.slice(0, dot); const name = key.slice(dot + 1);
+      if (this.catalog.models[source]) return memoryTarget(kind, source, name).target;
+    }
+    return memoryTarget('term', key.toLowerCase()).target;
   }
 
   /**
@@ -200,9 +214,8 @@ export class Engine {
         id: entry.id,
         note: entry.note,
         ...(question ? { question } : {}),
-        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, ...(r.fuzzy ? { fuzzy_resolved_from: r.from } : {}), surfaces_in: this._memorySurfaceHint(r) })),
+        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, surfaces_in: this._memorySurfaceHint(r) })),
         ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.addressable.term) } : {}),
-        ...(resolved.some((r) => r.fuzzy) ? { fuzzy_links_note: 'Some targets were not exact and were fuzzy-matched to the closest catalog entity (see fuzzy_resolved_from) — pass the exact name if a match is wrong.' } : {}),
         aliases, links,
         next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
       };
@@ -595,7 +608,16 @@ export class Engine {
       // The SOURCE is a separate argument and the view has no source-less spelling: the schema
       // pairs each column with the model that carries it, so both arrive named.
       const pSource = input.source; const p = String(input.property);
-      if (c.attributeKind(pSource, p) !== 'property') {
+      // The enum normally makes an unknown name unwritable — but a source that declares NOTHING
+      // yet (a table whose columns have not been introspected) has no enum to project, and the
+      // field degrades to an open string. Answer that with the catalog's own refusal instead of
+      // reading `.type` off a column that is not there.
+      const kind = c.attributeKind(pSource, p);
+      if (!kind) {
+        const known = c.propertyEnumFor(pSource);
+        throw new ToolError(`'${p}' is not a property or attribute of '${pSource}'.${known.length ? ` It carries: ${known.slice(0, 20).join(', ')}${known.length > 20 ? `, … (${known.length} in all)` : ''}.` : ' It declares no columns at all.'}`, { stage: 'validate', field: 'property' });
+      }
+      if (kind !== 'property') {
         const mk = pSource; const col = p;
         const dim = (c.getModel(mk).dimensions || {})[col];
         const dDescs = c.columnDescriptions(mk);
@@ -1571,7 +1593,7 @@ export class Engine {
     if (!referenced.length) return [];
     const evCol = c.eventNameColumn(fact);
     const scoped = new Set(); let hasScope = false;
-    for (const st of draft.stages) if (st.stage === 'where') for (const c of st.conditions || []) if (c.column === evCol) { hasScope = true; (Array.isArray(c.value) ? c.value : [c.value]).forEach((v) => scoped.add(v)); }
+    for (const st of draft.stages) if (st.stage === 'where') for (const cond of st.conditions || []) if (cond.column === evCol) { hasScope = true; (Array.isArray(cond.value) ? cond.value : [cond.value]).forEach((v) => scoped.add(v)); }
     const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !evs.every((e) => scoped.has(e)); });
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
@@ -1836,7 +1858,7 @@ export class Engine {
     const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
     // A rebuild under the same name must leave no stale model of the previous chain behind: dbt
     // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
-    this.ctxs.removeGeneratedWhere(ctx.id, (f) => f === `${modelName}.sql` || f === `${modelName}.py` || f === `${modelName}.yml` || new RegExp(`^${modelName}_s\\d+\\.(sql|py|yml)$`).test(f));
+    this.ctxs.removePipelineFiles(ctx.id, modelName);
     for (const m of models) {
       if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `{{ config(materialized='${m === last ? materialized : 'table'}') }}\n${header}${m.sql}\n`);
       else { this.ctxs.writeFile(ctx.id, `${m.model}.py`, m.code); this.ctxs.writeFile(ctx.id, `${m.model}.yml`, m.yml); }
@@ -1854,7 +1876,10 @@ export class Engine {
     let rows = []; let columns = [...out.columns.keys()];
     if (this.runner) {
       let r;
-      if (models.length > 1) {
+      // Detached whenever the build can be SLOW, not merely when it is a chain: a pipeline whose
+      // only stage is `python` renders as ONE model and still pays the warehouse Python runtime's
+      // cold start — minutes during which a synchronous call just blocks with no query_id to poll.
+      if (hasPython || models.length > 1) {
         // Select the chain's OWN models by name (space = dbt's union operator), in ref order —
         // never `+model`, whose ancestor operator would also select the catalog's base tables and
         // REBUILD them. A Python model is a cold start of minutes on the warehouse runtime, so the
@@ -1863,7 +1888,7 @@ export class Engine {
         if (bg.status === 'running') {
           return {
             context_id: ctx.id, kind: 'pipeline', ok: true, status: 'running', query_id: bg.query_id, model: modelName, materialized, dialect, models: chainInfo, ...(hasPython ? { python: pyInfo } : {}),
-            message: `dbt is building the chain of ${models.length} models (${hasPython ? 'the Python models run on the warehouse runtime — a cold start' : 'SQL'}) (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}`,
+            message: `dbt is building ${models.length > 1 ? `the chain of ${models.length} models` : 'the model'} (${hasPython ? 'Python models run on the warehouse runtime — a cold start' : 'SQL'}) (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}`,
             read_with: { tool: 'get_query_result', query_id: bg.query_id, table: modelName },
           };
         }
@@ -1980,12 +2005,13 @@ export class Engine {
     const ctx = this._ctx(input.context_id);
     if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native (pipeline) model registered in this context' };
     const model = ctx.state.model;
-    this.ctxs.removeGeneratedFile(ctx.id, `${model}.sql`);
+    // a pipeline is a CHAIN of files (.sql / .py / .yml, plus `_sN` steps) — all of them go
+    const removedFiles = this.ctxs.removePipelineFiles(ctx.id, model);
     delete ctx.state.engine; delete ctx.state.model; delete ctx.state.native;
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (context({ action: 'drop' })) or the store cleans ephemeral objects" };
+    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (context({ action: 'drop' })) or the store cleans ephemeral objects" };
   }
 
   async create_semantic_model(input) {

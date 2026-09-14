@@ -749,33 +749,6 @@ function buildOps(catalog, d, baseColumns, stages, source) {
   return { ops, cols };
 }
 
-// Chained-CTE assembly (works for both dialects). A stage that renders itself
-// (op.render, e.g. match_recognize) contributes its own self-contained SELECT as
-// one CTE; all others use the dialect's stepCte.
-function assembleCteSql(d, dialectName, baseRelation, ops) {
-  let prev = baseRelation;
-  const ctes = [];
-  for (const op of ops) {
-    const name = `p${ctes.length}`;
-    const sql = op.render ? op.render(prev, dialectName) : d.stepCte(prev, op);
-    ctes.push({ name, sql });
-    prev = name;
-  }
-  const head = ctes.length ? `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\n` : '';
-  return `${head}SELECT * FROM ${prev}`;
-}
-
-/**
- * Lower a pipeline over an explicit base relation to one SQL text (chained-CTE
- * form). Used by the funnel: [...prepare, match_recognize].
- */
-export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages, source) {
-  const d = getDialect(dialectName);
-  if (stages.some((st) => STAGES[st.stage]?.python)) throw new Error('a python stage cannot be part of a funnel prepare list — it is a model of its own in a pipeline');
-  const { ops } = buildOps(catalog, d, baseColumns, stages, source);
-  return assembleCteSql(d, dialectName, baseRelation, ops);
-}
-
 /**
  * Render a full pipeline over a catalog `source` as a CHAIN of dbt models. Stages run in one SQL
  * model until a `python` stage: that stage is a dbt Python model of its own, the SQL stages after

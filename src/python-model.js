@@ -288,11 +288,6 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
   return { code, yml, packages: [...packages].sort(), functions: [...byName.values()], bindings: [...bound, ...byName.keys()], outputColumns: outCols, config: cfg, runtime: profile.key };
 }
 
-/** The operator's literal dbt.config extras (MCP_PYTHON_MODEL_CONFIG) — also decide the frame profile. */
-export function pythonModelConfigFromEnv(env = process.env) {
-  try { return JSON.parse(env.MCP_PYTHON_MODEL_CONFIG || '{}'); } catch { return {}; }
-}
-
 /**
  * Run the static gate over the declared functions with the given Python interpreter.
  * `bindings` are the names the declaration itself introduces — what its `imports` bound plus the

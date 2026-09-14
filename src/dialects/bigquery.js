@@ -213,35 +213,36 @@ export class BigQueryDialect extends Dialect {
       }
       case 'join': {
         // The RIGHT side is a subquery that projects exactly what the stage promised: the join key
-        // and `attrs` under their aliases — nothing else of the joined model reaches the pipe. A
-        // declared relationship (`onKeys`) evaluates its right-hand key expression there under the
-        // LEFT side's column name, so both forms join with `USING` and the key arrives once.
+        // and `attrs` under their aliases — nothing else of the joined model reaches the pipe. Its
+        // key expression is evaluated there, under the LEFT side's column name.
         const kind = op.kind === 'INNER' ? 'INNER ' : 'LEFT ';
         const attrs = op.attrs.map((a) => (a.as === a.column ? this.ident(a.column) : `${this.ident(a.column)} AS ${this.ident(a.as)}`));
-        const keys = op.onKeys
-          ? op.onKeys.left.map((lp, i) => ({ name: this.ident(lp.column), expr: this.keyPartExpr(op.onKeys.right[i]) }))
-          : op.on.map((c) => ({ name: this.ident(c), expr: this.ident(c) }));
-        if (!op.between) {
-          const proj = [...keys.map((k) => (k.expr === k.name ? k.name : `${k.expr} AS ${k.name}`)), ...attrs];
+        // Both sides come from the SAME builder, so a part's grain truncates both — never just the
+        // projected one. `USING` can only equate bare columns, so it is used only when neither side
+        // needs an expression; a truncated part joins `ON`, like a validity window does.
+        const keys = this.joinKeyParts(op, (c) => `base.${c}`, (c) => c);
+        if (!op.between && !this.joinKeyIsExpression(op)) {
+          const proj = [...keys.map((k) => (k.right === k.name ? k.name : `${k.right} AS ${k.name}`)), ...attrs];
           return `|> ${kind}JOIN (SELECT ${proj.join(', ')} FROM ${op.relation}) AS ${op.alias} USING (${keys.map((k) => k.name).join(', ')})`;
         }
-        // A validity window is a predicate `USING` cannot say, so this form joins `ON`: the pipe
-        // input is named (`|> AS base`) so the condition can qualify its side, the subquery carries
-        // the key and the window under private names, and those are dropped once the match is made
-        // — the output is again base's columns plus `attrs`.
+        // Joining `ON`: the pipe input is named (`|> AS base`) so each condition can qualify its
+        // side, the subquery carries the key (and the window, when there is one) under private
+        // names, and those are dropped once the match is made — the output is again base's columns
+        // plus `attrs`. This is the only form that can compare an EXPRESSION, which is what a key
+        // part with a declared grain is, and the only one that can carry a validity window.
         const priv = (n) => `_j_${n}`;
-        const proj = [
-          ...keys.map((k, i) => `${k.expr} AS ${priv(`key${i}`)}`),
-          `${this.ident(op.between.from)} AS ${priv('from')}`, `${this.ident(op.between.to)} AS ${priv('to')}`,
-          ...attrs,
-        ];
+        const win = op.between
+          ? [`${this.ident(op.between.from)} AS ${priv('from')}`, `${this.ident(op.between.to)} AS ${priv('to')}`]
+          : [];
+        const proj = [...keys.map((k, i) => `${k.right} AS ${priv(`key${i}`)}`), ...win, ...attrs];
         const on = [
-          ...keys.map((k, i) => `base.${k.name} = ${op.alias}.${priv(`key${i}`)}`),
-          `base.${this.ident(op.between.value)} BETWEEN ${op.alias}.${priv('from')} AND ${op.alias}.${priv('to')}`,
+          ...keys.map((k, i) => `${k.left} = ${op.alias}.${priv(`key${i}`)}`),
+          ...(op.between ? [`base.${this.ident(op.between.value)} BETWEEN ${op.alias}.${priv('from')} AND ${op.alias}.${priv('to')}`] : []),
         ];
+        const drop = [...keys.map((_, i) => priv(`key${i}`)), ...(op.between ? [priv('from'), priv('to')] : [])];
         return `|> AS base
 |> ${kind}JOIN (SELECT ${proj.join(', ')} FROM ${op.relation}) AS ${op.alias} ON ${on.join(' AND ')}
-|> DROP ${[...keys.map((_, i) => priv(`key${i}`)), priv('from'), priv('to')].join(', ')}`;
+|> DROP ${drop.join(', ')}`;
       }
       case 'aggregate':
         return `|> AGGREGATE ${op.aggs.map((a) => `${a.expr} AS ${this.ident(a.as)}`).join(', ')}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;

@@ -270,3 +270,64 @@ test('a session-named key is not a fact attribute unless marked dimension like a
   const c = load(withSession + USERS());
   assert.ok(!c.modelDimensionColumns('events').includes('sess'));
 });
+
+// A key part's `grain` is the unit the two sides are COMPARED at, and it truncates the side that
+// declares it. Declared on one side only, the join compares a truncated value against a raw one
+// and matches (almost) nothing — a wrong NUMBER, from a query that looks right. The load-time
+// check used to compare only how MANY parts each side had, never their grains.
+const SPEND = (dayGrain) => `  - name: fct_spend
+    meta:
+      mcp:
+        role: acquisition
+        entities:
+          user_day: { type: unique, key: [{ column: user_id }, { column: spend_date${dayGrain ? ', grain: day' : ''} }] }
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: spend_date, data_type: date, meta: { mcp: { is_time: true } } }
+      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+`;
+const EVENTS_DAY = (dayGrain) => EVENTS.replace(
+  '          ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
+  `          user_day: { type: foreign, key: [{ column: user_id }, { column: ts${dayGrain ? ', grain: day' : ''} }] }`,
+);
+
+test('both sides of a key must be joined at the SAME grain', () => {
+  // the events side truncates to day, the spend side does not → refused, naming both shapes
+  assert.throws(() => load(EVENTS_DAY(true) + SPEND(false) + USERS()),
+    /entity 'user_day' is joined at a different grain on each side.*part 2: day.*part 2: no grain/s);
+  // and the other way round
+  assert.throws(() => load(EVENTS_DAY(false) + SPEND(true) + USERS()),
+    /joined at a different grain on each side/);
+});
+
+test('the same grain on both sides loads, and so does no grain at all', () => {
+  const day = load(EVENTS_DAY(true) + SPEND(true) + USERS());
+  assert.deepEqual(day.entityKey('events', 'user_day'), [{ column: 'user_id' }, { column: 'ts', grain: 'day' }]);
+  assert.deepEqual(day.entityKey('acquisition', 'user_day'), [{ column: 'user_id' }, { column: 'spend_date', grain: 'day' }]);
+  const raw = load(EVENTS_DAY(false) + SPEND(false) + USERS());
+  assert.deepEqual(raw.entityKey('events', 'user_day'), [{ column: 'user_id' }, { column: 'ts' }]);
+});
+
+// A VARIANT expands into its own '<relationship>_<variant>' entity, so it is held to the shape of
+// that entity just like any other side — a variant cannot quietly join at another grain.
+test('a variant is held to the shape of the entity it expands into', () => {
+  const variants = `  - name: fct_crash2
+    meta:
+      mcp:
+        role: crashlytics
+        primary_entity: crash
+        known_events: [boom]
+        entities:
+          user_day:
+            type: foreign
+            variants:
+              a: { key: [{ column: user_id }, { column: ts, grain: day }] }
+              b: { key: [{ column: user_id }, { column: ts }] }
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+`;
+  assert.throws(() => load(EVENTS_DAY(true) + SPEND(true) + variants + USERS()),
+    /entity 'user_day_b' is joined at a different grain on each side/);
+});

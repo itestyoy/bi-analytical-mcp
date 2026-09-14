@@ -511,8 +511,10 @@ export function dbtSchemaToCatalog(doc) {
         // On an events source the time axis is the event time, surfaced as the fact's own
         // time dimension. On any OTHER source (an install record, a daily spend table) the
         // axis is equally a groupable attribute — "installs by install day" — so it stays in
-        // the dimension list and everything reading dimensions keeps seeing it.
-        if (!isFact) dimensions[col.name] = { type: 'time', granularity: m.time.granularity };
+        // the dimension list and everything reading dimensions keeps seeing it. Unless the
+        // author opts out with meta.mcp.dimension: false, which means here exactly what it
+        // means on any other column: a real column that is not an attribute to group by.
+        if (!isFact && cm.dimension !== false) dimensions[col.name] = { type: 'time', granularity: m.time.granularity };
         continue;
       }
       // A column declared a MEASURE becomes an aggregatable amount of this model (any aggregation
@@ -734,18 +736,30 @@ export function dbtSchemaToCatalog(doc) {
       ownerOf.set(name, key);
     }
   }
-  const arityOf = new Map();
+  // The SHAPE of a key is its parts in order, each with the grain it is compared at. Both the
+  // number of parts and the grain of each must agree across the sides: a grain declared on one
+  // side only truncates that side, so a day-truncated value is compared against a raw timestamp
+  // and the join matches (almost) nothing — silently, with a plausible-looking query.
+  const shapeOf = new Map();
+  const grainsOf = (parts) => parts.map((p) => p.grain || '-');
   for (const [key, m] of Object.entries(out.models)) {
     const all = [];
     const pe = m.primary_entity;
     if (pe && typeof pe === 'object' && pe.key) all.push([pe.name, pe.key]);
+    // variants are already expanded into their own '<relationship>_<variant>' entities above, each
+    // with its own key — so every side of every relationship is in this list exactly once.
     for (const [name, e] of Object.entries(m.entities || {})) if (e.key) all.push([name, e.key]);
     for (const [name, parts] of all) {
-      const prev = arityOf.get(name);
+      const prev = shapeOf.get(name);
       if (prev && prev.n !== parts.length) {
         throw new Error(`entity '${name}' is declared with ${prev.n} key part(s) on '${prev.model}' but ${parts.length} on '${key}'. Both sides of a join must be built from the same number of parts, in the same order.`);
       }
-      if (!prev) arityOf.set(name, { n: parts.length, model: key });
+      const grains = grainsOf(parts);
+      if (prev && String(prev.grains) !== String(grains)) {
+        const show = (g) => g.map((x, i) => `part ${i + 1}: ${x === '-' ? 'no grain' : x}`).join(', ');
+        throw new Error(`entity '${name}' is joined at a different grain on each side: ${show(prev.grains)} on '${prev.model}', but ${show(grains)} on '${key}'. A grain truncates the side that declares it, so declaring it on one side only compares a truncated value against a raw one and matches nothing — declare the same grain on both sides.`);
+      }
+      if (!prev) shapeOf.set(name, { n: parts.length, grains, model: key });
     }
   }
 

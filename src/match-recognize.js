@@ -53,23 +53,25 @@ const factEventNames = (catalog, source, names) => (names || []).map((n) => cata
   hint: 'a funnel runs over ONE fact, so start the pipeline from the fact that owns the event',
 }));
 
-export function stepPredicate(catalog, step, dialect, col, prepCols = new Map(), source) {
+export function stepPredicate(catalog, step, dialect, prepCols = new Map(), source) {
   const m = catalog.getModel(source);
   const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
-  const evCol = col ? `${col}.${m.event_name.column}` : m.event_name.column;
-  const dataCol = col ? `${col}.${catalog.eventDataColumn(source)}` : catalog.eventDataColumn(source);
+  // Unqualified, for the same reason buildPrefilter is: the predicate applies to the single
+  // relation the pattern scans, and a payload property is rendered by catalog.propertyExpr, which
+  // carries no qualifier — so half of a qualified predicate would silently stay unqualified.
+  const evCol = m.event_name.column;
   const names = factEventNames(catalog, source, step.event_name);
   const ev = names.length === 1 ? `${evCol} = ${sqlLiteral(names[0])}` : `${evCol} IN (${names.map(sqlLiteral).join(', ')})`;
   const props = (step.where || []).map((c) => {
     // a prepare-derived column is referenced directly (it's a real column now)
     if (prepCols.has(c.property)) {
-      return comparePred(col ? `${col}.${c.property}` : c.property, c.op, c.value);
+      return comparePred(c.property, c.op, c.value);
     }
     const p = (m.properties || {})[c.property];
     if (!p) {
       // a physical model column (envelope/dimension column like bundle_id) → compare it
       // directly, so a step filter can use model columns without a separate where stage.
-      if (modelCols.has(c.property)) return comparePred(col ? `${col}.${c.property}` : c.property, c.op, c.value);
+      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value);
       throw new Error(`unknown event property or column in step: ${c.property}`);
     }
     if (catalog.isComplexEventProp(c.property, source)) {
@@ -87,15 +89,17 @@ export function stepPredicate(catalog, step, dialect, col, prepCols = new Map(),
  * population only — it does NOT redefine steps. Event-level filters: time window,
  * event_name allowlist, event_data property conditions. To filter by USER
  * attributes, add a `join` (users) + `where` stage before match_recognize.
+ *
+ * Columns are referenced UNQUALIFIED: the filter always applies to the one relation being scanned,
+ * and a payload property is rendered by `catalog.propertyExpr`, which has no qualifier of its own —
+ * so a qualifier here would reach half the clauses and silently skip the rest.
  */
-export function buildPrefilter(catalog, spec, dialect, col, source) {
+export function buildPrefilter(catalog, spec, dialect, source) {
   const f = spec.filter;
   if (!f) return '';
   const m = catalog.getModel(source);
-  const q = (c) => (col ? `${col}.${c}` : c);
-  const evNameCol = q(m.event_name.column);
-  const timeCol = q(m.time.column);
-  const dataCol = q(catalog.eventDataColumn(source));
+  const evNameCol = m.event_name.column;
+  const timeCol = m.time.column;
   const clauses = [];
   if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
   if (f.time_range?.end) { const ex = dateEndExclusive(f.time_range.end); clauses.push(ex ? `${timeCol} < ${sqlLiteral(ex)}` : `${timeCol} <= ${sqlLiteral(f.time_range.end)}`); }
@@ -105,7 +109,7 @@ export function buildPrefilter(catalog, spec, dialect, col, source) {
     const p = (m.properties || {})[c.property];
     if (!p) {
       // physical model column (e.g. bundle_id) → direct comparison; no separate where needed.
-      if (modelCols.has(c.property)) { clauses.push(comparePred(q(c.property), c.op, c.value)); continue; }
+      if (modelCols.has(c.property)) { clauses.push(comparePred(c.property, c.op, c.value)); continue; }
       throw new Error(`unknown event property or column in filter.where: ${c.property}`);
     }
     clauses.push(comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value));
@@ -207,7 +211,7 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
     return out;
   });
 
-  const stepPreds = (d, col) => spec.steps.map((s) => stepPredicate(catalog, s, d, col, prepCols, source));
+  const stepPreds = (d) => spec.steps.map((s) => stepPredicate(catalog, s, d, prepCols, source));
   const rows = spec.rows || 'one_per_partition';
   return { m, fact: source, partCols, timeCol, mode, betweenSteps, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
 }
@@ -245,7 +249,7 @@ export function matchStepPostgres(r, fromRel, catalog) {
   if (r.mode === 'strict') {
     throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the Postgres equivalent");
   }
-  const preds = r.stepPreds('postgres', null);
+  const preds = r.stepPreds('postgres');
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
   const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : catalog.propertyExpr(r.fact, c.property, 'postgres', { type: c.type })}) AS ${c.id}`);
@@ -305,7 +309,7 @@ export function matchStepPostgres(r, fromRel, catalog) {
  *    partition via the outer QUALIFY (ROW_NUMBER ORDER BY t1 = 1) — the earliest-S1
  *    match, equivalent regardless of skip mode. */
 export function matchStepBigQuery(r, fromRel, catalog) {
-  const preds = r.stepPreds('bigquery', null);
+  const preds = r.stepPreds('bigquery');
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
@@ -342,7 +346,7 @@ ${defines.join(',\n')}
  *  pick becomes a ROW_NUMBER window + `|> WHERE`, and a final `|> SELECT` projects the
  *  output columns (dropping the internal t1..tn). */
 export function matchStepBigQueryPipe(r, spec, catalog) {
-  const preds = r.stepPreds('bigquery', null);
+  const preds = r.stepPreds('bigquery');
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
@@ -367,7 +371,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `secs_${m.name}`),
     ...r.propCaptures.map((c) => c.id),
   ];
-  const pre = buildPrefilter(catalog, spec, 'bigquery', null, r.fact);
+  const pre = buildPrefilter(catalog, spec, 'bigquery', r.fact);
   const lines = [];
   if (pre) lines.push(`|> WHERE ${pre}`);
   lines.push(`|> MATCH_RECOGNIZE (
@@ -461,7 +465,7 @@ registerStage('match_recognize', {
         // SELECT (render), which the dialect places as one CTE of its chain.
         bqPipe: d.name === 'bigquery' ? matchStepBigQueryPipe(r, spec, catalog) : null,
         render: (prev, dn) => {
-          const pre = buildPrefilter(catalog, spec, dn, null, r.fact);
+          const pre = buildPrefilter(catalog, spec, dn, r.fact);
           const fromRel = pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev;
           return dn === 'bigquery' ? matchStepBigQuery(r, fromRel, catalog) : matchStepPostgres(r, fromRel, catalog);
         },

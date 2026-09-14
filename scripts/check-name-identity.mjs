@@ -40,6 +40,18 @@ const RULES = [
     },
   },
   {
+    // A join has two sides, and they must be derived TOGETHER. Rendering one side from the
+    // declaration and letting the other default to the bare column is how a key part's `grain`
+    // came to truncate only the projected side on BigQuery, while Postgres truncated both — the
+    // same declaration, a different answer per dialect, and no error anywhere. So a dialect reads
+    // the key only through Dialect.joinKeyParts (base.js), which returns both sides at once.
+    id: 'one-sided-join-key',
+    only: /dialects\/(?!base\.js)/,
+    re: /\bop\.onKeys\b|\bthis\.keyPartExpr\(/g,
+    why: 'a dialect deriving ONE side of a join key — use this.joinKeyParts(op, left, right), which returns both',
+    allow: {},
+  },
+  {
     id: 'hardcoded-catalog-name',
     // a literal the catalog's AUTHOR chooses (relationship / event / property names) compared in code
     re: /[=!]==\s*['"`](user|session|country|player_id|appsflyer_id|event_name|install)['"`]/g,
@@ -68,6 +80,7 @@ for (const file of files.sort()) {
   const text = readFileSync(file, 'utf8');
   const lines = text.split('\n');
   for (const rule of RULES) {
+    if (rule.only && !rule.only.test(rel)) continue;
     const allowed = rule.allow?.[base] || [];
     lines.forEach((line, i) => {
       if (line.trimStart().startsWith('//') || line.trimStart().startsWith('*')) return; // prose

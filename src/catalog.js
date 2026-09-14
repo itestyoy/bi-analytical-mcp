@@ -13,6 +13,9 @@ export { SUPPORTED_DIALECTS };
 // Aggregations a catalog measure may declare — dbt/MetricFlow's set. Any column or model
 // measure may use ANY of these; nothing here is specific to a role or a column name.
 export const MEASURE_AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'sum_boolean', 'median', 'percentile']);
+// The aggregations that compute a NUMBER out of the values — the ones a non-numeric field has to be
+// cast for. (count / count_distinct count rows, sum_boolean counts trues: any type will do.)
+export const NUMERIC_AGGS = new Set(['sum', 'average', 'median', 'min', 'max', 'percentile']);
 
 /**
  * Normalise one GOVERNED measure — the opt-in case where a declaration also fixes its
@@ -115,7 +118,7 @@ function normalizeEntityKey(name, decl, { model, columns }) {
     return { type, variants }; // variants only: this side has no single canonical key
   }
   const parts = normalizeKeyParts(raw, { where, columns });
-  return { type, key: parts, ...(parts.length === 1 ? { column: parts[0].column } : {}), ...(Object.keys(variants).length ? { variants } : {}) };
+  return { type, key: parts, ...(Object.keys(variants).length ? { variants } : {}) };
 }
 
 // Native dbt `data_type`s that map to a MetricFlow time dimension.
@@ -486,7 +489,7 @@ export function dbtSchemaToCatalog(doc) {
           // column then supplies its key, which is the normal pairing. What must not pass is a
           // SECOND column claiming the identity, or a column claiming a different name than the
           // model declared: either way one of the two declarations would be dropped in silence.
-          const declaredName = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          const declaredName = primaryEntityName(m);
           if (primaryFromColumn) {
             throw new Error(`model '${model.name}': columns '${primaryFromColumn.column}' and '${col.name}' both declare a PRIMARY entity ('${primaryFromColumn.name}' and '${cm.entity.name}'). A model has exactly one identity — for a key that spans BOTH columns declare it once in meta.mcp.entities with a composite key; for a second join key use type: unique (still a join target) or foreign.`);
           }
@@ -494,10 +497,10 @@ export function dbtSchemaToCatalog(doc) {
             throw new Error(`model '${model.name}' declares meta.mcp.primary_entity '${declaredName}', but column '${col.name}' declares primary entity '${cm.entity.name}'. One of the two would be dropped — name the identity once.`);
           }
           primaryFromColumn = { name: cm.entity.name, column: col.name };
-          m.primary_entity = { name: cm.entity.name, column: col.name, key: ent.key };
+          m.primary_entity = { name: cm.entity.name, key: ent.key };
         } else {
           if (entities[cm.entity.name]) {
-            throw new Error(`model '${model.name}': entity '${cm.entity.name}' is declared on two columns ('${entities[cm.entity.name].column}' and '${col.name}'). One relationship has one key here — use meta.mcp.entities with a composite key if it spans both columns, or 'variants' if they are alternative keys for it.`);
+            throw new Error(`model '${model.name}': entity '${cm.entity.name}' is declared on two columns ('${(entities[cm.entity.name].key || []).map((p) => p.column).join(', ')}' and '${col.name}'). One relationship has one key here — use meta.mcp.entities with a composite key if it spans both columns, or 'variants' if they are alternative keys for it.`);
           }
           entities[cm.entity.name] = ent;
         }
@@ -635,17 +638,17 @@ export function dbtSchemaToCatalog(doc) {
         const ent = normalizeEntityKey(name, decl || {}, { model: model.name, columns: known });
         if (ent.type === 'primary') {
           if (ent.variants) throw new Error(`entity '${name}' of model '${model.name}': a primary entity is the model's single identity and cannot have variants; declare the alternatives as type: unique or foreign.`);
-          const prev = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          const prev = primaryEntityName(m);
           if (prev && prev !== name) throw new Error(`model '${model.name}' declares two primary entities ('${prev}' and '${name}'). A model has exactly one identity; declare the other key as type: unique (still a join target) or foreign.`);
-          m.primary_entity = { name, ...(ent.column ? { column: ent.column } : {}), key: ent.key };
+          m.primary_entity = { name, key: ent.key };
         } else {
           // The same name declared BOTH on a column and here: the model-level entry would win
           // by position in the file. Say so instead — the author has two keys for one
           // relationship and must state which it is.
           if (entities[name]) {
-            throw new Error(`model '${model.name}': entity '${name}' is declared both on column '${entities[name].column}' (meta.mcp.entity) and in meta.mcp.entities. Declare it in ONE place — meta.mcp.entities is the form that can carry a composite key or variants.`);
+            throw new Error(`model '${model.name}': entity '${name}' is declared both on column '${(entities[name].key || []).map((p) => p.column).join(', ')}' (meta.mcp.entity) and in meta.mcp.entities. Declare it in ONE place — meta.mcp.entities is the form that can carry a composite key or variants.`);
           }
-          const peName = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          const peName = primaryEntityName(m);
           if (peName === name) {
             throw new Error(`model '${model.name}': '${name}' is already the model's PRIMARY entity, so it cannot also be declared in meta.mcp.entities — the semantic model would carry two entities of that name. Drop the duplicate, or give this key its own relationship name.`);
           }
@@ -671,14 +674,19 @@ export function dbtSchemaToCatalog(doc) {
   // identity of the semantic model and the join TARGET for that entity, so a second
   // claimant would silently hijack the join (e.g. a new fact stealing `user` from the
   // users dimension) and MetricFlow would reject the duplicate identity anyway.
-  const primaryEntityOwner = new Map();
+  // THE entity -> owning model map, built once here from the primary entities and extended below
+  // with the `unique` ones (after variant expansion, so an expanded name is checked too).
+  const ownerOf = new Map();
   for (const [key, m] of Object.entries(out.models)) {
-    const pe = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+    // A primary entity is written EITHER as a bare name (meta.mcp.primary_entity: event, the
+    // events-source form) or as an object with a key — both make the model the owner, so it is
+    // read through one accessor.
+    const pe = primaryEntityName(m);
     if (!pe) continue;
-    if (primaryEntityOwner.has(pe)) {
-      throw new Error(`models '${primaryEntityOwner.get(pe)}' and '${key}' both declare primary entity '${pe}'. A primary entity has exactly one owner (it is the join target for that entity) — give each model its own meta.mcp.primary_entity, e.g. 'event' for the analytics fact and 'crash' for a crash fact.`);
+    if (ownerOf.has(pe)) {
+      throw new Error(`models '${ownerOf.get(pe)}' and '${key}' both declare primary entity '${pe}'. A primary entity has exactly one owner (it is the join target for that entity) — give each model its own meta.mcp.primary_entity, e.g. 'event' for the analytics fact and 'crash' for a crash fact.`);
     }
-    primaryEntityOwner.set(pe, key);
+    ownerOf.set(pe, key);
   }
   // EXPAND KEY VARIANTS. A relationship may be carried by several alternative key columns on one
   // side (a crash row reporting one tracking id per ad format). Each variant becomes its own
@@ -717,14 +725,6 @@ export function dbtSchemaToCatalog(doc) {
   // and every side of the same entity built from the same NUMBER of key parts — two sides with
   // different arity would compare a one-part key against a two-part one and silently match
   // nothing. Checked at load so a mistyped key fails here, not as an empty result set.
-  const ownerOf = new Map();
-  for (const [key, m] of Object.entries(out.models)) {
-    // A primary entity is written EITHER as a bare name (meta.mcp.primary_entity: event, the
-    // events-source form) or as an object with a key — both make the model the owner, so read
-    // it through the same accessor the owner index uses.
-    const pe = primaryEntityName(m);
-    if (pe) ownerOf.set(pe, key);
-  }
   for (const [key, m] of Object.entries(out.models)) {
     for (const [name, e] of Object.entries(m.entities || {})) {
       if (e.type !== 'unique') continue;
@@ -805,7 +805,7 @@ export function dbtSchemaToCatalog(doc) {
 }
 
 /** Logical name of a model's primary entity. */
-function primaryEntityName(model) {
+export function primaryEntityName(model) {
   const pe = model.primary_entity;
   return typeof pe === 'string' ? pe : pe?.name;
 }
@@ -908,7 +908,7 @@ export class Catalog {
       }
       const pe = m.primary_entity;
       if (pe && typeof pe === 'object') {
-        const parts = pe.key || (pe.column ? [{ column: pe.column }] : []);
+        const parts = pe.key || [];
         for (const part of parts) if (!has(part.column)) missing.push(`${part.column} (key of the primary entity '${pe.name}')`);
       }
       if (missing.length) { unavailable[key] = { reason: `the table lacks structural column(s): ${missing.join('; ')}`, missing: missing.map((x) => x.split(' ')[0]) }; continue; }
@@ -939,7 +939,7 @@ export class Catalog {
       // the warehouse instead of here. A relationship is one capability among several, so it is
       // dropped alone (unlike the primary key above, which is the model's identity).
       if (m.entities) for (const [name, e] of Object.entries(m.entities)) {
-        const parts = e.key || (e.column ? [{ column: e.column }] : []);
+        const parts = e.key || [];
         if (parts.some((p) => !has(p.column))) { delete m.entities[name]; gone.add(`entity:${name}`); }
       }
       // A model is SLOWLY-CHANGING only while it still HAS its window. If the validity columns
@@ -1227,9 +1227,9 @@ export class Catalog {
     const m = this.getModel(key);
     const cols = [];
     const pe = m.primary_entity;
-    if (typeof pe === 'object') for (const p of pe.key || (pe.column ? [{ column: pe.column }] : [])) cols.push(p.column);
+    if (typeof pe === 'object') for (const p of pe.key || []) cols.push(p.column);
     for (const e of Object.values(m.entities || {})) {
-      for (const p of e.key || (e.column ? [{ column: e.column }] : [])) cols.push(p.column);
+      for (const p of e.key || []) cols.push(p.column);
     }
     return [...new Set(cols)];
   }
@@ -1239,8 +1239,8 @@ export class Catalog {
     const m = this.getModel(key);
     const out = {};
     const pe = m.primary_entity;
-    if (pe && typeof pe === 'object' && pe.name) out[pe.name] = { type: 'primary', key: pe.key || [{ column: pe.column }] };
-    for (const [name, e] of Object.entries(m.entities || {})) out[name] = { type: e.type, key: e.key || [{ column: e.column }] };
+    if (pe && typeof pe === 'object' && pe.name) out[pe.name] = { type: 'primary', key: pe.key || [] };
+    for (const [name, e] of Object.entries(m.entities || {})) out[name] = { type: e.type, key: e.key || [] };
     return out;
   }
 

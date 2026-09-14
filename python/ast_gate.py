@@ -16,8 +16,10 @@ This is a structural guard over what the caller declares, not a sandbox: the cod
 the warehouse's Python runtime, and what it may touch THERE is decided by that runtime and the
 credentials dbt runs with.
 
-Protocol: one JSON object on stdin — {"functions": [{"name","params","body"}], "bindings": [...]}
-— one JSON object on stdout — {"ok": bool, "errors": [{"function","line","text","message"}]}.
+Protocol: one JSON object on stdin — {"functions": [{"name","params","body","id"?,"bindings"?]}],
+"bindings": [...]} — one JSON object on stdout — {"ok": bool, "errors": [{"function","id","line",
+"text","message"}]}. A function may carry its own `bindings` (and an `id` echoed back in its
+errors), so the functions of SEVERAL declarations are checked in one run without sharing names.
 Lines are 1-based within the BODY as the caller wrote it.
 """
 import ast
@@ -91,8 +93,12 @@ def _bound_names(fdef):
     return names
 
 
-def _check(fn, bindings):
+def _check(fn, default_bindings):
     name, params, body = fn["name"], fn.get("params") or [], fn.get("body") or ""
+    bindings = fn.get("bindings")
+    if bindings is None:
+        bindings = default_bindings
+    fid = fn.get("id")
     header = "def %s(%s):\n" % (name, ", ".join(params))
     indented = "".join("    " + line + "\n" for line in body.splitlines()) or "    pass\n"
     src = header + indented
@@ -102,7 +108,7 @@ def _check(fn, bindings):
     except SyntaxError as e:  # line 1 of `src` is the def line
         ln = max(1, (e.lineno or 2) - 1)
         lines = body.splitlines()
-        errors.append({"function": name, "line": ln, "text": lines[ln - 1].strip() if 0 < ln <= len(lines) else "", "message": "syntax error: %s" % e.msg})
+        errors.append({"function": name, "id": fid, "line": ln, "text": lines[ln - 1].strip() if 0 < ln <= len(lines) else "", "message": "syntax error: %s" % e.msg})
         return errors
     fdef = tree.body[0]
     body_lines = body.splitlines()
@@ -115,7 +121,7 @@ def _check(fn, bindings):
         return body_lines[i - 1].strip() if 0 < i <= len(body_lines) else ""
 
     def err(node, message):
-        errors.append({"function": name, "line": at(node), "text": text(node), "message": message})
+        errors.append({"function": name, "id": fid, "line": at(node), "text": text(node), "message": message})
 
     readable = _bound_names(fdef) | set(bindings) | SAFE_BUILTINS
     for node in ast.walk(fdef):
@@ -132,7 +138,7 @@ def _check(fn, bindings):
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in readable:
             err(node, "'%s' is not available here — a step function sees its parameters, its own locals, the declaration's `imports` and the other declared functions" % node.id)
     if not any(isinstance(n, ast.Return) and n.value is not None for n in ast.walk(fdef)):
-        errors.append({"function": name, "line": 1, "text": body_lines[0].strip() if body_lines else "", "message": "a step function must `return` the frame it produced"})
+        errors.append({"function": name, "id": fid, "line": 1, "text": body_lines[0].strip() if body_lines else "", "message": "a step function must `return` the frame it produced"})
     # one error per line is enough to act on; keep the first few in source order
     seen = set()
     unique = []

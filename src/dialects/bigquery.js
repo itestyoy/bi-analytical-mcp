@@ -95,12 +95,9 @@ export class BigQueryDialect extends Dialect {
 
   arrayContains(column, value) { return `${this.sqlLiteral(value)} IN UNNEST(${column})`; }
 
-  jsonColumnStructField(column, field, type = 'string') {
-    this.ident(field);
-    const base = `JSON_VALUE(${column}, '$.${field}')`;
-    const ct = this.castType(type);
-    return ct ? `CAST(${base} AS ${ct})` : base;
-  }
+  // JSON_VALUE parses a STRING holding JSON exactly as it reads a JSON-typed column, so the
+  // struct-in-a-string form is the same expression here (on Postgres it is not: that one casts).
+  jsonColumnStructField(column, field, type = 'string') { return this.jsonColumnField(column, field, type); }
 
   // ── time / scalar / statistical ────────────────────────────────────────────
   dateDiff(unit, from, to) {
@@ -179,17 +176,8 @@ export class BigQueryDialect extends Dialect {
         const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type, op.encoding);
         return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
       }
-      case 'join': {
-        // `onKeys` = a relationship declared in the schema: each side brings its OWN expression
-        // for the same logical key (different column names, a time column truncated to the
-        // declared grain), compared part by part. `on` = the plain shared-name form.
-        const eq = op.onKeys
-          ? op.onKeys.left.map((lp, i) => `${this.keyPartExpr(lp, (c) => `base.${c}`)} = ${this.keyPartExpr(op.onKeys.right[i], (c) => `j.${c}`)}`).join(' AND ')
-          : op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
-        const btw = op.between ? ` AND base.${this.ident(op.between.value)} BETWEEN j.${this.ident(op.between.from)} AND j.${this.ident(op.between.to)}` : '';
-        const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
-        return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
-      }
+      case 'join':
+        return this.joinCte(prev, op);
       case 'aggregate': {
         const sel = [...op.groupBy.map((c) => this.ident(c)), ...op.aggs.map((a) => `${a.expr} AS ${this.ident(a.as)}`)];
         return `SELECT ${sel.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;

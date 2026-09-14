@@ -3,6 +3,7 @@
 // and namespacing happens here; the renderer just serializes.
 
 import { jsonExtract, sqlLiteral, isNumericType, castExpr } from './dialect.js';
+import { NUMERIC_AGGS } from './catalog.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
@@ -103,8 +104,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     // an event property; numeric aggregations need a numeric type OR an explicit cast
     // (e.g. complete_time arrives as STRING upstream → add "cast": "numeric").
     const { name: propName, spec } = found;
-    const numericAgg = ['sum', 'average', 'median', 'min', 'max', 'percentile'].includes(decl.agg);
-    if (numericAgg && !isNumericType(spec.type) && !decl.cast) {
+    if (NUMERIC_AGGS.has(decl.agg) && !isNumericType(spec.type) && !decl.cast) {
       fail(`measure '${decl.name}': property '${field}' is type '${spec.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
     }
     valueExpr = propExpr(catalog, modelKey, propName, spec);
@@ -112,18 +112,16 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     // An AMOUNT the schema marks aggregatable on this source. The schema says only WHAT may be
     // aggregated (a column, or an expression over columns); the function is this caller's choice.
     const amount = catalog.aggregatableField(modelKey, field);
-    const numericAgg = ['sum', 'average', 'median', 'min', 'max', 'percentile'].includes(decl.agg);
-    if (numericAgg && amount.type && !isNumericType(amount.type) && !decl.cast) {
+    if (NUMERIC_AGGS.has(decl.agg) && amount.type && !isNumericType(amount.type) && !decl.cast) {
       fail(`measure '${decl.name}': '${field}' is type '${amount.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
     }
     valueExpr = amount.expr;
   } else {
     // a physical column of THIS model (an entity key like the player id, or any real column).
     // Anything else would compile into SQL the warehouse rejects — refuse it here, with the fix.
-    const columns = new Set((catalog.modelColumns(modelKey) || []).map((col) => col.name));
-    for (const parts of Object.values(catalog.entitiesOf(modelKey) || {})) for (const part of parts.key || []) columns.add(part.column);
-    const pe = catalog.getModel(modelKey).primary_entity;
-    if (pe && typeof pe === 'object') for (const part of pe.key || []) columns.add(part.column);
+    // The same set the measure `field` enum is built from (schema.js) — asked for once, here, so
+    // the tool cannot offer a field this then rejects.
+    const columns = new Set([...(catalog.modelColumns(modelKey) || []).map((col) => col.name), ...catalog.entityKeyColumns(modelKey)]);
     if (!columns.has(field)) {
       fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ model: '${modelKey}' }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
     }

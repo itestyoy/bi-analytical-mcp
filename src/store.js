@@ -210,7 +210,8 @@ export class MemoryBackend {
       all: () => [...runs].sort((a, b) => b.id - a.id),
       get: (id) => runs.find((x) => x.id === id) || null,
       recordProperty: (runId, p = {}) => {
-        const row = { run_id: runId, source: p.source ?? null, property: p.property, ms: p.ms ?? null, values_written: p.valuesWritten ?? null, distinct_count: p.distinctCount ?? null, total_count: p.totalCount ?? null, status: p.status ?? null, error: p.error ?? null, started_at: runs.find((x) => x.id === runId)?.started_at ?? null };
+        if (!p.source || !p.property) throw new Error('recordProperty needs both source and property — a run row is keyed by (run, source, property)');
+        const row = { run_id: runId, source: p.source, property: p.property, ms: p.ms ?? null, values_written: p.valuesWritten ?? null, distinct_count: p.distinctCount ?? null, total_count: p.totalCount ?? null, status: p.status ?? null, error: p.error ?? null, started_at: runs.find((x) => x.id === runId)?.started_at ?? null };
         const i = runProps.findIndex((x) => x.run_id === runId && x.source === row.source && x.property === p.property);
         if (i >= 0) runProps[i] = row; else runProps.push(row);
       },
@@ -397,7 +398,10 @@ export class SqliteBackend {
       get(id) { return s._get('SELECT * FROM index_runs WHERE id = ?', id) || null; },
       // per-property timing/coverage within a run
       recordProperty(runId, p = {}) {
-        s._run('INSERT INTO index_run_props (run_id, source, property, ms, values_written, distinct_count, total_count, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, source, property) DO UPDATE SET ms=excluded.ms, values_written=excluded.values_written, distinct_count=excluded.distinct_count, total_count=excluded.total_count, status=excluded.status, error=excluded.error', runId, p.source ?? null, p.property, p.ms ?? null, p.valuesWritten ?? null, p.distinctCount ?? null, p.totalCount ?? null, p.status ?? null, p.error ?? null);
+        // (run, source, property) is this table's PRIMARY KEY, and SQLite lets NULL into it without
+        // ever conflicting: a row missing its source would be inserted afresh on every write.
+        if (!p.source || !p.property) throw new Error('recordProperty needs both source and property — a run row is keyed by (run, source, property)');
+        s._run('INSERT INTO index_run_props (run_id, source, property, ms, values_written, distinct_count, total_count, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, source, property) DO UPDATE SET ms=excluded.ms, values_written=excluded.values_written, distinct_count=excluded.distinct_count, total_count=excluded.total_count, status=excluded.status, error=excluded.error', runId, p.source, p.property, p.ms ?? null, p.valuesWritten ?? null, p.distinctCount ?? null, p.totalCount ?? null, p.status ?? null, p.error ?? null);
       },
       properties(runId, { limit = 1000 } = {}) { return s._all('SELECT * FROM index_run_props WHERE run_id = ? ORDER BY ms DESC, property ASC LIMIT ?', runId, limit); },
       propertyHistory(source, property, { limit = 20 } = {}) { return s._all('SELECT p.*, r.started_at FROM index_run_props p JOIN index_runs r ON r.id = p.run_id WHERE p.source = ? AND p.property = ? ORDER BY p.run_id DESC LIMIT ?', source, property, limit); },

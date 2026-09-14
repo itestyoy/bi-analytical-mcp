@@ -308,19 +308,6 @@ export class Engine {
     return set;
   }
 
-  /** Resolve a bare task-dim name to its entity-qualified MetricFlow path. */
-  _resolvePath(ctx, path) {
-    return this._taskDimMap(ctx).get(path) || path;
-  }
-
-  /**
-   * An attribute may be addressed WITHOUT knowing MetricFlow's `<entity>__<attribute>` spelling:
-   * { model, attribute, via? } names the model that carries the attribute and the attribute
-   * itself, and this resolves the path — the relationship the task's source declares towards
-   * that model, or the model's own identity when the attribute is the source's own. `via` picks
-   * the relationship when the source carries several to the same model (key variants). A string
-   * is returned unchanged, so both spellings flow through the same validation.
-   */
   /** The structured spelling of a legacy `<entity>__<attribute>` / task-dimension path, for error messages. */
   _suggestRef(ctx, path) {
     const c = this.catalog;
@@ -340,6 +327,14 @@ export class Engine {
     return `{ model: '<model>', attribute: '${p}' }`;
   }
 
+  /**
+   * An attribute may be addressed WITHOUT knowing MetricFlow's `<entity>__<attribute>` spelling:
+   * { model, attribute, via? } names the model that carries the attribute and the attribute
+   * itself, and this resolves the path — the relationship the task's source declares towards
+   * that model, or the model's own identity when the attribute is the source's own. `via` picks
+   * the relationship when the source carries several to the same model (key variants). A string
+   * is returned unchanged, so both spellings flow through the same validation.
+   */
   _normalizeRef(ctx, ref, where = 'group_by') {
     if (typeof ref === 'string') {
       throw new ToolError(`${where}: an attribute is addressed by where it lives — { model, attribute } (plus via when several relationships lead there) — never by a path string. '${ref}' → ${this._suggestRef(ctx, ref)}.`, { stage: 'validate', field: where });
@@ -1488,8 +1483,11 @@ export class Engine {
     // materialize (as preview shows), so it counts here too — e.g. as the SQL stage a python stage needs.
     const effective = this._draftEffectiveStages({ ...draft, stages: newStages });
     const offset = effective.length - newStages.length;
+    let rendered = null;
     try {
-      if (newStages.length) renderPipeline(this.catalog, this.catalog.dialect, draft.source, effective, { physicalCols: physSet });
+      // This render IS the validation and it returns the resulting columns, so the "after" state
+      // below reads them from here instead of rendering the same stages a second time.
+      if (newStages.length) rendered = renderPipeline(this.catalog, this.catalog.dialect, draft.source, effective, { physicalCols: physSet });
     } catch (e) {
       // Reject WITHOUT persisting; pinpoint which step broke so an edit in the middle is actionable.
       const at = this._failingStepIndex(draft.source, effective, physSet);
@@ -1508,7 +1506,9 @@ export class Engine {
     }
     draft.stages = newStages;
     this.ctxs.touch(ctx.id);
-    const after = this._draftColumns(draft, physSet);
+    const after = rendered
+      ? [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }))
+      : this._draftColumns(draft, physSet);
     const beforeNames = new Set(before.map((c) => c.name));
     const afterNames = new Set(after.map((c) => c.name));
     const removed = before.filter((c) => !afterNames.has(c.name)).map((c) => c.name);
@@ -1754,7 +1754,7 @@ export class Engine {
     const models = this._chainModels(rendered.chain, { name: draft.name, pipeline: { source: draft.source } });
     return {
       ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql,
-      ...(models.length > 1 ? { models: models.map(({ yml, ...m }) => m), note: `The pipeline builds as a chain of ${models.length} dbt models (each python stage is a model of its own, reading the previous one via dbt.ref); ${modelName} — the last — is the result.` } : {}),
+      ...(models.length > 1 ? { models: models.map(({ yml, functions, bindings, ...m }) => m), note: `The pipeline builds as a chain of ${models.length} dbt models (each python stage is a model of its own, reading the previous one via dbt.ref); ${modelName} — the last — is the result.` } : {}),
     };
   }
 
@@ -1766,7 +1766,7 @@ export class Engine {
   _chainModels(chain, pipeline) {
     return chain.map((seg) => (seg.kind === 'sql'
       ? { model: seg.model, kind: 'sql', input: seg.input, stages: seg.stages.map((st) => st.stage), sql: seg.sql, columns: [...seg.columns.keys()] }
-      : (() => { const py = this._compilePythonStage(seg.stage, { modelName: seg.model, inputModel: seg.input, pipeline }); return { model: seg.model, kind: 'python', input: seg.input, runtime: py.runtime, packages: py.packages, steps: seg.stage.steps.map((st) => st.call), code: py.code, yml: py.yml, columns: [...seg.columns.keys()] }; })()));
+      : (() => { const py = this._compilePythonStage(seg.stage, { modelName: seg.model, inputModel: seg.input, pipeline }); return { model: seg.model, kind: 'python', input: seg.input, runtime: py.runtime, packages: py.packages, steps: seg.stage.steps.map((st) => st.call), code: py.code, yml: py.yml, functions: py.functions, bindings: py.bindings, columns: [...seg.columns.keys()] }; })()));
   }
 
   /** Compile a python stage into its dbt model (structure only — the gate is separate). */
@@ -1777,15 +1777,30 @@ export class Engine {
     } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
   }
 
-  /** The static gate over a python stage's function bodies (syntax, no imports/dbt/session/eval…). */
+  /** The static gate over ONE python stage's function bodies (the incremental builder's path). */
   async _gatePythonStage(stage) {
     const compiled = this._compilePythonStage(stage, { modelName: 'm', inputModel: 'm_in', pipeline: null });
-    const gate = await runAstGate(this.pythonBin, compiled.functions, compiled.bindings);
-    if (!gate.ok) {
-      const lines = gate.errors.map((e) => `${e.function} line ${e.line}${e.text ? ` (${e.text})` : ''}: ${e.message}`);
-      throw new ToolError(`python stage: functions rejected by the static gate:\n${lines.join('\n')}`, { stage: 'validate', field: 'functions', details: gate.errors });
-    }
+    await this._gateCompiled([compiled]);
     return compiled;
+  }
+
+  /**
+   * The static gate over the bodies of ALREADY-COMPILED python models — every stage of a chain in
+   * ONE interpreter run (the gate takes a list, and each function carries its own bindings, so the
+   * stages are still checked separately). Re-compiling a stage just to gate it would only repeat
+   * work the chain has done, and one interpreter start-up per stage is pure request latency.
+   */
+  async _gateCompiled(units) {
+    const functions = units.flatMap((u, i) => (u.functions || []).map((f) => ({ ...f, id: String(i), bindings: u.bindings || [] })));
+    if (!functions.length) return;
+    const gate = await runAstGate(this.pythonBin, functions);
+    if (gate.ok) return;
+    const named = units.length > 1;
+    const lines = gate.errors.map((e) => {
+      const where = named && units[Number(e.id)]?.model ? `${units[Number(e.id)].model}: ` : '';
+      return `${where}${e.function} line ${e.line}${e.text ? ` (${e.text})` : ''}: ${e.message}`;
+    });
+    throw new ToolError(`python stage: functions rejected by the static gate:\n${lines.join('\n')}`, { stage: 'validate', field: 'functions', details: gate.errors });
   }
 
   /**
@@ -1874,11 +1889,11 @@ export class Engine {
     // Python model reading the previous one (or the source), and so on; the last model carries
     // the pipeline's name and is the result. Every python stage's bodies pass the static gate
     // BEFORE anything else happens, so a refused declaration leaves nothing behind.
-    const gateAll = async (chain) => { for (const seg of chain) if (seg.kind === 'python') await this._gatePythonStage(seg.stage); };
     if (input.dry_run) {
       const out = render(`pipe_${input.name}`);
-      await gateAll(out.chain);
-      const models = this._chainModels(out.chain, input).map(({ yml, ...m }) => m);
+      const built = this._chainModels(out.chain, input);
+      await this._gateCompiled(built.filter((m) => m.kind === 'python'));
+      const models = built.map(({ yml, functions, bindings, ...m }) => m);
       const last = out.chain[out.chain.length - 1];
       const resp = {
         kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: last.kind === 'python' ? 'table' : (input.materialized || 'table'), dialect,
@@ -1894,8 +1909,10 @@ export class Engine {
       if (est != null) resp.estimated_source_rows = est;
       return resp;
     }
+    // Everything that can refuse the declaration runs BEFORE a context exists, so a refused one
+    // leaves nothing behind: the chain is laid out and its python bodies gated on this probe.
     const probe = render('pipe');
-    await gateAll(probe.chain);
+    await this._gateCompiled(this._chainModels(probe.chain, input).filter((m) => m.kind === 'python'));
     const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
     const out = render(modelName);
@@ -1914,7 +1931,7 @@ export class Engine {
       if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `{{ config(materialized='${m === last ? materialized : 'table'}') }}\n${header}${m.sql}\n`);
       else { this.ctxs.writeFile(ctx.id, `${m.model}.py`, m.code); this.ctxs.writeFile(ctx.id, `${m.model}.yml`, m.yml); }
     }
-    const pyInfo = hasPython ? models.filter((m) => m.kind === 'python').map(({ yml, ...m }) => m) : null;
+    const pyInfo = hasPython ? models.filter((m) => m.kind === 'python').map(({ yml, functions, bindings, ...m }) => m) : null;
     const chainInfo = models.map((m) => ({ model: m.model, kind: m.kind, input: m.input, materialized: m === last ? materialized : 'table' }));
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;

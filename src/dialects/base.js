@@ -55,6 +55,22 @@ export class Dialect {
     return parts.map((p) => this.castExpr(this.keyPartExpr(p, qualify), 'string')).join(" || '|' || ");
   }
 
+  /**
+   * The CTE form of a pipeline `join` op: base row plus exactly the attributes it asked for.
+   * `onKeys` = a relationship declared in the schema — each side brings its OWN expression for the
+   * same logical key (different column names, a part truncated to its declared grain), compared
+   * part by part; `on` = the plain shared-name form. `between` adds the validity window.
+   * Standard SQL, so both dialects join a declared relationship exactly the same way.
+   */
+  joinCte(prev, op) {
+    const eq = op.onKeys
+      ? op.onKeys.left.map((lp, i) => `${this.keyPartExpr(lp, (c) => `base.${c}`)} = ${this.keyPartExpr(op.onKeys.right[i], (c) => `j.${c}`)}`).join(' AND ')
+      : op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
+    const btw = op.between ? ` AND base.${this.ident(op.between.value)} BETWEEN j.${this.ident(op.between.from)} AND j.${this.ident(op.between.to)}` : '';
+    const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
+    return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
+  }
+
   isNumericType(type) { return isNumericType(type); }
   isTimeType(type) { return isTimeType(type); }
 

@@ -117,3 +117,19 @@ test('a correctly keyed database is opened as-is: its rows survive a restart', (
   assert.deepEqual(index.sampleValues('users', 'country', 5), [{ value: 'US', freq: 4 }]);
   index.close();
 });
+
+// A run row is keyed by (run, SOURCE, property). SQLite allows NULL in a non-INTEGER primary key
+// and NULLs never conflict, so a row written without its source would be inserted afresh on every
+// write — double-counted in the run breakdown and invisible to the per-property history. It is a
+// caller mistake, refused as one (an input-validation guard).
+test('a run diagnostics row without its source is refused, not filed under NULL', () => {
+  for (const store of [openStore({}), openStore({ dbPath: dbFile() })]) {
+    assert.throws(() => store.runs.recordProperty(1, { property: 'ad_type_of_event_data', ms: 5 }), /needs both source and property/);
+    assert.throws(() => store.runs.recordProperty(1, { source: 'events', ms: 5 }), /needs both source and property/);
+    store.runs.recordProperty(1, { source: 'events', property: 'ad_type_of_event_data', ms: 5, status: 'ok' });
+    store.runs.recordProperty(1, { source: 'events', property: 'ad_type_of_event_data', ms: 9, status: 'ok' });
+    assert.equal(store.runs.properties(1).length, 1, 'the second write updated the row it keys');
+    assert.equal(store.runs.properties(1)[0].ms, 9);
+    store.close?.();
+  }
+});

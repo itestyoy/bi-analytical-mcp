@@ -3,6 +3,7 @@
 // template from the catalog, augmented with the task additions.
 
 import yaml from 'js-yaml';
+import { primaryEntityName } from './catalog.js';
 import { getDialect } from './dialects/index.js';
 
 const EVENT_TIME_DIM = 'event_time';
@@ -13,7 +14,7 @@ const EVENT_TIME_DIM = 'event_time';
  * expression, so the two sides compare the same value even when their columns differ in name.
  */
 function entityExpr(catalog, ent) {
-  const parts = ent.key || (ent.column ? [{ column: ent.column }] : []);
+  const parts = ent.key || []; // a variants-only side has no single canonical key
   if (!parts.length) return undefined;
   // One plain column stays the column itself (what MetricFlow has always seen) — and needs no
   // dialect to say so. A grain makes it an expression like any composite key, because the
@@ -62,7 +63,7 @@ export function renderBaseModel(catalog, key) {
   // facts each get their own agg_time_dimension without colliding.
   if (catalog.isFact(key)) {
     sm.defaults = { agg_time_dimension: EVENT_TIME_DIM };
-    sm.primary_entity = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity.name;
+    sm.primary_entity = primaryEntityName(m);
     sm.entities = Object.entries(m.entities || {}).map(([name, e]) => ({ name, type: e.type, expr: entityExpr(catalog, e) }));
     sm.dimensions = [
       { name: EVENT_TIME_DIM, type: 'time', type_params: { time_granularity: m.time.granularity || 'day' }, expr: m.time.column },
@@ -102,13 +103,13 @@ export function renderBaseModel(catalog, key) {
     throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one can only be reached through a pipeline join stage, not use_base_models.`);
   }
   const peName = typeof pe === 'string' ? pe : pe.name;
-  const peCol = typeof pe === 'string' ? undefined : pe.column;
+
   // For SCD the join key is a `natural` entity (not unique per row). dbt still requires the model
   // to declare a PRIMARY entity when it has dimensions, so also set the model-level primary_entity
   // (verified via `dbt parse` + `mf query`: this yields the point-in-time join, no fan-out).
   if (scd) sm.primary_entity = peName;
   const peExpr = typeof pe === 'string' ? undefined : entityExpr(catalog, pe);
-  sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : (peCol ? { expr: peCol } : {})) }];
+  sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: entityExpr(catalog, e) });
   }

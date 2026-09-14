@@ -399,3 +399,27 @@ test('an adapter with no SQL dialect of its own is reported, not silently render
     assert.equal((await new Engine({ catalog: pg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }) }).semantic_index({})).dialect_note, undefined);
   } finally { if (saved === undefined) delete process.env.WAREHOUSE_DIALECT; else process.env.WAREHOUSE_DIALECT = saved; }
 });
+
+// Every python stage of a chain is gated in ONE interpreter run, from the models the chain already
+// compiled: a spawn per stage is pure request latency, and re-compiling a stage to gate it only
+// repeats work. The error still names the stage's own model and the function inside it.
+test('a chain with several python stages is gated in one run, and errors name the model', async (t) => {
+  if (skipNoPy(t)) return;
+  const e = engine();
+  let runs = 0;
+  const realSpawn = (await import('node:child_process')).spawn;
+  assert.ok(realSpawn);
+  const py = { ...PY_STAGE };
+  const second = { stage: 'python', functions: [{ name: 'tag', params: ['df'], body: ["df['t'] = 1", 'return df'] }], steps: [{ call: 'tag' }], output: { columns: ['player_id_of_internal', 'revenue_z', 't'] } };
+  // count the gate's interpreter runs by wrapping the engine's own gate entry point
+  const gate = e._gateCompiled.bind(e);
+  e._gateCompiled = async (units) => { if (units.length) runs += 1; return gate(units); };
+  const ok = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, second] } }));
+  assert.equal(ok.python.length, 2, 'two python models in the chain');
+  assert.equal(runs, 1, 'gated in a single run');
+  // and a body that is refused in the SECOND stage is reported against that stage's model
+  const bad = { stage: 'python', functions: [{ name: 'tag', params: ['df'], body: ["df['t'] = getattr(df, 'x')", 'return df'] }], steps: [{ call: 'tag' }] };
+  const err = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, bad] } })).catch((x) => x);
+  assert.ok(err instanceof Error);
+  assert.match(err.message, /pipe_seg: tag line 1 .*'getattr' is not available here/, 'the model whose body was refused is named (here the chain\'s last, which carries the pipeline name)');
+});

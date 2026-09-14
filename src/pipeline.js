@@ -698,7 +698,7 @@ function sourceColumns(catalog, key, physicalCols = null) {
     if (m.event_name?.column && !cols.has(m.event_name.column)) cols.set(m.event_name.column, { type: 'string' });
     if (m.time?.column && !cols.has(m.time.column)) cols.set(m.time.column, { type: 'time' });
     if (m.event_data_column && !cols.has(m.event_data_column)) cols.set(m.event_data_column, { type: 'json' });
-    for (const e of Object.values(m.entities || {})) if (e.column && !cols.has(e.column)) cols.set(e.column, { type: 'string' });
+    for (const e of Object.values(m.entities || {})) for (const p of e.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
   } else {
     if (typeof m.primary_entity === 'object' && m.primary_entity.column && !cols.has(m.primary_entity.column)) cols.set(m.primary_entity.column, { type: 'string' });
     for (const [name, dd] of Object.entries(m.dimensions || {})) if (!cols.has(name)) cols.set(name, { type: dd.type });

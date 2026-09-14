@@ -40,7 +40,7 @@ test('memory record fuzzy-resolves a near-miss target to the real entity', async
   const out = await e.memory({ action: 'record', note: 'ad format lives here', targets: ['ad_type_of_even_data'] });
   const link = out.linked_to[0];
   assert.equal(link.kind, 'property');
-  assert.equal(link.target, 'events.ad_type_of_event_data', 'fuzzy-linked to the real property, named with its source');
+  assert.deepEqual(link.target, { source: 'events', name: 'ad_type_of_event_data' }, 'fuzzy-linked to the real property, named with its source');
   assert.equal(link.fuzzy_resolved_from, 'ad_type_of_even_data');
   assert.ok(out.fuzzy_links_note, 'flags that a fuzzy link was used');
   // and it actually surfaces on the real property's view.

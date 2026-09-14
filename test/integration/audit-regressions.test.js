@@ -315,9 +315,9 @@ test('20. with an owner declared, both sides label the relationship consistently
 
 // ═══════════ D. MEMORY TARGETS ═══════════
 
-test('21. a finding recorded on events.ad_finished surfaces on that event', opts, async (t) => {
+test('21. a finding recorded on { source: events, name: ad_finished } surfaces on that event', opts, async (t) => {
   if (skip(t)) return;
-  const saved = await engine.memory({ action: 'record', note: 'ad_finished carries revenue; ad_started never does', targets: ['events.ad_finished'] });
+  const saved = await engine.memory({ action: 'record', note: 'ad_finished carries revenue; ad_started never does', targets: [{ source: 'events', name: 'ad_finished' }] });
   assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event']);
   const v = await engine.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((v.memory || []).some((m) => /ad_finished carries revenue/.test(m.note)), JSON.stringify(v.memory));
@@ -325,7 +325,7 @@ test('21. a finding recorded on events.ad_finished surfaces on that event', opts
 
 test('22. a finding on a qualified crash property surfaces on that property', opts, async (t) => {
   if (skip(t)) return;
-  await engine.memory({ action: 'record', note: 'ANR seconds are only on anr reports', targets: ['crashlytics.anr_duration_of_event_data'] });
+  await engine.memory({ action: 'record', note: 'ANR seconds are only on anr reports', targets: [{ source: 'crashlytics', name: 'anr_duration_of_event_data' }] });
   const v = await engine.semantic_index({ source: 'crashlytics', property: 'anr_duration_of_event_data' });
   assert.ok((v.memory || []).some((m) => /ANR seconds/.test(m.note)), JSON.stringify(v.memory));
 });

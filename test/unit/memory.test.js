@@ -51,18 +51,20 @@ test('memory record resolves targets to catalog entities (property/attr/event/mo
   const out = await e.memory({
     action: 'record',
     note: "'ad format' = the event_data property ad_type_of_event_data, only on ad_started/ad_finished; values rewarded/interstitial/banner.",
-    targets: ['ad_type_of_event_data', 'users.country', 'ad_finished', 'users', 'ad format'],
+    targets: ['ad_type_of_event_data', { source: 'users', name: 'country' }, 'ad_finished', { source: 'users' }, 'ad format'],
     aliases: ['ad format', 'ad type'],
     links: ['https://confluence/ads', { url: 'https://dash/ads', title: 'Ads dashboard' }],
   });
   assert.equal(out.saved, true);
   assert.ok(out.id, 'returns a note id');
-  const byKey = Object.fromEntries(out.linked_to.map((l) => [l.target, l.kind]));
-  assert.equal(byKey['events.ad_type_of_event_data'], 'property', 'a target names its source');
-  assert.equal(byKey['users.country'], 'property');
-  assert.equal(byKey['events.ad_finished'], 'event');
-  assert.equal(byKey['users'], 'model');
-  assert.equal(byKey['ad format'], 'term', 'an unmatched phrase is kept as a free term');
+  const linked = out.linked_to.map((l) => ({ kind: l.kind, ...l.target }));
+  assert.deepEqual(linked, [
+    { kind: 'property', source: 'events', name: 'ad_type_of_event_data' }, // a bare name resolved to its ONE source
+    { kind: 'property', source: 'users', name: 'country' },
+    { kind: 'event', source: 'events', name: 'ad_finished' },
+    { kind: 'model', source: 'users' },
+    { kind: 'term', term: 'ad format' }, // an unmatched phrase is kept as a free term
+  ]);
   assert.deepEqual(out.unresolved_terms, ['ad format']);
   // links normalise (string → { url }); aliases pass through.
   assert.deepEqual(out.links, [{ url: 'https://confluence/ads' }, { url: 'https://dash/ads', title: 'Ads dashboard' }]);
@@ -79,7 +81,7 @@ test('a recorded finding surfaces through semantic_index (views + search) by its
   const prop = await e.semantic_index({ property: 'ad_type_of_event_data' });
   assert.ok(prop.memory?.some((m) => m.id === rec.id && m.note === note), 'note attached to the property view');
   const attached = prop.memory.find((m) => m.id === rec.id);
-  assert.ok(attached.about.some((a) => a.kind === 'property' && a.key === 'events.ad_type_of_event_data'));
+  assert.ok(attached.about.some((a) => a.kind === 'property' && a.source === 'events' && a.name === 'ad_type_of_event_data'));
 
   // { event } — the carrying event.
   const ev = await e.semantic_index({ event: 'ad_finished' });
@@ -91,17 +93,17 @@ test('a recorded finding surfaces through semantic_index (views + search) by its
 
   // { search } by the ALIAS the user used → resolves back to the finding (+ the real field).
   const s = await e.semantic_index({ search: 'ad format' });
-  assert.ok(s.memory_matches?.some((m) => m.id === rec.id && m.about.some((a) => a.key === 'events.ad_type_of_event_data')), 'alias search resurfaces the note pointing at the real field');
+  assert.ok(s.memory_matches?.some((m) => m.id === rec.id && m.about.some((a) => a.source === 'events' && a.name === 'ad_type_of_event_data')), 'alias search resurfaces the note pointing at the real field');
 
   // an UNlinked property carries no memory.
   const other = await e.semantic_index({ property: 'level_id_of_event_data' });
   assert.equal(other.memory, undefined, 'unrelated property has no memory');
 });
 
-// A "<model>.<column>" attribute finding surfaces on that attribute's view.
+// A { source, name } attribute finding surfaces on that attribute's view.
 test('memory linked to a users attribute surfaces on its property view', async () => {
   const e = engine();
-  const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2 on dim_users.', targets: ['users.country'] });
+  const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2 on dim_users.', targets: [{ source: 'users', name: 'country' }] });
   const attr = await e.semantic_index({ source: 'users', property: 'country' });
   assert.ok(attr.memory?.some((m) => m.id === rec.id), 'attribute view carries the note');
 });
@@ -110,7 +112,7 @@ test('memory linked to a users attribute surfaces on its property view', async (
 test('memory list / search / forget round-trip', async () => {
   const e = engine();
   const a = await e.memory({ action: 'record', note: 'finding A about ads', targets: ['ad_type_of_event_data'], aliases: ['ad format'] });
-  const b = await e.memory({ action: 'record', note: 'finding B about country', targets: ['users.country'] });
+  const b = await e.memory({ action: 'record', note: 'finding B about country', targets: [{ source: 'users', name: 'country' }] });
 
   const all = await e.memory({ action: 'list' });
   assert.equal(all.total, 2);
@@ -188,7 +190,7 @@ test('search finds a multi-word phrase from the note body (interleaved words)', 
 test('a failing embedder reports semantic:false + semantic_error (not a silent true)', async () => {
   const boom = { model: 'boom', embed: async () => { throw new Error('provider unreachable'); } };
   const e = engineWith(boom);
-  const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2', targets: ['users.country'], aliases: ['geo'] });
+  const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2', targets: [{ source: 'users', name: 'country' }], aliases: ['geo'] });
   const r = await e.memory({ action: 'search', query: 'geo' });
   assert.equal(r.semantic, false, 'embedding failed → semantic reported false');
   assert.ok(typeof r.semantic_error === 'string' && r.semantic_error.includes('provider unreachable'), 'the failure reason is surfaced');

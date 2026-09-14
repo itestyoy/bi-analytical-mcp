@@ -216,9 +216,9 @@ test('semantic_index({ model }) reports an owned relationship as owned, with a g
 
 // The qualified '<source>.<name>' form — the one the tool itself emits — resolves; a bare name
 // carried by several sources is reported, never guessed.
-test('memory targets: qualified names resolve, ambiguous bare names are refused', async () => {
+test('memory targets: { source, name } resolves, ambiguous bare names are refused', async () => {
   const e = engine();
-  const saved = await e.memory({ action: 'record', note: 'ad_finished fires once per completed impression', targets: ['events.ad_finished', 'crashlytics.anr_duration_of_event_data', 'users.country'] });
+  const saved = await e.memory({ action: 'record', note: 'ad_finished fires once per completed impression', targets: [{ source: 'events', name: 'ad_finished' }, { source: 'crashlytics', name: 'anr_duration_of_event_data' }, { source: 'users', name: 'country' }] });
   assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event', 'property', 'property'], JSON.stringify(saved.linked_to));
   assert.deepEqual(saved.unresolved_terms || [], []);
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });

@@ -86,59 +86,59 @@ export class Engine {
   _memoryTargetCandidates() {
     const c = this.catalog;
     const out = [];
-    for (const k of c.modelKeys()) out.push({ kind: 'model', key: k, canon: `model:${k}` });
+    for (const k of c.modelKeys()) out.push(memoryTarget('model', k));
     for (const f of c.facts) {
-      for (const ev of c.eventNames(f)) out.push({ kind: 'event', key: `${f}.${ev}`, canon: `event:${f}.${ev}` });
-      for (const prop of c.eventProps(f)) out.push({ kind: 'property', key: `${f}.${prop}`, canon: `property:${f}.${prop}` });
+      for (const ev of c.eventNames(f)) out.push(memoryTarget('event', f, ev));
+      for (const prop of c.eventProps(f)) out.push(memoryTarget('property', f, prop));
     }
     for (const k of c.modelKeys()) {
-      for (const col of Object.keys(c.getModel(k).dimensions || {})) out.push({ kind: 'property', key: `${k}.${col}`, canon: `property:${k}.${col}` });
+      for (const col of Object.keys(c.getModel(k).dimensions || {})) out.push(memoryTarget('property', k, col));
     }
     return out;
   }
 
   /**
-   * Resolve a memory TARGET string to a canonical, typed key so a saved finding links to a
-   * real semantic_index view. EXACT match first ('<model>.<column>' / model / event / event-
-   * property); if none, a FUZZY match against the catalog entities catches a near-miss name
-   * (a slight typo/variant still links instead of silently degrading); only a genuinely
-   * unrecognised string is kept as a free `term` (still searchable).
+   * Resolve a memory TARGET to a canonical, typed key so a saved finding links to a real
+   * semantic_index view. `{ source, name }` names an attribute, payload property or event of that
+   * source exactly; `{ source }` alone names the model. A bare STRING is a model key, or a name
+   * attributed to the ONE source that declares it; if none matches exactly, a FUZZY match against
+   * the catalog entities catches a near-miss (a slight typo still links instead of silently
+   * degrading), and only a genuinely unrecognised string is kept as a free `term` (searchable).
    */
   _resolveMemoryTarget(t) {
     const c = this.catalog;
-    const s = String(t).trim();
-    const dot = s.indexOf('.');
-    if (dot > 0) {
-      // The qualified '<source>.<name>' form — the one this tool emits back in linked_to — names
-      // an attribute, an event or an event property of that source exactly.
-      const mk = s.slice(0, dot); const col = s.slice(dot + 1);
-      if (c.attributeKind(mk, col)) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
-      if (c.isFact(mk) && c.eventNames(mk).includes(col)) return { kind: 'event', key: `${mk}.${col}`, canon: `event:${mk}.${col}` };
+    if (t && typeof t === 'object') {
+      const source = String(t.source ?? '').trim(); const name = t.name == null ? null : String(t.name).trim();
+      if (!c.models[source]) throw new ToolError(`memory target: unknown source '${source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(source)}`, { stage: 'validate', field: 'targets' });
+      if (!name) return memoryTarget('model', source);
+      if (c.attributeKind(source, name)) return memoryTarget('property', source, name);
+      if (c.isFact(source) && c.eventNames(source).includes(name)) return memoryTarget('event', source, name);
+      throw new ToolError(`memory target: '${name}' is not a property, attribute or event of '${source}'. semantic_index({ model: '${source}' }) lists what it carries.`, { stage: 'validate', field: 'targets' });
     }
-    if (c.models[s]) return { kind: 'model', key: s, canon: `model:${s}` };
+    const s = String(t).trim();
+    if (c.models[s]) return memoryTarget('model', s);
     // A bare name is attributed to the source that declares it — when exactly one does. Two
     // sources carrying the same name is reported, never guessed (the rule every other resolver
     // here follows).
     const owners = [
-      ...c.facts.filter((f) => c.eventNames(f).includes(s)).map((f) => ({ kind: 'event', key: `${f}.${s}`, canon: `event:${f}.${s}` })),
-      ...c.ownersOf(s).map(({ source }) => ({ kind: 'property', key: `${source}.${s}`, canon: `property:${source}.${s}` })),
+      ...c.facts.filter((f) => c.eventNames(f).includes(s)).map((f) => memoryTarget('event', f, s)),
+      ...c.ownersOf(s).map(({ source }) => memoryTarget('property', source, s)),
     ];
     if (owners.length === 1) return owners[0];
-    if (owners.length > 1) throw new ToolError(`memory target '${s}' is ambiguous — it exists as ${owners.map((o) => `'${o.key}'`).join(', ')}. Qualify it as '<source>.<name>'.`, { stage: 'validate', field: 'targets' });
+    if (owners.length > 1) throw new ToolError(`memory target '${s}' is ambiguous — it exists as ${owners.map((o) => `'${o.key}'`).join(', ')}. Pass { source, name } to say which one.`, { stage: 'validate', field: 'targets' });
     // Fuzzy fallback: a near-miss entity name links to the real entity (marked fuzzy) rather
     // than becoming an orphan term. High threshold so only a confident match auto-links.
     const [best] = rankFuzzy(s, this._memoryTargetCandidates(), { fields: (x) => [x.key], threshold: 0.82, limit: 1 });
     if (best && best.item.key.toLowerCase() !== s.toLowerCase()) return { ...best.item, fuzzy: true, from: s };
-    return { kind: 'term', key: s, canon: `term:${s.toLowerCase()}` };
+    return { kind: 'term', key: s, canon: `term:${s.toLowerCase()}`, target: { term: s } };
   }
 
   /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
-  _memorySurfaceHint({ kind, key }) {
-    const [source, name] = String(key).split('.');
-    if (kind === 'property') return `semantic_index({ source: '${source}', property: '${name}' })`;
-    if (kind === 'event') return `semantic_index({ source: '${source}', event: '${name}' })`;
-    if (kind === 'model') return `semantic_index({ model: '${key}' })`;
-    return `semantic_index({ search: '${key}' })`; // term
+  _memorySurfaceHint({ kind, target }) {
+    if (kind === 'property') return `semantic_index({ source: '${target.source}', property: '${target.name}' })`;
+    if (kind === 'event') return `semantic_index({ source: '${target.source}', event: '${target.name}' })`;
+    if (kind === 'model') return `semantic_index({ model: '${target.source}' })`;
+    return `semantic_index({ search: '${target.term}' })`;
   }
 
   /** Compact notes linked to any of `canonKeys`, for attaching to a semantic_index view. */
@@ -150,7 +150,7 @@ export class Engine {
    * Attach saved findings to a semantic_index view COMPACTLY (token-lean): the `cap` most recent,
    * each note truncated. Always leaves an explicit drill so nothing is lost — memory({ action:
    * 'list', target }) returns EVERY linked finding in full. `drillTarget` is the singular target
-   * string that view is about (a property/attribute/event/model key).
+   * that view is about — { source, name } for a property/attribute/event, { source } for a model.
    */
   _attachMemory(out, canonKeys, drillTarget, { cap = 3 } = {}) {
     const all = this.memoryStore.forTargets(canonKeys);
@@ -162,7 +162,7 @@ export class Engine {
     if (hiddenCount > 0) out.memory_more = hiddenCount;
     if (hiddenCount > 0 || truncatedAny) {
       (out.next_actions ||= []).push({
-        call: `memory({ action: 'list', target: '${drillTarget}' })`,
+        call: `memory({ action: 'list', target: ${JSON.stringify(drillTarget)} })`,
         why: hiddenCount > 0
           ? `read all ${all.length} saved findings linked here IN FULL (only the ${shown.length} most recent are shown, truncated)`
           : `read the ${all.length} finding(s) above IN FULL (note text is truncated here)`,
@@ -197,8 +197,8 @@ export class Engine {
         id: entry.id,
         note: entry.note,
         ...(question ? { question } : {}),
-        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.key, ...(r.fuzzy ? { fuzzy_resolved_from: r.from } : {}), surfaces_in: this._memorySurfaceHint(r) })),
-        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.key) } : {}),
+        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.target, ...(r.fuzzy ? { fuzzy_resolved_from: r.from } : {}), surfaces_in: this._memorySurfaceHint(r) })),
+        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.target.term) } : {}),
         ...(resolved.some((r) => r.fuzzy) ? { fuzzy_links_note: 'Some targets were not exact and were fuzzy-matched to the closest catalog entity (see fuzzy_resolved_from) — pass the exact name if a match is wrong.' } : {}),
         aliases, links,
         next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
@@ -208,7 +208,7 @@ export class Engine {
     if (action === 'list') {
       if (input.target !== undefined) {
         const r = this._resolveMemoryTarget(input.target);
-        return { target: r.key, kind: r.kind, notes: this.memoryStore.forTargets([r.canon]).map(memoryView) };
+        return { target: r.target, kind: r.kind, notes: this.memoryStore.forTargets([r.canon]).map(memoryView) };
       }
       return { total: this.memoryStore.counts().notes, notes: this.memoryStore.all({ limit: input.limit ?? 50 }).map(memoryView) };
     }
@@ -523,7 +523,7 @@ export class Engine {
           { call: "semantic_index({ search: '<value>' })", why: 'find where a known attribute value occurs' },
         ];
       // Saved findings about this model (memory tool) — surface them where they belong (compact).
-      this._attachMemory(out, [`model:${k}`], k);
+      this._attachMemory(out, [`model:${k}`], { source: k });
       return out;
     }
 
@@ -577,7 +577,7 @@ export class Engine {
         next_actions: nextActions,
         recommendations: recommendations.slice(0, 4),
       };
-      this._attachMemory(eventOut, [`event:${fact}.${eventName}`, `event:${eventName}`], `${fact}.${eventName}`);
+      this._attachMemory(eventOut, [`event:${fact}.${eventName}`, `event:${eventName}`], { source: fact, name: eventName });
       return eventOut;
     }
 
@@ -615,7 +615,7 @@ export class Engine {
           indexing: this._indexHistory(mk, col, input.recent ?? 3),
           recommendations: recommendations.slice(0, 3),
         };
-        this._attachMemory(attrOut, [`property:${mk}.${col}`, `property:${col}`], `${mk}.${col}`);
+        this._attachMemory(attrOut, [`property:${mk}.${col}`, `property:${col}`], { source: mk, name: col });
         return attrOut;
       }
       const propFact = pSource; const propName = p;
@@ -710,7 +710,7 @@ export class Engine {
           if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ bundle: '<app>' }) or include_coverage:true.`];
         }
       }
-      this._attachMemory(out, [`property:${propFact}.${p}`, `property:${p}`], `${propFact}.${p}`);
+      this._attachMemory(out, [`property:${propFact}.${p}`, `property:${p}`], { source: propFact, name: p });
       return out;
     }
 
@@ -2702,8 +2702,31 @@ function clone(x) {
 }
 
 /**
+ * A memory target, resolved: `kind` (property | event | model | term), the public `target` the
+ * tool speaks — { source, name } for a property/attribute/event, { source } for a model, { term }
+ * for a free phrase — plus the stored canonical key "<kind>:<source>.<name>" and the flat `key`
+ * the fuzzy matcher scores.
+ */
+function memoryTarget(kind, source, name = null) {
+  const key = name == null ? source : `${source}.${name}`;
+  return { kind, key, canon: `${kind}:${key}`, target: name == null ? { source } : { source, name } };
+}
+
+/** The stored canonical key back to its public { kind, ...target } form. */
+function memoryTargetFromCanon(canon) {
+  const s = String(canon); const i = s.indexOf(':');
+  if (i <= 0) return { kind: 'term', term: s };
+  const kind = s.slice(0, i); const key = s.slice(i + 1);
+  if (kind === 'term') return { kind, term: key };
+  if (kind === 'model') return { kind, source: key };
+  const dot = key.indexOf('.');
+  return dot > 0 ? { kind, source: key.slice(0, dot), name: key.slice(dot + 1) } : { kind, name: key };
+}
+
+/**
  * Presentation shape for a stored memory note: decode the canonical "<kind>:<key>" targets
- * back into typed { kind, key } objects, expose the note/aliases/links, and stamp the time.
+ * back into their public { kind, source, name } form, expose the note/aliases/links, and stamp
+ * the time.
  */
 // Compact form of a saved finding for ATTACHING to a semantic_index view: id + a truncated note +
 // the date. The full text + question + about[] + aliases[] + links[] are fetched on demand via
@@ -2714,7 +2737,7 @@ function memoryCompact(e, maxLen = 220) {
   // Keep the semantically useful, usually-short parts inline (note/question/about); drop the long
   // search-metadata (aliases/links). The full untruncated note + aliases/links is one drill away
   // via memory({ action: 'list', target }).
-  const targets = (e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? { kind: t.slice(0, i), key: t.slice(i + 1) } : { kind: 'term', key: String(t) }; });
+  const targets = (e.targets || []).map(memoryTargetFromCanon);
   return {
     view: {
       id: e.id,
@@ -2728,7 +2751,7 @@ function memoryCompact(e, maxLen = 220) {
 }
 
 function memoryView(e) {
-  const targets = (e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? { kind: t.slice(0, i), key: t.slice(i + 1) } : { kind: 'term', key: String(t) }; });
+  const targets = (e.targets || []).map(memoryTargetFromCanon);
   return {
     id: e.id,
     note: e.note,

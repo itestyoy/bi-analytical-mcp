@@ -322,7 +322,7 @@ export function buildSchemas(catalog) {
   const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
   const buildModel = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; read the rows back with get_query_result. For REUSABLE named metrics you query many ways (group_by / time / filters), use create_semantic_model instead (the governed path).',
+    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. MATERIALIZE IS NOT THE END: the draft stays open and the table it built STANDS FOR the steps so far, so the steps you add next read THAT table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; read the rows back with get_query_result. For REUSABLE named metrics you query many ways (group_by / time / filters), use create_semantic_model instead (the governed path).',
     // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
     // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
     // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
@@ -338,7 +338,7 @@ export function buildSchemas(catalog) {
       { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'after']) } },
     ],
     properties: {
-      action: { enum: ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + source columns); add_step appends ONE stage and returns the columns available after it; add_steps appends SEVERAL stages at once (applied in order) and returns a per-step breakdown of how each changed the data — atomic (all-or-nothing); edit_step replaces step `index`; insert_step inserts a stage BEFORE `index`; delete_step removes step `index`; truncate keeps only steps 1..`after` (cheap "go back to step N"); fork branches a NEW draft from steps 1..`after` of this draft (or an already-materialized pipeline) WITHOUT touching the original — iterate variants without re-typing the shared prefix; preview shows steps + generated SQL; materialize builds the model; discard drops the draft. Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. PREFER add_step or SMALL add_steps chunks over one giant add_steps, so you see how each chunk changes the data.' },
+      action: { enum: ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + source columns); add_step appends ONE stage and returns the columns available after it; add_steps appends SEVERAL stages at once (applied in order) and returns a per-step breakdown of how each changed the data — atomic (all-or-nothing); edit_step replaces step `index`; insert_step inserts a stage BEFORE `index`; delete_step removes step `index`; truncate keeps only steps 1..`after` (cheap "go back to step N"); fork branches a NEW draft from steps 1..`after` of this draft (or an already-materialized pipeline) WITHOUT touching the original — iterate variants without re-typing the shared prefix; preview shows steps + the SQL that would actually run (from a materialized prefix when there is one); materialize builds the model AND keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft. Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. PREFER add_step or SMALL add_steps chunks over one giant add_steps, so you see how each chunk changes the data.' },
       draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for everything except start. For fork it may also be a context whose pipeline was already materialized.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
@@ -415,15 +415,17 @@ export function buildSchemas(catalog) {
     type: 'object', additionalProperties: false, required: ['action'],
     description: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, with cascade for dependent metrics).',
     allOf: [
-      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['context_id', 'semantic_model', 'cascade']) },
-      { if: { properties: { action: { enum: ['describe', 'drop', 'delete_model'] } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['semantic_model', 'cascade']) } },
-      { if: { properties: { action: { const: 'delete_semantic_model' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'] } },
+      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['context_id', 'semantic_model', 'cascade', 'force']) },
+      { if: { properties: { action: { enum: ['describe', 'delete_model'] } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['semantic_model', 'cascade', 'force']) } },
+      { if: { properties: { action: { const: 'drop' } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['semantic_model', 'cascade']) } },
+      { if: { properties: { action: { const: 'delete_semantic_model' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'], ...forbid(['force']) } },
     ],
     properties: {
       action: { enum: ['list', 'describe', 'drop', 'delete_model', 'delete_semantic_model'], description: 'list → all active contexts; describe → one context in depth; drop → tear down the whole context; delete_model → remove the native pipeline model only; delete_semantic_model → remove one model\'s task additions.' },
       context_id: { type: 'string', pattern: CTX, description: `${D.context_id} Required for every action except list.` },
       semantic_model: { type: 'string', enum: modelKeys, description: 'delete_semantic_model: which model\'s task additions to remove.' },
       cascade: { type: 'boolean', description: 'delete_semantic_model: also remove metrics that depend on the removed measures.' },
+      force: { type: 'boolean', description: 'drop: tear the context down even though another draft READS a table it built (a fork that inherited a materialized prefix). Those drafts then have to recompute that prefix from the source.' },
     },
   };
 
@@ -466,7 +468,11 @@ export function buildSchemas(catalog) {
     list_query_jobs: empty,
     update_semantic_model: update,
     delete_semantic_model: del,
-    drop_context: { ...ctxRef, description: 'Tear down an entire isolated context (delete its files + artifacts).' },
+    drop_context: {
+      ...ctxRef,
+      description: 'Tear down an entire isolated context (delete its files + artifacts).',
+      properties: { ...ctxRef.properties, force: { type: 'boolean', description: 'Drop even though another draft reads a table this context built.' } },
+    },
     describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
     list_contexts: empty,
     semantic_index: semanticIndexSchema(catalog),

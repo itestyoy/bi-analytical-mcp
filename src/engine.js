@@ -1272,11 +1272,109 @@ export class Engine {
     return { cols, phantom: phantom.map((c) => c.name) };
   }
 
+  // ---- CHECKPOINTS: a materialized prefix of the draft ---------------------------------------
+  // `materialize` no longer ends the draft: the table it built STANDS FOR the first `at` stages, so
+  // the steps added after it read that table instead of recomputing the prefix (an expensive
+  // aggregate, a python model). Several materializations chain into several checkpoints.
+  // The checkpoints live in the draft — the thing we own and edit — so invalidation is POSITIONAL
+  // and needs no hashing: editing step i retires every checkpoint whose baked prefix contains i.
+  // Freshness is not positional, so it rides on the value index's own run marker: a completed index
+  // scan (whatever it found) means the underlying data may have moved, and every checkpoint taken
+  // before it is retired.
+
+  /** The value index's current run marker — a checkpoint built under a different one is stale. */
+  _indexRunId() {
+    try { return this.valueIndex?.syncStatus?.({ recent: 1 })?.last_successful_run?.id ?? null; }
+    catch { return null; } // no index / unreadable status → nothing to compare against
+  }
+
+  /** null when the checkpoint is usable, { retire: why } when it never will be, { building } while its build runs. */
+  _checkpointState(cp) {
+    if (!this.ctxs.has(cp.owner)) return { retire: `the context that built ${cp.model} (${cp.owner}) is gone` };
+    if (!this.ctxs.hasPipelineModel(cp.owner, cp.model)) return { retire: `the model ${cp.model} no longer exists` };
+    if (cp.query_id) {
+      const job = this.jobs.get(cp.query_id);
+      if (!job) return { retire: `the build of ${cp.model} left no job record` };
+      if (job.status === 'error') return { retire: `the build of ${cp.model} failed` };
+      if (job.status !== 'ready') return { building: cp.query_id };
+    }
+    const run = this._indexRunId();
+    if ((cp.index_run_id ?? null) !== run) return { retire: `the value index was refreshed after ${cp.model} was built, so the source data may have moved` };
+    return null;
+  }
+
+  /**
+   * The last checkpoint of `list` that can still be read from, with the stale ones retired.
+   * A checkpoint whose build is still running carries valid COLUMNS (so the draft keeps growing),
+   * but nothing can read its table yet — forBuild refuses instead of silently recomputing.
+   */
+  _useCheckpoint(list = [], { forBuild = false } = {}) {
+    const retired = []; let checkpoint = null;
+    for (let i = list.length - 1; i >= 0 && !checkpoint; i -= 1) {
+      const st = this._checkpointState(list[i]);
+      if (st?.retire) { retired.push({ at: list[i].at, model: list[i].model, reason: st.retire }); continue; }
+      if (st?.building && forBuild) {
+        throw new ToolError(`steps 1..${list[i].at} are still being materialized as ${list[i].model} — poll get_query_result({ query_id: '${st.building}' }) and materialize again once it is ready`, { stage: 'validate', field: 'draft_id' });
+      }
+      checkpoint = list[i];
+    }
+    const gone = new Set(retired.map((r) => r.model));
+    return { checkpoint, retired, surviving: list.filter((cp) => !gone.has(cp.model)) };
+  }
+
+  /**
+   * How the draft renders RIGHT NOW: from the catalog source, or from the last live checkpoint.
+   * `dropFrom` retires the checkpoints an edit at that step invalidates BEFORE choosing (they are
+   * only written back to the draft once the edit validates). `stepOf` maps a position in the
+   * rendered stage list back to the draft's own step numbering, so an error still names the step
+   * the caller sees.
+   */
+  _renderPlan(draft, stages = draft.stages, { dropFrom = null, forBuild = false } = {}) {
+    const all = draft.checkpoints || [];
+    const dropped = dropFrom == null ? [] : all.filter((cp) => cp.at >= dropFrom);
+    const kept = dropped.length ? all.filter((cp) => !dropped.includes(cp)) : all;
+    const { checkpoint, retired, surviving } = this._useCheckpoint(kept, { forBuild });
+    if (checkpoint) this.ctxs.touch(checkpoint.owner); // a checkpoint in use keeps its owner alive
+    if (!checkpoint) {
+      const effective = this._draftEffectiveStages({ ...draft, stages });
+      const offset = effective.length - stages.length;
+      return { from: null, checkpoint: null, stages: effective, dropped, retired, checkpoints: surviving, stepOf: (i) => i - offset };
+    }
+    return {
+      from: { model: checkpoint.model, columns: checkpoint.columns },
+      checkpoint, stages: stages.slice(checkpoint.at), dropped, retired, checkpoints: surviving,
+      stepOf: (i) => checkpoint.at + i,
+    };
+  }
+
+  /**
+   * Whether a built relation still carries the SOURCE's own identifying columns (event name, time
+   * axis, payload). It decides nothing by itself — every stage validates the columns it reads —
+   * but it is what makes "can I still run a funnel on this?" answerable from the checkpoint alone.
+   */
+  _carriesSource(source, columns) {
+    const m = this.catalog.getModel(source);
+    const need = [m.event_name?.column, m.time?.column, m.event_data_column].filter(Boolean);
+    if (!need.length) return null;
+    const have = new Set(columns.map((c) => c.name));
+    return need.every((n) => have.has(n)) ? source : null;
+  }
+
+  /** Delete the files of checkpoints this context owns and nobody else reads (a fork may). */
+  _retireCheckpointFiles(ctx, checkpoints = []) {
+    for (const cp of checkpoints) {
+      if (cp.owner !== ctx.id) continue; // another context's model: not ours to remove
+      if ((ctx.state.checkpoint_consumers?.[cp.model] || []).some((id) => this.ctxs.has(id))) continue;
+      this.ctxs.removePipelineFiles(ctx.id, cp.model);
+    }
+  }
+
   /** Columns available after a draft's accumulated stages (source columns when empty),
    *  grounded to the physical relation (phantom catalog columns excluded). */
   _draftColumns(draft, physSet) {
     if (!draft.stages.length) return this._groundedDeclared(draft.source, physSet).cols;
-    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, this._draftEffectiveStages(draft), { physicalCols: physSet });
+    const plan = this._renderPlan(draft);
+    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, plan.stages, { physicalCols: physSet, from: plan.from });
     return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   }
 
@@ -1320,7 +1418,7 @@ export class Engine {
   async _draftStart(input) {
     const ctx = input.draft_id ? this._ctx(input.draft_id) : this.ctxs.create();
     const source = input.source;
-    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
+    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [], checkpoints: [], builds: 0 };
     this.ctxs.touch(ctx.id);
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
     // the catalog declares but the table lacks simply does not appear (a clean internal
@@ -1404,7 +1502,7 @@ export class Engine {
   async _draftEditStep(ctx, draft, index, stage, includeColumns = false) {
     const i = this._stepIndex(draft, index, 'edit_step');
     const next = draft.stages.slice(); next[i - 1] = stage;
-    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, action: 'edit_step', stepIndex: i });
+    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, action: 'edit_step', stepIndex: i, dropFrom: i });
   }
 
   /** Insert a step BEFORE position N (1-based; N = count+1 appends). */
@@ -1413,14 +1511,14 @@ export class Engine {
       throw new ToolError(`insert_step index=${index} out of range — use 1..${draft.stages.length + 1} (insert before that step; ${draft.stages.length + 1} appends)`, { stage: 'validate', field: 'index' });
     }
     const next = draft.stages.slice(); next.splice(index - 1, 0, stage);
-    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, action: 'insert_step', stepIndex: index });
+    return this._draftCommit(ctx, draft, next, { changedStage: stage, includeColumns, action: 'insert_step', stepIndex: index, dropFrom: index });
   }
 
   /** Delete step N (then revalidate the remaining downstream steps). */
   async _draftDeleteStep(ctx, draft, index, includeColumns = false) {
     const i = this._stepIndex(draft, index, 'delete_step');
     const next = draft.stages.slice(); next.splice(i - 1, 1);
-    return this._draftCommit(ctx, draft, next, { changedStage: null, includeColumns, action: 'delete_step', stepIndex: Math.min(i, next.length) });
+    return this._draftCommit(ctx, draft, next, { changedStage: null, includeColumns, action: 'delete_step', stepIndex: Math.min(i, next.length), dropFrom: i });
   }
 
   /** Drop every step after position N — the cheap "go back to step N" (after=0 empties the draft). */
@@ -1428,7 +1526,7 @@ export class Engine {
     if (!Number.isInteger(after) || after < 0 || after > draft.stages.length) {
       throw new ToolError(`truncate after=${after} out of range — the draft has ${draft.stages.length} step(s); use 0..${draft.stages.length}`, { stage: 'validate', field: 'after' });
     }
-    return this._draftCommit(ctx, draft, draft.stages.slice(0, after), { changedStage: null, includeColumns, action: 'truncate', stepIndex: after });
+    return this._draftCommit(ctx, draft, draft.stages.slice(0, after), { changedStage: null, includeColumns, action: 'truncate', stepIndex: after, dropFrom: after + 1 });
   }
 
   /**
@@ -1446,7 +1544,25 @@ export class Engine {
     const ctx = this.ctxs.create();
     const name = input.name || origin.name;
     // Deep-copy the kept stages so editing the fork can never mutate the source's stages.
-    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))) };
+    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), checkpoints: [], builds: 0 };
+    // A materialized prefix the fork KEEPS (at <= after) is inherited: the fork reads the SAME
+    // table, so branching a variant on top of an expensive prefix costs only the new steps. The
+    // owner's model definition is copied into this overlay so `{{ ref() }}` resolves here (a
+    // context is a copy of the BASE project, so it has none of its parent's generated models);
+    // nothing rebuilds it — every build selects its own models by name.
+    const inherited = [];
+    for (const cp of (origin.checkpoints || []).filter((c) => c.at <= after)) {
+      const owner = cp.owner;
+      if (!this.ctxs.has(owner) || !this.ctxs.hasPipelineModel(owner, cp.model)) continue; // gone → nothing to inherit
+      this.ctxs.copyPipelineFiles(owner, ctx.id, cp.model);
+      ctx.state.draft.checkpoints.push(JSON.parse(JSON.stringify(cp)));
+      // Reference count on the OWNER: dropping it would take the table this fork reads with it.
+      const ownerState = this.ctxs.get(owner).state;
+      const consumers = ((ownerState.checkpoint_consumers ||= {})[cp.model] ||= []);
+      if (!consumers.includes(ctx.id)) consumers.push(ctx.id);
+      this.ctxs.touch(owner);
+      inherited.push({ at: cp.at, model: cp.model, owner });
+    }
     this.ctxs.touch(ctx.id);
     const physSet = await this._physicalCols(ctx.state.draft.source);
     const cols = this._draftColumns(ctx.state.draft, physSet);
@@ -1454,9 +1570,11 @@ export class Engine {
       draft_id: ctx.id, action: 'fork', forked_from: input.draft_id, name, source: ctx.state.draft.source,
       materialized: ctx.state.draft.materialized, copied_steps: after, step_index: after,
       steps: this._draftSteps(ctx.state.draft), column_count: cols.length,
+      ...(inherited.length ? { inherited_checkpoints: inherited } : {}),
       next: 'Continue editing this NEW draft (add_step / edit_step / insert_step / delete_step / truncate); the original is untouched. Materialize when done.',
       recommendations: [
         `Forked ${after} of ${total} step(s) into a new draft ${ctx.id}; the source ${input.draft_id} is unchanged — branch variants freely.`,
+        ...(inherited.length ? [`Steps 1..${inherited[inherited.length - 1].at} are already materialized (${inherited[inherited.length - 1].model}, built in ${inherited[inherited.length - 1].owner}) and this fork READS that table: only the steps you add here are computed. Keep that context alive while this fork uses it — context({ action: 'drop' }) on it is refused unless forced.`] : []),
         `Materialize with build_native_model({ action: "materialize", draft_id: "${ctx.id}" }).`,
       ],
     };
@@ -1465,9 +1583,9 @@ export class Engine {
   }
 
   /** Index (1-based) of the first step in `stages` that fails to render — for a pinpointed error. */
-  _failingStepIndex(source, stages, physSet) {
+  _failingStepIndex(source, stages, physSet, from = null) {
     for (let i = 1; i <= stages.length; i += 1) {
-      try { renderPipeline(this.catalog, this.catalog.dialect, source, stages.slice(0, i), { physicalCols: physSet }); }
+      try { renderPipeline(this.catalog, this.catalog.dialect, source, stages.slice(0, i), { physicalCols: physSet, from }); }
       catch { return i; }
     }
     return null;
@@ -1481,22 +1599,23 @@ export class Engine {
    * `changedStage` (the added/edited stage; null for delete/truncate) drives the filter/scope/
    * funnel warnings.
    */
-  async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, includeSteps = false, action = 'add_step', stepIndex = null } = {}) {
+  async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, includeSteps = false, action = 'add_step', stepIndex = null, dropFrom = null } = {}) {
     const physSet = await this._physicalCols(draft.source);
     const before = this._draftColumns(draft, physSet); // columns BEFORE the change
-    // Validate what will actually be built: the draft's time_range becomes a leading where at
-    // materialize (as preview shows), so it counts here too — e.g. as the SQL stage a python stage needs.
-    const effective = this._draftEffectiveStages({ ...draft, stages: newStages });
-    const offset = effective.length - newStages.length;
+    // Validate what will actually be built: from the last live checkpoint when there is one (the
+    // steps it baked are a TABLE now, not stages to re-validate), else from the source with the
+    // draft's time_range as the leading where materialize will add. An edit at step i first
+    // retires the checkpoints that baked it — but only the draft's acceptance writes that back.
+    const plan = this._renderPlan(draft, newStages, { dropFrom });
     let rendered = null;
     try {
       // This render IS the validation and it returns the resulting columns, so the "after" state
       // below reads them from here instead of rendering the same stages a second time.
-      if (newStages.length) rendered = renderPipeline(this.catalog, this.catalog.dialect, draft.source, effective, { physicalCols: physSet });
+      if (newStages.length) rendered = renderPipeline(this.catalog, this.catalog.dialect, draft.source, plan.stages, { physicalCols: physSet, from: plan.from });
     } catch (e) {
       // Reject WITHOUT persisting; pinpoint which step broke so an edit in the middle is actionable.
-      const at = this._failingStepIndex(draft.source, effective, physSet);
-      const step = at != null ? at - offset : null;
+      const at = this._failingStepIndex(draft.source, plan.stages, physSet, plan.from);
+      const step = at != null ? plan.stepOf(at) : null;
       throw new ToolError(step ? `step ${step}: ${e.message}` : e.message, { stage: 'compile', field: 'stage' });
     }
     // Verify filter literals on the changed stage against the SOURCE's real values BEFORE persisting
@@ -1510,6 +1629,11 @@ export class Engine {
         .map((cd) => ({ at: this._valueKeyForColumn(draft.source, cd.column), op: cd.op, value: cd.value, where: `where ${cd.column}` })));
     }
     draft.stages = newStages;
+    // The edit is accepted: the checkpoints it invalidated (and any that went stale) go now, and
+    // the files of the ones nobody else reads go with them.
+    const retiredNow = [...plan.dropped.map((cp) => ({ at: cp.at, model: cp.model, reason: `step ${dropFrom} was ${action === 'delete_step' ? 'deleted' : action === 'insert_step' ? 'shifted by an insert' : action === 'truncate' ? 'truncated away' : 'edited'}` })), ...plan.retired];
+    draft.checkpoints = plan.checkpoints;
+    this._retireCheckpointFiles(ctx, plan.dropped);
     this.ctxs.touch(ctx.id);
     const after = rendered
       ? [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }))
@@ -1534,11 +1658,15 @@ export class Engine {
       // Always give the count; include the full list only when it is short or include_columns is set.
       columns_removed_count: removed.length,
       ...((includeColumns || removed.length <= 10) ? { columns_removed: removed } : {}),
+      ...(plan.checkpoint ? { from_checkpoint: { at: plan.checkpoint.at, model: plan.checkpoint.model, built_at: plan.checkpoint.built_at }, steps_recomputed: newStages.length - plan.checkpoint.at } : {}),
+      ...(retiredNow.length ? { checkpoints_dropped: retiredNow } : {}),
       next: action === 'add_step'
         ? 'add_step the next stage; or fix a prior step with edit_step/insert_step/delete_step/truncate; or materialize. Pass include_columns:true / preview for the full column list.'
         : 'Pipeline revalidated end-to-end after the edit. Continue editing, preview, or materialize (include_columns:true for the full list).',
       recommendations: [
         ...filterWarnings,
+        ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
+        ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
         ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
         ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
@@ -1766,14 +1894,25 @@ export class Engine {
     const physSet = await this._physicalCols(draft.source);
     const base = { draft_id: ctx.id, action: 'preview', name: draft.name, source: draft.source, materialized: draft.materialized, dialect, steps: this._draftSteps(draft) };
     if (!draft.stages.length) return { ...base, available_columns: this._groundedDeclared(draft.source, physSet).cols, note: 'No stages yet — add_step first.' };
-    const stages = this._draftEffectiveStages(draft);
+    // Preview what materialize would ACTUALLY build: from the last live checkpoint when there is
+    // one (the steps it baked are a table, not SQL to re-render), else the whole pipeline.
+    const plan = this._renderPlan(draft);
+    draft.checkpoints = plan.checkpoints;
+    const seq = (draft.builds || 0) + 1;
+    const modelName = `pipe_${draft.name}_${ctx.id}${seq > 1 ? `_c${seq}` : ''}`;
     // Render ONLY the active warehouse dialect, so every response is consistent with where
     // the pipeline actually runs (bigquery → `|>`, postgres → CTEs). Grounded to physical.
-    const modelName = `pipe_${draft.name}_${ctx.id}`;
-    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages, { physicalCols: physSet, modelName });
+    const rendered = renderPipeline(this.catalog, dialect, draft.source, plan.stages, { physicalCols: physSet, modelName, from: plan.from });
     const models = this._chainModels(rendered.chain, { name: draft.name, pipeline: { source: draft.source } });
     return {
       ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql,
+      ...(plan.checkpoint ? {
+        from_checkpoint: { at: plan.checkpoint.at, model: plan.checkpoint.model, built_at: plan.checkpoint.built_at },
+        steps_recomputed: plan.stages.length,
+        checkpoint_note: plan.stages.length
+          ? `Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}; the SQL above is only what runs on top of it (${plan.stages.length} step(s)).`
+          : `Every step is already materialized as ${plan.checkpoint.model} — add_step before materializing again (the SQL above would just copy that table).`,
+      } : {}),
       ...(models.length > 1 ? { models: models.map(({ yml, functions, bindings, ...m }) => m), note: `The pipeline builds as a chain of ${models.length} dbt models (each python stage is a model of its own, reading the previous one via dbt.ref); ${modelName} — the last — is the result.` } : {}),
     };
   }
@@ -1861,9 +2000,20 @@ export class Engine {
 
   async _draftMaterialize(ctx, draft) {
     if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
+    // Build only what is NOT already a table: with a live checkpoint the run starts from it and
+    // only the steps after it are rendered. Each build gets its own model name, so a rebuild never
+    // overwrites the very table it is reading (nor one a fork inherited).
+    const plan = this._renderPlan(draft, draft.stages, { forBuild: true });
+    draft.checkpoints = plan.checkpoints;
+    if (plan.checkpoint && !plan.stages.length) {
+      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_step first, or read the built table with get_query_result({ context_id: '${plan.checkpoint.owner}', table: '${plan.checkpoint.model}' })`, { stage: 'validate', field: 'draft_id' });
+    }
+    const seq = (draft.builds || 0) + 1;
     const result = await this._registerPipeline({
       name: draft.name, context_id: ctx.id, materialized: draft.materialized,
       pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
+      from_checkpoint: plan.checkpoint ? { at: plan.checkpoint.at, model: plan.checkpoint.model, columns: plan.checkpoint.columns } : null,
+      model_suffix: seq > 1 ? `_c${seq}` : '',
     });
     if (result && result.ok === false) return result; // build/run FAILED — keep the draft so it can be fixed & retried (no rebuild from scratch)
     // Funnel-completeness nudge: a one_per_match funnel with NO downstream completed filter
@@ -1872,9 +2022,37 @@ export class Engine {
     if (mrIdx >= 0 && !draft.stages.slice(mrIdx + 1).some((s) => s.stage === 'where' && (s.conditions || []).some((c) => c.column === 'completed')) && result && typeof result === 'object') {
       (result.warnings ||= []).push(`This funnel used rows:'one_per_match' with NO downstream filter on completed — the row count includes partial/abandoned chains (all starts), not only completed situations. Add a 'where completed = true' step before materialize if you meant completed funnels.`);
     }
-    // Snapshot the built pipeline so it can still be forked after the draft is cleared.
-    ctx.state.pipeline_origin = { name: draft.name, source: draft.source, materialized: draft.materialized, time_range: draft.time_range || null, stages: draft.stages.map((s) => JSON.parse(JSON.stringify(s))) };
-    delete ctx.state.draft; // materialized — clear the draft so the context holds only the built model
+    // The built table IS the first `stages.length` steps from now on: record the checkpoint and KEEP
+    // the draft open, so the next step reads that table instead of recomputing the prefix.
+    const physSet = await this._physicalCols(draft.source);
+    const columns = this._draftColumns(draft, physSet);
+    const checkpoint = {
+      at: draft.stages.length, model: result.model, owner: ctx.id, columns,
+      built_at: new Date().toISOString(), index_run_id: this._indexRunId(),
+      rows: result.row_count ?? null, carries_source: this._carriesSource(draft.source, columns),
+      ...(result.status === 'running' && result.query_id ? { query_id: result.query_id } : {}),
+    };
+    draft.builds = seq;
+    draft.checkpoints = [...draft.checkpoints.filter((cp) => cp.at < checkpoint.at), checkpoint];
+    // Snapshot the built pipeline (with its checkpoints) so it can still be forked after a discard.
+    ctx.state.pipeline_origin = { name: draft.name, source: draft.source, materialized: draft.materialized, time_range: draft.time_range || null, stages: draft.stages.map((s) => JSON.parse(JSON.stringify(s))), checkpoints: draft.checkpoints.map((cp) => JSON.parse(JSON.stringify(cp))) };
+    this.ctxs.touch(ctx.id);
+    if (result && typeof result === 'object') {
+      if (plan.checkpoint) {
+        result.from_checkpoint = { at: plan.checkpoint.at, model: plan.checkpoint.model, built_at: plan.checkpoint.built_at };
+        result.steps_recomputed = plan.stages.length;
+      }
+      result.checkpoint = { at: checkpoint.at, model: checkpoint.model, ...(checkpoint.carries_source ? { carries_source: checkpoint.carries_source } : {}) };
+      // A VIEW is not a computed prefix: reading it re-runs its SQL, so continuing on top of one
+      // saves nothing. Say it once, here, where the choice can still be changed.
+      if (result.materialized === 'view') {
+        (result.warnings ||= []).push(`${checkpoint.model} is a VIEW, so the steps you add next re-run its SQL instead of reading a computed prefix — nothing is saved. Start the draft with materialized:'table' when the point of materializing is to stop recomputing.`);
+      }
+      (result.assumptions ||= []).push(
+        `The draft ${ctx.id} stays open and steps 1..${checkpoint.at} are now the table ${checkpoint.model}: add_step continues ON TOP of it (that prefix is not recomputed), while editing a step at or before ${checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`
+        + (plan.checkpoint ? ` This build recomputed only ${plan.stages.length} step(s), reading ${plan.checkpoint.model} for the first ${plan.checkpoint.at}.` : ''),
+      );
+    }
     return result;
   }
 
@@ -1891,7 +2069,11 @@ export class Engine {
     // Timezone-aware via _timeRangeConditions (boundaries are wall-clock in tr.timezone).
     let stages = input.pipeline.stages;
     const tr = input.pipeline.time_range;
-    if (tr && (tr.start || tr.end)) {
+    // A materialized prefix (checkpoint): the first `at` stages ARE the relation we start from, so
+    // only the rest is rendered — and the window they were built under is already baked into it.
+    const from = input.from_checkpoint || null;
+    if (from) stages = stages.slice(from.at);
+    else if (tr && (tr.start || tr.end)) {
       if (!this.catalog.getModel(source).time?.column) throw new ToolError(`time_range given but source '${source}' has no time column`, { stage: 'validate', field: 'time_range' });
       const conditions = this._timeRangeConditions(source, tr);
       if (conditions) stages = [{ stage: 'where', conditions }, ...stages];
@@ -1909,7 +2091,7 @@ export class Engine {
     // phantom catalog column is rejected as "unknown column" here, not as a raw
     // warehouse error after the build.
     const physSet = await this._physicalCols(source);
-    const render = (modelName) => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet, modelName });
+    const render = (modelName) => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet, modelName, from: from ? { model: from.model, columns: from.columns } : null });
     // A pipeline renders as a CHAIN of dbt models: SQL stages until a python stage, that stage as a
     // Python model reading the previous one (or the source), and so on; the last model carries
     // the pipeline's name and is the result. Every python stage's bodies pass the static gate
@@ -1943,7 +2125,9 @@ export class Engine {
     const probe = render('pipe');
     await this._gateCompiled(this._chainModels(probe.chain, input).filter((m) => m.kind === 'python'));
     const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
-    const modelName = `pipe_${input.name}_${ctx.id}`;
+    // Every build of the same draft gets its own name (`_c2`, `_c3`, …): a rebuild must never
+    // overwrite the table it reads as its checkpoint, nor one a fork inherited.
+    const modelName = `pipe_${input.name}_${ctx.id}${input.model_suffix || ''}`;
     const out = render(modelName);
     const models = this._chainModels(out.chain, input);
     const last = models[models.length - 1];
@@ -1952,7 +2136,9 @@ export class Engine {
     // model something else reads, is a table (a Python model reads a relation, a view would re-run
     // the SQL through the runtime).
     const materialized = last.kind === 'python' ? 'table' : (input.materialized || 'table');
-    const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
+    // The header records the WHOLE declaration; when this model only computes the tail, it also
+    // says which built relation the earlier steps are, so the file is readable on its own.
+    const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline, ...(from ? { continues: { model: from.model, after_step: from.at } } : {}) });
     // A rebuild under the same name must leave no stale model of the previous chain behind: dbt
     // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
     this.ctxs.removePipelineFiles(ctx.id, modelName);
@@ -2093,7 +2279,7 @@ export class Engine {
     switch (input.action) {
       case 'list': return this.list_contexts();
       case 'describe': return this.describe_context({ context_id: input.context_id });
-      case 'drop': return this.drop_context({ context_id: input.context_id });
+      case 'drop': return this.drop_context({ context_id: input.context_id, ...(input.force ? { force: true } : {}) });
       case 'delete_model': return this.delete_native_model({ context_id: input.context_id });
       case 'delete_semantic_model': return this.delete_semantic_model({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });
       default: throw new ToolError(`unknown context action '${input.action}'`, { stage: 'validate', field: 'action' });
@@ -2106,13 +2292,22 @@ export class Engine {
     const ctx = this._ctx(input.context_id);
     if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native (pipeline) model registered in this context' };
     const model = ctx.state.model;
-    // a pipeline is a CHAIN of files (.sql / .py / .yml, plus `_sN` steps) — all of them go
-    const removedFiles = this.ctxs.removePipelineFiles(ctx.id, model);
+    // a pipeline is a CHAIN of files (.sql / .py / .yml, plus `_sN` steps) — all of them go, and so
+    // do the models of its earlier builds (`_cN`): the base name owns the whole family.
+    const consumers = this._checkpointConsumers(ctx.id); // forks reading a table built here
+    const removedFiles = this.ctxs.removePipelineFiles(ctx.id, model.replace(/_c\d+$/, ''));
     delete ctx.state.engine; delete ctx.state.model; delete ctx.state.native;
+    if (ctx.state.draft) { ctx.state.draft.checkpoints = []; ctx.state.draft.builds = 0; } // their tables are gone with the files
+    delete ctx.state.checkpoint_consumers;
+    for (const c of consumers) { // a fork that read one of these prefixes has to recompute it now
+      const st = this.ctxs.get(c.consumer).state;
+      if (st.draft) st.draft.checkpoints = (st.draft.checkpoints || []).filter((cp) => cp.model !== c.model);
+      this.ctxs.touch(c.consumer);
+    }
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (context({ action: 'drop' })) or the store cleans ephemeral objects" };
+    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (context({ action: 'drop' })) or the store cleans ephemeral objects" };
   }
 
   async create_semantic_model(input) {
@@ -2244,7 +2439,38 @@ export class Engine {
 
   drop_context(input) {
     this._validate('drop_context', input);
+    // A context whose materialized prefix another draft READS cannot just vanish: the fork's
+    // `{{ ref() }}` would resolve to a relation that no longer exists. Name the consumers and let
+    // the operator decide (drop them first, or force).
+    const consumers = this._checkpointConsumers(input.context_id);
+    if (consumers.length && !input.force) {
+      throw new ToolError(
+        `context ${input.context_id} cannot be dropped: ${consumers.map((c) => `draft ${c.consumer} reads ${c.model}`).join('; ')} — that table is built HERE, so dropping this context leaves them with an unresolvable model. `
+        + `Drop those drafts first, or pass force: true (they will then have to recompute that prefix from the source).`,
+        { stage: 'validate', field: 'context_id' },
+      );
+    }
+    for (const c of consumers) { // forced: the consumers' checkpoints are dead as of now
+      const st = this.ctxs.get(c.consumer).state;
+      if (st.draft) st.draft.checkpoints = (st.draft.checkpoints || []).filter((cp) => cp.model !== c.model);
+      this.ctxs.touch(c.consumer);
+    }
     return this.ctxs.drop(input.context_id);
+  }
+
+  /** Drafts in OTHER contexts that read a table this context materialized. */
+  _checkpointConsumers(id) {
+    if (!this.ctxs.has(id)) return [];
+    const map = this.ctxs.get(id).state.checkpoint_consumers || {};
+    const out = [];
+    for (const [model, ids] of Object.entries(map)) {
+      for (const consumer of ids) {
+        if (consumer === id || !this.ctxs.has(consumer)) continue;
+        const draft = this.ctxs.get(consumer).state.draft;
+        if ((draft?.checkpoints || []).some((cp) => cp.model === model)) out.push({ consumer, model });
+      }
+    }
+    return out;
   }
 
   list_contexts() {
@@ -2421,12 +2647,22 @@ export class Engine {
           columns = declared.length ? declared : cols.columns.map((col) => col.name);
         }
       }
+      const draft = ctx.state.draft;
       return {
         context_id: ctx.id,
         engine: 'pipeline',
         tasks: ctx.state.tasks || [],
         models: [{ model: n.model, materialized: n.materialized, columns }],
         columns,
+        // A draft that already materialized something is still OPEN: say which steps are a table
+        // already, so continuing it is an informed choice rather than a rediscovery.
+        ...(draft ? {
+          draft: {
+            name: draft.name, source: draft.source, steps: this._draftSteps(draft),
+            checkpoints: (draft.checkpoints || []).map((cp) => ({ at: cp.at, model: cp.model, owner: cp.owner, built_at: cp.built_at, ...(cp.carries_source ? { carries_source: cp.carries_source } : {}) })),
+          },
+        } : {}),
+        ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { checkpoint_consumers: ctx.state.checkpoint_consumers } : {}),
         read_with: 'get_query_result',
         files: this.ctxs.generatedFiles(ctx.id),
       };

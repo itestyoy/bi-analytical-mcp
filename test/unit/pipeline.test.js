@@ -56,7 +56,7 @@ test('user attribute is rejected on the fact directly, accepted via a users-join
 
 test('pivot rejects an unsafe value (non-identifier)', () => {
   assert.throws(() => renderPipeline(catalog, 'postgres', 'events', [
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
     { stage: 'join', with: 'users', on: 'appsflyer_id', attrs: ['country'] },
     { stage: 'pivot', group_by: [], on: 'country', fn: 'sum', value_column: 'price', values: ["US'); drop"] },
   ]));
@@ -64,7 +64,7 @@ test('pivot rejects an unsafe value (non-identifier)', () => {
 
 test('percentile requires q in (0,1); compute validates operands', () => {
   assert.throws(() => renderPipeline(catalog, 'postgres', 'events', [
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'p', fn: 'percentile', column: 'price' }] },
   ]), /percentile requires q/);
   assert.throws(() => renderPipeline(catalog, 'postgres', 'events', [
@@ -74,7 +74,7 @@ test('percentile requires q in (0,1); compute validates operands', () => {
 
 test('date_diff / stat functions render on both dialects', () => {
   const stages = [
-    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd', type: 'numeric' },
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
     { stage: 'compute', name: 'age', op: 'date_diff', from: { column: 'device_time' }, to: { now: true }, unit: 'day' },
     { stage: 'aggregate', group_by: [], measures: [{ name: 'm', fn: 'median', column: 'price' }] },
   ];

@@ -35,6 +35,22 @@ const TIME_SPINE_YML = `models:
         granularity: day
 `;
 
+/** The files ONE pipeline model is: `<model>.sql|.py|.yml` and its chain steps `<model>_sN.*`. */
+function pipelineModelMatcher(model) {
+  const re = new RegExp(`^${model}(_s\\d+)?\\.(sql|py|yml)$`);
+  return (f) => re.test(f);
+}
+
+/**
+ * The files of a pipeline NAME — that model plus the models of its later builds, `<model>_cN(_sM).*`:
+ * a pipeline continued on top of a materialized prefix builds under a fresh `_cN` name so it never
+ * overwrites the table it reads, and a rebuild of the name must leave none of them orphaned.
+ */
+function pipelineFamilyMatcher(model) {
+  const re = new RegExp(`^${model}(_c\\d+)?(_s\\d+)?\\.(sql|py|yml)$`);
+  return (f) => re.test(f);
+}
+
 export function newContextId() {
   return randomBytes(6).toString('hex'); // 12 hex chars
 }
@@ -277,8 +293,37 @@ export class ContextManager {
    * this model", used by both the rebuild and the delete.
    */
   removePipelineFiles(id, model) {
-    const chain = new RegExp(`^${model}_s\\d+\\.(sql|py|yml)$`);
-    return this.removeGeneratedWhere(id, (f) => f === `${model}.sql` || f === `${model}.py` || f === `${model}.yml` || chain.test(f));
+    return this.removeGeneratedWhere(id, pipelineFamilyMatcher(model));
+  }
+
+  /** The generated files of ONE pipeline model (its chain included), by name. */
+  pipelineFiles(id, model) {
+    const d = this.generatedDir(id);
+    if (!existsSync(d)) return [];
+    return readdirSync(d).filter(pipelineModelMatcher(model));
+  }
+
+  /** True when a pipeline model's definition is still in this overlay (its table may exist). */
+  hasPipelineModel(id, model) {
+    const d = this.generatedDir(id);
+    return existsSync(join(d, `${model}.sql`)) || existsSync(join(d, `${model}.py`));
+  }
+
+  /**
+   * Copy one pipeline model's files (chain included) from one context overlay into another.
+   * A context is a copy of the BASE project, so a fork does not otherwise have the models its
+   * parent generated — and `{{ ref('<parent model>') }}` would not resolve there. Copying the
+   * definition makes dbt resolve the ref to the SAME physical relation (contexts differ by project
+   * dir, not by schema, and the model name carries its owner's context id, so there is no
+   * collision). Nothing rebuilds it: every build here selects its own models by name.
+   */
+  copyPipelineFiles(fromId, toId, model) {
+    const src = this.generatedDir(fromId);
+    const dst = this.generatedDir(toId);
+    mkdirSync(dst, { recursive: true });
+    const files = this.pipelineFiles(fromId, model);
+    for (const f of files) cpSync(join(src, f), join(dst, f));
+    return files;
   }
 
   /** Remove a generated file (model or yaml) from the context overlay. */

@@ -118,6 +118,35 @@ export function buildPrefilter(catalog, spec, dialect, source) {
   return clauses.join(' AND ');
 }
 
+/**
+ * The SOURCE columns a funnel reads — the event name, the ordering axis, and the physical column
+ * behind every property a step or the prefilter tests — must still be AVAILABLE where the stage
+ * stands. After a stage that changed the grain (an aggregate, a pivot), or on top of a materialized
+ * prefix built from one, the rows are no longer that source's events: there is no sequence to
+ * search, and the pattern would reference columns the relation does not have. Refused here, naming
+ * what dropped out, instead of as a warehouse error after the build.
+ */
+function requireSourceColumns(catalog, spec, source, availableCols) {
+  if (!availableCols) return; // standalone resolve (no pipeline column set to check against)
+  const m = catalog.getModel(source);
+  const need = new Map(); // physical column -> what reads it
+  const want = (col, why) => { if (col && !need.has(col)) need.set(col, why); };
+  want(m.event_name?.column, 'the event name');
+  want(spec.order_by || m.time?.column, 'the sequence order');
+  const tested = [...(spec.filter?.where || []), ...(spec.steps || []).flatMap((st) => st.where || [])];
+  for (const c of tested) {
+    if (availableCols.has(c.property)) continue; // already a real column here (upstream stage / prepare)
+    if ((m.properties || {})[c.property]) want(catalog.propertyBackingColumn(source, c.property), `property '${c.property}'`);
+  }
+  const missing = [...need].filter(([col]) => !availableCols.has(col));
+  if (!missing.length) return;
+  throw new Error(
+    `match_recognize reads ${missing.map(([col, why]) => `${why} ('${col}')`).join(', ')} of '${source}', not available at this stage `
+    + `(available: ${[...availableCols.keys()].join(', ')}) — these rows are no longer that source's events, so there is no sequence to search. `
+    + `Put the funnel BEFORE the stage that dropped them (a funnel over a materialized prefix works only while that prefix still carries the event columns).`,
+  );
+}
+
 function resolve(catalog, spec, dialect, availableCols = null, source) {
   if (!spec || !Array.isArray(spec.steps) || spec.steps.length < 2) {
     throw new Error('sequence requires at least 2 ordered steps');
@@ -161,6 +190,7 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
     partCols = [entityCol(ent, 'partition_by (default)')];
   }
   if (availableCols) for (const c of partCols) if (!availableCols.has(c)) throw new Error(`partition_by column '${c}' is not available at the match_recognize stage`);
+  requireSourceColumns(catalog, spec, source, availableCols);
   // Order key (the sequence axis): caller may override; defaults to the event time.
   const timeCol = spec.order_by || m.time.column;
   const mode = spec.mode || 'ordered';

@@ -1137,9 +1137,21 @@ export class Catalog {
     fact = this._fact(fact);
     const spec = (this.models[fact].properties || {})[name];
     if (!spec) throw new Error(`unknown event property '${name}' on '${fact}'`);
-    const q = (col) => (qualifier ? `${qualifier}.${col}` : col);
-    if (spec.column) return q(spec.column);
-    return jsonExtractSql(dialect, q(this.eventDataColumn(fact)), name, type || spec.type);
+    const col = this.propertyBackingColumn(fact, name); // the ONE rule for which column this reads
+    const q = qualifier ? `${qualifier}.${col}` : col;
+    return spec.column ? q : jsonExtractSql(dialect, q, name, type || spec.type);
+  }
+
+  /**
+   * The PHYSICAL column a property is read from: its own flattened column, or the source's payload
+   * blob. Whoever reads a property needs that column to still be there, so the same rule that
+   * builds the expression also answers "which column does this depend on".
+   */
+  propertyBackingColumn(fact, name) {
+    fact = this._fact(fact);
+    const spec = (this.models[fact].properties || {})[name];
+    if (!spec) throw new Error(`unknown event property '${name}' on '${fact}'`);
+    return spec.column || this.eventDataColumn(fact);
   }
 
   /**

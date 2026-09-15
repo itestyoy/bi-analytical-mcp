@@ -174,6 +174,41 @@ aggregate/pivot/unpivot/sample/window/order_by/limit/project, optionally ending 
 `match_recognize`). A `pipeline` is materialized as a dbt model whose rows ARE the
 result (returned directly, and re-readable/sliceable via `get_query_result`).
 
+### 6.1 Continuing a pipeline on top of what it already built (checkpoints)
+
+`materialize` does not end the incremental builder's draft. The table it built
+STANDS FOR the steps taken so far, and the draft records that as a **checkpoint**
+(`{ at, model, owner, columns, built_at, index_run_id }`). The steps added next are
+rendered from `{{ ref(<checkpoint model>) }}` with the checkpoint's columns as their
+starting set — the same cut `renderPipeline` already makes at a python stage, for a
+second reason. An expensive prefix (a per-player aggregate, a python model with a
+clustering) is therefore paid for once, and several materializations chain into
+several checkpoints.
+
+Because the draft owns the edit sequence, invalidation is **positional** and needs
+no hashing: `edit_step(i)` / `insert_step(i)` / `delete_step(i)` retire every
+checkpoint with `at >= i`, `truncate(after)` those with `at > after`, and appending
+retires none. Freshness is not positional, so it rides on the value index's own run
+marker: a completed index scan (whatever it found) means the source data may have
+moved, and every checkpoint taken before it is retired. Each build takes its own
+model name (`_c2`, `_c3`, …) so a rebuild never overwrites the table it reads.
+
+What may FOLLOW a checkpoint is decided by the columns that survived into it, by the
+same rule every stage already obeys: a funnel needs the source's event-name and time
+columns, a payload read needs the flattened column or the blob. After a checkpoint
+built from an aggregate they are gone and such a stage is refused, naming what
+dropped out; after one that only filtered/joined events they are intact and the
+funnel runs over the materialized slice. The checkpoint records `carries_source` so
+that question is answerable from it alone.
+
+`fork` inherits the checkpoints it keeps (`at <= after`) and copies their model
+definitions into the fork's overlay — a context is a copy of the BASE project, so
+`ref` would not otherwise resolve there; nothing is rebuilt, because every build
+selects its own models by name. Both contexts then read the SAME physical table (the
+model name carries its owner's context id, so there is no collision), which makes
+branching variants over an expensive prefix cheap — and makes dropping the owner a
+refusal that names the consumers, unless forced.
+
 ## 7. Migration path (from today's code)
 
 Already in place: the stage registry pattern (`src/prepare.js`), chained-CTE

@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { pyLiteral, importAllowlist, frameProfile, compilePythonStage } from '../../src/python-model.js';
+import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate } from '../../src/python-model.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 // The fixture catalog is loaded without a dbt profile here → no Python runtime → the stage would be
@@ -356,7 +356,10 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   assert.match(bq.ml, /bigframes\.ml\.cluster\.KMeans/);
   assert.match(bq.guide, /NEVER sklearn/);
   assert.match(bq.guide, /AVOID iterrows and df\.apply/);
-  assert.match(bq.guide, /partial ordering/);
+  // the guide names the FAILURE, not just the property: unordered head/tail raises, it does not
+  // quietly return an arbitrary slice
+  assert.match(bq.guide, /ordering_mode="partial"/);
+  assert.match(bq.guide, /OrderRequiredError/);
   const spark = frameProfile({ runtime: 'databricks' });
   assert.match(spark.ml, /pyspark\.ml/);
   assert.ok(!spark.guide.includes('bigframes'), 'no BigFrames rules on Spark');
@@ -423,4 +426,56 @@ test('a chain with several python stages is gated in one run, and errors name th
   const err = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, py, { stage: 'limit', n: 5 }, bad] } })).catch((x) => x);
   assert.ok(err instanceof Error);
   assert.match(err.message, /pipe_seg: tag line 1 .*'getattr' is not available here/, 'the model whose body was refused is named (here the chain\'s last, which carries the pipeline name)');
+});
+
+// ── TWO RUNTIME TRAPS OF THE WAREHOUSE'S PYTHON RUNTIME ────────────────────────────────────
+// Both were found by running models, and neither fails in parsing: they fail minutes later, in a
+// notebook runtime whose output the author never sees. So both are answered BEFORE submission.
+
+// (1) `dbt.source(...)[["col"]]` — a subscript directly on the call breaks dbt's own AST scan, the
+// dependency never reaches the manifest, and the notebook dies with KeyError: 'bi.player_installs'.
+// Here it cannot be written at all: a step body sees only its own names, so `dbt` and `session`
+// are not readable, and the ONE dbt.ref the model needs is written by the server on its own line.
+test('a step body cannot reach dbt or session at all (so no subscript-on-call can break the manifest)', async (t) => {
+  if (skipNoPy(t)) return;
+  const sub = await runAstGate(PY, [{ name: 'f', params: ['df'], body: 'x = dbt.source("bi","player_installs")[["col"]]\nreturn x' }]);
+  assert.equal(sub.ok, false);
+  assert.match(sub.errors[0].message, /'dbt' is not available here/);
+  const sess = await runAstGate(PY, [{ name: 'f', params: ['df'], body: 'return session.table("x")' }]);
+  assert.equal(sess.ok, false);
+  assert.match(sess.errors[0].message, /'session' is not available here/);
+});
+
+// (2) dbt's BigFrames wrapper runs with ordering_mode="partial", where head()/tail() on a frame
+// with no explicit order RAISE OrderRequiredError instead of returning an arbitrary slice.
+test('unordered head/tail is refused on a partial-ordering runtime, and accepted once sorted', async (t) => {
+  if (skipNoPy(t)) return;
+  const body = (code) => [{ name: 'f', params: ['df'], body: code }];
+  const opts = { requireOrderForRowSlice: true };
+
+  const bare = await runAstGate(PY, body('top = df.head(10)\nreturn top'), [], opts);
+  assert.equal(bare.ok, false);
+  assert.match(bare.errors[0].message, /OrderRequiredError.*ordering_mode/s);
+  assert.match(bare.errors[0].message, /sort first/);
+
+  const sorted = await runAstGate(PY, body('top = df.sort_values("revenue", ascending=False).head(10)\nreturn top'), [], opts);
+  assert.equal(sorted.ok, true, JSON.stringify(sorted.errors));
+  const tailSorted = await runAstGate(PY, body('t = df.sort_values("ts").tail(5)\nreturn t'), [], opts);
+  assert.equal(tailSorted.ok, true, JSON.stringify(tailSorted.errors));
+  // nlargest orders by itself, so it needs no separate sort
+  const nlargest = await runAstGate(PY, body('return df.nlargest(10, "revenue")'), [], opts);
+  assert.equal(nlargest.ok, true, JSON.stringify(nlargest.errors));
+
+  // on a runtime that does NOT partially order, the same body is fine
+  const elsewhere = await runAstGate(PY, body('top = df.head(10)\nreturn top'));
+  assert.equal(elsewhere.ok, true, JSON.stringify(elsewhere.errors));
+});
+
+// The flag is not a hand-set option: it comes from the runtime profile, so the rule follows the
+// warehouse the deployment actually submits to.
+test('only the BigFrames profile declares partial ordering', () => {
+  assert.equal(frameProfile({ runtime: 'bigquery', method: 'bigframes' }, {}).partialOrdering, true);
+  for (const rt of [{ runtime: 'bigquery', method: 'cluster' }, { runtime: 'snowflake' }, { runtime: 'duckdb' }, {}]) {
+    assert.ok(!frameProfile(rt, {}).partialOrdering, JSON.stringify(rt));
+  }
 });

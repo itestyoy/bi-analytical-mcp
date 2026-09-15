@@ -1800,7 +1800,12 @@ export class Engine {
   async _gateCompiled(units) {
     const functions = units.flatMap((u, i) => (u.functions || []).map((f) => ({ ...f, id: String(i), bindings: u.bindings || [] })));
     if (!functions.length) return;
-    const gate = await runAstGate(this.pythonBin, functions);
+    // Whether an unordered head()/tail() is fatal is a property of the RUNTIME (dbt's BigFrames
+    // wrapper runs with ordering_mode="partial" and raises OrderRequiredError there), so the
+    // profile decides and the gate enforces — the author hears it here, not from a traceback in
+    // the warehouse's notebook runtime.
+    const requireOrderForRowSlice = !!frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}).partialOrdering;
+    const gate = await runAstGate(this.pythonBin, functions, [], { requireOrderForRowSlice });
     if (gate.ok) return;
     const named = units.length > 1;
     const lines = gate.errors.map((e) => {

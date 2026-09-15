@@ -50,8 +50,13 @@ export function frameProfile(rt, config = {}) {
       native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API compiled to BigQuery SQL and executed in BigQuery (import bigframes.pandas as bpd for constructors)',
       pandas: 'df.to_pandas()',
       ml: 'bigframes.ml — the scikit-learn API run as BigQuery ML (model.fit trains in BigQuery, model.predict returns a BigFrames frame): bigframes.ml.cluster.KMeans; linear_model.LinearRegression / LogisticRegression; ensemble.XGBRegressor / XGBClassifier / RandomForestRegressor / RandomForestClassifier; decomposition.PCA; forecasting.ARIMAPlus; preprocessing.StandardScaler / MinMaxScaler / MaxAbsScaler / OneHotEncoder / LabelEncoder / KBinsDiscretizer; compose.ColumnTransformer; pipeline.Pipeline; model_selection.train_test_split / KFold / cross_validate; metrics',
-      guide: 'RULES FOR BIGFRAMES: (1) modelling = bigframes.ml (import { package: "bigframes", submodule: "ml.cluster", names: ["KMeans"] } etc.) — NEVER sklearn here: it needs df.to_pandas() and runs single-node in the notebook; (2) stay vectorized — column expressions, groupby/agg, merge, rolling/window, .str / .dt accessors, Series.map with a dict (a CASE in SQL); AVOID iterrows and df.apply / Series.map with a Python function: BigFrames runs no Python per row — a plain function is tried ONCE over the whole Series as a vectorized expression and otherwise fails at run time ("convert it to a BigFrames BigQuery function"); a bpd.remote_function / bpd.udf is the LAST resort for logic no column expression can say — it deploys a Cloud Run service at call time; (3) execution is deferred — nothing runs until the frame the model returns is materialized; df.cache() only for an expensive intermediate used twice (it stores a temporary BigQuery table you pay for); (4) never rely on row order (partial ordering may be on) — sort_values() explicitly where order matters; (5) df.to_pandas() pulls the whole table into the notebook runtime — only for a small, already-aggregated frame.',
+      guide: 'RULES FOR BIGFRAMES: (1) modelling = bigframes.ml (import { package: "bigframes", submodule: "ml.cluster", names: ["KMeans"] } etc.) — NEVER sklearn here: it needs df.to_pandas() and runs single-node in the notebook; (2) stay vectorized — column expressions, groupby/agg, merge, rolling/window, .str / .dt accessors, Series.map with a dict (a CASE in SQL); AVOID iterrows and df.apply / Series.map with a Python function: BigFrames runs no Python per row — a plain function is tried ONCE over the whole Series as a vectorized expression and otherwise fails at run time ("convert it to a BigFrames BigQuery function"); a bpd.remote_function / bpd.udf is the LAST resort for logic no column expression can say — it deploys a Cloud Run service at call time; (3) execution is deferred — nothing runs until the frame the model returns is materialized; df.cache() only for an expensive intermediate used twice (it stores a temporary BigQuery table you pay for); (4) the frame has NO inherent row order: dbt\'s wrapper runs with ordering_mode="partial", where head() / tail() on an unsorted frame RAISE OrderRequiredError at run time — always sort first (df.sort_values(<column>, ascending=False).head(n)), and never rely on row order anywhere else either; (5) df.to_pandas() pulls the whole table into the notebook runtime — only for a small, already-aggregated frame.',
       packagesNote: 'On BigFrames prefer bigframes (bigframes.ml) over sklearn / scipy / statsmodels: those run only after df.to_pandas(), single-node.',
+      // dbt's BigFrames wrapper sets ordering_mode="partial": a frame carries no row order, and
+      // head()/tail() on an unordered one RAISE rather than return an arbitrary slice. The static
+      // gate refuses that pairing for this runtime, so the author learns it here instead of from a
+      // traceback in the warehouse's notebook runtime.
+      partialOrdering: true,
       packages: ['bigframes'],
     };
   }
@@ -294,7 +299,7 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
  * other declared functions — so the gate can allowlist the names a body may read instead of
  * chasing an open-ended list of the ones it may not.
  */
-export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20000 } = {}) {
+export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20000, requireOrderForRowSlice = false } = {}) {
   return new Promise((resolve, reject) => {
     const proc = spawn(pythonBin, [GATE], { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = ''; let err = '';
@@ -307,7 +312,7 @@ export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20
       if (code !== 0 && !out) return reject(new Error(`ast gate failed (${pythonBin} exit ${code}): ${err.trim()}`));
       try { resolve(JSON.parse(out)); } catch { reject(new Error(`ast gate returned no JSON: ${(out || err).slice(0, 300)}`)); }
     });
-    proc.stdin.end(JSON.stringify({ functions, bindings: [...bindings] }));
+    proc.stdin.end(JSON.stringify({ functions, bindings: [...bindings], require_order_for_row_slice: !!requireOrderForRowSlice }));
   });
 }
 

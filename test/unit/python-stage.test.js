@@ -499,6 +499,61 @@ test('a dict lookup via map is refused on an index-less runtime; merge and set_i
   assert.equal(elsewhere.ok, true, JSON.stringify(elsewhere.errors));
 });
 
+// The rule refuses ONE shape, so everything else must stay legal — a gate that blocks working code
+// costs more than the traceback it prevents. These are the shapes that look related and are not.
+test('the index rule refuses nothing else: masks, groupby columns, builtin map, real pandas, projections', async (t) => {
+  if (skipNoPy(t)) return;
+  const opts = { requireIndexForAlign: true };
+  const legal = [
+    "mask = df['a'] > 1\nreturn df[mask]", // a mask from the SAME frame — the case we must not touch
+    "df['m'] = df.groupby('k')['v'].transform('mean')\nreturn df", // broadcasting groupby
+    "df['v'] = list(map(str, [1, 2]))\nreturn df", // the BUILTIN map is a call on a name, not a method
+    "pdf = df.to_pandas()\npdf['v'] = pdf['k'].map(d)\nreturn pdf", // left the lazy frame: real pandas
+    "df = df.reindex(columns=['a', 'b'])\nreturn df", // a projection, not index alignment
+    "cfg = {}\ncfg.update({'a': 1})\nreturn df",
+    "df['x'] = np.log(df['v'])\nreturn df",
+  ];
+  for (const body of legal) {
+    const r = await runAstGate(PY, [{ name: 'f', params: ['df', 'd'], body }], ['bpd', 'np'], opts);
+    assert.equal(r.ok, true, `${body} → ${JSON.stringify(r.errors)}`);
+  }
+  // and EVERY lookup is named, not just the first: each one needs its own merge
+  const two = await runAstGate(PY, [{ name: 'f', params: ['df', 'd', 'e'], body: "df['v'] = df['k'].map(d)\ndf['w'] = df['k'].map(e)\nreturn df" }], ['bpd'], opts);
+  assert.equal(two.ok, false);
+  assert.equal(two.errors.length, 2, JSON.stringify(two.errors));
+});
+
+// The flag reaches the gate from the RUNTIME, not from the call site: a declaration that would
+// raise NullIndexError on the deployment's warehouse is refused by the tool itself.
+test('a BigFrames deployment refuses the map lookup through the tool, naming function and line', async (t) => {
+  if (skipNoPy(t)) return;
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
+  const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
+  const e = new Engine({ catalog, contextManager: ctxs, pythonBin: PY });
+  const stage = {
+    stage: 'python',
+    imports: [{ package: 'bigframes', submodule: 'pandas', as: 'bpd' }],
+    functions: [{ name: 'lookup_size', params: ['df', 'sizes'], body: ["df['n'] = df['k'].map(sizes)", 'return df'] }],
+    steps: [{ call: 'lookup_size', args: { sizes: { a: 1 } } }],
+    output: { columns: ['k', 'revenue', 'n'] },
+  };
+  const stages = [
+    { stage: 'derive', name: 'k', op: 'extract', source: 'currency_of_event_data' },
+    { stage: 'aggregate', group_by: ['k'], measures: [{ name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] },
+    stage,
+  ];
+  await assert.rejects(
+    () => e.register_native_model({ name: 'seg', dry_run: true, pipeline: { source: 'events', stages } }),
+    (err) => {
+      assert.match(err.message, /lookup_size line 1/);
+      assert.match(err.message, /NullIndexError/);
+      return true;
+    },
+  );
+  assert.equal(ctxs.list().length, 0, 'a refused declaration leaves no context behind');
+});
+
 // The flag is not a hand-set option: it comes from the runtime profile, so the rule follows the
 // warehouse the deployment actually submits to.
 test('only the BigFrames profile declares partial ordering and a null index', () => {

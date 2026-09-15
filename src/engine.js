@@ -2,6 +2,7 @@
 // declarations, renders YAML, drives dbt/mf within isolated contexts.
 
 import { buildSchemas } from './schema.js';
+import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration } from './compile.js';
@@ -66,6 +67,18 @@ export class Engine {
     if (recipes) {
       const branch = (this.schemas.semantic_index?.oneOf || []).find((b) => b.properties?.recipe);
       if (branch) branch.properties.recipe = { type: 'string', enum: recipes.ids(), description: branch.properties.recipe.description };
+    }
+    // An empty vocabulary (a source with no events yet, a model with no groupable column) renders
+    // as `enum: []` / `oneOf: []`, which ajv refuses — and it refuses the WHOLE schema, so the
+    // server would not start and the message would point at a branch instead of at the catalog.
+    // schema-kit keeps those constructs from being built; this is the backstop that names the
+    // offender if one ever gets in another way.
+    for (const [tool, schema] of Object.entries(this.schemas)) {
+      const bad = assertSchemaSound(schema, `#/${tool}`);
+      if (bad.length) {
+        throw new Error(`the catalog produced an unusable tool schema (an empty vocabulary): ${bad.join('; ')}. `
+          + `A source with no known events, or a model with nothing groupable, must render as an open field — see src/schema-kit.js.`);
+      }
     }
     this.validators = makeValidators(this.schemas);
     this.ctxs = contextManager || new ContextManager({});
@@ -1939,9 +1952,12 @@ export class Engine {
    * one class name. Append what that class name means for THIS runtime, so the caller reads the fix
    * instead of a stack. Best-effort decoration: the original message is always kept intact.
    */
-  _pythonRunMessage(message) {
+  _pythonRunMessage(stdout, stderr) {
+    const message = formatDbtError(stdout, stderr);
     try {
-      const hints = pythonRunHints(frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}), message);
+      // Match the RAW output, not `message`: formatDbtError slices from the first dbt marker and
+      // truncates, and the runtime's traceback — where the class name is — can fall outside that.
+      const hints = pythonRunHints(frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}), `${stderr || ''}\n${stdout || ''}`);
       return hints.length ? `${message}\n\n${hints.join('\n')}` : message;
     } catch { return message; }
   }
@@ -2001,7 +2017,7 @@ export class Engine {
     const build = (async () => {
       try {
         result = await this.runner.run(dir, select);
-        if (!result.ok) this.jobs.fail(id, this._pythonRunMessage(formatDbtError(result.stdout, result.stderr)));
+        if (!result.ok) this.jobs.fail(id, this._pythonRunMessage(result.stdout, result.stderr));
         else this.jobs.ready(id);
       } catch (e) {
         result = { ok: false, stdout: '', stderr: e?.message || String(e) };
@@ -2218,7 +2234,7 @@ export class Engine {
         }
         r = bg.result;
       } else r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
-      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: hasPython ? this._pythonRunMessage(formatDbtError(r.stdout, r.stderr)) : formatDbtError(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
+      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: hasPython ? this._pythonRunMessage(r.stdout, r.stderr) : formatDbtError(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };

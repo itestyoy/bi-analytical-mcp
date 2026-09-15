@@ -51,7 +51,7 @@ export function frameProfile(rt, config = {}) {
       native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API compiled to BigQuery SQL and executed in BigQuery (import bigframes.pandas as bpd for constructors)',
       pandas: 'df.to_pandas()',
       ml: 'bigframes.ml — the scikit-learn API run as BigQuery ML (model.fit trains in BigQuery, model.predict returns a BigFrames frame): bigframes.ml.cluster.KMeans; linear_model.LinearRegression / LogisticRegression; ensemble.XGBRegressor / XGBClassifier / RandomForestRegressor / RandomForestClassifier; decomposition.PCA; forecasting.ARIMAPlus; preprocessing.StandardScaler / MinMaxScaler / MaxAbsScaler / OneHotEncoder / LabelEncoder / KBinsDiscretizer; compose.ColumnTransformer; pipeline.Pipeline; model_selection.train_test_split / KFold / cross_validate; metrics',
-      guide: 'RULES FOR BIGFRAMES: (1) modelling = bigframes.ml (import { package: "bigframes", submodule: "ml.cluster", names: ["KMeans"] } etc.) — NEVER sklearn here: it needs df.to_pandas() and runs single-node in the notebook; (2) stay vectorized — column expressions, groupby/agg, merge, rolling/window, .str / .dt accessors; AVOID iterrows and df.apply / Series.map: BigFrames runs no Python per row — a plain function is tried ONCE over the whole Series as a vectorized expression and otherwise fails at run time ("convert it to a BigFrames BigQuery function"); a bpd.remote_function / bpd.udf is the LAST resort for logic no column expression can say — it deploys a Cloud Run service at call time; (3) execution is deferred — nothing runs until the frame the model returns is materialized; df.cache() only for an expensive intermediate used twice (it stores a temporary BigQuery table you pay for); (4) the frame has NO inherent row order: dbt\'s wrapper runs with ordering_mode="partial", where head() / tail() on an unsorted frame RAISE OrderRequiredError at run time — always sort first (df.sort_values(<column>, ascending=False).head(n)), and never rely on row order anywhere else either; (5) the frame from dbt.ref() has NO INDEX AT ALL, so anything that has to ALIGN TWO OBJECTS raises NullIndexError ("Cannot implicitly align objects") at run time — and reset_index(drop=True) does NOT give it one. A lookup is a MERGE, never a map: lookup = bpd.DataFrame({"k": list(d.keys()), "v": list(d.values())}); df = df.merge(lookup, on="k", how="inner") — NOT df["v"] = df["k"].map(d). Likewise never filter a frame with a Series taken from ANOTHER frame (a groupby result, a second frame): merge it, or wrap the aligning step in df.set_index("k") ... reset_index(). Inside ONE frame everything is normal: filters, arithmetic, np.log(df[c]) and assigning a column computed from that same frame; (6) df.to_pandas() pulls the whole table into the notebook runtime — only for a small, already-aggregated frame.',
+      guide: 'RULES FOR BIGFRAMES: (1) modelling = bigframes.ml (import { package: "bigframes", submodule: "ml.cluster", names: ["KMeans"] } etc.) — NEVER sklearn here: it needs df.to_pandas() and runs single-node in the notebook; (2) stay vectorized — column expressions, groupby/agg, merge, rolling/window, .str / .dt accessors, np.where over columns of the SAME frame (a CASE in SQL); AVOID iterrows and df.apply / Series.map: BigFrames runs no Python per row — a plain function is tried ONCE over the whole Series as a vectorized expression and otherwise fails at run time ("convert it to a BigFrames BigQuery function"); a bpd.remote_function / bpd.udf is the LAST resort for logic no column expression can say — it deploys a Cloud Run service at call time; (3) execution is deferred — nothing runs until the frame the model returns is materialized; df.cache() only for an expensive intermediate used twice (it stores a temporary BigQuery table you pay for); (4) the frame has NO inherent row order: dbt\'s wrapper runs with ordering_mode="partial", where head() / tail() on an unsorted frame RAISE OrderRequiredError at run time — always sort first (df.sort_values(<column>, ascending=False).head(n)), and never rely on row order anywhere else either; (5) the frame from dbt.ref() has NO INDEX AT ALL, so anything that has to ALIGN TWO OBJECTS raises NullIndexError ("Cannot implicitly align objects") at run time — and reset_index(drop=True) does NOT give it one. A lookup is a MERGE, never a map (the gate refuses .map on this runtime): lookup = bpd.DataFrame({"k": list(d.keys()), "v": list(d.values())}); df = df.merge(lookup, on="k", how="inner") — NOT df["v"] = df["k"].map(d); a groupby aggregate goes back the same way (df.merge(agg, on="k")), never assigned as a column. Likewise never filter a frame with a Series taken from ANOTHER frame: merge it, or wrap the aligning step in df.set_index("k") ... reset_index(). Inside ONE frame everything is normal: filters, arithmetic, np.log(df[c]) and assigning a column computed from that same frame; (6) df.to_pandas() pulls the whole table into the notebook runtime — only for a small, already-aggregated frame.',
       packagesNote: 'On BigFrames prefer bigframes (bigframes.ml) over sklearn / scipy / statsmodels: those run only after df.to_pandas(), single-node.',
       // dbt's BigFrames wrapper sets ordering_mode="partial": a frame carries no row order, and
       // head()/tail() on an unordered one RAISE rather than return an arbitrary slice. The static
@@ -63,6 +63,13 @@ export function frameProfile(rt, config = {}) {
       // frame by another's Series) raises NullIndexError instead of aligning. The gate refuses the
       // unmistakable one; the rest is in `guide` and in the run-failure hints below.
       nullIndex: true,
+      // What a failed run of THIS runtime means, for the failures whose actionable part is one
+      // class name. Declared here so `pythonRunHints` stays a matcher with no runtime inside it.
+      runHints: [
+        { match: 'NullIndexError|Cannot implicitly align', hint: 'NullIndexError: the frame from dbt.ref() has NO INDEX on this runtime, so an operation that aligns two objects (Series.map with a dict, assigning a groupby aggregate as a column, filtering one frame by another frame\'s Series) cannot run — and reset_index(drop=True) does not give it one. Put the other side in a frame and MERGE it (df.merge(lookup, on=<key>, how="inner")), or wrap the aligning step in df.set_index(<key>) … reset_index().' },
+        { match: 'OrderRequiredError', hint: 'OrderRequiredError: this runtime carries no row order (ordering_mode="partial"), so head()/tail() need an explicit sort first — df.sort_values(<column>, ascending=False).head(n).' },
+        { match: 'convert it to a BigFrames BigQuery function|remote_function', hint: 'This runtime runs no Python per row: a plain function passed to apply/map is tried once as a vectorized expression and otherwise fails. Express it as column operations, or deploy a bpd.udf / bpd.remote_function deliberately.' },
+      ],
       packages: ['bigframes'],
     };
   }
@@ -312,24 +319,14 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
 
 /**
  * A failed dbt run of a PYTHON model comes back as the warehouse runtime's own traceback, in which
- * the actionable part is one class name. These turn that class name into the fix — the same rules
- * the stage description carries, repeated where the author actually meets them. Keyed off the
- * runtime's own properties (`nullIndex`, `partialOrdering`), never off a platform name, so a
- * runtime that does not have the property never gets its hint.
+ * the actionable part is one class name. This turns that class name into the fix — the same rules
+ * the stage description carries, repeated where the author actually meets them. The rules are the
+ * RUNTIME's (`profile.runHints`), so nothing here knows a platform: a runtime that declares none
+ * stays silent, and adding one is a profile entry, not a branch in this function.
  */
 export function pythonRunHints(profile, text) {
   const log = String(text || '');
-  const out = [];
-  if (profile?.nullIndex && /NullIndexError|Cannot implicitly align/i.test(log)) {
-    out.push('NullIndexError: the frame from dbt.ref() has NO INDEX on this runtime, so an operation that aligns two objects (Series.map with a dict, filtering one frame by another frame\'s Series) cannot run — and reset_index(drop=True) does not give it one. Put the lookup in a frame and merge it (df.merge(lookup, on=<key>, how="inner")), or wrap the aligning step in df.set_index(<key>) … reset_index().');
-  }
-  if (profile?.partialOrdering && /OrderRequiredError/i.test(log)) {
-    out.push('OrderRequiredError: this runtime carries no row order (ordering_mode="partial"), so head()/tail() need an explicit sort first — df.sort_values(<column>, ascending=False).head(n).');
-  }
-  if (/convert it to a BigFrames BigQuery function|remote_function/i.test(log) && profile?.key === 'bigframes') {
-    out.push('This runtime runs no Python per row: a plain function passed to apply/map is tried once as a vectorized expression and otherwise fails. Express it as column operations, or deploy a bpd.udf / bpd.remote_function deliberately.');
-  }
-  return out;
+  return (profile?.runHints || []).filter((h) => new RegExp(h.match, 'i').test(log)).map((h) => h.hint);
 }
 
 /**

@@ -56,6 +56,24 @@ ${EVENTS(USER_KEY)}  - name: dim_users
       - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
 `;
 
+// An events source with NO declared event vocabulary. `known_events` is optional (the vocabulary is
+// measured, not declared), so this is an ordinary first-day catalog — and every event_name field in
+// every tool would render as `enum: []`.
+const NO_EVENT_NAMES = `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp: { role: events, primary_entity: event }
+    columns:
+${USER_KEY}      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+  - name: dim_users
+    meta: { mcp: { role: users } }
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: country, data_type: string }
+`;
+
 test('every tool schema compiles for a catalog whose sources declare no relationship', () => {
   const { engine } = engineFor(NO_RELATIONSHIPS); // constructing the Engine IS the compile
   assert.ok(engine.schemas.build_native_model, 'the pipeline tool is still offered');
@@ -72,12 +90,24 @@ test('every tool schema compiles for a model with no groupable dimension', () =>
   assert.ok(branch.properties.measures, 'measures are unaffected');
 });
 
+test('every tool schema compiles for an events source with no declared event vocabulary', () => {
+  const { catalog, engine } = engineFor(NO_EVENT_NAMES); // constructing the Engine IS the compile
+  assert.deepEqual(catalog.eventNames('events'), [], 'nothing is declared yet');
+  // Every event_name field stays a field — an OPEN string, since there is no vocabulary to offer.
+  const measure = engine.schemas.create_semantic_model.properties.semantic_models.items.oneOf
+    .find((b) => b.properties?.from?.const === 'events').properties.measures.items.properties.event_name;
+  assert.equal(measure.items.type, 'string');
+  assert.equal(measure.items.enum, undefined, 'no vocabulary → no closed list, not an empty one');
+  // and the funnel stage, which builds its own step vocabulary, is offered too
+  assert.ok(engine.schemas.build_native_model.properties.stage, 'the pipeline tool is still offered');
+});
+
 // The backstop: whatever the catalog, no built schema may carry an empty enum/oneOf/anyOf/allOf.
 test('no shipped or degenerate catalog produces an empty enum or choice anywhere', () => {
   const shipped = ['config/catalog.yml', 'test/integration/fixtures/catalog.yml']
     .map((p) => fileURLToPath(new URL(`../../${p}`, import.meta.url)))
     .map((p) => loadCatalog(p, {}));
-  const degenerate = [NO_RELATIONSHIPS, NO_DIMENSIONS].map((y) => {
+  const degenerate = [NO_RELATIONSHIPS, NO_DIMENSIONS, NO_EVENT_NAMES].map((y) => {
     const f = join(mkdtempSync(join(tmpdir(), 'snd-')), 'catalog.yml');
     writeFileSync(f, y);
     return loadCatalog(f, {});

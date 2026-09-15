@@ -178,8 +178,9 @@ def _check(fn, default_bindings, require_order_for_row_slice=False, require_inde
         if not indexed:
             for node in ast.walk(fdef):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ALIGNING_METHODS:
+                    # every one of them, unlike the ordering rule: one sort_values fixes a whole
+                    # function, but each lookup needs its own merge
                     err(node, "'%s' aligns two objects, and the frame from dbt.ref() has NO INDEX on this runtime, so it raises NullIndexError at run time (reset_index(drop=True) does not give it one) — put the lookup in a frame and MERGE it: lookup = bpd.DataFrame({\"k\": list(d.keys()), \"v\": list(d.values())}); df = df.merge(lookup, on=\"k\", how=\"inner\"); or, if you really need alignment, wrap the step in df.set_index('<key>') ... reset_index()" % node.func.attr)
-                    break
 
     if not any(isinstance(n, ast.Return) and n.value is not None for n in ast.walk(fdef)):
         errors.append({"function": name, "id": fid, "line": 1, "text": body_lines[0].strip() if body_lines else "", "message": "a step function must `return` the frame it produced"})

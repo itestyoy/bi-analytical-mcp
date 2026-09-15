@@ -123,7 +123,7 @@ function genericMeasureItem(catalog) {
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
       cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
       label: { type: 'string', description: D.label },
-      event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNameEnum() }, description: D.event_name },
+      event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: D.event_name },
       where: { type: 'array', description: D.where_measure, items: genericWhereItem(catalog) },
     },
     allOf: [{ if: { properties: { agg: { const: 'percentile' } } }, then: { required: ['percentile'] } }],
@@ -157,7 +157,7 @@ function measureItemSchema(catalog, modelKey) {
       label: { type: 'string', description: D.label },
       ...(catalog.isFact(modelKey)
         ? {
-            event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames(modelKey) }, description: D.event_name },
+            event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNames(modelKey)), description: D.event_name },
             where: {
               type: 'array',
               description: D.where_measure,
@@ -185,7 +185,7 @@ function semanticModelBranch(catalog, modelKey) {
       additionalProperties: false,
       description: 'Default event filter applied to ALL measures in this semantic model (each measure can still narrow further via its own event_name). Use when the whole task concerns one event type.',
       properties: {
-        event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNames(modelKey) }, description: 'Events that scope every measure here.' },
+        event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNames(modelKey)), description: 'Events that scope every measure here.' },
       },
     };
   }

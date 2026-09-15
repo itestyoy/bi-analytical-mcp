@@ -204,7 +204,7 @@ function importLine(spec, i, allow) {
  * Returns { code, yml, packages, functions + bindings (for the gate), outputColumns, config }. Throws on a
  * structural problem (imports, names, arguments) — the static gate over the bodies is separate.
  */
-export function compilePythonStage(stage, { modelName, inputModel, allow, config = {}, pipeline = null, profile = frameProfile(null) }) {
+export function compilePythonStage(stage, { modelName, inputModel, allow, config = {}, pipeline = null, profile = frameProfile(null), submission = null }) {
   const importLines = [];
   const packages = new Set();
   const bound = new Set();
@@ -256,8 +256,19 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
   }
 
   // dbt.config takes literals only (the docs' contract): materialization + packages + the
-  // operator's runtime extras (submission method etc.) — never the caller's.
-  const cfg = { materialized: 'table', ...(packages.size ? { packages: [...packages].sort() } : {}), ...config };
+  // SUBMISSION this server resolved + the operator's runtime extras — never the caller's.
+  //
+  // The submission is written HERE because dbt decides it from its own config, not from what this
+  // server concluded: a profile that merely carries a method's settings (compute_region + a bucket,
+  // no submission_method) leaves dbt on its default submission, so the model ran somewhere else
+  // than every message said it would. Writing it down makes the two agree. The operator's
+  // MCP_PYTHON_MODEL_CONFIG still wins — it is spread last.
+  const cfg = {
+    materialized: 'table',
+    ...(packages.size ? { packages: [...packages].sort() } : {}),
+    ...(submission ? { submission_method: submission } : {}),
+    ...config,
+  };
   const cfgArgs = Object.entries(cfg).map(([k, v]) => `${k}=${pyLiteral(v)}`).join(', ');
   const header = yaml.dump({ pipeline: pipeline?.name || null, source: pipeline?.pipeline?.source || null, runtime: profile.key, python: { imports: stage.imports || [], steps, output: stage.output || null } }, { lineWidth: 100, noRefs: true, skipInvalid: true })
     .split('\n').filter(Boolean).map((l) => `#   ${l}`).join('\n');
@@ -413,7 +424,7 @@ registerStage('python', {
   build: ({ cols, catalog }, st) => {
     const rt = catalog?.pythonRuntime;
     const pr = frameProfile(rt, rt?.config || {});
-    compilePythonStage(st, { modelName: 'm', inputModel: 'm_in', allow: importAllowlist(rt || process.env, pr), config: rt?.config || {}, profile: pr });
+    compilePythonStage(st, { modelName: 'm', inputModel: 'm_in', allow: importAllowlist(rt || process.env, pr), config: rt?.config || {}, profile: pr, submission: rt?.method || null });
     return { op: { op: 'python', python: true, stage: st }, cols: pythonStageColumns(cols, st) };
   },
 });

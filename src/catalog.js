@@ -359,6 +359,39 @@ export function profileOutput(profilesDir, projectDir) {
   }
 }
 
+/**
+ * The python submission the PROJECT configures. `submission_method` is a MODEL config, not a
+ * profile setting — dbt's bigquery macro reads it with `config.get("submission_method",
+ * "serverless")` and nothing else. So the profile's compute_region / gcs_bucket say who may submit
+ * a job, never how: a project with those settings and no submission config runs on the DEFAULT
+ * submission, which is how a BigFrames-shaped model ended up as a Dataproc job (a Colab notebook
+ * holding PySpark code, or a 403 on dataproc.batches.create when that path is not granted).
+ *
+ * dbt_project.yml is therefore the authoritative place, and it nests: `models: <project>: <dir>:
+ * +submission_method`. The value is taken from anywhere in that tree — the deepest one wins, since
+ * a more specific path overrides a broader one in dbt, and this server writes the SAME value into
+ * every python model it generates.
+ */
+export function submissionFromProject(projectDir) {
+  if (!projectDir) return undefined;
+  try {
+    const pj = join(projectDir, 'dbt_project.yml');
+    if (!existsSync(pj)) return undefined;
+    const doc = yaml.load(readFileSync(pj, 'utf8')) || {};
+    let found;
+    const walk = (node) => {
+      if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+      if (typeof node['+submission_method'] === 'string') found = node['+submission_method'];
+      else if (typeof node.submission_method === 'string') found = node.submission_method;
+      for (const v of Object.values(node)) walk(v);
+    };
+    walk(doc.models);
+    return found;
+  } catch {
+    return undefined; // best-effort, like every other read of the operator's files
+  }
+}
+
 /** Read the adapter `type` from the dbt profile (the dialect dbt runs with). */
 function dialectFromProfile(profilesDir, projectDir) {
   const type = profileOutput(profilesDir, projectDir)?.type;
@@ -397,8 +430,22 @@ export function resolvePythonRuntime({ profilesDir, projectDir, env = process.en
   if (!out) return decided({ available: false, reason: 'no dbt profile found — dbt Python models need an adapter that runs them (BigQuery with a submission set up, Snowflake, Databricks, DuckDB)' });
   if (['duckdb', 'snowflake', 'databricks'].includes(type)) return decided({ available: true, runtime: type });
   if (type === 'bigquery') {
-    const method = out.submission_method || (out.dataproc_cluster_name ? 'cluster' : (out.dataproc_region ? 'serverless' : (out.compute_region ? 'bigframes' : null)));
-    if (method) return decided({ available: true, runtime: 'bigquery', method });
+    // Where the submission comes from, most authoritative first:
+    //   project  — dbt_project.yml `+submission_method`: a MODEL config, which is the only thing
+    //              dbt's macro actually reads (config.get("submission_method", "serverless"));
+    //   profile  — `submission_method` written in the profile output: not read by the macro, but
+    //              an unambiguous statement of intent by the operator;
+    //   inferred — only that method's SETTINGS are present (compute_region → bigframes,
+    //              dataproc_region → serverless, a cluster name → cluster). A guess.
+    // Whatever the source, the value is written into every generated model's dbt.config, so the
+    // frame API the code is written against and the runtime it lands on cannot disagree — that
+    // mismatch is what produced a Colab notebook full of PySpark, and a 403 on Dataproc.
+    const fromProject = submissionFromProject(projectDir);
+    const fromProfile = out.submission_method || null;
+    const inferred = out.dataproc_cluster_name ? 'cluster' : (out.dataproc_region ? 'serverless' : (out.compute_region ? 'bigframes' : null));
+    const method = fromProject || fromProfile || inferred;
+    const method_source = fromProject ? 'dbt_project.yml' : (fromProfile ? 'profile' : (inferred ? 'inferred from the profile\'s settings' : null));
+    if (method) return decided({ available: true, runtime: 'bigquery', method, method_source, method_declared: !!(fromProject || fromProfile) });
     return decided({ available: false, reason: 'the BigQuery profile has no Python submission set up: add submission_method (bigframes | serverless | cluster) with gcs_bucket and dataproc_region / compute_region to the profile output' });
   }
   return decided({ available: false, reason: `the '${type || 'unknown'}' adapter runs no dbt Python models` });

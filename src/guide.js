@@ -8,7 +8,7 @@
 // Built from the catalog (roles/event_semantics) + recipes (the per-task playbooks),
 // so it stays correct for ANY catalog without hardcoding names.
 
-export function buildGuide(catalog, recipes, { task } = {}) {
+export function buildGuide(catalog, recipes, { task, python = null } = {}) {
   const usersModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'users') || 'users';
   const experimentsModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'experiments') || 'experiments';
   // A catalog may carry SEVERAL events sources (e.g. analytics events + crash reports). They are
@@ -76,6 +76,12 @@ export function buildGuide(catalog, recipes, { task } = {}) {
   const tasks = {};
   if (recipes) for (const r of recipes.summary()) (tasks[r.task_type] ||= []).push({ id: r.id, title: r.title, when_to_use: r.when_to_use });
 
+  // A reserved family: 'python' is not a recipe family but the AUTHORING GUIDE for the warehouse
+  // runtime this deployment submits python models to — served here so the examples reach the model
+  // through the tools, on demand, instead of bloating every tool description.
+  if (task === 'python') {
+    return python || { task: 'python', note: 'This deployment runs no python models (no warehouse runtime for them), so there is no python authoring guide. The overview reports python_models.' };
+  }
   if (typeof task === 'string') {
     const list = tasks[task];
     return list
@@ -85,7 +91,7 @@ export function buildGuide(catalog, recipes, { task } = {}) {
 
   return {
     ...(multi ? { events_sources: { sources: facts, note: 'Independent, equal events sources: each owns its events, payload properties and indexed values. Name the source you mean (semantic_index({ source, event }), build_native_model({ source }), semantic_models[].from); within one, names are used as-is. A funnel runs over ONE source; metrics from different sources can still be compared over metric_time.' } } : {}),
-    note: 'The analyst procedure + routing for this server. Follow `workflow`; use `routing_triggers` (IF…DO) to pick the right tool; `tasks` lists ready-made recipes per family — fetch one with semantic_index({ recipe: id }). Narrow to one family with semantic_index({ guide: "<task_type>" }).',
+    note: `The analyst procedure + routing for this server. Follow \`workflow\`; use \`routing_triggers\` (IF…DO) to pick the right tool; \`tasks\` lists ready-made recipes per family — fetch one with semantic_index({ recipe: id }). Narrow to one family with semantic_index({ guide: "<task_type>" }).${python ? ' Writing a python stage? semantic_index({ guide: "python" }) is the authoring guide for this warehouse\'s python runtime — the constraints and a worked example per task.' : ''}`,
     workflow,
     routing_triggers,
     ...(Object.keys(sem).length ? { event_semantics: sem } : {}),

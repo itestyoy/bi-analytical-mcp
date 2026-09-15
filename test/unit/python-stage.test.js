@@ -487,3 +487,37 @@ test('a run failure explains the runtime behind the error class, without prescri
   assert.match(pythonRunHints(bq, 'OrderRequiredError: the frame is not ordered')[0], /no row order/);
   assert.deepEqual(pythonRunHints(bq, 'Database Error: syntax error at or near "selct"'), [], 'an ordinary SQL failure is left alone');
 });
+
+// The cookbook is served THROUGH the tools — semantic_index({ guide: 'python' }) — so the examples
+// reach the model on demand instead of bloating every tool description. It is per RUNTIME: the
+// deployment's own profile decides which one (or none).
+test('the python authoring guide is served for this deployment\'s runtime, with examples', async (t) => {
+  if (skipNoPy(t)) return;
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide-')) }), pythonBin: PY });
+
+  const g = await e.semantic_index({ guide: 'python' });
+  assert.equal(g.runtime, 'bigframes');
+  assert.ok(g.rules.length >= 5 && g.examples.length >= 10, 'constraints and a worked example per task');
+  // every example says what to do, and the ones that replace a trap say what it replaces and why
+  for (const ex of g.examples) {
+    assert.ok(ex.task && Array.isArray(ex.do) && ex.do.length, JSON.stringify(ex));
+    if (ex.avoid) assert.ok(ex.why, `${ex.task}: an 'avoid' without a 'why' teaches nothing`);
+  }
+  // the traps this runtime actually has are covered by an example, not only by prose
+  const text = JSON.stringify(g);
+  for (const needle of ['merge', 'peek', 'sort_values', 'groupby', 'cache()', 'bigframes.ml', 'sql_scalar', 'to_pandas']) {
+    assert.ok(text.includes(needle), `the guide covers ${needle}`);
+  }
+  // …and the stage description points at it rather than repeating it
+  assert.match(frameProfile(catalog.pythonRuntime, {}).guide, /semantic_index\(\{ guide: "python" \}\)/);
+
+  // a deployment that runs no python models says so instead of showing another runtime's guide
+  const plain = loadCatalog(CATALOG, {});
+  plain.pythonRuntime = { available: false, reason: 'no runtime' };
+  const e2 = new Engine({ catalog: plain, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide2-')) }) });
+  const none = await e2.semantic_index({ guide: 'python' });
+  assert.match(none.note, /runs no python models/);
+  assert.equal(none.examples, undefined);
+});

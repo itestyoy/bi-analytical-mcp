@@ -18,6 +18,7 @@ import { renderPipeline } from './pipeline.js';
 import { CatalogSearch } from './search.js';
 import { rankFuzzy } from './fuzzy.js';
 import { buildGuide } from './guide.js';
+import { pythonAuthoringGuide } from './python-guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { MemoryStore, targetKey, targetWords } from './memory.js';
@@ -480,7 +481,12 @@ export class Engine {
     // ── { guide }: the analyst procedure + routing (workflow, IF/DO triggers, per-task
     // recipes) — the generic skill knowledge served through the MCP, single-sourced. ──
     if (input.guide !== undefined && input.guide !== false) {
-      return buildGuide(this.catalog, this.recipes, { task: typeof input.guide === 'string' ? input.guide : undefined });
+      return buildGuide(this.catalog, this.recipes, {
+        task: typeof input.guide === 'string' ? input.guide : undefined,
+        // The python authoring guide is a property of the RUNTIME this deployment submits to, so it
+        // comes from the same profile the stage description and the compiled model come from.
+        python: this.catalog.pythonRuntime?.available ? pythonAuthoringGuide(frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig)) : null,
+      });
     }
 
     // ── { recipe }: one ready-made recipe by id (folded in from the old get_recipe tool) ──

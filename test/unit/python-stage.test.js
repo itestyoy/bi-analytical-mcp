@@ -358,7 +358,9 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   const bq = frameProfile({ runtime: 'bigquery', method: 'bigframes' });
   assert.match(bq.ml, /bigframes\.ml\.cluster\.KMeans/);
   assert.match(bq.guide, /NEVER sklearn/);
-  assert.match(bq.guide, /AVOID iterrows and df\.apply/);
+  assert.match(bq.guide, /stay in COLUMN EXPRESSIONS/);
+  assert.match(bq.guide, /apply\/map/);
+  assert.match(bq.guide, /THE RIGHT FORM PER TASK/, 'the right form for each task is in the description itself');
   // the guide names the FAILURE, not just the property: unordered head/tail raises, it does not
   // quietly return an arbitrary slice
   assert.match(bq.guide, /ordering_mode="partial"/);
@@ -520,4 +522,27 @@ test('the python authoring guide is served for this deployment\'s runtime, with 
   const none = await e2.semantic_index({ guide: 'python' });
   assert.match(none.note, /runs no python models/);
   assert.equal(none.examples, undefined);
+});
+
+// The rules must be IN the stage description — the agent sees it without fetching anything — and
+// they are rendered from the same data as the full guide, so the two cannot drift.
+test('the stage description itself carries the runtime rules and the right form per task', async (t) => {
+  if (skipNoPy(t)) return;
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pydesc-')) }), pythonBin: PY });
+  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
+
+  // every rule of the guide is represented in the description…
+  const guide = await e.semantic_index({ guide: 'python' });
+  for (const r of guide.rules) assert.ok(py.description.includes(r.short), `rule missing from the description: ${r.short.slice(0, 40)}…`);
+  // …and so is the right form for every task the guide has an example for
+  for (const ex of guide.examples) assert.ok(py.description.includes(ex.line), `form missing from the description: ${ex.line.slice(0, 40)}…`);
+  // the declaration form the caller actually writes is there too
+  assert.match(py.description, /you declare `imports`/);
+  assert.match(py.description, /submission_method="bigframes"/);
+  // the BODY description does not repeat it — one copy per tool surface
+  const body = py.properties.functions.items.properties.body.description;
+  assert.ok(!body.includes('THE RIGHT FORM PER TASK'), 'the rules live in one place');
+  assert.match(body, /RULES for this runtime — and the right form for each task — are on the stage description/);
 });

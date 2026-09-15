@@ -183,3 +183,33 @@ test('materialized paging: limit/offset + has_more reconstruct the full stored r
   assert.equal(collected.length, total);                   // pages cover every row exactly
   assert.equal(collected.reduce((s, x) => s + num(x.mon_revenue), 0), 85);
 });
+
+// A description is metadata, and metadata must not be able to change a number. It travels into the
+// generated model's config banner (a SQL comment), so the way to prove it is inert is to build the
+// SAME pipeline twice — once labelled, once not — and compare the ROWS, not the SQL text.
+test('a described pipeline builds and returns exactly the rows of the same pipeline unlabelled', opts, async (t) => {
+  if (skip(t)) return;
+  const stages = [
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }, { name: 'purchases', fn: 'count' }] },
+    { stage: 'order_by', keys: [{ key: 'player_id_of_internal', direction: 'asc' }] },
+  ];
+  const build = async (name, description) => {
+    const out = await engine.register_native_model({ name, ...(description ? { description } : {}), pipeline: { source: 'events', stages } });
+    assert.equal(out.build?.ok, true, JSON.stringify(out.error || out.build));
+    return out;
+  };
+
+  const plain = await build('descr_plain');
+  const labelled = await build('descr_labelled', 'revenue per payer — the weekly monetization readout');
+
+  const norm = (rows) => rows.map((r) => [String(r.player_id_of_internal), Number(r.revenue), Number(r.purchases)]);
+  assert.ok(labelled.rows.length > 0, 'the labelled build returned rows');
+  assert.deepEqual(norm(labelled.rows), norm(plain.rows), 'the label changed no value');
+  // …and the label is what the context now says this model is for
+  const described = await engine.context({ action: 'describe', context_id: labelled.context_id });
+  assert.equal(described.models?.[0]?.description, 'revenue per payer — the weekly monetization readout');
+  await engine.delete_native_model({ context_id: plain.context_id });
+  await engine.delete_native_model({ context_id: labelled.context_id });
+});

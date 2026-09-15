@@ -51,6 +51,11 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 - `CONFIG_DIR` — host path mounted read-only at `/config` for optional `recipes.json` (and a standalone `catalog.yml` if you set `CATALOG_PATH`).
 - `CATALOG_PATH` — optional; set to a standalone catalog file instead of project discovery.
 - `QUERY_TIMEOUT_SECONDS`, `CONTEXT_TTL_MS` — query/GC tuning.
+- `PYTHON_BUILD_GRACE_SECONDS` (default 5) — how long a build that includes a **Python** model is
+  allowed to hold the tool call before it hands back a `query_id` to poll. It is deliberately much
+  shorter than `QUERY_TIMEOUT_SECONDS`: a warehouse Python runtime cold-starts for minutes, and the
+  calling client's own timeout (which the server cannot raise) would expire first — the caller would
+  see "the server is not responding" while the build it started kept running.
 - `DBT_PG_HOST/PORT/USER/PASSWORD/DBNAME/SCHEMA` — warehouse connection, consumed by your `profiles.yml` via `env_var(...)`.
 
 Your `profiles.yml` should read the connection from env, e.g.:

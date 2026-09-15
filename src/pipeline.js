@@ -658,7 +658,14 @@ function addCol(cols, name, type) {
   return out;
 }
 function requireCol(cols, name) {
-  if (!cols.has(name)) throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
+  if (cols.has(name)) return;
+  // '*' is the GOVERNED path's spelling for "the rows themselves" (measures take field: '*').
+  // A stage counts rows by leaving `column` out entirely, so say that instead of listing every
+  // column and leaving the caller to guess what a SQL habit translates to here.
+  if (name === '*') {
+    throw new Error("pipeline: '*' is not a column — a stage counts ROWS by omitting `column` ({ name, fn: 'count' }); `field: '*'` is the governed path's spelling (create_semantic_model measures)");
+  }
+  throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
 }
 
 // Static type guard so a JSON/string column passed to an array op is rejected when the
@@ -749,7 +756,15 @@ function buildOps(catalog, d, baseColumns, stages, source) {
   const ops = [];
   for (const st of stages) {
     const def = STAGES[st.stage];
-    if (!def) throw new Error(`unknown pipeline stage: ${st.stage}`);
+    if (!def) {
+      // A stage object with NO `stage` at all is not a wrong stage type — it is a stage that never
+      // arrived. Say that, because the usual cause is on the way in (a large payload cut short by
+      // the client), and "unknown stage: undefined" sends the reader to the schema instead.
+      if (st?.stage === undefined) {
+        throw new Error(`the stage object has no \`stage\` field (got ${st === undefined ? 'nothing' : JSON.stringify(st).slice(0, 80)}) — nothing says which stage this is. If the payload was large, the call may have been truncated on the way in: send this stage on its own with add_step`);
+      }
+      throw new Error(`unknown pipeline stage: ${st.stage} (known: ${Object.keys(STAGES).join(', ')})`);
+    }
     if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
     const res = def.build({ d, catalog, cols, source }, st);
     ops.push(res.op);

@@ -11,10 +11,15 @@
 // It is DATA, one entry per runtime key (the frame profile's `key`), consumed generically by
 // src/guide.js: adding a runtime is a new entry here, never a branch in the guide builder.
 //
-// The BigFrames entry follows Google's own documentation for BigQuery DataFrames — the dbt
-// integration, partial ordering mode and its two named failure modes, the type system, the
-// bigframes.bigquery SQL functions and bigframes.ml. Every "do" form below is the form those pages
-// show; the "avoid" forms are the ones they call out as unsupported, non-deterministic or costly.
+// The BigFrames entry is checked against the LIBRARY, not against its prose. Written from the
+// documentation it was wrong in both directions — it told callers head(n) "returns different rows
+// between runs" (it raises), that nlargest "orders by itself" (it needs an ordering unless
+// keep='all'), that unique()/drop_duplicates() "do not work" (one does, the other has a keyword
+// that makes it work), and it handed them std(ddof=0), a parameter this library does not have. So
+// the facts now come from config/bigframes-facts.json, which scripts/bigframes-facts.py extracts
+// from bigframes itself (its `requires_index` / `requires_ordering` decorators, its signatures,
+// and the join/merge/ml paths with the place in the code that decides each), and
+// test/unit/bigframes-facts.test.js holds the text below to it.
 //
 // Shape of an entry:
 //   runs_where  — one sentence on what actually executes the code
@@ -22,6 +27,31 @@
 //   examples    — task → do / avoid, in the body form THIS server's python stage takes: the lines
 //                 of one declared function over `df`, the frame dbt.ref() returns
 //   dbt         — what the generated model carries, so the caller knows what it does NOT write
+
+import { readFileSync } from 'node:fs';
+import { assetPath } from './runtime-assets.js';
+
+// The extracted fact sheet (see the header). Absent → the guide renders without the method lists;
+// it never guesses them.
+function loadFacts() {
+  try {
+    const path = assetPath('bigframesFacts');
+    if (path) return JSON.parse(readFileSync(path, 'utf8'));
+  } catch { /* unreadable → treated as absent */ }
+  return null;
+}
+const FACTS = loadFacts();
+/** The methods of DataFrame+Series that need one thing or the other, public names only. */
+function needs(kind) {
+  const per = FACTS?.[kind] || {};
+  const names = [...new Set([...(per.DataFrame || []), ...(per.Series || [])])].filter((n) => !n.startsWith('_'));
+  return names.sort();
+}
+const NEEDS_ORDER = needs('requires_ordering');
+const NEEDS_INDEX = needs('requires_index');
+const BY_ARG = Object.entries(FACTS?.ordering_enforced_by_argument?.Series || {}).map(([name, why]) => `${name} (${why.join(', ')})`);
+const VERSION = FACTS?.version ? `bigframes ${FACTS.version}` : 'this runtime';
+const list = (xs, n = 99) => xs.slice(0, n).join(', ');
 
 const BIGFRAMES = {
   // The one paragraph that STAYS in the stage description when the worked recipes carry the forms:
@@ -32,14 +62,13 @@ const BIGFRAMES = {
   rules: [
     {
       rule: 'The frame has NO INDEX and NO ROW ORDER (dbt\'s wrapper runs with ordering_mode="partial").',
-      short: 'NO INDEX and NO ROW ORDER (ordering_mode="partial"): objects from different table expressions never combine implicitly (merge them), an op needing an index raises NullIndexError (set_index), one needing an order raises OrderRequiredError (sort_values/sort_index; groupby gives both by its keys), unique()/drop_duplicates() do not work, head(n) varies between runs, and reset_index(drop=True) creates NO index',
-      why: 'Partial ordering mode stops BigFrames from building a total order over all rows — that order is what makes filters unable to reduce the bytes scanned, so dropping it is what makes a query over a large partitioned table cheap. The price is that positional access and index alignment are gone.',
+      short: `NO INDEX and NO ROW ORDER (ordering_mode="partial"), and the library decides this per METHOD: these RAISE OrderRequiredError until you sort_values/sort_index first — ${list(NEEDS_ORDER)}${BY_ARG.length ? `, and by argument ${list(BY_ARG)}` : ''}; these RAISE NullIndexError, full stop — ${list(NEEDS_INDEX)}; reset_index(drop=True) creates NO index; ALIGNMENT between two objects works only when both come from the SAME frame (a projection/filter/window of it), so a Series from another frame, a groupby aggregate, a cache()d frame or an ml result cannot be assigned into this one — merge on a key instead (merge is a SQL join and needs no index; .join() is the align path and is not the same thing)`,
+      why: `Partial ordering mode stops BigFrames from building a total order over all rows — that order is what keeps filters from reducing the bytes scanned, so dropping it is what makes a query over a large partitioned table cheap. The price is positional access and index alignment. Which operations pay it is not a matter of interpretation: they are marked in the library (@requires_index / @requires_ordering), and the lists above are extracted from ${VERSION} rather than described.`,
       consequences: [
-        'Two objects that come from DIFFERENT table expressions are never combined implicitly — join them with an explicit merge.',
-        'An operation that needs an index (unstack, interpolate) raises NullIndexError ("Set an index using set_index"); groupby() provides an index by itself, unless as_index=False.',
-        'An operation that needs an order (iloc, head in some contexts) raises OrderRequiredError ("Use .sort_values or .sort_index to provide an ordering"); groupby() provides a total ordering by its keys.',
-        'Series.unique() and Series.drop_duplicates() do not work in this mode.',
-        'head(n) may return different rows on different runs; reset_index(drop=True) does NOT create an index.',
+        'Ordering: sort_values (or sort_index) is what grants it — after that the whole list above is available, because the sorted node reports itself as explicitly ordered. Without it the op raises; it does not silently return an arbitrary slice.',
+        'Alignment: two objects combine implicitly only while they share a root — df and df["x"] > 0 do; df and model.predict(df) do not, because predict re-reads its result as a new query.',
+        'A lookup by key is therefore a merge, never Series.map(dict): map builds a local frame, indexes it, and joins — one side indexed, one side not, which always raises here.',
+        'groupby provides both an index and an order by its keys, which is why transform() broadcasts inside one frame but an aggregate assigned back does not.',
       ],
     },
     {
@@ -96,24 +125,24 @@ const BIGFRAMES = {
     },
     {
       task: 'Distinct values of a column',
-      line: 'distinct: df.groupby(["k"], as_index=False).size().drop(columns="size") — NOT unique()/drop_duplicates()',
-      do: ['uniq = df.groupby(["k"], as_index=False).size().drop(columns="size")', 'return uniq'],
-      avoid: ['uniq = df["k"].unique()', 'df = df.drop_duplicates(subset=["k"])'],
-      why: 'unique() and drop_duplicates() are unsupported in partial ordering mode; groupby is the documented replacement.',
+      line: 'distinct: df.drop_duplicates(subset=["k"]) (works as is) or df["k"].unique(keep_order=False) — plain unique() raises, it keeps order',
+      do: ['uniq = df.drop_duplicates(subset=["k"])[["k"]]', 'return uniq'],
+      avoid: ['uniq = df["k"].unique()'],
+      why: 'drop_duplicates needs no ordering (it is a ROW_NUMBER over a partition, so which copy survives is arbitrary — for a distinct list that is exactly what you want). Series.unique() defaults to keep_order=True, which demands an ordering and raises; unique(keep_order=False) is the aggregate form and is fine. A groupby on the key is the third form, and the one to use when you want the counts too.',
     },
     {
       task: 'The top N rows by a column',
-      line: 'top N: df.sort_values("x", ascending=False).head(10) or df.nlargest(10, "x") — NOT df.head(10)/df.iloc[:10]',
+      line: 'top N: df.sort_values("x", ascending=False).head(10) — head/tail/iloc/nlargest all RAISE OrderRequiredError on an unsorted frame',
       do: ['top = df.sort_values("revenue", ascending=False).head(10)', 'return top'],
-      avoid: ['top = df.head(10)', 'top = df.iloc[:10]'],
-      why: 'Without an explicit order there is no "first" row: head() may differ between runs and iloc raises OrderRequiredError. nlargest("revenue", 10) also orders by itself.',
+      avoid: ['top = df.head(10)', 'top = df.nlargest(10, "revenue")'],
+      why: 'There is no "first" row until you say what first means, and the library does not guess: head, tail and iat raise, and nlargest/nsmallest raise too unless keep="all" (they have to break ties). sort_values is what makes the frame explicitly ordered — after it, every one of those works.',
     },
     {
-      task: 'Look at a few rows while developing',
-      line: 'peek at data: df.peek(5) (arbitrary sample, cheap) — head() only when the ORDER is the point',
-      do: ['sample = df.peek(5)'],
-      avoid: ['sample = df.head(5)'],
-      why: 'peek() returns an arbitrary small sample and is the cheaper call; head() is for when the ORDER is the point.',
+      task: 'Look at a few rows (in a notebook, not in a model)',
+      line: 'peek: df.peek(5) — an arbitrary sample, no ordering needed, but it returns PANDAS: for looking, never as the model\'s result',
+      do: ['sample = df.peek(5)  # pandas, local — inspect only'],
+      avoid: ['return df.peek(5)'],
+      why: 'peek(n) executes and brings n arbitrary rows back as a pandas object, so it needs no ordering (unlike head) — and cannot be what the stage returns, because the stage must return a frame this runtime can materialize.',
     },
     {
       task: 'A CASE / conditional column',
@@ -124,9 +153,10 @@ const BIGFRAMES = {
     },
     {
       task: 'Arithmetic, normalization, a z-score',
-      line: 'z-score/arithmetic: df["z"] = (df["x"] - df["x"].mean()) / df["x"].std(ddof=0) (aggregates of the same frame broadcast)',
-      do: ['df["revenue_z"] = (df["revenue"] - df["revenue"].mean()) / df["revenue"].std(ddof=0)', 'return df'],
-      why: 'Aggregates of the same frame broadcast as scalars — one SQL statement, no alignment.',
+      line: 'z-score/arithmetic: df["z"] = (df["x"] - df["x"].mean()) / df["x"].std() — std() takes NO ddof here (it is the sample form, N-1)',
+      do: ['df["revenue_z"] = (df["revenue"] - df["revenue"].mean()) / df["revenue"].std()', 'return df'],
+      avoid: ['df["revenue_z"] = (df["revenue"] - df["revenue"].mean()) / df["revenue"].std(ddof=0)'],
+      why: 'Aggregates of the same frame come back as scalars and broadcast over its rows — one SQL statement, no alignment. But std() here is std(self): there is no ddof parameter at all, and passing it is a TypeError. It is the SAMPLE deviation (N-1); for the population form write it out — ((s - s.mean()) ** 2).mean() ** 0.5 — and say which one the number is.',
     },
     {
       task: 'Keep only some rows',
@@ -137,9 +167,10 @@ const BIGFRAMES = {
     },
     {
       task: 'Reuse an expensive intermediate',
-      line: 'reuse: joined = df.merge(other, on="k"); joined.cache(); then derive from `joined`',
+      line: 'reuse: joined = df.merge(other, on="k"); joined.cache(); then derive EVERYTHING from `joined` (objects taken before the cache have a different root)',
       do: ['joined = df.merge(other, on="k", how="inner")', 'joined.cache()', 'top = joined.sort_values("amount", ascending=False).head(10)', 'return top'],
-      why: 'Deferred execution would otherwise recompute the join for every derived result; cache() stores it in a temporary BigQuery table.',
+      avoid: ['mask = joined["amount"] > 0', 'joined.cache()', 'top = joined[mask]  # mask predates the cache → different root'],
+      why: 'Deferred execution would otherwise recompute the join for every derived result; cache() materializes it into a temporary BigQuery table (which you pay to store). It does that by REPLACING the object\'s own node with a read of that table and returning self — so anything derived before the call belongs to the old expression, and combining the two raises.',
     },
     {
       task: 'Read a STRUCT field / an ARRAY element out of a payload column',
@@ -167,16 +198,17 @@ const BIGFRAMES = {
     },
     {
       task: 'Cluster / segment rows (KMeans)',
-      line: 'clustering: from bigframes.ml.cluster import KMeans; m = KMeans(n_clusters=4); m.fit(X); df["segment"] = m.predict(X)["CENTROID_ID"]',
-      do: ['from bigframes.ml.cluster import KMeans  (declare it in `imports`)', 'features = df[["sessions", "playtime", "revenue"]]', 'model = KMeans(n_clusters=4)', 'model.fit(features)', 'df["segment"] = model.predict(features)["CENTROID_ID"]', 'return df'],
-      avoid: ['from sklearn.cluster import KMeans', 'pdf = df.to_pandas()'],
-      why: 'bigframes.ml trains and predicts INSIDE BigQuery as BigQuery ML; sklearn would need the whole table in the notebook.',
+      line: 'clustering: m = KMeans(n_clusters=4); m.fit(X); out = m.predict(df) → RETURN out (it already carries every input column + CENTROID_ID) — do NOT assign df["segment"] = m.predict(X)[...]',
+      do: ['from bigframes.ml.cluster import KMeans  (declare it in `imports`)', 'model = KMeans(n_clusters=4)', 'model.fit(df[["sessions", "playtime", "revenue"]])', 'out = model.predict(df)', 'return out'],
+      avoid: ['df["segment"] = model.predict(df[["sessions", "playtime", "revenue"]])["CENTROID_ID"]'],
+      why: 'predict wraps its input in a BigQuery ML table function and RE-READS the result as a new query, so the frame it returns has a different root than df — assigning its column into df is a cross-frame alignment and raises NullIndexError. It is also unnecessary: that output already contains every input column with the prediction appended (CENTROID_ID for clustering, predicted_<label> for a supervised model), so return it and declare those columns in output.columns. The same holds for preprocessing transform/fit_transform.',
     },
     {
       task: 'Scale / encode features before a model',
-      line: 'scaling: from bigframes.ml.preprocessing import StandardScaler; StandardScaler().fit_transform(df[[...]])',
-      do: ['from bigframes.ml.preprocessing import StandardScaler  (declare it in `imports`)', 'scaler = StandardScaler()', 'scaled = scaler.fit_transform(df[["sessions", "playtime"]])', 'return scaled'],
-      why: 'The preprocessing transformers are BigQuery ML too — same API as scikit-learn, no data movement.',
+      line: 'scaling: scaled = StandardScaler().fit_transform(df[[...]]) → a NEW frame (feed it to fit, or return it); do not assign its columns into df',
+      do: ['from bigframes.ml.preprocessing import StandardScaler  (declare it in `imports`)', 'scaled = StandardScaler().fit_transform(df[["sessions", "playtime"]])', 'model.fit(scaled)', 'return model.predict(df)'],
+      avoid: ['df["sessions_scaled"] = StandardScaler().fit_transform(df[["sessions"]])["sessions"]'],
+      why: 'The preprocessing transformers are BigQuery ML too — same API as scikit-learn, no data movement — and like predict they return their own re-read frame, so use it as the next step\'s input rather than assigning it back.',
     },
     {
       task: 'Train and evaluate with a split',

@@ -213,6 +213,10 @@ export async function makeEngine(opts = {}) {
       ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
       : null;
   const queryTimeoutMs = (Number(process.env.QUERY_TIMEOUT_SECONDS) || 60) * 1000;
+  // A build that includes a PYTHON model hands back its query_id after this instead — seconds, not
+  // a minute: the caller's client has a timeout of its own, and a cold-starting warehouse runtime
+  // will outlast it. Raise it only if a deployment's python builds are genuinely quick.
+  const pythonBuildGraceMs = (Number(process.env.PYTHON_BUILD_GRACE_SECONDS) || 5) * 1000;
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
   // <workspaceRoot>/mcp.sqlite; pin it elsewhere (e.g. a persistent volume) via MCP_DB.
   const dbPath = opts.dbPath || process.env.MCP_DB || join(ctxs.workspaceRoot, 'mcp.sqlite');
@@ -258,7 +262,7 @@ export async function makeEngine(opts = {}) {
   } else {
     console.error(`[mcp] ${new Date().toISOString()} memory: findings live in the shared store at ${dbPath} — set MCP_MEMORY_DB to a persistent volume to retain them across container restarts`);
   }
-  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath });
+  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, pythonBuildGraceMs, dbPath, resetDb, embedder, memoryDbPath });
   // Persistence surfaces as semantic_index({ status }).value_index.persisted. If a DB path was
   // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
   // loudly, because otherwise the index silently rebuilds from scratch on every restart.

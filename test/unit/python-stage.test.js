@@ -610,3 +610,67 @@ test('the stage description and the guide send the caller to this deployment\'s 
   assert.match(py2.description, /THE RIGHT FORM PER OPERATION/);
   assert.ok(py2.description.length > py.description.length, 'pointing at recipes is what makes the description shorter');
 });
+
+// A python stage at the size a real analysis reaches — six functions, ~150 lines, nested blocks —
+// went in as `step 2: unknown pipeline stage: undefined`, which reads like a schema problem and
+// sent the caller to shrink the payload. The schema's own limits (30 functions, 400 body lines per
+// function, 500 chars per line, 50 steps, 20 imports) are nowhere near that, so a payload this size
+// must simply pass: through add_step, through add_steps, and through the all-at-once register.
+// Whatever produced that message, it was not a limit here, and this test is what would catch it
+// becoming one.
+test('a python stage of six functions / ~150 lines is accepted by every entry point', async (t) => {
+  if (skipNoPy(t)) return;
+  const line = (n) => `df["c${n}"] = df["revenue"] * ${n}`;
+  const fn = (i) => ({
+    name: `step_${i}`,
+    params: ['df', 'column'],
+    body: [
+      `# stage ${i}: a block with nesting, a loop and a branch`,
+      'total = df[column].sum()',
+      'if total > 0:',
+      [
+        'df["share"] = df[column] / total',
+        'for k in range(3):',
+        [
+          'if k > 1:',
+          [line(i * 10 + 1)],
+          'else:',
+          [line(i * 10 + 2)],
+        ],
+      ],
+      'else:',
+      ['df["share"] = 0'],
+      ...Array.from({ length: 22 }, (_, j) => line(i * 100 + j)),
+      'return df',
+    ],
+  });
+  const functions = [1, 2, 3, 4, 5, 6].map(fn);
+  const count = (block) => block.reduce((n, item) => n + (Array.isArray(item) ? count(item) : 1), 0);
+  const lines = functions.reduce((n, f) => n + count(f.body), 0);
+  assert.ok(lines >= 150, `the payload must be at the reported size (got ~${lines} lines)`);
+  const big = {
+    stage: 'python',
+    imports: [{ package: 'numpy', as: 'np' }],
+    functions,
+    steps: functions.map((f) => ({ call: f.name, args: { column: 'revenue' } })),
+    output: { columns: ['player_id_of_internal', 'revenue', 'share'] },
+  };
+
+  // 1. incrementally: the aggregate, then the big stage
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'bigpy', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
+  const added = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: big });
+  assert.equal(added.step?.stage, 'python', JSON.stringify(added.error || added).slice(0, 300));
+
+  // 2. both stages at once
+  const e2 = engine();
+  const s2 = await e2.build_native_model({ action: 'start', name: 'bigpy2', source: 'events' });
+  const many = await e2.build_native_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [AGG, big] });
+  assert.equal(many.added, 2, JSON.stringify(many.error || many).slice(0, 300));
+
+  // 3. all-at-once registration: renders the whole chain (python model + its SQL prep)
+  const dry = await engine().register_native_model({ name: 'bigpy3', dry_run: true, pipeline: { source: 'events', stages: [AGG, big] } });
+  assert.equal(dry.dry_run, true, JSON.stringify(dry.error || {}).slice(0, 300));
+  assert.equal(dry.python?.length, 1, 'one python model in the chain');
+});

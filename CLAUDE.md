@@ -12,8 +12,10 @@
      index (keyed by `(source, property)`), and they are never mixed. No source is
      privileged: the SOURCE is always a separate argument — `semantic_index({
      source, event })`, `build_native_model({ source })`, `semantic_models[].from`
-     — never glued into a name. Within a source, names are used as-is. A source may
-     be omitted only when the catalog has exactly one.
+     — never glued into a name. Within a source, names are used as-is. A source is
+     named ALWAYS, in every catalog, including one that declares a single source:
+     one address for one thing, so no name ever has a second, owner-less spelling
+     that a reader has to trace back to a source.
   2. **users** — the user-attributes dimension (one row per user).
   3. **experiments** — A/B-test assignments (one row per user×experiment:
      experiment_name, variant_group, assigned_at, ended_at); joined to events by

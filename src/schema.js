@@ -281,7 +281,7 @@ export function buildSchemas(catalog) {
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
-      description: { type: 'string', description: 'Free-text note describing what this task computes (metadata only).' },
+      description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ action: "describe" | "list" }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
       use_base_models: { type: 'array', items: { type: 'string', enum: catalog.joinableModelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as { model, attribute } (e.g. "users" to slice by { model: "users", attribute: "country" }). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
       semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
       metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
@@ -299,6 +299,7 @@ export function buildSchemas(catalog) {
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
+      description: { type: 'string', description: 'What this model computes, in your words. Kept with the context (returned by context({ action: "describe" | "list" })) and written into the generated model\'s config banner, so the table can be traced back to the question it answers.' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored: table (precomputed snapshot, default) or view (always fresh).' },
       dry_run: { type: 'boolean', description: 'If true, return the generated model definition for preview WITHOUT building anything.' },
       pipeline: {
@@ -329,18 +330,19 @@ export function buildSchemas(catalog) {
     // belong to the action, so a stray param is an error rather than silently ignored.
     allOf: [
       { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name', 'source'], ...forbid(['stage', 'stages', 'index', 'after']) } },
-      { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stages']) } },
-      { if: { properties: { action: { const: 'add_steps' } }, required: ['action'] }, then: { required: ['draft_id', 'stages'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stage']) } },
-      { if: { properties: { action: { enum: ['edit_step', 'insert_step'] } }, required: ['action'] }, then: { required: ['draft_id', 'index', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'after', 'stages']) } },
-      { if: { properties: { action: { const: 'delete_step' } }, required: ['action'] }, then: { required: ['draft_id', 'index'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'after']) } },
-      { if: { properties: { action: { const: 'truncate' } }, required: ['action'] }, then: { required: ['draft_id', 'after'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index']) } },
+      { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stages', 'description']) } },
+      { if: { properties: { action: { const: 'add_steps' } }, required: ['action'] }, then: { required: ['draft_id', 'stages'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stage', 'description']) } },
+      { if: { properties: { action: { enum: ['edit_step', 'insert_step'] } }, required: ['action'] }, then: { required: ['draft_id', 'index', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'after', 'stages', 'description']) } },
+      { if: { properties: { action: { const: 'delete_step' } }, required: ['action'] }, then: { required: ['draft_id', 'index'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'after', 'description']) } },
+      { if: { properties: { action: { const: 'truncate' } }, required: ['action'] }, then: { required: ['draft_id', 'after'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'description']) } },
       { if: { properties: { action: { const: 'fork' } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['source', 'materialized', 'time_range', 'stage', 'stages', 'index']) } },
-      { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'after']) } },
+      { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'after', 'description']) } },
     ],
     properties: {
       action: { enum: ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + source columns); add_step appends ONE stage and returns the columns available after it; add_steps appends SEVERAL stages at once (applied in order) and returns a per-step breakdown of how each changed the data — atomic (all-or-nothing); edit_step replaces step `index`; insert_step inserts a stage BEFORE `index`; delete_step removes step `index`; truncate keeps only steps 1..`after` (cheap "go back to step N"); fork branches a NEW draft from steps 1..`after` of this draft (or an already-materialized pipeline) WITHOUT touching the original — iterate variants without re-typing the shared prefix; preview shows steps + the SQL that would actually run (from a materialized prefix when there is one); materialize builds the model AND keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft. Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. PREFER add_step or SMALL add_steps chunks over one giant add_steps, so you see how each chunk changes the data.' },
       draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for everything except start. For fork it may also be a context whose pipeline was already materialized.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
+      description: { type: 'string', description: 'What this pipeline computes, in your words (start, or fork to override the parent\'s). Kept with the draft and carried to the model it materializes: returned by context({ action: "describe" | "list" }) and written into the generated model\'s config banner. A draft is cheap to make and easy to lose track of — this is what tells two of them apart later.' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
       source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads (start only, and REQUIRED there). Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
       time_range: trProp,
@@ -522,10 +524,23 @@ function semanticIndexSchema(catalog) {
   const eventRef = (f) => strEnum(eventsOf(f), `An event '${f}' declares.`);
   const propRef = (k) => strEnum(catalog.propertyEnumFor(k), `A payload property or attribute of '${k}'.`);
 
+  // The single-view fields, written once: the branch that requires one and the flat root map below
+  // reference the SAME schema, so the two cannot describe the same field differently.
+  const field = {
+    model: { enum: [...models, ...unavailable], description: 'The model to describe.' },
+    search: { type: 'string', description: 'The word or phrase to look for.' },
+    fuzzy: { type: 'boolean', description: 'Enable typo/approximate matching (default true); false = exact substring only.' },
+    status: { const: true, description: 'Ask for the operational state.' },
+    run: { type: 'integer', minimum: 1, description: 'Run id, from the status view.' },
+    bundle: { type: 'string', description: 'The app/bundle id; the overview lists them.' },
+    recipe: { type: 'string', description: 'Recipe id, from the overview.' },
+    guide: { type: ['boolean', 'string'], description: 'true for the whole guide, a task family name, or "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation).' },
+  };
+
   const branches = [
     view('overview (no arguments)', 'OVERVIEW (no arguments): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
     view('{ model }', 'VIEW { model }: one model — its entities, time axis, dimension attributes with real sample values, physical columns, declared relationships and aggregatable amounts.', ['model'], {
-      model: { enum: [...models, ...unavailable], description: 'The model to describe.' },
+      model: field.model,
     }),
     // one branch per source: an event name belongs to the source that declares it, so a pairing
     // that source does not have cannot be written down.
@@ -540,35 +555,62 @@ function semanticIndexSchema(catalog) {
       ...paging,
     })),
     view('{ search }', 'VIEW { search }: find events, properties, attributes, indexed VALUES and recipes by word — typo- and paraphrase-tolerant.', ['search'], {
-      search: { type: 'string', description: 'The word or phrase to look for.' },
-      fuzzy: { type: 'boolean', description: 'Enable typo/approximate matching (default true); false = exact substring only.' },
+      search: field.search,
+      fuzzy: field.fuzzy,
       limit: paging.limit,
     }),
     view('{ status }', 'VIEW { status }: operational state — value-index sync runs (freshness, errors, slowest properties) and background query jobs.', ['status'], {
-      status: { const: true, description: 'Ask for the operational state.' },
+      status: field.status,
       recent: paging.recent,
     }),
     view('{ run }', 'VIEW { run }: one sync run by id — its per-property breakdown, slowest first.', ['run'], {
-      run: { type: 'integer', minimum: 1, description: 'Run id, from the status view.' },
+      run: field.run,
       recent: paging.recent,
     }),
     ...(bundleSources.length ? [view('{ bundle }', 'VIEW { bundle }: for ONE app — which properties carry data for it vs are EMPTY.', ['bundle'], {
-      bundle: { type: 'string', description: 'The app/bundle id; the overview lists them.' },
+      bundle: field.bundle,
       source: { enum: bundleSources, description: 'Which source to read the per-app coverage of (needed when several declare an app column).' },
     })] : []),
     view('{ recipe }', 'VIEW { recipe }: ONE ready-made recipe by id — its payload, example queries and the reusable hack.', ['recipe'], {
-      recipe: { type: 'string', description: 'Recipe id, from the overview.' },
+      recipe: field.recipe,
     }),
     view('{ guide }', 'VIEW { guide }: HOW to approach a question — the analyst workflow and IF/DO routing; pass a task family to narrow it.', ['guide'], {
-      guide: { type: ['boolean', 'string'], description: 'true for the whole guide, a task family name, or "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation).' },
+      guide: field.guide,
     }),
   ];
   return {
     // Every tool's input is an OBJECT; the MCP handshake validates that on the root schema,
-    // so `oneOf` narrows the shape but never replaces it.
+    // so the branch union narrows the shape but never replaces it.
     type: 'object',
     description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass NO arguments for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
-    oneOf: branches,
+    // A FLAT map of every field, next to the union. Some clients rewrite a tool schema for
+    // OpenAI-style function calling, where a union at the ROOT is not part of the supported
+    // subset: they drop it, and what the caller is then shown is an object with no fields at all
+    // — which is how "the server wants `source` but it was not in the schema" happens. The union
+    // is still the gate (a stripped schema only loses the narrowing, never the checking, because
+    // validation runs here); this map is what survives the stripping.
+    //
+    // A NAME is still never offered without its owner: `event` and `property` are plain strings
+    // here, and the per-source branch above is what enumerates the names of one source.
+    properties: {
+      model: field.model,
+      source: { enum: models, description: `The source a name belongs to — passed TOGETHER with \`event\` or \`property\` (each source owns its own events and payload; they are never mixed). One of: ${models.join(', ')}.` },
+      event: { type: 'string', description: 'An event NAME of `source` — the two are one address. The { source, event } branch for that source enumerates the names it declares.' },
+      property: { type: 'string', description: 'A payload property or attribute NAME of `source` — the two are one address. The { source, property } branch for that source enumerates the names it has.' },
+      search: field.search,
+      fuzzy: field.fuzzy,
+      status: field.status,
+      run: field.run,
+      ...(bundleSources.length ? { bundle: field.bundle } : {}),
+      recipe: field.recipe,
+      guide: field.guide,
+      ...paging,
+    },
+    // `anyOf`, not `oneOf`: every branch is CLOSED (additionalProperties: false) and has its own
+    // required set, so "at least one" and "exactly one" reject the same inputs here — and anyOf is
+    // inside the subset the strict function-calling schemas support, so a client that keeps it
+    // keeps the narrowing too.
+    anyOf: branches,
   };
 }
 

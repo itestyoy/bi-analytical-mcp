@@ -28,7 +28,7 @@ import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, pythonBuildGraceMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -53,6 +53,11 @@ export class Engine {
     } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
+    // A build with a PYTHON model detaches almost at once instead: the warehouse Python runtime is
+    // a cold start of minutes, and the client in front of this call has its own timeout that we
+    // neither know nor control — so the query_id has to reach it long before that timeout, or the
+    // caller sees "the server is not responding" while the job it started keeps running.
+    this.pythonBuildGraceMs = pythonBuildGraceMs ?? Math.min(this.queryTimeoutMs, 5000);
     // Literal dbt.config extras the OPERATOR pins for every generated Python model (e.g.
     // {"submission_method":"bigframes"}); the caller never decides where the compute runs. The
     // catalog resolved them from the environment already — an injected value replaces them THERE,
@@ -71,8 +76,12 @@ export class Engine {
     // Constrain the recipe view to real ids when recipes are configured.
     // The recipe view offers the ids this server actually has — the schema says what exists.
     if (recipes) {
-      const branch = (this.schemas.semantic_index?.oneOf || []).find((b) => b.properties?.recipe);
-      if (branch) branch.properties.recipe = { type: 'string', enum: recipes.ids(), description: branch.properties.recipe.description };
+      const si = this.schemas.semantic_index;
+      const branch = (si?.anyOf || si?.oneOf || []).find((b) => b.properties?.recipe);
+      const withIds = (prop) => ({ type: 'string', enum: recipes.ids(), description: prop.description });
+      if (branch) branch.properties.recipe = withIds(branch.properties.recipe);
+      // …and in the flat root map too, which is what a client that strips the union is left with.
+      if (si?.properties?.recipe) si.properties.recipe = withIds(si.properties.recipe);
     }
     // An empty vocabulary (a source with no events yet, a model with no groupable column) renders
     // as `enum: []` / `oneOf: []`, which ajv refuses — and it refuses the WHOLE schema, so the
@@ -1496,7 +1505,7 @@ export class Engine {
   async _draftStart(input) {
     const ctx = input.draft_id ? this._ctx(input.draft_id) : this.ctxs.create();
     const source = input.source;
-    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [], checkpoints: [] };
+    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [], checkpoints: [], ...(input.description ? { description: input.description } : {}) };
     this.ctxs.touch(ctx.id);
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
     // the catalog declares but the table lacks simply does not appear (a clean internal
@@ -1505,6 +1514,7 @@ export class Engine {
     const { cols } = this._groundedDeclared(source, physSet);
     const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
+      ...(ctx.state.draft.description ? { description: ctx.state.draft.description } : {}),
       steps: [], column_count: cols.length,
       next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response shows only the columns that stage added/removed (use include_columns:true or preview for the full list).',
       recommendations: [
@@ -1622,7 +1632,8 @@ export class Engine {
     const ctx = this.ctxs.create();
     const name = input.name || origin.name;
     // Deep-copy the kept stages so editing the fork can never mutate the source's stages.
-    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), checkpoints: [] };
+    const description = input.description || origin.description;
+    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), checkpoints: [], ...(description ? { description } : {}) };
     // A materialized prefix the fork KEEPS (at <= after) is inherited: the fork reads the SAME
     // table, so branching a variant on top of an expensive prefix costs only the new steps. The
     // owner's model definition is copied into this overlay so `{{ ref() }}` resolves here (a
@@ -2086,10 +2097,17 @@ export class Engine {
 
   /**
    * Run `dbt run --select <select>` detached, with a lease on the context, as a background job:
-   * past queryTimeoutMs the caller gets a query_id to poll (get_query_result), otherwise the
-   * finished result. Used where a build is a cold start of minutes (a Python model).
+   * past `graceMs` the caller gets a query_id to poll (get_query_result), otherwise the finished
+   * result. Used where a build is a cold start of minutes (a Python model).
+   *
+   * The grace is NOT one number for everything. A build that is expected to be slow should hand
+   * back its query_id almost at once: the caller in front of us is a tool call inside another
+   * agent's client, and that client has a timeout of its own which we do not know and cannot
+   * raise. Waiting 60s on a BigQuery Python model means the client gives up first and reports the
+   * server as unresponsive — while the job it started runs on to completion, invisible. Handing
+   * back the id in a few seconds keeps the poll in the caller's hands, where it belongs.
    */
-  async _runDetached(ctx, select, table) {
+  async _runDetached(ctx, select, table, { graceMs = this.queryTimeoutMs } = {}) {
     const dir = this.ctxs.dir(ctx.id);
     const id = this.jobs.create({ contextId: ctx.id });
     this.jobs.setTable(id, table);
@@ -2108,7 +2126,7 @@ export class Engine {
       }
     })().catch(() => {});
     let timer;
-    const timed = new Promise((res) => { timer = setTimeout(() => res('timeout'), this.queryTimeoutMs); });
+    const timed = new Promise((res) => { timer = setTimeout(() => res('timeout'), graceMs); });
     const winner = await Promise.race([build.then(() => 'done'), timed]);
     clearTimeout(timer); // a finished build must not keep the process alive for the rest of the window
     if (winner === 'timeout') return { status: 'running', query_id: id };
@@ -2142,6 +2160,8 @@ export class Engine {
     try {
       result = await this._registerPipeline({
         name: draft.name, context_id: ctx.id, materialized: draft.materialized,
+        ...(draft.description ? { description: draft.description } : {}), // the draft's note travels to the model it builds
+
         pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
         from_checkpoint: plan.checkpoint ? { at: plan.checkpoint.at, model: plan.checkpoint.model, columns: plan.checkpoint.columns } : null,
         model_name: modelName,
@@ -2279,7 +2299,7 @@ export class Engine {
     const materialized = last.kind === 'python' ? 'table' : (input.materialized || 'table');
     // The header records the WHOLE declaration; when this model only computes the tail, it also
     // says which built relation the earlier steps are, so the file is readable on its own.
-    const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline, ...(from ? { continues: { model: from.model, after_step: from.at } } : {}) });
+    const header = sqlConfigHeader('pipeline_model', { name: input.name, ...(input.description ? { description: input.description } : {}), pipeline: input.pipeline, ...(from ? { continues: { model: from.model, after_step: from.at } } : {}) });
     // A rebuild under the same name must leave no stale model of the previous chain behind: dbt
     // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
     this.ctxs.removePipelineFiles(ctx.id, modelName);
@@ -2291,7 +2311,7 @@ export class Engine {
     const chainInfo = models.map((m) => ({ model: m.model, kind: m.kind, input: m.input, materialized: m === last ? materialized : 'table' }));
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
-    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(models.length > 1 ? { chain: chainInfo } : {}), ...(hasPython ? { python: pyInfo.map(({ code, ...m }) => m) } : {}) };
+    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(input.description ? { description: input.description } : {}), ...(models.length > 1 ? { chain: chainInfo } : {}), ...(hasPython ? { python: pyInfo.map(({ code, ...m }) => m) } : {}) };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);
     // Honest status: `executed` makes it unambiguous whether the model was actually built
@@ -2308,11 +2328,12 @@ export class Engine {
         // never `+model`, whose ancestor operator would also select the catalog's base tables and
         // REBUILD them. A Python model is a cold start of minutes on the warehouse runtime, so the
         // build runs detached and may hand back a query_id.
-        const bg = await this._runDetached(ctx, models.map((m) => m.model).join(' '), modelName);
+        const graceMs = hasPython ? this.pythonBuildGraceMs : this.queryTimeoutMs;
+        const bg = await this._runDetached(ctx, models.map((m) => m.model).join(' '), modelName, { graceMs });
         if (bg.status === 'running') {
           return {
             context_id: ctx.id, kind: 'pipeline', ok: true, status: 'running', query_id: bg.query_id, model: modelName, materialized, dialect, models: chainInfo, ...(hasPython ? { python: pyInfo } : {}),
-            message: `dbt is building ${models.length > 1 ? `the chain of ${models.length} models` : 'the model'} (${hasPython ? 'Python models run on the warehouse runtime — a cold start' : 'SQL'}) (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}`,
+            message: `dbt is building ${models.length > 1 ? `the chain of ${models.length} models` : 'the model'} (${hasPython ? 'a Python model runs on the warehouse runtime — a cold start of minutes, so this was handed back after ' : 'SQL, longer than '}${graceMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}. The build continues on its own: calling materialize again does NOT start a second one (it is refused while this build is in flight), so poll rather than retry.`,
             read_with: { tool: 'get_query_result', query_id: bg.query_id, table: modelName },
           };
         }
@@ -2788,13 +2809,13 @@ export class Engine {
         context_id: ctx.id,
         engine: 'pipeline',
         tasks: ctx.state.tasks || [],
-        models: [{ model: n.model, materialized: n.materialized, columns }],
+        models: [{ model: n.model, materialized: n.materialized, ...(n.description ? { description: n.description } : {}), columns }],
         columns,
         // A draft that already materialized something is still OPEN: say which steps are a table
         // already, so continuing it is an informed choice rather than a rediscovery.
         ...(draft ? {
           draft: {
-            name: draft.name, source: draft.source, steps: this._draftSteps(draft),
+            name: draft.name, source: draft.source, ...(draft.description ? { description: draft.description } : {}), steps: this._draftSteps(draft),
             checkpoints: (draft.checkpoints || []).map((cp) => ({ at: cp.at, model: cp.model, owner: cp.owner, built_at: cp.built_at, ...(cp.carries_source ? { carries_source: cp.carries_source } : {}) })),
           },
         } : {}),
@@ -2804,10 +2825,25 @@ export class Engine {
       };
     }
     const additions = ctx.state.additions || {};
+    // An OPEN draft lives here too, before anything is materialized — and it used to be invisible:
+    // describe reported the (empty) governed side and said nothing about the pipeline being built.
+    // Several drafts are the normal case, so this is what tells them apart.
+    const openDraft = ctx.state.draft;
     return {
       context_id: ctx.id,
       engine: 'core',
       tasks: ctx.state.tasks || [],
+      ...(openDraft ? {
+        draft: {
+          name: openDraft.name, source: openDraft.source,
+          ...(openDraft.description ? { description: openDraft.description } : {}),
+          steps: this._draftSteps(openDraft),
+          ...(openDraft.building ? { building: openDraft.building } : {}),
+        },
+      } : {}),
+      // Per task, what its author said it computes — a name namespaces the metrics, it does not
+      // explain them.
+      ...(Object.keys(ctx.state.task_notes || {}).length ? { task_notes: ctx.state.task_notes } : {}),
       semantic_models: Object.keys(additions),
       measures: Object.values(additions).flatMap((a) => a.measures.map((m) => m.name)),
       metrics: (ctx.state.metrics || []).map((m) => m.name),

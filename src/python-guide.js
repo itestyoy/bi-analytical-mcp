@@ -199,7 +199,7 @@ const COOKBOOKS = { bigframes: BIGFRAMES };
  * The authoring guide for the runtime this deployment actually submits to, or null when that
  * runtime has none written. `profile` is a frame profile (src/python-model.js).
  */
-export function pythonAuthoringGuide(profile) {
+export function pythonAuthoringGuide(profile, recipeIds = []) {
   if (!profile) return null;
   const book = COOKBOOKS[profile.key];
   if (!book) {
@@ -212,7 +212,16 @@ export function pythonAuthoringGuide(profile) {
     note: 'How to write a python stage for THIS warehouse runtime: the constraints and why they exist, then one worked example per task. `do` / `avoid` are the lines of ONE declared function over `df` — the frame dbt.ref() returns. The same rules, compressed, are in the python stage description.',
     ...book,
     modelling: profile.ml || undefined,
-    read_next: 'Declare the stage with build_native_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.',
+    ...(recipeIds.length ? {
+      recipes: {
+        ids: recipeIds,
+        note: 'READ ONE FIRST — each is a COMPLETE, compiling payload for a common python task (its SQL stages, its declared functions, its output columns) plus the technique to generalise it. Adapting one is faster and safer than writing a stage from scratch.',
+        fetch: `semantic_index({ recipe: '${recipeIds[0]}' })`,
+      },
+    } : {}),
+    read_next: recipeIds.length
+      ? `Read the closest recipe (semantic_index({ recipe: '${recipeIds[0]}' }) …) and adapt it, then declare the stage with build_native_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.`
+      : 'Declare the stage with build_native_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.',
   };
 }
 
@@ -221,7 +230,7 @@ export function pythonAuthoringGuide(profile) {
  * caller reads the rules and the right form of every task without fetching anything. Built from the
  * same data as the full guide (each rule's `short`, each example's `line`), so the two cannot drift.
  */
-export function pythonRulesText(key) {
+export function pythonRulesText(key, recipeIds = []) {
   const book = COOKBOOKS[key];
   if (!book) return '';
   const rules = book.rules.map((r) => r.short).filter(Boolean);
@@ -230,6 +239,9 @@ export function pythonRulesText(key) {
     + `${rules.map((r, i) => `(${i + 1}) ${r}`).join('; ')}. `
     + `THE RIGHT FORM PER TASK — ${lines.join('; ')}. `
     + `${book.stage_form || ''} `
+    + (recipeIds.length
+      ? `READ A RECIPE BEFORE YOU WRITE: this deployment ships worked, COMPILING payloads for the common python tasks — ${recipeIds.join(', ')} — fetch the closest one with semantic_index({ recipe: "<id>" }) and adapt it instead of writing a stage from scratch; each carries its SQL stages, its functions, its output columns and the technique to generalise it. `
+      : '')
     + `The same guide with the reasoning behind each rule and the full examples: semantic_index({ guide: "python" }).`;
 }
 

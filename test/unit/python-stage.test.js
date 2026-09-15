@@ -546,3 +546,43 @@ test('the stage description itself carries the runtime rules and the right form 
   assert.ok(!body.includes('THE RIGHT FORM PER TASK'), 'the rules live in one place');
   assert.match(body, /RULES for this runtime — and the right form for each task — are on the stage description/);
 });
+
+// A worked recipe beats prose: the caller has to know they exist BEFORE writing a function, so the
+// ids are named in the stage description itself and the guide points at them. Wired from the
+// deployment's own recipe file — a deployment that ships none says nothing.
+test('the stage description and the guide send the caller to this deployment\'s python recipes', async (t) => {
+  if (skipNoPy(t)) return;
+  const { loadRecipes } = await import('../../src/recipes.js');
+  const recipes = loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url)));
+  const ids = recipes.idsRequiring('python_models');
+  assert.ok(ids.length >= 3, 'the shipped recipes cover the common python tasks');
+
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec-')) }), recipes, pythonBin: PY });
+
+  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
+  assert.match(py.description, /READ A RECIPE BEFORE YOU WRITE/);
+  for (const id of ids) assert.ok(py.description.includes(id), `recipe ${id} is not named in the stage description`);
+  assert.match(py.description, /semantic_index\(\{ recipe: "<id>" \}\)/, 'and the description says HOW to fetch one');
+
+  const g = await e.semantic_index({ guide: 'python' });
+  assert.deepEqual(g.recipes.ids, ids);
+  assert.match(g.recipes.fetch, /semantic_index\(\{ recipe: '/);
+  assert.match(g.read_next, /Read the closest recipe/);
+
+  // every one of them is fetchable and carries what makes it adaptable
+  for (const id of ids) {
+    const r = await e.semantic_index({ recipe: id });
+    const body = r.recipe || r;
+    assert.ok(body.register_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
+    assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
+  }
+
+  // a deployment with no python recipes says nothing about them
+  const bare = loadCatalog(CATALOG, {});
+  bare.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
+  const e2 = new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec2-')) }), pythonBin: PY });
+  const py2 = e2.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
+  assert.ok(!py2.description.includes('READ A RECIPE BEFORE YOU WRITE'));
+});

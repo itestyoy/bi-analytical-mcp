@@ -52,7 +52,7 @@ export function frameProfile(rt, config = {}) {
       native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API compiled to BigQuery SQL and executed in BigQuery (import bigframes.pandas as bpd for constructors)',
       pandas: 'df.to_pandas()',
       ml: 'bigframes.ml — the scikit-learn API run as BigQuery ML (model.fit trains in BigQuery, model.predict returns a BigFrames frame): bigframes.ml.cluster.KMeans; linear_model.LinearRegression / LogisticRegression; ensemble.XGBRegressor / XGBClassifier / RandomForestRegressor / RandomForestClassifier; decomposition.PCA; forecasting.ARIMAPlus; preprocessing.StandardScaler / MinMaxScaler / MaxAbsScaler / OneHotEncoder / LabelEncoder / KBinsDiscretizer; compose.ColumnTransformer; pipeline.Pipeline; model_selection.train_test_split / KFold / cross_validate; metrics',
-      guide: pythonRulesText('bigframes'),
+      guide: pythonRulesText('bigframes', rt?.recipes || []),
       packagesNote: 'On BigFrames prefer bigframes (bigframes.ml) over sklearn / scipy / statsmodels: those run only after df.to_pandas(), single-node.',
       // Two things this frame does NOT have — no row order (dbt's wrapper runs with
       // ordering_mode="partial") and no index at all — are stated in `guide`, where the author
@@ -444,7 +444,9 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
 // follow. `build` validates the structure (imports / names / arguments) against a placeholder
 // ref; the body gate and the real names are the engine's part.
 registerStage('python', {
-  schema: (catalog) => { const rt = catalog?.pythonRuntime; const pr = frameProfile(rt, rt?.config || {}); return pythonStageSchema(importAllowlist(rt || process.env, pr), pr); },
+  // The DESCRIPTION also names this deployment's worked recipes for a python stage (the engine
+  // puts their ids on the catalog): the caller must know they exist before writing a function.
+  schema: (catalog) => { const rt = catalog?.pythonRuntime; const pr = frameProfile({ ...rt, recipes: catalog?.pythonRecipes || [] }, rt?.config || {}); return pythonStageSchema(importAllowlist(rt || process.env, pr), pr); },
   defs: () => pythonStageDefs(), // hoisted to the root of every tool schema embedding stages
   // Offered only where dbt can run Python models (the profile's adapter + its submission settings,
   // see resolvePythonRuntime); elsewhere the stage is absent from the schemas and refused here.

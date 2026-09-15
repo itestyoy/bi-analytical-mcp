@@ -19,6 +19,11 @@ export class Recipes {
     return [...this.byId.keys()];
   }
 
+  /** Ids of the recipes that need a given capability (e.g. 'python_models'). */
+  idsRequiring(capability) {
+    return this.list.filter((r) => r.requires === capability).map((r) => r.id);
+  }
+
   /** Compact catalog of recipes (no full payloads) for listing. */
   summary() {
     return this.list.map((r) => ({
@@ -27,6 +32,7 @@ export class Recipes {
       title: r.title,
       when_to_use: r.when_to_use,
       metric_types: r.metric_types,
+      ...(r.requires ? { requires: r.requires } : {}), // e.g. 'python_models' — a deployment without them cannot run it
       hack: r.hack, // the generalizable technique — lets the AI adapt a recipe to novel tasks
     }));
   }

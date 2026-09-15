@@ -495,3 +495,30 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
   const ctx = e.ctxs.get(out.context_id);
   assert.equal(e._normalizeRef(ctx, { model: 'users', attribute: 'country' }), 'user__country');
 });
+
+// ── one name, two meanings: the value index silently overwrote one with the other ────────────
+// A fact's payload properties and its groupable columns now share one (source, property) key —
+// that key is how the index files values, how semantic_index addresses a field, and how a filter
+// literal is verified. A name carried by BOTH produced two index targets with one key: the later
+// scan overwrote the earlier, so the view rendered one field's spec over the other's numbers.
+test('a name that is both a payload property and a groupable column is refused', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'clash-')), 'catalog.yml');
+  writeFileSync(file, `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp: { role: events, primary_entity: event, known_events: [ad_finished] }
+    columns:
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: bundle_id, data_type: string, meta: { mcp: { dimension: { bundle: true } } } }
+      - name: event_data
+        data_type: jsonb
+        meta:
+          mcp:
+            is_event_data: true
+            properties:
+              bundle_id: { type: string }
+`);
+  assert.throws(() => loadCatalog(file, {}), /bundle_id.*BOTH as an event_data property and as a groupable column/s);
+});

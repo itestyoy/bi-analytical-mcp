@@ -221,6 +221,42 @@ test('grounding: a table that cannot be introspected makes its model UNAVAILABLE
   assert.ok(catalog.modelKeys().includes('events') && catalog.modelKeys().includes('users'));
 });
 
+// dbt prints its diagnostics to STDOUT, so a real failure arrives with stderr EMPTY. The
+// transient/unavailable split used to read "an error and no stderr" as "dbt could not run", which
+// is the shape of every genuine relation-not-found: the model was then neither pruned nor marked,
+// and the server advertised a table nothing backs until the first query died on it.
+test('grounding: a relation-not-found that dbt reported on STDOUT still marks the model unavailable', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const full = physicalSets(catalog);
+  const runner = { relationColumns: async (_dir, model) => {
+    const key = catalog.modelKeys().find((k) => catalog.getModel(k).dbt_model === model);
+    // exactly what DbtRunner.relationColumns returns for `dbt exited with code 2`
+    if (key === 'experiments') {
+      return { ok: false, stdout: 'Runtime Error in operation mcp_relation_columns\n  relation "fct_experiment_assignments" does not exist', stderr: '', error: 'dbt exited with code 2', killed: false, signal: null };
+    }
+    return { ok: true, columns: [...full[key]].map((name) => ({ name })) };
+  } };
+  const { unavailable } = await groundCatalogToPhysical(catalog, runner, '/tmp/x');
+  assert.ok(unavailable.experiments, 'the model is marked, not left as declared');
+  assert.match(unavailable.experiments.reason, /does not exist/);
+  assert.ok(!catalog.modelKeys().includes('experiments'));
+});
+
+// …while dbt not RUNNING at all (a spawn failure: no output on either stream) says nothing about
+// the table and must leave the catalog as declared.
+test('grounding: dbt that never ran leaves the model as declared', async () => {
+  const catalog = loadCatalog(CATALOG, {});
+  const full = physicalSets(catalog);
+  const runner = { relationColumns: async (_dir, model) => {
+    const key = catalog.modelKeys().find((k) => catalog.getModel(k).dbt_model === model);
+    if (key === 'experiments') return { ok: false, stdout: '', stderr: '', error: 'dbt exited with code ENOENT', killed: false, signal: null };
+    return { ok: true, columns: [...full[key]].map((name) => ({ name })) };
+  } };
+  const { unavailable } = await groundCatalogToPhysical(catalog, runner, '/tmp/x');
+  assert.equal(unavailable.experiments, undefined);
+  assert.ok(catalog.modelKeys().includes('experiments'), 'still offered — nothing was learned about it');
+});
+
 test('grounding: losing EVERY events source is a load failure, not a silent empty catalog', () => {
   const catalog = loadCatalog(CATALOG, {});
   const phys = physicalSets(catalog);

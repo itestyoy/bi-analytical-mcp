@@ -160,8 +160,10 @@ export async function groundCatalogToPhysical(catalog, runner, baseProjectDir, l
       const r = await runner.relationColumns(baseProjectDir, catalog.getModel(key).dbt_model);
       if (r && r.ok && Array.isArray(r.columns)) { phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase())); continue; }
       // dbt never got to ASK the warehouse (its own timeout, a signal, a spawn failure). That says
-      // nothing about the table, so it is not evidence of an absent one.
-      if (r?.killed || r?.signal || (r?.error && !r?.stderr)) { transient.push([key, r.error || `dbt was killed by ${r.signal}`]); continue; }
+      // nothing about the table, so it is not evidence of an absent one. Told apart by OUTPUT, not
+      // by stream: dbt ran means dbt printed — and it prints its diagnostics to STDOUT, leaving
+      // stderr empty, so "error and no stderr" would have called every missing relation transient.
+      if (r?.killed || r?.signal || (r?.error && !r?.stdout && !r?.stderr)) { transient.push([key, r.error || `dbt was killed by ${r.signal}`]); continue; }
       // dbt ran and could not introspect the relation (not built, dropped, renamed): the model is
       // UNAVAILABLE — declared, but nothing in the warehouse backs it. Working on as declared would
       // only move the failure to the first query.
@@ -730,6 +732,19 @@ export function dbtSchemaToCatalog(doc) {
     const m = out.models[key];
     if (!m.event_name) throw new Error(`fact model '${key}' declares no event_name column: add meta.mcp.is_event_name to the column carrying the event type.`);
     if (!m.time) throw new Error(`fact model '${key}' declares no time column: add meta.mcp.is_time to the column carrying the event time.`);
+  }
+
+  // One NAME per source: a payload property and a groupable column of the same source live in the
+  // same (source, property) space — it is how the value index files values, how semantic_index
+  // addresses a field and how a filter literal is verified. A name carried by both is a field
+  // nobody can address: the index writes one over the other and the views describe one while
+  // reporting the other's numbers. Refused here, where it is a one-line rename.
+  for (const key of Object.keys(out.models)) {
+    const m = out.models[key];
+    const clash = Object.keys(m.properties || {}).filter((name) => (m.dimensions || {})[name]);
+    if (clash.length) {
+      throw new Error(`model '${m.dbt_model}' (role '${key}') carries ${clash.map((n) => `'${n}'`).join(', ')} BOTH as an event_data property and as a groupable column — one source addresses a field by ONE name, so these cannot coexist. Rename the payload entry, or give it its own name with an explicit column: mapping.`);
+    }
   }
 
   // A PRIMARY entity must be owned by exactly ONE model: it is both the MetricFlow

@@ -1958,9 +1958,10 @@ export class Engine {
   }
 
   /**
-   * A dbt failure of a PYTHON model is the warehouse runtime's traceback, and its actionable part is
-   * one class name. Append what that class name means for THIS runtime, so the caller reads the fix
-   * instead of a stack. Best-effort decoration: the original message is always kept intact.
+   * A dbt failure of a PYTHON model is the warehouse runtime's traceback, and the part that says
+   * WHERE to look is one class name. Append what that class name is ABOUT on this runtime — a fact
+   * about the runtime, not a diagnosis of the code: which line raised it is in the traceback, and
+   * nothing here can know what the author meant. Best-effort: the original message is kept intact.
    */
   _pythonRunMessage(stdout, stderr) {
     const message = formatDbtError(stdout, stderr);
@@ -1992,6 +1993,9 @@ export class Engine {
    * ONE interpreter run (the gate takes a list, and each function carries its own bindings, so the
    * stages are still checked separately). Re-compiling a stage just to gate it would only repeat
    * work the chain has done, and one interpreter start-up per stage is pure request latency.
+   * It checks STRUCTURE only (imports in bodies, private/dunder access, names a body may read):
+   * what a given line does on a particular warehouse runtime is the stage rules' business, not a
+   * static refusal's — the runtime's own rules are in the stage description.
    */
   async _gateCompiled(units) {
     const functions = units.flatMap((u, i) => (u.functions || []).map((f) => ({ ...f, id: String(i), bindings: u.bindings || [] })));
@@ -2000,10 +2004,7 @@ export class Engine {
     // wrapper runs with ordering_mode="partial" and raises OrderRequiredError there), so the
     // profile decides and the gate enforces — the author hears it here, not from a traceback in
     // the warehouse's notebook runtime.
-    // The same for the INDEX the frame does not have: an alignment that would raise NullIndexError
-    // there is refused here, where the author can still change the code.
-    const profile = frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {});
-    const gate = await runAstGate(this.pythonBin, functions, [], { requireOrderForRowSlice: !!profile.partialOrdering, requireIndexForAlign: !!profile.nullIndex });
+    const gate = await runAstGate(this.pythonBin, functions, []);
     if (gate.ok) return;
     const named = units.length > 1;
     const lines = gate.errors.map((e) => {

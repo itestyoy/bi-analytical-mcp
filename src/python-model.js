@@ -16,12 +16,13 @@
 // Function bodies pass a static gate (python/ast_gate.py) before anything is written or run.
 
 import { spawn } from 'node:child_process';
+import { assetPath, missingAssetMessage } from './runtime-assets.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { registerStage } from './pipeline.js';
 
-const GATE = join(dirname(fileURLToPath(import.meta.url)), '..', 'python', 'ast_gate.py');
+// the gate script is a non-JS runtime asset — see src/runtime-assets.js for why it is resolved there
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MODULE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/;
 // Python keywords (no identifier may be one) + the names the generated file reserves for its own
@@ -300,8 +301,12 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
  * chasing an open-ended list of the ones it may not.
  */
 export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20000, requireOrderForRowSlice = false } = {}) {
+  // A build that shipped src/ without python/ used to surface as "python3 exit 2: can't open
+  // file" — a message that reads like the analyst's code broke. Say what actually happened.
+  const gate = assetPath('astGate');
+  if (!gate) return Promise.reject(new Error(missingAssetMessage('astGate')));
   return new Promise((resolve, reject) => {
-    const proc = spawn(pythonBin, [GATE], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const proc = spawn(pythonBin, [gate], { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = ''; let err = '';
     const timer = setTimeout(() => { proc.kill(); reject(new Error(`ast gate timed out after ${timeoutMs}ms`)); }, timeoutMs);
     proc.stdout.on('data', (d) => { out += d; });

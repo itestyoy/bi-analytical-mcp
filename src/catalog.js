@@ -3,6 +3,7 @@
 // reference is projected from here into JSON-Schema enums.
 
 import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
+import { assetPath, missingAssetMessage } from './runtime-assets.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import yaml from 'js-yaml';
@@ -385,6 +386,11 @@ export function resolvePythonRuntime({ profilesDir, projectDir, env = process.en
   const decided = (r) => ({ ...r, config, packages });
   const force = String(env.MCP_PYTHON_MODELS || '').trim().toLowerCase();
   if (/^(off|0|false|no)$/.test(force)) return decided({ available: false, reason: 'disabled by MCP_PYTHON_MODELS=off' });
+  // No gate script in this build — no python stage. Every body must pass the static gate before a
+  // model is submitted, so without it the stage cannot be admitted at all: say that HERE, where it
+  // takes the stage out of the tool schema, instead of letting a caller write one and fail on the
+  // spawn. An operator's MCP_PYTHON_MODELS=on cannot override a file that is not there.
+  if (!assetPath('astGate')) return decided({ available: false, reason: missingAssetMessage('astGate') });
   const out = profileOutput(profilesDir, projectDir);
   const type = String(out?.type || '').toLowerCase();
   if (/^(on|1|true|yes)$/.test(force)) return decided({ available: true, runtime: type || 'unknown', forced: true });

@@ -7,12 +7,10 @@
 // `query` goes through the persistent sidecar.
 
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { DbtRunner } from '../dbt-runner.js';
-
-const SIDECAR = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'python', 'mf_sidecar.py');
+// the sidecar script is a non-JS runtime asset — see src/runtime-assets.js for why it lives there
+import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 
 export class MfEngineBackend {
   constructor({ pythonBin = 'python', dbtBin = 'dbt', profilesDir, timeout = 600000 } = {}) {
@@ -27,7 +25,11 @@ export class MfEngineBackend {
 
   _ensureProc() {
     if (this._proc) return;
-    const proc = spawn(this.pythonBin, [SIDECAR], { stdio: ['pipe', 'pipe', 'pipe'] });
+    // A build without python/ cannot start the sidecar at all; say so as a packaging defect
+    // rather than letting the spawn fail with a bare "exit 2".
+    const sidecar = assetPath('mfSidecar');
+    if (!sidecar) throw new Error(missingAssetMessage('mfSidecar'));
+    const proc = spawn(this.pythonBin, [sidecar], { stdio: ['pipe', 'pipe', 'pipe'] });
     proc.stderr.on('data', () => {}); // sidecar diagnostics; ignore
     const rl = createInterface({ input: proc.stdout });
     rl.on('line', (line) => {

@@ -29,7 +29,14 @@ RUN npm ci --omit=dev || npm install --omit=dev
 # App source ONLY. The image is generic: NO catalog, recipes, dbt project, or any
 # project-specific data is baked in — all of that is supplied at runtime via
 # volumes + env in docker-compose. Only infra defaults live here.
+#
+# `python/` is SERVER CODE, not project data: the static gate the python pipeline stage runs
+# before submitting a model (python/ast_gate.py) and the warm MetricFlow sidecar
+# (python/mf_sidecar.py). Nothing imports them, so an image built from src/ alone looks fine and
+# then fails at the first call that shells out to one. src/runtime-assets.js declares the set and
+# test/unit/runtime-assets.test.js checks that this COPY covers it.
 COPY src ./src
+COPY python ./python
 
 ENV HOST=0.0.0.0 \
     PORT=3000 \

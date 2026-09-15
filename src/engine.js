@@ -60,10 +60,11 @@ export class Engine {
     // describe the same runtime.
     if (pythonModelConfig) catalog.pythonRuntime = { ...catalog.pythonRuntime, config: pythonModelConfig };
     this.pythonModelConfig = catalog.pythonRuntime?.config || {};
-    // The python stage description names the WORKED RECIPES this deployment ships for it: a
-    // compiling payload per common task is worth more than any amount of prose, and the caller has
-    // to know they exist before writing the first function.
-    if (recipes) catalog.pythonRecipes = recipes.idsRequiring('python_models');
+    // The python stage description INDEXES the worked recipes this deployment ships for it (id +
+    // which move each one covers) instead of spelling every form out in prose: a compiling payload
+    // per move is worth more than any amount of description text, and the caller has to know the
+    // index exists before writing the first function.
+    if (recipes) catalog.pythonRecipes = recipes.entriesRequiring('python_models');
     this.schemas = buildSchemas(catalog);
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
@@ -490,7 +491,7 @@ export class Engine {
         // The python authoring guide is a property of the RUNTIME this deployment submits to, so it
         // comes from the same profile the stage description and the compiled model come from.
         python: this.catalog.pythonRuntime?.available
-          ? pythonAuthoringGuide(frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig), this.recipes?.idsRequiring('python_models') || [])
+          ? pythonAuthoringGuide(frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig), this.recipes?.entriesRequiring('python_models') || [])
           : null,
       });
     }

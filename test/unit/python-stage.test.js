@@ -547,14 +547,16 @@ test('the stage description itself carries the runtime rules and the right form 
   assert.match(body, /RULES for this runtime — and the right form for each task — are on the stage description/);
 });
 
-// A worked recipe beats prose: the caller has to know they exist BEFORE writing a function, so the
-// ids are named in the stage description itself and the guide points at them. Wired from the
-// deployment's own recipe file — a deployment that ships none says nothing.
+// A worked recipe beats prose, so the stage DESCRIPTION is an INDEX of them rather than a manual:
+// each id with the move it covers and an instruction to study them, because the caller has to know
+// they exist BEFORE writing the first function. Wired from the deployment's own recipe file — a
+// deployment that ships none has nothing to point at, so its description keeps carrying the forms
+// itself (checked at the end).
 //
 // They are per APPROACH, not per business task: each one is the correct form of a single move on
 // the frame (a lookup, a per-group value, a top-N, a threshold, a prediction), so a real question
-// is assembled from several. Hence every id must be reachable — a caller that can only find the
-// one nearest its wording would miss the others its function needs.
+// is assembled from several. Hence every id must be reachable WITH its move named — a caller that
+// can only find the one nearest its wording would miss the others its function needs.
 test('the stage description and the guide send the caller to this deployment\'s python recipes', async (t) => {
   if (skipNoPy(t)) return;
   const { loadRecipes } = await import('../../src/recipes.js');
@@ -567,14 +569,27 @@ test('the stage description and the guide send the caller to this deployment\'s 
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec-')) }), recipes, pythonBin: PY });
 
   const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
-  assert.match(py.description, /READ A RECIPE BEFORE YOU WRITE/);
-  for (const id of ids) assert.ok(py.description.includes(id), `recipe ${id} is not named in the stage description`);
+  assert.match(py.description, /STUDY THE RECIPES FIRST/, 'the description INSISTS on reading them');
+  const entries = recipes.entriesRequiring('python_models');
+  for (const { id, title } of entries) {
+    assert.ok(py.description.includes(id), `recipe ${id} is not named in the stage description`);
+    assert.ok(py.description.includes(title), `recipe ${id} is named without its move (${title}) — the caller cannot tell which one it needs`);
+  }
   assert.match(py.description, /semantic_index\(\{ recipe: "<id>" \}\)/, 'and the description says HOW to fetch one');
+  // …and it is an INDEX, not a manual: the per-operation code forms live in the recipes and the
+  // full guide now, so the description no longer repeats them (that is what makes it shorter).
+  assert.ok(!py.description.includes('THE RIGHT FORM PER OPERATION'), 'the forms are in the recipes, not inlined here');
+  // what it still carries itself: why this runtime bites, and where the reasoning lives
+  assert.match(py.description, /NullIndexError/);
+  assert.match(py.description, /OrderRequiredError/);
+  assert.match(py.description, /semantic_index\(\{ guide: "python" \}\)/);
 
   const g = await e.semantic_index({ guide: 'python' });
   assert.deepEqual(g.recipes.ids, ids);
+  assert.deepEqual(g.recipes.moves, entries.map((r) => `${r.id}: ${r.title}`), 'the guide names the move behind every id too');
   assert.match(g.recipes.fetch, /semantic_index\(\{ recipe: '/);
-  assert.match(g.read_next, /Read the closest recipe/);
+  assert.match(g.read_next, /STUDY THE RECIPES BEFORE YOU WRITE/);
+  assert.match(g.recipes.note, /STUDY THESE BEFORE WRITING A FUNCTION/);
 
   // every one of them is fetchable and carries what makes it adaptable
   for (const id of ids) {
@@ -589,5 +604,9 @@ test('the stage description and the guide send the caller to this deployment\'s 
   bare.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e2 = new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec2-')) }), pythonBin: PY });
   const py2 = e2.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
-  assert.ok(!py2.description.includes('READ A RECIPE BEFORE YOU WRITE'));
+  assert.ok(!py2.description.includes('STUDY THE RECIPES FIRST'));
+  for (const { id } of entries) assert.ok(!py2.description.includes(id), 'no recipe of another deployment is advertised');
+  // …and with nothing to point at, the description carries the forms itself instead of dropping them
+  assert.match(py2.description, /THE RIGHT FORM PER OPERATION/);
+  assert.ok(py2.description.length > py.description.length, 'pointing at recipes is what makes the description shorter');
 });

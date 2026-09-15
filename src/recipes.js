@@ -78,7 +78,16 @@ export class Recipes {
 
   /** Ids of the visible recipes that need a given capability (e.g. 'python_models'). */
   idsRequiring(capability) {
-    return this.visible().filter((r) => r.requires === capability).map((r) => r.id);
+    return this.entriesRequiring(capability).map((r) => r.id);
+  }
+
+  /**
+   * The same set as `idsRequiring`, but as { id, title } — what a tool DESCRIPTION needs to tell
+   * the caller which recipe covers which move, instead of listing bare ids it has to fetch one by
+   * one to find out. Title is the recipe's own, so nothing about a recipe lives in src/.
+   */
+  entriesRequiring(capability) {
+    return this.visible().filter((r) => r.requires === capability).map((r) => ({ id: r.id, title: r.title }));
   }
 
   /** Compact catalog of recipes (no full payloads) for listing — only what fits here. */

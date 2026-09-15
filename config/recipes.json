@@ -2977,7 +2977,7 @@
     {
       "id": "bf_lookup_via_merge",
       "task_type": "bigframes",
-      "title": "BigFrames approach — a value from a lookup: merge, never map",
+      "title": "A value from a lookup — merge, never map",
       "when_to_use": "You have a mapping (id → label, day → target, country → tier) and want it as a column.",
       "approach": "Put the other side in a frame and MERGE on the key: `lookup = bpd.DataFrame({\"k\": [...], \"v\": [...]}); df = df.merge(lookup, on=\"k\", how=\"left\")`.",
       "instead_of": "`df[\"v\"] = df[\"k\"].map(mapping)` — map aligns two objects by index, and the frame from dbt.ref() has none: NullIndexError.",
@@ -3069,7 +3069,7 @@
     {
       "id": "bf_group_value_back_to_rows",
       "task_type": "bigframes",
-      "title": "BigFrames approach — a group's aggregate back on its rows: transform or merge",
+      "title": "A group's aggregate back on its rows — transform or merge",
       "when_to_use": "Share of a group's total, deviation from a group mean, \"how big is my cohort\" as a column.",
       "approach": "Same number of rows → `df[\"m\"] = df.groupby(\"k\")[\"x\"].transform(\"mean\")` (broadcasts inside ONE frame). A different shape, or several aggregates → build it with `groupby(..., as_index=False)` and MERGE it back.",
       "instead_of": "`df[\"m\"] = df.groupby(\"k\")[\"x\"].mean()` — the groupby result is another object with its own index; assigning it needs alignment the frame cannot do.",
@@ -3160,7 +3160,7 @@
     {
       "id": "bf_distinct_values",
       "task_type": "bigframes",
-      "title": "BigFrames approach — distinct values: a groupby, not unique()",
+      "title": "Distinct values — a groupby, not unique()",
       "when_to_use": "A distinct list of ids, of (user, level) pairs, of values a column takes.",
       "approach": "`uniq = df.groupby([\"k\"], as_index=False).size().drop(columns=\"size\")` — the documented replacement for this runtime.",
       "instead_of": "`df[\"k\"].unique()` / `df.drop_duplicates(subset=[\"k\"])` — both are unsupported in partial ordering mode.",
@@ -3233,7 +3233,7 @@
     {
       "id": "bf_top_n_needs_order",
       "task_type": "bigframes",
-      "title": "BigFrames approach — top-N and anything positional: sort_values first",
+      "title": "Top-N and anything positional — sort_values first",
       "when_to_use": "Top/bottom N, \"the largest\", \"the first row per group\", anything positional.",
       "approach": "`top = df.sort_values(\"x\", ascending=False).head(10)` — or `df.nlargest(10, \"x\")`, which orders by itself.",
       "instead_of": "`df.head(10)` on an unsorted frame (its rows differ between runs) and `df.iloc[:10]` (raises OrderRequiredError).",
@@ -3312,7 +3312,7 @@
     {
       "id": "bf_order_dependent_series",
       "task_type": "bigframes",
-      "title": "BigFrames approach — rolling / shift / cumulative: sort, then the operation",
+      "title": "Rolling / shift / cumulative — sort, then the operation",
       "when_to_use": "7-day averages, day-over-day deltas, cumulative totals, previous-value comparisons.",
       "approach": "`df = df.sort_values(order_key)` and then the series operation: `rolling(window=n).mean()`, `shift(1)`, `cumsum()`, `diff()`, `pct_change()`.",
       "instead_of": "Calling rolling/shift/cumsum on the frame as it arrives — the window is then over an arbitrary order, and the numbers are silently meaningless.",
@@ -3406,7 +3406,7 @@
     {
       "id": "bf_same_frame_statistic",
       "task_type": "bigframes",
-      "title": "BigFrames approach — a statistic OF the frame back ON it: a broadcast scalar",
+      "title": "A statistic OF the frame back ON it — a broadcast scalar",
       "when_to_use": "z-score, share of total, distance from the mean, normalisation.",
       "approach": "An aggregate OF the frame applied back TO it: `df[\"z\"] = (df[\"x\"] - df[\"x\"].mean()) / df[\"x\"].std(ddof=0)`; `df[\"share\"] = df[\"x\"] / df[\"x\"].sum()`.",
       "instead_of": "Computing the statistic in one frame and joining it in from another — unnecessary here, and it needs an index.",
@@ -3490,7 +3490,7 @@
     {
       "id": "bf_threshold_from_distribution",
       "task_type": "bigframes",
-      "title": "BigFrames approach — a threshold from the distribution: one quantile as a scalar",
+      "title": "A threshold from the distribution — one quantile as a scalar",
       "when_to_use": "\"The slowest 10%\", \"unusually hard levels\", any \"above normal\" where nobody has defined normal.",
       "approach": "`cut = df[\"x\"].quantile(0.9)` (a SCALAR) → write it as a column and compare: `df[\"p90\"] = cut; df[\"is_high\"] = df[\"x\"] >= cut`.",
       "instead_of": "`df[\"x\"].quantile([0.5, 0.9])` — a SERIES indexed by q, which this runtime has no index to align; and a hard-coded threshold nobody can defend.",
@@ -3581,7 +3581,7 @@
     {
       "id": "bf_filter_by_another_frame",
       "task_type": "bigframes",
-      "title": "BigFrames approach — filtering by another frame's data: merge the flag in",
+      "title": "Filtering by another frame's data — merge the flag in",
       "when_to_use": "Keeping only qualifying users, excluding a blacklist, filtering by a per-group condition.",
       "approach": "Merge the other side in and filter on the merged column: `df = df.merge(flags, on=\"k\", how=\"inner\")` (or how=\"left\" then `df[df[\"flag\"]]`).",
       "instead_of": "`df[other[\"flag\"]]` / `df[df[\"k\"].isin(other_series)]` — a Series from ANOTHER frame has no index to align with this one.",
@@ -3665,7 +3665,7 @@
     {
       "id": "bf_ml_predict_as_column",
       "task_type": "bigframes",
-      "title": "BigFrames approach — bigframes.ml: the prediction back as a column",
+      "title": "An ml prediction back as a column (bigframes.ml)",
       "when_to_use": "Clustering, scoring, classification, a predicted value per row.",
       "approach": "Fit and predict INSIDE BigQuery, then take the prediction column off the result: `model.fit(X); df[\"segment\"] = model.predict(X)[\"CENTROID_ID\"]`. Scale first when the algorithm is distance-based.",
       "instead_of": "sklearn / scipy — they need `to_pandas()` first and then run single-node in the notebook; and a per-row Python scoring function, which this runtime cannot execute.",
@@ -3786,7 +3786,7 @@
     {
       "id": "bf_ml_output_replaces_frame",
       "task_type": "bigframes",
-      "title": "BigFrames approach — an estimator whose output REPLACES the frame: declare its columns",
+      "title": "An estimator whose output REPLACES the frame — declare its columns",
       "when_to_use": "Forecasting, model metrics, a transformed matrix — anything where the result is not \"my rows plus a column\".",
       "approach": "When the estimator returns its OWN shape (forecast, score, metrics), the python stage returns THAT frame and `output.columns` describes it: `out = model.predict(horizon=30); return out`.",
       "instead_of": "Declaring the input columns as the output — the following SQL stages then reference columns that do not exist.",
@@ -3893,7 +3893,7 @@
     {
       "id": "bf_cache_expensive_intermediate",
       "task_type": "bigframes",
-      "title": "BigFrames approach — an expensive intermediate read twice: cache()",
+      "title": "An expensive intermediate read twice — cache()",
       "when_to_use": "One heavy join or aggregate feeding several outputs in the same function.",
       "approach": "Materialize it once: `joined = df.merge(other, on=\"k\"); joined.cache()` and derive everything from `joined`.",
       "instead_of": "Deriving several results from the same expensive expression without caching — execution is deferred, so each dependent result re-runs the whole thing.",
@@ -3979,7 +3979,7 @@
     {
       "id": "bf_sql_only_function",
       "task_type": "bigframes",
-      "title": "BigFrames approach — what only SQL can do: bigframes.bigquery (bbq)",
+      "title": "What only SQL can do — bigframes.bigquery (bbq)",
       "when_to_use": "LEAST/GREATEST, array aggregation, building a STRUCT column, epoch conversions, a SQL function with no pandas name.",
       "approach": "Reach the BigQuery function directly: `bbq.sql_scalar(\"LEAST({0}, {1})\", columns=[df[\"a\"], df[\"b\"]])`, `bbq.array_agg(df.groupby(\"k\")[\"c\"])`, `bbq.struct(df[[\"a\",\"b\"]])`, `bbq.unix_micros(df[\"t\"])`.",
       "instead_of": "`to_pandas()` to get a Python equivalent — that leaves BigQuery and brings the whole result into the notebook.",
@@ -4067,7 +4067,7 @@
     {
       "id": "bf_leave_to_pandas_last",
       "task_type": "bigframes",
-      "title": "BigFrames approach — leaving for pandas only after the aggregation",
+      "title": "Leaving for pandas only after the aggregation",
       "when_to_use": "A library call that only exists in pandas/numpy, on a small aggregated result.",
       "approach": "Aggregate in the warehouse FIRST, convert the small result: `small = df.groupby(\"k\", as_index=False)[\"x\"].sum(); pdf = small.to_pandas()`.",
       "instead_of": "`pdf = df.to_pandas()` on the incoming frame — it downloads the whole table into the notebook runtime and everything after it is single-node.",

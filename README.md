@@ -74,8 +74,10 @@ One family is deliberately NOT organised by business task: `bigframes` recipes
 APPROACH — the correct form of a single move on the frame `dbt.ref()` returns
 (a lookup, a per-group value, top-N, a threshold, an ml prediction, `cache()`),
 each carrying `approach` (the form that works) next to `instead_of` (the form
-that raises, and why). A real question combines several. Their ids are named in
-the python stage description itself and in `semantic_index({ guide: "python" })`.
+that raises, and why). A real question combines several, so the python stage
+description is an INDEX of them — every id with the move it covers, under an
+instruction to study them before writing a function — and the code forms
+themselves live in the recipes and in `semantic_index({ guide: "python" })`.
 
 A deployment ADDS its own recipes via `RECIPES_PATH` (comma-separated files);
 the shipped ones stay, and an id collision lets an operator override one

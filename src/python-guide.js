@@ -1,7 +1,10 @@
 // The AUTHORING GUIDE for a python stage, per warehouse runtime. It is served TWICE from this one
 // source, so the two can never drift:
-//   - compressed, as the python stage's own DESCRIPTION (`pythonRulesText`) — every rule and the
-//     right form for every task, so the caller always has them in front of it without asking;
+//   - compressed, as the python stage's own DESCRIPTION (`pythonRulesText`) — why this runtime
+//     bites, an INDEX of the worked recipes (which one covers which move) with an instruction to
+//     study them, and how a stage is declared here; where a deployment ships no recipes there is
+//     nothing to point at, so the description falls back to every rule and the right form per
+//     operation;
 //   - in full, through semantic_index({ guide: 'python' }) (`pythonAuthoringGuide`) — the same
 //     rules WITH the reasoning behind each, and each example as do / avoid / why.
 //
@@ -21,6 +24,10 @@
 //   dbt         — what the generated model carries, so the caller knows what it does NOT write
 
 const BIGFRAMES = {
+  // The one paragraph that STAYS in the stage description when the worked recipes carry the forms:
+  // what is different about this frame and what it costs to ignore. Everything specific — the form
+  // per move, the reasoning per rule — is behind the recipe index and the full guide.
+  headline: 'What makes it different, and what ignoring it costs: the frame dbt.ref() hands you has NO INDEX and NO ROW ORDER (dbt runs with ordering_mode="partial"), so pandas code that reads correctly either raises (NullIndexError, OrderRequiredError) or silently answers a different question — a lookup with map, a groupby result assigned back, a head() without a sort, a Series taken from another frame; execution is DEFERRED and re-runs per dependent result; a per-row Python function is not something BigQuery can execute; and to_pandas() leaves BigQuery for a single node. None of it is refused before the run: nothing here can know which line you meant, so the cost of guessing is a failed build or a wrong number.',
   runs_where: 'dbt runs this model in a Colab Enterprise notebook: the BigFrames library turns your DataFrame operations into BigQuery SQL and BigQuery executes it. Nothing runs row by row in Python, and nothing is transferred out of BigQuery unless you ask for it with to_pandas().',
   rules: [
     {
@@ -199,8 +206,9 @@ const COOKBOOKS = { bigframes: BIGFRAMES };
  * The authoring guide for the runtime this deployment actually submits to, or null when that
  * runtime has none written. `profile` is a frame profile (src/python-model.js).
  */
-export function pythonAuthoringGuide(profile, recipeIds = []) {
+export function pythonAuthoringGuide(profile, recipes = []) {
   if (!profile) return null;
+  const index = (recipes || []).map((r) => (typeof r === 'string' ? { id: r } : r)).filter((r) => r?.id);
   const book = COOKBOOKS[profile.key];
   if (!book) {
     // No cookbook for this runtime: the stage description's own rules are still the contract.
@@ -209,39 +217,59 @@ export function pythonAuthoringGuide(profile, recipeIds = []) {
   return {
     runtime: profile.key,
     frame: profile.native,
-    note: 'How to write a python stage for THIS warehouse runtime: the constraints and why they exist, then one worked example per OPERATION. `do` / `avoid` are the lines of ONE declared function over `df` — the frame dbt.ref() returns. The same rules, compressed, are in the python stage description.',
+    note: 'How to write a python stage for THIS warehouse runtime: the constraints and why they exist, then one worked example per OPERATION. `do` / `avoid` are the lines of ONE declared function over `df` — the frame dbt.ref() returns. This is the LONG form: the stage description itself carries the framing and an index of the worked recipes, and sends you here for the reasoning.',
     ...book,
     modelling: profile.ml || undefined,
-    ...(recipeIds.length ? {
+    ...(index.length ? {
       recipes: {
-        ids: recipeIds,
-        note: 'READ ONE FIRST. These are not per-business-task templates: each is ONE APPROACH — the correct form of a single move on this runtime (a lookup, a per-group value, a top-N, a threshold, a prediction, a cached intermediate) as a COMPLETE compiling payload, with `approach` = the form that works, `instead_of` = the form that raises and why, and `hack` = how to generalise it. A real question usually combines several: pick one per move you need. Listed side by side under `tasks` in semantic_index({ guide: true }).',
-        fetch: `semantic_index({ recipe: '${recipeIds[0]}' })`,
+        ids: index.map((r) => r.id),
+        moves: index.filter((r) => r.title).map((r) => `${r.id}: ${r.title}`),
+        note: 'STUDY THESE BEFORE WRITING A FUNCTION — and not only the nearest one: a real question needs several. They are not per-business-task templates: each is ONE APPROACH — the correct form of a single move on this runtime (a lookup, a per-group value, a top-N, a threshold, a prediction, a cached intermediate) as a COMPLETE compiling payload, with `approach` = the form that works, `instead_of` = the form that raises and why, and `hack` = how to generalise it. `moves` says which id covers which move; they are listed side by side under `tasks` in semantic_index({ guide: true }) too.',
+        fetch: `semantic_index({ recipe: '${index[0].id}' })`,
       },
     } : {}),
-    read_next: recipeIds.length
-      ? `Read the closest recipe (semantic_index({ recipe: '${recipeIds[0]}' }) …) and adapt it, then declare the stage with build_native_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.`
+    read_next: index.length
+      ? `STUDY THE RECIPES BEFORE YOU WRITE: fetch EVERY move your question involves (semantic_index({ recipe: '${index[0].id}' }), … — \`recipes.moves\` above says which id covers which), adapt them, and only then declare the stage with build_native_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.`
       : 'Declare the stage with build_native_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.',
   };
 }
 
 /**
- * The COMPACT rendering of a runtime's cookbook — what the python stage DESCRIPTION carries, so the
- * caller reads the rules and the right form of every task without fetching anything. Built from the
- * same data as the full guide (each rule's `short`, each example's `line`), so the two cannot drift.
+ * The COMPACT rendering of a runtime's cookbook — what the python stage DESCRIPTION carries.
+ *
+ * With recipes it is an INDEX: why this runtime bites (`headline`), then each recipe id with the
+ * move it covers, an instruction to study them, and the stage form. Without them (a deployment
+ * shipping none) there is nothing to point at, so it falls back to every rule's `short` and every
+ * example's `line` — built from the same data as the full guide, so the two cannot drift.
  */
-export function pythonRulesText(key, recipeIds = []) {
+export function pythonRulesText(key, recipes = []) {
   const book = COOKBOOKS[key];
   if (!book) return '';
+  // Recipes may arrive as { id, title } (what a deployment's recipe file gives) or as bare ids.
+  const index = (recipes || []).map((r) => (typeof r === 'string' ? { id: r } : r)).filter((r) => r?.id);
+
+  // WITH recipes: the description is an INDEX, not a manual. Each move has a worked, compiling
+  // payload that shows the right form next to the one that raises, so repeating those forms here
+  // only makes the description longer and lets the two drift. What stays is why the runtime bites,
+  // the index itself with an insistence on reading it, and how to declare the stage in this server.
+  if (index.length) {
+    return `RULES FOR ${key.toUpperCase()} — ${book.runs_where} ${book.headline || ''} `
+      + `SO: DO NOT WRITE A FUNCTION FROM MEMORY — STUDY THE RECIPES FIRST. `
+      + `This deployment ships one worked, COMPILING payload PER MOVE (not per business task), each showing the form that works next to the form that raises and the technique to generalise it: `
+      + `${index.map((r) => `${r.id}${r.title ? `: ${r.title}` : ''}`).join('; ')}. `
+      + `Fetch each with semantic_index({ recipe: "<id>" }) and adapt it. A real question needs SEVERAL of them (a feature table, a threshold, a prediction, a cached intermediate), so read every move yours involves before writing — one glance at the nearest id is not reading it. They are also listed together under \`tasks\` in semantic_index({ guide: true }). `
+      + `EVERY RULE with the reasoning behind it, and a do / avoid / why for each operation: semantic_index({ guide: "python" }) — read it before your first python stage. `
+      + `${book.stage_form || ''}`;
+  }
+
+  // WITHOUT recipes (a deployment that ships none) there is nothing to point at, so the description
+  // carries the rules and the right form per operation itself — built from the same data.
   const rules = book.rules.map((r) => r.short).filter(Boolean);
   const lines = book.examples.map((e) => e.line).filter(Boolean);
   return `RULES FOR ${key.toUpperCase()} — ${book.runs_where} `
     + `${rules.map((r, i) => `(${i + 1}) ${r}`).join('; ')}. `
     + `THE RIGHT FORM PER OPERATION — ${lines.join('; ')}. `
     + `${book.stage_form || ''} `
-    + (recipeIds.length
-      ? `READ A RECIPE BEFORE YOU WRITE: this deployment ships one COMPILING payload PER APPROACH — not per business task, but the correct form of a single move on this runtime, each with the form that raises beside it and the technique to generalise it: ${recipeIds.join(', ')}. A real question combines several; fetch each with semantic_index({ recipe: "<id>" }) (they are also listed together under \`tasks\` in semantic_index({ guide: true })) and adapt rather than writing a stage from scratch. `
-      : '')
     + `The same guide with the reasoning behind each rule and the full examples: semantic_index({ guide: "python" }).`;
 }
 

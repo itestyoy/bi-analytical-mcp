@@ -700,7 +700,10 @@ function sourceColumns(catalog, key, physicalCols = null) {
     if (m.event_data_column && !cols.has(m.event_data_column)) cols.set(m.event_data_column, { type: 'json' });
     for (const e of Object.values(m.entities || {})) for (const p of e.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
   } else {
-    if (typeof m.primary_entity === 'object' && m.primary_entity.column && !cols.has(m.primary_entity.column)) cols.set(m.primary_entity.column, { type: 'string' });
+    // the primary entity's key can span several columns, and each of them is a real column of the
+    // relation — the same shape the fact branch above reads (the old single `.column` form is gone)
+    for (const p of (typeof m.primary_entity === 'object' && m.primary_entity.key) || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
+    for (const e of Object.values(m.entities || {})) for (const p of e.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
     for (const [name, dd] of Object.entries(m.dimensions || {})) if (!cols.has(name)) cols.set(name, { type: dd.type });
   }
   // GROUNDING: when the caller supplies the relation's PHYSICAL column names (lowercased),
@@ -710,8 +713,6 @@ function sourceColumns(catalog, key, physicalCols = null) {
   if (physicalCols) for (const name of [...cols.keys()]) if (!physicalCols.has(name.toLowerCase())) cols.delete(name);
   return cols;
 }
-
-/** Starting columns for the events anchor (so prepare/funnel pipelines run over it). */
 
 /** The scalar columns a `prepare` stage list adds (name -> { type }) — threads prep columns. */
 export function prepareColumns(catalog, dialectName, stages = [], source) {

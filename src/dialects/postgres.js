@@ -82,16 +82,27 @@ export class PostgresDialect extends Dialect {
   }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
-  // A TEXT column holding JSON must be cast before the jsonb operators apply.
+  /**
+   * A TEXT column holding JSON, read through the jsonb operators. The `::jsonb` cast RAISES on a
+   * row whose text is not JSON, and ONE such row fails the whole statement — so every read guards
+   * the cast the same way: the value is tested first, and a row that does not hold the expected
+   * JSON shape yields NULL, which counts as absent everywhere these are used.
+   *
+   * The guard is what makes a malformed row a missing value instead of a failed query, so it
+   * belongs to EVERY read, not just the one that happened to be scanned over every row. It needs
+   * `IS JSON`, which is Postgres 16+ (PGlite 17 and BigQuery's own guards are fine); on an older
+   * server these reads are unsupported rather than silently unguarded.
+   */
+  _jsonbWhenValid(column, expr, shape = '') {
+    return `(CASE WHEN ${column} IS JSON${shape ? ` ${shape}` : ''} THEN ${expr} END)`;
+  }
+
   jsonColumnArrayLength(column) {
-    // The cast RAISES on text that is not JSON, and one such row would fail the whole scan (a
-    // coverage pass over every row of the fact), so the value is tested first: not an array → NULL,
-    // which counts as absent everywhere this is used. (`IS JSON` is Postgres 16+.)
-    return `(CASE WHEN ${column} IS JSON ARRAY THEN jsonb_array_length((${column})::jsonb) END)`;
+    return this._jsonbWhenValid(column, `jsonb_array_length((${column})::jsonb)`, 'ARRAY');
   }
 
   jsonColumnArrayContains(column, value) {
-    return `(((${column})::jsonb) @> ${this.sqlLiteral(JSON.stringify([value]))}::jsonb)`;
+    return this._jsonbWhenValid(column, `(((${column})::jsonb) @> ${this.sqlLiteral(JSON.stringify([value]))}::jsonb)`, 'ARRAY');
   }
 
   arrayContains(column, value) { return `(${this.sqlLiteral(value)} = ANY(${column}))`; }
@@ -100,7 +111,7 @@ export class PostgresDialect extends Dialect {
     this.ident(field);
     const base = `((${column})::jsonb->>'${field}')`;
     const ct = this.castType(type);
-    return ct ? `${base}::${ct}` : base;
+    return this._jsonbWhenValid(column, ct ? `${base}::${ct}` : base);
   }
 
   // ── time / scalar / statistical ────────────────────────────────────────────
@@ -184,9 +195,6 @@ export class PostgresDialect extends Dialect {
     });
     return `WITH ${ctes.join(',\n')}\nSELECT * FROM ${prev}`;
   }
-
-  /** CTE-form rendering of one op (used by the funnel/prepare pipeline). */
-  stepCte(prev, op) { return this._step(prev, op); }
 
   _step(prev, op) {
     switch (op.op) {

@@ -164,42 +164,6 @@ export class BigQueryDialect extends Dialect {
     return lines.join('\n');
   }
 
-  /** CTE-form rendering of one op (fallback used only when a pipeline must lower to a
-   *  chained CTE). match_recognize stays pipe-form on BigQuery (see _step), so this is
-   *  rarely hit here. Standard SQL — valid on BigQuery. */
-  stepCte(prev, op) {
-    switch (op.op) {
-      case 'where':
-        return `SELECT * FROM ${prev} WHERE ${op.preds.join(' AND ')}`;
-      case 'extend':
-        return `SELECT *, ${op.cols.map((c) => `(${c.expr}) AS ${this.ident(c.name)}`).join(', ')} FROM ${prev}`;
-      case 'unnest': {
-        const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type, op.encoding);
-        return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
-      }
-      case 'join':
-        return this.joinCte(prev, op);
-      case 'aggregate': {
-        const sel = [...op.groupBy.map((c) => this.ident(c)), ...op.aggs.map((a) => `${a.expr} AS ${this.ident(a.as)}`)];
-        return `SELECT ${sel.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;
-      }
-      case 'pivot': {
-        const cols = op.values.map((v) => { if (!/^[A-Za-z0-9_]+$/.test(String(v))) throw new Error(`unsafe pivot value: ${v}`); return `${op.fn}(CASE WHEN ${this.ident(op.on)} = ${this.sqlLiteral(v)} THEN ${this.ident(op.valueCol)} END) AS ${v}`; });
-        return `SELECT ${op.groupBy.map((c) => this.ident(c)).join(', ')}${op.groupBy.length ? ', ' : ''}${cols.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;
-      }
-      case 'order_by':
-        return `SELECT * FROM ${prev} ORDER BY ${op.keys.map((k) => `${this.ident(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
-      case 'limit':
-        return `SELECT * FROM ${prev} LIMIT ${Number(op.n)}`;
-      case 'project':
-        return `SELECT ${op.cols.map((c) => this.ident(c)).join(', ')} FROM ${prev}`;
-      case 'sample':
-        return `SELECT * FROM ${prev} WHERE RAND() < ${Number(op.percent) / 100}`;
-      default:
-        throw new Error(`bigquery: op '${op.op}' is not supported as a CTE step`);
-    }
-  }
-
   _step(op) {
     switch (op.op) {
       case 'where':

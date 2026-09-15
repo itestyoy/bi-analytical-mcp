@@ -85,13 +85,49 @@ export class Engine {
   get_recipe(input) {
     if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
     const r = this.recipes.get(input.id);
+    // A recipe ships as ONE payload for every catalog, but whether a join needs a point-in-time
+    // window is a property of THIS catalog's schema — so the payload is fitted to it before it is
+    // handed over, and what was fitted is said out loud.
+    const { payload, fitted } = this._fitRecipePipeline(r.register_payload);
     // A recipe is a reusable BUILDING BLOCK: a ready payload for a task family PLUS `hack`
     // — the generalizable technique to adapt it to a novel question.
     return {
       ...r,
+      ...(payload ? { register_payload: payload } : {}),
+      ...(fitted.length ? { fitted_to_catalog: fitted } : {}),
       naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
       building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question; feed a pipeline payload through build_native_model, a create_payload through create_semantic_model.',
     };
+  }
+
+  /**
+   * Fit a recipe's pipeline payload to THIS catalog. A recipe is written once for every
+   * deployment, but a join it declares may or may not need a point-in-time window: that depends on
+   * whether the joined model keeps several versions per key HERE. Left unfitted, the shipped
+   * payload runs as-is and fans out to every historical version — plausible numbers, inflated.
+   *
+   * Only the window is filled in, and only where the catalog says one is required; the moment it
+   * pins is the source's own event time, which is what `_joinCompletenessWarnings` recommends for
+   * a hand-written join. Every change is reported so the caller sees it rather than discovering a
+   * payload that does not match the recipe text.
+   */
+  _fitRecipePipeline(payload) {
+    const fitted = [];
+    const stages = payload?.pipeline?.stages;
+    if (!Array.isArray(stages)) return { payload: null, fitted };
+    const source = payload.pipeline.source;
+    const eventTime = source ? this.catalog.getModel(source)?.time?.column : null;
+    const next = stages.map((st) => {
+      if (st?.stage !== 'join' || st.between || !st.with || !eventTime) return st;
+      let m; try { m = this.catalog.getModel(st.with); } catch { return st; }
+      if (!m?.scd) return st;
+      const from = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'start')?.[0];
+      const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
+      if (!from || !to) return st;
+      fitted.push(`join with '${st.with}': added between { value: '${eventTime}', from: '${from}', to: '${to}' } — '${st.with}' keeps several versions per key in this catalog, so without the window every row would match every historical version and the counts would inflate.`);
+      return { ...st, between: { value: eventTime, from, to } };
+    });
+    return { payload: fitted.length ? { ...payload, pipeline: { ...payload.pipeline, stages: next } } : null, fitted };
   }
 
   _validate(tool, input) {
@@ -268,18 +304,40 @@ export class Engine {
     return map;
   }
 
-  /** What a context can group / filter by, in the form the tools accept: [{ model, attribute, via? }] —
-   *  the catalog's reachable attributes plus the dimensions the task declared (by their bare name). */
-  _groupableRefs(ctx) {
-    const out = [...this.catalog.reachableAttributes()];
+  /**
+   * What a context can group / filter by, in the form the tools accept: [{ model, attribute, via? }]
+   * — the catalog's reachable attributes plus the dimensions the task declared.
+   *
+   * Split by whether the ref works RIGHT NOW: a query may only name a model the context has
+   * loaded, so an attribute of a model it has not is offered separately, with what to do about it.
+   * Publishing the whole catalog as `groupable` (and picking the example from it) produced calls
+   * the query path then refused — "needs model 'users', which is not loaded in this context".
+   */
+  _groupableSplit(ctx) {
+    const all = [...this.catalog.reachableAttributes()];
     const tasks = ctx.state.tasks || [];
     for (const [model, add] of Object.entries(ctx.state.additions || {})) {
       for (const d of add.dimensions || []) {
         const attribute = declaredAttribute(d, tasks);
-        if (!out.some((r) => r.model === model && r.attribute === attribute && !r.via)) out.push({ model, attribute });
+        if (!all.some((r) => r.model === model && r.attribute === attribute && !r.via)) all.push({ model, attribute });
       }
     }
-    return out;
+    const loaded = new Set(ctx.state.usedModels || []);
+    return { now: all.filter((r) => loaded.has(r.model)), afterLoading: all.filter((r) => !loaded.has(r.model)) };
+  }
+
+  /** The refs a query in THIS context may name today — what the tools publish as `groupable`. */
+  _groupableRefs(ctx) {
+    return this._groupableSplit(ctx).now;
+  }
+
+  /** One wording for "here is what you CAN name, and how to reach the rest", shared by every
+   *  not-reachable refusal so they never disagree about what is available. */
+  _reachableHint(ctx) {
+    const { now, afterLoading } = this._groupableSplit(ctx);
+    const show = (rs) => rs.slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ');
+    const models = [...new Set(afterLoading.map((r) => r.model))];
+    return `Reachable now: ${show(now) || '(none beyond metric_time)'}.${models.length ? ` Also in the catalog, once their model is loaded (use_base_models): ${show(afterLoading)}${afterLoading.length > 20 ? ', …' : ''}.` : ''}`;
   }
 
   /** All group-by/where dimension paths allowed for a context (bare + qualified). */
@@ -634,8 +692,10 @@ export class Engine {
         else recommendations.push('No values indexed yet (the background value index may not have run).');
         if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
         recommendations.push(...nullRecs);
+        // A metric query names the attribute STRUCTURALLY — { model, attribute } — and the old
+        // '<entity>__<attr>' path string is refused by the schema, so it must not be recommended.
         recommendations.push(ent
-          ? `Group/filter by it in metric queries via '${ent}__${col}', or reference '${col}' after a pipeline join with:'${mk}'.`
+          ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}'${ent !== this.catalog.primaryEntityName(mk) ? `, via: '${ent}'` : ''} } (declare use_base_models: ['${mk}']), or reference '${col}' after a pipeline join with:'${mk}'.`
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
         const attrOut = {
           property: col, source: mk, model: mk, column: col, type: dim.type,
@@ -1487,6 +1547,21 @@ export class Engine {
    * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
    * add the window (and fix it) instead of trusting a silently wrong join.
    */
+  /**
+   * The stage-level warnings for a WHOLE pipeline — the same judgements the incremental builder
+   * makes per step, applied to a pipeline submitted all at once. Both entry points must warn about
+   * the same stages: a recipe or a hand-written payload that goes straight through
+   * register_native_model is exactly where a silently-wrong join does the most damage, because
+   * nobody stepped through it.
+   */
+  _stageWarnings(source, stages = []) {
+    const draft = { source, stages };
+    return stages.flatMap((st) => [
+      ...this._joinCompletenessWarnings(st, draft),
+      ...this._funnelCompletionWarnings(st),
+    ]);
+  }
+
   _joinCompletenessWarnings(stage, draft = null) {
     if (!stage || stage.stage !== 'join' || stage.between) return [];
     let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
@@ -1835,6 +1910,10 @@ export class Engine {
         ...(models.length > 1 ? { models } : {}),
         ...(models.some((m) => m.kind === 'python') ? { python: models.filter((m) => m.kind === 'python') } : {}),
       };
+      // The same per-stage judgements the incremental builder makes: a dry run is exactly where a
+      // silently-wrong stage should be pointed out, BEFORE anything is built.
+      const dryWarnings = this._stageWarnings(source, stages);
+      if (dryWarnings.length) resp.warnings = dryWarnings;
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before materializing.
       const est = await this._estimateSourceRows(source, tr);
@@ -1921,6 +2000,10 @@ export class Engine {
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
       ],
       warnings: [
+        // The same per-stage judgements the incremental builder makes — a pipeline submitted all at
+        // once (a recipe payload, a hand-written one) gets them too, or a silently-wrong join
+        // reaches the caller as plausible numbers.
+        ...this._stageWarnings(source, stages),
         ...((this.runner && rows.length === 0)
           ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
           : []),
@@ -2036,8 +2119,9 @@ export class Engine {
     this.ctxs.touch(ctx.id);
 
     const parse = await this._parse(ctx.id);
-    const groupable = this._groupableRefs(ctx);
-    const exRef = groupable.find((g) => g.model !== compiled.usedModels?.[0]) || groupable[0];
+    const { now: groupable, afterLoading } = this._groupableSplit(ctx);
+    // the example must be a call that RUNS in this context, so it comes from what is loaded
+    const exRef = groupable[0];
     const exText = exRef ? `{ model: '${exRef.model}', attribute: '${exRef.attribute}'${exRef.via ? `, via: '${exRef.via}'` : ''} }` : "{ time: 'metric_time', grain: 'day' }";
     return {
       context_id: ctx.id,
@@ -2048,6 +2132,10 @@ export class Engine {
       joined_models: ctx.state.usedModels,
       metrics: render.metricNames,
       groupable,
+      ...(afterLoading.length ? {
+        groupable_after_loading: afterLoading,
+        groupable_after_loading_note: `These attributes are reachable in the catalog but their model is not loaded in this context — add it with use_base_models: ['${afterLoading[0].model}'] (create/update) before naming them in group_by/where.`,
+      } : {}),
       parse,
       assumptions: this._assumptions(ctx),
       warnings: render.warnings || [],
@@ -2084,7 +2172,22 @@ export class Engine {
       }
       add.measures = add.measures.filter((m) => !input.remove_measures.includes(m.name));
     }
-    if (input.remove_dimensions) add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(d.name));
+    if (input.remove_dimensions) {
+      // A dimension is named by its ATTRIBUTE — the name `groupable` offers and `add_dimensions`
+      // takes. What is STORED is the task-namespaced copy ('ret_country'), a name the caller is
+      // never shown, so matching on it made every removal a silent no-op that still reported
+      // success. Match on the attribute the dimension declares, and refuse a name that matches
+      // nothing rather than pretending to have removed it.
+      const tasks = state.tasks || [];
+      const attrOf = (d) => declaredAttribute(d, tasks);
+      for (const name of input.remove_dimensions) {
+        if (!add.dimensions.some((d) => attrOf(d) === name || d.name === name)) {
+          const have = [...new Set(add.dimensions.map(attrOf))];
+          throw new ToolError(`cannot remove dimension '${name}': '${modelKey}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove_dimensions' });
+        }
+      }
+      add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(attrOf(d)) && !input.remove_dimensions.includes(d.name));
+    }
 
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state);
@@ -2350,7 +2453,7 @@ export class Engine {
         const tok = `metric_time__${g.grain || 'day'}`;
         groupBy.push(tok); rename.set(tok, `metric_time_${g.grain || 'day'}`); continue;
       }
-      if (!allowed.has(g)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' is not reachable in this context. Reachable: ${this._groupableRefs(ctx).slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ')}`, { stage: 'validate', field: 'group_by' });
+      if (!allowed.has(g)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' is not reachable in this context. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'group_by' });
       this._checkModelLoaded(ctx, gRaw);
       const friendly = `${gRaw.model}_${gRaw.attribute}`;
       if (input.metrics.includes(friendly) || [...rename.values()].includes(friendly)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' would produce a result column '${friendly}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'group_by' });
@@ -2377,7 +2480,7 @@ export class Engine {
           const at = this._valueKeyForColumn(p.field.model, p.field.attribute);
           p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
           delete p.field.model; delete p.field.attribute; delete p.field.via;
-          if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. Reachable: ${this._groupableRefs(ctx).slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ')}`, { stage: 'validate', field: 'where' });
+          if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'where' });
           this._checkModelLoaded(ctx, { model: refModel, attribute: refAttr });
           // Verify the filter literal against the column's REAL values (source-scoped):
           // reject a wrong-cased/non-existent value instead of filtering to nothing.

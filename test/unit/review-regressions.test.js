@@ -13,6 +13,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { openStore } from '../../src/store.js';
+import { renderContext } from '../../src/yaml-render.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (over = {}) => new Engine({
@@ -197,4 +198,98 @@ models:
   };
   const out = await e.register_native_model({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
   assert.ok(out.ok !== false, JSON.stringify(out.error || {}));
+});
+
+// ── a shipped recipe joined a slowly-changing dimension with no point-in-time window ───────
+// The recipe text mentioned the window as something the caller should add; the payload did not
+// carry it, so `dn_retention_exact` run as shipped fanned out to every historical version of each
+// player and inflated Day-N retention. Whether the window is NEEDED is a property of the catalog,
+// so the payload is fitted to it when the recipe is handed over.
+test('a recipe payload is fitted to this catalog: an SCD join gets its validity window', async () => {
+  const { loadRecipes } = await import('../../src/recipes.js');
+  const e = new Engine({
+    catalog: loadCatalog(CATALOG, {}),
+    recipes: loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url))),
+    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
+  });
+  const out = await e.semantic_index({ recipe: 'dn_retention_exact' });
+  const joinStage = out.register_payload.pipeline.stages.find((s) => s.stage === 'join' && s.with === 'users');
+  const u = e.catalog.getModel('users');
+  assert.ok(u.scd, 'the fixture users model is slowly-changing (otherwise this test proves nothing)');
+  const from = Object.entries(u.dimensions).find(([, d]) => d.validity === 'start')[0];
+  const to = Object.entries(u.dimensions).find(([, d]) => d.validity === 'end')[0];
+  assert.deepEqual(joinStage.between, { value: e.catalog.getModel('events').time.column, from, to });
+  assert.ok(out.fitted_to_catalog?.some((f) => f.includes("join with 'users'")), JSON.stringify(out.fitted_to_catalog));
+});
+
+// ── a pipeline submitted all at once got none of the stage warnings ─────────────────────────
+// The incremental builder warns about an SCD join with no window; register_native_model ran the
+// very same stages silently. Both paths now make the same judgements.
+test('register_native_model warns about an incomplete SCD join, like the step builder does', async () => {
+  const e = engine();
+  const out = await e.register_native_model({
+    name: 'scd_fanout', dry_run: true,
+    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: ['country'] }] },
+  });
+  assert.ok((out.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(out.warnings));
+  // with the window stated, there is nothing to warn about
+  const ok = await e.register_native_model({
+    name: 'scd_pit', dry_run: true,
+    pipeline: { source: 'events', stages: [{ stage: 'join', with: 'users', via: 'user', attrs: ['country'], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } }] },
+  });
+  assert.ok(!(ok.warnings || []).some((w) => /INCOMPLETE JOIN/.test(w)), JSON.stringify(ok.warnings));
+});
+
+// ── remove_dimensions matched a name nobody is ever shown ───────────────────────────────────
+// What is stored is the task-namespaced copy ('ret_country'); what the tools publish is the
+// attribute ('country'). Matching on the stored name made every removal a silent no-op that
+// still reported success.
+test('remove_dimensions takes the attribute it was offered, and refuses an unknown one', async () => {
+  const e = engine();
+  const first = await e.create_semantic_model({
+    name: 'ret',
+    semantic_models: [
+      { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
+      { from: 'users', dimensions: [{ source: 'model_column', column: 'country' }] },
+    ],
+    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+  });
+  const ctx = e.ctxs.get(first.context_id);
+  assert.deepEqual(ctx.state.additions.users.dimensions.map((d) => d.name), ['ret_country'], 'stored namespaced');
+  assert.ok(first.groupable.some((g) => g.model === 'users' && g.attribute === 'country'), 'offered as the attribute');
+
+  await assert.rejects(
+    () => e.update_semantic_model({ context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['nope'] }),
+    /cannot remove dimension 'nope'.*It has: country/s,
+  );
+  const out = await e.update_semantic_model({ context_id: first.context_id, semantic_model: 'users', remove_dimensions: ['country'] });
+  assert.deepEqual(e.ctxs.get(first.context_id).state.additions.users.dimensions, [], 'the declaration is really gone');
+  // and out of the manifest — `country` stays REACHABLE through the join (that is the catalog's
+  // own surface), but the task no longer declares its own copy of it
+  const { yaml } = renderContext(e.catalog, e.ctxs.get(first.context_id).state);
+  assert.ok(!/ret_country/.test(yaml), 'the task-namespaced dimension is out of the manifest');
+  assert.ok(out.metrics.length >= 1, 'the rest of the task is intact');
+});
+
+// ── the suggested group_by example named a model the context had not loaded ─────────────────
+// `groupable` returned every attribute the CATALOG can reach, and the example deliberately picked
+// a model other than the task's source — so the suggested call failed with "needs model 'users',
+// which is not loaded in this context".
+test('groupable and the example only name models this context loaded', async () => {
+  const e = engine();
+  const out = await e.create_semantic_model({
+    name: 'evonly',
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+  });
+  const loaded = new Set(out.joined_models);
+  assert.ok(!loaded.has('users'), 'this context loaded no users model');
+  assert.ok((out.groupable || []).every((g) => loaded.has(g.model)), JSON.stringify(out.groupable));
+  assert.ok((out.groupable_after_loading || []).some((g) => g.model === 'users'), 'and the rest is offered separately');
+  assert.match(out.groupable_after_loading_note || '', /use_base_models/);
+  // whatever is published as groupable is accepted by the query path
+  const ctx = e.ctxs.get(out.context_id);
+  for (const g of out.groupable || []) {
+    assert.equal(typeof e._normalizeRef(ctx, { model: g.model, attribute: g.attribute, ...(g.via ? { via: g.via } : {}) }, 'group_by'), 'string');
+  }
 });

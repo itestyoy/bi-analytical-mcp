@@ -183,7 +183,6 @@ models:
         role: events           # the logical name the tools use (the dbt model can be named anything)
         primary_entity: event  # the grain of the fact (no physical key column)
         partition_column: event_date   # cost hint: the physical partition — always constrain it (or device_time)
-        require_time_range: true       # a query or pipeline over this source must carry a bounded window
         known_events:
           # activity
           - first_launch
@@ -1954,7 +1953,6 @@ models:
       mcp:
         role: crashlytics           # the logical name the tools use: source: 'crashlytics'
         partition_column: event_date      # cost hint: always constrain this (or device_time)
-        require_time_range: true          # a query or pipeline over this source must carry a bounded window
         event_semantics:
           crash_event: FATAL        # a hard crash that killed the app
           non_fatal_event: NON_FATAL

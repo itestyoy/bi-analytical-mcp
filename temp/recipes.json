@@ -62,11 +62,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -77,11 +73,7 @@
               "time": "metric_time",
               "grain": "week"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -92,11 +84,7 @@
               "time": "metric_time",
               "grain": "month"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "DAU/MAU ratio (stickiness) = active_users at day vs month grain.",
@@ -187,11 +175,7 @@
               "model": "users",
               "attribute": "country"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -202,11 +186,7 @@
               "model": "users",
               "attribute": "platform"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -217,11 +197,7 @@
               "model": "users",
               "attribute": "media_source"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -232,11 +208,7 @@
               "model": "users",
               "attribute": "acquisition_type"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -247,11 +219,7 @@
               "model": "users",
               "attribute": "media_source"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "User attributes via the implicit events.user -> users.user join; campaign_id is a plain string attribute on dim_users (1-hop, like country/platform) — there is no separate campaigns table.",
@@ -334,20 +302,12 @@
           "metrics": [
             "lvl_funnel_starters",
             "lvl_funnel_completers"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
             "lvl_funnel_completion_rate"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -358,11 +318,7 @@
               "model": "users",
               "attribute": "country"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Conversion base/conversion measures must be count_distinct. No native N-step funnel; chain 2-step conversions or use derived over step counts.",
@@ -492,29 +448,17 @@
             "tut_funnel_step1",
             "tut_funnel_step2",
             "tut_funnel_step3"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
             "tut_funnel_conv_1_2"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
             "tut_funnel_conv_2_3"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "A funnel step is a measure scoped by event_name + a property `where` (event_data value). Steps chain as 2-step conversion metrics (s1->s2, s2->s3); multiply/compose for end-to-end. Could also key the step on level_id, screen_to, placement, etc.",
@@ -590,20 +534,12 @@
         {
           "metrics": [
             "retention_d1"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
             "retention_d7"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -614,11 +550,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Cohort = users with a first_launch (acquisition); returned = users who start a new_session within the window. base_measure and conversion_measure are DIFFERENT events so the rate is meaningful (not identically 1.0). Approximates N-day retention via conversion window; exact point-in-time D-N retention is not native to MetricFlow.",
@@ -699,11 +631,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -714,11 +642,7 @@
               "model": "users",
               "attribute": "install_date"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Group by install_date (cohort) and metric_time (age). Cumulative LTV per cohort can layer a cumulative metric.",
@@ -783,11 +707,7 @@
         {
           "metrics": [
             "behavior_purchases"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -798,11 +718,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Split did/didn't with a Metric() in --where, e.g. `{{ Metric('behavior_purchases', group_by=['user']) }} > 0`.",
@@ -878,20 +794,12 @@
         {
           "metrics": [
             "visit_purchase_visits"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
             "visit_purchase_conversion"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -902,11 +810,7 @@
               "model": "users",
               "attribute": "country"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Use constant_properties to require the same product across base/conversion events when relevant.",
@@ -1015,11 +919,7 @@
               "model": "events",
               "attribute": "level_id_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -1030,11 +930,7 @@
               "model": "events",
               "attribute": "level_id_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Group by the JSON-extracted level_id dimension. Churn-at-level derived from starts of level N vs N+1 in post-processing.",
@@ -1144,11 +1040,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -1159,11 +1051,7 @@
               "model": "events",
               "attribute": "product_id_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -1174,20 +1062,12 @@
               "model": "users",
               "attribute": "country"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
             "monetization_aov"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "LTV curve = cumulative revenue over metric_time by acquisition cohort (needs time spine).",
@@ -1287,11 +1167,7 @@
               "model": "events",
               "attribute": "network_of_additional_info_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -1302,11 +1178,7 @@
               "model": "events",
               "attribute": "placement_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -1317,11 +1189,7 @@
               "model": "events",
               "attribute": "ad_type_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Ad revenue lives on ad_finished.revenue. eCPM = rev_per_imp * 1000 (post-process).",
@@ -1416,21 +1284,13 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
             "economy_coins_in",
             "economy_coins_out"
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -1441,11 +1301,7 @@
               "model": "events",
               "attribute": "source_type_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "net_coins is a derived metric (income - outcome). Source/sink breakdown via source_type.",
@@ -1501,11 +1357,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -1516,11 +1368,7 @@
               "time": "metric_time",
               "grain": "month"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "DAU/MAU ratio = active_users at day grain / active_users at month grain.",
@@ -1636,11 +1484,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       },
       "ab_test": {
@@ -1712,11 +1556,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -1727,11 +1567,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "cumulative with no window = running total from the start; grain_to_date:month = month-to-date (resets monthly). Add `window` (e.g. \"7 day\") for a trailing rolling-window cumulative.",
@@ -1812,11 +1648,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       },
       "notes": "ad_revenue is defined here as: ad_finished only, cast to float64, clamped to [0,1] USD per impression. The clamp WINSORIZES (an outlier becomes 1.0, the row is not dropped), so a governed sum measure cannot reproduce it — that is why this recipe is a native pipeline and not a semantic model. revenue_of_event_data is ALREADY USD: dividing it by 100 is wrong, and the same money is repeated on ad_loaded/ad_started/ad_revenue/ad_finished, so exactly ONE of those events may be summed. The IAP leg is the IN-GAME price: iap_purchase_completed before tax, unvalidated. A BI inapp figure built from validated store/attribution purchases is a DIFFERENT quantity and will not match — if the question is about billed revenue, take it from there, not from here.",
@@ -1946,11 +1778,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       },
       "ab_test": {
@@ -2180,11 +2008,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       },
       "ab_test": {
@@ -2404,11 +2228,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       }
     },
@@ -2499,11 +2319,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       }
     },
@@ -2682,11 +2498,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -2697,11 +2509,7 @@
               "model": "events",
               "attribute": "chain_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -2712,11 +2520,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Governed measures (count* / sum of a numeric event_data property scoped by event_name): session counts and duration, units started/completed. NOTE: playtime here is the RAW complete_time; a version bounded to [0,3600]s per row needs a native pipeline, because a governed measure cannot clamp before summing (see game_playtime_native).",
@@ -2820,11 +2624,7 @@
               "time": "metric_time",
               "grain": "day"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -2835,11 +2635,7 @@
               "model": "events",
               "attribute": "source_type_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -2850,11 +2646,7 @@
               "model": "events",
               "attribute": "monetization_type_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Governed sum of value_in_coins (coin value) scoped to currency_income/outcome; net_coins is a derived metric. Negatives are summed AS THEY ARE here: a version that floors each row at zero (greatest(x,0)) needs a native pipeline, since a governed measure cannot floor before summing. For raw resource amount swap value_in_coins_of_event_data -> amount_of_event_data.",
@@ -3015,11 +2807,7 @@
               "model": "events",
               "attribute": "network_of_additional_info_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -3030,11 +2818,7 @@
               "model": "events",
               "attribute": "ad_type_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         },
         {
           "metrics": [
@@ -3045,11 +2829,7 @@
               "model": "events",
               "attribute": "placement_of_event_data"
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       ],
       "notes": "Governed: ad_fills = count of ad_loaded with status=success (per-measure where); funnel rates as ratio metrics; eCPM = rev_per_imp*1000. Revenue here is summed UNCAPPED; a capped ad revenue ([0,1] USD/imp) and clamped display/latency need the native pipeline, because a governed measure cannot bound a row before summing (ad_quality_native).",
@@ -3106,11 +2886,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       },
       "notes": "Playtime per completed unit with complete_time clamped to [0,3600] seconds per row, then summed. Read the result via get_query_result; group_by event_date.",
@@ -3207,11 +2983,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       },
       "notes": "Three per-row bounded quantities, each summed: ad revenue capped to [0,1] USD per impression, display duration clamped to [0,150]s, waterfall latency in ms/1000 clamped to [0,300]s — plus the count of latency-eligible events. Avg latency = latency_sum / latency_events_count; avg display = display_sum / impressions (post-process or a downstream compute).",
@@ -3344,11 +3116,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       },
       "notes": "Balances captured ON the unit_started / unit_completed events (coins, lives, skill), total hints used, and total hint/booster balance count — each summed by day. State columns are not aggregatable as governed measures, so this uses a native pipeline.",
@@ -3419,11 +3187,7 @@
                 }
               ]
             }
-          ],
-          "time_range": {
-            "start": "2026-08-01",
-            "end": "2026-08-31"
-          }
+          ]
         }
       },
       "notes": "Coin-value of the player's hint/booster balance at unit start and completion: each hint type weighted by that app's coin price (a hint type with no price for an app contributes 0), summed by day.",

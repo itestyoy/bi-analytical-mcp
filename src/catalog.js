@@ -397,8 +397,15 @@ export function resolvePythonRuntime({ profilesDir, projectDir, env = process.en
   if (!out) return decided({ available: false, reason: 'no dbt profile found — dbt Python models need an adapter that runs them (BigQuery with a submission set up, Snowflake, Databricks, DuckDB)' });
   if (['duckdb', 'snowflake', 'databricks'].includes(type)) return decided({ available: true, runtime: type });
   if (type === 'bigquery') {
-    const method = out.submission_method || (out.dataproc_cluster_name ? 'cluster' : (out.dataproc_region ? 'serverless' : (out.compute_region ? 'bigframes' : null)));
-    if (method) return decided({ available: true, runtime: 'bigquery', method });
+    // The profile may DECLARE the submission, or only hint at it by carrying that method's
+    // settings. The difference matters downstream: dbt reads `submission_method`, not our
+    // inference, so an INFERRED method has to be written into the model's own dbt.config or dbt
+    // silently falls back to its default submission (the live case: a profile with compute_region
+    // + gcs_bucket and no submission_method, where every python model went to Dataproc and died
+    // with 403 dataproc.batches.create while this server reported 'bigframes').
+    const declared = out.submission_method || null;
+    const method = declared || (out.dataproc_cluster_name ? 'cluster' : (out.dataproc_region ? 'serverless' : (out.compute_region ? 'bigframes' : null)));
+    if (method) return decided({ available: true, runtime: 'bigquery', method, method_declared: !!declared });
     return decided({ available: false, reason: 'the BigQuery profile has no Python submission set up: add submission_method (bigframes | serverless | cluster) with gcs_bucket and dataproc_region / compute_region to the profile output' });
   }
   return decided({ available: false, reason: `the '${type || 'unknown'}' adapter runs no dbt Python models` });

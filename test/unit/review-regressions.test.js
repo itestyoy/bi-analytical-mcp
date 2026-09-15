@@ -293,3 +293,49 @@ test('groupable and the example only name models this context loaded', async () 
     assert.equal(typeof e._normalizeRef(ctx, { model: g.model, attribute: g.attribute, ...(g.via ? { via: g.via } : {}) }, 'group_by'), 'string');
   }
 });
+
+// ── the submission method was concluded but never written down ──────────────────────────────
+// A BigQuery profile may only HINT at its python submission: compute_region + gcs_bucket and no
+// `submission_method`. This server inferred 'bigframes' from those settings and said so in
+// semantic_index — but wrote `dbt.config(materialized="table")` and nothing else, so dbt fell back
+// to its own default submission and every python model went to Dataproc instead, dying with
+// "403 … dataproc.batches.create". The conclusion has to travel INTO the model.
+test('the resolved submission method is written into the model, not just reported', async () => {
+  const { resolvePythonRuntime } = await import('../../src/catalog.js');
+  const { frameProfile, compilePythonStage, importAllowlist } = await import('../../src/python-model.js');
+  const dir = mkdtempSync(join(tmpdir(), 'prof-'));
+  writeFileSync(join(dir, 'profiles.yml'), [
+    'p:', '  target: prod', '  outputs:', '    prod:',
+    '      type: bigquery', '      project: x', '      dataset: bi',
+    '      compute_region: us-central1', '      gcs_bucket: staging-bucket', '',
+  ].join('\n'));
+
+  const rt = resolvePythonRuntime({ profilesDir: dir, env: {} });
+  assert.equal(rt.available, true);
+  assert.equal(rt.method, 'bigframes', 'inferred from compute_region');
+  assert.equal(rt.method_declared, false, 'the profile never declared it — which is why it must be written down');
+
+  const profile = frameProfile(rt, rt.config || {});
+  const stage = { stage: 'python', functions: [{ name: 'f', params: ['df'], body: ['return df'] }], steps: [{ call: 'f' }] };
+  const compiled = compilePythonStage(stage, {
+    modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile),
+    config: rt.config || {}, profile, submission: rt.method,
+  });
+  assert.equal(compiled.config.submission_method, 'bigframes', 'the model configures the submission it was resolved to run on');
+
+  // the operator's own override still wins over what was inferred
+  const forced = compilePythonStage(stage, {
+    modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile),
+    config: { submission_method: 'serverless' }, profile, submission: rt.method,
+  });
+  assert.equal(forced.config.submission_method, 'serverless');
+
+  // a profile that DECLARES the method is marked as such (nothing is being guessed there)
+  writeFileSync(join(dir, 'profiles.yml'), [
+    'p:', '  target: prod', '  outputs:', '    prod:',
+    '      type: bigquery', '      project: x', '      dataset: bi',
+    '      submission_method: bigframes', '      compute_region: us-central1', '      gcs_bucket: b', '',
+  ].join('\n'));
+  const declared = resolvePythonRuntime({ profilesDir: dir, env: {} });
+  assert.equal(declared.method_declared, true);
+});

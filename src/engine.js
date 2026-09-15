@@ -1780,7 +1780,7 @@ export class Engine {
   _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
-      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, pipeline, profile });
+      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, pipeline, profile, submission: this.catalog.pythonRuntime?.method || null });
     } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
   }
 

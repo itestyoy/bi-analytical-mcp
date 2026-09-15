@@ -1741,7 +1741,7 @@
       "id": "blended_revenue",
       "task_type": "monetization",
       "title": "Blended revenue: IAP + ad revenue capped at 1 USD/impression",
-      "when_to_use": "Combine two revenue streams into one blended total: IAP price in USD + ad revenue capped to [0,1] USD/impression exactly as the BI macro does. Both legs are ALREADY USD — never divide by 100.",
+      "when_to_use": "Combine two revenue streams into one blended total: IAP price in USD + ad revenue capped to [0,1] USD/impression. Both legs are ALREADY USD — never divide by 100.",
       "required_events": [
         "iap_purchase_completed",
         "ad_finished"
@@ -1819,8 +1819,8 @@
           }
         }
       },
-      "notes": "ad_revenue mirrors macro measure__ad_revenue EXACTLY: ad_finished only, cast to float64, clamped to [0,1] USD per impression. The clamp WINSORIZES (an outlier becomes 1.0, the row is not dropped), so a governed sum measure cannot reproduce it — that is why this recipe is a native pipeline and not a semantic model. revenue_of_event_data is ALREADY USD: dividing it by 100 is wrong, and the same money is repeated on ad_loaded/ad_started/ad_revenue/ad_finished, so exactly ONE of those events may be summed. The IAP leg does NOT mirror a macro: bi-dbt builds inapp revenue from validated AppsFlyer purchase events (event_revenue_usd, is_validated), while this source carries the in-game iap_purchase_completed price before tax — expect it to differ from BI inapp revenue.",
-      "hack": "Mirror a bi-dbt measure macro by porting its per-row CASE verbatim into a compute op=raw and summing it; per-row clamps (least/greatest) are expressible ONLY there, never in a governed sum measure. Extrapolate: any macro-faithful measure — port the macro row expression into compute op=raw and aggregate at the reporting grain."
+      "notes": "ad_revenue is defined here as: ad_finished only, cast to float64, clamped to [0,1] USD per impression. The clamp WINSORIZES (an outlier becomes 1.0, the row is not dropped), so a governed sum measure cannot reproduce it — that is why this recipe is a native pipeline and not a semantic model. revenue_of_event_data is ALREADY USD: dividing it by 100 is wrong, and the same money is repeated on ad_loaded/ad_started/ad_revenue/ad_finished, so exactly ONE of those events may be summed. The IAP leg is the IN-GAME price: iap_purchase_completed before tax, unvalidated. A BI inapp figure built from validated store/attribution purchases is a DIFFERENT quantity and will not match — if the question is about billed revenue, take it from there, not from here.",
+      "hack": "A per-row clamp lives in compute op=raw and nowhere else: least/greatest around the value, then sum it — a governed sum measure aggregates a column, it cannot bound each row first. Extrapolate: any quantity that must be bounded, floored or conditionally zeroed BEFORE aggregation — write that row expression in compute op=raw and aggregate it at the reporting grain."
     },
     {
       "id": "ab_test_revenue",
@@ -2719,7 +2719,7 @@
           }
         }
       ],
-      "notes": "Governed measures (count* / sum of a numeric event_data property scoped by event_name). Mirrors macros sessions_count, session_duration, units_started/completed_count. NOTE: the macro units_playtime clamps complete_time to [0,3600] — that clamp needs a native pipeline (see game_playtime_native).",
+      "notes": "Governed measures (count* / sum of a numeric event_data property scoped by event_name): session counts and duration, units started/completed. NOTE: playtime here is the RAW complete_time; a version bounded to [0,3600]s per row needs a native pipeline, because a governed measure cannot clamp before summing (see game_playtime_native).",
       "hack": "Count an event = count(*) scoped by event_name; rate = ratio(next/prev); per-event avg = ratio(sum(value)/count(event)). Extrapolate: any event-count metric, any adjacent-stage rate, and any per-event average built the same way."
     },
     {
@@ -2857,7 +2857,7 @@
           }
         }
       ],
-      "notes": "Governed sum of value_in_coins (coin value) scoped to currency_income/outcome; net_coins is a derived metric. The macro floors negatives (greatest(x,0)); for the exact floored version use the native pipeline. For raw resource amount swap value_in_coins_of_event_data -> amount_of_event_data.",
+      "notes": "Governed sum of value_in_coins (coin value) scoped to currency_income/outcome; net_coins is a derived metric. Negatives are summed AS THEY ARE here: a version that floors each row at zero (greatest(x,0)) needs a native pipeline, since a governed measure cannot floor before summing. For raw resource amount swap value_in_coins_of_event_data -> amount_of_event_data.",
       "hack": "Two oppositely-scoped sum measures + derived (in - out) = net flow. Extrapolate: any signed two-sided quantity (faucets vs sinks, credits vs debits) modelled as two scoped sums plus a derived difference."
     },
     {
@@ -3052,14 +3052,14 @@
           }
         }
       ],
-      "notes": "Governed: ad_fills = count of ad_loaded with status=success (per-measure where); funnel rates as ratio metrics; eCPM = rev_per_imp*1000. Macro ad_revenue caps to [0,1] USD/imp and display/latency are clamped — those need the native pipeline (ad_quality_native).",
+      "notes": "Governed: ad_fills = count of ad_loaded with status=success (per-measure where); funnel rates as ratio metrics; eCPM = rev_per_imp*1000. Revenue here is summed UNCAPPED; a capped ad revenue ([0,1] USD/imp) and clamped display/latency need the native pipeline, because a governed measure cannot bound a row before summing (ad_quality_native).",
       "hack": "Delivery funnel = count(*) per stage event (+ where on status) chained as ratio metrics. Extrapolate: any staged delivery funnel — chain count(*) per stage event into ratio metrics between adjacent stages."
     },
     {
       "id": "game_playtime_native",
       "task_type": "engagement",
       "title": "Game playtime (complete_time clamped to [0,3600])",
-      "when_to_use": "Faithful units_playtime: per completed unit, clean complete_time clamped to [0,3600]s, summed by day. Needs a native pipeline because governed measures cannot clamp.",
+      "when_to_use": "Playtime per completed unit: complete_time clamped to [0,3600]s per row, summed by day. Needs a native pipeline because a governed measure cannot clamp before summing.",
       "required_events": [
         "level_completed",
         "puzzle_completed"
@@ -3113,14 +3113,14 @@
           }
         }
       },
-      "notes": "Mirrors macro units_playtime exactly (clamp [0,3600]). Read result via get_query_result; group_by event_date.",
+      "notes": "Playtime per completed unit with complete_time clamped to [0,3600] seconds per row, then summed. Read the result via get_query_result; group_by event_date.",
       "hack": "Clamp = greatest(least(x, hi), lo) inside a compute op=raw, then aggregate sum. Extrapolate: any per-row value that needs bounding before aggregation — clamp inside compute op=raw, then sum."
     },
     {
       "id": "ad_quality_native",
       "task_type": "ads",
       "title": "Ad quality: capped revenue, clamped display & waterfall latency",
-      "when_to_use": "Faithful ad measures with clamps: ad_revenue capped [0,1] USD/imp, display_duration clamped [0,150], waterfall latency ms/1000 clamped [0,300] + eligible-event count (for avg latency).",
+      "when_to_use": "Ad quality with per-row bounds: revenue capped [0,1] USD/imp, display_duration clamped [0,150]s, waterfall latency ms/1000 clamped [0,300]s + eligible-event count (for avg latency).",
       "required_events": [
         "ad_loaded",
         "ad_finished"
@@ -3214,7 +3214,7 @@
           }
         }
       },
-      "notes": "Mirrors macros ad_revenue (cap), ad_display_duration (clamp 150), ad_latency (/1000 clamp 300) + ad_latency_events_count. Avg latency = ad_latency / ad_latency_events_count; avg display = ad_display_duration / impressions (post-process or downstream compute).",
+      "notes": "Three per-row bounded quantities, each summed: ad revenue capped to [0,1] USD per impression, display duration clamped to [0,150]s, waterfall latency in ms/1000 clamped to [0,300]s — plus the count of latency-eligible events. Avg latency = latency_sum / latency_events_count; avg display = display_sum / impressions (post-process or a downstream compute).",
       "hack": "Clamps/conditions as compute op=raw per row, summed; ratios computed on the result. Extrapolate: any per-row conditional quantity summed into a total, with ratios derived on the aggregated result rather than per row."
     },
     {
@@ -3351,7 +3351,7 @@
           }
         }
       },
-      "notes": "Mirrors the unit_started/completed_* snapshot macros + unit_completed_resource_used_count. State columns are not aggregatable as governed measures, so this uses a native pipeline.",
+      "notes": "Balances captured ON the unit_started / unit_completed events (coins, lives, skill), total hints used, and total hint/booster balance count — each summed by day. State columns are not aggregatable as governed measures, so this uses a native pipeline.",
       "hack": "Snapshot = state column captured on the event, summed; per-unit average = snapshot_sum / units_*_count. Extrapolate: any state column carried on an event — sum it and divide by the count of the unit it was captured on."
     },
     {
@@ -3426,7 +3426,7 @@
           }
         }
       },
-      "notes": "Mirrors macros unit_started/completed_resource_balance_coins exactly (per-app coin price weighting; hint types not priced for an app contribute 0).",
+      "notes": "Coin-value of the player's hint/booster balance at unit start and completion: each hint type weighted by that app's coin price (a hint type with no price for an app contributes 0), summed by day.",
       "hack": "Per-app weighting = nested CASE on app_id inside a compute op=raw; summed by day. Extrapolate: any per-app or per-segment weighting — a nested CASE inside compute op=raw, aggregated by the reporting grain."
     }
   ]

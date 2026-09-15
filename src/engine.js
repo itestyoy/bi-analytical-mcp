@@ -1296,7 +1296,9 @@ export class Engine {
       const job = this.jobs.get(cp.query_id);
       if (!job) return { retire: `the build of ${cp.model} left no job record` };
       if (job.status === 'error') return { retire: `the build of ${cp.model} failed` };
-      if (job.status !== 'ready') return { building: cp.query_id };
+      // Still 'running', but only THIS process drives a build: a job inherited from the store is
+      // one whose builder is gone, so waiting on it forever is wrong — retire it and rebuild.
+      if (job.status !== 'ready') return this.jobs.isLive?.(cp.query_id) ? { building: cp.query_id } : { retire: `the build of ${cp.model} did not finish (its builder is gone)` };
     }
     const run = this._indexRunId();
     if ((cp.index_run_id ?? null) !== run) return { retire: `the value index was refreshed after ${cp.model} was built, so the source data may have moved` };
@@ -1314,7 +1316,11 @@ export class Engine {
       const st = this._checkpointState(list[i]);
       if (st?.retire) { retired.push({ at: list[i].at, model: list[i].model, reason: st.retire }); continue; }
       if (st?.building && forBuild) {
-        throw new ToolError(`steps 1..${list[i].at} are still being materialized as ${list[i].model} — poll get_query_result({ query_id: '${st.building}' }) and materialize again once it is ready`, { stage: 'validate', field: 'draft_id' });
+        throw new ToolError(
+          `steps 1..${list[i].at} are still being materialized as ${list[i].model} — nothing can read that table yet, so a second build would only duplicate the work. `
+          + `Poll get_query_result({ query_id: '${st.building}' }) and materialize again once it is ready; if that build is gone for good (the server restarted), retire it with truncate/edit_step at or before step ${list[i].at} — or context({ action: 'delete_model' }) — and materialize again.`,
+          { stage: 'validate', field: 'draft_id' },
+        );
       }
       checkpoint = list[i];
     }
@@ -2000,6 +2006,17 @@ export class Engine {
 
   async _draftMaterialize(ctx, draft) {
     if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
+    // A build of THIS draft already in flight is never started twice. A retried call — the first
+    // response never reached the caller, a dropped connection — is the same pipeline, and a second
+    // run would write the same model files under the first one's feet. Once a build detaches into
+    // the background the pending checkpoint takes over this duty (see _checkpointState).
+    if (draft.building) {
+      throw new ToolError(
+        `a build of this draft is already in flight (started ${draft.building.started_at}) — it is the SAME pipeline, so a second run would build nothing new and would write over the first one. `
+        + `Find it with list_query_jobs() and poll it with get_query_result({ query_id }); the result table is ${draft.building.model}.`,
+        { stage: 'validate', field: 'draft_id' },
+      );
+    }
     // Build only what is NOT already a table: with a live checkpoint the run starts from it and
     // only the steps after it are rendered. Each build gets its own model name, so a rebuild never
     // overwrites the very table it is reading (nor one a fork inherited).
@@ -2009,12 +2026,19 @@ export class Engine {
       throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_step first, or read the built table with get_query_result({ context_id: '${plan.checkpoint.owner}', table: '${plan.checkpoint.model}' })`, { stage: 'validate', field: 'draft_id' });
     }
     const seq = (draft.builds || 0) + 1;
-    const result = await this._registerPipeline({
-      name: draft.name, context_id: ctx.id, materialized: draft.materialized,
-      pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
-      from_checkpoint: plan.checkpoint ? { at: plan.checkpoint.at, model: plan.checkpoint.model, columns: plan.checkpoint.columns } : null,
-      model_suffix: seq > 1 ? `_c${seq}` : '',
-    });
+    const suffix = seq > 1 ? `_c${seq}` : '';
+    draft.building = { started_at: new Date().toISOString(), model: `pipe_${draft.name}_${ctx.id}${suffix}` };
+    let result;
+    try {
+      result = await this._registerPipeline({
+        name: draft.name, context_id: ctx.id, materialized: draft.materialized,
+        pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
+        from_checkpoint: plan.checkpoint ? { at: plan.checkpoint.at, model: plan.checkpoint.model, columns: plan.checkpoint.columns } : null,
+        model_suffix: suffix,
+      });
+    } finally {
+      delete draft.building; // a detached build hands the guard over to its pending checkpoint
+    }
     if (result && result.ok === false) return result; // build/run FAILED — keep the draft so it can be fixed & retried (no rebuild from scratch)
     // Funnel-completeness nudge: a one_per_match funnel with NO downstream completed filter
     // counts all starts (incl. partials), not completed situations — surface it on the result.
@@ -2042,6 +2066,9 @@ export class Engine {
         result.from_checkpoint = { at: plan.checkpoint.at, model: plan.checkpoint.model, built_at: plan.checkpoint.built_at };
         result.steps_recomputed = plan.stages.length;
       }
+      // Why a build started from further back than the caller may expect (a failed/lost build, a
+      // refreshed value index) — said on the result, not left to be guessed from the timing.
+      if (plan.retired.length) result.checkpoints_dropped = plan.retired;
       result.checkpoint = { at: checkpoint.at, model: checkpoint.model, ...(checkpoint.carries_source ? { carries_source: checkpoint.carries_source } : {}) };
       // A VIEW is not a computed prefix: reading it re-runs its SQL, so continuing on top of one
       // saves nothing. Say it once, here, where the choice can still be changed.

@@ -122,6 +122,9 @@ export class ContextManager {
         // usedModels drives the require_time_range guard and rendering; a registry written before
         // it existed lists the models only under additions — rebuild it so the guard sees them.
         const st = (c.state ||= {});
+        // A build cannot survive the process that ran it: an in-flight marker read back from the
+        // registry is stale, and keeping it would wedge the draft as "already building".
+        if (st.draft?.building) delete st.draft.building;
         st.usedModels ||= [];
         for (const k of Object.keys(st.additions || {})) if (!st.usedModels.includes(k)) st.usedModels.push(k);
         this.contexts.set(c.id, c);

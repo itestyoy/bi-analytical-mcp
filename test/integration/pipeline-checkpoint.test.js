@@ -117,6 +117,41 @@ test('the prefix is READ, not recomputed: changing the data in its table changes
   assert.deepEqual(rows[victim], [99, 4242], 'the continuation read the materialized prefix');
   // every other player keeps the real numbers the prefix computed
   for (const p of players.filter((x) => x !== victim && before[x][0] >= 2)) assert.deepEqual(rows[p], before[p]);
+  // …and the prefix itself was NOT re-materialized: its table still holds exactly what it held
+  // before the continuation ran (a recompute would have restored the real totals).
+  const prefix = await engine.get_query_result({ context_id: draft_id, table: built.model });
+  assert.equal(prefix.ok, true, JSON.stringify(prefix.error));
+  assert.deepEqual(byPlayer(prefix.rows)[victim], [99, 4242], 'the prefix table was left alone');
+  assert.notEqual(out.model, built.model, 'the continuation built its own model');
+});
+
+// A prefix that only FILTERED events still carries the source's own columns, so the stages that read
+// them — a funnel, a payload read — keep working on top of it. The numbers must be identical to the
+// same pipeline computed in one go.
+test('a funnel and a payload read run on top of a materialized event slice, with the same numbers', opts, async (t) => {
+  if (skip(t)) return;
+  const SLICE = { stage: 'where', conditions: [{ column: 'event_name', op: 'in', value: ['level_started', 'level_completed'] }] };
+  const FUNNEL = {
+    stage: 'match_recognize',
+    partition_by: ['player_id_of_internal'],
+    steps: [{ name: 'started', event_name: ['level_started'] }, { name: 'completed', event_name: ['level_completed'] }],
+  };
+  const COUNT = { stage: 'aggregate', group_by: ['completed'], measures: [{ name: 'players', fn: 'count' }] };
+
+  const whole = await build('cp_fn_whole', [SLICE, FUNNEL, COUNT]);
+  const split = await build('cp_fn_split', [SLICE, FUNNEL, COUNT], [1]); // the slice is the prefix
+  assert.equal(split.result.from_checkpoint.at, 1);
+  assert.equal(split.result.steps_recomputed, 2);
+  const tally = (r) => Object.fromEntries(r.rows.map((x) => [String(x.completed), num(x.players)]));
+  assert.ok(Object.keys(tally(whole.result)).length > 0, 'the funnel returns rows at all');
+  assert.deepEqual(tally(split.result), tally(whole.result));
+
+  // The payload column survived the slice too, so a derive on top of the prefix reads it.
+  const wholeScore = await build('cp_pl_whole', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', fn: 'sum', column: 'score' }] }]);
+  const splitScore = await build('cp_pl_split', [SLICE, STEPS[1], { stage: 'aggregate', group_by: [], measures: [{ name: 'total', fn: 'sum', column: 'score' }] }], [1]);
+  assert.equal(splitScore.result.from_checkpoint.at, 1);
+  assert.equal(num(splitScore.result.rows[0].total), num(wholeScore.result.rows[0].total));
+  assert.ok(num(wholeScore.result.rows[0].total) > 0, 'the payload actually carried values');
 });
 
 test('a fork inherits the prefix: same numbers as an independent recompute, and the table is only read', opts, async (t) => {

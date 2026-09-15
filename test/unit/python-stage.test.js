@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate } from '../../src/python-model.js';
+import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate, pythonRunHints } from '../../src/python-model.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 // The fixture catalog is loaded without a dbt profile here → no Python runtime → the stage would be
@@ -474,11 +474,53 @@ test('unordered head/tail is refused on a partial-ordering runtime, and accepted
   assert.equal(elsewhere.ok, true, JSON.stringify(elsewhere.errors));
 });
 
+// The OTHER thing dbt's BigFrames wrapper takes away: the frame from dbt.ref() has no INDEX, so a
+// dict lookup written as Series.map raises NullIndexError in the warehouse's notebook runtime. The
+// gate refuses it where the author can still fix it, and names the merge that replaces it.
+test('a dict lookup via map is refused on an index-less runtime; merge and set_index are accepted', async (t) => {
+  if (skipNoPy(t)) return;
+  const body = (code) => [{ name: 'f', params: ['df', 'd'], body: code }];
+  const opts = { requireIndexForAlign: true };
+
+  const mapped = await runAstGate(PY, body('df["v"] = df["k"].map(d)\nreturn df'), ['bpd'], opts);
+  assert.equal(mapped.ok, false);
+  assert.match(mapped.errors[0].message, /NullIndexError/);
+  assert.match(mapped.errors[0].message, /merge/);
+  assert.match(mapped.errors[0].message, /set_index/);
+
+  // the fix the rule teaches: the lookup becomes a frame and is merged
+  const merged = await runAstGate(PY, body('lookup = bpd.DataFrame({"k": list(d.keys()), "v": list(d.values())})\ndf = df.merge(lookup, on="k", how="inner")\nreturn df'), ['bpd'], opts);
+  assert.equal(merged.ok, true, JSON.stringify(merged.errors));
+  // …or an index is established first, and then alignment is legitimate
+  const indexed = await runAstGate(PY, body('df = df.set_index("k")\ndf["v"] = df["k"].map(d)\nreturn df.reset_index()'), ['bpd'], opts);
+  assert.equal(indexed.ok, true, JSON.stringify(indexed.errors));
+  // on a runtime whose frames DO carry an index, the same body is ordinary pandas
+  const elsewhere = await runAstGate(PY, body('df["v"] = df["k"].map(d)\nreturn df'), ['bpd']);
+  assert.equal(elsewhere.ok, true, JSON.stringify(elsewhere.errors));
+});
+
 // The flag is not a hand-set option: it comes from the runtime profile, so the rule follows the
 // warehouse the deployment actually submits to.
-test('only the BigFrames profile declares partial ordering', () => {
+test('only the BigFrames profile declares partial ordering and a null index', () => {
   assert.equal(frameProfile({ runtime: 'bigquery', method: 'bigframes' }, {}).partialOrdering, true);
+  assert.equal(frameProfile({ runtime: 'bigquery', method: 'bigframes' }, {}).nullIndex, true);
   for (const rt of [{ runtime: 'bigquery', method: 'cluster' }, { runtime: 'snowflake' }, { runtime: 'duckdb' }, {}]) {
     assert.ok(!frameProfile(rt, {}).partialOrdering, JSON.stringify(rt));
+    assert.ok(!frameProfile(rt, {}).nullIndex, JSON.stringify(rt));
   }
+});
+
+// A failure that only the warehouse can produce still has to arrive as a fix, not as a stack: the
+// hint is keyed off the runtime's declared properties, so a runtime without them stays silent.
+test('a run failure names the runtime rule behind it', () => {
+  const bq = frameProfile({ runtime: 'bigquery', method: 'bigframes' }, {});
+  const duck = frameProfile({ runtime: 'duckdb' }, {});
+  const log = 'Compilation Error in model pipe_seg_ab12\n  NullIndexError: Cannot implicitly align objects. Please set an index using set_index.';
+  const hints = pythonRunHints(bq, log);
+  assert.equal(hints.length, 1);
+  assert.match(hints[0], /NO INDEX/);
+  assert.match(hints[0], /merge|set_index/);
+  assert.deepEqual(pythonRunHints(duck, log), [], 'a runtime whose frames carry an index says nothing');
+  assert.match(pythonRunHints(bq, 'OrderRequiredError: the frame is not ordered')[0], /sort_values/);
+  assert.deepEqual(pythonRunHints(bq, 'Database Error: syntax error at or near "selct"'), [], 'an ordinary SQL failure is left alone');
 });

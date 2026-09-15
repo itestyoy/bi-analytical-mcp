@@ -10,7 +10,7 @@ import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
-import { compilePythonStage, importAllowlist, runAstGate, frameProfile } from './python-model.js'; // registers the python pipeline stage
+import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
@@ -1934,6 +1934,18 @@ export class Engine {
       : (() => { const py = this._compilePythonStage(seg.stage, { modelName: seg.model, inputModel: seg.input, pipeline }); return { model: seg.model, kind: 'python', input: seg.input, runtime: py.runtime, packages: py.packages, steps: seg.stage.steps.map((st) => st.call), code: py.code, yml: py.yml, functions: py.functions, bindings: py.bindings, columns: [...seg.columns.keys()] }; })()));
   }
 
+  /**
+   * A dbt failure of a PYTHON model is the warehouse runtime's traceback, and its actionable part is
+   * one class name. Append what that class name means for THIS runtime, so the caller reads the fix
+   * instead of a stack. Best-effort decoration: the original message is always kept intact.
+   */
+  _pythonRunMessage(message) {
+    try {
+      const hints = pythonRunHints(frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}), message);
+      return hints.length ? `${message}\n\n${hints.join('\n')}` : message;
+    } catch { return message; }
+  }
+
   /** Compile a python stage into its dbt model (structure only — the gate is separate). */
   _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
@@ -1962,8 +1974,10 @@ export class Engine {
     // wrapper runs with ordering_mode="partial" and raises OrderRequiredError there), so the
     // profile decides and the gate enforces — the author hears it here, not from a traceback in
     // the warehouse's notebook runtime.
-    const requireOrderForRowSlice = !!frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}).partialOrdering;
-    const gate = await runAstGate(this.pythonBin, functions, [], { requireOrderForRowSlice });
+    // The same for the INDEX the frame does not have: an alignment that would raise NullIndexError
+    // there is refused here, where the author can still change the code.
+    const profile = frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {});
+    const gate = await runAstGate(this.pythonBin, functions, [], { requireOrderForRowSlice: !!profile.partialOrdering, requireIndexForAlign: !!profile.nullIndex });
     if (gate.ok) return;
     const named = units.length > 1;
     const lines = gate.errors.map((e) => {
@@ -1987,7 +2001,7 @@ export class Engine {
     const build = (async () => {
       try {
         result = await this.runner.run(dir, select);
-        if (!result.ok) this.jobs.fail(id, formatDbtError(result.stdout, result.stderr));
+        if (!result.ok) this.jobs.fail(id, this._pythonRunMessage(formatDbtError(result.stdout, result.stderr)));
         else this.jobs.ready(id);
       } catch (e) {
         result = { ok: false, stdout: '', stderr: e?.message || String(e) };
@@ -2204,7 +2218,7 @@ export class Engine {
         }
         r = bg.result;
       } else r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
-      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
+      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: hasPython ? this._pythonRunMessage(formatDbtError(r.stdout, r.stderr)) : formatDbtError(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };

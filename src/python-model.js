@@ -21,6 +21,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { registerStage } from './pipeline.js';
+import { pythonRulesText } from './python-guide.js';
 
 // the gate script is a non-JS runtime asset — see src/runtime-assets.js for why it is resolved there
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -51,13 +52,30 @@ export function frameProfile(rt, config = {}) {
       native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API compiled to BigQuery SQL and executed in BigQuery (import bigframes.pandas as bpd for constructors)',
       pandas: 'df.to_pandas()',
       ml: 'bigframes.ml — the scikit-learn API run as BigQuery ML (model.fit trains in BigQuery, model.predict returns a BigFrames frame): bigframes.ml.cluster.KMeans; linear_model.LinearRegression / LogisticRegression; ensemble.XGBRegressor / XGBClassifier / RandomForestRegressor / RandomForestClassifier; decomposition.PCA; forecasting.ARIMAPlus; preprocessing.StandardScaler / MinMaxScaler / MaxAbsScaler / OneHotEncoder / LabelEncoder / KBinsDiscretizer; compose.ColumnTransformer; pipeline.Pipeline; model_selection.train_test_split / KFold / cross_validate; metrics',
-      guide: 'RULES FOR BIGFRAMES: (1) modelling = bigframes.ml (import { package: "bigframes", submodule: "ml.cluster", names: ["KMeans"] } etc.) — NEVER sklearn here: it needs df.to_pandas() and runs single-node in the notebook; (2) stay vectorized — column expressions, groupby/agg, merge, rolling/window, .str / .dt accessors, Series.map with a dict (a CASE in SQL); AVOID iterrows and df.apply / Series.map with a Python function: BigFrames runs no Python per row — a plain function is tried ONCE over the whole Series as a vectorized expression and otherwise fails at run time ("convert it to a BigFrames BigQuery function"); a bpd.remote_function / bpd.udf is the LAST resort for logic no column expression can say — it deploys a Cloud Run service at call time; (3) execution is deferred — nothing runs until the frame the model returns is materialized; df.cache() only for an expensive intermediate used twice (it stores a temporary BigQuery table you pay for); (4) the frame has NO inherent row order: dbt\'s wrapper runs with ordering_mode="partial", where head() / tail() on an unsorted frame RAISE OrderRequiredError at run time — always sort first (df.sort_values(<column>, ascending=False).head(n)), and never rely on row order anywhere else either; (5) df.to_pandas() pulls the whole table into the notebook runtime — only for a small, already-aggregated frame.',
+      guide: pythonRulesText('bigframes', rt?.recipes || []),
       packagesNote: 'On BigFrames prefer bigframes (bigframes.ml) over sklearn / scipy / statsmodels: those run only after df.to_pandas(), single-node.',
-      // dbt's BigFrames wrapper sets ordering_mode="partial": a frame carries no row order, and
-      // head()/tail() on an unordered one RAISE rather than return an arbitrary slice. The static
-      // gate refuses that pairing for this runtime, so the author learns it here instead of from a
-      // traceback in the warehouse's notebook runtime.
-      partialOrdering: true,
+      // Two things this frame does NOT have — no row order (dbt's wrapper runs with
+      // ordering_mode="partial") and no index at all — are stated in `guide`, where the author
+      // reads them BEFORE writing the code. They are deliberately not gated: whether a given line
+      // trips them depends on how the code is written, and a static refusal would block working
+      // code as often as it would catch a real trap.
+      // The submission this profile DESCRIBES. A deployment may resolve none (MCP_PYTHON_MODELS=on
+      // on a profile with no submission_method, a profile that only hints at one): the frame, the
+      // allowlist, the rules and the gate all then describe BigFrames while dbt, reading nothing,
+      // would fall back to its own default (serverless → PySpark) and the model would die in a
+      // Dataproc job. Writing the submission this profile stands for keeps the two the same.
+      submission: 'bigframes',
+      // What a failure of THIS runtime MEANS, for the failures whose actionable part is one class
+      // name. A fact about the runtime, NOT a diagnosis of the code: which operation raised it is
+      // in the traceback, and we cannot know from here which line the author meant — so nothing
+      // here prescribes a rewrite. The stage's rules (`guide`) say how to write it; this only says
+      // what the class name is about. Declared here so `pythonRunHints` stays a matcher with no
+      // runtime inside it.
+      runHints: [
+        { match: 'NullIndexError|Cannot implicitly align', hint: 'About this runtime: the frame dbt.ref() returns carries NO INDEX, so an operation that needs to align two objects fails this way (and reset_index(drop=True) does not create one). The traceback above says which operation it was.' },
+        { match: 'OrderRequiredError', hint: 'About this runtime: it carries no row order (the dbt wrapper runs with ordering_mode="partial"), so taking rows off a frame that was not explicitly sorted fails this way.' },
+        { match: 'convert it to a BigFrames BigQuery function|remote_function', hint: 'About this runtime: it runs no Python per row — a plain function passed to apply/map is attempted once as a vectorized expression over the whole column, and fails this way when it cannot be one.' },
+      ],
       packages: ['bigframes'],
     };
   }
@@ -266,7 +284,7 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
   const cfg = {
     materialized: 'table',
     ...(packages.size ? { packages: [...packages].sort() } : {}),
-    ...(submission ? { submission_method: submission } : {}),
+    ...((submission || profile.submission) ? { submission_method: submission || profile.submission } : {}),
     ...config,
   };
   const cfgArgs = Object.entries(cfg).map(([k, v]) => `${k}=${pyLiteral(v)}`).join(', ');
@@ -306,12 +324,24 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
 }
 
 /**
+ * A failed dbt run of a PYTHON model comes back as the warehouse runtime's own traceback, in which
+ * the actionable part is one class name. This turns that class name into the fix — the same rules
+ * the stage description carries, repeated where the author actually meets them. The rules are the
+ * RUNTIME's (`profile.runHints`), so nothing here knows a platform: a runtime that declares none
+ * stays silent, and adding one is a profile entry, not a branch in this function.
+ */
+export function pythonRunHints(profile, text) {
+  const log = String(text || '');
+  return (profile?.runHints || []).filter((h) => new RegExp(h.match, 'i').test(log)).map((h) => h.hint);
+}
+
+/**
  * Run the static gate over the declared functions with the given Python interpreter.
  * `bindings` are the names the declaration itself introduces — what its `imports` bound plus the
  * other declared functions — so the gate can allowlist the names a body may read instead of
  * chasing an open-ended list of the ones it may not.
  */
-export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20000, requireOrderForRowSlice = false } = {}) {
+export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20000 } = {}) {
   // A build that shipped src/ without python/ used to surface as "python3 exit 2: can't open
   // file" — a message that reads like the analyst's code broke. Say what actually happened.
   const gate = assetPath('astGate');
@@ -328,7 +358,7 @@ export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20
       if (code !== 0 && !out) return reject(new Error(`ast gate failed (${pythonBin} exit ${code}): ${err.trim()}`));
       try { resolve(JSON.parse(out)); } catch { reject(new Error(`ast gate returned no JSON: ${(out || err).slice(0, 300)}`)); }
     });
-    proc.stdin.end(JSON.stringify({ functions, bindings: [...bindings], require_order_for_row_slice: !!requireOrderForRowSlice }));
+    proc.stdin.end(JSON.stringify({ functions, bindings: [...bindings] }));
   });
 }
 
@@ -359,7 +389,7 @@ export function pythonStageDefs() {
 function bodySchema(profile = frameProfile(null)) {
   return {
     $ref: '#/$defs/py_block',
-    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. ${profile.ml ? `Modelling: ${profile.ml.split(' — ')[0]} (see the stage description for the classes and the do/don't rules). ` : ''}${profile.guide} Nothing is converted for you${profile.pandas ? `: if a body truly needs pandas, it converts itself with ${profile.pandas} and owns the cost — single-node, the whole table in memory — so do it only on a small, already-aggregated table` : ''}. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. A body may name only its own parameters and locals, what \`imports\` bound and the other declared functions, and may touch only public attributes — checked before anything runs, so an import inside, dbt/session, or a private/dunder attribute is refused with the line.`,
+    description: `The function body as STRUCTURE: an array where a string is one line of code and a nested array is the block indented under the line before it (which must end with ":" — if/for/else/with/try…); nesting is unbounded. Example: ["if k > 1:", ["df['seg'] = 1"], "else:", ["df['seg'] = 0"], "return df"]. THE FRAME: the first parameter is what dbt.ref() returns on THIS warehouse — ${profile.native} — passed along untouched from step to step; write the body against THAT API so the work stays in the warehouse engine. ${profile.ml ? `Modelling: ${profile.ml.split(' — ')[0]} (see the stage description for the classes and the do/don't rules). ` : ''}The RULES for this runtime — and the right form for each task — are on the stage description above; they apply to every line here. Nothing is converted for you${profile.pandas ? `: if a body truly needs pandas, it converts itself with ${profile.pandas} and owns the cost — single-node, the whole table in memory — so do it only on a small, already-aggregated table` : ''}. The frame the LAST step returns IS the model's result table, exactly as returned (no projection is added — return the columns you declare in output.columns). Must return the frame. A body may name only its own parameters and locals, what \`imports\` bound and the other declared functions, and may touch only public attributes — checked before anything runs, so an import inside, dbt/session, or a private/dunder attribute is refused with the line.`,
   };
 }
 
@@ -414,7 +444,9 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
 // follow. `build` validates the structure (imports / names / arguments) against a placeholder
 // ref; the body gate and the real names are the engine's part.
 registerStage('python', {
-  schema: (catalog) => { const rt = catalog?.pythonRuntime; const pr = frameProfile(rt, rt?.config || {}); return pythonStageSchema(importAllowlist(rt || process.env, pr), pr); },
+  // The DESCRIPTION also names this deployment's worked recipes for a python stage (the engine
+  // puts their ids on the catalog): the caller must know they exist before writing a function.
+  schema: (catalog) => { const rt = catalog?.pythonRuntime; const pr = frameProfile({ ...rt, recipes: catalog?.pythonRecipes || [] }, rt?.config || {}); return pythonStageSchema(importAllowlist(rt || process.env, pr), pr); },
   defs: () => pythonStageDefs(), // hoisted to the root of every tool schema embedding stages
   // Offered only where dbt can run Python models (the profile's adapter + its submission settings,
   // see resolvePythonRuntime); elsewhere the stage is absent from the schemas and refused here.

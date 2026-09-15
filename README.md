@@ -64,10 +64,34 @@ AI ──► query_semantic_model (enum-constrained)
 ## Recipes
 
 The `semantic_index` overview lists recipe ids and `semantic_index({ recipe: id })`
-returns one in full — ready-to-run templates for common analytics task types
-(trends, segmentation, funnel, retention, cohort, behavioral, conversion, level
-progression, monetization, stickiness) — each a valid `create_semantic_model`
-payload + example queries. See `config/recipes.json` and
+returns one in full — ready-to-run, warehouse-proven payloads.
+
+The recipes shipped with the server are per TECHNIQUE, not per business task: a
+business shape differs per product, the technique does not. Five technical
+families — `metric_types` (ratio, derived, cumulative, conversion window,
+boolean measure, the aggregation chosen per question, a governed measure),
+`joins` (an attribute of another model, a cohort grid on two time axes, two
+independent sources, a pipeline join by relationship name, a point-in-time
+join), `pipeline` (window lag, episodes by gap, an age axis, an ordered
+sequence, unnest, reshape, a volume/coverage check), `ab_test` (proportion,
+mean, CUPED, ratio, SRM, power) and `bigframes` (below). A real question
+combines two or three of them. Domain recipes — your events, your funnels, your
+conventions — go in a deployment file via `RECIPES_PATH`, which is merged on top
+of the shipped set (your id wins on a collision).
+
+One family is deliberately NOT organised by business task: `bigframes` recipes
+(`bf_*`, offered only where dbt runs python models on that runtime) are one per
+APPROACH — the correct form of a single move on the frame `dbt.ref()` returns
+(a lookup, a per-group value, top-N, a threshold, an ml prediction, `cache()`),
+each carrying `approach` (the form that works) next to `instead_of` (the form
+that raises, and why). A real question combines several, so the python stage
+description is an INDEX of them — every id with the move it covers, under an
+instruction to study them before writing a function — and the code forms
+themselves live in the recipes and in `semantic_index({ guide: "python" })`.
+
+A deployment ADDS its own recipes via `RECIPES_PATH` (comma-separated files);
+the shipped ones stay, and an id collision lets an operator override one
+deliberately. See `config/recipes.json`, `docs/SCHEMA_AUTHORING.md` (§2d) and
 `docs/analytics-task-taxonomy.md`.
 
 ## Run

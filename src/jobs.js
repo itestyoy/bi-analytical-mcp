@@ -14,6 +14,9 @@ export class JobManager {
     this.store = store || openStore({ dbPath });
     this._ownsStore = !store; // only close what we opened
     this.jobs = new Map();
+    // Jobs THIS process started. A job the store hands back as 'running' was started by a process
+    // that is gone — nothing is driving it any more, and whoever waits on it has to know.
+    this.live = new Set();
     for (const row of this.store.jobs.init()) this.jobs.set(row.id, row);
   }
 
@@ -25,8 +28,14 @@ export class JobManager {
     const id = randomBytes(6).toString('hex');
     const j = { id, status: 'running', startedAt: Date.now(), ...meta };
     this.jobs.set(id, j);
+    this.live.add(id);
     this._persist(j);
     return id;
+  }
+
+  /** True when this process is the one running the job (false for one inherited from the store). */
+  isLive(id) {
+    return this.live.has(id);
   }
 
   setTable(id, table) {

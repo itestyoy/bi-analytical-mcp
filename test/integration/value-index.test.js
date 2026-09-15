@@ -415,7 +415,7 @@ test('semantic_index({ search }) finds attribute values, dimensions, experiments
   assert.ok(dim.dimension_matches.some((d) => d.source === 'users' && d.column === 'country'), JSON.stringify(dim.dimension_matches));
   // a recipe is discoverable by task keyword.
   const ret = await engine.semantic_index({ search: 'retention' });
-  assert.ok(ret.recipe_matches.some((r) => r.id === 'nday_retention'), JSON.stringify(ret.recipe_matches));
+  assert.ok(ret.recipe_matches.some((r) => r.id === 'conversion_metric_window'), JSON.stringify(ret.recipe_matches));
   assert.ok(ret.recommendations.some((r) => r.includes('semantic_index({ recipe')), 'search guides to the recipe view');
 });
 

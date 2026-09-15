@@ -17,7 +17,7 @@ the warehouse's Python runtime, and what it may touch THERE is decided by that r
 credentials dbt runs with.
 
 Protocol: one JSON object on stdin — {"functions": [{"name","params","body","id"?,"bindings"?]}],
-"bindings": [...], "require_order_for_row_slice"?: bool} — one JSON object on stdout — {"ok": bool, "errors": [{"function","id","line",
+"bindings": [...]} — one JSON object on stdout — {"ok": bool, "errors": [{"function","id","line",
 "text","message"}]}. A function may carry its own `bindings` (and an `id` echoed back in its
 errors), so the functions of SEVERAL declarations are checked in one run without sharing names.
 Lines are 1-based within the BODY as the caller wrote it.
@@ -58,15 +58,6 @@ ALLOWED_NODES = (
     ast.operator, ast.cmpop, ast.boolop, ast.unaryop, ast.expr_context,
 )
 
-# Frame methods that TAKE the first/last rows, and the ones that establish an order. On a frame
-# whose ordering_mode is "partial" (the default of dbt's BigFrames wrapper) taking rows off an
-# unordered frame is not merely non-deterministic — it RAISES OrderRequiredError at run time, in
-# the warehouse's Python runtime where nothing of this gate's feedback reaches the author. So the
-# pairing is checked here, before the model is submitted.
-ROW_SLICE_METHODS = frozenset({"head", "tail"})
-ORDERING_METHODS = frozenset({
-    "sort_values", "sort_index", "sort", "orderBy", "order_by", "order", "nlargest", "nsmallest",
-})
 
 NODE_LABEL = {
     "Import": "an import inside a function body is not allowed — list the module in the declaration's `imports`",
@@ -103,7 +94,7 @@ def _bound_names(fdef):
     return names
 
 
-def _check(fn, default_bindings, require_order_for_row_slice=False):
+def _check(fn, default_bindings):
     name, params, body = fn["name"], fn.get("params") or [], fn.get("body") or ""
     bindings = fn.get("bindings")
     if bindings is None:
@@ -147,17 +138,6 @@ def _check(fn, default_bindings, require_order_for_row_slice=False):
             err(node, "attribute '%s' is private — a step function uses the public API of the frame it receives" % node.attr)
         elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id not in readable:
             err(node, "'%s' is not available here — a step function sees its parameters, its own locals, the declaration's `imports` and the other declared functions" % node.id)
-    if require_order_for_row_slice:
-        ordered = any(
-            isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ORDERING_METHODS
-            for n in ast.walk(fdef)
-        )
-        if not ordered:
-            for node in ast.walk(fdef):
-                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr in ROW_SLICE_METHODS:
-                    err(node, "'%s' on a frame with no explicit order raises OrderRequiredError on this runtime (the dbt wrapper runs with ordering_mode=\"partial\") — sort first, e.g. df.sort_values('<column>', ascending=False).%s(n)" % (node.func.attr, node.func.attr))
-                    break
-
     if not any(isinstance(n, ast.Return) and n.value is not None for n in ast.walk(fdef)):
         errors.append({"function": name, "id": fid, "line": 1, "text": body_lines[0].strip() if body_lines else "", "message": "a step function must `return` the frame it produced"})
     # one error per line is enough to act on; keep the first few in source order
@@ -174,12 +154,9 @@ def _check(fn, default_bindings, require_order_for_row_slice=False):
 def main():
     req = json.loads(sys.stdin.read() or "{}")
     bindings = req.get("bindings") or []
-    # The caller knows the warehouse runtime, so it decides whether unordered head/tail is fatal
-    # there; the gate only enforces what it is told.
-    require_order = bool(req.get("require_order_for_row_slice"))
     errors = []
     for fn in req.get("functions") or []:
-        errors.extend(_check(fn, bindings, require_order))
+        errors.extend(_check(fn, bindings))
     sys.stdout.write(json.dumps({"ok": not errors, "errors": errors}))
 
 

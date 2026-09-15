@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate } from '../../src/python-model.js';
+import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate, pythonRunHints } from '../../src/python-model.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 // The fixture catalog is loaded without a dbt profile here → no Python runtime → the stage would be
@@ -358,7 +358,9 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   const bq = frameProfile({ runtime: 'bigquery', method: 'bigframes' });
   assert.match(bq.ml, /bigframes\.ml\.cluster\.KMeans/);
   assert.match(bq.guide, /NEVER sklearn/);
-  assert.match(bq.guide, /AVOID iterrows and df\.apply/);
+  assert.match(bq.guide, /stay in COLUMN EXPRESSIONS/);
+  assert.match(bq.guide, /apply\/map/);
+  assert.match(bq.guide, /THE RIGHT FORM PER OPERATION/, 'the right form for each operation is in the description itself');
   // the guide names the FAILURE, not just the property: unordered head/tail raises, it does not
   // quietly return an arbitrary slice
   assert.match(bq.guide, /ordering_mode="partial"/);
@@ -449,36 +451,162 @@ test('a step body cannot reach dbt or session at all (so no subscript-on-call ca
   assert.match(sess.errors[0].message, /'session' is not available here/);
 });
 
-// (2) dbt's BigFrames wrapper runs with ordering_mode="partial", where head()/tail() on a frame
-// with no explicit order RAISE OrderRequiredError instead of returning an arbitrary slice.
-test('unordered head/tail is refused on a partial-ordering runtime, and accepted once sorted', async (t) => {
-  if (skipNoPy(t)) return;
-  const body = (code) => [{ name: 'f', params: ['df'], body: code }];
-  const opts = { requireOrderForRowSlice: true };
-
-  const bare = await runAstGate(PY, body('top = df.head(10)\nreturn top'), [], opts);
-  assert.equal(bare.ok, false);
-  assert.match(bare.errors[0].message, /OrderRequiredError.*ordering_mode/s);
-  assert.match(bare.errors[0].message, /sort first/);
-
-  const sorted = await runAstGate(PY, body('top = df.sort_values("revenue", ascending=False).head(10)\nreturn top'), [], opts);
-  assert.equal(sorted.ok, true, JSON.stringify(sorted.errors));
-  const tailSorted = await runAstGate(PY, body('t = df.sort_values("ts").tail(5)\nreturn t'), [], opts);
-  assert.equal(tailSorted.ok, true, JSON.stringify(tailSorted.errors));
-  // nlargest orders by itself, so it needs no separate sort
-  const nlargest = await runAstGate(PY, body('return df.nlargest(10, "revenue")'), [], opts);
-  assert.equal(nlargest.ok, true, JSON.stringify(nlargest.errors));
-
-  // on a runtime that does NOT partially order, the same body is fine
-  const elsewhere = await runAstGate(PY, body('top = df.head(10)\nreturn top'));
-  assert.equal(elsewhere.ok, true, JSON.stringify(elsewhere.errors));
+// The two things dbt's BigFrames wrapper takes away — row order and the index — are RULES, not
+// refusals: what a given line does on a runtime depends on how the code is written, so they are
+// stated where the author reads them before writing (the stage description), and the failure they
+// cause is explained when it happens. This pins that they are actually in that description.
+test('the BigFrames rules state both runtime traps and the form that works', () => {
+  const { guide } = frameProfile({ runtime: 'bigquery', method: 'bigframes' }, {});
+  // no row order → head()/tail() need an explicit sort
+  assert.match(guide, /ordering_mode="partial"/);
+  assert.match(guide, /OrderRequiredError/);
+  assert.match(guide, /sort_values/);
+  // no index → an alignment raises, and the form that works is a merge
+  assert.match(guide, /NO INDEX/);
+  assert.match(guide, /NullIndexError/);
+  assert.match(guide, /merge/);
+  assert.match(guide, /set_index/);
+  assert.ok(!/Series\.map with a dict/.test(guide), 'and the form that raises is not recommended');
+  // the runtimes whose frames carry both say none of it
+  for (const rt of [{ runtime: 'snowflake' }, { runtime: 'duckdb' }, { runtime: 'bigquery', method: 'cluster' }]) {
+    assert.ok(!/NullIndexError|ordering_mode/.test(frameProfile(rt, {}).guide), JSON.stringify(rt));
+  }
 });
 
-// The flag is not a hand-set option: it comes from the runtime profile, so the rule follows the
-// warehouse the deployment actually submits to.
-test('only the BigFrames profile declares partial ordering', () => {
-  assert.equal(frameProfile({ runtime: 'bigquery', method: 'bigframes' }, {}).partialOrdering, true);
-  for (const rt of [{ runtime: 'bigquery', method: 'cluster' }, { runtime: 'snowflake' }, { runtime: 'duckdb' }, {}]) {
-    assert.ok(!frameProfile(rt, {}).partialOrdering, JSON.stringify(rt));
+// A failure only the warehouse can produce arrives with what the error CLASS means on this runtime
+// — a fact about the runtime, not a diagnosis of the author's code (we cannot know from here which
+// line raised it). Keyed off what the runtime declares, so a runtime without such rules stays silent.
+test('a run failure explains the runtime behind the error class, without prescribing a rewrite', () => {
+  const bq = frameProfile({ runtime: 'bigquery', method: 'bigframes' }, {});
+  const duck = frameProfile({ runtime: 'duckdb' }, {});
+  const log = 'Compilation Error in model pipe_seg_ab12\n  NullIndexError: Cannot implicitly align objects. Please set an index using set_index.';
+  const hints = pythonRunHints(bq, log);
+  assert.equal(hints.length, 1);
+  assert.match(hints[0], /NO INDEX/);
+  assert.match(hints[0], /^About this runtime:/, 'it states what the runtime is like…');
+  assert.ok(!/\b(Put|Express|Wrap|Use|Rewrite)\b/.test(hints[0]), '…and does not prescribe a rewrite it cannot know is the right one');
+  assert.deepEqual(pythonRunHints(duck, log), [], 'a runtime whose frames carry an index says nothing');
+  assert.match(pythonRunHints(bq, 'OrderRequiredError: the frame is not ordered')[0], /no row order/);
+  assert.deepEqual(pythonRunHints(bq, 'Database Error: syntax error at or near "selct"'), [], 'an ordinary SQL failure is left alone');
+});
+
+// The cookbook is served THROUGH the tools — semantic_index({ guide: 'python' }) — so the examples
+// reach the model on demand instead of bloating every tool description. It is per RUNTIME: the
+// deployment's own profile decides which one (or none).
+test('the python authoring guide is served for this deployment\'s runtime, with examples', async (t) => {
+  if (skipNoPy(t)) return;
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide-')) }), pythonBin: PY });
+
+  const g = await e.semantic_index({ guide: 'python' });
+  assert.equal(g.runtime, 'bigframes');
+  assert.ok(g.rules.length >= 5 && g.examples.length >= 10, 'constraints and a worked example per task');
+  // every example says what to do, and the ones that replace a trap say what it replaces and why
+  for (const ex of g.examples) {
+    assert.ok(ex.task && Array.isArray(ex.do) && ex.do.length, JSON.stringify(ex));
+    if (ex.avoid) assert.ok(ex.why, `${ex.task}: an 'avoid' without a 'why' teaches nothing`);
   }
+  // the traps this runtime actually has are covered by an example, not only by prose
+  const text = JSON.stringify(g);
+  for (const needle of ['merge', 'peek', 'sort_values', 'groupby', 'cache()', 'bigframes.ml', 'sql_scalar', 'to_pandas']) {
+    assert.ok(text.includes(needle), `the guide covers ${needle}`);
+  }
+  // …and the stage description points at it rather than repeating it
+  assert.match(frameProfile(catalog.pythonRuntime, {}).guide, /semantic_index\(\{ guide: "python" \}\)/);
+
+  // a deployment that runs no python models says so instead of showing another runtime's guide
+  const plain = loadCatalog(CATALOG, {});
+  plain.pythonRuntime = { available: false, reason: 'no runtime' };
+  const e2 = new Engine({ catalog: plain, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide2-')) }) });
+  const none = await e2.semantic_index({ guide: 'python' });
+  assert.match(none.note, /runs no python models/);
+  assert.equal(none.examples, undefined);
+});
+
+// The rules must be IN the stage description — the agent sees it without fetching anything — and
+// they are rendered from the same data as the full guide, so the two cannot drift.
+test('the stage description itself carries the runtime rules and the right form per task', async (t) => {
+  if (skipNoPy(t)) return;
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pydesc-')) }), pythonBin: PY });
+  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
+
+  // every rule of the guide is represented in the description…
+  const guide = await e.semantic_index({ guide: 'python' });
+  for (const r of guide.rules) assert.ok(py.description.includes(r.short), `rule missing from the description: ${r.short.slice(0, 40)}…`);
+  // …and so is the right form for every task the guide has an example for
+  for (const ex of guide.examples) assert.ok(py.description.includes(ex.line), `form missing from the description: ${ex.line.slice(0, 40)}…`);
+  // the declaration form the caller actually writes is there too
+  assert.match(py.description, /you declare `imports`/);
+  assert.match(py.description, /submission_method="bigframes"/);
+  // the BODY description does not repeat it — one copy per tool surface
+  const body = py.properties.functions.items.properties.body.description;
+  assert.ok(!body.includes('THE RIGHT FORM PER TASK'), 'the rules live in one place');
+  assert.match(body, /RULES for this runtime — and the right form for each task — are on the stage description/);
+});
+
+// A worked recipe beats prose, so the stage DESCRIPTION is an INDEX of them rather than a manual:
+// each id with the move it covers and an instruction to study them, because the caller has to know
+// they exist BEFORE writing the first function. Wired from the deployment's own recipe file — a
+// deployment that ships none has nothing to point at, so its description keeps carrying the forms
+// itself (checked at the end).
+//
+// They are per APPROACH, not per business task: each one is the correct form of a single move on
+// the frame (a lookup, a per-group value, a top-N, a threshold, a prediction), so a real question
+// is assembled from several. Hence every id must be reachable WITH its move named — a caller that
+// can only find the one nearest its wording would miss the others its function needs.
+test('the stage description and the guide send the caller to this deployment\'s python recipes', async (t) => {
+  if (skipNoPy(t)) return;
+  const { loadRecipes } = await import('../../src/recipes.js');
+  const recipes = loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url)));
+  const ids = recipes.idsRequiring('python_models');
+  assert.ok(ids.length >= 3, 'the shipped recipes cover the frame approaches of this runtime');
+
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec-')) }), recipes, pythonBin: PY });
+
+  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
+  assert.match(py.description, /STUDY THE RECIPES FIRST/, 'the description INSISTS on reading them');
+  const entries = recipes.entriesRequiring('python_models');
+  for (const { id, title } of entries) {
+    assert.ok(py.description.includes(id), `recipe ${id} is not named in the stage description`);
+    assert.ok(py.description.includes(title), `recipe ${id} is named without its move (${title}) — the caller cannot tell which one it needs`);
+  }
+  assert.match(py.description, /semantic_index\(\{ recipe: "<id>" \}\)/, 'and the description says HOW to fetch one');
+  // …and it is an INDEX, not a manual: the per-operation code forms live in the recipes and the
+  // full guide now, so the description no longer repeats them (that is what makes it shorter).
+  assert.ok(!py.description.includes('THE RIGHT FORM PER OPERATION'), 'the forms are in the recipes, not inlined here');
+  // what it still carries itself: why this runtime bites, and where the reasoning lives
+  assert.match(py.description, /NullIndexError/);
+  assert.match(py.description, /OrderRequiredError/);
+  assert.match(py.description, /semantic_index\(\{ guide: "python" \}\)/);
+
+  const g = await e.semantic_index({ guide: 'python' });
+  assert.deepEqual(g.recipes.ids, ids);
+  assert.deepEqual(g.recipes.moves, entries.map((r) => `${r.id}: ${r.title}`), 'the guide names the move behind every id too');
+  assert.match(g.recipes.fetch, /semantic_index\(\{ recipe: '/);
+  assert.match(g.read_next, /STUDY THE RECIPES BEFORE YOU WRITE/);
+  assert.match(g.recipes.note, /STUDY THESE BEFORE WRITING A FUNCTION/);
+
+  // every one of them is fetchable and carries what makes it adaptable
+  for (const id of ids) {
+    const r = await e.semantic_index({ recipe: id });
+    const body = r.recipe || r;
+    assert.ok(body.register_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
+    assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
+  }
+
+  // a deployment with no python recipes says nothing about them
+  const bare = loadCatalog(CATALOG, {});
+  bare.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
+  const e2 = new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec2-')) }), pythonBin: PY });
+  const py2 = e2.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
+  assert.ok(!py2.description.includes('STUDY THE RECIPES FIRST'));
+  for (const { id } of entries) assert.ok(!py2.description.includes(id), 'no recipe of another deployment is advertised');
+  // …and with nothing to point at, the description carries the forms itself instead of dropping them
+  assert.match(py2.description, /THE RIGHT FORM PER OPERATION/);
+  assert.ok(py2.description.length > py.description.length, 'pointing at recipes is what makes the description shorter');
 });

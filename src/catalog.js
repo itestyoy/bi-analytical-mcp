@@ -160,8 +160,10 @@ export async function groundCatalogToPhysical(catalog, runner, baseProjectDir, l
       const r = await runner.relationColumns(baseProjectDir, catalog.getModel(key).dbt_model);
       if (r && r.ok && Array.isArray(r.columns)) { phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase())); continue; }
       // dbt never got to ASK the warehouse (its own timeout, a signal, a spawn failure). That says
-      // nothing about the table, so it is not evidence of an absent one.
-      if (r?.killed || r?.signal || (r?.error && !r?.stderr)) { transient.push([key, r.error || `dbt was killed by ${r.signal}`]); continue; }
+      // nothing about the table, so it is not evidence of an absent one. Told apart by OUTPUT, not
+      // by stream: dbt ran means dbt printed — and it prints its diagnostics to STDOUT, leaving
+      // stderr empty, so "error and no stderr" would have called every missing relation transient.
+      if (r?.killed || r?.signal || (r?.error && !r?.stdout && !r?.stderr)) { transient.push([key, r.error || `dbt was killed by ${r.signal}`]); continue; }
       // dbt ran and could not introspect the relation (not built, dropped, renamed): the model is
       // UNAVAILABLE — declared, but nothing in the warehouse backs it. Working on as declared would
       // only move the failure to the first query.
@@ -714,6 +716,13 @@ export function dbtSchemaToCatalog(doc) {
     if (Object.keys(entities).length) m.entities = entities;
     if (Object.keys(dimensions).length) m.dimensions = dimensions;
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
+    // The role IS the source's identity, so two models cannot share one: the second used to
+    // silently REPLACE the first, and everything downstream — the tool enums, the value index,
+    // every join path — then described a table nobody meant. Several events sources are fine;
+    // each carries its own role name.
+    if (out.models[key]) {
+      throw new Error(`catalog models '${out.models[key].dbt_model}' and '${model.name}' both declare meta.mcp.role: '${key}' — the role is the source's IDENTITY, so exactly one model may carry it. Give one of them its own role name (several sources of the same kind are fine: events, crashlytics, …).`);
+    }
     out.models[key] = m;
   }
   if (!(out.facts || []).length) throw new Error('no events source: at least one model must declare an event_name (meta.mcp.is_event_name) or event_data (meta.mcp.is_event_data) column');
@@ -723,6 +732,19 @@ export function dbtSchemaToCatalog(doc) {
     const m = out.models[key];
     if (!m.event_name) throw new Error(`fact model '${key}' declares no event_name column: add meta.mcp.is_event_name to the column carrying the event type.`);
     if (!m.time) throw new Error(`fact model '${key}' declares no time column: add meta.mcp.is_time to the column carrying the event time.`);
+  }
+
+  // One NAME per source: a payload property and a groupable column of the same source live in the
+  // same (source, property) space — it is how the value index files values, how semantic_index
+  // addresses a field and how a filter literal is verified. A name carried by both is a field
+  // nobody can address: the index writes one over the other and the views describe one while
+  // reporting the other's numbers. Refused here, where it is a one-line rename.
+  for (const key of Object.keys(out.models)) {
+    const m = out.models[key];
+    const clash = Object.keys(m.properties || {}).filter((name) => (m.dimensions || {})[name]);
+    if (clash.length) {
+      throw new Error(`model '${m.dbt_model}' (role '${key}') carries ${clash.map((n) => `'${n}'`).join(', ')} BOTH as an event_data property and as a groupable column — one source addresses a field by ONE name, so these cannot coexist. Rename the payload entry, or give it its own name with an explicit column: mapping.`);
+    }
   }
 
   // A PRIMARY entity must be owned by exactly ONE model: it is both the MetricFlow
@@ -1137,9 +1159,21 @@ export class Catalog {
     fact = this._fact(fact);
     const spec = (this.models[fact].properties || {})[name];
     if (!spec) throw new Error(`unknown event property '${name}' on '${fact}'`);
-    const q = (col) => (qualifier ? `${qualifier}.${col}` : col);
-    if (spec.column) return q(spec.column);
-    return jsonExtractSql(dialect, q(this.eventDataColumn(fact)), name, type || spec.type);
+    const col = this.propertyBackingColumn(fact, name); // the ONE rule for which column this reads
+    const q = qualifier ? `${qualifier}.${col}` : col;
+    return spec.column ? q : jsonExtractSql(dialect, q, name, type || spec.type);
+  }
+
+  /**
+   * The PHYSICAL column a property is read from: its own flattened column, or the source's payload
+   * blob. Whoever reads a property needs that column to still be there, so the same rule that
+   * builds the expression also answers "which column does this depend on".
+   */
+  propertyBackingColumn(fact, name) {
+    fact = this._fact(fact);
+    const spec = (this.models[fact].properties || {})[name];
+    if (!spec) throw new Error(`unknown event property '${name}' on '${fact}'`);
+    return spec.column || this.eventDataColumn(fact);
   }
 
   /**
@@ -1238,8 +1272,12 @@ export class Catalog {
   attributeKind(source, name) {
     const m = this.models[source];
     if (!m || !name) return null;
-    if (this.facts.includes(source) && (m.properties || {})[name]) return 'property';
-    return (m.dimensions || {})[name] ? 'dimension' : null;
+    // `has` on the OWN keys only: a plain-object lookup also answers for Object.prototype, so
+    // 'toString' / 'constructor' / 'valueOf' resolved as real fields and were then addressed
+    // as one (the memory tool's target `name` is free text, which is how they get in here).
+    const has = (bag, key) => !!bag && Object.prototype.hasOwnProperty.call(bag, key);
+    if (this.facts.includes(source) && has(m.properties, name)) return 'property';
+    return has(m.dimensions, name) ? 'dimension' : null;
   }
 
   /** Full spec for one event_data property ({ type, items?, fields?, values?, description? }). */

@@ -46,6 +46,24 @@ for (const r of recipes.list) {
   test(`recipe '${r.id}' is runnable end-to-end`, opts, async (t) => {
     if (!HAS_DBT) return t.skip('dbt/mf not installed');
 
+    // A recipe for a PYTHON model cannot run here: the test warehouse (PGlite/postgres) runs no
+    // dbt python models. It is still checked where it can rot — the payload must COMPILE for a
+    // deployment that does run them: the stages render, the chain is laid out, the function bodies
+    // pass the static gate and the declared output columns propagate to the SQL stages after it.
+    if (r.requires === 'python_models') {
+      const pyCatalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), {});
+      pyCatalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
+      const pyEngine = new Engine({ catalog: pyCatalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rp-py-')) }), pythonBin: PY_BIN });
+      const out = await pyEngine.register_native_model({ ...r.register_payload, dry_run: true });
+      assert.equal(out.dry_run, true, `${r.id}: ${JSON.stringify(out.error || {})}`);
+      assert.ok(out.python?.length, `${r.id}: a python recipe must render a python model`);
+      const declared = r.register_payload.pipeline.stages.flatMap((st) => st.output?.columns || []);
+      for (const col of declared) assert.ok(typeof col === 'string' && col.length, `${r.id}: bad declared output column`);
+      assert.ok(r.read_first && /guide: "python"/.test(r.read_first), `${r.id} must send the caller to the python guide first`);
+      assert.ok(r.hack && r.notes, `${r.id} must carry the technique and the caveats`);
+      return;
+    }
+
     // Tool-only recipe (no warehouse), e.g. power/sample-size planning: run each
     // declared tool call and assert it computes a successful result.
     if (r.tool_calls) {

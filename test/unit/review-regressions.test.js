@@ -13,7 +13,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { openStore } from '../../src/store.js';
-import { renderContext } from '../../src/yaml-render.js';
+import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (over = {}) => new Engine({
@@ -212,7 +212,7 @@ test('a recipe payload is fitted to this catalog: an SCD join gets its validity 
     recipes: loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url))),
     contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
   });
-  const out = await e.semantic_index({ recipe: 'dn_retention_exact' });
+  const out = await e.semantic_index({ recipe: 'pipeline_age_offset_axis' });
   const joinStage = out.register_payload.pipeline.stages.find((s) => s.stage === 'join' && s.with === 'users');
   const u = e.catalog.getModel('users');
   assert.ok(u.scd, 'the fixture users model is slowly-changing (otherwise this test proves nothing)');
@@ -329,6 +329,21 @@ test('the resolved submission method is written into the model, not just reporte
     config: { submission_method: 'serverless' }, profile, submission: rt.method,
   });
   assert.equal(forced.config.submission_method, 'serverless');
+  // …and a deployment where NOTHING resolved a method (MCP_PYTHON_MODELS=on over a profile that
+  // carries none) still writes the submission this profile DESCRIBES: otherwise the frame, the
+  // allowlist, the rules and the gate all say BigFrames while dbt, reading no config, submits to
+  // its own default (serverless → PySpark) and the model dies in a Dataproc job.
+  const unresolved = compilePythonStage(stage, {
+    modelName: 'm', inputModel: 'in', allow: new Map(),
+    config: {}, profile: frameProfile({ runtime: 'bigquery' }, {}), submission: null,
+  });
+  assert.equal(unresolved.config.submission_method, 'bigframes');
+  // a runtime with no such config says nothing
+  const duck = compilePythonStage(stage, {
+    modelName: 'm', inputModel: 'in', allow: new Map(),
+    config: {}, profile: frameProfile({ runtime: 'duckdb' }, {}), submission: null,
+  });
+  assert.equal(duck.config.submission_method, undefined);
 
   // a profile that DECLARES the method is marked as such (nothing is being guessed there)
   writeFileSync(join(dir, 'profiles.yml'), [
@@ -382,4 +397,163 @@ test('the submission is read from dbt_project.yml first, and its source is repor
     { modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile), config: {}, profile, submission: declared.method },
   );
   assert.equal(compiled.config.submission_method, 'serverless');
+});
+
+// ── agg_time_dimension named a COLUMN that was not a dimension ──────────────────────────────
+// The model's aggregation time axis was seeded from the time COLUMN and emitted unconditionally.
+// A time column may be opted out of grouping (meta.mcp.dimension: false) — then it is not a
+// dimension, and dbt-semantic-interfaces rejects the whole manifest ("agg_time_dimension … is not
+// defined as a dimension"), so `dbt parse` fails for EVERY context that merely loads the model.
+// Input-validation guard on what is rendered: the axis must be a dimension this model emits.
+const spendCatalog = (axisMeta) => {
+  const file = join(mkdtempSync(join(tmpdir(), 'aggtime-')), 'catalog.yml');
+  writeFileSync(file, `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp: { role: events, primary_entity: event, known_events: [login] }
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+  - name: fct_spend
+    meta:
+      mcp: { role: measures, primary_entity: { name: row, type: primary } }
+    columns:
+      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row, type: primary } } } }
+      - { name: spend_date, data_type: date, meta: { mcp: { ${axisMeta} } } }
+      - { name: channel, data_type: string, meta: { mcp: { dimension: true } } }
+      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+`);
+  return loadCatalog(file, {});
+};
+
+test('a time axis opted out of grouping is not named as agg_time_dimension', () => {
+  const optedOut = spendCatalog('is_time: true, dimension: false');
+  assert.equal(optedOut.getModel('measures').dimensions?.spend_date, undefined, 'the axis is not a dimension here');
+  assert.equal(renderBaseModel(optedOut, 'measures').defaults, undefined, 'so it is not named as the aggregation axis either');
+  // the ordinary shape is unchanged: the axis IS a dimension and IS named
+  const grouped = spendCatalog('is_time: true');
+  const rendered = renderBaseModel(grouped, 'measures');
+  assert.ok(rendered.dimensions.some((d) => d.name === 'spend_date' && d.type === 'time'));
+  assert.deepEqual(rendered.defaults, { agg_time_dimension: 'spend_date' });
+});
+
+// ── two models could claim the same role, and the second silently replaced the first ────────
+// The role IS the source's identity. A duplicate used to overwrite, so every tool enum, the value
+// index and every join path then described a table nobody meant — with no warning anywhere.
+test('two models declaring the same role are refused, naming both', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'dup-')), 'catalog.yml');
+  writeFileSync(file, `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp: { role: events, primary_entity: event, known_events: [login] }
+    columns:
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+  - name: fct_spend_a
+    meta:
+      mcp: { role: measures, primary_entity: { name: row, type: primary } }
+    columns:
+      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row, type: primary } } } }
+      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+  - name: fct_spend_b
+    meta:
+      mcp: { role: measures, primary_entity: { name: row2, type: primary } }
+    columns:
+      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row2, type: primary } } } }
+      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+`);
+  assert.throws(() => loadCatalog(file, {}), /fct_spend_a.*fct_spend_b.*role.*measures/s);
+});
+
+// ── the "no relationship to this model" refusal was unreachable ──────────────────────────────
+// It was guarded by `joinTargetFor(own) === model`, which is a tautology: `own` IS that model's
+// primary entity, so it always resolves back to it. Every unreachable attribute was therefore
+// accepted as `<own>__<attribute>` and died later inside MetricFlow, as an unknown entity.
+test('an attribute of a LOADED model no source can reach is refused here, not by MetricFlow', async () => {
+  const e = engine();
+  // measures on one events source; the OTHER events source is loaded, but nothing declares a
+  // relationship to it (two facts do not point at each other).
+  const out = await e.create_semantic_model({
+    name: 'evonly',
+    use_base_models: ['crashlytics', 'users'],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+  });
+  await assert.rejects(
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),
+    (err) => {
+      assert.match(err.message, /no source in this context declares a relationship to 'crashlytics'/);
+      assert.match(err.message, /relationships/, 'and says where to look');
+      return true;
+    },
+  );
+  // …while the REACHABLE model of the same context still resolves under its relationship (the fix
+  // closed no path; the warehouse-backed group-bys prove the rest).
+  const ctx = e.ctxs.get(out.context_id);
+  assert.equal(e._normalizeRef(ctx, { model: 'users', attribute: 'country' }), 'user__country');
+});
+
+// ── one name, two meanings: the value index silently overwrote one with the other ────────────
+// A fact's payload properties and its groupable columns now share one (source, property) key —
+// that key is how the index files values, how semantic_index addresses a field, and how a filter
+// literal is verified. A name carried by BOTH produced two index targets with one key: the later
+// scan overwrote the earlier, so the view rendered one field's spec over the other's numbers.
+test('a name that is both a payload property and a groupable column is refused', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'clash-')), 'catalog.yml');
+  writeFileSync(file, `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp: { role: events, primary_entity: event, known_events: [ad_finished] }
+    columns:
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - { name: bundle_id, data_type: string, meta: { mcp: { dimension: { bundle: true } } } }
+      - name: event_data
+        data_type: jsonb
+        meta:
+          mcp:
+            is_event_data: true
+            properties:
+              bundle_id: { type: string }
+`);
+  assert.throws(() => loadCatalog(file, {}), /bundle_id.*BOTH as an event_data property and as a groupable column/s);
+});
+
+// ── unnest read a payload column without checking it is still there ─────────────────────────
+// `derive` gained that check; `unnest` did not, so after a stage that changed the grain it emitted
+// a lateral join over a column the relation no longer has — a raw warehouse error at materialize
+// instead of a stage-time refusal at add_step.
+test('unnest is refused when the payload column it explodes is gone', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'items', source: 'events' });
+  // the array property is readable while the rows are still events
+  const ok = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } });
+  assert.equal(ok.step_index, 1);
+  // …and after an aggregate collapses the grain, the same stage cannot read it any more
+  const agg = await e.build_native_model({ action: 'start', name: 'items2', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }] } });
+  await assert.rejects(
+    () => e.build_native_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } }),
+    /unknown column 'event_data' at this stage/,
+  );
+});
+
+// ── a prototype key resolved as a real field ────────────────────────────────────────────────
+// `attributeKind` looked a name up in a plain object, which also answers for Object.prototype, so
+// 'toString' / 'constructor' came back as a property or dimension and were then addressed as one.
+// The memory tool's target `name` is free text, which is how such a name reaches here.
+test('a prototype key is not a field of any source', () => {
+  const catalog = loadCatalog(CATALOG, {});
+  for (const name of ['toString', 'constructor', 'valueOf', 'hasOwnProperty', '__proto__']) {
+    for (const source of catalog.modelKeys()) {
+      assert.equal(catalog.attributeKind(source, name), null, `${source}.${name}`);
+    }
+  }
+  // …while the real ones still resolve, each as what it is
+  assert.equal(catalog.attributeKind('events', 'level_id_of_event_data'), 'property');
+  assert.equal(catalog.attributeKind('users', 'country'), 'dimension');
 });

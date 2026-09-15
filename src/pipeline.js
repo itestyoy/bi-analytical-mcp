@@ -207,6 +207,10 @@ const STAGES = {
       const found = sourceProp(catalog, source, p.source);
       const spec = found?.spec;
       const key = found?.name || p.source; // the PHYSICAL payload key (qualifier stripped)
+      // A payload read depends on a REAL column of the row (the flattened one, or the blob). After a
+      // stage that changed the grain — or on top of a materialized prefix built from one — it is
+      // gone, and the expression would reference a column the relation does not have.
+      requireCol(cols, spec?.column || blob);
       // A FLATTENED payload column carries the array/object itself; `encoding` says whether it
       // is a native ARRAY or a STRING holding JSON, which decides how to read it.
       const flat = spec?.column || null;
@@ -415,6 +419,10 @@ const STAGES = {
       } else {
         throw new Error(`unnest: '${p.source}' is not an array event property of '${source}' nor an array column at this stage`);
       }
+      // The column it explodes must still be HERE, exactly as `derive`'s read must: after a stage
+      // that changed the grain (or on top of a materialized prefix built from one) the payload is
+      // gone, and the unnest would reference a column the relation does not have.
+      requireCol(cols, column);
       const type = p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string'));
       return { op: { op: 'unnest', column, key, as: p.as, field: p.field, type, encoding }, cols: addCol(cols, p.as, type) };
     },
@@ -750,6 +758,12 @@ function buildOps(catalog, d, baseColumns, stages, source) {
   return { ops, cols };
 }
 
+/** A tracked column set from a stored column list ([{ name, type }]) or an existing Map. */
+export function columnMap(columns) {
+  if (columns instanceof Map) return new Map(columns);
+  return new Map((columns || []).map((c) => [c.name, { type: c.type || 'unknown' }]));
+}
+
 /**
  * Render a full pipeline over a catalog `source` as a CHAIN of dbt models. Stages run in one SQL
  * model until a `python` stage: that stage is a dbt Python model of its own, the SQL stages after
@@ -759,11 +773,17 @@ function buildOps(catalog, d, baseColumns, stages, source) {
  * SQL uses the dialect-native form (Postgres chained CTE, BigQuery `|>` pipe syntax) for the first
  * model unless a stage requires CTE form (match_recognize on Postgres); later SQL models read a
  * ref, so they are plain CTE chains.
+ *
+ * `from` starts the chain from an ALREADY-BUILT relation instead of the catalog source: the model
+ * to read (`{{ ref(model) }}`) and the columns it carries. The stages passed are then only the
+ * ones that still have to run — the prefix is the table. `source` is still the catalog source the
+ * stages resolve their event/property semantics against; a stage that needs a column the built
+ * relation no longer carries fails as a normal "unknown column".
  * @returns { chain: [{ kind: 'sql'|'python', model, input, stages|stage, sql?, columns }], columns, sql }
  *   `columns` = the final tracked column set (Map); `sql` = the LAST SQL model's text (the whole
  *   pipeline when there is no python stage).
  */
-export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null, modelName = 'pipe' } = {}) {
+export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null, modelName = 'pipe', from = null } = {}) {
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
   // Cut the stage list at every python stage.
@@ -772,8 +792,8 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
     if (STAGES[st.stage]?.python) { if (cur.length) segments.push({ kind: 'sql', stages: cur }); segments.push({ kind: 'python', stage: st }); cur = []; } else cur.push(st);
   }
   if (cur.length || !segments.length) segments.push({ kind: 'sql', stages: cur });
-  let cols = sourceColumns(catalog, source, physicalCols);
-  let input = m.dbt_model; // what the segment's dbt.ref() / FROM names: the source, then the previous model
+  let cols = from ? columnMap(from.columns) : sourceColumns(catalog, source, physicalCols);
+  let input = from ? from.model : m.dbt_model; // what the segment's dbt.ref() / FROM names: the source (or a built relation), then the previous model
   segments.forEach((seg, i) => {
     seg.model = i === segments.length - 1 ? modelName : `${modelName}_s${i + 1}`;
     seg.input = input;

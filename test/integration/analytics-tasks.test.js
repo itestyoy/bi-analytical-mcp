@@ -67,7 +67,7 @@ async function buildRecipe(t, id) {
 }
 const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...input });
 
-// ── 1. trends: active_users_trend ────────────────────────────────────────────
+// ── 1. metric_types: measure_over_metric_time ────────────────────────────────
 // #6: a numeric value that arrives as STRING is aggregable via cast:numeric.
 test('TASK cast: sum/avg a STRING-numeric property with cast:numeric', opts, async (t) => {
   if (skip(t)) return;
@@ -99,9 +99,9 @@ test('TASK cast: sum/avg a STRING-numeric property with cast:numeric', opts, asy
   }), /not numeric|cast/i);
 });
 
-test('TASK active_users_trend: DAU/WAU/MAU & event volume', opts, async (t) => {
+test('TASK measure_over_metric_time: DAU/WAU/MAU & event volume', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'active_users_trend');
+  const ctx = await buildRecipe(t, 'measure_over_metric_time');
   const grand = await q(ctx, { metrics: ['active_users_dau'] });
   const byDay = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   const byMonth = await q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'month' }] });
@@ -134,10 +134,10 @@ test('TASK active_users_trend: DAU/WAU/MAU & event volume', opts, async (t) => {
   await assert.rejects(() => q(ctx, { metrics: ['active_users_dau'], group_by: [{ time: 'metric_time', grain: 'day' }], order_by: [{ key: 'nonsense' }] }), /Orderable:/);
 });
 
-// ── 2. segmentation: metric_by_user_segment ──────────────────────────────────
-test('TASK metric_by_user_segment: revenue/payers/ARPPU by user attribute (1-hop join)', opts, async (t) => {
+// ── 2. joins: group_by_joined_attribute ──────────────────────────────────────
+test('TASK group_by_joined_attribute: revenue/payers/ARPPU by user attribute (1-hop join)', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'metric_by_user_segment');
+  const ctx = await buildRecipe(t, 'group_by_joined_attribute');
   const total = await q(ctx, { metrics: ['rev_segment_revenue', 'rev_segment_payers'] });
   const byCountry = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ model: 'users', attribute: 'country' }] });
   const byPlatform = await q(ctx, { metrics: ['rev_segment_revenue'], group_by: [{ model: 'users', attribute: 'platform' }] });
@@ -161,30 +161,10 @@ test('TASK metric_by_user_segment: revenue/payers/ARPPU by user attribute (1-hop
   }
 });
 
-// ── 3. funnel: step_conversion_funnel (level_started -> level_completed) ──────
-test('TASK step_conversion_funnel: distinct-user start->complete conversion', opts, async (t) => {
+// ── 3. metric_types: funnel_from_event_property_steps (event + step_id property value) ───
+test('TASK funnel_from_event_property_steps: tutorial step_id drop-off 8 -> 5 -> 3', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'step_conversion_funnel');
-  const counts = await q(ctx, { metrics: ['lvl_funnel_starters', 'lvl_funnel_completers'] });
-  const rate = await q(ctx, { metrics: ['lvl_funnel_completion_rate'] });
-  const rateByDay = await q(ctx, { metrics: ['lvl_funnel_completion_rate'], group_by: [{ time: 'metric_time', grain: 'day' }] });
-  const startsByDay = await q(ctx, { metrics: ['lvl_funnel_starters'], group_by: [{ time: 'metric_time', grain: 'day' }] });
-  const byCountry = await q(ctx, { metrics: ['lvl_funnel_completion_rate'], group_by: [{ model: 'users', attribute: 'country' }] });
-  for (const r of [counts, rate, rateByDay, startsByDay, byCountry]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
-  // all 12 users start AND complete at least one level (level 1 completed by all)
-  assert.equal(num(counts.rows[0].lvl_funnel_starters), 12);
-  assert.equal(num(counts.rows[0].lvl_funnel_completers), 12);
-  assert.ok(num(counts.rows[0].lvl_funnel_completers) <= num(counts.rows[0].lvl_funnel_starters)); // completers <= starters
-  const cr = num(rate.rows[0].lvl_funnel_completion_rate);
-  assert.ok(cr >= 0 && cr <= 1, `rate ${cr}`);                          // rate in [0,1]
-  assert.ok(rateByDay.rows.every((r) => { const v = num(r.lvl_funnel_completion_rate); return !Number.isFinite(v) || (v >= 0 && v <= 1); }));
-  assert.ok(sumCol(startsByDay.rows, 'lvl_funnel_starters') >= 12);     // per-day distinct >= overall distinct
-});
-
-// ── 4. funnel: multistep_funnel (event + step_id property value) ──────────────
-test('TASK multistep_funnel: tutorial step_id drop-off 8 -> 5 -> 3', opts, async (t) => {
-  if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'multistep_funnel');
+  const ctx = await buildRecipe(t, 'funnel_from_event_property_steps');
   const steps = await q(ctx, { metrics: ['tut_funnel_step1', 'tut_funnel_step2', 'tut_funnel_step3'] });
   const c12 = await q(ctx, { metrics: ['tut_funnel_conv_1_2'] });
   const c23 = await q(ctx, { metrics: ['tut_funnel_conv_2_3'] });
@@ -201,10 +181,10 @@ test('TASK multistep_funnel: tutorial step_id drop-off 8 -> 5 -> 3', opts, async
   assert.ok(Math.abs(v12 - 5 / 8) < 0.06, `conv12≈0.625 got ${v12}`);
 });
 
-// ── 5. retention: nday_retention ─────────────────────────────────────────────
-test('TASK nday_retention: D1/D7 return-within-window conversion rates', opts, async (t) => {
+// ── 4. metric_types: conversion_metric_window ────────────────────────────────
+test('TASK conversion_metric_window: D1/D7 return-within-window conversion rates', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'nday_retention');
+  const ctx = await buildRecipe(t, 'conversion_metric_window');
   const d1 = await q(ctx, { metrics: ['retention_d1'] });
   const d7 = await q(ctx, { metrics: ['retention_d7'] });
   const d1ByDay = await q(ctx, { metrics: ['retention_d1'], group_by: [{ time: 'metric_time', grain: 'day' }] });
@@ -227,10 +207,10 @@ test('TASK nday_retention: D1/D7 return-within-window conversion rates', opts, a
   assert.ok(d7ByDay.rows.some((r) => Number.isFinite(num(r.retention_d7)) && num(r.retention_d7) > 0));
 });
 
-// ── 6. cohort: cohort_retention_grid (install_date x activity) ────────────────
-test('TASK cohort_retention_grid: install-cohort x activity revenue/buyers grid', opts, async (t) => {
+// ── 5. joins: cohort_grid_two_time_axes (install_date x activity) ────────────
+test('TASK cohort_grid_two_time_axes: install-cohort x activity revenue/buyers grid', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'cohort_retention_grid');
+  const ctx = await buildRecipe(t, 'cohort_grid_two_time_axes');
   const total = await q(ctx, { metrics: ['cohort_grid_revenue'] });
   const buyersTotal = await q(ctx, { metrics: ['cohort_grid_buyers'] });
   const byCohort = await q(ctx, { metrics: ['cohort_grid_revenue'], group_by: [{ model: 'users', attribute: 'install_date' }] });
@@ -244,10 +224,10 @@ test('TASK cohort_retention_grid: install-cohort x activity revenue/buyers grid'
   assert.ok(buyersByCohort.rows.every((r) => num(r.cohort_grid_buyers) <= 7)); // per-cohort buyers <= total payers
 });
 
-// ── 7. behavioral: behavioral_cohort (did / didn't purchase) ─────────────────
-test('TASK behavioral_cohort: did/didn-t-purchase counts & Metric()-in-where split', opts, async (t) => {
+// ── 6. metric_types: boolean_condition_as_measure (did / didn't purchase) ────
+test('TASK boolean_condition_as_measure: did/didn-t-purchase counts & Metric()-in-where split', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'behavioral_cohort');
+  const ctx = await buildRecipe(t, 'boolean_condition_as_measure');
   const purchases = await q(ctx, { metrics: ['behavior_purchases'] });
   const sessions = await q(ctx, { metrics: ['behavior_sessions'] });
   const both = await q(ctx, { metrics: ['behavior_purchases', 'behavior_sessions'] });
@@ -268,28 +248,10 @@ test('TASK behavioral_cohort: did/didn-t-purchase counts & Metric()-in-where spl
   assert.equal(num(did.rows[0].behavior_sessions) + num(didnt.rows[0].behavior_sessions), 21);
 });
 
-// ── 8. conversion: visit_to_purchase_conversion ──────────────────────────────
-test('TASK visit_to_purchase_conversion: native conversion metric', opts, async (t) => {
+// ── 7. metric_types: agg_chosen_per_question (per level_id) ──────────────────
+test('TASK agg_chosen_per_question: starts/completes/rate per level_id', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'visit_to_purchase_conversion');
-  const visits = await q(ctx, { metrics: ['visit_purchase_visits'] });
-  const overall = await q(ctx, { metrics: ['visit_purchase_conversion'] });
-  const byCountry = await q(ctx, { metrics: ['visit_purchase_conversion'], group_by: [{ model: 'users', attribute: 'country' }] });
-  const byPlatform = await q(ctx, { metrics: ['visit_purchase_conversion'], group_by: [{ model: 'users', attribute: 'platform' }] });
-  const byDay = await q(ctx, { metrics: ['visit_purchase_conversion'], group_by: [{ time: 'metric_time', grain: 'day' }] });
-  for (const r of [visits, overall, byCountry, byPlatform, byDay]) assert.equal(r.ok, true, JSON.stringify(r.error || r));
-  assert.equal(num(visits.rows[0].visit_purchase_visits), 12);         // all 12 users visit
-  const cv = num(overall.rows[0].visit_purchase_conversion);
-  assert.ok(cv >= 0 && cv <= 1, `cv ${cv}`);                           // rate in [0,1]
-  assert.ok(Math.abs(cv - 7 / 12) < 0.06, `cv≈0.583 got ${cv}`);       // ~ payers/visitors = 7/12
-  assert.ok(byCountry.rows.every((r) => { const v = num(r.visit_purchase_conversion); return !Number.isFinite(v) || (v >= 0 && v <= 1); }));
-  assert.ok(byDay.row_count > 0 && byDay.rows.every((r) => { const v = num(r.visit_purchase_conversion); return !Number.isFinite(v) || v >= 0; }));
-});
-
-// ── 9. progression: level_progression (per level_id) ─────────────────────────
-test('TASK level_progression: starts/completes/rate per level_id', opts, async (t) => {
-  if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'level_progression');
+  const ctx = await buildRecipe(t, 'agg_chosen_per_question');
   const totals = await q(ctx, { metrics: ['progression_starts', 'progression_completes'] });
   const rate = await q(ctx, { metrics: ['progression_completion_rate'] });
   const avgTime = await q(ctx, { metrics: ['progression_avg_time'] });
@@ -307,10 +269,10 @@ test('TASK level_progression: starts/completes/rate per level_id', opts, async (
   assert.equal(sumCol(startsByLevel.rows, 'progression_starts'), 28);  // grouped starts sum to 28
 });
 
-// ── 10. monetization: monetization_metrics ───────────────────────────────────
-test('TASK monetization_metrics: revenue/ARPPU/AOV by product/day/segment', opts, async (t) => {
+// ── 8. metric_types: ratio_metric ────────────────────────────────────────────
+test('TASK ratio_metric: revenue/ARPPU/AOV by product/day/segment', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'monetization_metrics');
+  const ctx = await buildRecipe(t, 'ratio_metric');
   const totals = await q(ctx, { metrics: ['monetization_revenue', 'monetization_payers', 'monetization_purchases'] });
   const aov = await q(ctx, { metrics: ['monetization_aov'] });
   const byProduct = await q(ctx, { metrics: ['monetization_revenue'], group_by: [{ model: 'events', attribute: 'product_id_of_event_data' }] });
@@ -327,10 +289,10 @@ test('TASK monetization_metrics: revenue/ARPPU/AOV by product/day/segment', opts
   assert.equal(sumCol(byDay.rows, 'monetization_revenue'), 85);        // per-day sum == grand total
 });
 
-// ── 11. ads: ad_monetization ─────────────────────────────────────────────────
-test('TASK ad_monetization: ad revenue & impressions by network/placement', opts, async (t) => {
+// ── 9. metric_types: payload_property_measure_and_dimension ──────────────────
+test('TASK payload_property_measure_and_dimension: ad revenue & impressions by network/placement', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'ad_monetization');
+  const ctx = await buildRecipe(t, 'payload_property_measure_and_dimension');
   const totals = await q(ctx, { metrics: ['ads_ad_revenue', 'ads_impressions'] });
   const byNetwork = await q(ctx, { metrics: ['ads_ad_revenue'], group_by: [{ model: 'events', attribute: 'network_of_additional_info_of_event_data' }] });
   const byPlacement = await q(ctx, { metrics: ['ads_impressions'], group_by: [{ model: 'events', attribute: 'placement_of_event_data' }] });
@@ -347,10 +309,10 @@ test('TASK ad_monetization: ad revenue & impressions by network/placement', opts
   assert.ok(Math.abs(rpi - 29 / 12) < 1e-6, `rev_per_imp ${rpi}`);     // rev_per_imp == 29/12
 });
 
-// ── 12. economy: currency_economy (coins in vs out) ──────────────────────────
-test('TASK currency_economy: coins in (510) vs out (140) & source split', opts, async (t) => {
+// ── 10. metric_types: two_event_scopes_and_a_net (coins in vs out) ───────────
+test('TASK two_event_scopes_and_a_net: coins in (510) vs out (140) & source split', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'currency_economy');
+  const ctx = await buildRecipe(t, 'two_event_scopes_and_a_net');
   const totals = await q(ctx, { metrics: ['economy_coins_in', 'economy_coins_out'] });
   const inBySource = await q(ctx, { metrics: ['economy_coins_in'], group_by: [{ model: 'events', attribute: 'source_type_of_event_data' }] });
   const outBySource = await q(ctx, { metrics: ['economy_coins_out'], group_by: [{ model: 'events', attribute: 'source_type_of_event_data' }] });
@@ -366,10 +328,10 @@ test('TASK currency_economy: coins in (510) vs out (140) & source split', opts, 
   assert.equal(sumCol(inByDay.rows, 'economy_coins_in'), 510);         // income per-day sums to 510
 });
 
-// ── 13. stickiness: stickiness_lifecycle (DAU/MAU) ───────────────────────────
-test('TASK stickiness_lifecycle: DAU/MAU active base & stickiness', opts, async (t) => {
+// ── 11. metric_types: same_measure_two_grains (DAU/MAU) ──────────────────────
+test('TASK same_measure_two_grains: DAU/MAU active base & stickiness', opts, async (t) => {
   if (skip(t)) return;
-  const ctx = await buildRecipe(t, 'stickiness_lifecycle');
+  const ctx = await buildRecipe(t, 'same_measure_two_grains');
   const grand = await q(ctx, { metrics: ['stickiness_active_users'] });
   const byDay = await q(ctx, { metrics: ['stickiness_active_users'], group_by: [{ time: 'metric_time', grain: 'day' }] });
   const byWeek = await q(ctx, { metrics: ['stickiness_active_users'], group_by: [{ time: 'metric_time', grain: 'week' }] });

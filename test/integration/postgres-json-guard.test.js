@@ -48,3 +48,35 @@ test('postgres JSON reads: a malformed row yields NULL instead of failing the qu
   const count = await pg.db.query('SELECT count(*)::int AS n FROM payloads');
   assert.equal(count.rows[0].n, 3);
 });
+
+// The JSON was valid, the VALUE was not a number: `::numeric` on a word aborts the whole statement
+// on Postgres, while BigQuery's SAFE_CAST returns NULL for that row and results for the rest. Both
+// dialects must answer the same question the same way, so every typed read goes through the safe
+// cast. Asserted on the values that come back (and on the aggregate over them).
+test('postgres typed reads: a non-numeric value reads as NULL and the query still returns rows', async (t) => {
+  const db = (await startPglite());
+  t.after(async () => { await db.stop(); });
+  await db.db.exec(`
+    CREATE TABLE amounts (id int, blob jsonb, flat text, arr text);
+    INSERT INTO amounts VALUES
+      (1, '{"amount":"12.5"}', '{"amount":"12.5"}', '["1","2"]'),
+      (2, '{"amount":"n/a"}',  '{"amount":"n/a"}',  '["3","x"]');
+  `);
+
+  // a blob property read as a number: the word becomes NULL, 12.5 still arrives
+  const blob = await db.db.query(`SELECT id, ${d.jsonExtract('blob', 'amount', 'numeric')} AS v FROM amounts ORDER BY id`);
+  assert.deepEqual(blob.rows.map((r) => [r.id, r.v == null ? null : Number(r.v)]), [[1, 12.5], [2, null]]);
+
+  // the same through a FLATTENED text column holding JSON
+  const flat = await db.db.query(`SELECT id, ${d.jsonColumnStructField('flat', 'amount', 'numeric')} AS v FROM amounts ORDER BY id`);
+  assert.deepEqual(flat.rows.map((r) => [r.id, r.v == null ? null : Number(r.v)]), [[1, 12.5], [2, null]]);
+
+  // and through an unnested array of strings read as numbers
+  const un = d.arrayUnnest('a', 'arr', null, 'el', null, 'int', 'json');
+  const arr = await db.db.query(`SELECT a.id, ${un.element} AS v FROM amounts a ${un.join} ORDER BY a.id, v NULLS LAST`);
+  assert.deepEqual(arr.rows.map((r) => [r.id, r.v == null ? null : Number(r.v)]), [[1, 1], [1, 2], [2, 3], [2, null]]);
+
+  // an aggregate over the mixed column still works — that is what a pipeline actually does
+  const sum = await db.db.query(`SELECT sum(${d.jsonExtract('blob', 'amount', 'numeric')}) AS total FROM amounts`);
+  assert.equal(Number(sum.rows[0].total), 12.5);
+});

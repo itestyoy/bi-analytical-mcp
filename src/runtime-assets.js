@@ -21,6 +21,11 @@ export const RUNTIME_ASSETS = {
     repoPath: 'python/ast_gate.py',
     why: 'the static gate over a python stage\'s function bodies — without it no python stage can be admitted',
   },
+  systemRecipes: {
+    path: join(ROOT, 'config', 'recipes.json'),
+    repoPath: 'config/recipes.json',
+    why: 'the SYSTEM recipes — the technical, universal task templates every deployment gets, merged under the deployment\'s own file (RECIPES_PATH). Resolved from the server\'s directory so it survives being started from another cwd.',
+  },
   mfSidecar: {
     path: join(ROOT, 'python', 'mf_sidecar.py'),
     repoPath: 'python/mf_sidecar.py',

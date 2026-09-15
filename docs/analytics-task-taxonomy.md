@@ -15,6 +15,14 @@
 > [`config/catalog.json`](../config/catalog.json) and the constructs in
 > [`dbt-semantic-layer-spec.md`](./dbt-semantic-layer-spec.md). No invented columns.
 
+> **On the ids in this document.** The SYSTEM recipe file (`config/recipes.json`) does not ship
+> one recipe per business task — it ships one per TECHNIQUE (a metric type, a join, a pipeline
+> stage pattern, a BigFrames move), because the business shapes differ per product while the
+> techniques do not. The ids below therefore name the technique a task is built from, and a real
+> task usually combines two or three of them. Domain recipes — your games, your events, your
+> conventions — belong in a deployment's own file (`RECIPES_PATH`), which is merged on top of the
+> system set. See `docs/SCHEMA_AUTHORING.md` §2d.
+
 ## Conventions (implementation-aligned)
 
 - **Namespacing:** single-underscore between semantic-model qualifier and field;
@@ -37,16 +45,16 @@
 
 | # | id | Title | Metric type(s) | Key aggregations |
 |---|---|---|---|---|
-| 1 | `active_users_trend` | DAU/WAU/MAU & events over time | simple, derived (ARPDAU) | `count_distinct(user_id)`, `count`, `sum(revenue)` |
-| 2 | `metric_by_user_segment` | Segmentation by user property | simple, ratio | `count_distinct`, `count`, `sum` |
-| 3 | `step_conversion_funnel` | Step / funnel conversion | conversion (2-step), derived (multi-step) | `count_distinct`, `count` |
-| 4 | `nday_retention` | N-day / unbounded / rolling retention | conversion (N-day), cumulative (rolling) | `count_distinct(user_id)` |
-| 5 | `cohort_retention_grid` | Acquisition cohort × age grid | ratio/conversion + derived | `count_distinct(user_id)`, `sum(revenue)` |
-| 6 | `behavioral_cohort` | Did/didn't do event X | simple + metric-in-filter, ratio | `count_distinct`, `sum_boolean` |
-| 7 | `visit_to_purchase_conversion` | Visit→purchase conversion | conversion | `count_distinct`/`count` base & conversion |
-| 8 | `level_progression` | Win rate / attempts / churn per level | ratio, simple, derived | `count`, `count_distinct`, `average`, `sum_boolean` |
-| 9 | `monetization_metrics` | ARPU/ARPPU/payer share/LTV/revenue mix | simple, ratio, derived, cumulative | `sum(revenue)`, `count_distinct`, `average` |
-| 10 | `stickiness_lifecycle` | DAU/MAU stickiness & lifecycle states | derived (ratio of metrics), simple, conversion | `count_distinct(user_id)` |
+| 1 | `measure_over_metric_time` | DAU/WAU/MAU & events over time | simple, derived (ARPDAU) | `count_distinct(user_id)`, `count`, `sum(revenue)` |
+| 2 | `group_by_joined_attribute` | Segmentation by user property | simple, ratio | `count_distinct`, `count`, `sum` |
+| 3 | `funnel_from_event_property_steps` | Step / funnel conversion | conversion (2-step), derived (multi-step) | `count_distinct`, `count` |
+| 4 | `conversion_metric_window` | N-day / unbounded / rolling retention | conversion (N-day), cumulative (rolling) | `count_distinct(user_id)` |
+| 5 | `cohort_grid_two_time_axes` | Acquisition cohort × age grid | ratio/conversion + derived | `count_distinct(user_id)`, `sum(revenue)` |
+| 6 | `boolean_condition_as_measure` | Did/didn't do event X | simple + metric-in-filter, ratio | `count_distinct`, `sum_boolean` |
+| 7 | `conversion_metric_window` | Visit→purchase conversion | conversion | `count_distinct`/`count` base & conversion |
+| 8 | `agg_chosen_per_question` | Win rate / attempts / churn per level | ratio, simple, derived | `count`, `count_distinct`, `average`, `sum_boolean` |
+| 9 | `ratio_metric` | ARPU/ARPPU/payer share/LTV/revenue mix | simple, ratio, derived, cumulative | `sum(revenue)`, `count_distinct`, `average` |
+| 10 | `same_measure_two_grains` | DAU/MAU stickiness & lifecycle states | derived (ratio of metrics), simple, conversion | `count_distinct(user_id)` |
 
 > Honest limits up front: MetricFlow has **no native multi-step funnel or path
 > analysis** and **no exact "active again on day N" retention** primitive. The
@@ -58,7 +66,7 @@
 
 ---
 
-## 1. `active_users_trend` — Trends / time-series active users & ARPDAU
+## 1. `measure_over_metric_time` — Trends / time-series active users & ARPDAU
 
 - **Business question:** How do DAU/WAU/MAU, total events, and ARPDAU move over time?
 - **Required events:** `session_start` (or any event) for activity; `purchase` for ARPDAU revenue.
@@ -81,7 +89,7 @@
 
 ---
 
-## 2. `metric_by_user_segment` — Segmentation by user property
+## 2. `group_by_joined_attribute` — Segmentation by user property
 
 - **Business question:** How does a metric (users, events, revenue) break down by
   `country` / `platform` / `media_source` / `acquisition_type` (and campaign `channel`)?
@@ -104,7 +112,7 @@
 
 ---
 
-## 3. `step_conversion_funnel` — Step / funnel conversion
+## 3. `funnel_from_event_property_steps` — Step / funnel conversion
 
 - **Business question:** What fraction of users progress from one step to the next
   (e.g. `level_start` → `level_complete`; tutorial `tutorial_step` progression; path to
@@ -134,7 +142,7 @@
 
 ---
 
-## 4. `nday_retention` — N-day / unbounded / rolling retention
+## 4. `conversion_metric_window` — N-day / unbounded / rolling retention
 
 - **Business question:** What % of an install cohort is active on day N (D1/D7/D30),
   or within a rolling window?
@@ -160,7 +168,7 @@
 
 ---
 
-## 5. `cohort_retention_grid` — Acquisition cohort × age grid (revenue/retention)
+## 5. `cohort_grid_two_time_axes` — Acquisition cohort × age grid (revenue/retention)
 
 - **Business question:** For each install cohort (by `install_date`, sliced by
   `acquisition_type`/`media_source`/campaign `channel`), what is retention and revenue
@@ -188,7 +196,7 @@
 
 ---
 
-## 6. `behavioral_cohort` — Segmentation by event history (did / didn't do X)
+## 6. `boolean_condition_as_measure` — Segmentation by event history (did / didn't do X)
 
 - **Business question:** How do users who performed event X (e.g. made a `purchase`,
   reached level ≥ K, clicked an ad) differ from those who didn't, on some metric?
@@ -215,7 +223,7 @@
 
 ---
 
-## 7. `visit_to_purchase_conversion` — Conversion metric (visit → purchase)
+## 7. `conversion_metric_window` — Conversion metric (visit → purchase)
 
 - **Business question:** What share of visiting/active users convert to a purchase
   within a window, optionally on the same `product_id`?
@@ -239,7 +247,7 @@
 
 ---
 
-## 8. `level_progression` — Level / progression analysis
+## 8. `agg_chosen_per_question` — Level / progression analysis
 
 - **Business question:** Per level — what is the win rate, average attempts/moves/score,
   completion vs fail, and where do players churn?
@@ -268,7 +276,7 @@
 
 ---
 
-## 9. `monetization_metrics` — ARPU / ARPPU / payer conversion / LTV / revenue mix
+## 9. `ratio_metric` — ARPU / ARPPU / payer conversion / LTV / revenue mix
 
 - **Business question:** What are ARPU, ARPPU, payer share, conversion-to-payer, the
   cumulative LTV curve, and revenue split by `product_id` / `ad_network` / campaign `channel`?
@@ -299,7 +307,7 @@
 
 ---
 
-## 10. `stickiness_lifecycle` — Stickiness (DAU/MAU) & lifecycle states
+## 10. `same_measure_two_grains` — Stickiness (DAU/MAU) & lifecycle states
 
 - **Business question:** What is the DAU/MAU stickiness ratio, and how do users split
   across lifecycle states (new / active / resurrected / dormant)?

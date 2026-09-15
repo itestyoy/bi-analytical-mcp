@@ -118,6 +118,35 @@ export function buildPrefilter(catalog, spec, dialect, source) {
   return clauses.join(' AND ');
 }
 
+/**
+ * The SOURCE columns a funnel reads — the event name, the ordering axis, and the physical column
+ * behind every property a step or the prefilter tests — must still be AVAILABLE where the stage
+ * stands. After a stage that changed the grain (an aggregate, a pivot), or on top of a materialized
+ * prefix built from one, the rows are no longer that source's events: there is no sequence to
+ * search, and the pattern would reference columns the relation does not have. Refused here, naming
+ * what dropped out, instead of as a warehouse error after the build.
+ */
+function requireSourceColumns(catalog, spec, source, availableCols) {
+  if (!availableCols) return; // standalone resolve (no pipeline column set to check against)
+  const m = catalog.getModel(source);
+  const need = new Map(); // physical column -> what reads it
+  const want = (col, why) => { if (col && !need.has(col)) need.set(col, why); };
+  want(m.event_name?.column, 'the event name');
+  want(spec.order_by || m.time?.column, 'the sequence order');
+  const tested = [...(spec.filter?.where || []), ...(spec.steps || []).flatMap((st) => st.where || [])];
+  for (const c of tested) {
+    if (availableCols.has(c.property)) continue; // already a real column here (upstream stage / prepare)
+    if ((m.properties || {})[c.property]) want(catalog.propertyBackingColumn(source, c.property), `property '${c.property}'`);
+  }
+  const missing = [...need].filter(([col]) => !availableCols.has(col));
+  if (!missing.length) return;
+  throw new Error(
+    `match_recognize reads ${missing.map(([col, why]) => `${why} ('${col}')`).join(', ')} of '${source}', not available at this stage `
+    + `(available: ${[...availableCols.keys()].join(', ')}) — these rows are no longer that source's events, so there is no sequence to search. `
+    + `Put the funnel BEFORE the stage that dropped them (a funnel over a materialized prefix works only while that prefix still carries the event columns).`,
+  );
+}
+
 function resolve(catalog, spec, dialect, availableCols = null, source) {
   if (!spec || !Array.isArray(spec.steps) || spec.steps.length < 2) {
     throw new Error('sequence requires at least 2 ordered steps');
@@ -161,6 +190,7 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
     partCols = [entityCol(ent, 'partition_by (default)')];
   }
   if (availableCols) for (const c of partCols) if (!availableCols.has(c)) throw new Error(`partition_by column '${c}' is not available at the match_recognize stage`);
+  requireSourceColumns(catalog, spec, source, availableCols);
   // Order key (the sequence axis): caller may override; defaults to the event time.
   const timeCol = spec.order_by || m.time.column;
   const mode = spec.mode || 'ordered';
@@ -413,7 +443,7 @@ function relationshipNames(catalog) {
 function matchRecognizeSchema(catalog) {
   const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
   const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: CMP }, value: {} } };
-  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNameEnum() }, description: 'Event(s) that satisfy this step, from the pipeline SOURCE\'s own events. An event of another source is rejected: a funnel scans ONE table.' }, where: { type: 'array', items: stepWhere, description: 'Extra conditions narrowing the step.' } } };
+  const step = { type: 'object', additionalProperties: false, required: ['event_name'], description: 'One funnel step = an event (+ optional event_data/column conditions).', properties: { name: { type: 'string', pattern: NAME, description: 'Step name (referenced by metrics).' }, event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: 'Event(s) that satisfy this step, from the pipeline SOURCE\'s own events. An event of another source is rejected: a funnel scans ONE table.' }, where: { type: 'array', items: stepWhere, description: 'Extra conditions narrowing the step.' } } };
   const metric = { type: 'object', additionalProperties: false, required: ['name', 'type'], description: 'A metric over each match (captured as a column on the output).', properties: { name: { type: 'string', pattern: NAME }, type: { enum: ['reached', 'completed', 'conversion', 'avg_seconds_between', 'agg_at_step'] }, step: { type: 'string' }, from: { type: 'string' }, to: { type: 'string' }, agg: { enum: ['sum', 'avg', 'min', 'max'] }, property: { type: 'string', pattern: NAME } } };
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
@@ -443,7 +473,7 @@ function matchRecognizeSchema(catalog) {
         type: 'object', additionalProperties: false, description: 'Optional event-level pre-filter applied BEFORE matching (speed; narrows the population only). To filter by USER attributes, add a join (users) + where stage before this one instead.',
         properties: {
           time_range: { type: 'object', additionalProperties: false, properties: { start: { type: 'string' }, end: { type: 'string' } }, description: 'Event-time window (ISO).' },
-          event_name: { type: 'array', minItems: 1, items: { type: 'string', enum: catalog.eventNameEnum() }, description: 'Only scan these events (of the pipeline source).' },
+          event_name: { type: 'array', minItems: 1, items: strEnum(catalog.eventNameEnum()), description: 'Only scan these events (of the pipeline source).' },
           where: { type: 'array', items: stepWhere, description: 'event_data/column conditions ANDed across the scan.' },
         },
       },

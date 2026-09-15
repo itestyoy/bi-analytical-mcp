@@ -393,7 +393,7 @@ test('6. semantic_index overview lists recipes; { recipe: id } returns a payload
   const overview = await engine.semantic_index();
   assert.ok(Array.isArray(overview.recipes) && overview.recipes.length > 0, 'recipes listed in the overview');
   const ids = overview.recipes.map((r) => r.id);
-  for (const want of ['ab_test_conversion', 'monetization_metrics', 'multistep_funnel', 'ab_test_power']) {
+  for (const want of ['ab_test_conversion', 'ratio_metric', 'funnel_from_event_property_steps', 'ab_test_power']) {
     assert.ok(ids.includes(want), `recipe '${want}' present`);
   }
   const conv = await engine.semantic_index({ recipe: 'ab_test_conversion' });

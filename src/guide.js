@@ -8,7 +8,7 @@
 // Built from the catalog (roles/event_semantics) + recipes (the per-task playbooks),
 // so it stays correct for ANY catalog without hardcoding names.
 
-export function buildGuide(catalog, recipes, { task } = {}) {
+export function buildGuide(catalog, recipes, { task, python = null } = {}) {
   const usersModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'users') || 'users';
   const experimentsModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'experiments') || 'experiments';
   // A catalog may carry SEVERAL events sources (e.g. analytics events + crash reports). They are
@@ -67,7 +67,9 @@ export function buildGuide(catalog, recipes, { task } = {}) {
     { if: 'you only need a QUICK directional read on large data (shape, not an exact number)', do: 'add a `sample` stage to a build_native_model pipeline (or get_query_result with sample:true) — a fast ~N% random subset. The result is flagged `approximate`; ALWAYS re-run WITHOUT the sample for any number you will act on (sampling error flips rates near 0/1, small segments, distinct counts).' },
     { if: 'counting DISTINCT (users, sessions, payers) — especially across time/segments', do: 'PREFER HLL sketches: a build_native_model aggregate with hll_init (per bucket) → hll_merge (combine). Unlike count_distinct, HLL is MERGEABLE — one sketch re-aggregates across days/segments and composes incrementally, at high accuracy and a fraction of the cost. Use exact count_distinct only when an exact integer is required on a small set. (count_distinct is NOT additive across buckets; HLL is.)' },
     { if: 'you made a mistake on step N of a long build_native_model draft', do: 'do NOT discard and rebuild. Fix it in place: edit_step / insert_step / delete_step { index }, or truncate { after } to roll back to step N. Every edit revalidates the whole pipeline and names the failing step if an edit breaks a later one.' },
-    { if: 'you want to try a VARIANT of a draft (or an already-built pipeline) without losing the original', do: 'build_native_model({ action: "fork", draft_id, after }) branches a NEW draft from steps 1..after — iterate the variant without re-typing the shared prefix; the original is untouched.' },
+    { if: 'the question needs something SQL cannot express (clustering/segmentation, z-scores and outliers, a rolling average, a percentile cut-off, a forecast)', do: 'that is a python stage — and it starts with READING, not writing: semantic_index({ guide: "python" }) for this warehouse\'s frame rules (what raises, and the right form for each task), then semantic_index({ recipe: "<id>" }) for the closest worked recipe (a complete compiling payload + the technique to generalise it). Adapt the recipe; write from scratch only when none is close.' },
+    { if: 'you want to try a VARIANT of a draft (or an already-built pipeline) without losing the original', do: 'build_native_model({ action: "fork", draft_id, after }) branches a NEW draft from steps 1..after — iterate the variant without re-typing the shared prefix; the original is untouched. A fork INHERITS the materialized prefixes it keeps and reads the same tables, so a variant over an expensive prefix costs only its own steps.' },
+    { if: 'you materialized a pipeline and now want to look at something ELSE in the result (drill into one segment, group it differently)', do: 'just keep going on the SAME draft: add_step after materialize reads the table already built instead of recomputing the prefix, and materialize again. Do NOT start a new draft that repeats the expensive steps. The response says what it started from (from_checkpoint / steps_recomputed). Editing a step at or before that prefix retires it (checkpoints_dropped) and the next materialize rebuilds from the source — so put exploratory steps AFTER the point you materialized.' },
   ];
 
   // Playbooks = the curated recipes, grouped by task family. Fetch one in full with
@@ -75,6 +77,12 @@ export function buildGuide(catalog, recipes, { task } = {}) {
   const tasks = {};
   if (recipes) for (const r of recipes.summary()) (tasks[r.task_type] ||= []).push({ id: r.id, title: r.title, when_to_use: r.when_to_use });
 
+  // A reserved family: 'python' is not a recipe family but the AUTHORING GUIDE for the warehouse
+  // runtime this deployment submits python models to — served here so the examples reach the model
+  // through the tools, on demand, instead of bloating every tool description.
+  if (task === 'python') {
+    return python || { task: 'python', note: 'This deployment runs no python models (no warehouse runtime for them), so there is no python authoring guide. The overview reports python_models.' };
+  }
   if (typeof task === 'string') {
     const list = tasks[task];
     return list
@@ -84,7 +92,7 @@ export function buildGuide(catalog, recipes, { task } = {}) {
 
   return {
     ...(multi ? { events_sources: { sources: facts, note: 'Independent, equal events sources: each owns its events, payload properties and indexed values. Name the source you mean (semantic_index({ source, event }), build_native_model({ source }), semantic_models[].from); within one, names are used as-is. A funnel runs over ONE source; metrics from different sources can still be compared over metric_time.' } } : {}),
-    note: 'The analyst procedure + routing for this server. Follow `workflow`; use `routing_triggers` (IF…DO) to pick the right tool; `tasks` lists ready-made recipes per family — fetch one with semantic_index({ recipe: id }). Narrow to one family with semantic_index({ guide: "<task_type>" }).',
+    note: `The analyst procedure + routing for this server. Follow \`workflow\`; use \`routing_triggers\` (IF…DO) to pick the right tool; \`tasks\` lists ready-made recipes per family — fetch one with semantic_index({ recipe: id }). Narrow to one family with semantic_index({ guide: "<task_type>" }).${python ? ' Writing a python stage? semantic_index({ guide: "python" }) is the authoring guide for this warehouse\'s python runtime — the constraints and a worked example per operation.' : ''}`,
     workflow,
     routing_triggers,
     ...(Object.keys(sem).length ? { event_semantics: sem } : {}),

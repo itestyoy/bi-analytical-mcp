@@ -35,6 +35,22 @@ const TIME_SPINE_YML = `models:
         granularity: day
 `;
 
+/** The files ONE pipeline model is: `<model>.sql|.py|.yml` and its chain steps `<model>_sN.*`. */
+function pipelineModelMatcher(model) {
+  const re = new RegExp(`^${model}(_s\\d+)?\\.(sql|py|yml)$`);
+  return (f) => re.test(f);
+}
+
+/**
+ * The files of a pipeline NAME — that model plus the models of its later builds, `<model>_cN(_sM).*`:
+ * a pipeline continued on top of a materialized prefix builds under a fresh `_cN` name so it never
+ * overwrites the table it reads, and a rebuild of the name must leave none of them orphaned.
+ */
+function pipelineFamilyMatcher(model) {
+  const re = new RegExp(`^${model}(_c\\d+)?(_s\\d+)?\\.(sql|py|yml)$`);
+  return (f) => re.test(f);
+}
+
 export function newContextId() {
   return randomBytes(6).toString('hex'); // 12 hex chars
 }
@@ -106,6 +122,9 @@ export class ContextManager {
         // usedModels drives the require_time_range guard and rendering; a registry written before
         // it existed lists the models only under additions — rebuild it so the guard sees them.
         const st = (c.state ||= {});
+        // A build cannot survive the process that ran it: an in-flight marker read back from the
+        // registry is stale, and keeping it would wedge the draft as "already building".
+        if (st.draft?.building) delete st.draft.building;
         st.usedModels ||= [];
         for (const k of Object.keys(st.additions || {})) if (!st.usedModels.includes(k)) st.usedModels.push(k);
         this.contexts.set(c.id, c);
@@ -277,8 +296,46 @@ export class ContextManager {
    * this model", used by both the rebuild and the delete.
    */
   removePipelineFiles(id, model) {
-    const chain = new RegExp(`^${model}_s\\d+\\.(sql|py|yml)$`);
-    return this.removeGeneratedWhere(id, (f) => f === `${model}.sql` || f === `${model}.py` || f === `${model}.yml` || chain.test(f));
+    return this.removeGeneratedWhere(id, pipelineFamilyMatcher(model));
+  }
+
+  /**
+   * Remove ONE pipeline model (with its chain) and nothing else. Retiring a materialized prefix
+   * uses this, not the family form: the prefix's name is the BASE name of every later build, so the
+   * family matcher would take the current result's files with it.
+   */
+  removePipelineModelFiles(id, model) {
+    return this.removeGeneratedWhere(id, pipelineModelMatcher(model));
+  }
+
+  /** The generated files of ONE pipeline model (its chain included), by name. */
+  pipelineFiles(id, model) {
+    const d = this.generatedDir(id);
+    if (!existsSync(d)) return [];
+    return readdirSync(d).filter(pipelineModelMatcher(model));
+  }
+
+  /** True when a pipeline model's definition is still in this overlay (its table may exist). */
+  hasPipelineModel(id, model) {
+    const d = this.generatedDir(id);
+    return existsSync(join(d, `${model}.sql`)) || existsSync(join(d, `${model}.py`));
+  }
+
+  /**
+   * Copy one pipeline model's files (chain included) from one context overlay into another.
+   * A context is a copy of the BASE project, so a fork does not otherwise have the models its
+   * parent generated — and `{{ ref('<parent model>') }}` would not resolve there. Copying the
+   * definition makes dbt resolve the ref to the SAME physical relation (contexts differ by project
+   * dir, not by schema, and the model name carries its owner's context id, so there is no
+   * collision). Nothing rebuilds it: every build here selects its own models by name.
+   */
+  copyPipelineFiles(fromId, toId, model) {
+    const src = this.generatedDir(fromId);
+    const dst = this.generatedDir(toId);
+    mkdirSync(dst, { recursive: true });
+    const files = this.pipelineFiles(fromId, model);
+    for (const f of files) cpSync(join(src, f), join(dst, f));
+    return files;
   }
 
   /** Remove a generated file (model or yaml) from the context overlay. */
@@ -314,11 +371,31 @@ export class ContextManager {
     const dropped = [];
     for (const c of [...this.contexts.values()]) {
       if (this.leases.get(c.id)) continue; // never reclaim a context with a live build
+      // …nor one whose materialized prefix another (live) context reads: dropping it would take
+      // that table with it, which is exactly what context({ action: 'drop' }) refuses to do
+      // without force. A consumer in use keeps this one's lastUsedAt fresh, so an owner is only
+      // held while its table is actually being read.
+      if (this.checkpointConsumers(c.id).length) continue;
       if (now - (c.lastUsedAt || c.createdAt) > maxIdleMs) {
         try { this.drop(c.id); dropped.push(c.id); } catch { /* in-flight; skip */ }
       }
     }
     return dropped;
+  }
+
+  /**
+   * Contexts that read a table THIS context materialized: [{ consumer, model }]. The link is
+   * recorded when a fork inherits a prefix; a consumer whose workspace is gone does not count.
+   */
+  checkpointConsumers(id) {
+    const map = this.contexts.get(id)?.state?.checkpoint_consumers || {};
+    const out = [];
+    for (const [model, ids] of Object.entries(map)) {
+      for (const consumer of ids) {
+        if (consumer !== id && this.contexts.has(consumer)) out.push({ consumer, model });
+      }
+    }
+    return out;
   }
 
   /** Tear down a whole context (waits on no in-flight leases). */

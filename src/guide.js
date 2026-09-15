@@ -92,7 +92,7 @@ export function buildGuide(catalog, recipes, { task, python = null } = {}) {
 
   return {
     ...(multi ? { events_sources: { sources: facts, note: 'Independent, equal events sources: each owns its events, payload properties and indexed values. Name the source you mean (semantic_index({ source, event }), build_native_model({ source }), semantic_models[].from); within one, names are used as-is. A funnel runs over ONE source; metrics from different sources can still be compared over metric_time.' } } : {}),
-    note: `The analyst procedure + routing for this server. Follow \`workflow\`; use \`routing_triggers\` (IF…DO) to pick the right tool; \`tasks\` lists ready-made recipes per family — fetch one with semantic_index({ recipe: id }). Narrow to one family with semantic_index({ guide: "<task_type>" }).${python ? ' Writing a python stage? semantic_index({ guide: "python" }) is the authoring guide for this warehouse\'s python runtime — the constraints and a worked example per task.' : ''}`,
+    note: `The analyst procedure + routing for this server. Follow \`workflow\`; use \`routing_triggers\` (IF…DO) to pick the right tool; \`tasks\` lists ready-made recipes per family — fetch one with semantic_index({ recipe: id }). Narrow to one family with semantic_index({ guide: "<task_type>" }).${python ? ' Writing a python stage? semantic_index({ guide: "python" }) is the authoring guide for this warehouse\'s python runtime — the constraints and a worked example per operation.' : ''}`,
     workflow,
     routing_triggers,
     ...(Object.keys(sem).length ? { event_semantics: sem } : {}),

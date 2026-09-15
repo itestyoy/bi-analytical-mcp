@@ -2975,22 +2975,17 @@
       ]
     },
     {
-      "id": "python_player_segments_kmeans",
-      "task_type": "segmentation",
-      "title": "Behavioural player segments (KMeans over a per-player feature table)",
-      "when_to_use": "\"Split players into groups by behaviour\" — segments nobody has defined in advance. Build the feature table in SQL stages, cluster it in one python stage.",
+      "id": "bf_lookup_via_merge",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — a value from a lookup: merge, never map",
+      "when_to_use": "You have a mapping (id → label, day → target, country → tier) and want it as a column.",
+      "approach": "Put the other side in a frame and MERGE on the key: `lookup = bpd.DataFrame({\"k\": [...], \"v\": [...]}); df = df.merge(lookup, on=\"k\", how=\"left\")`.",
+      "instead_of": "`df[\"v\"] = df[\"k\"].map(mapping)` — map aligns two objects by index, and the frame from dbt.ref() has none: NullIndexError.",
       "requires": "python_models",
-      "read_first": "BEFORE writing any python function: semantic_index({ guide: \"python\" }) — the rules of this warehouse's frame API and the right form for every task. This recipe is one of those forms, filled in.",
-      "required_events": [
-        "new_session",
-        "level_completed",
-        "iap_purchase_completed"
-      ],
-      "required_properties": [
-        "price_in_usd_of_event_data"
-      ],
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
-        "name": "player_segments",
+        "name": "lookup_merge",
         "pipeline": {
           "source": "events",
           "stages": [
@@ -3008,12 +3003,7 @@
               ],
               "measures": [
                 {
-                  "name": "sessions",
-                  "fn": "count_distinct",
-                  "column": "session_number"
-                },
-                {
-                  "name": "levels_done",
+                  "name": "events",
                   "fn": "count"
                 },
                 {
@@ -3028,118 +3018,69 @@
               "imports": [
                 {
                   "package": "bigframes",
-                  "submodule": "ml.cluster",
-                  "names": [
-                    "KMeans"
-                  ]
-                },
-                {
-                  "package": "bigframes",
-                  "submodule": "ml.preprocessing",
-                  "names": [
-                    "StandardScaler"
-                  ]
+                  "submodule": "pandas",
+                  "as": "bpd"
                 }
               ],
               "functions": [
                 {
-                  "name": "cluster_players",
+                  "name": "attach_labels",
                   "params": [
                     "df",
-                    "features",
-                    "k",
+                    "key",
+                    "mapping",
                     "as_"
                   ],
                   "body": [
-                    "scaler = StandardScaler()",
-                    "scaled = scaler.fit_transform(df[features])",
-                    "model = KMeans(n_clusters=k)",
-                    "model.fit(scaled)",
-                    "df[as_] = model.predict(scaled)[\"CENTROID_ID\"]",
+                    "lookup = bpd.DataFrame({key: list(mapping.keys()), as_: list(mapping.values())})",
+                    "df = df.merge(lookup, on=key, how=\"left\")",
                     "return df"
                   ]
                 }
               ],
               "steps": [
                 {
-                  "call": "cluster_players",
+                  "call": "attach_labels",
                   "args": {
-                    "features": [
-                      "sessions",
-                      "levels_done",
-                      "revenue"
-                    ],
-                    "k": 4,
-                    "as_": "segment"
+                    "key": "events",
+                    "mapping": {
+                      "1": "one_event",
+                      "2": "two_events"
+                    },
+                    "as_": "event_label"
                   }
                 }
               ],
               "output": {
                 "columns": [
                   "player_id_of_internal",
-                  "sessions",
-                  "levels_done",
+                  "events",
                   "revenue",
-                  "segment"
+                  "event_label"
                 ]
               }
-            },
-            {
-              "stage": "aggregate",
-              "group_by": [
-                "segment"
-              ],
-              "measures": [
-                {
-                  "name": "players",
-                  "fn": "count"
-                },
-                {
-                  "name": "avg_revenue",
-                  "fn": "avg",
-                  "column": "revenue"
-                },
-                {
-                  "name": "avg_sessions",
-                  "fn": "avg",
-                  "column": "sessions"
-                }
-              ]
             }
           ]
         }
       },
-      "notes": "Scale before clustering: KMeans is distance-based, so revenue in dollars would otherwise dominate session counts. fit/predict run INSIDE BigQuery as BigQuery ML; predict() returns BQML's own CENTROID_ID column, which is why it is subscripted. The last SQL stage turns the per-player table into the segment PROFILE — what each group is, which is what the question actually asks.",
-      "hack": "Per-entity feature table in SQL → one python stage that fits a bigframes.ml estimator and writes its prediction back as a COLUMN of the same frame (no alignment, no index) → a SQL stage that profiles the groups. Swap KMeans for any estimator: the shape does not change."
+      "notes": "The dict keys must have the SAME type as the column they join on — bpd.DataFrame turns Python strings into STRING, so a numeric key needs numbers, not \"1\". how=\"left\" keeps unmatched rows with NULL; how=\"inner\" drops them, which is a different question.",
+      "hack": "Any \"value from somewhere else\" is a merge: a dict, a groupby result, a second table, a threshold per group. Build the other side as a frame with the key as a COLUMN, then merge."
     },
     {
-      "id": "python_revenue_outliers_zscore",
-      "task_type": "data_quality",
-      "title": "Outlier players by z-score (same-frame statistics)",
-      "when_to_use": "\"Who is abnormal\" / \"is this number driven by a few accounts\" — flag rows more than N standard deviations from the mean before trusting an average.",
+      "id": "bf_group_value_back_to_rows",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — a group's aggregate back on its rows: transform or merge",
+      "when_to_use": "Share of a group's total, deviation from a group mean, \"how big is my cohort\" as a column.",
+      "approach": "Same number of rows → `df[\"m\"] = df.groupby(\"k\")[\"x\"].transform(\"mean\")` (broadcasts inside ONE frame). A different shape, or several aggregates → build it with `groupby(..., as_index=False)` and MERGE it back.",
+      "instead_of": "`df[\"m\"] = df.groupby(\"k\")[\"x\"].mean()` — the groupby result is another object with its own index; assigning it needs alignment the frame cannot do.",
       "requires": "python_models",
-      "read_first": "BEFORE writing any python function: semantic_index({ guide: \"python\" }) — the rules of this warehouse's frame API and the right form for every task. This recipe is one of those forms, filled in.",
-      "required_events": [
-        "iap_purchase_completed"
-      ],
-      "required_properties": [
-        "price_in_usd_of_event_data"
-      ],
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
-        "name": "revenue_outliers",
+        "name": "group_back_to_rows",
         "pipeline": {
           "source": "events",
           "stages": [
-            {
-              "stage": "where",
-              "conditions": [
-                {
-                  "column": "event_name",
-                  "op": "eq",
-                  "value": "iap_purchase_completed"
-                }
-              ]
-            },
             {
               "stage": "derive",
               "name": "price",
@@ -3147,106 +3088,6 @@
               "source": "price_in_usd_of_event_data",
               "type": "numeric"
             },
-            {
-              "stage": "aggregate",
-              "group_by": [
-                "player_id_of_internal"
-              ],
-              "measures": [
-                {
-                  "name": "revenue",
-                  "fn": "sum",
-                  "column": "price"
-                }
-              ]
-            },
-            {
-              "stage": "python",
-              "imports": [],
-              "functions": [
-                {
-                  "name": "zscore",
-                  "params": [
-                    "df",
-                    "column",
-                    "as_"
-                  ],
-                  "body": [
-                    "df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)",
-                    "return df"
-                  ]
-                }
-              ],
-              "steps": [
-                {
-                  "call": "zscore",
-                  "args": {
-                    "column": "revenue",
-                    "as_": "revenue_z"
-                  }
-                }
-              ],
-              "output": {
-                "columns": [
-                  "player_id_of_internal",
-                  "revenue",
-                  "revenue_z"
-                ]
-              }
-            },
-            {
-              "stage": "compute",
-              "name": "is_outlier",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "revenue_z",
-                      "op": "gte",
-                      "value": 3
-                    }
-                  ],
-                  "then": {
-                    "value": true
-                  }
-                }
-              ],
-              "else": {
-                "value": false
-              }
-            },
-            {
-              "stage": "order_by",
-              "keys": [
-                {
-                  "key": "revenue_z",
-                  "direction": "desc"
-                }
-              ]
-            }
-          ]
-        }
-      },
-      "notes": "mean() and std() of the SAME frame come back as scalars and broadcast over its rows — one SQL statement, no alignment and no index needed. ddof=0 is the population deviation; use ddof=1 for a sample. The flag and the sort are SQL stages, because SQL says them perfectly well (a case whose branches are booleans declares no scalar type).",
-      "hack": "A statistic OF a frame applied back TO that frame (z-score, share of total, distance from the median) is always safe: aggregate, broadcast, compare. Anything that needs a value from ANOTHER frame is a merge instead."
-    },
-    {
-      "id": "python_cohort_share_merge",
-      "task_type": "cohort",
-      "title": "Cohort size as a column (a lookup is a MERGE, never a map)",
-      "when_to_use": "Any \"share of its cohort / group\" number: retention %, share of a day's installs, per-country share. The shape every dict-lookup mistake turns into.",
-      "requires": "python_models",
-      "read_first": "BEFORE writing any python function: semantic_index({ guide: \"python\" }) — the rules of this warehouse's frame API and the right form for every task. This recipe is one of those forms, filled in.",
-      "required_events": [
-        "first_launch",
-        "new_session"
-      ],
-      "register_payload": {
-        "name": "cohort_share",
-        "pipeline": {
-          "source": "events",
-          "stages": [
             {
               "stage": "compute",
               "name": "day",
@@ -3262,8 +3103,9 @@
               ],
               "measures": [
                 {
-                  "name": "events",
-                  "fn": "count"
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
                 }
               ]
             },
@@ -3272,47 +3114,30 @@
               "imports": [],
               "functions": [
                 {
-                  "name": "add_cohort_size",
+                  "name": "day_share",
                   "params": [
                     "df",
                     "key",
-                    "as_"
+                    "value",
+                    "total_as",
+                    "share_as"
                   ],
                   "body": [
-                    "sizes = df.groupby(key, as_index=False)[\"player_id_of_internal\"].count()",
-                    "sizes = sizes.rename(columns={\"player_id_of_internal\": as_})",
-                    "df = df.merge(sizes, on=key, how=\"left\")",
-                    "return df"
-                  ]
-                },
-                {
-                  "name": "share_of_cohort",
-                  "params": [
-                    "df",
-                    "part",
-                    "whole",
-                    "as_"
-                  ],
-                  "body": [
-                    "df[as_] = df[part] / df[whole]",
+                    "totals = df.groupby(key, as_index=False)[value].sum().rename(columns={value: total_as})",
+                    "df = df.merge(totals, on=key, how=\"left\")",
+                    "df[share_as] = df[value] / df[total_as]",
                     "return df"
                   ]
                 }
               ],
               "steps": [
                 {
-                  "call": "add_cohort_size",
+                  "call": "day_share",
                   "args": {
                     "key": "day",
-                    "as_": "cohort_players"
-                  }
-                },
-                {
-                  "call": "share_of_cohort",
-                  "args": {
-                    "part": "events",
-                    "whole": "cohort_players",
-                    "as_": "share"
+                    "value": "revenue",
+                    "total_as": "day_revenue",
+                    "share_as": "share_of_day"
                   }
                 }
               ],
@@ -3320,30 +3145,182 @@
                 "columns": [
                   "day",
                   "player_id_of_internal",
-                  "events",
-                  "cohort_players",
-                  "share"
+                  "revenue",
+                  "day_revenue",
+                  "share_of_day"
                 ]
               }
             }
           ]
         }
       },
-      "notes": "The groupby result is a DIFFERENT object with its own index, so assigning it as a column (df[\"n\"] = df.groupby(...)...) raises NullIndexError on this runtime. Merging it back on the key is the form that works — and it is the join BigQuery would run anyway. as_index=False keeps the key a column so there is something to merge on.",
-      "hack": "Lookup table → frame → merge. Build the other side with groupby(..., as_index=False), rename its value column, merge on the key. Same move for a dict you computed in Python: bpd.DataFrame({\"k\": [...], \"v\": [...]}) and merge."
+      "notes": "as_index=False keeps the key as a COLUMN — without it the key becomes the index and there is nothing to merge on. rename() before the merge, or both sides bring a column of the same name and the merge suffixes them.",
+      "hack": "Two forms, one rule: inside one frame — transform; between two frames — merge. Never assignment."
     },
     {
-      "id": "python_rolling_7d_trend",
-      "task_type": "trend",
-      "title": "7-day rolling average of a daily series (sort FIRST)",
-      "when_to_use": "Smoothing a noisy daily metric — DAU, revenue, crashes — so a trend is readable and weekday seasonality stops dominating.",
+      "id": "bf_distinct_values",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — distinct values: a groupby, not unique()",
+      "when_to_use": "A distinct list of ids, of (user, level) pairs, of values a column takes.",
+      "approach": "`uniq = df.groupby([\"k\"], as_index=False).size().drop(columns=\"size\")` — the documented replacement for this runtime.",
+      "instead_of": "`df[\"k\"].unique()` / `df.drop_duplicates(subset=[\"k\"])` — both are unsupported in partial ordering mode.",
       "requires": "python_models",
-      "read_first": "BEFORE writing any python function: semantic_index({ guide: \"python\" }) — the rules of this warehouse's frame API and the right form for every task. This recipe is one of those forms, filled in.",
-      "required_events": [
-        "new_session"
-      ],
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
-        "name": "dau_rolling",
+        "name": "distinct_pairs",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "column": "event_name",
+                  "op": "eq",
+                  "value": "level_completed"
+                }
+              ]
+            },
+            {
+              "stage": "derive",
+              "name": "level_id",
+              "op": "extract",
+              "source": "level_id_of_event_data",
+              "type": "int"
+            },
+            {
+              "stage": "python",
+              "imports": [],
+              "functions": [
+                {
+                  "name": "distinct_pairs",
+                  "params": [
+                    "df",
+                    "keys"
+                  ],
+                  "body": [
+                    "out = df.groupby(keys, as_index=False).size()",
+                    "out = out.drop(columns=\"size\")",
+                    "return out"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "distinct_pairs",
+                  "args": {
+                    "keys": [
+                      "player_id_of_internal",
+                      "level_id"
+                    ]
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "level_id"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "notes": "size() is what makes it a groupby rather than an aggregate over a column — drop it afterwards, or keep it and you have the counts for free. In a SQL stage the same thing is an aggregate with no measures; prefer that when you are not already in python.",
+      "hack": "De-duplication is a GROUPING, not a row operation: group by the columns that define uniqueness, keep one row per group."
+    },
+    {
+      "id": "bf_top_n_needs_order",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — top-N and anything positional: sort_values first",
+      "when_to_use": "Top/bottom N, \"the largest\", \"the first row per group\", anything positional.",
+      "approach": "`top = df.sort_values(\"x\", ascending=False).head(10)` — or `df.nlargest(10, \"x\")`, which orders by itself.",
+      "instead_of": "`df.head(10)` on an unsorted frame (its rows differ between runs) and `df.iloc[:10]` (raises OrderRequiredError).",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "register_payload": {
+        "name": "top_payers",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "python",
+              "imports": [],
+              "functions": [
+                {
+                  "name": "top_by",
+                  "params": [
+                    "df",
+                    "column",
+                    "n"
+                  ],
+                  "body": [
+                    "out = df.sort_values(column, ascending=False).head(n)",
+                    "return out"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "top_by",
+                  "args": {
+                    "column": "revenue",
+                    "n": 10
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "events",
+                  "revenue"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "notes": "This frame has no row order of its own, so \"the first N\" is only defined after a sort. For a quick LOOK at the data during development use peek(n) instead — it returns an arbitrary sample and is the cheaper call.",
+      "hack": "Order is data: state it (sort_values / nlargest) wherever the answer depends on it, and never rely on the order rows happen to arrive in."
+    },
+    {
+      "id": "bf_order_dependent_series",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — rolling / shift / cumulative: sort, then the operation",
+      "when_to_use": "7-day averages, day-over-day deltas, cumulative totals, previous-value comparisons.",
+      "approach": "`df = df.sort_values(order_key)` and then the series operation: `rolling(window=n).mean()`, `shift(1)`, `cumsum()`, `diff()`, `pct_change()`.",
+      "instead_of": "Calling rolling/shift/cumsum on the frame as it arrives — the window is then over an arbitrary order, and the numbers are silently meaningless.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "register_payload": {
+        "name": "series_ops",
         "pipeline": {
           "source": "events",
           "stages": [
@@ -3382,29 +3359,32 @@
               "imports": [],
               "functions": [
                 {
-                  "name": "rolling_mean",
+                  "name": "rolling_and_delta",
                   "params": [
                     "df",
                     "order_key",
                     "column",
                     "window",
-                    "as_"
+                    "mean_as",
+                    "delta_as"
                   ],
                   "body": [
                     "df = df.sort_values(order_key)",
-                    "df[as_] = df[column].rolling(window=window).mean()",
+                    "df[mean_as] = df[column].rolling(window=window).mean()",
+                    "df[delta_as] = df[column].diff()",
                     "return df"
                   ]
                 }
               ],
               "steps": [
                 {
-                  "call": "rolling_mean",
+                  "call": "rolling_and_delta",
                   "args": {
                     "order_key": "day",
                     "column": "dau",
                     "window": 7,
-                    "as_": "dau_7d"
+                    "mean_as": "dau_7d",
+                    "delta_as": "dau_delta"
                   }
                 }
               ],
@@ -3412,32 +3392,113 @@
                 "columns": [
                   "day",
                   "dau",
-                  "dau_7d"
+                  "dau_7d",
+                  "dau_delta"
                 ]
               }
             }
           ]
         }
       },
-      "notes": "A rolling window is the one place row ORDER is the data: this frame has none of its own, so sort_values comes first or the result is arbitrary (and head()/iloc would raise OrderRequiredError). The first window-1 rows come back NULL by definition — say so when reporting, or filter them out in a following SQL stage.",
-      "hack": "Order-dependent operations (rolling, expanding, ewm, shift, cumulative) = sort_values on the axis, THEN the operation, on a frame small enough to be one series per group. Aggregate to the grain first; never roll over raw events."
+      "notes": "Aggregate to the grain of the series FIRST (one row per day here) — rolling over raw events is both wrong and expensive. The first window-1 rows come back NULL by definition: say so, or drop them in a following SQL stage.",
+      "hack": "Order-dependent operations are a pair: sort_values on the axis, then the operation. One sort is enough for the whole function."
     },
     {
-      "id": "python_p90_threshold_flag",
-      "task_type": "progression",
-      "title": "A p90 threshold as a column, and the rows above it",
-      "when_to_use": "\"Which levels/sessions are unusually long\", \"the slowest 10%\" — a percentile of the distribution used as a cut-off instead of a number someone guessed.",
+      "id": "bf_same_frame_statistic",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — a statistic OF the frame back ON it: a broadcast scalar",
+      "when_to_use": "z-score, share of total, distance from the mean, normalisation.",
+      "approach": "An aggregate OF the frame applied back TO it: `df[\"z\"] = (df[\"x\"] - df[\"x\"].mean()) / df[\"x\"].std(ddof=0)`; `df[\"share\"] = df[\"x\"] / df[\"x\"].sum()`.",
+      "instead_of": "Computing the statistic in one frame and joining it in from another — unnecessary here, and it needs an index.",
       "requires": "python_models",
-      "read_first": "BEFORE writing any python function: semantic_index({ guide: \"python\" }) — the rules of this warehouse's frame API and the right form for every task. This recipe is one of those forms, filled in.",
-      "required_events": [
-        "level_completed"
-      ],
-      "required_properties": [
-        "level_id_of_event_data",
-        "daily_level_score_of_event_data"
-      ],
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
-        "name": "level_p90",
+        "name": "frame_statistics",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "python",
+              "imports": [],
+              "functions": [
+                {
+                  "name": "zscore_and_share",
+                  "params": [
+                    "df",
+                    "column",
+                    "z_as",
+                    "share_as"
+                  ],
+                  "body": [
+                    "df[z_as] = (df[column] - df[column].mean()) / df[column].std(ddof=0)",
+                    "df[share_as] = df[column] / df[column].sum()",
+                    "return df"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "zscore_and_share",
+                  "args": {
+                    "column": "revenue",
+                    "z_as": "revenue_z",
+                    "share_as": "revenue_share"
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "events",
+                  "revenue",
+                  "revenue_z",
+                  "revenue_share"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "notes": "mean()/sum()/std() of the SAME frame come back as scalars and broadcast over its rows — one statement, no alignment. ddof=0 is the population deviation, ddof=1 the sample one; say which you used when reporting a z-score.",
+      "hack": "Whole-frame statistic → scalar → column. Safe for mean, sum, std, min, max, count and a single quantile."
+    },
+    {
+      "id": "bf_threshold_from_distribution",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — a threshold from the distribution: one quantile as a scalar",
+      "when_to_use": "\"The slowest 10%\", \"unusually hard levels\", any \"above normal\" where nobody has defined normal.",
+      "approach": "`cut = df[\"x\"].quantile(0.9)` (a SCALAR) → write it as a column and compare: `df[\"p90\"] = cut; df[\"is_high\"] = df[\"x\"] >= cut`.",
+      "instead_of": "`df[\"x\"].quantile([0.5, 0.9])` — a SERIES indexed by q, which this runtime has no index to align; and a hard-coded threshold nobody can defend.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "register_payload": {
+        "name": "distribution_cut",
         "pipeline": {
           "source": "events",
           "stages": [
@@ -3450,13 +3511,6 @@
                   "value": "level_completed"
                 }
               ]
-            },
-            {
-              "stage": "derive",
-              "name": "score",
-              "op": "extract",
-              "source": "daily_level_score_of_event_data",
-              "type": "numeric"
             },
             {
               "stage": "derive",
@@ -3474,11 +3528,6 @@
                 {
                   "name": "attempts",
                   "fn": "count"
-                },
-                {
-                  "name": "avg_score",
-                  "fn": "avg",
-                  "column": "score"
                 }
               ]
             },
@@ -3487,7 +3536,7 @@
               "imports": [],
               "functions": [
                 {
-                  "name": "percentile_flag",
+                  "name": "cut_at_quantile",
                   "params": [
                     "df",
                     "column",
@@ -3505,7 +3554,7 @@
               ],
               "steps": [
                 {
-                  "call": "percentile_flag",
+                  "call": "cut_at_quantile",
                   "args": {
                     "column": "attempts",
                     "q": 0.9,
@@ -3518,42 +3567,234 @@
                 "columns": [
                   "level_id",
                   "attempts",
-                  "avg_score",
                   "p90_attempts",
                   "is_hard"
                 ]
               }
+            }
+          ]
+        }
+      },
+      "notes": "Ask for ONE q at a time. Several quantiles at once belong in a SQL stage (aggregate with fn=percentile), which returns them as columns instead of an indexed series. Keeping the threshold as a column makes the cut visible in the result instead of hidden in a filter.",
+      "hack": "A cut-off computed FROM the data (median, p90, IQR) written back as a column, then compared row by row."
+    },
+    {
+      "id": "bf_filter_by_another_frame",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — filtering by another frame's data: merge the flag in",
+      "when_to_use": "Keeping only qualifying users, excluding a blacklist, filtering by a per-group condition.",
+      "approach": "Merge the other side in and filter on the merged column: `df = df.merge(flags, on=\"k\", how=\"inner\")` (or how=\"left\" then `df[df[\"flag\"]]`).",
+      "instead_of": "`df[other[\"flag\"]]` / `df[df[\"k\"].isin(other_series)]` — a Series from ANOTHER frame has no index to align with this one.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "register_payload": {
+        "name": "filter_by_other",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
             },
             {
-              "stage": "order_by",
-              "keys": [
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
                 {
-                  "key": "attempts",
-                  "direction": "desc"
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "python",
+              "imports": [],
+              "functions": [
+                {
+                  "name": "keep_matching",
+                  "params": [
+                    "df",
+                    "key",
+                    "threshold",
+                    "value"
+                  ],
+                  "body": [
+                    "picked = df.groupby(key, as_index=False)[value].sum()",
+                    "picked = picked[picked[value] >= threshold]",
+                    "picked = picked.drop(columns=[value])",
+                    "df = df.merge(picked, on=key, how=\"inner\")",
+                    "return df"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "keep_matching",
+                  "args": {
+                    "key": "player_id_of_internal",
+                    "threshold": 1,
+                    "value": "revenue"
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "events",
+                  "revenue"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "notes": "A mask built from the SAME frame (df[df[\"x\"] > 0]) is always fine — this rule is only about a condition that lives in another object. An inner merge on the key IS the semi-join SQL would run; dropping the helper column keeps the output clean.",
+      "hack": "\"Keep the rows that are in X\" = build X as a frame of keys and inner-merge it. Same move for \"exclude\": merge with how=\"left\" and keep the NULLs."
+    },
+    {
+      "id": "bf_ml_predict_as_column",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — bigframes.ml: the prediction back as a column",
+      "when_to_use": "Clustering, scoring, classification, a predicted value per row.",
+      "approach": "Fit and predict INSIDE BigQuery, then take the prediction column off the result: `model.fit(X); df[\"segment\"] = model.predict(X)[\"CENTROID_ID\"]`. Scale first when the algorithm is distance-based.",
+      "instead_of": "sklearn / scipy — they need `to_pandas()` first and then run single-node in the notebook; and a per-row Python scoring function, which this runtime cannot execute.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "register_payload": {
+        "name": "ml_predict_column",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "python",
+              "imports": [
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.cluster",
+                  "names": [
+                    "KMeans"
+                  ]
+                },
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.preprocessing",
+                  "names": [
+                    "StandardScaler"
+                  ]
+                }
+              ],
+              "functions": [
+                {
+                  "name": "cluster",
+                  "params": [
+                    "df",
+                    "features",
+                    "k",
+                    "as_"
+                  ],
+                  "body": [
+                    "scaler = StandardScaler()",
+                    "scaled = scaler.fit_transform(df[features])",
+                    "model = KMeans(n_clusters=k)",
+                    "model.fit(scaled)",
+                    "df[as_] = model.predict(scaled)[\"CENTROID_ID\"]",
+                    "return df"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "cluster",
+                  "args": {
+                    "features": [
+                      "events",
+                      "revenue"
+                    ],
+                    "k": 3,
+                    "as_": "segment"
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "events",
+                  "revenue",
+                  "segment"
+                ]
+              }
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "segment"
+              ],
+              "measures": [
+                {
+                  "name": "players",
+                  "fn": "count"
+                },
+                {
+                  "name": "avg_revenue",
+                  "fn": "avg",
+                  "column": "revenue"
                 }
               ]
             }
           ]
         }
       },
-      "notes": "quantile(q) with a single q is a SCALAR, so it broadcasts like mean() — safe. quantile([0.5, 0.9]) returns a SERIES indexed by q, which this runtime has no index to align: ask for one q at a time, or aggregate the quantiles in a SQL stage with fn=percentile.",
-      "hack": "A distribution cut-off (median, p90, IQR) computed on the frame and written back as a column, then compared row by row. Keeps the threshold VISIBLE in the result instead of hiding it in a filter."
+      "notes": "predict() returns BigQuery ML's own columns — CENTROID_ID for clustering, predicted_<label> for a supervised model — which is why it is subscripted. The prediction is a column of the SAME frame, so nothing needs aligning. A SQL stage after it profiles the groups: the segment number alone answers nothing.",
+      "hack": "Feature table in SQL → fit/predict in one python stage → prediction as a column → profile in SQL. The shape holds for every estimator; only the class and the output column change."
     },
     {
-      "id": "python_revenue_forecast_arima",
-      "task_type": "trend",
-      "title": "Forecast a daily series (ARIMA_PLUS in BigQuery ML)",
-      "when_to_use": "\"Where does this go next month\" on a single daily series — revenue, installs, DAU. Not for per-segment forecasts (one model per series).",
+      "id": "bf_ml_output_replaces_frame",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — an estimator whose output REPLACES the frame: declare its columns",
+      "when_to_use": "Forecasting, model metrics, a transformed matrix — anything where the result is not \"my rows plus a column\".",
+      "approach": "When the estimator returns its OWN shape (forecast, score, metrics), the python stage returns THAT frame and `output.columns` describes it: `out = model.predict(horizon=30); return out`.",
+      "instead_of": "Declaring the input columns as the output — the following SQL stages then reference columns that do not exist.",
       "requires": "python_models",
-      "read_first": "BEFORE writing any python function: semantic_index({ guide: \"python\" }) — the rules of this warehouse's frame API and the right form for every task. This recipe is one of those forms, filled in.",
-      "required_events": [
-        "iap_purchase_completed"
-      ],
-      "required_properties": [
-        "price_in_usd_of_event_data"
-      ],
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
-        "name": "revenue_forecast",
+        "name": "ml_output_shape",
         "pipeline": {
           "source": "events",
           "stages": [
@@ -3607,7 +3848,7 @@
               ],
               "functions": [
                 {
-                  "name": "forecast_series",
+                  "name": "forecast",
                   "params": [
                     "df",
                     "time_column",
@@ -3624,7 +3865,7 @@
               ],
               "steps": [
                 {
-                  "call": "forecast_series",
+                  "call": "forecast",
                   "args": {
                     "time_column": "day",
                     "value_column": "revenue",
@@ -3646,8 +3887,269 @@
           ]
         }
       },
-      "notes": "predict() returns BigQuery ML's OWN forecast columns, not your input ones — the declared output.columns above is what ARIMA_PLUS.FORECAST produces. Verify them on the first run (the result's columns are reported back) and rename in a following SQL stage if you want your own names. History IS the model's input: aggregate to one row per day first, with no gaps in the series.",
-      "hack": "fit(X=time, y=value) then predict(horizon) — a model whose OUTPUT REPLACES the frame instead of adding a column. Whenever an estimator returns its own shape (forecast, score, metrics), the python stage's output.columns describes THAT shape, and the SQL stages after it work on it."
+      "notes": "The declared columns above are what ARIMA_PLUS.FORECAST produces; verify them on the first run (the result reports its columns) and rename in a following SQL stage if you want your own names. History IS the input: one row per period, no gaps. One model per series — a per-segment forecast is one model per segment, not one call.",
+      "hack": "Whenever an estimator's output is its own table (forecast, score, metrics, transform), the stage's output.columns describes THAT table — and the SQL after it works on those names."
+    },
+    {
+      "id": "bf_cache_expensive_intermediate",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — an expensive intermediate read twice: cache()",
+      "when_to_use": "One heavy join or aggregate feeding several outputs in the same function.",
+      "approach": "Materialize it once: `joined = df.merge(other, on=\"k\"); joined.cache()` and derive everything from `joined`.",
+      "instead_of": "Deriving several results from the same expensive expression without caching — execution is deferred, so each dependent result re-runs the whole thing.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "register_payload": {
+        "name": "cache_intermediate",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "day",
+              "op": "date_trunc",
+              "granularity": "day",
+              "column": "device_time"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "day",
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "python",
+              "imports": [],
+              "functions": [
+                {
+                  "name": "day_stats",
+                  "params": [
+                    "df",
+                    "key",
+                    "value"
+                  ],
+                  "body": [
+                    "per_day = df.groupby(key, as_index=False)[value].sum()",
+                    "per_day.cache()",
+                    "per_day = per_day.sort_values(value, ascending=False)",
+                    "per_day[\"share\"] = per_day[value] / per_day[value].sum()",
+                    "return per_day"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "day_stats",
+                  "args": {
+                    "key": "day",
+                    "value": "revenue"
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "day",
+                  "revenue",
+                  "share"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "notes": "cache() writes a temporary BigQuery table — you pay for its storage, so use it for an intermediate that is genuinely read more than once (a join, a heavy groupby), not for every line. It is a hint about REUSE, not a speed-up of a single pass.",
+      "hack": "Deferred execution means \"written once\" is not \"computed once\". If two or more results read the same intermediate, cache it."
+    },
+    {
+      "id": "bf_sql_only_function",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — what only SQL can do: bigframes.bigquery (bbq)",
+      "when_to_use": "LEAST/GREATEST, array aggregation, building a STRUCT column, epoch conversions, a SQL function with no pandas name.",
+      "approach": "Reach the BigQuery function directly: `bbq.sql_scalar(\"LEAST({0}, {1})\", columns=[df[\"a\"], df[\"b\"]])`, `bbq.array_agg(df.groupby(\"k\")[\"c\"])`, `bbq.struct(df[[\"a\",\"b\"]])`, `bbq.unix_micros(df[\"t\"])`.",
+      "instead_of": "`to_pandas()` to get a Python equivalent — that leaves BigQuery and brings the whole result into the notebook.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "register_payload": {
+        "name": "bbq_functions",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "python",
+              "imports": [
+                {
+                  "package": "bigframes",
+                  "submodule": "bigquery",
+                  "as": "bbq"
+                }
+              ],
+              "functions": [
+                {
+                  "name": "add_sql_expr",
+                  "params": [
+                    "df",
+                    "a",
+                    "b",
+                    "as_"
+                  ],
+                  "body": [
+                    "df[as_] = bbq.sql_scalar(\"LEAST({0}, {1})\", columns=[df[a], df[b]])",
+                    "return df"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "add_sql_expr",
+                  "args": {
+                    "a": "events",
+                    "b": "revenue",
+                    "as_": "smaller"
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "events",
+                  "revenue",
+                  "smaller"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "notes": "sql_scalar takes a single-column expression with {0}, {1} … placeholders bound to the columns you pass — it is not a place for a whole query. Everything in bbq still compiles to SQL and runs in BigQuery.",
+      "hack": "Before converting to pandas for a missing function, look in bbq: arrays, structs, epochs and an arbitrary scalar SQL expression are all there."
+    },
+    {
+      "id": "bf_leave_to_pandas_last",
+      "task_type": "bigframes",
+      "title": "BigFrames approach — leaving for pandas only after the aggregation",
+      "when_to_use": "A library call that only exists in pandas/numpy, on a small aggregated result.",
+      "approach": "Aggregate in the warehouse FIRST, convert the small result: `small = df.groupby(\"k\", as_index=False)[\"x\"].sum(); pdf = small.to_pandas()`.",
+      "instead_of": "`pdf = df.to_pandas()` on the incoming frame — it downloads the whole table into the notebook runtime and everything after it is single-node.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "register_payload": {
+        "name": "pandas_last_resort",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "python",
+              "imports": [
+                {
+                  "package": "bigframes",
+                  "submodule": "pandas",
+                  "as": "bpd"
+                }
+              ],
+              "functions": [
+                {
+                  "name": "summarise_locally",
+                  "params": [
+                    "df",
+                    "key",
+                    "value"
+                  ],
+                  "body": [
+                    "small = df.groupby(key, as_index=False)[value].sum()",
+                    "pdf = small.to_pandas()",
+                    "pdf[\"rank\"] = pdf[value].rank(ascending=False)",
+                    "return bpd.read_pandas(pdf)"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "summarise_locally",
+                  "args": {
+                    "key": "player_id_of_internal",
+                    "value": "revenue"
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "revenue",
+                  "rank"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "notes": "The model must return a frame this runtime can materialize, so a pandas result goes back with bpd.read_pandas(). Do this only when the operation genuinely has no frame equivalent — and only on an already-aggregated table, because the download and everything after it happen on one node.",
+      "hack": "The boundary is a decision, not a convenience: aggregate, then convert, then convert back. If the frame you hand to to_pandas() could be large, the approach is wrong."
     }
   ]
 }

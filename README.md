@@ -67,7 +67,19 @@ The `semantic_index` overview lists recipe ids and `semantic_index({ recipe: id 
 returns one in full — ready-to-run templates for common analytics task types
 (trends, segmentation, funnel, retention, cohort, behavioral, conversion, level
 progression, monetization, stickiness) — each a valid `create_semantic_model`
-payload + example queries. See `config/recipes.json` and
+payload + example queries.
+
+One family is deliberately NOT organised by business task: `bigframes` recipes
+(`bf_*`, offered only where dbt runs python models on that runtime) are one per
+APPROACH — the correct form of a single move on the frame `dbt.ref()` returns
+(a lookup, a per-group value, top-N, a threshold, an ml prediction, `cache()`),
+each carrying `approach` (the form that works) next to `instead_of` (the form
+that raises, and why). A real question combines several. Their ids are named in
+the python stage description itself and in `semantic_index({ guide: "python" })`.
+
+A deployment ADDS its own recipes via `RECIPES_PATH` (comma-separated files);
+the shipped ones stay, and an id collision lets an operator override one
+deliberately. See `config/recipes.json`, `docs/SCHEMA_AUTHORING.md` (§2d) and
 `docs/analytics-task-taxonomy.md`.
 
 ## Run

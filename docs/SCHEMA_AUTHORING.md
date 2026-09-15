@@ -653,18 +653,23 @@ python-рантайм). Развёртывание добавляет СВОИ �
 | `example_queries` | для `create_payload` | `[{ metrics, group_by?, … }]` | 2–5 запросов: **первый исполняется в тесте**; остальные показывают срезы. Имена метрик — полные |
 | `ab_test` | для A/B | сопоставление колонок результата → аргументы `experiment({ action: 'analyze' })` | см. таблицу ниже |
 | `srm_check` | для SRM | `{ group_field, n_field, expected_ratio? }` | → `experiment({ action: 'check_split' })` |
+| `approach` | для приёма | форма, которая работает | одна строка кода в обратных кавычках + чем она является; только в рецепте-приёме |
+| `instead_of` | для приёма | форма, которая падает, и почему | называйте класс ошибки (`NullIndexError`, `OrderRequiredError`) или в чём тихая неправильность |
+| `read_first` | для python | куда пойти ДО написания функции | `semantic_index({ guide: "python" })` — правила рантайма; рецепт есть один приём оттуда |
 | `notes` | да | что учесть при чтении результата | оговорки, определения, что НЕ значит цифра |
 | `hack` | да | обобщённый приём | формула: *что сделать → чем это является → как расширить* («Extrapolate: …») |
 
 Семейства `task_type`, которые уже есть: `trends`, `segmentation`, `funnel`, `retention`,
 `cohort`, `behavioral`, `conversion`, `progression`, `monetization`, `ads`, `economy`,
-`stickiness`, `ab_test`, `engagement`, `data_quality`.
+`stickiness`, `ab_test`, `engagement`, `data_quality` — и `bigframes`, единственное
+семейство НЕ по бизнес-задаче: в нём рецепт описывает один ПРИЁМ работы с фреймом на
+python-рантайме (см. четвёртую форму ниже).
 
 Словарь `metric_types`: `simple`, `ratio`, `derived`, `cumulative`, `conversion` — типы
 управляемых метрик; `proportion`, `mean`, `cuped`, `ratio` — статистические тесты A/B; `srm`,
 `power` — сопутствующие расчёты.
 
-### Три формы рецепта
+### Четыре формы рецепта
 
 **Управляемая метрика** — `create_payload` + `example_queries`. Самая частая форма. Агент
 может не только выполнить пример, но и **переспросить** тот же контекст любым другим срезом.
@@ -770,6 +775,38 @@ python-рантайм). Развёртывание добавляет СВОИ �
 }
 ```
 
+**Приём работы с python-рантаймом** — `register_payload` со стадией `python`, `requires:
+"python_models"`, `runtime: "<рантайм>"` и парой `approach` / `instead_of`. Такой рецепт описан
+НЕ по бизнес-задаче, а по ОДНОМУ ДЕЙСТВИЮ над фреймом: подставить значение из справочника,
+вернуть агрегат группы на строки, взять топ-N, посчитать порог, предсказать модель, закешировать
+промежуток. Причина: на BigFrames падает или тихо врёт не задача, а конкретная форма записи
+(у фрейма из `dbt.ref()` нет индекса и нет порядка строк), поэтому полезно ровно то, что
+показывает рабочую форму рядом с падающей. Реальный вопрос собирается из нескольких таких
+приёмов — id названы по действию (`bf_*`), а не по вопросу.
+
+```json
+{
+  "id": "bf_lookup_via_merge",
+  "task_type": "bigframes",
+  "title": "BigFrames approach — a value from a lookup: merge, never map",
+  "when_to_use": "You have a mapping (id → label, day → target, country → tier) and want it as a column.",
+  "approach": "Put the other side in a frame and MERGE on the key: `lookup = bpd.DataFrame({\"k\": [...], \"v\": [...]}); df = df.merge(lookup, on=\"k\", how=\"left\")`.",
+  "instead_of": "`df[\"v\"] = df[\"k\"].map(mapping)` — map aligns two objects by index, and the frame from dbt.ref() has none: NullIndexError.",
+  "requires": "python_models",
+  "runtime": "bigframes",
+  "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+  "register_payload": { "name": "lookup_merge", "pipeline": { "source": "events", "stages": ["…SQL-стадии…", "…стадия python…"] } },
+  "notes": "…",
+  "hack": "Any \"value from somewhere else\" is a merge: a dict, a groupby result, a second table, a threshold per group."
+}
+```
+
+Как такой рецепт достаётся агенту: id перечислены прямо в описании стадии `python`
+(`READ A RECIPE BEFORE YOU WRITE`), рядом лежит `semantic_index({ recipe: "<id>" })` за одним
+целиком; `semantic_index({ guide: "python" })` отдаёт правила рантайма и те же id; `{ guide: true }`
+показывает их вместе под `tasks.bigframes`. Там, где dbt не запускает python-модели, они не
+предлагаются вовсе.
+
 ### Что рецепт обязан выдержать
 
 Рецепт **не валидируется по структуре** при загрузке — он валидируется **исполнением**.
@@ -780,6 +817,7 @@ python-рантайм). Развёртывание добавляет СВОИ �
 | `create_payload` | `create_semantic_model` парсится (dbt parse), **первый** `example_queries` исполняется и возвращает строки |
 | `register_payload` | pipeline собирается и выполняется, результат ≥ 2 строк; если есть `ab_test` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `srm_check` — то же для `check_split` |
 | `tool_calls` | каждый вызов возвращает `ok: true` |
+| `requires: python_models` | на складе фикстуры (PGlite) python-модели не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: `register_native_model({ …, dry_run: true })` — стадии рендерятся, цепочка моделей раскладывается, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после; плюс наличие `read_first`, `hack`, `notes` |
 
 Следствия для автора: имена событий, свойств и атрибутов в payload должны существовать **в
 фикстуре** (`test/integration/fixtures/catalog.yml`), а не только в проде — иначе рецепт не

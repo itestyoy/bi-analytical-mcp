@@ -360,7 +360,7 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   assert.match(bq.guide, /NEVER sklearn/);
   assert.match(bq.guide, /stay in COLUMN EXPRESSIONS/);
   assert.match(bq.guide, /apply\/map/);
-  assert.match(bq.guide, /THE RIGHT FORM PER TASK/, 'the right form for each task is in the description itself');
+  assert.match(bq.guide, /THE RIGHT FORM PER OPERATION/, 'the right form for each operation is in the description itself');
   // the guide names the FAILURE, not just the property: unordered head/tail raises, it does not
   // quietly return an arbitrary slice
   assert.match(bq.guide, /ordering_mode="partial"/);
@@ -550,12 +550,17 @@ test('the stage description itself carries the runtime rules and the right form 
 // A worked recipe beats prose: the caller has to know they exist BEFORE writing a function, so the
 // ids are named in the stage description itself and the guide points at them. Wired from the
 // deployment's own recipe file — a deployment that ships none says nothing.
+//
+// They are per APPROACH, not per business task: each one is the correct form of a single move on
+// the frame (a lookup, a per-group value, a top-N, a threshold, a prediction), so a real question
+// is assembled from several. Hence every id must be reachable — a caller that can only find the
+// one nearest its wording would miss the others its function needs.
 test('the stage description and the guide send the caller to this deployment\'s python recipes', async (t) => {
   if (skipNoPy(t)) return;
   const { loadRecipes } = await import('../../src/recipes.js');
   const recipes = loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url)));
   const ids = recipes.idsRequiring('python_models');
-  assert.ok(ids.length >= 3, 'the shipped recipes cover the common python tasks');
+  assert.ok(ids.length >= 3, 'the shipped recipes cover the frame approaches of this runtime');
 
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };

@@ -560,7 +560,7 @@ function semanticIndexSchema(catalog) {
       recipe: { type: 'string', description: 'Recipe id, from the overview.' },
     }),
     view('{ guide }', 'VIEW { guide }: HOW to approach a question — the analyst workflow and IF/DO routing; pass a task family to narrow it.', ['guide'], {
-      guide: { type: ['boolean', 'string'], description: 'true for the whole guide, a task family name, or "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per task).' },
+      guide: { type: ['boolean', 'string'], description: 'true for the whole guide, a task family name, or "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation).' },
     }),
   ];
   return {

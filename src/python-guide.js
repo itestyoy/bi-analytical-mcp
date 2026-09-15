@@ -209,13 +209,13 @@ export function pythonAuthoringGuide(profile, recipeIds = []) {
   return {
     runtime: profile.key,
     frame: profile.native,
-    note: 'How to write a python stage for THIS warehouse runtime: the constraints and why they exist, then one worked example per task. `do` / `avoid` are the lines of ONE declared function over `df` — the frame dbt.ref() returns. The same rules, compressed, are in the python stage description.',
+    note: 'How to write a python stage for THIS warehouse runtime: the constraints and why they exist, then one worked example per OPERATION. `do` / `avoid` are the lines of ONE declared function over `df` — the frame dbt.ref() returns. The same rules, compressed, are in the python stage description.',
     ...book,
     modelling: profile.ml || undefined,
     ...(recipeIds.length ? {
       recipes: {
         ids: recipeIds,
-        note: 'READ ONE FIRST — each is a COMPLETE, compiling payload for a common python task (its SQL stages, its declared functions, its output columns) plus the technique to generalise it. Adapting one is faster and safer than writing a stage from scratch.',
+        note: 'READ ONE FIRST. These are not per-business-task templates: each is ONE APPROACH — the correct form of a single move on this runtime (a lookup, a per-group value, a top-N, a threshold, a prediction, a cached intermediate) as a COMPLETE compiling payload, with `approach` = the form that works, `instead_of` = the form that raises and why, and `hack` = how to generalise it. A real question usually combines several: pick one per move you need. Listed side by side under `tasks` in semantic_index({ guide: true }).',
         fetch: `semantic_index({ recipe: '${recipeIds[0]}' })`,
       },
     } : {}),
@@ -237,10 +237,10 @@ export function pythonRulesText(key, recipeIds = []) {
   const lines = book.examples.map((e) => e.line).filter(Boolean);
   return `RULES FOR ${key.toUpperCase()} — ${book.runs_where} `
     + `${rules.map((r, i) => `(${i + 1}) ${r}`).join('; ')}. `
-    + `THE RIGHT FORM PER TASK — ${lines.join('; ')}. `
+    + `THE RIGHT FORM PER OPERATION — ${lines.join('; ')}. `
     + `${book.stage_form || ''} `
     + (recipeIds.length
-      ? `READ A RECIPE BEFORE YOU WRITE: this deployment ships worked, COMPILING payloads for the common python tasks — ${recipeIds.join(', ')} — fetch the closest one with semantic_index({ recipe: "<id>" }) and adapt it instead of writing a stage from scratch; each carries its SQL stages, its functions, its output columns and the technique to generalise it. `
+      ? `READ A RECIPE BEFORE YOU WRITE: this deployment ships one COMPILING payload PER APPROACH — not per business task, but the correct form of a single move on this runtime, each with the form that raises beside it and the technique to generalise it: ${recipeIds.join(', ')}. A real question combines several; fetch each with semantic_index({ recipe: "<id>" }) (they are also listed together under \`tasks\` in semantic_index({ guide: true })) and adapt rather than writing a stage from scratch. `
       : '')
     + `The same guide with the reasoning behind each rule and the full examples: semantic_index({ guide: "python" }).`;
 }

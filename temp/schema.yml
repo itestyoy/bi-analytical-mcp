@@ -1,0 +1,2285 @@
+version: 2
+
+# MCP catalog expressed as dbt model-schema YAML. The five data sources are
+# described as ordinary dbt models with `columns`; everything MCP-specific lives
+# under `meta.mcp` (model-level and column-level). The loader (src/catalog.js)
+# transforms this into the internal registry. There are FIVE models, each addressed by
+# its meta.mcp.role, and each a thin view over a finished bi-dbt prod table declared in
+# sources.yml:
+#   events       fct_analytics_events   product events   (is_event_name + is_time)
+#   crashlytics  fct_stability_events   crash reports — a SECOND, EQUAL events source
+#   users        dim_users              one row per player per install-validity interval
+#   experiments  fct_experiment_assignments  one row per player x experiment
+#   acquisition  fct_player_acquisition MEASURES source: is_time + measures, NO event_name
+# The two events sources are equal, not nested: each has its own known_events, its own
+# primary_entity and its own place in the value index, so the source is always a separate
+# argument — semantic_index({ source, event }), build_native_model({ source }) — never
+# glued onto a name.
+# The parsing/attribution already happened upstream — we DO NOT re-parse anything;
+# we take the ready, flattened columns as-is and only re-shape (rename role columns).
+#
+# Descriptions are written for an AI consumer: each one states what the field is,
+# which event(s) it appears on, its unit/allowed values, and any gotchas. The
+# event taxonomy is documented in Confluence (space PA, "Кастомные аналитические
+# события (с девайса игрока)") and covers a portfolio of word/puzzle games
+# (Fillwords, Jigsawgram, Relax Puzzles, Sky Words, Sudoku Master, Tile Trip,
+# Word Pizza, Word Search Sea, Word Spells).
+#
+# NAMING: hierarchical names use `_of_` (leaf-first), NEVER `__` — MetricFlow
+# reserves `__` as the entity/dimension separator. The upstream payload field
+# event_data.additional_info.network is the column `network_of_additional_info_of_event_data`;
+# envelope main_data.app_id is `app_id_of_main_data`; the grain key is `internal_player_id`.
+# (Alias the physical columns to these names in the dbt model.)
+#
+# IMPORTANT for the AI consumer: the envelope columns (*_of_main_data, *_of_device_info,
+# *_of_state) are present on EVERY event. Each *_of_event_data payload property, by
+# contrast, is populated only on some events and reads NULL on the rest — WHICH events is
+# MEASURED by the value index per source, not declared here. Always scope by event_name
+# before using a payload field; do not assume it exists on every row.
+#
+# Types come from the NATIVE dbt `data_type` (date/timestamp -> time dimension,
+# else categorical) — not from meta. On a dimension model every non-entity column
+# is a groupable dimension automatically. meta.mcp only carries what dbt has no
+# native field for:
+#   entity:        { name, type: primary|foreign }  -> entity / join key
+#   entities:      { <rel>: { type, key: [...] } }   -> MODEL-level join key, declared once
+#                                                      and read by both paths. The caller
+#                                                      NEVER writes the path: an attribute
+#                                                      is addressed where it lives —
+#                                                      group_by: [{ model, attribute }] —
+#                                                      and the server derives the join from
+#                                                      these keys (`via` only when several
+#                                                      relationships lead to one model).
+#                                                      `variants` splits one relationship
+#                                                      across alternative key columns
+#   measure:       true | { unit, label, description, agg, name }
+#                                                   -> the column is an AMOUNT: aggregatable
+#                                                      by any function the caller picks, and
+#                                                      therefore NOT groupable and not
+#                                                      value-indexed. `agg` is opt-in and
+#                                                      additionally publishes a governed
+#                                                      measure with the function fixed
+#   measures:      { <name>: { expr, unit, ... } }   -> MODEL-level aggregatable EXPRESSION
+#                                                      over the columns; function likewise
+#                                                      not fixed
+#   dimension:     false                            -> a real column a pipeline can
+#                                                      reference, but NOT a groupable
+#                                                      attribute
+#   index:         false                            -> groupable, but skip value profiling
+#                                                      (ids)
+#   is_time:       true (+ granularity, default day) -> the event time axis
+#   is_event_name: true                             -> the event_name column
+#   dimension:     {}                               -> mark an events-fact column groupable
+#   dimension:     { bundle: true }                 -> the app/bundle identifier column: groupable
+#                                                      AND the axis for per-app coverage
+#                                                      (semantic_index({ bundle }): which payload
+#                                                      fields are populated vs empty per app)
+#   array:         { items|fields, encoding }       -> an array column (encoding: native|json) — unnestable
+#   property:      true                             -> a flat payload column IS an event
+#                                                      property. Which events populate it,
+#                                                      what values it takes and how often it
+#                                                      is empty are all MEASURED by the
+#                                                      index — never declared
+#
+# The grain / join key across all five models is `internal_player_id` (an INT64
+# surrogate id present on the prod events fact, stability events, installs and
+# experiments tables).
+# The events payload is ALREADY flattened upstream into real typed columns
+# (*_of_event_data), referenced directly — there is no raw JSON payload column. The
+# anchor (events fact) is detected from its is_event_name + is_time columns.
+#
+# The warehouse dialect is NOT stored here — it is runtime config, resolved from
+# the WAREHOUSE_DIALECT env var or the dbt profile's output `type`.
+
+models:
+  - name: fct_analytics_events
+    description: >
+      Client analytics events fact: one row per tracked in-game event sent from
+      the player's device. Every event shares an envelope (main_data context,
+      device_info, and a state snapshot of the player) plus a per-event payload,
+      all flattened upstream into real typed columns (*_of_event_data). Use
+      event_name to pick an event type, device_time for the time axis, and
+      internal_player_id to join to dim_users / fct_experiment_assignments.
+      Envelope columns (*_of_main_data, *_of_device_info, *_of_state) exist on every
+      event; each *_of_event_data field only applies to the events in its
+      meta.mcp.events array and is NULL elsewhere — always scope by event_name first.
+
+      DATA SCOPE — THE LAST 90 DAYS ONLY. This model is a view over the prod events
+      table restricted to `date(event_date) >= current_date - interval 90 day`, so it
+      holds a rolling 90-day window, not full history. Anything older simply is not
+      here: a question about last year, a year-over-year comparison, or a cohort that
+      installed more than 90 days ago will come back empty or truncated rather than
+      wrong-looking, so state that limit in the answer instead of reporting the
+      shortfall as a real drop. Note the ASYMMETRY: dim_users and
+      fct_experiment_assignments are NOT windowed and cover full history, so an install
+      cohort can exist with zero events visible here purely because of the window.
+      The view also applies two filters you must not redo: duplicate events are already
+      removed (no need to dedupe on event_id_of_main_data), and rows without an
+      internal_player_id are already dropped.
+
+      AD EVENT FLOW — the reference chain, per the ad taxonomy spec. Formats differ, and
+      that difference drives every ad funnel.
+
+      * Session start: ad_initialized reports whether ad init succeeded and which ad units
+        are available (from the built-in default config and from remote config).
+      * INTERSTITIAL / REWARDED:
+        ad_requested (tracking_id is minted here, right before Load)
+        -> ad_loaded (success / failure / expired)
+        -> ad_available (readiness check before showing)
+        -> ad_started (right before Show)
+        -> ad_revenue (the provider counts the impression)
+        -> ad_finished (display ends).
+        AppHarbr quality events — ad_blocked / ad_incident / ad_analyzed — can interrupt
+        the chain at the load, ready or show step. ad_validated marks an ad unit valid or
+        invalid.
+      * BANNER: no ad_requested / ad_loaded / ad_available / ad_started. The display
+        begins at ad_revenue, which also mints the tracking_id; ad_redirected fires when
+        the screen changes during the display; ad_finished ends it. The previous banner
+        counts as finished the moment the next ad_revenue arrives.
+
+      tracking_id spans one request-to-show cycle and is released by ad_loaded
+      failure/expired, ad_blocked and ad_finished. bidfloor_info accompanies ad_loaded /
+      ad_started / ad_revenue / ad_finished, but only while dynamic bidfloors are active
+      (they require manual-refresh mode; manual refresh alone does not imply bidfloors).
+
+      Not every app version and build emits the full chain — newer events and payload
+      fields roll out gradually. Check the live index for what is actually populated for
+      the app and period in question instead of assuming either presence or absence.
+
+      TIME METRICS — two distinct concepts, never conflate them:
+
+      * SESSION TIME = all time with the app open, whatever it was spent on
+        (gameplay, ads, menus, shop). The engagement metric. Either
+        timestamp_diff(max(device_time), min(device_time), second) per
+        (internal_player_id, session_number) clamped to [0, 43200], or
+        session_duration_of_event_data on end_session (client-reported, undercounts
+        because end_session is lost on crashes). Average session length divides by
+        the count of new_session events.
+      * PLAYTIME = gameplay time spent completing levels/puzzles — the DIFFICULTY
+        signal, not an engagement metric.
+        greatest(least(cast(complete_time_of_event_data as float64), 3600), 0)
+        on event_name IN ('level_completed', 'puzzle_completed') only. Per level,
+        prefer MEDIAN over AVG (long-tailed), and read alongside win rate
+        (result_of_event_data) and attempts (open_number_of_event_data).
+
+      Ad watching (display_duration_of_event_data) is inside session time and outside
+      playtime, so "gameplay vs ads" contrasts the two.
+
+      NAMING TRAP: playtime_of_main_data is NOT playtime in this sense — it is a
+      cumulative counter of SESSION TIME, advancing by session_duration on each session.
+
+      RETENTION DAY — measured in whole 24-HOUR buckets from the install moment, NOT
+      in calendar days. There is no retention column on this fact: it requires a JOIN
+      to dim_users for install_date, then the whole-24h-day distance from install_date
+      to device_time.
+
+      HOW TO COMPUTE IT — use the pipeline's built-in primitive, do NOT hand-roll date
+      math or cast anything yourself:
+        compute op=elapsed_days
+          from = install_date   (the install moment)
+          to   = device_time    (the event moment)
+    meta:
+      mcp:
+        role: events           # the logical name the tools use (the dbt model can be named anything)
+        primary_entity: event  # the grain of the fact (no physical key column)
+        partition_column: event_date   # cost hint: the physical partition — always constrain it (or device_time)
+        known_events:
+          # activity
+          - first_launch
+          - new_session
+          - end_session
+          # levels / puzzles / games
+          - level_started
+          - fragment_started
+          - fragment_finished
+          - level_completed
+          - word_selected
+          - battle_of_wits_started
+          - battle_of_wits_finished
+          - puzzle_started
+          - puzzle_part_completed
+          - puzzle_completed
+          # economy
+          - currency_income
+          - currency_outcome
+          # in-game timed events
+          - event_start
+          - event_prize
+          - event_end
+          # advertising
+          - ad_initialized
+          - ad_requested
+          - ad_loaded
+          - ad_available
+          - ad_validated
+          - ad_blocked
+          - ad_incident
+          - ad_analyzed
+          - ad_started
+          - ad_revenue
+          - ad_finished
+          - ad_freezed
+          - ad_redirected
+          # in-app purchases
+          - shop_opened
+          - iap_started
+          - iap_purchase_failed
+          - iap_purchase_completed
+          # interface
+          - screen_changed
+          # mechanics
+          - progress_restored
+          - piggy_bank_opened
+          - tutorial
+          - wheel_spin
+        entities:
+          # The flat side of the crashlytics fact's `ad_funnel` variants: one tracking id
+          # column here answers all three formats. Pipeline-only — a tracking spans
+          # several events, so neither side is unique on the key and nobody owns it.
+          ad_funnel: { type: foreign, key: [tracking_id_of_event_data, internal_player_id] }
+    columns:
+      # ---- role columns ---------------------------------------------------
+      - name: internal_player_id
+        data_type: integer
+        description: >
+          Stable internal player id (surrogate hash of appsflyer_id + bundle_id +
+          platform). The canonical join key from events to dim_users and
+          fct_experiment_assignments. Present on every event.
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }
+      - name: session_number
+        data_type: integer
+        description: >
+          Per-player session counter that increments on each new_session. Present
+          on every event. Use it to order a player's sessions or aggregate per session.
+          NOT globally unique — a session is identified by
+          (internal_player_id, session_number), so always pair the two when grouping.
+          This pair is the grain for SESSION TIME:
+          timestamp_diff(max(device_time), min(device_time), second) clamped to 12
+          hours; a session can straddle midnight and therefore two event_date
+          partitions, so widen the date filter by a day when measuring sessions.
+        meta:
+          mcp:
+            entity: { name: session, type: foreign }
+      - name: device_time
+        data_type: timestamp
+        description: >
+          When the event happened on the player's device, normalized to the
+          player's time zone. Present on every event. This is the metric time axis.
+        meta:
+          mcp:
+            is_time: true   # granularity defaults to day
+      - name: event_name
+        data_type: string
+        description: >
+          The event type. Always one of known_events. Filter on this first to scope a query to a
+          specific event.
+        meta:
+          mcp:
+            is_event_name: true
+      - name: event_version
+        data_type: string
+        description: >
+          Schema version of the event payload: absent (NULL) on the initial
+          iteration of an event, then a counter starting at 1. Some payload
+          fields only exist from a given version (e.g. currency_income gained
+          monetization_type in v1; ad events moved status from ad_started to
+          ad_finished in later versions).
+        meta:
+          mcp:
+            dimension: {}   # groupable on every event (filter/segment by schema version)
+      - name: event_date
+        data_type: timestamp
+        description: >
+          Day-truncated event date. Present on every event. It is the column the model's 90-day
+          window is applied to, so its minimum value is current_date - 90 days: no filter can
+          reach data older than that (see DATA SCOPE in the model description).
+        meta:
+          mcp:
+            dimension: {}   # groupable (daily buckets); device_time remains the metric_time axis
+
+      # ---- envelope: main_data (present on EVERY event) -------------------
+      - name: bundle_id
+        data_type: string
+        description: "Resolved store bundle id of the app the event came from. Present on every event."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            dimension: { bundle: true }   # the APP identifier: groupable on every event (segment by app without a users-join) AND drives per-app coverage in semantic_index({ bundle }) — which properties are populated vs empty for each app
+      - name: app_id_of_main_data
+        data_type: string
+        description: >
+          Short internal game code — a stable per-game identifier, distinct from the store
+          bundle_id. Present on every event.
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            dimension: {}
+      # NOTE: platform/country/media_source/ab_test_group/install_* below are the
+      # PER-EVENT envelope values physically carried on every event. The canonical
+      # per-player versions live on dim_users (role: users) — reach those by addressing the
+      # attribute where it lives: group_by: [{ model: 'users', attribute: 'country' }].
+      # Use the fact columns when you want the value as it was on the event itself.
+      - name: platform_of_main_data
+        data_type: string
+        description: >
+          Device OS family the event was sent from, lower-cased. Present on every event.
+          Per-event envelope value; for the install-time platform of the player use
+          dim_users.platform.
+        meta:
+          mcp:
+            dimension: {}
+      - name: media_source_of_main_data
+        data_type: string
+        description: >
+          Acquisition channel / attribution source carried on the event. Present on every event.
+          Per-event envelope value; the canonical per-player attribution lives on
+          dim_users.media_source.
+        meta:
+          mcp:
+            dimension: {}
+      - name: appsflyer_id_of_main_data
+        data_type: string
+        description: "AppsFlyer device id (client-stored attribution id). Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+            index: false   # groupable, but an id has no value set worth profiling
+      - name: appmetrica_id_of_main_data
+        data_type: string
+        description: "AppMetrica device id. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+            index: false   # groupable, but an id has no value set worth profiling
+      - name: active_day_of_main_data
+        data_type: integer
+        description: >
+          Ordinal calendar active-day of the player, counting from 1 on the first
+          active day. Present on every event. Useful as a lifetime/retention axis.
+        meta:
+          mcp:
+            dimension: {}
+      - name: playtime_of_main_data
+        data_type: numeric
+        description: >
+          Cumulative lifetime SESSION TIME of the player — all time with the app open, including
+          ad views and menus. Despite the name this is NOT playtime in the difficulty sense: it
+          is the running total of session durations, advancing by session_duration on each
+          session. Present on every event. A monotonically growing counter, so NOT additive:
+          never SUM it. Use MAX per internal_player_id for the lifetime total, or MAX - MIN per
+          player for time accumulated inside a window (prefer MAX over "latest value" — the
+          counter can drop on reinstalls and restored progress). No upstream production measure
+          is built on this field.
+        meta:
+          mcp:
+            dimension: {}
+            unit: seconds
+      - name: build_version_of_main_data
+        data_type: string
+        description: "Current app version (semantic version string) at event time. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: build_number_of_main_data
+        data_type: string
+        description: "Current app build number at event time. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: install_build_version_of_main_data
+        data_type: string
+        description: >
+          App version the player originally installed, carried on the event.
+          Present on every event. For the canonical install record use
+          dim_users.app_version.
+        meta:
+          mcp:
+            dimension: {}
+      - name: install_build_number_of_main_data
+        data_type: string
+        description: "App build number the player originally installed, carried on the event. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: install_package_of_main_data
+        data_type: string
+        description: >
+          Android installer / vendor package that initiated the install; empty on
+          iOS, 'undefined' for dev/sideloaded APKs. Present on every event.
+        meta:
+          mcp:
+            dimension: {}
+      - name: is_valid_install_of_main_data
+        data_type: string
+        description: "TRUE when install_package = com.android.vending, else FALSE. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: is_test_of_main_data
+        data_type: string
+        description: "TRUE when the player is an internal tester; exclude for production analytics."
+        meta:
+          mcp:
+            dimension: {}
+      - name: event_id_of_main_data
+        data_type: string
+        description: "Unique client-generated id of this event (used for dedup upstream). Present on every event."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            dimension: false   # technical column: readable in a pipeline, not a group-by attribute
+      - name: time_zone_of_main_data
+        data_type: string
+        description: "Player time-zone offset (±hh:mm) used to localize device_time. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: device_time_ms_of_main_data
+        data_type: integer
+        description: "Raw client event time as a local UNIX timestamp in milliseconds. Present on every event."
+
+        meta:
+          mcp:
+            dimension: false   # technical column: readable in a pipeline, not a group-by attribute
+      # ---- envelope: device_info (present on EVERY event) -----------------
+      - name: cpu_type_of_device_info
+        data_type: string
+        description: "Device CPU type. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: device_model_of_device_info
+        data_type: string
+        description: "Device model identifier. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: gpu_of_device_info
+        data_type: string
+        description: "Device GPU name. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: graphics_memory_size_of_device_info
+        data_type: string
+        description: "Graphics memory size in MB (string). Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: os_version_of_device_info
+        data_type: string
+        description: "Operating-system version of the device. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: resolution_of_device_info
+        data_type: string
+        description: "Screen resolution string. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: system_memory_size_of_device_info
+        data_type: string
+        description: "System RAM size in MB (string). Present on every event."
+
+        meta:
+          mcp:
+            dimension: {}
+      # ---- envelope: state — player snapshot at event time (present on EVERY event) ----
+      - name: language_of_state
+        data_type: string
+        description: "In-game language (IETF code) at event time. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: level_number_of_state
+        data_type: string
+        description: "Last started level of the main progression (chain=common). Present on every event. Starts at 0 (historical, unlike most counters). Freezes once the player reaches the last main level until new main levels ship."
+        meta:
+          mcp:
+            dimension: {}
+      - name: level_fragment_of_state
+        data_type: string
+        description: "Last started sub-level (fragment) of the main-progression level, numbered from 1. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: puzzles_completed_of_state
+        data_type: string
+        description: "Total puzzles/levels the player has completed so far (Relax Puzzles, Jigsawgram, Sudoku Master). Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: relax_level_of_state
+        data_type: string
+        description: "Current relax progress in percent (Relax Puzzles). Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: skill_points_of_state
+        data_type: string
+        description: "Player's accumulated skill/mastery points — game-specific: Sudoku Master skill, Word Pizza mastery, Word Search Sea knowledge/rating/shine, Word Spells combo rating. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: chosen_skill_level_of_state
+        data_type: string
+        description: "Player-selected difficulty (Sudoku): not_assigned / novice / intermediate / expert."
+        meta:
+          mcp:
+            dimension: {}
+      - name: active_segments_of_state
+        data_type: string
+        description: "Firebase remote-config segments the player is in, formatted 'Segmentation: segment', multiple comma-separated alphabetically. Distinct from the bi-console segments (upstream main_data.active_segments, not exposed in this model). Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: coins_balance_of_state
+        data_type: string
+        description: "Soft-currency (coins) balance at event time. Present on every event."
+        meta:
+          mcp:
+            dimension: {}
+      - name: lives_balance_of_state
+        data_type: string
+        description: "Lives balance (Tile Trip; deprecated in newer projects)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: bonus_lives_balance_of_state
+        data_type: string
+        description: "Bonus-lives balance (Sudoku Master)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: spins_of_state
+        data_type: string
+        description: "Wheel/roulette spin balance."
+        meta:
+          mcp:
+            dimension: {}
+      - name: booster_all_notes_balance_of_state
+        data_type: string
+        description: "Balance of the 'all notes' booster (Sudoku Master)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: hint_open_first_letter_balance_of_state
+        data_type: string
+        description: "Balance of the 'open first letter' hint — in-game name varies: letter (Fillwords), bulb (Sky Words), hint (Word Pizza), seahorse (Word Search Sea), lightning (Word Spells)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: hint_open_any_letter_balance_of_state
+        data_type: string
+        description: "Balance of the 'open any letter' hint — finger (Sky Words), pointer (Word Pizza), crab (Word Search Sea), wand (Word Spells)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: hint_open_several_letters_balance_of_state
+        data_type: string
+        description: "Balance of the 'open several letters' hint — lightning (Word Pizza), jellyfish (Word Search Sea), rocket (Word Spells)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: hint_open_cell_balance_of_state
+        data_type: string
+        description: "Balance of the 'open cell' hint (Sudoku Master)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: hint_magnet_balance_of_state
+        data_type: string
+        description: "Balance of the 'magnet' hint (Relax Puzzles, Tile Trip)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: hint_cancel_balance_of_state
+        data_type: string
+        description: "Balance of the 'cancel' hint (Tile Trip)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: hint_shuffle_balance_of_state
+        data_type: string
+        description: "Balance of the 'shuffle' hint (Tile Trip)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: hint_clear_balance_of_state
+        data_type: string
+        description: "Balance of the 'clear' hint (Tile Trip; deprecated)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: hint_extra_slot_balance_of_state
+        data_type: string
+        description: "Balance of the '+1 slot' (extra slot) hint (Tile Trip)."
+        meta:
+          mcp:
+            dimension: {}
+      - name: auto_openers_balance_of_state
+        data_type: string
+        description: "Balance of auto-openers — booster (Fillwords), trains (Word Pizza), sea star (Word Search Sea), firefly (Word Spells)."
+
+        meta:
+          mcp:
+            dimension: {}
+      # ---- event_data: advertising ----------------------------------------
+      # (each field below carries a value ONLY for the events in meta.mcp.events)
+      - name: ad_type_of_event_data
+        data_type: string
+        description: >
+          Ad format. Formats follow DIFFERENT event chains, which matters for every ad
+          funnel: interstitial and rewarded run
+          ad_requested -> ad_loaded -> ad_available -> ad_started -> ad_finished, while a
+          BANNER emits essentially only ad_finished and ad_redirected — it has no
+          ad_requested/ad_loaded/ad_started at all (a negligible trickle of ad_available
+          aside). So never build request/load/fill funnels across formats: for banners
+          the denominator does not exist, and mixing them in silently understates every
+          rate. Filter to interstitial+rewarded for funnel work and treat banners apart.
+          Beware of volume asymmetry when reading totals: banner dominates ad_finished by
+          roughly an order of magnitude over interstitial and rewarded combined.
+          Besides the three canonical formats, legacy values rewarded_video and leader
+          occur on ad_started/ad_finished, and a mis-encoded 'ınterstitial' (dotless i)
+          appears on ad_loaded — normalize these rather than letting them split a
+          group-by.
+        meta:
+          mcp:
+            property: true
+      - name: placement_of_event_data
+        data_type: string
+        description: >
+          In-app ad placement — the trigger point in the game the impression was requested for.
+        meta:
+          mcp:
+            property: true
+      - name: status_of_event_data
+        data_type: string
+        description: >
+          Result of the ad action, with a different value set per event. ad_loaded: success /
+          failure / expired — 'expired' means the creative expired and was reloaded, and for
+          analysis it is equivalent to failure (both end the attempt), so group them together
+          unless the question is specifically about expiry. ad_available: ready / no_advertise /
+          no_internet. ad_finished: success / display_failed / crash / timeout / placeholder —
+          crash carries crash_info, display_failed carries additional_info. Everything other
+          than success means the player saw no impression, and revenue is 0 there. The field is
+          NOT set at all on banners and on the legacy ad types: it reads NULL there, so
+          filtering status = 'success' silently excludes those impressions — never filter on
+          status when banners are in scope. Moved from ad_started to ad_finished in v1.
+        meta:
+          mcp:
+            property: true
+      - name: revenue_of_event_data
+        data_type: numeric
+        description: >
+          Ad revenue, ALREADY IN USD — never divide it by 100, it is not cents. It is carried at
+          several points of one impression cycle and is the SAME money each time, not additive:
+          ad_loaded and ad_started report the price of the loaded creative, ad_revenue is the
+          moment the provider counts the impression, and ad_finished reports it once display
+          ends. Summing across those events multiplies the same revenue, so pick exactly one
+          event. To match reported ad revenue, compute it this way: ad_finished only, cast to
+          float64, clamp each row to [0,1] USD per impression, then sum (an empty sum reads as
+          0). The clamp winsorizes — a row above the cap becomes 1.0 and is KEPT — so filtering
+          those rows out is not a substitute for clamping them.
+        meta:
+          mcp:
+            unit: usd
+            property: true
+      - name: display_duration_of_event_data
+        data_type: string
+        description: >
+          Seconds the ad was on screen, counted from ad_started; 0 if display_failed;
+          includes time away if the player backgrounded (is_user_returned=False).
+          Ad time — inside SESSION TIME and outside PLAYTIME, so gameplay-vs-ads
+          splits pair it with complete_time_of_event_data. Clamp to [0, 150] seconds
+          when aggregating (the upstream measure does), since backgrounded
+          impressions produce arbitrarily large values.
+        meta:
+          mcp:
+            unit: seconds
+            property: true
+      - name: is_clicked_of_event_data
+        data_type: string
+        description: >
+          Whether the player clicked the ad. False if the player backgrounded and
+          returned in a later session. On ad_finished it also captures a click on the
+          overlay that closes the ad. Note the two events differ in scope: ad_redirected
+          is emitted for BANNERS only — it fires when the screen changes during a banner
+          display, including without any click by the player — so is_clicked on that
+          event is not by itself evidence of a click-through.
+        meta:
+          mcp:
+            property: true
+      - name: is_rewarded_of_event_data
+        data_type: string
+        description: "Whether the impression was a rewarded ad."
+        meta:
+          mcp:
+            property: true
+      - name: is_reward_received_of_event_data
+        data_type: string
+        description: "Whether the rewarded-ad reward was granted; always False for banners; False if the player backgrounded and returned in a later session."
+        meta:
+          mcp:
+            property: true
+      - name: is_user_returned_of_event_data
+        data_type: string
+        description: "Whether the player returned to the app after the ad."
+        meta:
+          mcp:
+            property: true
+      - name: tracking_id_of_event_data
+        data_type: string
+        description: >
+          Id of one request-to-show cycle, correlating the chain
+          ad_requested -> ad_loaded -> ad_started -> ad_finished (with
+          ad_analyzed/ad_incident/ad_blocked in between). Generated at ad_requested and
+          RETIRED at the end of the cycle: ad_loaded with failure/expired, ad_blocked,
+          and ad_finished all release it. A retry that happens before any answer arrives
+          re-sends ad_requested with the SAME tracking_id, so a tracking_id can carry
+          several ad_requested rows — count cycles with COUNT(DISTINCT tracking_id), not
+          with COUNT(ad_requested), or retries inflate the funnel entry. For banners the
+          id is minted at the start of the display instead, since they have no
+          ad_requested. Added in v1.
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: substitution_reason_of_event_data
+        data_type: string
+        description: >
+          Why a substitute ad was shown: set when an INTERSTITIAL was displayed in place
+          of the rewarded ad that was asked for. Present only on substituted impressions,
+          so a non-NULL value marks the swap — useful when reward-delivery or rewarded
+          fill is under investigation, since those impressions never granted a reward.
+        meta:
+          mcp:
+            property: true
+      - name: start_watch_time_of_event_data
+        data_type: timestamp
+        description: "Local-device UNIX timestamp when ad display started; 0 if status=display_failed."
+        meta:
+          mcp:
+            property: true
+      - name: creative_id_of_additional_info_of_event_data
+        data_type: string
+        description: "Ad creative id (mediation metadata; populated when status = success)."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: ad_unit_of_additional_info_of_event_data
+        data_type: string
+        description: "Ad unit id requested from the mediation SDK."
+        meta:
+          mcp:
+            property: true
+      - name: network_of_additional_info_of_event_data
+        data_type: string
+        description: >
+          Ad network that served the creative. Populated when status = success.
+        meta:
+          mcp:
+            property: true
+      - name: network_code_of_additional_info_of_event_data
+        data_type: string
+        description: "Error code from the ad network (populated when status = failure / display_failed)."
+        meta:
+          mcp:
+            property: true
+      - name: network_message_of_additional_info_of_event_data
+        data_type: string
+        description: "Error message from the ad network (populated when status = failure / display_failed)."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: test_name_of_additional_info_of_event_data
+        data_type: string
+        description: "Applovin split-tool A/B test name (monetization-side experiment, e.g. 2602_sw_gp_rv_aa_test); distinct from product-side A/B assignments tracked on the experiments source (role: experiments)."
+        meta:
+          mcp:
+            property: true
+      - name: waterfall_latency_of_additional_info_of_event_data
+        data_type: string
+        description: "Mediation waterfall latency in milliseconds."
+        meta:
+          mcp:
+            unit: seconds
+            property: true
+      - name: waterfall_name_of_additional_info_of_event_data
+        data_type: string
+        description: "Name of the mediation waterfall used."
+        meta:
+          mcp:
+            property: true
+      - name: max_code_of_additional_info_of_event_data
+        data_type: string
+        description: "Applovin MAX error code (populated when status = failure / display_failed)."
+        meta:
+          mcp:
+            property: true
+      - name: max_message_of_additional_info_of_event_data
+        data_type: string
+        description: "Applovin MAX error message (populated when status = failure / display_failed)."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: response_message_of_additional_info_of_event_data
+        data_type: string
+        description: "Server/mediation response message (deprecated; struck through in the events taxonomy)."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: response_type_of_additional_info_of_event_data
+        data_type: string
+        description: "Server/mediation response type (deprecated; struck through in the events taxonomy)."
+        meta:
+          mcp:
+            property: true
+      - name: should_load_new_ad_of_additional_info_of_event_data
+        data_type: string
+        description: "AppHarbr hint on whether to load a fresh ad after a block."
+        meta:
+          mcp:
+            property: true
+      - name: step_of_additional_info_of_event_data
+        data_type: string
+        description: "AppHarbr pipeline step where the block/analyze occurred: load (after ad_requested, before ad_loaded), ready (after ad_loaded, before ad_started), show (after ad_started, before ad_finished)."
+        meta:
+          mcp:
+            property: true
+      - name: user_defined_application_of_additional_info_of_event_data
+        data_type: string
+        description: "Bundle id of the app advertised in the blocked/reported creative (AppHarbr)."
+        meta:
+          mcp:
+            property: true
+      - name: user_defined_domain_of_additional_info_of_event_data
+        data_type: string
+        description: "Domain associated with the ad's resources (AppHarbr)."
+        meta:
+          mcp:
+            property: true
+      - name: block_reasons_of_additional_info_of_event_data
+        data_type: array
+        description: "AppHarbr reasons the ad was blocked (string array)."
+        meta:
+          mcp:
+            array: { items: string }
+      - name: report_reasons_of_additional_info_of_event_data
+        data_type: array
+        description: "AppHarbr reasons the ad was reported as suspicious but not blocked (string array)."
+        meta:
+          mcp:
+            array: { items: string }
+      - name: analyze_results_of_additional_info_of_event_data
+        data_type: array
+        description: "AppHarbr ad-analysis results (string array)."
+        meta:
+          mcp:
+            array: { items: string }
+      - name: type_of_crash_info_of_event_data
+        data_type: string
+        description: "Crash type captured when an ad caused a crash."
+        meta:
+          mcp:
+            property: true
+      - name: date_of_crash_info_of_event_data
+        data_type: string
+        description: "Timestamp of the ad-related crash."
+        meta:
+          mcp:
+            property: true
+      - name: msg_of_crash_info_of_event_data
+        data_type: string
+        description: "Crash message for the ad-related crash."
+        meta:
+          mcp:
+            property: true
+
+      # ---- event_data: economy --------------------------------------------
+      - name: amount_of_event_data
+        data_type: numeric
+        description: "Resource amount gained or spent."
+        meta:
+          mcp:
+            property: true
+      - name: currency_of_event_data
+        data_type: string
+        description: >
+          Two regimes depending on the event. On economy events it is the RESOURCE name (a soft
+          currency or an inventory item). On IAP events it is a 3-letter ISO 4217 currency code
+          in upper case, and it is the unit of price_in_currency_of_event_data on the same row.
+        meta:
+          mcp:
+            property: true
+      - name: value_in_coins_of_event_data
+        data_type: numeric
+        description: "Transaction value in coins - only for resources that have a coin value (soft currency, hints, auto-openers); 0 for the rest."
+        meta:
+          mcp:
+            property: true
+      - name: monetization_type_of_event_data
+        data_type: string
+        description: "How the resource was obtained/spent: free / rewarded / iap (added in v1; absent in v0)."
+        meta:
+          mcp:
+            property: true
+      - name: source_type_of_event_data
+        data_type: string
+        description: "Economy source/sink category: core, daily_level, meta, event, daily_bonus, spins, piggy_bank, offers, shop, battle."
+        meta:
+          mcp:
+            property: true
+      - name: source_name_of_event_data
+        data_type: string
+        description: >
+          Specific economy source or sink point within source_type — the exact place the
+          resource came from or went to.
+        meta:
+          mcp:
+            property: true
+
+      # ---- event_data: in-app purchases -----------------------------------
+      - name: price_in_usd_of_event_data
+        data_type: numeric
+        description: >
+          IAP price as charged by the store, before tax.
+        meta:
+          mcp:
+            unit: usd
+            property: true
+      - name: price_in_currency_of_event_data
+        data_type: numeric
+        description: >
+          IAP price in the player's local currency. The unit is NOT fixed: it is whatever
+          currency_of_event_data says on the same row, so this column must never be summed
+          across rows or mixed with price_in_usd_of_event_data.
+        meta:
+          mcp:
+            property: true
+      - name: product_id_of_event_data
+        data_type: string
+        description: "IAP product id (without the bundle_id prefix)."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: order_id_of_event_data
+        data_type: string
+        description: "Android purchase order id."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: transaction_id_of_event_data
+        data_type: string
+        description: "iOS transaction id."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: discount_of_event_data
+        data_type: numeric
+        description: "Discount percent applied to the IAP offer."
+        meta:
+          mcp:
+            property: true
+      - name: location_of_event_data
+        data_type: string
+        description: "Where the purchase was initiated (e.g. main_shop)."
+        meta:
+          mcp:
+            property: true
+      - name: location_from_of_event_data
+        data_type: string
+        description: >
+          Where the action was initiated from: for shop_opened, the screen the shop was opened
+          from; for puzzle_started, where the puzzle was launched from.
+        meta:
+          mcp:
+            property: true
+      - name: reason_of_event_data
+        data_type: string
+        description: "Reason a purchase did not complete."
+        meta:
+          mcp:
+            property: true
+      - name: with_elements_of_event_data
+        data_type: string
+        description: "What accent/highlight marked the UI element that opened the shop (e.g. badges on the shop button); not sent when there was none."
+        meta:
+          mcp:
+            property: true
+      - name: coins_in_bank_of_event_data
+        data_type: numeric
+        description: "Coins accumulated in the piggy bank when opened."
+        meta:
+          mcp:
+            property: true
+      - name: coins_limit_of_event_data
+        data_type: numeric
+        description: "Piggy-bank capacity."
+        meta:
+          mcp:
+            property: true
+      - name: purchase_number_of_event_data
+        data_type: integer
+        description: "Sequential piggy-bank purchase number."
+        meta:
+          mcp:
+            property: true
+
+      # ---- event_data: levels / puzzles / games ---------------------------
+      - name: level_id_of_event_data
+        data_type: string
+        description: "Level identifier."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: line_levels_id_of_event_data
+        data_type: string
+        description: "Level-line / level-pack id: MD5 hash of the level set in Sky Words; pack id in Word Search Sea (e.g. ru_04.2026_ver_3)."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: level_size_of_event_data
+        data_type: string
+        description: "Level size, e.g. number of letters on the board (Fillwords; battle of wits)."
+        meta:
+          mcp:
+            property: true
+      - name: level_seed_id_of_event_data
+        data_type: string
+        description: "Seed id used to generate the level board."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: chain_of_event_data
+        data_type: string
+        description: "Progression track: common = main progression, daily = daily levels, repeated = repeated levels after the main progression, battle = battle-of-wits levels."
+        meta:
+          mcp:
+            property: true
+      - name: chain_level_number_of_event_data
+        data_type: string
+        description: "Level number within its chain: from 0 in the main progression (chain=common), from 1 in other chains (order issued to the player)."
+        meta:
+          mcp:
+            property: true
+      - name: mechanics_of_event_data
+        data_type: string
+        description: "Gameplay mechanic(s) of the level, project-specific; multiple are comma-separated."
+        meta:
+          mcp:
+            property: true
+      - name: method_of_event_data
+        data_type: string
+        description: "How the level/puzzle/action was opened or paid for: level/fragment/puzzle/battle = free/ad/coins/lives; piggy_bank_opened = ad/iap; wheel_spin = ad/free (screen_changed uses method = auto/manual)."
+        meta:
+          mcp:
+            property: true
+      - name: result_of_event_data
+        data_type: string
+        description: "Outcome of a completed unit - fragment_finished/battle_of_wits_finished: win/lose; level_completed: win/lose/exit; puzzle_completed: win/restart/new_game; event_end: completed/place_#/timeout."
+        meta:
+          mcp:
+            property: true
+      - name: difficulty_of_event_data
+        data_type: string
+        description: "Difficulty of the puzzle (Sudoku Master)."
+        meta:
+          mcp:
+            property: true
+      - name: game_mode_of_event_data
+        data_type: string
+        description: "Puzzle game mode: common or daily (Sudoku Master)."
+        meta:
+          mcp:
+            property: true
+      - name: complete_time_of_event_data
+        data_type: string
+        description: >
+          PLAYTIME: clean gameplay seconds, from first entry on this attempt to
+          completion; excludes ad views, level exits and screen fades. The upstream
+          production measure is
+          sum(greatest(least(cast(complete_time_of_event_data as float64), 3600), 0))
+          restricted to event_name IN ('level_completed', 'puzzle_completed').
+          Always apply both parts: the [0, 3600] clamp (the client reports large
+          outliers for units left open in the background) and the event_name
+          restriction (the field is also sent on fragment_finished,
+          puzzle_part_completed and battle_of_wits_finished, which are sub-units of a
+          level/puzzle, so including them double-counts the same time). Only units
+          that emitted a completion event are covered — time on attempts abandoned
+          mid-level is not represented.
+        meta:
+          mcp:
+            unit: seconds
+            property: true
+      - name: open_number_of_event_data
+        data_type: integer
+        description: "How many times this level/puzzle has been opened (from 1); resets on a fresh playthrough; auto-opens (e.g. on session start) also count."
+        meta:
+          mcp:
+            property: true
+      - name: start_number_of_event_data
+        data_type: integer
+        description: "Sequential start counter (from 1)."
+        meta:
+          mcp:
+            property: true
+      - name: total_words_of_event_data
+        data_type: integer
+        description: "Total words to find on the level (Fillwords, Sky Words, Word Pizza, Word Search Sea, Word Spells)."
+        meta:
+          mcp:
+            property: true
+      - name: main_words_found_of_event_data
+        data_type: integer
+        description: "Number of main words found."
+        meta:
+          mcp:
+            property: true
+      - name: additional_words_found_of_event_data
+        data_type: integer
+        description: "Number of additional words found."
+        meta:
+          mcp:
+            property: true
+      - name: bonus_words_found_of_event_data
+        data_type: numeric
+        description: "Number of bonus words found."
+        meta:
+          mcp:
+            property: true
+      - name: wrong_words_found_of_event_data
+        data_type: integer
+        description: "Number of wrong words of 3+ letters found."
+        meta:
+          mcp:
+            property: true
+      - name: word_number_of_event_data
+        data_type: integer
+        description: "Index of the collected word."
+        meta:
+          mcp:
+            property: true
+      - name: word_name_of_event_data
+        data_type: string
+        description: "The collected word."
+        meta:
+          mcp:
+            property: true
+      - name: word_dictionary_of_event_data
+        data_type: string
+        description: "Dictionary classification of the collected word: main / additional / already_found / wrong. Only sent in projects where levels mix dictionaries."
+        meta:
+          mcp:
+            property: true
+      - name: selected_word_of_event_data
+        data_type: string
+        description: "Word the player selected during level gameplay."
+        meta:
+          mcp:
+            property: true
+      - name: pattern_of_event_data
+        data_type: string
+        description: "Letters of the level pattern in alphabetical order (Sky Words, Word Pizza, Word Search Sea, Word Spells)."
+        meta:
+          mcp:
+            property: true
+      - name: combo_points_earned_of_event_data
+        data_type: numeric
+        description: "Combo points earned on the level (Word Pizza, Word Search Sea, Word Spells)."
+        meta:
+          mcp:
+            property: true
+      - name: daily_level_score_of_event_data
+        data_type: numeric
+        description: >
+          Score earned on a daily level, in whatever reward unit that game's daily chain uses.
+        meta:
+          mcp:
+            property: true
+      - name: score_of_event_data
+        data_type: numeric
+        description: "Score achieved in the match — the sum of letters across found words."
+        meta:
+          mcp:
+            property: true
+      - name: quest_progress_of_event_data
+        data_type: string
+        description: "Progress added to the active quest by completing the level; not sent when no quest is active."
+        meta:
+          mcp:
+            property: true
+      - name: active_event_of_event_data
+        data_type: string
+        description: "Active in-game timed event(s) when the unit was played; multiple are comma-separated alphabetically; omitted when none."
+        meta:
+          mcp:
+            property: true
+      - name: event_objects_of_event_data
+        data_type: string
+        description: "Timed-event objects: count on the board at start (level_started/fragment_started), count collected at finish (fragment_finished/level_completed)."
+        meta:
+          mcp:
+            property: true
+      - name: found_after_any_hint_of_event_data
+        data_type: boolean
+        description: "Whether the word/level was solved after using any hint."
+        meta:
+          mcp:
+            property: true
+      - name: fragment_number_of_event_data
+        data_type: integer
+        description: "Sub-level (fragment) index within a staged level (Fillwords staged daily levels, Tile Trip fragments)."
+        meta:
+          mcp:
+            property: true
+      - name: fragments_count_of_event_data
+        data_type: integer
+        description: "Total fragments in the staged level (deprecated since Tile Trip v1.4.13)."
+        meta:
+          mcp:
+            property: true
+      - name: tiles_count_of_event_data
+        data_type: integer
+        description: "Total tiles on the fragment's board (Tile Trip)."
+        meta:
+          mcp:
+            property: true
+      - name: tiles_left_of_event_data
+        data_type: integer
+        description: "Tiles remaining when the fragment was LOST; not sent when the fragment is passed (Tile Trip)."
+        meta:
+          mcp:
+            property: true
+      - name: time_from_previous_of_event_data
+        data_type: integer
+        description: "Seconds since the previous word (right or wrong) was collected; for the first word, seconds since level start."
+        meta:
+          mcp:
+            unit: seconds
+            property: true
+      - name: words_selected_of_event_data
+        data_type: json
+        description: >
+          Per-word collection log: array of {word_number, word_name,
+          time_from_previous, mistakes_from_previous, word_dictionary}. Access via
+          the array/struct prepare pipeline.
+        meta:
+          mcp:
+            array:
+              encoding: json
+              fields: { word_number: int, word_name: string, time_from_previous: numeric, mistakes_from_previous: int, word_dictionary: string }
+      # battle of wits
+      - name: bot_level_of_event_data
+        data_type: string
+        description: "Difficulty level of the bot opponent."
+        meta:
+          mcp:
+            property: true
+      - name: player_rating_of_event_data
+        data_type: numeric
+        description: "Player rating; on battle_of_wits_finished this is the new rating after the match."
+        meta:
+          mcp:
+            property: true
+      - name: cup_difference_of_event_data
+        data_type: integer
+        description: "Absolute cup/trophy change from the battle; logged only against a real opponent, never against a bot."
+        meta:
+          mcp:
+            property: true
+      - name: opponent_type_of_event_data
+        data_type: string
+        description: "Type of opponent."
+        meta:
+          mcp:
+            property: true
+      - name: time_to_match_of_event_data
+        data_type: integer
+        description: "Matchmaking time in milliseconds."
+        meta:
+          mcp:
+            unit: seconds
+            property: true
+      - name: stage_number_of_event_data
+        data_type: integer
+        description: "Stage number within a multi-stage competition/race."
+        meta:
+          mcp:
+            property: true
+      - name: stage_place_of_event_data
+        data_type: string
+        description: "Player's place at the stage: gold = 1, silver = 2, bronze = 3."
+        meta:
+          mcp:
+            property: true
+      - name: climb_race_reward_of_event_data
+        data_type: numeric
+        description: "Reward earned for a stage of a climb/dive race competition (Sudoku Master)."
+        meta:
+          mcp:
+            property: true
+      # puzzles
+      - name: puzzle_class_of_event_data
+        data_type: string
+        description: "Puzzle class/category (Relax Puzzles)."
+        meta:
+          mcp:
+            property: true
+      - name: puzzle_number_of_event_data
+        data_type: string
+        description: "Puzzle number / numberKey (Relax Puzzles)."
+        meta:
+          mcp:
+            property: true
+      - name: puzzle_pack_of_event_data
+        data_type: string
+        description: "Puzzle pack the puzzle was taken from (Relax Puzzles)."
+        meta:
+          mcp:
+            property: true
+      - name: puzzle_size_of_event_data
+        data_type: numeric
+        description: "Number of pieces in the puzzle (Relax Puzzles)."
+        meta:
+          mcp:
+            property: true
+      - name: parts_count_of_event_data
+        data_type: integer
+        description: "Total parts the puzzle is split into (Relax Puzzles)."
+        meta:
+          mcp:
+            property: true
+      - name: part_number_of_event_data
+        data_type: string
+        description: "Part number being completed (from 1)."
+        meta:
+          mcp:
+            property: true
+      - name: mistakes_count_of_event_data
+        data_type: integer
+        description: "Number of mistakes made (Sudoku Master)."
+        meta:
+          mcp:
+            property: true
+      - name: reward_coins_of_event_data
+        data_type: numeric
+        description: "Coins rewarded for the puzzle/part (Relax Puzzles)."
+        meta:
+          mcp:
+            property: true
+      - name: reward_relax_of_event_data
+        data_type: numeric
+        description: "Relax points rewarded for the puzzle/part (Relax Puzzles)."
+        meta:
+          mcp:
+            property: true
+      - name: reward_points_of_event_data
+        data_type: numeric
+        description: "Points rewarded for completing the level/puzzle (Sudoku Master)."
+        meta:
+          mcp:
+            property: true
+      - name: rotate_of_event_data
+        data_type: boolean
+        description: "Whether puzzle-piece rotation mode was enabled (Relax Puzzles)."
+        meta:
+          mcp:
+            property: true
+      # match-3 / moves mechanics
+      - name: moves_added_of_event_data
+        data_type: integer
+        description: "Total extra moves added on the level."
+        meta:
+          mcp:
+            property: true
+      - name: moves_added_ad_of_event_data
+        data_type: integer
+        description: "Extra moves added by watching an ad."
+        meta:
+          mcp:
+            property: true
+      - name: moves_added_coin_of_event_data
+        data_type: integer
+        description: "Extra moves bought with coins."
+        meta:
+          mcp:
+            property: true
+      - name: moves_on_start_of_event_data
+        data_type: integer
+        description: "Moves available at level start."
+        meta:
+          mcp:
+            property: true
+      - name: moves_left_of_event_data
+        data_type: integer
+        description: "Moves remaining when the level ended."
+        meta:
+          mcp:
+            property: true
+      - name: level_continue_number_of_event_data
+        data_type: integer
+        description: "How many times the player continued the level after running out."
+        meta:
+          mcp:
+            property: true
+      - name: out_of_moves_number_of_event_data
+        data_type: integer
+        description: "How many times the player ran out of moves on the level."
+        meta:
+          mcp:
+            property: true
+      - name: total_complete_time_of_event_data
+        data_type: integer
+        description: >
+          Total clean completion time of the level across ALL attempts. Already includes the
+          time reported in complete_time_of_event_data for this level, so never sum the two
+          together — pick one: complete_time for per-attempt playtime (the production
+          definition), total_complete_time only when the question is explicitly about cumulative
+          effort on a level.
+        meta:
+          mcp:
+            unit: seconds
+            property: true
+
+      # ---- event_data: hint usage -----------------------------------------
+      - name: hint_open_first_letter_used_of_event_data
+        data_type: string
+        description: "Count of 'open first letter' hints used."
+        meta:
+          mcp:
+            property: true
+      - name: hint_open_any_letter_used_of_event_data
+        data_type: string
+        description: "Count of 'open any letter' hints used."
+        meta:
+          mcp:
+            property: true
+      - name: hint_open_several_letters_used_of_event_data
+        data_type: string
+        description: "Count of 'open several letters' hints used."
+        meta:
+          mcp:
+            property: true
+      - name: hint_open_cell_used_of_event_data
+        data_type: string
+        description: "Count of 'open cell' hints used (Sudoku Master)."
+        meta:
+          mcp:
+            property: true
+      - name: hints_magnet_used_of_event_data
+        data_type: string
+        description: "Count of magnet hints used (Tile Trip)."
+        meta:
+          mcp:
+            property: true
+      - name: hints_cancel_used_of_event_data
+        data_type: string
+        description: "Count of cancel hints used (Tile Trip)."
+        meta:
+          mcp:
+            property: true
+      - name: hints_shuffle_used_of_event_data
+        data_type: string
+        description: "Count of shuffle hints used (Tile Trip)."
+        meta:
+          mcp:
+            property: true
+      - name: hints_clear_used_of_event_data
+        data_type: string
+        description: "Count of clear hints used (Tile Trip; deprecated since v1.4.13)."
+        meta:
+          mcp:
+            property: true
+      - name: hints_extra_slot_used_of_event_data
+        data_type: string
+        description: "Count of '+1 slot' (extra-slot) hints used (Tile Trip)."
+        meta:
+          mcp:
+            property: true
+      - name: hints_for_ad_used_of_event_data
+        data_type: numeric
+        description: >
+          Count of hints granted for watching an ad and consumed immediately, bypassing the
+          balance. The value names the rewarded placement the hint came from.
+        meta:
+          mcp:
+            property: true
+      - name: hints_help_used_of_event_data
+        data_type: integer
+        description: "Count of generic 'help' hints used."
+        meta:
+          mcp:
+            property: true
+      - name: hint_undo_used_of_event_data
+        data_type: integer
+        description: "Count of undo hints used."
+        meta:
+          mcp:
+            property: true
+      - name: auto_openers_usage_free_of_event_data
+        data_type: string
+        description: "Count of free auto-opener usages (Sky Words)."
+        meta:
+          mcp:
+            property: true
+      - name: hint_open_first_letter_multiplied_x2_of_event_data
+        data_type: string
+        description: "Count of 'open first letter' hints used with a x2 multiplier (Sky Words)."
+        meta:
+          mcp:
+            property: true
+      - name: hint_open_several_letters_multiplied_x2_of_event_data
+        data_type: string
+        description: "Count of 'open several letters' hints used with a x2 multiplier (Sky Words)."
+        meta:
+          mcp:
+            property: true
+      - name: hint_open_any_letter_multiplied_x2_of_event_data
+        data_type: string
+        description: "Count of 'open any letter' hints used with a x2 multiplier (Sky Words)."
+        meta:
+          mcp:
+            property: true
+      - name: hint_open_first_letter_discount_50_of_event_data
+        data_type: string
+        description: "Count of 'open first letter' hints used at a 50% discount (Sky Words)."
+        meta:
+          mcp:
+            property: true
+      - name: hint_open_several_letters_discount_50_of_event_data
+        data_type: string
+        description: "Count of 'open several letters' hints used at a 50% discount (Sky Words)."
+        meta:
+          mcp:
+            property: true
+      - name: hint_open_any_letter_discount_50_of_event_data
+        data_type: string
+        description: "Count of 'open any letter' hints used at a 50% discount (Sky Words)."
+        meta:
+          mcp:
+            property: true
+
+      # ---- event_data: sessions / in-game events / interface / mechanics --
+      - name: session_duration_of_event_data
+        data_type: numeric
+        description: >
+          SESSION TIME as reported by the client: length of the session, INCLUDING ad views and
+          menus, not clean gameplay. One value per session, so SUM it over event_name =
+          'end_session' only (never mix with other events). Caveat: end_session is not emitted
+          on crashes or force-quits, so this systematically undercounts; the
+          timestamp-difference definition on the session grain does not.
+        meta:
+          mcp:
+            unit: seconds
+            property: true
+      - name: state_of_event_data
+        data_type: string
+        description: "How the session began - default = not from background; background = resumed after the app idled in the background for 10+ minutes."
+        meta:
+          mcp:
+            property: true
+      - name: event_number_of_event_data
+        data_type: integer
+        description: "Instance number of the in-game timed event."
+        meta:
+          mcp:
+            property: true
+      - name: event_duration_of_event_data
+        data_type: numeric
+        description: "Planned duration of the in-game timed event in hours."
+        meta:
+          mcp:
+            unit: seconds
+            property: true
+      - name: prize_number_of_event_data
+        data_type: integer
+        description: "Index of the prize received during an in-game event."
+        meta:
+          mcp:
+            property: true
+      - name: goals_completed_of_event_data
+        data_type: integer
+        description: "Number of event goals completed / prizes received when the event ended."
+        meta:
+          mcp:
+            property: true
+      - name: action_of_event_data
+        data_type: string
+        description: "Tutorial interaction type."
+        meta:
+          mcp:
+            property: true
+      - name: element_of_event_data
+        data_type: string
+        description: "Human-readable id of the tutorial element the player interacted with."
+        meta:
+          mcp:
+            property: true
+      - name: reward_item_of_event_data
+        data_type: string
+        description: "Item won on the wheel spin."
+        meta:
+          mcp:
+            property: true
+      - name: reward_amount_of_event_data
+        data_type: numeric
+        description: "Amount of the wheel-spin reward."
+        meta:
+          mcp:
+            property: true
+      - name: spin_number_of_event_data
+        data_type: string
+        description: "Sequential spin number within a series of spins."
+        meta:
+          mcp:
+            property: true
+      - name: screen_from_of_event_data
+        data_type: string
+        description: "Origin screen of a UI transition."
+        meta:
+          mcp:
+            property: true
+      - name: screen_to_of_event_data
+        data_type: string
+        description: "Destination screen of a UI transition."
+        meta:
+          mcp:
+            property: true
+      - name: name_of_event_data
+        data_type: string
+        description: "Generic name field (e.g. the in-game event name)."
+        meta:
+          mcp:
+            property: true
+      - name: previous_appsflyer_id_of_event_data
+        data_type: string
+        description: "AppsFlyer id of the previously-linked account restored from cloud save."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: previous_appmetrica_id_of_event_data
+        data_type: string
+        description: "AppMetrica id of the previously-linked account restored from cloud save."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            property: true
+      - name: progress_restoration_level_number_of_event_data
+        data_type: integer
+        description: "Level number reached in the restored progress (logged separately because state.level_number on this event already reflects the restored progress)."
+        meta:
+          mcp:
+            property: true
+
+  - name: dim_users
+    description: >
+      User attributes dimension built from the player's install record: acquisition,
+      geo, device and app attributes used to segment and cohort players.
+
+      GRAIN: one row per player per install-VALIDITY INTERVAL — usually exactly one row
+      per internal_player_id, but re-attribution and re-installs add further rows, each
+      valid for its own [install_time_valid_from, install_time_valid_until] window. So
+      internal_player_id alone is NOT unique here: joining on it alone fans out those
+      players and double-counts their events.
+      HOW TO JOIN IT IN A PIPELINE — use the `join` stage with a `between` window; do
+      NOT hand-roll the temporal predicate:
+          { "stage": "join", "with": "users", "on": "internal_player_id",
+            "attrs": [ ...the attributes you need... ],
+            "between": { "value": "device_time",
+                        "from": "install_time_valid_from",
+                        "to":   "install_time_valid_until" } }
+      `on` gives the key equality; `between` ANDs the temporal predicate
+      `device_time BETWEEN install_time_valid_from AND install_time_valid_until`, which
+      picks the install record in force when the event happened — so the join stays
+      1:1 and events are not double-counted. Omitting `between` here is a bug: it fans
+      out re-attributed / re-installed players. The same pattern applies to the
+      experiments source — put its `assigned_at`-vs-window match in `between`.
+      For a player-level count use aggregate with count_distinct on internal_player_id
+      (never a plain count/count(*)).
+    meta:
+      mcp:
+        role: users            # logical name (the dbt model can be named anything)
+    columns:
+      - name: internal_player_id
+        data_type: integer
+        description: >
+          Player identifier — the join target for events and experiments. NOT unique on
+          its own: a player with re-attributions/re-installs has one row per validity
+          interval, so pair it with the
+          device_time BETWEEN install_time_valid_from AND install_time_valid_until
+          predicate (see the model description) to keep the join one-to-one.
+        meta:
+          mcp:
+            entity: { name: user, type: primary }
+      # Non-entity columns of this dimension model are groupable dimensions; their
+      # type is inferred from the native `data_type` (date/timestamp -> time, else
+      # categorical). Only value hints / non-day granularity live in meta.
+      - name: install_date
+        data_type: timestamp
+        meta:
+          mcp:
+            is_time: true   # the time axis of this dimension ("installs by install date")
+        description: >
+          When the player installed the app (UTC instant) — the cohort/acquisition time
+          dimension, and the anchor for retention. Retention day is the whole 24-hour
+          bucket between this and the event time, so it always requires joining this
+          model to the events fact. Do NOT compute it by hand: use the pipeline op
+          compute op=elapsed_days with from=install_date, to=device_time — it returns
+          retention day in whole 24-hour buckets (NOT calendar days) and handles the
+          casting, negative spans, and missing-install case for you. A player present in
+          the events fact but absent from this model has no install_date on the join;
+          elapsed_days folds that (and any pre-install event) to day 0 by default
+          (pass clamp_zero:false only if you deliberately want the raw NULL/negative value).
+      - name: install_time_valid_from
+        data_type: timestamp
+        meta:
+          mcp:
+            dimension: { validity: start }
+        description: >
+          Start of the window during which this install record is the authoritative one
+          for the player (UTC instant). Join key companion, not a reporting dimension:
+          match the event's device_time with
+          device_time BETWEEN install_time_valid_from AND install_time_valid_until.
+          Never NULL — an open lower bound is the sentinel 1970-01-01 00:00:00.
+          NEVER use this field for retention, cohorting, install counts or any other
+          calculation, and never expose it as a reporting dimension or time axis. It is
+          purely TECHNICAL: a record-versioning bound, not the moment the player
+          installed. Its value is a bookkeeping artefact (it carries sentinels and
+          shifts whenever a re-attribution rewrites the record), so any metric built on
+          it is meaningless. The one and only install moment for retention, cohorts and
+          age-since-install is install_date, which is the correct and current value for
+          exactly the interval this record is valid for.
+      - name: install_time_valid_until
+        data_type: timestamp
+        meta:
+          mcp:
+            dimension: { validity: end }
+        description: >
+          End of the window during which this install record is authoritative (UTC
+          instant, inclusive — the predicate is a closed BETWEEN). The currently-active
+          record carries the sentinel 2099-12-31 23:59:59 rather than NULL, so the
+          BETWEEN needs no coalesce.
+          NEVER use this field for retention, cohorting, churn or any other calculation,
+          and never expose it as a reporting dimension or time axis. It is purely
+          TECHNICAL: the end of a record's validity window, NOT the player's last
+          activity, churn date or install date — for active players it is just the
+          sentinel 2099-12-31. Use install_date as the install moment for retention and
+          cohorts (it is the correct, current value for exactly the interval this record
+          covers), and event timestamps for anything about player activity.
+      - name: platform
+        data_type: string
+        description: "Device OS family the player installed on."
+      - name: os_version
+        data_type: string
+        description: "Operating-system version at install time."
+      - name: user_source
+        data_type: string
+        description: "Origin of the user acquisition (attribution source classification)."
+      - name: country_group
+        data_type: string
+        description: "Grouping of countries into geo/market segments for analysis."
+      - name: device_model
+        data_type: string
+        description: "Device model the player installed on."
+      - name: country
+        data_type: string
+        description: "Player country (ISO 3166-1 alpha-2) for geo segmentation."
+      - name: language
+        data_type: string
+        description: "Player's in-game language code."
+      - name: media_source
+        data_type: string
+        description: >
+          Acquisition channel / attribution source the player was acquired through.
+      - name: acquisition_type
+        data_type: string
+        description: "Install lifecycle category from attribution (organic vs. reattributed vs. reinstalled)."
+      - name: campaign
+        data_type: string
+        description: "Attribution campaign name the player was acquired through."
+      - name: campaign_id
+        data_type: string
+        description: "Attribution campaign id."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+      - name: app_id
+        data_type: string
+        description: "Store bundle id of the app the player installed."
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+      - name: app_name
+        data_type: string
+        description: >
+          Short app name — a stable per-game code, distinct from the store bundle id in app_id.
+      - name: app_version
+        data_type: string
+        description: "App version the player originally installed (install-time app version)."
+      - name: is_valid_install
+        data_type: string
+        description: "TRUE when install_package = com.android.vending (a legitimate Play Store install)."
+
+  # A/B-test assignments — like the users dimension but MANY rows per player: one
+  # row per (player, experiment). Joinable to events/users by the user entity.
+  # Window events from assigned_at ONWARD (no per-player end bound — see the
+  # description), group by experiment_name+variant_group, aggregate per group, then run
+  # the `ab_test` tool. The dbt model can be named anything; only role: experiments matters.
+  - name: fct_experiment_assignments
+    description: >
+      A/B-test assignments: one row per (player, experiment). Each row records which
+      experiment a player entered, the assigned variant, and when the assignment
+      started. Join to events/users on internal_player_id.
+
+      ATTRIBUTION WINDOW — COUNT FROM assigned_at ONWARD, WITH NO END BOUND. This is the
+      firstExposure model, and it is what GrowthBook does: once a player is exposed, all
+      of their subsequent events count toward their variant. So the only per-player
+      predicate is
+
+          device_time >= assigned_at
+
+      There is deliberately NO end-of-experiment column in this model to pair it with.
+      The period AFTER the experiment closes is not noise to be trimmed —
+      it is often the whole point: we want to see what happens to those users afterwards,
+      whether a lift persists, decays or reverses once the test is over. Closing the
+      window destroys exactly that signal. A per-player upper bound is also the classic
+      way to get numbers that disagree with GrowthBook: it drops everything a player did
+      after their own assignment window closed — mostly ad and IAP revenue, which keeps
+      accruing — so every absolute total comes out systematically lower, and it gives
+      players unequal observation lengths, which biases the comparison between variants
+      rather than merely shrinking it.
+
+      DEFAULT BEHAVIOUR: leave the window OPEN. Never introduce an end bound on your own
+      initiative, not even to "match the experiment dates" — only when the user
+      explicitly asks to cut the analysis off at a point in time. When they do ask, use
+      ONE bound shared by every player and variant (the experiment phase end or the
+      reporting period end), never a per-player end: equal windows for all
+      groups is what makes variants comparable. And say which bound was applied.
+
+      Then group by experiment_name + variant_group, aggregate per group, and run the
+      ab_test tool.
+      NOTE: all names here — experiment_name, variant_group, experiment_type, etc. —
+      are stored in lowercase; therefore always perform any search/filter/comparison
+      in lowercase (e.g. lower(column) = lower('value')).
+    meta:
+      mcp:
+        role: experiments
+    columns:
+      - name: internal_player_id
+        data_type: integer
+        description: "Player identifier (joins to events and users; many rows per player)."
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }   # foreign: many rows per player
+      - name: experiment_name
+        data_type: string
+        description: >
+          Name of the A/B test / experiment the player was assigned to.
+          Stored in lowercase — always filter/compare in lowercase
+          (e.g. lower(experiment_name) = lower('value')).
+      - name: experiment_type
+        data_type: string
+        description: >
+          Experiment category. Stored in lowercase — always filter/compare in
+          lowercase (e.g. lower(experiment_type) = lower('value')).
+      - name: variant_group
+        data_type: string
+        description: >
+          Variant/group the player was assigned. Stored in lowercase — always filter/compare in
+          lowercase (e.g. lower(variant_group) = lower('value')).
+      - name: assigned_at
+        data_type: timestamp
+        description: >
+          When the player was first exposed to the experiment — the ONLY per-player time
+          bound used in analysis. Filter events with device_time >= assigned_at and count
+          everything from there on (firstExposure), with no per-player end bound.
+
+  # ── SECOND EVENTS FACT — ad-associated stability events ────────────────────────────────
+  # An EQUAL source to the analytics fact, not nested under it. Address it with
+  # source: 'crashlytics' (semantic_index({ source, event }),
+  # build_native_model({ source: 'crashlytics' }), semantic_models[].from).
+  #
+  # Structural rules observed here:
+  #   · primary_entity is `crash`, declared on event_id — NOT `event`, which
+  #     fct_analytics_events owns.
+  #   · it declares is_event_name + is_time, as a fact must.
+  #   · `ad_funnel` is OWNED here as `unique` — one error per tracking, so this side is
+  #     the join target and the governed path works. `foreign` on fct_analytics_events,
+  #     where a tracking spans several events. Both sides declare a 2-part key.
+  #   · column names use the `_of_` form, never `__` (MetricFlow reserves `__`).
+  - name: fct_stability_events
+    description: >
+      Ad-associated stability events: one row per error — a crash, non-fatal error or ANR
+      that happened while an ad was RUNNING on screen. Keyed by event_id (unique). Where
+      tracking_id is set, (internal_player_id, tracking_id) is unique too, so a join on it
+      does not fan out; about a third of the rows have NO tracking_id — an error whose
+      ad slot was recorded as open but without a selected tracking — and those never
+      join to the ad funnel.
+
+      EVERY row has an install interval on dim_users covering its device_time (an EXISTS
+      filter upstream), so a join to dim_users loses nothing.
+
+      WHY ONE ERROR PER AD — an ad tracking is one request-to-show cycle of one ad, and it
+      can own at most ONE error, ever. Upstream keeps the earliest error of each
+      (player, tracking) and releases every later one as a plain error, so those are not
+      here.
+
+      WHAT IS NOT HERE — a plain error with no ad open, a second or later error of the same
+      tracking, an error whose selected ad slot was not EXPLICITLY unfinished (finished, or
+      the is_finished key missing), and an error with no install interval at its device
+      time. So this is not the place to ask how many crashes there were in total.
+
+      tracking_id is the ad the error was ATTRIBUTED to: of the slots the client had open,
+      the still-unfinished one with the latest start watch time. ad_format says which
+      format that was. A SECOND ad can be running alongside, and that is not carried as
+      its own column; the raw per-slot start times and is_finished flags are the snapshot
+      it can be read from.
+    meta:
+      mcp:
+        role: crashlytics           # the logical name the tools use: source: 'crashlytics'
+        partition_column: event_date      # cost hint: always constrain this (or device_time)
+        event_semantics:
+          crash_event: FATAL        # a hard crash that killed the app
+          non_fatal_event: NON_FATAL
+          anr_event: ANR            # Application Not Responding (main thread blocked)
+        known_events:               # the only three values event_name ever takes
+          - FATAL
+          - NON_FATAL
+          - ANR
+        entities:
+          # The ad view this error belongs to, OWNED here as `unique`: an ad tracking can
+          # hold at most ONE error (upstream keeps only the earliest per player+tracking),
+          # so (tracking_id, internal_player_id) is unique on this model wherever
+          # tracking_id is set — verified, zero exceptions. Rows with a NULL tracking_id
+          # (about a third) simply never match. That makes this side the join TARGET, so
+          # the governed path works:
+          # a metric query over the analytics fact can group by
+          # { model: 'crashlytics', attribute: '<attr>' }. On fct_analytics_events the same
+          # relationship is `foreign`, because one tracking spans several of its events
+          # (request -> load -> start -> revenue -> finish).
+          ad_funnel:
+            type: unique
+            key: [tracking_id, internal_player_id]
+    columns:
+      # ---- the unique key -------------------------------------------------
+      - name: internal_player_id
+        data_type: integer
+        description: >
+          The player — the same surrogate id as on dim_users, fct_analytics_events and
+          fct_player_acquisition, and the join key to them. Never NULL. Not unique on its
+          own: a player can have many ad-associated errors.
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }
+      - name: tracking_id
+        data_type: string
+        description: >
+          Id of the ad tracking this error was attributed to — the same id as
+          fct_analytics_events.tracking_id_of_event_data, so it is the join key from an
+          error to the ad funnel that produced it. Unique per player when set. NULL on
+          about a third of the rows: the client logged an open, unfinished ad slot (see
+          ad_format and the per-slot snapshot) but no tracking id for it, so the error
+          cannot be tied to a funnel. Filter `tracking_id is not null` for funnel joins.
+        meta:
+          mcp:
+            dimension: {}
+            index: false   # groupable, but an id has no value set worth profiling
+
+      # ---- role columns ---------------------------------------------------
+      - name: device_time
+        data_type: timestamp
+        description: >
+          When the error happened on the device — the metric time axis of this fact.
+          Sanitized upstream: a device time more than 30 days from the receive time, or
+          ahead of it, is replaced by the receive time, and it is capped at the receive
+          time and at now.
+        meta:
+          mcp:
+            is_time: true   # granularity defaults to day
+      - name: event_date
+        data_type: date
+        description: >
+          date(device_time), and the column this view's 90-day window is applied to, so its
+          minimum value is current_date - 90 days.
+        meta:
+          mcp:
+            dimension: {}   # groupable (daily buckets); device_time remains the metric_time axis
+      - name: event_name
+        data_type: string
+        description: >
+          The error class, from the Crashlytics export's error_type: FATAL (a crash that
+          killed the app), NON_FATAL (a caught and logged exception) or ANR (Application
+          Not Responding — the main thread was blocked). Uppercase, as the export reports
+          it.
+        meta:
+          mcp:
+            is_event_name: true
+
+      # ---- the error itself -----------------------------------------------
+      - name: event_id
+        data_type: string
+        description: >
+          Crashlytics id of the occurrence and the identity of this model — unique here
+          (a report Crashlytics re-exported on a later day is deduplicated to its earliest
+          copy).
+        meta:
+          mcp:
+            entity: { name: crash, type: primary }
+      - name: received_time
+        data_type: timestamp
+        description: >
+          The export's received_timestamp: when Crashlytics delivered the report. Always
+          at or after device_time. Rows are not dated by it — a report received today can
+          belong to an earlier event_date.
+        meta:
+          mcp:
+            dimension: {}
+      - name: issue_id
+        data_type: string
+        description: >
+          Crashlytics issue id — the grouping key of a defect: occurrences sharing a
+          stack-trace signature share it. count_distinct on it counts distinct defects, as
+          against a row count for occurrences.
+        meta:
+          mcp:
+            dimension: {}
+            index: false
+      - name: issue_title
+        data_type: string
+        description: >
+          Crashlytics issue title — the crashing frame, e.g. a shared-object name for a
+          native crash or the symbol for a managed one. Determined by issue_id and much
+          coarser: many issues share a title. Some values are the literal 'Native method',
+          where the real title is in issue_subtitle, or carry a leading 'Native method - '.
+        meta:
+          mcp:
+            dimension: {}
+      - name: issue_subtitle
+        data_type: string
+        description: >
+          Secondary line of the Crashlytics issue — the signal or reason, e.g.
+          'SIGABRT (ABORT)', or 'unknown' where the export did not classify it. Free text
+          that varies per occurrence even for one issue_id, so it is not a property of the
+          defect and does not aggregate. It also supplies the title when issue_title is
+          'Native method'.
+        meta:
+          mcp:
+            dimension: {}
+      - name: issue_url
+        data_type: string
+        description: >
+          Firebase console link to the issue, assembled upstream from the Firebase project
+          id, the platform, the bundle id and issue_id. Determined entirely by issue_id, so
+          it adds no grouping power of its own.
+        meta:
+          mcp:
+            dimension: {}
+            index: false
+      - name: exception_types
+        data_type: string
+        description: >
+          The exception class names of the occurrence, as to_json_string over the export's
+          exceptions array — a JSON array of strings, or the literal 'null' where the
+          report had no exceptions (native crashes). Stable per issue_id. Parse the JSON
+          before unnesting.
+        meta:
+          mcp:
+            array: { items: string, encoding: json }
+      - name: exception_messages
+        data_type: string
+        description: >
+          The exception messages of the occurrence, positionally aligned with
+          exception_types, in the same JSON-array-or-'null' encoding. Free text, varies per
+          occurrence.
+        meta:
+          mcp:
+            array: { items: string, encoding: json }
+
+      # ---- the ad this error was attributed to ----------------------------
+      - name: ad_format
+        data_type: string
+        description: >
+          Format of the ad the error was attributed to: 'banner', 'inter' (interstitial) or
+          'reward' (rewarded). Never NULL — set even where tracking_id is NULL (those rows
+          are all 'banner'). These are the upstream short codes, not the
+          spelling used by fct_analytics_events.ad_type_of_event_data — do not compare the
+          two literally.
+        meta:
+          mcp:
+            dimension: {}
+      - name: ad_start_watch_device_time
+        data_type: timestamp
+        description: >
+          Device timestamp at which the attributed ad view started, from that tracking's
+          `date` field in the client's custom keys. Subtract it from device_time to get how
+          far into the ad view the error occurred. Not clock-sanitized the way device_time
+          is, so clamp the difference before averaging.
+        meta:
+          mcp:
+            dimension: {}
+
+      # ---- app / device envelope -------------------------------------------
+      - name: bundle_id
+        data_type: string
+        description: >
+          Store bundle id of the app the error came from. The same identifier as on
+          fct_analytics_events and fct_player_acquisition.
+        meta:
+          mcp:
+            index: false   # groupable, but an id / free text has no value set worth profiling
+            dimension: { bundle: true }   # the APP identifier for THIS fact
+      - name: platform
+        data_type: string
+        description: >
+          Device OS family, lower-cased. Same values as dim_users.platform.
+        meta:
+          mcp:
+            dimension: {}
+      - name: os_version
+        data_type: string
+        description: >
+          OS version of the device at the time of the error. The per-event value;
+          dim_users.os_version is the install-time one.
+        meta:
+          mcp:
+            dimension: {}
+      - name: app_version
+        data_type: string
+        description: "App version the error was reported from."
+        meta:
+          mcp:
+            dimension: {}
+
+      # ---- raw per-slot snapshot, as logged in the custom keys -------------
+      # The client's tracking slots as written at the moment of THIS error, before the
+      # selector picked one. Diagnostic: they are how you tell that a second ad was running
+      # alongside the attributed one. A slot with a start watch time and is_finished = false
+      # was still running; is_finished = true means it had already ended; NULL means the
+      # client did not set that key.
+      - name: tracking_start_watch_time_of_banner
+        data_type: timestamp
+        description: >
+          Device timestamp the banner slot's ad view started. NULL where no banner tracking
+          was open.
+        meta:
+          mcp:
+            dimension: {}
+      - name: tracking_start_watch_time_of_rewarded
+        data_type: timestamp
+        description: >
+          Device timestamp the rewarded slot's ad view started. NULL where no rewarded
+          tracking was open.
+        meta:
+          mcp:
+            dimension: {}
+      - name: tracking_start_watch_time_of_interstitial
+        data_type: timestamp
+        description: >
+          Device timestamp the interstitial slot's ad view started. NULL where none was
+          open.
+        meta:
+          mcp:
+            dimension: {}
+      - name: tracking_is_finished_of_banner
+        data_type: boolean
+        description: >
+          Whether the banner slot had already finished at the moment of this error. NULL
+          where the client did not set the key.
+        meta:
+          mcp:
+            dimension: {}
+      - name: tracking_is_finished_of_rewarded
+        data_type: boolean
+        description: >
+          Whether the rewarded slot had already finished at the moment of this error. NULL
+          where the client did not set the key.
+        meta:
+          mcp:
+            dimension: {}
+      - name: tracking_is_finished_of_interstitial
+        data_type: boolean
+        description: >
+          Whether the interstitial slot had already finished at the moment of this error.
+          TRUE means it ended while another slot kept running. NULL where the client did
+          not set the key.
+        meta:
+          mcp:
+            dimension: {}
+
+  # ── MEASURES SOURCE — user-acquisition spend ───────────────────────────────────────────
+  # NOT an events source: it declares is_time and a measure, and NO event_name. Rows are
+  # amounts, not events. Address it with source: 'acquisition'
+  # (build_native_model({ source: 'acquisition' }), semantic_models[].from).
+  #
+  # Structural rules observed here:
+  #   · primary_entity is `acquisition` — distinct from `event`, `crash` and `user`. It is
+  #     the model's logical identity; there is no separate physical key column, because the
+  #     grain IS the player.
+  #   · internal_player_id is declared `foreign`, not `unique`, even though it is unique
+  #     here: the `user` entity is OWNED by dim_users, and an entity has exactly one owner.
+  #   · is_time is declared, is_event_name is not.
+  #   · the amount carries meta.mcp.measure and is therefore NOT groupable; the aggregation
+  #     function is chosen per question by the caller, not fixed here.
+  - name: fct_player_acquisition
+    description: >
+      User-acquisition spend per player: one row per player, holding the day they were
+      acquired and the UA spend attributed to them. Full history, no time window.
+
+      internal_player_id is UNIQUE here, so a join on it does not fan out, and a player
+      count is a plain row count.
+
+      player_probabilistic_spend is an ALLOCATED share, not an observed per-player price:
+      UA spend is booked per campaign/day, and each player carries the part of it that
+      falls to them. Every dollar is allocated exactly once, so the figure is additive —
+      summing it over any set of players gives that set's real cost, and summing it over
+      all of them gives the UA budget. A player whose acquisition matched no spend carries
+      zero, which is why organic and unmatched players read 0 rather than NULL.
+
+      This model has no channel, campaign, geo or device columns: for those, join
+      dim_users on the user entity.
+    meta:
+      mcp:
+        role: acquisition
+        primary_entity: acquisition   # MUST differ from every other model's
+    columns:
+      - name: internal_player_id
+        data_type: integer
+        description: >
+          The player. Never NULL and unique — one row per player. The same id as on
+          dim_users and both events sources, so it is the join key to them. Declared
+          foreign because dim_users owns the user entity.
+        meta:
+          mcp:
+            entity: { name: user, type: foreign }
+      - name: cohort_date
+        data_type: timestamp
+        description: >
+          The day the player was acquired, day-truncated. This source's time axis, and
+          the column to cohort by. A player who was re-acquired later (reinstall,
+          re-attribution) still has one row, dated by the FIRST acquisition.
+        meta:
+          mcp:
+            is_time: true   # granularity defaults to day
+      - name: player_probabilistic_spend
+        data_type: numeric
+        description: >
+          The UA spend attributed to this player. Never NULL — zero when their acquisition
+          matched no spend.
+        meta:
+          mcp:
+            measure: { unit: usd, label: "Allocated UA spend" }

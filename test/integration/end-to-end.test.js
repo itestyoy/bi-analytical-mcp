@@ -101,31 +101,31 @@ test('1a. semantic_index overview lists models + event names (no column dump)', 
   assert.equal(overview.models.find((m) => m.key === 'events').physical_columns, undefined, 'overview stays compact');
 });
 
-test('1b. semantic_index({ event: "ad_finished" }) scopes to that event\'s properties + index hints', opts, async (t) => {
+test('1b. semantic_index({ source: "events", event: "ad_finished" }) scopes to that event\'s properties + index hints', opts, async (t) => {
   if (skip(t)) return;
-  const ev = await engine.semantic_index({ event: 'ad_finished' });
+  const ev = await engine.semantic_index({ source: 'events', event: 'ad_finished' });
   const p = ev.properties.find((x) => x.name === 'ad_type_of_event_data');
   assert.ok(p, 'ad_finished carries ad_type_of_event_data');
   assert.equal(p.distinct_count, 3); // rewarded/interstitial/banner over the whole fact
   assert.ok(p.sample_values.length <= 3 && p.sample_values.some((v) => v.value === 'rewarded'), 'compact top-3 hint includes rewarded');
 });
 
-test('1c. semantic_index({ property }) pages + orders the indexed values (10/8/6)', opts, async (t) => {
+test('1c. semantic_index({ source, property }) pages + orders the indexed values (10/8/6)', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.semantic_index({ property: 'ad_type_of_event_data' });
+  const out = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.equal(out.distinct_count, 3);
   assert.equal(out.total_count, 24); // 12 ad_started + 12 ad_finished
   assert.equal(valOf(out.sample_values, 'rewarded').freq, 10);
   assert.equal(valOf(out.sample_values, 'interstitial').freq, 8);
   assert.equal(valOf(out.sample_values, 'banner').freq, 6);
   // paging: top 1 by freq desc, then offset 1
-  const p1 = await engine.semantic_index({ property: 'ad_type_of_event_data', limit: 1 });
+  const p1 = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', limit: 1 });
   assert.deepEqual(p1.sample_values.map((v) => v.value), ['rewarded']);
   assert.equal(p1.value_stats.has_more, true);
-  const p2 = await engine.semantic_index({ property: 'ad_type_of_event_data', limit: 1, offset: 1 });
+  const p2 = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', limit: 1, offset: 1 });
   assert.deepEqual(p2.sample_values.map((v) => v.value), ['interstitial']);
   // order_by value asc → alphabetical
-  const alpha = await engine.semantic_index({ property: 'ad_type_of_event_data', order_by: 'value' });
+  const alpha = await engine.semantic_index({ source: 'events', property: 'ad_type_of_event_data', order_by: 'value' });
   assert.deepEqual(alpha.sample_values.map((v) => v.value), ['banner', 'interstitial', 'rewarded']);
   assert.ok(Array.isArray(out.recommendations) && out.recommendations.length > 0 && out.recommendations.every((r) => typeof r === 'string' && r.length), 'actionable recommendations');
 });

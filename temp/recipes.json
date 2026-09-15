@@ -22,7 +22,7 @@
               {
                 "name": "active_users",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "new_session"
                 ]
@@ -133,7 +133,7 @@
               {
                 "name": "payers",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal"
+                "field": "internal_player_id"
               }
             ]
           }
@@ -223,7 +223,7 @@
         }
       ],
       "notes": "User attributes via the implicit events.user -> users.user join; campaign_id is a plain string attribute on dim_users (1-hop, like country/platform) — there is no separate campaigns table.",
-      "hack": "Any measure + group_by { model: 'users', attribute: '<attr>' } makes the semantic layer join the user dimension — no join written. Extrapolate: segment ANY metric by ANY user attribute the same way."
+      "hack": "Any measure + group_by [{ model: 'users', attribute: '<attr>' }] makes the semantic layer auto-join the user dimension — no join written. Extrapolate: segment ANY metric by ANY user attribute the same way."
     },
     {
       "id": "step_conversion_funnel",
@@ -252,7 +252,7 @@
               {
                 "name": "starters",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "level_started"
                 ]
@@ -260,7 +260,7 @@
               {
                 "name": "completers",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "level_completed"
                 ]
@@ -322,18 +322,18 @@
         }
       ],
       "notes": "Conversion base/conversion measures must be count_distinct. No native N-step funnel; chain 2-step conversions or use derived over step counts.",
-      "hack": "A funnel step = an event narrowed by an event_data property value, counted as count_distinct(user); step conversion = ratio(next_step / prev_step). Extrapolate to any 2-step drop-off."
+      "hack": "A funnel step = an event narrowed by an event_data property value, counted as count_distinct(user); step conversion = ratio(next_step / prev_step). Extrapolate: any 2-step drop-off."
     },
     {
       "id": "multistep_funnel",
       "task_type": "funnel",
       "title": "Multi-step funnel where each step = event + property value",
-      "when_to_use": "Onboarding/activation funnels whose steps are the SAME event with a different property value (e.g. tutorial element_of_event_data=step_1 -> step_2 -> step_3), with step-to-step conversion.",
+      "when_to_use": "Onboarding/activation funnels whose steps are the SAME event with a different property value (e.g. tutorial step_id=step_1 -> step_2 -> step_3), with step-to-step conversion.",
       "required_events": [
         "tutorial"
       ],
       "required_properties": [
-        "element_of_event_data"
+        "step_id"
       ],
       "required_user_attrs": [],
       "metric_types": [
@@ -349,13 +349,13 @@
               {
                 "name": "s1",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "tutorial"
                 ],
                 "where": [
                   {
-                    "property": "element_of_event_data",
+                    "property": "chain_of_event_data",
                     "op": "eq",
                     "value": "step_1"
                   }
@@ -364,13 +364,13 @@
               {
                 "name": "s2",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "tutorial"
                 ],
                 "where": [
                   {
-                    "property": "element_of_event_data",
+                    "property": "chain_of_event_data",
                     "op": "eq",
                     "value": "step_2"
                   }
@@ -379,13 +379,13 @@
               {
                 "name": "s3",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "tutorial"
                 ],
                 "where": [
                   {
-                    "property": "element_of_event_data",
+                    "property": "chain_of_event_data",
                     "op": "eq",
                     "value": "step_3"
                   }
@@ -461,8 +461,8 @@
           ]
         }
       ],
-      "notes": "A funnel step is a measure scoped by event_name + a property `where` (event_data value). Steps chain as 2-step conversion metrics (s1->s2, s2->s3); multiply/compose for end-to-end. IMPORTANT: the step VALUES here (step_1..step_3) are an example — discover the real step values of your data first via semantic_index({ source, property: 'element_of_event_data' }) and substitute them. Could also key the step on level_id, screen_to, placement, etc.",
-      "hack": "Chain one count_distinct(user) measure per step (event + property value) and ratio metrics between consecutive steps. Extrapolate to any ordered N-step sequence."
+      "notes": "A funnel step is a measure scoped by event_name + a property `where` (event_data value). Steps chain as 2-step conversion metrics (s1->s2, s2->s3); multiply/compose for end-to-end. Could also key the step on level_id, screen_to, placement, etc.",
+      "hack": "Chain one count_distinct(user) measure per step (event + property value) and ratio metrics between consecutive steps. Extrapolate: any ordered N-step sequence."
     },
     {
       "id": "nday_retention",
@@ -487,7 +487,7 @@
               {
                 "name": "cohort",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "first_launch"
                 ]
@@ -495,7 +495,7 @@
               {
                 "name": "returned",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "new_session"
                 ]
@@ -553,7 +553,7 @@
           ]
         }
       ],
-      "notes": "Cohort = users with a first_launch (acquisition); returned = users who start a new_session within the window. base_measure and conversion_measure are DIFFERENT events so the rate is meaningful (not identically 1.0). Approximates N-day retention via conversion window; exact point-in-time D-N retention is not expressible as a governed metric.",
+      "notes": "Cohort = users with a first_launch (acquisition); returned = users who start a new_session within the window. base_measure and conversion_measure are DIFFERENT events so the rate is meaningful (not identically 1.0). Approximates N-day retention via conversion window; exact point-in-time D-N retention is not native to MetricFlow.",
       "hack": "Retention = a conversion metric (base = first/install event, conversion = a later activity event) with window = 'N day'. Extrapolate: change N or the base/return events for any Dn."
     },
     {
@@ -595,7 +595,7 @@
               {
                 "name": "buyers",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal"
+                "field": "internal_player_id"
               }
             ]
           }
@@ -722,7 +722,7 @@
         }
       ],
       "notes": "Split did/didn't with a Metric() in --where, e.g. `{{ Metric('behavior_purchases', group_by=['user']) }} > 0`.",
-      "hack": "Split the population by a behavioral flag (did event X) then measure later behavior on each arm. Extrapolate to any 'did A → compare B' cohort."
+      "hack": "Split the population by a behavioral flag (did event X) then measure later behavior on each arm. Extrapolate: any 'did A → compare B' cohort."
     },
     {
       "id": "visit_to_purchase_conversion",
@@ -752,7 +752,7 @@
               {
                 "name": "visits",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "new_session"
                 ]
@@ -760,7 +760,7 @@
               {
                 "name": "buyers",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "iap_purchase_completed"
                 ]
@@ -814,7 +814,7 @@
         }
       ],
       "notes": "Use constant_properties to require the same product across base/conversion events when relevant.",
-      "hack": "conversion metric linking two events by the shared user entity (base=visit, conversion=purchase). Extrapolate to any A→B funnel within a window."
+      "hack": "conversion metric linking two events by the shared user entity (base=visit, conversion=purchase). Extrapolate: any A→B funnel within a window."
     },
     {
       "id": "level_progression",
@@ -934,7 +934,7 @@
         }
       ],
       "notes": "Group by the JSON-extracted level_id dimension. Churn-at-level derived from starts of level N vs N+1 in post-processing.",
-      "hack": "Group an event measure by a numeric event_data ordinal (level_id) and ratio adjacent values = progression/drop-off. Extrapolate to any per-step numeric progression."
+      "hack": "Group an event measure by a numeric event_data ordinal (level_id) and ratio adjacent values = progression/drop-off. Extrapolate: any per-step numeric progression."
     },
     {
       "id": "monetization_metrics",
@@ -983,7 +983,7 @@
               {
                 "name": "payers",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal"
+                "field": "internal_player_id"
               },
               {
                 "name": "purchases",
@@ -1305,7 +1305,7 @@
         }
       ],
       "notes": "net_coins is a derived metric (income - outcome). Source/sink breakdown via source_type.",
-      "hack": "Two oppositely-scoped sum measures + a derived expr (in − out) = net flow / balance. Extrapolate to any signed two-sided quantity (faucets vs sinks, credits vs debits)."
+      "hack": "Two oppositely-scoped sum measures + a derived expr (in − out) = net flow / balance. Extrapolate: any signed two-sided quantity (faucets vs sinks, credits vs debits)."
     },
     {
       "id": "stickiness_lifecycle",
@@ -1329,7 +1329,7 @@
               {
                 "name": "active_users",
                 "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "field": "internal_player_id",
                 "event_name": [
                   "new_session"
                 ]
@@ -1402,8 +1402,7 @@
               "attrs": [
                 "experiment_name",
                 "variant_group",
-                "assigned_at",
-                "ended_at"
+                "assigned_at"
               ]
             },
             {
@@ -1416,15 +1415,6 @@
                   "op": "gte",
                   "right": {
                     "column": "assigned_at"
-                  }
-                },
-                {
-                  "left": {
-                    "column": "device_time"
-                  },
-                  "op": "lte",
-                  "right": {
-                    "column": "ended_at"
                   }
                 }
               ]
@@ -1457,7 +1447,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "player_id_of_internal"
+                "internal_player_id"
               ],
               "measures": [
                 {
@@ -1503,8 +1493,8 @@
         "n_field": "n",
         "conversions_field": "conversions"
       },
-      "notes": "The native-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ action: 'analyze', metric: proportion }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ action: 'analyze', metric: mean }).",
-      "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call experiment({ action: 'analyze' }). Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
+      "notes": "The native-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call ab_test with metric=proportion: control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call ab_test with metric=mean.",
+      "hack": "Join the experiments source, window events from assigned_at onward (firstExposure — no end bound), flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call ab_test. Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
     },
     {
       "id": "cumulative_revenue",
@@ -1581,13 +1571,13 @@
         }
       ],
       "notes": "cumulative with no window = running total from the start; grain_to_date:month = month-to-date (resets monthly). Add `window` (e.g. \"7 day\") for a trailing rolling-window cumulative.",
-      "hack": "cumulative metric over a sum measure = running total; grain_to_date resets each period (MTD/WTD); add a window for a trailing rolling total. Extrapolate to any accumulating quantity over time."
+      "hack": "cumulative metric over a sum measure = running total; grain_to_date resets each period (MTD/WTD); add a window for a trailing rolling total. Extrapolate: any accumulating quantity over time."
     },
     {
       "id": "blended_revenue",
       "task_type": "monetization",
-      "title": "Blended revenue (IAP + ads) via a derived metric",
-      "when_to_use": "Combine two revenue streams (IAP in USD + ad revenue in cents) into one blended metric. Showcases the derived metric type.",
+      "title": "Blended revenue: IAP + ad revenue capped at 1 USD/impression",
+      "when_to_use": "Combine two revenue streams into one blended total: IAP price in USD + ad revenue capped to [0,1] USD/impression. Both legs are ALREADY USD — never divide by 100.",
       "required_events": [
         "iap_purchase_completed",
         "ad_finished"
@@ -1598,85 +1588,71 @@
       ],
       "required_user_attrs": [],
       "metric_types": [
-        "simple",
-        "derived"
+        "simple"
       ],
-      "create_payload": {
+      "register_payload": {
         "name": "blended",
-        "semantic_models": [
-          {
-            "from": "events",
-            "measures": [
-              {
-                "name": "iap_revenue",
-                "agg": "sum",
-                "field": "price_in_usd_of_event_data",
-                "event_name": [
-                  "iap_purchase_completed"
-                ]
-              },
-              {
-                "name": "ad_revenue_cents",
-                "agg": "sum",
-                "field": "revenue_of_event_data",
-                "event_name": [
-                  "ad_finished"
-                ]
-              }
-            ]
-          }
-        ],
-        "metrics": [
-          {
-            "name": "iap_revenue",
-            "type": "simple",
-            "measure": {
-              "name": "iap_revenue"
-            }
-          },
-          {
-            "name": "ad_revenue_cents",
-            "type": "simple",
-            "measure": {
-              "name": "ad_revenue_cents"
-            }
-          },
-          {
-            "name": "total_revenue",
-            "type": "derived",
-            "expr": "iap_revenue + ad_revenue_cents / 100",
-            "metrics": [
-              {
-                "name": "iap_revenue"
-              },
-              {
-                "name": "ad_revenue_cents"
-              }
-            ]
-          }
-        ]
-      },
-      "example_queries": [
-        {
-          "metrics": [
-            "blended_total_revenue"
-          ],
-          "group_by": [
+        "pipeline": {
+          "source": "events",
+          "stages": [
             {
-              "time": "metric_time",
-              "grain": "month"
+              "stage": "compute",
+              "name": "iap_usd",
+              "op": "raw",
+              "sql": "case when event_name = 'iap_purchase_completed' then cast(price_in_usd_of_event_data as float64) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "ad_usd",
+              "op": "raw",
+              "sql": "case when event_name = 'ad_finished' then least(greatest(cast(revenue_of_event_data as float64), 0.0), 1.0) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "blended_usd",
+              "op": "raw",
+              "sql": "coalesce(case when event_name = 'iap_purchase_completed' then cast(price_in_usd_of_event_data as float64) end, 0.0) + coalesce(case when event_name = 'ad_finished' then least(greatest(cast(revenue_of_event_data as float64), 0.0), 1.0) end, 0.0)",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "event_date"
+              ],
+              "measures": [
+                {
+                  "name": "iap_revenue",
+                  "fn": "sum",
+                  "column": "iap_usd"
+                },
+                {
+                  "name": "ad_revenue",
+                  "fn": "sum",
+                  "column": "ad_usd"
+                },
+                {
+                  "name": "total_revenue",
+                  "fn": "sum",
+                  "column": "blended_usd"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "event_date",
+                  "direction": "asc"
+                }
+              ]
             }
-          ]
-        },
-        {
-          "metrics": [
-            "blended_iap_revenue",
-            "blended_ad_revenue_cents"
           ]
         }
-      ],
-      "notes": "derived metric = arithmetic over other metrics; here ad revenue (cents) is converted to USD (/100) and added to IAP USD. Only metric names, numbers and + - * / ( ) are allowed in expr.",
-      "hack": "derived metric = a formula over other metrics (incl. unit conversion like /100). Extrapolate: blend/normalize/combine any set of metrics into one composite number."
+      },
+      "notes": "ad_revenue is defined here as: ad_finished only, cast to float64, clamped to [0,1] USD per impression. The clamp WINSORIZES (an outlier becomes 1.0, the row is not dropped), so a governed sum measure cannot reproduce it — that is why this recipe is a native pipeline and not a semantic model. revenue_of_event_data is ALREADY USD: dividing it by 100 is wrong, and the same money is repeated on ad_loaded/ad_started/ad_revenue/ad_finished, so exactly ONE of those events may be summed. The IAP leg is the IN-GAME price: iap_purchase_completed before tax, unvalidated. A BI inapp figure built from validated store/attribution purchases is a DIFFERENT quantity and will not match — if the question is about billed revenue, take it from there, not from here.",
+      "hack": "A per-row clamp lives in compute op=raw and nowhere else: least/greatest around the value, then sum it — a governed sum measure aggregates a column, it cannot bound each row first. Extrapolate: any quantity that must be bounded, floored or conditionally zeroed BEFORE aggregation — write that row expression in compute op=raw and aggregate it at the reporting grain."
     },
     {
       "id": "ab_test_revenue",
@@ -1708,8 +1684,7 @@
               "attrs": [
                 "experiment_name",
                 "variant_group",
-                "assigned_at",
-                "ended_at"
+                "assigned_at"
               ]
             },
             {
@@ -1722,15 +1697,6 @@
                   "op": "gte",
                   "right": {
                     "column": "assigned_at"
-                  }
-                },
-                {
-                  "left": {
-                    "column": "device_time"
-                  },
-                  "op": "lte",
-                  "right": {
-                    "column": "ended_at"
                   }
                 }
               ]
@@ -1770,7 +1736,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "player_id_of_internal"
+                "internal_player_id"
               ],
               "measures": [
                 {
@@ -1822,8 +1788,8 @@
         "mean_field": "rev_mean",
         "stddev_field": "rev_sd"
       },
-      "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + avg + stddev and call experiment({ action: 'analyze', metric: mean }) (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
-      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). experiment({ action: 'analyze', metric: mean }) runs Welch t-test: control = control variant_group row, variants = the rest."
+      "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + avg + stddev and call ab_test metric=mean (Welch). Extrapolate: ANY per-user continuous metric (revenue, session time, items) between variants.",
+      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). ab_test metric=mean runs Welch t-test: control = control variant_group row, variants = the rest."
     },
     {
       "id": "ab_test_cuped",
@@ -1855,8 +1821,7 @@
               "attrs": [
                 "experiment_name",
                 "variant_group",
-                "assigned_at",
-                "ended_at"
+                "assigned_at"
               ]
             },
             {
@@ -1904,15 +1869,6 @@
                       "right": {
                         "column": "assigned_at"
                       }
-                    },
-                    {
-                      "left": {
-                        "column": "device_time"
-                      },
-                      "op": "lte",
-                      "right": {
-                        "column": "ended_at"
-                      }
                     }
                   ],
                   "then": {
@@ -1957,7 +1913,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "player_id_of_internal"
+                "internal_player_id"
               ],
               "measures": [
                 {
@@ -2065,7 +2021,7 @@
         "sumX2_field": "sum_x2",
         "sumXY_field": "sum_xy"
       },
-      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call experiment({ action: 'analyze', metric: cuped }). Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
+      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric from assigned_at onward) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call ab_test metric=cuped. Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
       "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass per-variant sufficient sums; the tool computes the pooled theta and runs Welch on the adjusted means."
     },
     {
@@ -2095,8 +2051,8 @@
         "sumDen2_field": "sum_den2",
         "sumNumDen_field": "sum_numden"
       },
-      "notes": "The native-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call experiment({ action: 'analyze', metric: ratio }): control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
-      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. experiment({ action: 'analyze', metric: ratio }) applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
+      "notes": "The native-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call ab_test with metric=ratio: control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
+      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. ab_test metric=ratio applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate: CTR (clicks/impressions), completion rate, ARPDAU, etc.",
       "register_payload": {
         "name": "ab_level_completion_ratio",
         "pipeline": {
@@ -2109,8 +2065,7 @@
               "attrs": [
                 "experiment_name",
                 "variant_group",
-                "assigned_at",
-                "ended_at"
+                "assigned_at"
               ]
             },
             {
@@ -2123,15 +2078,6 @@
                   "op": "gte",
                   "right": {
                     "column": "assigned_at"
-                  }
-                },
-                {
-                  "left": {
-                    "column": "device_time"
-                  },
-                  "op": "lte",
-                  "right": {
-                    "column": "ended_at"
                   }
                 }
               ]
@@ -2187,7 +2133,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "player_id_of_internal"
+                "internal_player_id"
               ],
               "measures": [
                 {
@@ -2306,8 +2252,8 @@
         "group_field": "variant_group",
         "n_field": "n"
       },
-      "notes": "The native-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ action: 'check_split' }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
-      "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with experiment({ action: 'check_split' }) (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
+      "notes": "The native-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to srm_check: it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
+      "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with srm_check (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
       "register_payload": {
         "name": "ab_srm_counts",
         "pipeline": {
@@ -2320,8 +2266,7 @@
               "attrs": [
                 "experiment_name",
                 "variant_group",
-                "assigned_at",
-                "ended_at"
+                "assigned_at"
               ]
             },
             {
@@ -2335,15 +2280,6 @@
                   "right": {
                     "column": "assigned_at"
                   }
-                },
-                {
-                  "left": {
-                    "column": "device_time"
-                  },
-                  "op": "lte",
-                  "right": {
-                    "column": "ended_at"
-                  }
                 }
               ]
             },
@@ -2352,7 +2288,7 @@
               "group_by": [
                 "experiment_name",
                 "variant_group",
-                "player_id_of_internal"
+                "internal_player_id"
               ],
               "measures": [
                 {
@@ -2399,31 +2335,28 @@
       "metric_types": [
         "power"
       ],
-      "notes": "experiment({ action: 'plan' }) is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev from a monetization_metrics or active_users_trend query first, then plan. Pair every experiment({ action: 'analyze' }) with an up-front MDE so a non-significant result can be read correctly.",
-      "hack": "Up-front power analysis: baseline/stddev + target effect → required n per group; or n → MDE. Run it before the test to size it and after an inconclusive test to check it was powered. Extrapolate to any two-arm comparison (proportion z-test or mean t-test).",
+      "notes": "sample_size is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev from a monetization_metrics or active_users_trend query first, then plan. Pair every ab_test with an up-front MDE so a non-significant result can be read correctly.",
+      "hack": "Up-front power analysis: baseline/stddev + target effect → required n per group; or n → MDE. Run it before the test to size it and after an inconclusive test to check it was powered. Extrapolate: any two-arm comparison (proportion z-test or mean t-test).",
       "tool_calls": [
         {
-          "tool": "experiment",
+          "tool": "sample_size",
           "args": {
-            "action": "plan",
             "metric": "proportion",
             "baseline": 0.2,
             "mde": 0.02
           }
         },
         {
-          "tool": "experiment",
+          "tool": "sample_size",
           "args": {
-            "action": "plan",
             "metric": "proportion",
             "baseline": 0.2,
             "n": 5000
           }
         },
         {
-          "tool": "experiment",
+          "tool": "sample_size",
           "args": {
-            "action": "plan",
             "metric": "mean",
             "stddev": 12,
             "mde": 1.5
@@ -2432,44 +2365,80 @@
       ]
     },
     {
-      "id": "retention_by_segment",
-      "task_type": "retention",
-      "title": "D1/D7 retention split by a user attribute (country / platform / source)",
-      "when_to_use": "Diagnose a retention change: which segment (country, platform, media_source, acquisition_type) drives the drop or growth in D1/D7 retention.",
+      "id": "game_engagement",
+      "task_type": "engagement",
+      "title": "Game engagement: sessions, unit starts/completions, session length",
+      "when_to_use": "Sessions, level/puzzle starts & completions, completion rate and avg session length, by progression chain/mechanic.",
       "required_events": [
-        "first_launch",
-        "new_session"
+        "new_session",
+        "end_session",
+        "level_started",
+        "level_completed",
+        "puzzle_started",
+        "puzzle_completed"
       ],
-      "required_properties": [],
-      "required_user_attrs": [
-        "country"
+      "required_properties": [
+        "session_duration",
+        "chain",
+        "mechanics"
       ],
+      "required_user_attrs": [],
       "metric_types": [
-        "conversion"
+        "ratio",
+        "simple"
       ],
       "create_payload": {
-        "name": "retention_seg",
-        "use_base_models": [
-          "users"
-        ],
+        "name": "game_engagement",
         "semantic_models": [
           {
             "from": "events",
+            "dimensions": [
+              {
+                "source": "event_property",
+                "property": "chain_of_event_data"
+              },
+              {
+                "source": "event_property",
+                "property": "mechanics_of_event_data"
+              },
+              {
+                "source": "event_property",
+                "property": "game_mode_of_event_data"
+              }
+            ],
             "measures": [
               {
-                "name": "cohort",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "name": "sessions_count",
+                "agg": "count",
+                "field": "*",
                 "event_name": [
-                  "first_launch"
+                  "new_session"
                 ]
               },
               {
-                "name": "returned",
-                "agg": "count_distinct",
-                "field": "player_id_of_internal",
+                "name": "session_seconds",
+                "agg": "sum",
+                "field": "session_duration_of_event_data",
                 "event_name": [
-                  "new_session"
+                  "end_session"
+                ]
+              },
+              {
+                "name": "units_started_count",
+                "agg": "count",
+                "field": "*",
+                "event_name": [
+                  "level_started",
+                  "puzzle_started"
+                ]
+              },
+              {
+                "name": "units_completed_count",
+                "agg": "count",
+                "field": "*",
+                "event_name": [
+                  "level_completed",
+                  "puzzle_completed"
                 ]
               }
             ]
@@ -2477,391 +2446,539 @@
         ],
         "metrics": [
           {
-            "name": "d1",
-            "type": "conversion",
-            "base_measure": {
-              "name": "cohort"
-            },
-            "conversion_measure": {
-              "name": "returned"
-            },
-            "entity": "user",
-            "window": "1 day"
+            "name": "sessions_count",
+            "type": "simple",
+            "measure": {
+              "name": "sessions_count"
+            }
           },
           {
-            "name": "d7",
-            "type": "conversion",
-            "base_measure": {
-              "name": "cohort"
+            "name": "units_started_count",
+            "type": "simple",
+            "measure": {
+              "name": "units_started_count"
+            }
+          },
+          {
+            "name": "units_completed_count",
+            "type": "simple",
+            "measure": {
+              "name": "units_completed_count"
+            }
+          },
+          {
+            "name": "completion_rate",
+            "type": "ratio",
+            "numerator": {
+              "name": "units_completed_count"
             },
-            "conversion_measure": {
-              "name": "returned"
+            "denominator": {
+              "name": "units_started_count"
+            }
+          },
+          {
+            "name": "avg_session_seconds",
+            "type": "ratio",
+            "numerator": {
+              "name": "session_seconds"
             },
-            "entity": "user",
-            "window": "7 day"
+            "denominator": {
+              "name": "sessions_count"
+            }
           }
         ]
       },
       "example_queries": [
         {
           "metrics": [
-            "retention_seg_d1"
+            "game_engagement_sessions_count"
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "country"
+              "time": "metric_time",
+              "grain": "day"
             }
           ]
         },
         {
           "metrics": [
-            "retention_seg_d1",
-            "retention_seg_d7"
+            "game_engagement_completion_rate"
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "platform"
+              "model": "events",
+              "attribute": "chain_of_event_data"
             }
           ]
         },
         {
           "metrics": [
-            "retention_seg_d1"
+            "game_engagement_avg_session_seconds"
           ],
           "group_by": [
             {
-              "model": "users",
-              "attribute": "media_source"
-            },
-            {
-              "model": "users",
-              "attribute": "country"
+              "time": "metric_time",
+              "grain": "day"
             }
           ]
         }
       ],
-      "notes": "Same conversion-window construction as nday_retention, plus use_base_models:['users'] so the user attributes are JOINABLE: group_by { model: 'users', attribute: '<attr>' }. Compare segments side by side to localize a retention change before investigating causes.",
-      "hack": "ANY metric becomes a per-segment diagnostic by adding use_base_models:['users'] + group_by { model: 'users', attribute: '<attr>' }. Localize first (which segment moved), then drill into that segment."
+      "notes": "Governed measures (count* / sum of a numeric event_data property scoped by event_name): session counts and duration, units started/completed. NOTE: playtime here is the RAW complete_time; a version bounded to [0,3600]s per row needs a native pipeline, because a governed measure cannot clamp before summing (see game_playtime_native).",
+      "hack": "Count an event = count(*) scoped by event_name; rate = ratio(next/prev); per-event avg = ratio(sum(value)/count(event)). Extrapolate: any event-count metric, any adjacent-stage rate, and any per-event average built the same way."
     },
     {
-      "id": "dn_retention_exact",
-      "task_type": "retention",
-      "title": "Exact day-N retention curve (returned ON day N, not within N days)",
-      "when_to_use": "Classic game-analytics retention curve: for each day-offset N since install, how many users were active exactly on that day. Use when 'within N days' (nday_retention) is not strict enough.",
+      "id": "coin_economy",
+      "task_type": "economy",
+      "title": "Coin economy: coins earned vs spent (coin value) by source",
+      "when_to_use": "Coins earned (income) vs spent (outcome) in coin value, net flow, by source/operation type.",
       "required_events": [
-        "new_session"
-      ],
-      "required_properties": [],
-      "required_user_attrs": [
-        "install_date"
-      ],
-      "metric_types": [],
-      "register_payload": {
-        "name": "dn_retention_curve",
-        "pipeline": {
-          "source": "events",
-          "stages": [
-            {
-              "stage": "where",
-              "conditions": [
-                {
-                  "column": "event_name",
-                  "op": "eq",
-                  "value": "new_session"
-                }
-              ]
-            },
-            {
-              "stage": "join",
-              "with": "users",
-              "via": "user",
-              "attrs": [
-                "install_date"
-              ]
-            },
-            {
-              "stage": "compute",
-              "name": "day_n",
-              "op": "date_diff",
-              "from": {
-                "column": "install_date"
-              },
-              "to": {
-                "column": "device_time"
-              },
-              "unit": "day"
-            },
-            {
-              "stage": "aggregate",
-              "group_by": [
-                "day_n"
-              ],
-              "measures": [
-                {
-                  "name": "returners",
-                  "fn": "count_distinct",
-                  "column": "player_id_of_internal"
-                }
-              ]
-            },
-            {
-              "stage": "order_by",
-              "keys": [
-                {
-                  "key": "day_n",
-                  "direction": "asc"
-                }
-              ]
-            }
-          ]
-        }
-      },
-      "notes": "day_n = date_diff(install_date -> device_time) buckets every session by its exact day offset since install; returners at day_n=N over the cohort size = exact D-N retention. Divide by the cohort (day_n=0 row, or a separate first_launch count) to get rates. This is point-in-time retention — stricter than the conversion-window approximation in nday_retention. The join uses the declared 'user' relationship, so it needs no column names. If the install record is SLOWLY-CHANGING (semantic_index({ model }) shows a validity window), add between: { value: 'device_time', from: '<validity start>', to: '<validity end>' } to the join stage — otherwise every session matches every historical version of the player and the returner counts inflate.",
-      "hack": "Exact Dn = join the install date, date_diff it against the activity time, group by the offset. The same offset axis powers cohort heatmaps and lifetime curves."
-    },
-    {
-      "id": "sessionize_events",
-      "task_type": "engagement",
-      "title": "Sessionization: rebuild sessions from raw events by inactivity gap",
-      "when_to_use": "Session metrics (length, depth, events-per-session) when you cannot trust a client session counter — rebuild sessions server-side as bursts of activity separated by an inactivity gap (30 min here).",
-      "required_events": [],
-      "required_properties": [],
-      "required_user_attrs": [],
-      "metric_types": [],
-      "register_payload": {
-        "name": "gap_sessions",
-        "pipeline": {
-          "source": "events",
-          "stages": [
-            {
-              "stage": "compute",
-              "name": "prev_ts",
-              "op": "window",
-              "fn": "lag",
-              "column": "device_time",
-              "partition_by": [
-                "player_id_of_internal"
-              ],
-              "order_by": [
-                {
-                  "key": "device_time",
-                  "direction": "asc"
-                }
-              ]
-            },
-            {
-              "stage": "compute",
-              "name": "gap_s",
-              "op": "date_diff",
-              "from": {
-                "column": "prev_ts"
-              },
-              "to": {
-                "column": "device_time"
-              },
-              "unit": "second"
-            },
-            {
-              "stage": "compute",
-              "name": "is_session_start",
-              "op": "case",
-              "cases": [
-                {
-                  "when": [
-                    {
-                      "column": "gap_s",
-                      "op": "is_null"
-                    }
-                  ],
-                  "then": {
-                    "value": 1
-                  }
-                },
-                {
-                  "when": [
-                    {
-                      "column": "gap_s",
-                      "op": "gt",
-                      "value": 1800
-                    }
-                  ],
-                  "then": {
-                    "value": 1
-                  }
-                }
-              ],
-              "else": {
-                "value": 0
-              },
-              "type": "int"
-            },
-            {
-              "stage": "compute",
-              "name": "session_idx",
-              "op": "window",
-              "fn": "sum",
-              "column": "is_session_start",
-              "partition_by": [
-                "player_id_of_internal"
-              ],
-              "order_by": [
-                {
-                  "key": "device_time",
-                  "direction": "asc"
-                }
-              ]
-            },
-            {
-              "stage": "aggregate",
-              "group_by": [
-                "player_id_of_internal",
-                "session_idx"
-              ],
-              "measures": [
-                {
-                  "name": "events_in_session",
-                  "fn": "count"
-                },
-                {
-                  "name": "session_start",
-                  "fn": "min",
-                  "column": "device_time"
-                },
-                {
-                  "name": "session_end",
-                  "fn": "max",
-                  "column": "device_time"
-                }
-              ]
-            },
-            {
-              "stage": "compute",
-              "name": "session_seconds",
-              "op": "date_diff",
-              "from": {
-                "column": "session_start"
-              },
-              "to": {
-                "column": "session_end"
-              },
-              "unit": "second"
-            },
-            {
-              "stage": "order_by",
-              "keys": [
-                {
-                  "key": "player_id_of_internal",
-                  "direction": "asc"
-                },
-                {
-                  "key": "session_idx",
-                  "direction": "asc"
-                }
-              ]
-            }
-          ]
-        }
-      },
-      "notes": "lag() gives the previous event time per user; a NULL or >30min gap starts a new session; the running sum of session starts assigns a session index; aggregating by (user, session_idx) yields one row per rebuilt session with depth and duration. Tune the 1800s threshold to your product.",
-      "hack": "Gap-based sessionization = lag -> gap -> CASE flag -> running-sum id -> aggregate. The same flag+running-sum pattern builds ANY 'episode' grouping (streaks, visits, bouts)."
-    },
-    {
-      "id": "period_over_period",
-      "task_type": "trend",
-      "title": "Period-over-period comparison (revenue by day with delta vs previous period)",
-      "when_to_use": "WoW/DoD/MoM readouts: a metric per period plus its change vs the previous period, in one result.",
-      "required_events": [
-        "iap_purchase_completed"
+        "currency_income",
+        "currency_outcome"
       ],
       "required_properties": [
-        "price_in_usd_of_event_data"
+        "value_in_coins",
+        "source_type",
+        "monetization_type"
       ],
       "required_user_attrs": [],
-      "metric_types": [],
+      "metric_types": [
+        "derived",
+        "simple"
+      ],
+      "create_payload": {
+        "name": "coin_economy",
+        "semantic_models": [
+          {
+            "from": "events",
+            "dimensions": [
+              {
+                "source": "event_property",
+                "property": "source_type_of_event_data"
+              },
+              {
+                "source": "event_property",
+                "property": "source_name_of_event_data"
+              },
+              {
+                "source": "event_property",
+                "property": "monetization_type_of_event_data"
+              }
+            ],
+            "measures": [
+              {
+                "name": "coins_in",
+                "agg": "sum",
+                "field": "value_in_coins_of_event_data",
+                "event_name": [
+                  "currency_income"
+                ]
+              },
+              {
+                "name": "coins_out",
+                "agg": "sum",
+                "field": "value_in_coins_of_event_data",
+                "event_name": [
+                  "currency_outcome"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "coins_in",
+            "type": "simple",
+            "measure": {
+              "name": "coins_in"
+            }
+          },
+          {
+            "name": "coins_out",
+            "type": "simple",
+            "measure": {
+              "name": "coins_out"
+            }
+          },
+          {
+            "name": "net_coins",
+            "type": "derived",
+            "expr": "coins_in - coins_out",
+            "metrics": [
+              {
+                "name": "coins_in"
+              },
+              {
+                "name": "coins_out"
+              }
+            ]
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "coin_economy_net_coins"
+          ],
+          "group_by": [
+            {
+              "time": "metric_time",
+              "grain": "day"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "coin_economy_coins_out"
+          ],
+          "group_by": [
+            {
+              "model": "events",
+              "attribute": "source_type_of_event_data"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "coin_economy_coins_in"
+          ],
+          "group_by": [
+            {
+              "model": "events",
+              "attribute": "monetization_type_of_event_data"
+            }
+          ]
+        }
+      ],
+      "notes": "Governed sum of value_in_coins (coin value) scoped to currency_income/outcome; net_coins is a derived metric. Negatives are summed AS THEY ARE here: a version that floors each row at zero (greatest(x,0)) needs a native pipeline, since a governed measure cannot floor before summing. For raw resource amount swap value_in_coins_of_event_data -> amount_of_event_data.",
+      "hack": "Two oppositely-scoped sum measures + derived (in - out) = net flow. Extrapolate: any signed two-sided quantity (faucets vs sinks, credits vs debits) modelled as two scoped sums plus a derived difference."
+    },
+    {
+      "id": "ad_delivery",
+      "task_type": "ads",
+      "title": "Ad delivery funnel: starts, fills, impressions, revenue",
+      "when_to_use": "Ad starts->fills->impressions funnel, fill/show rates, revenue & eCPM, by network/placement/format.",
+      "required_events": [
+        "ad_started",
+        "ad_loaded",
+        "ad_finished"
+      ],
+      "required_properties": [
+        "status",
+        "revenue",
+        "ad_type",
+        "placement",
+        "network"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "ratio",
+        "simple"
+      ],
+      "create_payload": {
+        "name": "ad_delivery",
+        "semantic_models": [
+          {
+            "from": "events",
+            "dimensions": [
+              {
+                "source": "event_property",
+                "property": "ad_type_of_event_data"
+              },
+              {
+                "source": "event_property",
+                "property": "placement_of_event_data"
+              },
+              {
+                "source": "event_property",
+                "property": "network_of_additional_info_of_event_data"
+              }
+            ],
+            "measures": [
+              {
+                "name": "ad_starts",
+                "agg": "count",
+                "field": "*",
+                "event_name": [
+                  "ad_started"
+                ]
+              },
+              {
+                "name": "ad_fills",
+                "agg": "count",
+                "field": "*",
+                "event_name": [
+                  "ad_loaded"
+                ],
+                "where": [
+                  {
+                    "property": "status_of_event_data",
+                    "op": "eq",
+                    "value": "success"
+                  }
+                ]
+              },
+              {
+                "name": "impressions",
+                "agg": "count",
+                "field": "*",
+                "event_name": [
+                  "ad_finished"
+                ]
+              },
+              {
+                "name": "ad_revenue",
+                "agg": "sum",
+                "field": "revenue_of_event_data",
+                "event_name": [
+                  "ad_finished"
+                ]
+              }
+            ]
+          }
+        ],
+        "metrics": [
+          {
+            "name": "ad_starts",
+            "type": "simple",
+            "measure": {
+              "name": "ad_starts"
+            }
+          },
+          {
+            "name": "ad_fills",
+            "type": "simple",
+            "measure": {
+              "name": "ad_fills"
+            }
+          },
+          {
+            "name": "impressions",
+            "type": "simple",
+            "measure": {
+              "name": "impressions"
+            }
+          },
+          {
+            "name": "ad_revenue",
+            "type": "simple",
+            "measure": {
+              "name": "ad_revenue"
+            }
+          },
+          {
+            "name": "fill_rate",
+            "type": "ratio",
+            "numerator": {
+              "name": "ad_fills"
+            },
+            "denominator": {
+              "name": "ad_starts"
+            }
+          },
+          {
+            "name": "show_rate",
+            "type": "ratio",
+            "numerator": {
+              "name": "impressions"
+            },
+            "denominator": {
+              "name": "ad_fills"
+            }
+          },
+          {
+            "name": "rev_per_imp",
+            "type": "ratio",
+            "numerator": {
+              "name": "ad_revenue"
+            },
+            "denominator": {
+              "name": "impressions"
+            }
+          }
+        ]
+      },
+      "example_queries": [
+        {
+          "metrics": [
+            "ad_delivery_fill_rate"
+          ],
+          "group_by": [
+            {
+              "model": "events",
+              "attribute": "network_of_additional_info_of_event_data"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "ad_delivery_rev_per_imp"
+          ],
+          "group_by": [
+            {
+              "model": "events",
+              "attribute": "ad_type_of_event_data"
+            }
+          ]
+        },
+        {
+          "metrics": [
+            "ad_delivery_impressions"
+          ],
+          "group_by": [
+            {
+              "model": "events",
+              "attribute": "placement_of_event_data"
+            }
+          ]
+        }
+      ],
+      "notes": "Governed: ad_fills = count of ad_loaded with status=success (per-measure where); funnel rates as ratio metrics; eCPM = rev_per_imp*1000. Revenue here is summed UNCAPPED; a capped ad revenue ([0,1] USD/imp) and clamped display/latency need the native pipeline, because a governed measure cannot bound a row before summing (ad_quality_native).",
+      "hack": "Delivery funnel = count(*) per stage event (+ where on status) chained as ratio metrics. Extrapolate: any staged delivery funnel — chain count(*) per stage event into ratio metrics between adjacent stages."
+    },
+    {
+      "id": "game_playtime_native",
+      "task_type": "engagement",
+      "title": "Game playtime (complete_time clamped to [0,3600])",
+      "when_to_use": "Playtime per completed unit: complete_time clamped to [0,3600]s per row, summed by day. Needs a native pipeline because a governed measure cannot clamp before summing.",
+      "required_events": [
+        "level_completed",
+        "puzzle_completed"
+      ],
+      "required_properties": [
+        "complete_time"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple",
+        "ratio"
+      ],
       "register_payload": {
-        "name": "revenue_pop",
+        "name": "game_playtime",
         "pipeline": {
           "source": "events",
           "stages": [
             {
-              "stage": "where",
-              "conditions": [
+              "stage": "compute",
+              "name": "playtime_val",
+              "op": "raw",
+              "sql": "case when event_name in ('level_completed','puzzle_completed') then greatest(least(cast(complete_time_of_event_data as float64), 3600), 0) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "event_date"
+              ],
+              "measures": [
                 {
-                  "column": "event_name",
-                  "op": "eq",
-                  "value": "iap_purchase_completed"
+                  "name": "units_playtime",
+                  "fn": "sum",
+                  "column": "playtime_val"
                 }
               ]
             },
             {
-              "stage": "derive",
-              "name": "price",
-              "op": "extract",
-              "source": "price_in_usd_of_event_data",
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "event_date",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "notes": "Playtime per completed unit with complete_time clamped to [0,3600] seconds per row, then summed. Read the result via get_query_result; group_by event_date.",
+      "hack": "Clamp = greatest(least(x, hi), lo) inside a compute op=raw, then aggregate sum. Extrapolate: any per-row value that needs bounding before aggregation — clamp inside compute op=raw, then sum."
+    },
+    {
+      "id": "ad_quality_native",
+      "task_type": "ads",
+      "title": "Ad quality: capped revenue, clamped display & waterfall latency",
+      "when_to_use": "Ad quality with per-row bounds: revenue capped [0,1] USD/imp, display_duration clamped [0,150]s, waterfall latency ms/1000 clamped [0,300]s + eligible-event count (for avg latency).",
+      "required_events": [
+        "ad_loaded",
+        "ad_finished"
+      ],
+      "required_properties": [
+        "revenue",
+        "display_duration",
+        "waterfall_latency",
+        "ad_type",
+        "status"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple",
+        "ratio"
+      ],
+      "register_payload": {
+        "name": "ad_quality",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "compute",
+              "name": "ad_revenue_val",
+              "op": "raw",
+              "sql": "case when event_name = 'ad_finished' then least(greatest(cast(revenue_of_event_data as float64), 0.0), 1.0) end",
               "type": "numeric"
             },
             {
               "stage": "compute",
-              "name": "period",
-              "op": "date_trunc",
-              "column": "device_time",
-              "granularity": "day"
+              "name": "display_val",
+              "op": "raw",
+              "sql": "case when event_name = 'ad_finished' then greatest(0.0, least(safe_cast(display_duration_of_event_data as float64), 150.0)) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "latency_val",
+              "op": "raw",
+              "sql": "case when ((event_name = 'ad_loaded' and lower(ad_type_of_event_data) in ('rewarded','interstitial')) or (lower(ad_type_of_event_data) = 'banner' and event_name = 'ad_finished')) and coalesce(status_of_event_data, 'success') = 'success' then greatest(least(safe_cast(waterfall_latency_of_additional_info_of_event_data as float64) / 1000, 300.0), 0.0) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "latency_evt",
+              "op": "raw",
+              "sql": "case when ((event_name = 'ad_loaded' and lower(ad_type_of_event_data) in ('rewarded','interstitial')) or (lower(ad_type_of_event_data) = 'banner' and event_name = 'ad_finished')) and coalesce(status_of_event_data, 'success') = 'success' then 1.0 else 0.0 end",
+              "type": "numeric"
             },
             {
               "stage": "aggregate",
               "group_by": [
-                "period"
+                "event_date"
               ],
               "measures": [
                 {
-                  "name": "revenue",
+                  "name": "ad_revenue_capped",
                   "fn": "sum",
-                  "column": "price"
-                }
-              ]
-            },
-            {
-              "stage": "compute",
-              "name": "prev_revenue",
-              "op": "window",
-              "fn": "lag",
-              "column": "revenue",
-              "order_by": [
+                  "column": "ad_revenue_val"
+                },
                 {
-                  "key": "period",
-                  "direction": "asc"
+                  "name": "ad_display_duration",
+                  "fn": "sum",
+                  "column": "display_val"
+                },
+                {
+                  "name": "ad_latency",
+                  "fn": "sum",
+                  "column": "latency_val"
+                },
+                {
+                  "name": "ad_latency_events_count",
+                  "fn": "sum",
+                  "column": "latency_evt"
                 }
               ]
-            },
-            {
-              "stage": "compute",
-              "name": "delta",
-              "op": "sub",
-              "left": {
-                "column": "revenue"
-              },
-              "right": {
-                "column": "prev_revenue"
-              }
-            },
-            {
-              "stage": "compute",
-              "name": "pct_change",
-              "op": "div",
-              "left": {
-                "column": "delta"
-              },
-              "right": {
-                "column": "prev_revenue"
-              }
             },
             {
               "stage": "order_by",
               "keys": [
                 {
-                  "key": "period",
+                  "key": "event_date",
                   "direction": "asc"
                 }
               ]
@@ -2869,37 +2986,124 @@
           ]
         }
       },
-      "notes": "lag(revenue) over the period axis gives the previous period in the same row; delta/pct_change follow with plain arithmetic. CAVEAT: lag is the previous ROW — if periods can be missing (days with zero revenue), densify the axis first or compare at a coarser grain (week/month via date_trunc granularity).",
-      "hack": "Period-over-period = aggregate to the period grain, then window lag + sub/div. Swap the measure or the grain freely; the same lag pattern yields growth rates and streak detection."
+      "notes": "Three per-row bounded quantities, each summed: ad revenue capped to [0,1] USD per impression, display duration clamped to [0,150]s, waterfall latency in ms/1000 clamped to [0,300]s — plus the count of latency-eligible events. Avg latency = latency_sum / latency_events_count; avg display = display_sum / impressions (post-process or a downstream compute).",
+      "hack": "Clamps/conditions as compute op=raw per row, summed; ratios computed on the result. Extrapolate: any per-row conditional quantity summed into a total, with ratios derived on the aggregated result rather than per row."
     },
     {
-      "id": "data_quality_event_volume",
-      "task_type": "data_quality",
-      "title": "Data-quality check: event volume + distinct users per event",
-      "when_to_use": "FIRST move when a metric looks anomalous: did the underlying events change volume (tracking broke, release dropped an event) or did real behavior change? Also a fast map of which events dominate the data.",
-      "required_events": [],
-      "required_properties": [],
+      "id": "game_state_snapshots_native",
+      "task_type": "progression",
+      "title": "Game state snapshots at unit start/completion (balances, hints used)",
+      "when_to_use": "Coins/lives/skill balances at level/puzzle start and completion, total hints used, and total hint/booster balance count — summed by day (divide by units_*_count for averages).",
+      "required_events": [
+        "level_started",
+        "level_completed",
+        "puzzle_started",
+        "puzzle_completed"
+      ],
+      "required_properties": [
+        "coins_balance",
+        "lives_balance",
+        "skill_points"
+      ],
       "required_user_attrs": [],
-      "metric_types": [],
+      "metric_types": [
+        "simple",
+        "ratio"
+      ],
       "register_payload": {
-        "name": "event_volume_audit",
+        "name": "game_state",
         "pipeline": {
           "source": "events",
           "stages": [
             {
+              "stage": "compute",
+              "name": "st_coins",
+              "op": "raw",
+              "sql": "case when event_name in ('level_started','puzzle_started') then cast(coins_balance_of_state as float64) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "cp_coins",
+              "op": "raw",
+              "sql": "case when event_name in ('level_completed','puzzle_completed') then cast(coins_balance_of_state as float64) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "st_lives",
+              "op": "raw",
+              "sql": "case when event_name in ('level_started','puzzle_started') then cast(lives_balance_of_state as float64) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "cp_lives",
+              "op": "raw",
+              "sql": "case when event_name in ('level_completed','puzzle_completed') then cast(lives_balance_of_state as float64) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "st_skill",
+              "op": "raw",
+              "sql": "case when event_name in ('level_started','puzzle_started') then cast(skill_points_of_state as float64) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "cp_skill",
+              "op": "raw",
+              "sql": "case when event_name in ('level_completed','puzzle_completed') then cast(skill_points_of_state as float64) end",
+              "type": "numeric"
+            },
+            {
+              "stage": "compute",
+              "name": "cp_res_used",
+              "op": "raw",
+              "sql": "case when event_name in ('level_completed','puzzle_completed') then (coalesce(cast(hint_open_first_letter_used_of_event_data as int64),0)+coalesce(cast(hint_open_any_letter_used_of_event_data as int64),0)+coalesce(cast(hint_open_several_letters_used_of_event_data as int64),0)+coalesce(cast(hints_cancel_used_of_event_data as int64),0)+coalesce(cast(hints_shuffle_used_of_event_data as int64),0)+coalesce(cast(hints_clear_used_of_event_data as int64),0)+coalesce(cast(hints_magnet_used_of_event_data as int64),0)+coalesce(cast(hint_open_cell_used_of_event_data as int64),0)) end",
+              "type": "numeric"
+            },
+            {
               "stage": "aggregate",
               "group_by": [
-                "event_name"
+                "event_date"
               ],
               "measures": [
                 {
-                  "name": "rows",
-                  "fn": "count"
+                  "name": "unit_started_coins_balance",
+                  "fn": "sum",
+                  "column": "st_coins"
                 },
                 {
-                  "name": "users",
-                  "fn": "count_distinct",
-                  "column": "player_id_of_internal"
+                  "name": "unit_completed_coins_balance",
+                  "fn": "sum",
+                  "column": "cp_coins"
+                },
+                {
+                  "name": "unit_started_lives_count",
+                  "fn": "sum",
+                  "column": "st_lives"
+                },
+                {
+                  "name": "unit_completed_lives_count",
+                  "fn": "sum",
+                  "column": "cp_lives"
+                },
+                {
+                  "name": "unit_started_skill_points",
+                  "fn": "sum",
+                  "column": "st_skill"
+                },
+                {
+                  "name": "unit_completed_skill_points",
+                  "fn": "sum",
+                  "column": "cp_skill"
+                },
+                {
+                  "name": "unit_completed_resource_used_count",
+                  "fn": "sum",
+                  "column": "cp_res_used"
                 }
               ]
             },
@@ -2907,72 +3111,87 @@
               "stage": "order_by",
               "keys": [
                 {
-                  "key": "rows",
-                  "direction": "desc"
+                  "key": "event_date",
+                  "direction": "asc"
                 }
               ]
             }
           ]
         }
       },
-      "notes": "Compare volumes and per-event user counts against expectation/history; a vanished or collapsed event usually means broken tracking, not changed behavior. Drill NULL coverage of a suspicious property with semantic_index({ source, property }) — it separates expected NULLs (property not applicable to the event) from real gaps. Add a time_range to audit a specific release window, or group_by a user attribute (join 'users') to localize a client-side break.",
-      "hack": "Anomaly triage order: (1) event volumes, (2) property NULL coverage, (3) only then the metric itself. Most 'metric drops' are tracking changes."
+      "notes": "Balances captured ON the unit_started / unit_completed events (coins, lives, skill), total hints used, and total hint/booster balance count — each summed by day. State columns are not aggregatable as governed measures, so this uses a native pipeline.",
+      "hack": "Snapshot = state column captured on the event, summed; per-unit average = snapshot_sum / units_*_count. Extrapolate: any state column carried on an event — sum it and divide by the count of the unit it was captured on."
     },
     {
-      "id": "two_sample_significance",
-      "task_type": "ab_test",
-      "title": "Two-sample significance for ANY two groups (no experiment needed)",
-      "when_to_use": "You have TWO groups from the SAME pipeline and want to know if a difference is statistically real — NOT a randomized experiment. E.g. mean time-to-first vs time-to-last occurrence, conversion of cohort A vs B, a metric before vs after a date, organic vs paid. There is NO experiments-assignment table involved.",
-      "required_events": [],
-      "required_properties": [],
-      "required_user_attrs": [],
-      "required_roles": [],
-      "metric_types": [
-        "mean",
-        "proportion"
+      "id": "resource_balance_coins_native",
+      "task_type": "economy",
+      "title": "Hint/booster balance coin-value at unit start/completion (per-app weighting)",
+      "when_to_use": "Coin-value of the player's hint/booster balance at level/puzzle start and completion, each hint weighted by a per-app coin price.",
+      "required_events": [
+        "level_started",
+        "level_completed",
+        "puzzle_started",
+        "puzzle_completed"
       ],
-      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_native_model pipeline, then feed them to ab_test — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (avg) + stddev, then ab_test({ metric: 'mean' }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then ab_test({ metric: 'proportion' }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a CASE/derive column, two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final ab_test step on example per-group aggregates.",
-      "hack": "Compare two groups → aggregate each to its sufficient stats (mean: n+mean+stddev; proportion: conversions+n) in one pipeline, then ONE ab_test call returns lift + p-value + CI + significance. Reuse for first-vs-last, before-vs-after, cohort-vs-cohort — anywhere you'd otherwise eyeball two numbers.",
-      "tool_calls": [
-        {
-          "tool": "ab_test",
-          "args": {
-            "metric": "mean",
-            "control": {
-              "label": "group_a",
-              "n": 1200,
-              "mean": 42.5,
-              "stddev": 18.3
+      "required_properties": [
+        "coins_balance"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [
+        "simple",
+        "derived"
+      ],
+      "register_payload": {
+        "name": "resource_coins",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "compute",
+              "name": "st_coins_value",
+              "op": "raw",
+              "sql": "case when event_name in ('level_started','puzzle_started') then (coalesce(cast(hint_open_first_letter_balance_of_state as int64),0)*(case app_id_of_main_data when 'fillwords' then 100 when 'sky_words' then 100 when 'tile_trip' then 10 when 'word_pizza' then 50 when 'word_search_sea' then 35 when 'word_spells' then 100 else 0 end)+coalesce(cast(hint_open_any_letter_balance_of_state as int64),0)*(case app_id_of_main_data when 'sky_words' then 200 when 'tile_trip' then 20 when 'word_pizza' then 100 when 'word_search_sea' then 70 when 'word_spells' then 200 else 0 end)+coalesce(cast(hint_open_several_letters_balance_of_state as int64),0)*(case app_id_of_main_data when 'sky_words' then 300 when 'tile_trip' then 60 when 'word_pizza' then 150 when 'word_search_sea' then 100 when 'word_spells' then 300 else 0 end)+coalesce(cast(hint_magnet_balance_of_state as int64),0)*(case app_id_of_main_data when 'tile_trip' then 40 else 0 end)) end",
+              "type": "numeric"
             },
-            "variants": [
-              {
-                "label": "group_b",
-                "n": 1180,
-                "mean": 39.1,
-                "stddev": 17.9
-              }
-            ]
-          }
-        },
-        {
-          "tool": "ab_test",
-          "args": {
-            "metric": "proportion",
-            "control": {
-              "label": "group_a",
-              "n": 4000,
-              "conversions": 820
+            {
+              "stage": "compute",
+              "name": "cp_coins_value",
+              "op": "raw",
+              "sql": "case when event_name in ('level_completed','puzzle_completed') then (coalesce(cast(hint_open_first_letter_balance_of_state as int64),0)*(case app_id_of_main_data when 'fillwords' then 100 when 'sky_words' then 100 when 'tile_trip' then 10 when 'word_pizza' then 50 when 'word_search_sea' then 35 when 'word_spells' then 100 else 0 end)+coalesce(cast(hint_open_any_letter_balance_of_state as int64),0)*(case app_id_of_main_data when 'sky_words' then 200 when 'tile_trip' then 20 when 'word_pizza' then 100 when 'word_search_sea' then 70 when 'word_spells' then 200 else 0 end)+coalesce(cast(hint_open_several_letters_balance_of_state as int64),0)*(case app_id_of_main_data when 'sky_words' then 300 when 'tile_trip' then 60 when 'word_pizza' then 150 when 'word_search_sea' then 100 when 'word_spells' then 300 else 0 end)+coalesce(cast(hint_magnet_balance_of_state as int64),0)*(case app_id_of_main_data when 'tile_trip' then 40 else 0 end)) end",
+              "type": "numeric"
             },
-            "variants": [
-              {
-                "label": "group_b",
-                "n": 4100,
-                "conversions": 905
-              }
-            ]
-          }
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "event_date"
+              ],
+              "measures": [
+                {
+                  "name": "unit_started_resource_balance_coins",
+                  "fn": "sum",
+                  "column": "st_coins_value"
+                },
+                {
+                  "name": "unit_completed_resource_balance_coins",
+                  "fn": "sum",
+                  "column": "cp_coins_value"
+                }
+              ]
+            },
+            {
+              "stage": "order_by",
+              "keys": [
+                {
+                  "key": "event_date",
+                  "direction": "asc"
+                }
+              ]
+            }
+          ]
         }
-      ]
+      },
+      "notes": "Coin-value of the player's hint/booster balance at unit start and completion: each hint type weighted by that app's coin price (a hint type with no price for an app contributes 0), summed by day.",
+      "hack": "Per-app weighting = nested CASE on app_id inside a compute op=raw; summed by day. Extrapolate: any per-app or per-segment weighting — a nested CASE inside compute op=raw, aggregated by the reporting grain."
     }
   ]
 }

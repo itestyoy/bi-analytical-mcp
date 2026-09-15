@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -65,7 +65,7 @@ test('semantic_index: per-property timing + drill-down by run and via the proper
   assert.equal(byRun.properties[0].ms, 80);
 
   // the property PASSPORT carries the indexing history across runs + average.
-  const byProp = await e.semantic_index({ property: 'ad_type_of_event_data' });
+  const byProp = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.equal(byProp.indexing.runs, 2);
   assert.equal(byProp.indexing.history[0].run_id, r2); // most recent first
   assert.equal(byProp.indexing.avg_ms, 70); // (80 + 60) / 2
@@ -79,12 +79,71 @@ test('semantic_index: per-property timing + drill-down by run and via the proper
 test('semantic_index: strict view contract (exactly one view, scoped params)', async () => {
   const e = engine();
   await assert.rejects(() => e.semantic_index({ bogus: 1 }), /invalid input/);
-  await assert.rejects(() => e.semantic_index({ event: 'tutorial', property: 'ad_type_of_event_data' }), /at most ONE view/);
-  await assert.rejects(() => e.semantic_index({ status: true, run: 1 }), /at most ONE view/);
-  await assert.rejects(() => e.semantic_index({ model: 'events', limit: 5 }), /limit only applies/);
-  await assert.rejects(() => e.semantic_index({ search: 'x', offset: 2 }), /offset only applies/);
-  await assert.rejects(() => e.semantic_index({ event: 'tutorial', recent: 3 }), /recent only applies/);
+  await assert.rejects(() => e.semantic_index({ event: 'tutorial', property: 'ad_type_of_event_data' }), /must be exactly one of: .*\{ source, property \}/);
+  await assert.rejects(() => e.semantic_index({ status: true, run: 1 }), /must be exactly one of: .*\{ status \}/);
+  // a paging field on a view that does not page is simply not a field of that view
+  await assert.rejects(() => e.semantic_index({ model: 'events', limit: 5 }), /unexpected property 'limit'/);
+  await assert.rejects(() => e.semantic_index({ search: 'x', offset: 2 }), /unexpected property 'offset'/);
+  await assert.rejects(() => e.semantic_index({ event: 'tutorial', recent: 3 }), /unexpected property 'recent'/);
   // valid scoped params are accepted.
   assert.ok((await e.semantic_index({ status: true, recent: 5 })).value_index);
   assert.ok((await e.semantic_index({ search: 'tutorial', limit: 5 })).query);
+});
+
+// The SOURCE is ALWAYS a separate, named argument — in every catalog, however many sources it
+// has. Input-validation guard: no view accepts an event or a column on its own, so no name ever
+// has to be traced back to an owner.
+const SINGLE_SOURCE = `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp:
+        role: events
+        primary_entity: event
+        known_events: [login, purchase]
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+`;
+
+const SECOND_SOURCE = `  - name: fct_crash
+    meta:
+      mcp:
+        role: crashlytics
+        primary_entity: crash
+        known_events: [boom]
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+`;
+
+function engineFor(yaml) {
+  const dir = mkdtempSync(join(tmpdir(), 'srcarg-'));
+  const file = join(dir, 'catalog.yml');
+  writeFileSync(file, yaml);
+  return new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) });
+}
+
+test('semantic_index: an event or a column is never asked for without its source', async () => {
+  // ONE events source: being the only one earns it no shortcut — the pairing is still written out.
+  const one = engineFor(SINGLE_SOURCE);
+  await assert.rejects(() => one.semantic_index({ event: 'login' }), /unexpected property 'event'/);
+  assert.equal((await one.semantic_index({ source: 'events', event: 'login' })).event, 'login');
+
+  // SEVERAL events sources: same rule, same spelling — nothing about the catalog changes it.
+  const two = engineFor(SINGLE_SOURCE + SECOND_SOURCE);
+  await assert.rejects(() => two.semantic_index({ event: 'login' }), /must be exactly one of: .*\{ source, event \}/);
+  assert.equal((await two.semantic_index({ source: 'events', event: 'login' })).event, 'login');
+  assert.equal((await two.semantic_index({ source: 'crashlytics', event: 'boom' })).event, 'boom');
+  // An event of the OTHER source is not in this source's vocabulary, so the pairing matches no
+  // branch: the refusal names the one field that can be corrected — the source that declares the
+  // event, or that source's event vocabulary.
+  await assert.rejects(() => two.semantic_index({ source: 'crashlytics', event: 'login' }), /`source` must be "events"/);
+  await assert.rejects(() => two.semantic_index({ source: 'events', event: 'boom' }), /`event` must be one of: login, purchase/);
+
+  // A COLUMN is addressed the same way: a bare name has no spelling in either catalog.
+  await assert.rejects(() => one.semantic_index({ property: 'user_id' }), /unexpected property 'property'/);
+  await assert.rejects(() => two.semantic_index({ property: 'user_id' }), /unexpected property 'property'/);
 });

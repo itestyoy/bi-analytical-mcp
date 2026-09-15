@@ -136,13 +136,6 @@ export class ValueIndex {
     return this.store.values.removeProperty ? this.store.values.removeProperty(source, property) : false;
   }
 
-  /** Carry a v1 index (one flat property namespace) into the (source, property) schema; see the
-   *  store. `resolve(oldKey)` -> { source, property } | null, supplied by the caller that holds
-   *  the catalog. No-op on a fresh database or a non-persistent backend. */
-  migrateLegacyKeys(resolve) {
-    return this.store.values.migrateLegacyKeys ? this.store.values.migrateLegacyKeys(resolve) : { migrated: 0, dropped: 0 };
-  }
-
   /**
    * [{ source, property, value, freq, score, match }] for stored values matching `query`.
    * Tier 1: EXACT substring (fast SQL, score 1, match 'exact'). When fuzzy is on and
@@ -152,13 +145,13 @@ export class ValueIndex {
   searchValues(query, limit = 20, { fuzzy = true } = {}) {
     const exact = this.store.values.search(query, limit).map((v) => ({ ...v, score: 1, match: 'exact' }));
     if (!fuzzy || exact.length >= limit || String(query).trim().length < 3) return exact;
-    const seen = new Set(exact.map((v) => `${v.source} ${v.property} ${v.value}`));
+    const seen = new Set(exact.map((v) => `${v.source}\u0000${v.property}\u0000${v.value}`));
     const ranked = rankFuzzy(query, this.store.values.candidates(VALUE_FUZZY_CAP), {
       fields: (v) => [v.value], threshold: 0.6, tiebreak: (v) => v.value,
     });
     const fuzzyHits = [];
     for (const { item: v, score, match } of ranked) {
-      if (match === 'exact' || seen.has(`${v.source} ${v.property} ${v.value}`)) continue; // exact already covered
+      if (match === 'exact' || seen.has(`${v.source}\u0000${v.property}\u0000${v.value}`)) continue; // exact already covered
       fuzzyHits.push({ source: v.source, property: v.property, value: v.value, freq: v.freq, score, match: 'fuzzy' });
       if (exact.length + fuzzyHits.length >= limit) break;
     }
@@ -185,7 +178,9 @@ export class ValueIndex {
 
   /** Record how long ONE property took within a run (+ what it produced). */
   recordPropertyTiming(runId, fields = {}) {
-    if (runId == null || !fields.property) return;
+    // Diagnostics are best-effort: a row that cannot be keyed (no run, or no source+property) is
+    // skipped rather than failing the scan it is only describing.
+    if (runId == null || !fields.property || !fields.source) return;
     this.store.runs.recordProperty(runId, fields);
   }
 
@@ -662,7 +657,7 @@ export class BackgroundIndexer {
     };
     const cov = addBy([...(prior.coverage || []), ...(delta.coverage || [])], (e) => e.event);
     const bun = addBy([...(prior.bundleCoverage || []), ...(delta.bundleCoverage || [])], (e) => e.bundle);
-    const cells = addBy([...(prior.cellCoverage || []), ...(delta.cellCoverage || [])], (e) => `${e.bundle} ${e.event}`);
+    const cells = addBy([...(prior.cellCoverage || []), ...(delta.cellCoverage || [])], (e) => `${e.bundle}\u0000${e.event}`);
     const total = (prior.total || 0) + (delta.total || 0);
     const rowsTotal = (prior.rowsTotal || 0) + (delta.rowsTotal || 0);
     const distinct = (prior.distinct == null && delta.distinct == null) ? null : Math.max(prior.distinct || 0, delta.distinct || 0);

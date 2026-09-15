@@ -18,7 +18,10 @@ export class PostgresDialect extends Dialect {
 
   jsonArrayLength(column, key) {
     this.ident(key);
-    return `jsonb_array_length(${column}->'${key}')`;
+    // A payload key is not typed: on some rows it may hold a scalar where others hold an array, and
+    // asking a scalar for its length RAISES — failing the whole query over the column. Not an array
+    // → NULL, which reads as "no array here" everywhere this is used. (`IS JSON` is Postgres 16+.)
+    return `(CASE WHEN (${column}->'${key}') IS JSON ARRAY THEN jsonb_array_length(${column}->'${key}') END)`;
   }
 
   // Element count of a native array column (array_length returns NULL for an empty array → 0).
@@ -79,11 +82,27 @@ export class PostgresDialect extends Dialect {
   }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
-  // A TEXT column holding JSON must be cast before the jsonb operators apply.
-  jsonColumnArrayLength(column) { return `jsonb_array_length((${column})::jsonb)`; }
+  /**
+   * A TEXT column holding JSON, read through the jsonb operators. The `::jsonb` cast RAISES on a
+   * row whose text is not JSON, and ONE such row fails the whole statement — so every read guards
+   * the cast the same way: the value is tested first, and a row that does not hold the expected
+   * JSON shape yields NULL, which counts as absent everywhere these are used.
+   *
+   * The guard is what makes a malformed row a missing value instead of a failed query, so it
+   * belongs to EVERY read, not just the one that happened to be scanned over every row. It needs
+   * `IS JSON`, which is Postgres 16+ (PGlite 17 and BigQuery's own guards are fine); on an older
+   * server these reads are unsupported rather than silently unguarded.
+   */
+  _jsonbWhenValid(column, expr, shape = '') {
+    return `(CASE WHEN ${column} IS JSON${shape ? ` ${shape}` : ''} THEN ${expr} END)`;
+  }
+
+  jsonColumnArrayLength(column) {
+    return this._jsonbWhenValid(column, `jsonb_array_length((${column})::jsonb)`, 'ARRAY');
+  }
 
   jsonColumnArrayContains(column, value) {
-    return `(((${column})::jsonb) @> ${this.sqlLiteral(JSON.stringify([value]))}::jsonb)`;
+    return this._jsonbWhenValid(column, `(((${column})::jsonb) @> ${this.sqlLiteral(JSON.stringify([value]))}::jsonb)`, 'ARRAY');
   }
 
   arrayContains(column, value) { return `(${this.sqlLiteral(value)} = ANY(${column}))`; }
@@ -92,7 +111,7 @@ export class PostgresDialect extends Dialect {
     this.ident(field);
     const base = `((${column})::jsonb->>'${field}')`;
     const ct = this.castType(type);
-    return ct ? `${base}::${ct}` : base;
+    return this._jsonbWhenValid(column, ct ? `${base}::${ct}` : base);
   }
 
   // ── time / scalar / statistical ────────────────────────────────────────────
@@ -170,14 +189,12 @@ export class PostgresDialect extends Dialect {
     const ctes = [];
     ops.forEach((op, i) => {
       const name = `p${i}`;
-      ctes.push(`${name} AS (\n  ${this._step(prev, op)}\n)`);
+      // A stage that renders itself (match_recognize) contributes its own self-contained SELECT.
+      ctes.push(`${name} AS (\n  ${op.render ? op.render(prev, this.name) : this._step(prev, op)}\n)`);
       prev = name;
     });
     return `WITH ${ctes.join(',\n')}\nSELECT * FROM ${prev}`;
   }
-
-  /** CTE-form rendering of one op (used by the funnel/prepare pipeline). */
-  stepCte(prev, op) { return this._step(prev, op); }
 
   _step(prev, op) {
     switch (op.op) {
@@ -189,17 +206,8 @@ export class PostgresDialect extends Dialect {
         const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type, op.encoding);
         return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
       }
-      case 'join': {
-        // `onKeys` = a relationship declared in the schema: each side brings its OWN expression
-        // for the same logical key (different column names, a time column truncated to the
-        // declared grain), compared part by part. `on` = the plain shared-name form.
-        const eq = op.onKeys
-          ? op.onKeys.left.map((lp, i) => `${this.keyPartExpr(lp, (c) => `base.${c}`)} = ${this.keyPartExpr(op.onKeys.right[i], (c) => `j.${c}`)}`).join(' AND ')
-          : op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
-        const btw = op.between ? ` AND base.${this.ident(op.between.value)} BETWEEN j.${this.ident(op.between.from)} AND j.${this.ident(op.between.to)}` : '';
-        const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
-        return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
-      }
+      case 'join':
+        return this.joinCte(prev, op);
       case 'aggregate': {
         const sel = [...op.groupBy.map((c) => this.ident(c)), ...op.aggs.map((a) => `${a.expr} AS ${this.ident(a.as)}`)];
         return `SELECT ${sel.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;

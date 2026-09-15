@@ -9,6 +9,7 @@ import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildToolDefs } from '../../src/server.js';
+import { renderContext } from '../../src/yaml-render.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -100,7 +101,7 @@ test('semantic_index folds recipes: overview list + { recipe } payload', async (
   assert.ok(r.hack && (r.create_payload || r.register_payload), 'recipe payload + hack returned');
   assert.ok(r.naming_note.includes('namespaced'), 'carries the task-namespacing note');
   // recipe is a mutually-exclusive view; an unknown id is rejected by the enum.
-  await assert.rejects(() => e.semantic_index({ recipe: 'nday_retention', event: 'tutorial' }), /at most ONE view/);
+  await assert.rejects(() => e.semantic_index({ recipe: 'nday_retention', event: 'tutorial' }), /must be exactly one of: .*\{ recipe \}/);
   await assert.rejects(() => e.semantic_index({ recipe: 'no_such_recipe' }), /invalid input/);
 });
 
@@ -173,7 +174,7 @@ test('semantic_index({ guide }) serves the workflow + routing triggers + per-tas
   // overview points at the guide; guide is a mutually-exclusive view.
   const ov = await e.semantic_index();
   assert.ok(typeof ov.guide === 'string' && /guide/.test(ov.guide));
-  await assert.rejects(() => e.semantic_index({ guide: true, model: 'events' }), /at most ONE view/);
+  await assert.rejects(() => e.semantic_index({ guide: true, model: 'events' }), /must be exactly one of: .*\{ guide \}/);
 });
 
 // Without recipes configured, the recipe view + overview list are simply absent.
@@ -214,17 +215,19 @@ test('semantic_index({ model }) reports an owned relationship as owned, with a g
   assert.equal(events.relationships.find((r) => r.entity === 'user').use, 'metric query + pipeline');
 });
 
-// The qualified '<source>.<name>' form — the one the tool itself emits — resolves; a bare name
-// carried by several sources is reported, never guessed.
-test('memory targets: qualified names resolve, ambiguous bare names are refused', async () => {
+// A target is the PAIR the tool itself emits. A name on its own has no spelling at all — so a name
+// two sources carry can never be attached to the wrong one, and never has to be disambiguated.
+test('memory targets: { source, name } resolves; a bare name is not a target', async () => {
   const e = engine();
-  const saved = await e.memory({ action: 'record', note: 'ad_finished fires once per completed impression', targets: ['events.ad_finished', 'crashlytics.anr_duration_of_event_data', 'users.country'] });
+  const saved = await e.memory({ action: 'record', note: 'ad_finished fires once per completed impression', targets: [{ source: 'events', name: 'ad_finished' }, { source: 'crashlytics', name: 'anr_duration_of_event_data' }, { source: 'users', name: 'country' }] });
   assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event', 'property', 'property'], JSON.stringify(saved.linked_to));
   assert.deepEqual(saved.unresolved_terms || [], []);
   const shown = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((shown.memory || []).length >= 1, 'the finding surfaces on the event it was about');
-  // app_version is an attribute of BOTH users and crashlytics
-  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /ambiguous.*users\.app_version.*crashlytics\.app_version|ambiguous.*crashlytics\.app_version.*users\.app_version/s);
+  // app_version is an attribute of BOTH users and crashlytics — each is written as its own target
+  await assert.rejects(() => e.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source, name \} \| \{ term \}/);
+  const both = await e.memory({ action: 'record', note: 'app_version means the build, on either source', targets: [{ source: 'users', name: 'app_version' }, { source: 'crashlytics', name: 'app_version' }] });
+  assert.deepEqual(both.linked_to.map((l) => l.target.source), ['users', 'crashlytics']);
 });
 
 // Attributes that live only on an events source are searchable by name like any other.
@@ -249,4 +252,62 @@ test('the guide derives its variant-join trigger from the catalog, or omits it',
   const plain = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'surf-')) }) });
   const g2 = await plain.semantic_index({ guide: true });
   assert.ok(!g2.routing_triggers.some((x) => /alternative columns/.test(x.if)), 'no variants → no trigger');
+});
+
+// A task's dimensions are namespaced `<task>_<attribute>` in the manifest. What the tools report
+// back (and accept again) is the attribute the caller DECLARED — recovered from the compiled
+// declaration, never by stripping whatever task name the identifier happens to start with: with
+// tasks 'ret' and 'ret_v2' the prefix 'ret_' also matches 'ret_v2_country'.
+test('a task dimension is reported under its declared attribute even when one task name prefixes another', async () => {
+  const e = engine();
+  const first = await e.create_semantic_model({
+    name: 'ret',
+    semantic_models: [
+      { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
+      { from: 'users', dimensions: [{ source: 'model_column', column: 'country' }] },
+    ],
+    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+  });
+  const out = await e.update_semantic_model({
+    context_id: first.context_id,
+    semantic_model: 'users',
+    task: 'ret_v2',
+    add_dimensions: [{ source: 'model_column', column: 'country' }],
+  });
+  const ctx = e.ctxs.get(first.context_id);
+  assert.deepEqual([...(ctx.state.tasks || [])].sort(), ['ret', 'ret_v2'], JSON.stringify(ctx.state.tasks));
+  const names = (ctx.state.additions.users.dimensions || []).map((d) => d.name).sort();
+  assert.deepEqual(names, ['ret_country', 'ret_v2_country'], 'both tasks namespaced their own copy');
+  // every declared dimension is offered under 'country' — never under 'v2_country'
+  const groupable = out.groupable || [];
+  assert.ok(groupable.some((r) => r.model === 'users' && r.attribute === 'country'), JSON.stringify(groupable));
+  assert.ok(!groupable.some((r) => String(r.attribute).startsWith('v2_')), `no half-stripped attribute: ${JSON.stringify(groupable)}`);
+  // and the offered ref is accepted back by the query path (it resolves to a real manifest path)
+  assert.equal(typeof e._normalizeRef(ctx, { model: 'users', attribute: 'country' }, 'group_by'), 'string');
+  // the manifest itself carries no internal annotation — dbt rejects a key it does not know
+  const { yaml } = renderContext(e.catalog, ctx.state);
+  assert.ok(/ret_v2_country/.test(yaml), 'the namespaced dimension IS in the manifest');
+  assert.ok(!/_attribute|_task/.test(yaml), 'but our own annotations are not');
+});
+
+// A funnel partitions by COLUMNS, or by a relationship the source DECLARES — named as one. No bare
+// magic word means a relationship, and nothing in the engine knows what any relationship is called.
+test('match_recognize partition_by: a column, or { entity } from the declared relationships', async () => {
+  const e = engine();
+  const st = e.schemas.build_native_model.properties.stage.oneOf.find((s) => s.properties?.stage?.const === 'match_recognize');
+  const branches = st.properties.partition_by.items.oneOf;
+  const entityBranch = branches.find((b) => b.type === 'object');
+  assert.ok(entityBranch, 'the entity form is in the schema, not only in prose');
+  assert.deepEqual(entityBranch.properties.entity.enum, ['ad_funnel', 'ad_funnel_banner', 'ad_funnel_interstitial', 'ad_funnel_rewarded', 'session', 'user'], 'the enum is what the catalog declares');
+  assert.ok(branches.some((b) => b.type === 'string'), 'a plain column is still a column');
+
+  const steps = [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['new_session'] }];
+  const start = await e.build_native_model({ action: 'start', name: 'fnl_part', source: 'events' });
+  const add = (partition_by) => e.build_native_model({ action: 'add_step', draft_id: start.draft_id, stage: { stage: 'match_recognize', steps, ...(partition_by ? { partition_by } : {}) } });
+  // a relationship written as a bare word is not a column — and the message says what to write
+  await assert.rejects(() => add(['user']), /'user' is a RELATIONSHIP of 'events', not a column — write \{ entity: 'user' \}/);
+  // a relationship keyed by several columns cannot be a partition column at all
+  await assert.rejects(() => add([{ entity: 'ad_funnel' }]), /is keyed by .*, which is an expression, not a column/);
+  // a relationship no source declares never gets past the SCHEMA — the enum is the contract
+  await assert.rejects(() => add([{ entity: 'nope' }]), /entity` must be one of: ad_funnel, .*, user/);
 });

@@ -1,0 +1,230 @@
+// The `python` pipeline stage, END TO END on a warehouse that runs dbt Python models locally:
+// DuckDB (the adapter dbt's own docs recommend for developing Python models). One declaration →
+// dbt builds the prep TABLE from the SQL stages, then runs the generated `def model(dbt, session)`
+// that reads it through dbt.ref — and we assert on the ROWS of the result table, computed
+// independently from the seed. The same files go to BigQuery/Snowflake unchanged; only the
+// profile decides where the Python runtime is.
+//
+// Needs the separate venv with dbt-duckdb + pandas (.duckvenv); skipped when absent.
+
+import { test, before, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { loadCatalog } from '../../src/catalog.js';
+import { ContextManager } from '../../src/context-manager.js';
+import { DbtRunner } from '../../src/dbt-runner.js';
+import { Engine } from '../../src/engine.js';
+
+const execFileP = promisify(execFile);
+const ROOT = process.cwd();
+const PROJECT = join(ROOT, 'test', 'integration', 'fixtures', 'duckdb_project');
+const DBT_BIN = process.env.DUCK_DBT_BIN || join(ROOT, '.duckvenv', 'bin', 'dbt');
+const PY_BIN = process.env.DUCK_PYTHON_BIN || join(ROOT, '.duckvenv', 'bin', 'python');
+const HAS = existsSync(DBT_BIN) && existsSync(PY_BIN);
+const opts = { timeout: 600000 };
+const skip = (t) => { if (!HAS) { t.skip('dbt-duckdb venv not installed (.duckvenv)'); return true; } return false; };
+
+let engine; let work;
+before(async () => {
+  if (!HAS) return;
+  work = mkdtempSync(join(tmpdir(), 'pystage-duck-'));
+  process.env.DUCKDB_PATH = join(work, 'wh.duckdb');
+  const env = { ...process.env, DBT_PROFILES_DIR: PROJECT, DBT_PROJECT_DIR: PROJECT };
+  await execFileP(DBT_BIN, ['seed'], { cwd: PROJECT, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  const runner = new DbtRunner({ dbtBin: DBT_BIN, profilesDir: PROJECT, timeout: 600000 });
+  const ctxs = new ContextManager({ baseProjectDir: PROJECT, workspaceRoot: join(work, 'ctx'), timeSpineDialect: 'postgres' });
+  const catalog = loadCatalog(join(ROOT, 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: PROJECT, projectDir: PROJECT });
+  engine = new Engine({ catalog, contextManager: ctxs, runner, pythonBin: PY_BIN, queryTimeoutMs: 600000, dbPath: join(work, 'index.sqlite') });
+}, opts);
+after(() => { try { engine?.close(); } catch { /* noop */ } if (work) rmSync(work, { recursive: true, force: true }); });
+
+// The seed (fixtures/duckdb_project/seeds/fct_analytics_events.csv): purchases p1 = 10 + 20,
+// p2 = 5, p3 = 40 + 25; p4 has only a level_completed row (no price). Per-player revenue after the
+// SQL aggregate: p1 30, p2 5, p3 65, p4 NULL. z-score over the three priced players (pandas skips
+// NaN; ddof = 0): mean 33.333…, std 24.607… → p1 −0.1355, p2 −1.1514, p3 +1.2869; p4 stays NaN.
+const Z = { p1: (30 - 100 / 3) / Math.sqrt(1816.6666667 / 3), p2: (5 - 100 / 3) / Math.sqrt(1816.6666667 / 3), p3: (65 - 100 / 3) / Math.sqrt(1816.6666667 / 3) };
+
+const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }, { name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
+const PY = {
+  stage: 'python',
+  imports: [{ package: 'numpy' }],
+  functions: [
+    // pandas is the author's explicit, single-node choice — written in the platform's own call (DuckDB: .df())
+    { name: 'to_pandas', params: ['df'], body: ['return df.df()'] },
+    { name: 'zscore', params: ['df', 'column', 'as_'], body: ['df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)', 'return df'] },
+    // a nested block: the tier is assigned only when the column exists — structure IS the indentation
+    { name: 'tier', params: ['df', 'column', 'threshold'], body: ['if column in df.columns:', ["df['tier'] = numpy.where(df[column] > threshold, 'high', 'low')"], 'else:', ["df['tier'] = 'low'"], 'return df'] },
+  ],
+  steps: [
+    { call: 'to_pandas' },
+    { call: 'zscore', args: { column: 'revenue', as_: 'revenue_z' } },
+    { call: 'tier', args: { column: 'revenue_z', threshold: 0 } },
+  ],
+  output: { columns: ['player_id_of_internal', 'n', 'revenue', 'revenue_z', 'tier'] },
+};
+const num = (v) => (v == null || v === '' ? null : Number(v));
+
+test('python stage: dbt builds the prep table, runs the Python model, and its ROWS are the pipeline result', opts, async (t) => {
+  if (skip(t)) return;
+  const r = await engine.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY] } });
+  assert.equal(r.ok ?? r.build?.ok, true, JSON.stringify(r.error || r));
+  assert.equal(r.build.executed, true, 'dbt actually ran both models');
+  assert.deepEqual(r.models.map((m) => [m.model, m.kind, m.input]), [[`${r.model}_s1`, 'sql', 'fct_analytics_events'], [r.model, 'python', `${r.model}_s1`]]);
+  assert.deepEqual(r.columns.map((c) => c.name ?? c), PY.output.columns);
+  const rows = r.rows.map((x) => ({ ...x, n: num(x.n), revenue: num(x.revenue), revenue_z: num(x.revenue_z) })).sort((a, b) => a.player_id_of_internal.localeCompare(b.player_id_of_internal));
+  assert.equal(rows.length, 4, 'one row per player, incl. the player with no purchases');
+  assert.deepEqual(rows.map((x) => [x.player_id_of_internal, x.n, x.revenue]), [['p1', 2, 30], ['p2', 1, 5], ['p3', 3, 65], ['p4', 1, null]], 'the SQL prep numbers');
+  for (const p of ['p1', 'p2', 'p3']) assert.ok(Math.abs(rows.find((x) => x.player_id_of_internal === p).revenue_z - Z[p]) < 1e-6, `${p} z = ${rows.find((x) => x.player_id_of_internal === p).revenue_z}`);
+  const p4 = rows.find((x) => x.player_id_of_internal === 'p4');
+  assert.ok(p4.revenue_z == null || Number.isNaN(p4.revenue_z), 'no revenue → no z-score');
+  assert.deepEqual(rows.map((x) => x.tier), ['low', 'low', 'high', 'low'], 'the second function ran on the first one\'s output');
+
+  // The result IS a table in the warehouse: re-read it through get_query_result, and re-slice it.
+  const again = await engine.get_query_result({ context_id: r.context_id, table: r.model });
+  assert.equal(again.rows.length, 4);
+  const byTier = await engine.get_query_result({ context_id: r.context_id, table: r.model, transform: { group_by: ['tier'], aggregations: [{ fn: 'count', as: 'players' }], order_by: [{ key: 'tier' }] } });
+  assert.deepEqual(byTier.rows.map((x) => [x.tier, num(x.players)]), [['high', 1], ['low', 3]]);
+  // and so is the prep table, under its own name
+  const prep = await engine.get_query_result({ context_id: r.context_id, table: r.models[0].model });
+  assert.equal(prep.rows.length, 4);
+  assert.ok(!Object.keys(prep.rows[0]).includes('tier'), 'the prep table is the SQL part only');
+});
+
+test('python stage: the incremental builder materializes the same split and returns the rows', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_native_model({ action: 'start', name: 'seg2', source: 'events' });
+  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
+  const keep = { name: 'keep', params: ['df', 'columns'], body: ['return df[columns]'] };
+  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { ...PY, functions: [...PY.functions, keep], steps: [PY.steps[0], PY.steps[1], { call: 'keep', args: { columns: ['player_id_of_internal', 'revenue_z'] } }], output: { columns: ['player_id_of_internal', 'revenue_z'] } } });
+  const m = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(m.build?.executed, true, JSON.stringify(m.error || m));
+  assert.equal(m.row_count, 4);
+  assert.deepEqual(Object.keys(m.rows[0]).sort(), ['player_id_of_internal', 'revenue_z']);
+  const p3 = m.rows.find((x) => x.player_id_of_internal === 'p3');
+  assert.ok(Math.abs(num(p3.revenue_z) - Z.p3) < 1e-6);
+});
+
+// A Python failure at run time (not caught by the gate — a wrong column name) comes back as the
+// dbt error, not as a silent empty table.
+test('python stage: a runtime error in the Python model is reported from dbt, nothing is materialized as the result', opts, async (t) => {
+  if (skip(t)) return;
+  const bad = { ...PY, steps: [PY.steps[0], { call: 'zscore', args: { column: 'no_such_column', as_: 'z' } }], output: { columns: ['player_id_of_internal', 'z'] } };
+  const r = await engine.register_native_model({ name: 'seg3', pipeline: { source: 'events', stages: [AGG, bad] } });
+  assert.equal(r.ok, false);
+  assert.equal(r.error.stage, 'run');
+  assert.match(r.error.message, /no_such_column/);
+  await assert.rejects(() => engine.get_query_result({ context_id: r.context_id, table: r.model }).then((x) => { if (x.ok === false) throw new Error(x.error?.message || 'not ok'); }));
+});
+
+// The steps work on what dbt.ref() returns on this warehouse — a DuckDBPyRelation here (BigFrames /
+// Snowpark / PySpark elsewhere) — and the work stays in the engine.
+test('python stage: steps run on the relation dbt.ref() returns — no pandas anywhere', opts, async (t) => {
+  if (skip(t)) return;
+  const native = {
+    stage: 'python',
+    functions: [
+      { name: 'payers', params: ['df'], body: ["return df.filter('revenue IS NOT NULL')"] },
+      { name: 'doubled', params: ['df'], body: ["return df.project('player_id_of_internal, revenue, revenue * 2 AS revenue_x2')"] },
+    ],
+    steps: [{ call: 'payers' }, { call: 'doubled' }],
+    output: { columns: ['player_id_of_internal', 'revenue_x2'] },
+  };
+  const r = await engine.register_native_model({ name: 'seg4', pipeline: { source: 'events', stages: [AGG, native] } });
+  assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
+  assert.equal(r.python[0].runtime, 'duckdb');
+  assert.deepEqual(Object.keys(r.rows[0]).sort(), ['player_id_of_internal', 'revenue', 'revenue_x2'], 'the last step\'s projection IS the result — nothing re-projected');
+  const rows = r.rows.map((x) => [x.player_id_of_internal, num(x.revenue_x2)]).sort((a, b) => a[0].localeCompare(b[0]));
+  assert.deepEqual(rows, [['p1', 60], ['p2', 10], ['p3', 130]], 'the player without purchases is filtered out; revenue doubled');
+});
+
+// A CHAIN with python anywhere: python FIRST over the raw source (native relation), SQL aggregate
+// over the Python model, python again (pandas by explicit choice), SQL where over ITS columns.
+// Four dbt models, built by dbt in ref order; the numbers prove every hop read the previous one.
+test('python stage anywhere: python → SQL → python → SQL is a chain of four dbt models with the right rows', opts, async (t) => {
+  if (skip(t)) return;
+  const first = { stage: 'python', functions: [{ name: 'purchases', params: ['df'], body: ["return df.filter(\"event_name = 'iap_purchase_completed'\")"] }], steps: [{ call: 'purchases' }] };
+  const z = { ...PY, output: { columns: ['player_id_of_internal', 'n', 'revenue', 'revenue_z', 'tier'] } };
+  const r = await engine.register_native_model({ name: 'chain', pipeline: { source: 'events', stages: [
+    first,                                                                             // s1: python over the SOURCE (purchases only → p4 disappears here)
+    AGG,                                                                               // s2: SQL over the python model
+    z,                                                                                 // s3: python (pandas by choice) over s2
+    { stage: 'where', conditions: [{ column: 'revenue_z', op: 'gt', value: 0 }] },    // result: SQL over the python model's declared columns
+  ] } });
+  assert.equal(r.build?.executed, true, JSON.stringify(r.error || r));
+  assert.deepEqual(r.models.map((m) => m.kind), ['python', 'sql', 'python', 'sql']);
+  assert.equal(r.models[0].input, 'fct_analytics_events');
+  assert.equal(r.models[3].input, r.models[2].model);
+  const rows = r.rows.map((x) => ({ ...x, n: num(x.n), revenue: num(x.revenue), revenue_z: num(x.revenue_z) }));
+  assert.deepEqual(rows.map((x) => [x.player_id_of_internal, x.n, x.revenue, x.tier]), [['p3', 2, 65, 'high']], 'only p3 has a positive z-score; n counts purchases only (the first python model filtered the source)');
+  assert.ok(Math.abs(rows[0].revenue_z - Z.p3) < 1e-6);
+  // every hop is a real table
+  for (const m of r.models) assert.equal((await engine.get_query_result({ context_id: r.context_id, table: m.model })).ok !== false, true, m.model);
+  const s1 = await engine.get_query_result({ context_id: r.context_id, table: r.models[0].model });
+  assert.equal(s1.rows.length, 5, 'the first python model kept the 5 purchase rows of the source');
+});
+
+// The body is STRUCTURE: a nested array is the block indented under the line before it, and nesting
+// is unbounded. What that renders to is Python whose MEANING depends on the indentation being
+// right — so it is proven by running it: twelve levels deep, each level picking a different value,
+// and the rows say which branch the interpreter actually took.
+test('python stage: a deeply nested body runs, and each level indents where it was declared', opts, async (t) => {
+  if (skip(t)) return;
+  // if revenue > 12: … elif > 11: … down to > 1, each level tagging its own depth.
+  const level = (n) => (n === 0
+    ? ["df['depth'] = 0"]
+    : [`if df['revenue'].fillna(0).max() > ${n}:`, [`df['depth'] = ${n}`], 'else:', level(n - 1)]);
+  const deep = {
+    stage: 'python',
+    functions: [
+      { name: 'to_pandas', params: ['df'], body: ['return df.df()'] },
+      { name: 'depth', params: ['df'], body: [...level(12), 'return df'] },
+    ],
+    steps: [{ call: 'to_pandas' }, { call: 'depth' }],
+    output: { columns: ['player_id_of_internal', 'revenue', 'depth'] },
+  };
+  const r = await engine.register_native_model({ name: 'deep', pipeline: { source: 'events', stages: [AGG, deep] } });
+  assert.equal(r.build?.ok, true, JSON.stringify(r.error || r.build));
+  // p3's 65 is the largest revenue in the seed, so the OUTERMOST branch (12) is the one that runs;
+  // every row gets it, because the function decides once for the frame.
+  assert.deepEqual([...new Set(r.rows.map((x) => num(x.depth)))], [12], JSON.stringify(r.rows));
+  assert.equal(r.rows.length, 4);
+});
+
+// The nested branches inside a body really are separate paths — not one flattened block: the same
+// function returns a different value per row depending on which branch its condition selects.
+test('python stage: both sides of a nested if/else are reachable, decided per row', opts, async (t) => {
+  if (skip(t)) return;
+  const branch = {
+    stage: 'python',
+    functions: [
+      { name: 'to_pandas', params: ['df'], body: ['return df.df()'] },
+      {
+        name: 'label',
+        params: ['df', 'cut'],
+        // for-loop over the rows, if/else inside it: two levels of nesting, both taken
+        body: [
+          "df['band'] = 'none'",
+          'for i in df.index:',
+          [
+            'if df.loc[i, "revenue"] > cut:',
+            ["df.loc[i, 'band'] = 'high'"],
+            'else:',
+            ["df.loc[i, 'band'] = 'low'"],
+          ],
+          'return df',
+        ],
+      },
+    ],
+    steps: [{ call: 'to_pandas' }, { call: 'label', args: { cut: 20 } }],
+    output: { columns: ['player_id_of_internal', 'revenue', 'band'] },
+  };
+  const r = await engine.register_native_model({ name: 'band', pipeline: { source: 'events', stages: [AGG, branch] } });
+  assert.equal(r.build?.ok, true, JSON.stringify(r.error || r.build));
+  const bands = Object.fromEntries(r.rows.map((x) => [x.player_id_of_internal, x.band]));
+  // revenue: p1 30, p2 5, p3 65, p4 NULL → the > 20 branch for p1/p3, the else for p2 and (NaN) p4
+  assert.deepEqual(bands, { p1: 'high', p2: 'low', p3: 'high', p4: 'low' }, JSON.stringify(r.rows));
+});

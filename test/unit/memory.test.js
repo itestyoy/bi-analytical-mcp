@@ -9,13 +9,15 @@ import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildToolDefs } from '../../src/server.js';
+import { openStore } from '../../src/store.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
-function engineWith(embedder) {
+function engineWith(embedder, store) {
   const catalog = loadCatalog(CATALOG, {});
-  return new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), embedder });
+  return new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), embedder, store });
 }
+function engineWithStore(store) { return engineWith(undefined, store); }
 function engine() { return engineWith(undefined); }
 
 // A deterministic, offline stub embedder: maps text to a 3-axis "concept" vector by keyword
@@ -51,18 +53,20 @@ test('memory record resolves targets to catalog entities (property/attr/event/mo
   const out = await e.memory({
     action: 'record',
     note: "'ad format' = the event_data property ad_type_of_event_data, only on ad_started/ad_finished; values rewarded/interstitial/banner.",
-    targets: ['ad_type_of_event_data', 'users.country', 'ad_finished', 'users', 'ad format'],
+    targets: [{ source: 'events', name: 'ad_type_of_event_data' }, { source: 'users', name: 'country' }, { source: 'events', name: 'ad_finished' }, { source: 'users' }, { term: 'ad format' }],
     aliases: ['ad format', 'ad type'],
     links: ['https://confluence/ads', { url: 'https://dash/ads', title: 'Ads dashboard' }],
   });
   assert.equal(out.saved, true);
   assert.ok(out.id, 'returns a note id');
-  const byKey = Object.fromEntries(out.linked_to.map((l) => [l.target, l.kind]));
-  assert.equal(byKey['events.ad_type_of_event_data'], 'property', 'a target names its source');
-  assert.equal(byKey['users.country'], 'property');
-  assert.equal(byKey['events.ad_finished'], 'event');
-  assert.equal(byKey['users'], 'model');
-  assert.equal(byKey['ad format'], 'term', 'an unmatched phrase is kept as a free term');
+  const linked = out.linked_to.map((l) => ({ kind: l.kind, ...l.target }));
+  assert.deepEqual(linked, [
+    { kind: 'property', source: 'events', name: 'ad_type_of_event_data' }, // a bare name resolved to its ONE source
+    { kind: 'property', source: 'users', name: 'country' },
+    { kind: 'event', source: 'events', name: 'ad_finished' },
+    { kind: 'model', source: 'users' },
+    { kind: 'term', term: 'ad format' }, // an unmatched phrase is kept as a free term
+  ]);
   assert.deepEqual(out.unresolved_terms, ['ad format']);
   // links normalise (string → { url }); aliases pass through.
   assert.deepEqual(out.links, [{ url: 'https://confluence/ads' }, { url: 'https://dash/ads', title: 'Ads dashboard' }]);
@@ -73,16 +77,16 @@ test('memory record resolves targets to catalog entities (property/attr/event/mo
 test('a recorded finding surfaces through semantic_index (views + search) by its links/aliases', async () => {
   const e = engine();
   const note = "'ad format' is ad_type_of_event_data (rewarded/interstitial/banner), only on ad_started/ad_finished.";
-  const rec = await e.memory({ action: 'record', note, targets: ['ad_type_of_event_data', 'ad_finished', 'users'], aliases: ['ad format'] });
+  const rec = await e.memory({ action: 'record', note, targets: [{ source: 'events', name: 'ad_type_of_event_data' }, { source: 'events', name: 'ad_finished' }, { source: 'users' }], aliases: ['ad format'] });
 
   // { property } — the event property it is about.
-  const prop = await e.semantic_index({ property: 'ad_type_of_event_data' });
+  const prop = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.ok(prop.memory?.some((m) => m.id === rec.id && m.note === note), 'note attached to the property view');
   const attached = prop.memory.find((m) => m.id === rec.id);
-  assert.ok(attached.about.some((a) => a.kind === 'property' && a.key === 'events.ad_type_of_event_data'));
+  assert.ok(attached.about.some((a) => a.kind === 'property' && a.source === 'events' && a.name === 'ad_type_of_event_data'));
 
   // { event } — the carrying event.
-  const ev = await e.semantic_index({ event: 'ad_finished' });
+  const ev = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok(ev.memory?.some((m) => m.id === rec.id), 'note attached to the event view');
 
   // { model } — a model-level link.
@@ -91,32 +95,32 @@ test('a recorded finding surfaces through semantic_index (views + search) by its
 
   // { search } by the ALIAS the user used → resolves back to the finding (+ the real field).
   const s = await e.semantic_index({ search: 'ad format' });
-  assert.ok(s.memory_matches?.some((m) => m.id === rec.id && m.about.some((a) => a.key === 'events.ad_type_of_event_data')), 'alias search resurfaces the note pointing at the real field');
+  assert.ok(s.memory_matches?.some((m) => m.id === rec.id && m.about.some((a) => a.source === 'events' && a.name === 'ad_type_of_event_data')), 'alias search resurfaces the note pointing at the real field');
 
   // an UNlinked property carries no memory.
-  const other = await e.semantic_index({ property: 'level_id_of_event_data' });
+  const other = await e.semantic_index({ source: 'events', property: 'level_id_of_event_data' });
   assert.equal(other.memory, undefined, 'unrelated property has no memory');
 });
 
-// A "<model>.<column>" attribute finding surfaces on that attribute's view.
-test('memory linked to a "<model>.<column>" attribute surfaces on its property view', async () => {
+// A { source, name } attribute finding surfaces on that attribute's view.
+test('memory linked to a users attribute surfaces on its property view', async () => {
   const e = engine();
-  const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2 on dim_users.', targets: ['users.country'] });
-  const attr = await e.semantic_index({ property: 'users.country' });
+  const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2 on dim_users.', targets: [{ source: 'users', name: 'country' }] });
+  const attr = await e.semantic_index({ source: 'users', property: 'country' });
   assert.ok(attr.memory?.some((m) => m.id === rec.id), 'attribute view carries the note');
 });
 
 // list (all + by target), search, forget — the lifecycle round-trips the stored data.
 test('memory list / search / forget round-trip', async () => {
   const e = engine();
-  const a = await e.memory({ action: 'record', note: 'finding A about ads', targets: ['ad_type_of_event_data'], aliases: ['ad format'] });
-  const b = await e.memory({ action: 'record', note: 'finding B about country', targets: ['users.country'] });
+  const a = await e.memory({ action: 'record', note: 'finding A about ads', targets: [{ source: 'events', name: 'ad_type_of_event_data' }], aliases: ['ad format'] });
+  const b = await e.memory({ action: 'record', note: 'finding B about country', targets: [{ source: 'users', name: 'country' }] });
 
   const all = await e.memory({ action: 'list' });
   assert.equal(all.total, 2);
   assert.ok(all.notes.some((n) => n.id === a.id) && all.notes.some((n) => n.id === b.id));
 
-  const byTarget = await e.memory({ action: 'list', target: 'ad_type_of_event_data' });
+  const byTarget = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });
   assert.equal(byTarget.notes.length, 1);
   assert.equal(byTarget.notes[0].id, a.id);
 
@@ -137,10 +141,10 @@ test('memory list / search / forget round-trip', async () => {
 // The original business `question` is stored, echoed, surfaced — and embedded with the note.
 test('memory records the business question and surfaces it', async () => {
   const e = engine();
-  const rec = await e.memory({ action: 'record', note: 'ad_type_of_event_data carries the ad format', question: 'which ad format drives the most rewarded revenue?', targets: ['ad_type_of_event_data'] });
+  const rec = await e.memory({ action: 'record', note: 'ad_type_of_event_data carries the ad format', question: 'which ad format drives the most rewarded revenue?', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });
   assert.equal(rec.question, 'which ad format drives the most rewarded revenue?', 'question echoed on record');
   // it travels onto the views + listings.
-  const prop = await e.semantic_index({ property: 'ad_type_of_event_data' });
+  const prop = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.equal(prop.memory.find((m) => m.id === rec.id).question, 'which ad format drives the most rewarded revenue?');
   assert.equal((await e.memory({ action: 'list' })).notes.find((n) => n.id === rec.id).question, 'which ad format drives the most rewarded revenue?');
 });
@@ -150,8 +154,8 @@ test('memory records the business question and surfaces it', async () => {
 test('semantic memory search finds a same-meaning note with no shared words', async () => {
   const sem = engineWith(stubEmbedder());
   // the business QUESTION is embedded with the note (note text alone shares no "revenue" word).
-  const mon = await sem.memory({ action: 'record', note: 'use ad_type to split the metric', question: 'which ad format makes the most money?', aliases: ['monetization'], targets: ['price_in_usd_of_event_data'] });
-  const tut = await sem.memory({ action: 'record', note: 'the onboarding tutorial has 5 steps', targets: ['tutorial'] });
+  const mon = await sem.memory({ action: 'record', note: 'use ad_type to split the metric', question: 'which ad format makes the most money?', aliases: ['monetization'], targets: [{ source: 'events', name: 'price_in_usd_of_event_data' }] });
+  const tut = await sem.memory({ action: 'record', note: 'the onboarding tutorial has 5 steps', targets: [{ source: 'events', name: 'tutorial' }] });
 
   const s = await sem.memory({ action: 'search', query: 'revenue problems' });
   assert.equal(s.semantic, true, 'embedder configured → semantic mode reported');
@@ -160,7 +164,7 @@ test('semantic memory search finds a same-meaning note with no shared words', as
 
   // Without an embedder, the same query (no lexical overlap) does NOT find it.
   const fuzzy = engine();
-  await fuzzy.memory({ action: 'record', note: 'IAP purchases are failing for some payers', aliases: ['monetization'], targets: ['price_in_usd_of_event_data'] });
+  await fuzzy.memory({ action: 'record', note: 'IAP purchases are failing for some payers', aliases: ['monetization'], targets: [{ source: 'events', name: 'price_in_usd_of_event_data' }] });
   const f = await fuzzy.memory({ action: 'search', query: 'revenue problems' });
   assert.ok(!f.notes.some((n) => n.note.includes('IAP purchases')), 'fuzzy-only misses the same-meaning note (proves semantic added the recall)');
 });
@@ -172,7 +176,7 @@ test('search finds a multi-word phrase from the note body (interleaved words)', 
   const rec = await e.memory({
     action: 'record',
     note: 'action=record требует note без target, но с targets/question/aliases; одиночный target в record невалиден.',
-    targets: ['betti_test'],
+    targets: [{ term: 'betti_test' }],
     aliases: ['memory test'],
   });
   // the query words appear in the note but with "в record" interleaved — not a substring.
@@ -188,7 +192,7 @@ test('search finds a multi-word phrase from the note body (interleaved words)', 
 test('a failing embedder reports semantic:false + semantic_error (not a silent true)', async () => {
   const boom = { model: 'boom', embed: async () => { throw new Error('provider unreachable'); } };
   const e = engineWith(boom);
-  const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2', targets: ['users.country'], aliases: ['geo'] });
+  const rec = await e.memory({ action: 'record', note: 'country is ISO-3166 alpha-2', targets: [{ source: 'users', name: 'country' }], aliases: ['geo'] });
   const r = await e.memory({ action: 'search', query: 'geo' });
   assert.equal(r.semantic, false, 'embedding failed → semantic reported false');
   assert.ok(typeof r.semantic_error === 'string' && r.semantic_error.includes('provider unreachable'), 'the failure reason is surfaced');
@@ -212,7 +216,7 @@ test('bilingual aliases bridge languages on the lexical path', async () => {
 test('semantic_index overview surfaces the memory count', async () => {
   const e = engine();
   assert.equal((await e.semantic_index()).memory, undefined, 'no memory key when nothing is saved');
-  await e.memory({ action: 'record', note: 'a finding', targets: ['ad_type_of_event_data'] });
+  await e.memory({ action: 'record', note: 'a finding', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });
   const ov = await e.semantic_index();
   assert.equal(ov.memory.notes, 1, 'overview reports the saved count');
 });
@@ -228,4 +232,77 @@ test('memory strict input validation', async () => {
   await assert.rejects(() => e.memory({ action: 'list', fuzzy: true }), /invalid input/, 'fuzzy is search-only');
   await assert.rejects(() => e.memory({ action: 'bogus' }), /invalid input/, 'unknown action rejected by enum');
   await assert.rejects(() => e.memory({ action: 'forget', id: 'nope_missing' }), /no memory note/, 'forgetting a missing id errors');
+});
+
+// A store written before a target carried its source keys a property/event by BARE name, which no
+// source owns: the note then surfaces on every source that happens to use the name. Opening an
+// Engine rewrites those keys once — into searchable terms. Which entity was meant is not
+// recoverable from a name, and attributing one would be a guess, so none is made.
+test('memory targets written without a source become searchable terms at open', async () => {
+  const store = openStore({});
+  const e0 = engineWithStore(store);
+  // three legacy keys: one owned by exactly one source, one owned by two, one gone from the catalog
+  store.memory.add({ id: 'legacy1', note: 'ad format lives in ad_type', targets: ['property:ad_type_of_event_data', 'event:ad_finished'], aliases: [], links: [], created_at: Date.now() });
+  store.memory.add({ id: 'legacy2', note: 'app_version is on both sources', targets: ['property:app_version'], aliases: [], links: [], created_at: Date.now() });
+  store.memory.add({ id: 'legacy3', note: 'a column that no longer exists', targets: ['property:dropped_column'], aliases: [], links: [], created_at: Date.now() });
+  assert.ok(e0);
+
+  const e = engineWithStore(store); // a fresh Engine over the same store runs the migration
+  const targetsOf = (id) => store.memory.get(id).targets;
+  // rewritten INTO THE SAME SHAPE a recorded target has — a structure, not a folded key string
+  assert.deepEqual(targetsOf('legacy1'), [{ kind: 'term', term: 'ad_type_of_event_data' }, { kind: 'term', term: 'ad_finished' }], 'a name with no source names no entity — it becomes a term');
+  assert.deepEqual(targetsOf('legacy2'), [{ kind: 'term', term: 'app_version' }], 'and so does a name two sources carry');
+  assert.deepEqual(targetsOf('legacy3'), [{ kind: 'term', term: 'dropped_column' }], 'and one the catalog no longer has');
+
+  // nothing is attached to a source that was never written down
+  const listed = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });
+  assert.ok(!listed.notes.some((n) => n.id === 'legacy1'), JSON.stringify(listed));
+  // …but every rewritten note stays findable by its own words
+  for (const [id, word] of [['legacy1', 'ad_type_of_event_data'], ['legacy2', 'app_version'], ['legacy3', 'dropped_column']]) {
+    const found = await e.memory({ action: 'search', query: word });
+    assert.ok(found.notes.some((n) => n.id === id), `${id} findable by '${word}'`);
+  }
+});
+
+// An entity is ALWAYS { source, name }; a phrase is { term }. Neither a bare name nor the glued
+// '<source>.<name>' spelling exists, so a finding is never linked by a string that has to be taken
+// apart — or silently kept as a free phrase, which would link it to nothing.
+test('memory target: an entity is { source, name }, a phrase is { term }, and a bare string is neither', async () => {
+  const e = engine();
+  await assert.rejects(
+    () => e.memory({ action: 'record', note: 'x', targets: ['users.country'] }),
+    /must be exactly one of: \{ source, name \} \| \{ term \}/,
+  );
+  await assert.rejects(
+    () => e.memory({ action: 'record', note: 'x', targets: ['country'] }),
+    /must be exactly one of: \{ source, name \} \| \{ term \}/,
+  );
+  // …and a phrase says it is one
+  const ok = await e.memory({ action: 'record', note: 'crashes spiked in 2.4.0', targets: [{ term: 'v2.4 rollout' }] });
+  assert.deepEqual(ok.linked_to.map((l) => l.kind), ['term']);
+  assert.deepEqual(ok.unresolved_terms, ['v2.4 rollout']);
+});
+
+// A target is STORED as what it names, not as a key that has to be taken apart to read it back.
+// (The key exists only to look the note up, and nothing ever parses it.)
+test('a memory target is stored structurally and read back without decoding', async () => {
+  const store = openStore({});
+  const e = engineWithStore(store);
+  const rec = await e.memory({
+    action: 'record',
+    note: 'ad_type carries the format',
+    targets: [{ source: 'events', name: 'ad_type_of_event_data' }, { source: 'users' }, { term: 'совсем свободная фраза' }],
+  });
+  const stored = store.memory.get(rec.id).targets;
+  assert.deepEqual(stored, [
+    { kind: 'property', source: 'events', name: 'ad_type_of_event_data' },
+    { kind: 'model', source: 'users' },
+    { kind: 'term', term: 'совсем свободная фраза' },
+  ], 'each target keeps its parts');
+  // what comes back out is the same parts — on the note, and as the thing you can pass back in
+  const listed = await e.memory({ action: 'list' });
+  assert.deepEqual(listed.notes.find((n) => n.id === rec.id).about, stored);
+  const again = await e.memory({ action: 'list', target: { source: 'events', name: 'ad_type_of_event_data' } });
+  assert.deepEqual(again.target, { source: 'events', name: 'ad_type_of_event_data' });
+  assert.ok(again.notes.some((n) => n.id === rec.id));
 });

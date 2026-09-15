@@ -81,7 +81,12 @@ export class BigQueryDialect extends Dialect {
   }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
-  jsonColumnArrayLength(column) { return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$'))`; }
+  jsonColumnArrayLength(column) {
+    // JSON_QUERY_ARRAY reads a JSON-typed column and a STRING holding JSON alike, and yields NULL
+    // when the value is not an array — so a row whose value is a scalar counts as absent instead of
+    // failing the query. (Postgres needs an explicit guard for the same thing; see its dialect.)
+    return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$'))`;
+  }
 
   jsonColumnArrayContains(column, value) {
     // JSON_EXTRACT_STRING_ARRAY yields ARRAY<STRING>, so the membership literal is compared as a
@@ -91,12 +96,9 @@ export class BigQueryDialect extends Dialect {
 
   arrayContains(column, value) { return `${this.sqlLiteral(value)} IN UNNEST(${column})`; }
 
-  jsonColumnStructField(column, field, type = 'string') {
-    this.ident(field);
-    const base = `JSON_VALUE(${column}, '$.${field}')`;
-    const ct = this.castType(type);
-    return ct ? `CAST(${base} AS ${ct})` : base;
-  }
+  // JSON_VALUE parses a STRING holding JSON exactly as it reads a JSON-typed column, so the
+  // struct-in-a-string form is the same expression here (on Postgres it is not: that one casts).
+  jsonColumnStructField(column, field, type = 'string') { return this.jsonColumnField(column, field, type); }
 
   // ── time / scalar / statistical ────────────────────────────────────────────
   dateDiff(unit, from, to) {
@@ -162,51 +164,6 @@ export class BigQueryDialect extends Dialect {
     return lines.join('\n');
   }
 
-  /** CTE-form rendering of one op (fallback used only when a pipeline must lower to a
-   *  chained CTE). match_recognize stays pipe-form on BigQuery (see _step), so this is
-   *  rarely hit here. Standard SQL — valid on BigQuery. */
-  stepCte(prev, op) {
-    switch (op.op) {
-      case 'where':
-        return `SELECT * FROM ${prev} WHERE ${op.preds.join(' AND ')}`;
-      case 'extend':
-        return `SELECT *, ${op.cols.map((c) => `(${c.expr}) AS ${this.ident(c.name)}`).join(', ')} FROM ${prev}`;
-      case 'unnest': {
-        const { join, element } = this.arrayUnnest('s', op.column, op.key, op.as, op.field, op.type, op.encoding);
-        return `SELECT s.*, ${element} AS ${this.ident(op.as)} FROM ${prev} s ${join}`;
-      }
-      case 'join': {
-        // `onKeys` = a relationship declared in the schema: each side brings its OWN expression
-        // for the same logical key (different column names, a time column truncated to the
-        // declared grain), compared part by part. `on` = the plain shared-name form.
-        const eq = op.onKeys
-          ? op.onKeys.left.map((lp, i) => `${this.keyPartExpr(lp, (c) => `base.${c}`)} = ${this.keyPartExpr(op.onKeys.right[i], (c) => `j.${c}`)}`).join(' AND ')
-          : op.on.map((c) => `j.${this.ident(c)} = base.${this.ident(c)}`).join(' AND ');
-        const btw = op.between ? ` AND base.${this.ident(op.between.value)} BETWEEN j.${this.ident(op.between.from)} AND j.${this.ident(op.between.to)}` : '';
-        const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
-        return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
-      }
-      case 'aggregate': {
-        const sel = [...op.groupBy.map((c) => this.ident(c)), ...op.aggs.map((a) => `${a.expr} AS ${this.ident(a.as)}`)];
-        return `SELECT ${sel.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;
-      }
-      case 'pivot': {
-        const cols = op.values.map((v) => { if (!/^[A-Za-z0-9_]+$/.test(String(v))) throw new Error(`unsafe pivot value: ${v}`); return `${op.fn}(CASE WHEN ${this.ident(op.on)} = ${this.sqlLiteral(v)} THEN ${this.ident(op.valueCol)} END) AS ${v}`; });
-        return `SELECT ${op.groupBy.map((c) => this.ident(c)).join(', ')}${op.groupBy.length ? ', ' : ''}${cols.join(', ')} FROM ${prev}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;
-      }
-      case 'order_by':
-        return `SELECT * FROM ${prev} ORDER BY ${op.keys.map((k) => `${this.ident(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
-      case 'limit':
-        return `SELECT * FROM ${prev} LIMIT ${Number(op.n)}`;
-      case 'project':
-        return `SELECT ${op.cols.map((c) => this.ident(c)).join(', ')} FROM ${prev}`;
-      case 'sample':
-        return `SELECT * FROM ${prev} WHERE RAND() < ${Number(op.percent) / 100}`;
-      default:
-        throw new Error(`bigquery: op '${op.op}' is not supported as a CTE step`);
-    }
-  }
-
   _step(op) {
     switch (op.op) {
       case 'where':
@@ -219,11 +176,37 @@ export class BigQueryDialect extends Dialect {
         return op.field ? `|> ${join}\n|> EXTEND ${element} AS ${this.ident(op.as)}` : `|> ${join}`;
       }
       case 'join': {
-        // A per-side key expression has no `USING (...)` form; such a join is flagged
-        // requiresCte at build and assembled as chained CTEs instead of reaching this path.
-        if (op.onKeys) throw new Error('bigquery: a join on a declared relationship renders as a CTE, not a pipe step');
-        const onCond = op.on.map((c) => this.ident(c)).join(', ');
-        return `|> ${op.kind === 'INNER' ? 'INNER ' : 'LEFT '}JOIN ${op.relation} ${op.alias} USING (${onCond})`;
+        // The RIGHT side is a subquery that projects exactly what the stage promised: the join key
+        // and `attrs` under their aliases — nothing else of the joined model reaches the pipe. Its
+        // key expression is evaluated there, under the LEFT side's column name.
+        const kind = op.kind === 'INNER' ? 'INNER ' : 'LEFT ';
+        const attrs = op.attrs.map((a) => (a.as === a.column ? this.ident(a.column) : `${this.ident(a.column)} AS ${this.ident(a.as)}`));
+        // Both sides come from the SAME builder, so a part's grain truncates both — never just the
+        // projected one. `USING` can only equate bare columns, so it is used only when neither side
+        // needs an expression; a truncated part joins `ON`, like a validity window does.
+        const keys = this.joinKeyParts(op, (c) => `base.${c}`, (c) => c);
+        if (!op.between && !this.joinKeyIsExpression(op)) {
+          const proj = [...keys.map((k) => (k.right === k.name ? k.name : `${k.right} AS ${k.name}`)), ...attrs];
+          return `|> ${kind}JOIN (SELECT ${proj.join(', ')} FROM ${op.relation}) AS ${op.alias} USING (${keys.map((k) => k.name).join(', ')})`;
+        }
+        // Joining `ON`: the pipe input is named (`|> AS base`) so each condition can qualify its
+        // side, the subquery carries the key (and the window, when there is one) under private
+        // names, and those are dropped once the match is made — the output is again base's columns
+        // plus `attrs`. This is the only form that can compare an EXPRESSION, which is what a key
+        // part with a declared grain is, and the only one that can carry a validity window.
+        const priv = (n) => `_j_${n}`;
+        const win = op.between
+          ? [`${this.ident(op.between.from)} AS ${priv('from')}`, `${this.ident(op.between.to)} AS ${priv('to')}`]
+          : [];
+        const proj = [...keys.map((k, i) => `${k.right} AS ${priv(`key${i}`)}`), ...win, ...attrs];
+        const on = [
+          ...keys.map((k, i) => `${k.left} = ${op.alias}.${priv(`key${i}`)}`),
+          ...(op.between ? [`base.${this.ident(op.between.value)} BETWEEN ${op.alias}.${priv('from')} AND ${op.alias}.${priv('to')}`] : []),
+        ];
+        const drop = [...keys.map((_, i) => priv(`key${i}`)), ...(op.between ? [priv('from'), priv('to')] : [])];
+        return `|> AS base
+|> ${kind}JOIN (SELECT ${proj.join(', ')} FROM ${op.relation}) AS ${op.alias} ON ${on.join(' AND ')}
+|> DROP ${drop.join(', ')}`;
       }
       case 'aggregate':
         return `|> AGGREGATE ${op.aggs.map((a) => `${a.expr} AS ${this.ident(a.as)}`).join(', ')}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;

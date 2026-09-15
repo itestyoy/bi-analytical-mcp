@@ -8,3 +8,6 @@ dbt_packages/
 
 # dbt local user file
 .user.yml
+
+# separate venv with dbt-duckdb (python-model data tests)
+.duckvenv

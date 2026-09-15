@@ -45,6 +45,7 @@ export function mergeCompiled(state, compiled) {
   state.metrics ||= [];
   state.usedModels ||= [];
   state.tasks ||= [];
+  for (const k of Object.keys(state.additions)) if (!state.usedModels.includes(k)) state.usedModels.push(k);
 
   for (const [modelKey, add] of Object.entries(compiled.additions || {})) {
     const cur = (state.additions[modelKey] ||= { measures: [], dimensions: [] });
@@ -101,7 +102,13 @@ export class ContextManager {
       const data = JSON.parse(readFileSync(this.registryPath, 'utf8'));
       for (const c of data.contexts || []) {
         // reconcile: keep only contexts whose workspace still exists on disk
-        if (existsSync(this.dir(c.id))) this.contexts.set(c.id, c);
+        if (!existsSync(this.dir(c.id))) continue;
+        // usedModels drives the require_time_range guard and rendering; a registry written before
+        // it existed lists the models only under additions — rebuild it so the guard sees them.
+        const st = (c.state ||= {});
+        st.usedModels ||= [];
+        for (const k of Object.keys(st.additions || {})) if (!st.usedModels.includes(k)) st.usedModels.push(k);
+        this.contexts.set(c.id, c);
       }
     } catch {
       /* corrupt registry -> start clean */
@@ -243,6 +250,35 @@ export class ContextManager {
     const file = join(this.generatedDir(id), `${name}.sql`);
     writeFileSync(file, sql);
     return file;
+  }
+
+  /** Write any generated file (a Python model, its YAML sidecar) into the context overlay. */
+  writeFile(id, filename, text) {
+    mkdirSync(this.generatedDir(id), { recursive: true });
+    const file = join(this.generatedDir(id), filename);
+    writeFileSync(file, text);
+    return file;
+  }
+
+  /** Remove every generated file whose name satisfies `pred` (a rebuilt chain leaves no stale model behind). */
+  removeGeneratedWhere(id, pred) {
+    const d = this.generatedDir(id);
+    if (!existsSync(d)) return [];
+    const gone = readdirSync(d).filter(pred);
+    for (const f of gone) rmSync(join(d, f), { force: true });
+    return gone;
+  }
+
+  /**
+   * Remove EVERY file a pipeline model generated. A pipeline is not one file: a python stage
+   * renders `<model>.py` + `<model>.yml`, and a chain renders `<model>_s1.sql`, `<model>_s2.py`, …
+   * Deleting only `<model>.sql` leaves the rest behind — dbt keeps compiling them, and with the
+   * context's state already cleared nothing can name them again. One definition of "the files of
+   * this model", used by both the rebuild and the delete.
+   */
+  removePipelineFiles(id, model) {
+    const chain = new RegExp(`^${model}_s\\d+\\.(sql|py|yml)$`);
+    return this.removeGeneratedWhere(id, (f) => f === `${model}.sql` || f === `${model}.py` || f === `${model}.yml` || chain.test(f));
   }
 
   /** Remove a generated file (model or yaml) from the context overlay. */

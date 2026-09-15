@@ -5,7 +5,8 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
-import { pipelineStageSchema } from './pipeline.js';
+import { pipelineStageSchema, stageDefs } from './pipeline.js';
+import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
@@ -23,20 +24,12 @@ const D = {
   where_measure: 'Per-measure conditions on event_data JSON properties, ANDed with the event scope. Used to define a funnel step as event + property value (e.g. event_name=tutorial AND step_id=step_1).',
 };
 
-// A string property constrained to `values` — but NEVER an empty enum (JSON
-// Schema forbids `enum: []`, and ajv rejects such a schema at compile time). When
-// the catalog yields no candidates the field stays an open string (there is
-// nothing valid to pick anyway, and compile-time checks still reject bad names).
-function strEnum(values, description) {
-  return values.length ? { type: 'string', enum: values, description } : { type: 'string', description };
-}
-
 function whereItemSchema(catalog, modelKey) {
   return {
     type: 'object', additionalProperties: false, required: ['property', 'op'],
     description: 'One condition on a SCALAR event_data property (array/struct properties must be reduced via a prepare stage first).',
     properties: {
-      property: strEnum(catalog.scalarEventProps(modelKey), 'Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ event })); scope the measure to those event_name(s) or it reads NULL.'),
+      property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to test. NB: each property is only populated on specific events (see semantic_index({ source: '${modelKey}', event })); scope the measure to those event_name(s) or it reads NULL.`),
       op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator. Use in/not_in with an array value; the rest take a scalar.' },
       value: { description: 'Literal value(s) to compare against. Scalar for eq/neq/gt/gte/lt/lte; array for in/not_in.' },
     },
@@ -86,13 +79,15 @@ function dimensionItemSchema(catalog, modelKey) {
       description: 'A dimension taken from an event_data property (e.g. level_id, product_id) so you can group/filter by it.',
       properties: {
         source: { const: 'event_property', description: 'Take the dimension from an event_data property.' },
-        property: strEnum(catalog.scalarEventProps(modelKey), 'Scalar event_data property to expose as a dimension. NB: only populated on specific events (see semantic_index({ event })); NULL on others.'),
+        property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to expose as a dimension. NB: only populated on specific events (see semantic_index({ source: '${modelKey}', event })); NULL on others.`),
         as_type: { const: 'categorical', default: 'categorical', description: 'event_data dimensions are always categorical.' },
         label: { type: 'string', description: D.label },
       },
     });
   }
-  return { type: 'object', description: 'A dimension to add to the semantic model (a column or an event_data property) for grouping/filtering.', oneOf: branches };
+  // A model with no groupable column and no payload has NO dimension to add: the field is left
+  // out of its branch rather than offered as a choice with no options.
+  return oneOfOr(branches, { type: 'object', description: 'A dimension to add to the semantic model (a column or an event_data property) for grouping/filtering.' });
 }
 
 // Generic (model-agnostic) item schemas for `update`, where the target model is
@@ -178,11 +173,12 @@ function measureItemSchema(catalog, modelKey) {
 }
 
 function semanticModelBranch(catalog, modelKey) {
-  const props = {
+  const dimItem = dimensionItemSchema(catalog, modelKey);
+  const props = withoutEmpty({
     from: { const: modelKey, description: `Source model this semantic model is built from ("${modelKey}").` },
-    dimensions: { type: 'array', items: dimensionItemSchema(catalog, modelKey), description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
+    dimensions: dimItem && { type: 'array', items: dimItem, description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
     measures: { type: 'array', items: measureItemSchema(catalog, modelKey), description: 'Measures (aggregations) defined on this model; metrics reference these by name.' },
-  };
+  });
   if (catalog.isFact(modelKey)) {
     props.event_scope = {
       type: 'object',
@@ -306,10 +302,10 @@ export function buildSchemas(catalog) {
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored: table (precomputed snapshot, default) or view (always fresh).' },
       dry_run: { type: 'boolean', description: 'If true, return the generated model definition for preview WITHOUT building anything.' },
       pipeline: {
-        type: 'object', additionalProperties: false, required: ['stages'],
+        type: 'object', additionalProperties: false, required: ['source', 'stages'],
         description: 'The transformation pipeline: a `source` table + ordered `stages` applied left-to-right.',
         properties: {
-          source: { type: 'string', enum: modelKeys, ...(catalog.defaultSource() ? { default: catalog.defaultSource() } : {}), description: `Source table the pipeline reads. ${catalog.defaultSource() ? 'Defaults to the only events source.' : `REQUIRED: this catalog has several events sources (${catalog.facts.join(', ')}), each with its own events and payload — name the one the question is about.`}` },
+          source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads. Always named: each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
           time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
           stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
         },
@@ -332,7 +328,7 @@ export function buildSchemas(catalog) {
     // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
     // belong to the action, so a stray param is an error rather than silently ignored.
     allOf: [
-      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'], ...forbid(['stage', 'stages', 'index', 'after']) } },
+      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name', 'source'], ...forbid(['stage', 'stages', 'index', 'after']) } },
       { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stages']) } },
       { if: { properties: { action: { const: 'add_steps' } }, required: ['action'] }, then: { required: ['draft_id', 'stages'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stage']) } },
       { if: { properties: { action: { enum: ['edit_step', 'insert_step'] } }, required: ['action'] }, then: { required: ['draft_id', 'index', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'after', 'stages']) } },
@@ -346,7 +342,7 @@ export function buildSchemas(catalog) {
       draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for everything except start. For fork it may also be a context whose pipeline was already materialized.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
-      source: { type: 'string', enum: modelKeys, ...(catalog.defaultSource() ? { default: catalog.defaultSource() } : {}), description: `Source table the pipeline reads (start only). ${catalog.defaultSource() ? 'Defaults to the only events source.' : `REQUIRED here: this catalog has several events sources (${catalog.facts.join(', ')}) — name the one the question is about.`}` },
+      source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads (start only, and REQUIRED there). Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
       time_range: trProp,
       stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
       stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
@@ -383,7 +379,7 @@ export function buildSchemas(catalog) {
       time_range: { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
-      materialize: { type: 'boolean', description: 'Materialize the result and read rows back from it (resilient, re-fetchable). Slow queries (> timeout) return a query_id; poll get_query_result.' },
+      materialize: { type: 'boolean', description: 'Materialize the result and read rows back from it (resilient, re-fetchable). The table holds the WHOLE result — `limit`/`offset` page the rows you get back, and get_query_result transforms run over all of it. Slow queries (> timeout) return a query_id; poll get_query_result.' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the compiled query WITHOUT executing it.' },
       explain: { type: 'boolean', description: 'If true, return the query plan (how the metrics compile) and the compiled query WITHOUT executing. A superset of dry_run; useful for inspecting/optimizing.' },
     },
@@ -433,8 +429,9 @@ export function buildSchemas(catalog) {
 
   return {
     create_semantic_model: create,
-    register_native_model: registerModel,
-    build_native_model: buildModel,
+    // Stage schemas may reference root-level definitions (the recursive python body): hoist them.
+    register_native_model: withStageDefs(registerModel, catalog),
+    build_native_model: withStageDefs(buildModel, catalog),
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     context: contextTool,
     query_semantic_model: query,
@@ -472,29 +469,7 @@ export function buildSchemas(catalog) {
     drop_context: { ...ctxRef, description: 'Tear down an entire isolated context (delete its files + artifacts).' },
     describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
     list_contexts: empty,
-    semantic_index: {
-      type: 'object', additionalProperties: false,
-      description: 'THE entry point for exploring the data: one progressive index over what every event/property/attribute MEANS, the REAL values it carries, how complete it is (NULL coverage), and how fresh the profiling is. Call with NO arguments for a compact overview (models, event names, event_semantics, group-by paths, value-index freshness). Then pass EXACTLY ONE view key: model → that model\'s entities/time/dimension attributes (with real sample values) + physical columns; event → only the properties populated on that event; property → ONE COLUMN\'S FULL PASSPORT (spec + unit, real value distribution paged by limit/offset/order_by/direction, NULL coverage per event with expected-vs-gap annotation, indexing history) — accepts bare event properties AND "<model>.<column>" attributes; search → events, properties, attributes, indexed VALUES and recipes by substring; bundle → for ONE app (bundle id), which event properties are populated vs EMPTY (the overview lists apps under `bundles`); status:true → operational state (value-index sync runs + background query jobs); run → one sync run\'s per-property breakdown. Views are mutually exclusive; paging params apply only to property/search.',
-      properties: {
-        model: { enum: [...catalog.modelKeys(), ...Object.keys(catalog.unavailableModels?.() || {})], description: 'VIEW: one model — its entities, time axis, dimension attributes (with indexed sample values) and REAL physical columns.' },
-        source: { enum: catalog.modelKeys(), description: 'Which SOURCE the `event` / `property` / `bundle` below belongs to. Every source owns its own events, payload properties and indexed values, so two sources may carry the same name — pass this to say which one. Optional when a name is unique across sources (then it is resolved for you; an ambiguous one is reported).' },
-        event: strEnum(catalog.eventNameEnum(), 'VIEW: one event of `source` — the event_data properties POPULATED on it (what you can measure/group/filter), each with real sample values + units.'),
-        property: { type: 'string', description: 'VIEW: one column\'s full passport, within `source`: an event property (e.g. "ad_type_of_event_data") or a dimension attribute (e.g. "country" on the users model): type/unit, where it applies, real value distribution (paged), NULL coverage per event, indexing history.' },
-        search: { type: 'string', description: 'VIEW: find across event names, event properties, dimension attributes (users/experiments columns), indexed VALUES, and recipes. FUZZY by default — typo- and paraphrase-tolerant (e.g. "retenton"→retention, "germny"→Germany); exact substring hits rank first, each match carries a score + match:"exact"|"fuzzy". Set fuzzy:false for substring-only.' },
-        fuzzy: { type: 'boolean', description: 'For { search }: enable typo/approximate matching (default true). false = exact substring only.' },
-        status: { type: 'boolean', description: 'VIEW: operational state — value-index sync runs (freshness, errors, slowest properties) + background query jobs.' },
-        run: { type: 'integer', minimum: 1, description: 'VIEW: one sync run by id (from the status view\'s value_index.recent_runs[].id): per-property timing/coverage, slowest first.' },
-        bundle: { type: 'string', description: 'VIEW: per-app coverage for ONE app, identified by its bundle id (e.g. "com.omg.wordsearch"). Returns which event properties are POPULATED for that app vs EMPTY (always NULL) — so you skip the empty ones instead of querying them blindly. The overview lists available apps under `bundles`; a property that is empty for one app may be populated for another. Requires the events fact to designate an app/bundle column.' },
-        recipe: { type: 'string', description: 'VIEW: get ONE ready-made recipe by id — its payload (create_semantic_model or a native-model pipeline + experiment mapping), example_queries, notes and `hack`. The overview lists available recipe ids; { search } finds them by keyword. (enum injected when recipes are configured.)' },
-        guide: { type: ['boolean', 'string'], description: 'VIEW: the analyst PROCEDURE for this server — guide:true returns the workflow (clarify → discover → prefer governed → review → report), IF/DO routing triggers (which tool to use when), and the per-task recipe families. Pass a task family name (e.g. "retention", "funnel", "ab_test") to narrow to that family. Read it to know HOW to approach a question.' },
-        limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'For { property }/{ search }: how many indexed values to return (default 10 for property, 20 for search). Page further with offset.' },
-        offset: { type: 'integer', minimum: 0, description: 'For { property }: skip this many values first — page through the value list.' },
-        order_by: { enum: ['freq', 'value'], description: 'For { property }: order the returned values by frequency (default) or alphabetically by value.' },
-        direction: { enum: ['asc', 'desc'], description: 'For { property }: sort direction (default desc for freq → most common first; asc for value → A→Z).' },
-        recent: { type: 'integer', minimum: 1, maximum: 100, description: 'For { status }/{ run }/{ property }: how many recent runs / jobs / history rows to include (default 3 for { property }).' },
-        include_coverage: { type: 'boolean', description: 'For { property }: return the FULL per-event and per-app coverage — every event and app, INCLUDING the ones where the property is always NULL. Default false: only the carriers (events/apps that actually populate it) are returned, with a count of the omitted ones. Set true when you need the complete NULL breakdown.' },
-      },
-    },
+    semantic_index: semanticIndexSchema(catalog),
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
       description: 'Wait for `seconds` (capped at 60), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.',
@@ -504,10 +479,90 @@ export function buildSchemas(catalog) {
       },
     },
     experiment: experimentSchema(),
-    memory: memorySchema(),
+    memory: memorySchema(catalog),
     ab_test: abTestSchema(),
     srm_check: srmCheckSchema(),
     sample_size: sampleSizeSchema(),
+  };
+}
+
+/**
+ * THE exploration tool, as ONE BRANCH PER VIEW. Each view lists exactly the fields it takes and the
+ * vocabulary it accepts, so "two views at once", "limit does not apply here" and "this source has
+ * no such property" are not refusals the engine has to write — they are inputs the schema cannot
+ * express. Names are enumerated PER SOURCE and a name is ALWAYS asked for within its source: there
+ * is no source-less spelling of an event or a column at all, in any catalog, so no name ever has to
+ * be traced back to an owner and no view ever has to guess which source was meant.
+ */
+function semanticIndexSchema(catalog) {
+  const models = catalog.modelKeys();
+  const unavailable = Object.keys(catalog.unavailableModels?.() || {});
+  const paging = {
+    limit: { type: 'integer', minimum: 1, maximum: 1000, description: 'How many indexed values to return (default 10).' },
+    offset: { type: 'integer', minimum: 0, description: 'Skip this many values first — page through a long tail.' },
+    order_by: { enum: ['freq', 'value'], description: 'Order the values by frequency (default) or alphabetically.' },
+    direction: { enum: ['asc', 'desc'], description: 'Sort direction (default desc for freq, asc for value).' },
+    recent: { type: 'integer', minimum: 1, maximum: 100, description: 'How many recent indexing runs to include.' },
+    include_coverage: { type: 'boolean', description: 'Return the FULL per-event and per-app coverage instead of the summary.' },
+  };
+  const view = (title, description, required, properties) => ({ title, type: 'object', additionalProperties: false, description, ...(required.length ? { required } : {}), properties });
+  const eventsOf = (k) => (catalog.isFact(k) ? catalog.eventNames(k) : []);
+  const bundleSources = models.filter((k) => catalog.getModel(k).bundle_column);
+
+  // Each vocabulary is written out where it is accepted, not hoisted into a $ref: a wrong name
+  // then fails INSIDE the branch that offered it, so the refusal can say which mode it was closest
+  // to and list that mode's names. Behind a $ref the failure belongs to the shared definition
+  // instead, and the reader is handed a vocabulary without being told whose it is.
+  const eventRef = (f) => strEnum(eventsOf(f), `An event '${f}' declares.`);
+  const propRef = (k) => strEnum(catalog.propertyEnumFor(k), `A payload property or attribute of '${k}'.`);
+
+  const branches = [
+    view('overview (no arguments)', 'OVERVIEW (no arguments): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
+    view('{ model }', 'VIEW { model }: one model — its entities, time axis, dimension attributes with real sample values, physical columns, declared relationships and aggregatable amounts.', ['model'], {
+      model: { enum: [...models, ...unavailable], description: 'The model to describe.' },
+    }),
+    // one branch per source: an event name belongs to the source that declares it, so a pairing
+    // that source does not have cannot be written down.
+    ...catalog.facts.map((f) => view('{ source, event }', `VIEW { source: '${f}', event }: the properties POPULATED on that event of '${f}'.`, ['source', 'event'], {
+      source: { const: f, description: `The events source '${f}'.` },
+      event: eventRef(f),
+    })),
+    // A column is ALWAYS asked for within its source — one branch per model, no source-less form.
+    ...models.map((k) => view('{ source, property }', `VIEW { source: '${k}', property }: one column of '${k}' — its meaning, real value distribution (pageable), NULL coverage and indexing freshness.`, ['source', 'property'], {
+      source: { const: k, description: `The source '${k}'.` },
+      property: propRef(k),
+      ...paging,
+    })),
+    view('{ search }', 'VIEW { search }: find events, properties, attributes, indexed VALUES and recipes by word — typo- and paraphrase-tolerant.', ['search'], {
+      search: { type: 'string', description: 'The word or phrase to look for.' },
+      fuzzy: { type: 'boolean', description: 'Enable typo/approximate matching (default true); false = exact substring only.' },
+      limit: paging.limit,
+    }),
+    view('{ status }', 'VIEW { status }: operational state — value-index sync runs (freshness, errors, slowest properties) and background query jobs.', ['status'], {
+      status: { const: true, description: 'Ask for the operational state.' },
+      recent: paging.recent,
+    }),
+    view('{ run }', 'VIEW { run }: one sync run by id — its per-property breakdown, slowest first.', ['run'], {
+      run: { type: 'integer', minimum: 1, description: 'Run id, from the status view.' },
+      recent: paging.recent,
+    }),
+    ...(bundleSources.length ? [view('{ bundle }', 'VIEW { bundle }: for ONE app — which properties carry data for it vs are EMPTY.', ['bundle'], {
+      bundle: { type: 'string', description: 'The app/bundle id; the overview lists them.' },
+      source: { enum: bundleSources, description: 'Which source to read the per-app coverage of (needed when several declare an app column).' },
+    })] : []),
+    view('{ recipe }', 'VIEW { recipe }: ONE ready-made recipe by id — its payload, example queries and the reusable hack.', ['recipe'], {
+      recipe: { type: 'string', description: 'Recipe id, from the overview.' },
+    }),
+    view('{ guide }', 'VIEW { guide }: HOW to approach a question — the analyst workflow and IF/DO routing; pass a task family to narrow it.', ['guide'], {
+      guide: { type: ['boolean', 'string'], description: 'true for the whole guide, or a task family name.' },
+    }),
+  ];
+  return {
+    // Every tool's input is an OBJECT; the MCP handshake validates that on the root schema,
+    // so `oneOf` narrows the shape but never replaces it.
+    type: 'object',
+    description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass NO arguments for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
+    oneOf: branches,
   };
 }
 
@@ -515,16 +570,43 @@ export function buildSchemas(catalog) {
 // A single action-driven tool. `record` saves a finding (+ the entities it is about,
 // the user's phrasings, and any source links); list/search/forget manage them. Strict
 // per-action fields so a param that does not belong to the action is rejected.
-function memorySchema() {
+/**
+ * What a finding can be ABOUT. Two things, each written as itself: an entity OF A SOURCE — always
+ * the pair, never a name on its own — or a phrase the user used. A NAME and a PHRASE are not the
+ * same thing, so they do not share a spelling; and since the source is its own field, the glued
+ * '<source>.<name>' form has no spelling either.
+ */
+function memoryTargetSchema(catalog, description) {
+  return {
+    ...(description ? { description } : {}),
+    oneOf: [
+      {
+        title: '{ source, name }',
+        type: 'object', additionalProperties: false, required: ['source'],
+        properties: {
+          source: { enum: catalog.modelKeys(), description: 'The source the entity belongs to.' },
+          name: { type: 'string', description: 'A property, user attribute or event of that source. Omit to link the model itself.' },
+        },
+      },
+      {
+        title: '{ term }',
+        type: 'object', additionalProperties: false, required: ['term'],
+        properties: { term: { type: 'string', minLength: 1, description: 'A phrase the user actually used, kept searchable as itself — for what the catalog has no entity for.' } },
+      },
+    ],
+  };
+}
+
+function memorySchema(catalog) {
   // Per-action field definitions (shared between the client-facing union `properties` and
   // the strict per-action branches, so the two never drift).
   const F = {
     note: { type: 'string', minLength: 1, description: 'ONE ATOMIC finding, in plain words (e.g. "\'ad format\' = the event_data property ad_type_of_event_data, populated only on ad_started/ad_finished; values rewarded/interstitial/banner"). Keep it to a single fact — when studying a topic, make several small notes instead of one long one (atomic notes link and retrieve far better; an over-long note matches poorly and may fail to index).' },
     question: { type: 'string', description: 'The ORIGINAL business question / analytical goal this finding answers — why you looked it up, in the stakeholder\'s terms (e.g. "which ad format drives the most rewarded-video revenue?"). Embedded together with the note, so a future similarly-phrased business question retrieves this insight by meaning. Include it whenever the finding answers a real question.' },
-    targets: { type: 'array', items: { type: 'string' }, description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is an event property (bare, "ad_type_of_event_data"), a "<model>.<column>" attribute ("users.country"), an event name ("ad_finished"), or a model key ("users"). A string that matches none is kept as a searchable free term.' },
+    targets: { type: 'array', items: memoryTargetSchema(catalog), description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is { source, name } — a property, user attribute or event of that source (e.g. { source: "events", name: "ad_type_of_event_data" }) — or { source } alone for the model itself. A name is never written on its own: the source says which entity it is. A phrase the catalog has no entity for is written { term: "..." } and stays searchable as itself.' },
     aliases: { type: 'array', items: { type: 'string' }, description: 'The word(s)/phrasing for this finding — give them IN BOTH the user\'s language AND English (e.g. ["ad format", "формат рекламы", "тип рекламы"]). Bilingual aliases make retrieval work cross-language: the lexical/fuzzy match needs the literal words (it cannot bridge scripts on its own), and the aliases are also embedded with the note so a query in either language matches by meaning. Add the user\'s exact wording + synonyms in each language.' },
     links: { type: 'array', description: 'Associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { oneOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
-    target: { type: 'string', description: 'Return notes linked to this ONE entity (singular — same forms as record\'s `targets`: a property/attribute/event/model name).' },
+    target: memoryTargetSchema(catalog, 'Return notes linked to this ONE entity (singular — the same forms as record\'s `targets`).'),
     query: { type: 'string', description: 'A word/phrase to match against note text, the business question, aliases and linked targets. Token-aware + typo-tolerant fuzzy by default; when embeddings are enabled it ALSO matches by MEANING (a same-sense note with no shared words still surfaces).' },
     fuzzy: { type: 'boolean', description: 'Enable typo/approximate lexical matching (default true). false = exact word/substring only (semantic matching, if enabled, still runs).' },
     id: { type: 'string', description: 'Id of the note to delete (as returned by record / list / search).' },
@@ -752,4 +834,11 @@ function experimentSchema() {
     ],
     properties,
   };
+}
+
+
+/** Attach the stages' `$defs` at a tool schema's root (where `#/$defs/…` references resolve). */
+function withStageDefs(toolSchema, catalog) {
+  const defs = stageDefs(catalog);
+  return Object.keys(defs).length ? { ...toolSchema, $defs: { ...(toolSchema.$defs || {}), ...defs } } : toolSchema;
 }

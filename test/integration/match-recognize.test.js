@@ -207,12 +207,26 @@ test('match_recognize rows: one_per_partition (12 players) vs one_per_match (28 
   assert.equal(reached(situations.rows, 'start'), 28);
 });
 
-test('funnel flexible partition: "user" alias and a per-(user,session) composite key', opts, async (t) => {
+test('funnel flexible partition: a declared relationship and a per-(user,session) composite key', opts, async (t) => {
   if (skip(t)) return;
-  // The partition key is caller-chosen. The "user" alias resolves to the user
-  // column → same 12 launched as the explicit ["player_id_of_internal"].
-  const alias = await pipe([matchActivation({ partition_by: ['user'] })]);
-  assert.equal(reached(alias.rows, 'launch'), 12);
+  // The partition key is caller-chosen. A DECLARED relationship is named as one — { entity } —
+  // and its key column is used: same 12 launched as the explicit ["player_id_of_internal"].
+  const byEntity = await pipe([matchActivation({ partition_by: [{ entity: 'user' }] })]);
+  assert.equal(reached(byEntity.rows, 'launch'), 12);
+  // …and so does the default, which finds that relationship through the ROLE of the model it
+  // points at — nothing here knows the relationship is called 'user'.
+  const byDefault = await pipe([{ stage: 'match_recognize', mode: 'ordered', steps: activationSteps }]);
+  assert.equal(reached(byDefault.rows, 'launch'), 12);
+  // A relationship written as a bare word is refused — it is not a column, and the message says so
+  await assert.rejects(
+    () => pipe([matchActivation({ partition_by: ['user'] })]),
+    /'user' is a RELATIONSHIP of 'events', not a column — write \{ entity: 'user' \}/,
+  );
+  // …and one whose key is composite cannot be a partition COLUMN at all
+  await assert.rejects(
+    () => pipe([matchActivation({ partition_by: [{ entity: 'ad_funnel' }] })]),
+    /relationship 'ad_funnel' of 'events' is keyed by .* which is an expression, not a column/,
+  );
   // A COMPOSITE key matches the sequence independently per (user, session) — one
   // row per matched (user,session); still 12 first_launch partitions (one/user).
   const composite = await pipe([matchActivation({ partition_by: ['player_id_of_internal', 'session_number'], steps: activationSteps.slice(0, 2) })]);
@@ -370,7 +384,7 @@ test('semantic_index: overview lists models, then { model } drills into the usab
   assert.ok(pcNames.includes('device_time') && pcNames.includes('player_id_of_internal'), 'columns include time + key');
   assert.equal(events.time, 'device_time', 'time axis (default window/match_recognize order) is reported');
   // { event } returns only the properties carried by that event
-  const ev = await engine.semantic_index({ event: 'iap_purchase_completed' });
+  const ev = await engine.semantic_index({ source: 'events', event: 'iap_purchase_completed' });
   assert.ok(ev.property_count > 0 && ev.properties.some((p) => p.name === 'price_in_usd_of_event_data'), 'event lists its scoped properties');
 });
 

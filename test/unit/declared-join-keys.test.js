@@ -193,13 +193,14 @@ test('a validity mark on a column that is not a dimension is rejected', () => {
   assert.throws(() => load(EVENTS + onAxis), /is the model's time axis \(meta\.mcp\.is_time\), so it never becomes a groupable time dimension/);
 });
 
-// THE SOURCE IS ALWAYS A SEPARATE ARGUMENT. With several events sources an accessor asked without
-// one has nothing to fall back to — there is no "default" fact — so it refuses instead of silently
-// answering for another source. With exactly one source the argument may be omitted.
-test('event accessors refuse an omitted source when the catalog has several', () => {
+// THE SOURCE IS ALWAYS A SEPARATE ARGUMENT, AND IS ALWAYS PASSED. There is no "default" fact in any
+// catalog, so an accessor asked without a source refuses instead of silently answering for one —
+// being the only source earns no exception, or the single-source case would quietly train callers
+// into a spelling that breaks the day a second source is declared.
+test('event accessors refuse an omitted source, whatever the catalog holds', () => {
   const two = load(EVENTS + CRASH + USERS());
   assert.equal(two.facts.length, 2);
-  assert.throws(() => two.eventNames(), /a source is required: this catalog has 2 events sources/);
+  assert.throws(() => two.eventNames(), /a source is required/);
   assert.throws(() => two.scalarEventProps(), /a source is required/);
   assert.throws(() => two.bundleColumn(), /a source is required/);
   assert.throws(() => two.eventNames('users'), /'users' is not an events source/);
@@ -207,7 +208,8 @@ test('event accessors refuse an omitted source when the catalog has several', ()
 
   const one = load(EVENTS + USERS());
   assert.equal(one.facts.length, 1);
-  assert.deepEqual(one.eventNames(), ['login'], 'a single source resolves without being named');
+  assert.throws(() => one.eventNames(), /a source is required/, 'being the only source is not a licence to omit it');
+  assert.deepEqual(one.eventNames('events'), ['login']);
 });
 
 // ── THE SCHEMA MARKS A PROPERTY; THE INDEX MEASURES THE REST ───────────────────────────────
@@ -232,7 +234,7 @@ test('meta.mcp.events is refused, naming the property marker', () => {
 
 test('meta.mcp.values is refused on a property and on an attribute', () => {
   assert.throws(() => load(withCol(EVENTS, '      - { name: result, data_type: string, meta: { mcp: { property: true, values: [win, lose] } } }') + USERS()),
-    /meta\.mcp\.values is no longer a schema key.*semantic_index\(\{ property \}\)/s);
+    /meta\.mcp\.values is no longer a schema key.*semantic_index\(\{ source, property \}\)/s);
   const dimVals = USERS().replace('- { name: country, data_type: string }', '- { name: country, data_type: string, meta: { mcp: { values: [US, GB] } } }');
   assert.throws(() => load(EVENTS + dimVals), /meta\.mcp\.values is no longer a schema key/);
   const blobVals = EVENTS.replace('      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }',
@@ -267,4 +269,65 @@ test('a session-named key is not a fact attribute unless marked dimension like a
     '      - { name: tracking_id, data_type: string }\n      - { name: sess, data_type: integer, meta: { mcp: { entity: { name: session, type: foreign } } } }');
   const c = load(withSession + USERS());
   assert.ok(!c.modelDimensionColumns('events').includes('sess'));
+});
+
+// A key part's `grain` is the unit the two sides are COMPARED at, and it truncates the side that
+// declares it. Declared on one side only, the join compares a truncated value against a raw one
+// and matches (almost) nothing — a wrong NUMBER, from a query that looks right. The load-time
+// check used to compare only how MANY parts each side had, never their grains.
+const SPEND = (dayGrain) => `  - name: fct_spend
+    meta:
+      mcp:
+        role: acquisition
+        entities:
+          user_day: { type: unique, key: [{ column: user_id }, { column: spend_date${dayGrain ? ', grain: day' : ''} }] }
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: spend_date, data_type: date, meta: { mcp: { is_time: true } } }
+      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+`;
+const EVENTS_DAY = (dayGrain) => EVENTS.replace(
+  '          ad_funnel: { type: foreign, key: [tracking_id, user_id] }',
+  `          user_day: { type: foreign, key: [{ column: user_id }, { column: ts${dayGrain ? ', grain: day' : ''} }] }`,
+);
+
+test('both sides of a key must be joined at the SAME grain', () => {
+  // the events side truncates to day, the spend side does not → refused, naming both shapes
+  assert.throws(() => load(EVENTS_DAY(true) + SPEND(false) + USERS()),
+    /entity 'user_day' is joined at a different grain on each side.*part 2: day.*part 2: no grain/s);
+  // and the other way round
+  assert.throws(() => load(EVENTS_DAY(false) + SPEND(true) + USERS()),
+    /joined at a different grain on each side/);
+});
+
+test('the same grain on both sides loads, and so does no grain at all', () => {
+  const day = load(EVENTS_DAY(true) + SPEND(true) + USERS());
+  assert.deepEqual(day.entityKey('events', 'user_day'), [{ column: 'user_id' }, { column: 'ts', grain: 'day' }]);
+  assert.deepEqual(day.entityKey('acquisition', 'user_day'), [{ column: 'user_id' }, { column: 'spend_date', grain: 'day' }]);
+  const raw = load(EVENTS_DAY(false) + SPEND(false) + USERS());
+  assert.deepEqual(raw.entityKey('events', 'user_day'), [{ column: 'user_id' }, { column: 'ts' }]);
+});
+
+// A VARIANT expands into its own '<relationship>_<variant>' entity, so it is held to the shape of
+// that entity just like any other side — a variant cannot quietly join at another grain.
+test('a variant is held to the shape of the entity it expands into', () => {
+  const variants = `  - name: fct_crash2
+    meta:
+      mcp:
+        role: crashlytics
+        primary_entity: crash
+        known_events: [boom]
+        entities:
+          user_day:
+            type: foreign
+            variants:
+              a: { key: [{ column: user_id }, { column: ts, grain: day }] }
+              b: { key: [{ column: user_id }, { column: ts }] }
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+`;
+  assert.throws(() => load(EVENTS_DAY(true) + SPEND(true) + variants + USERS()),
+    /entity 'user_day_b' is joined at a different grain on each side/);
 });

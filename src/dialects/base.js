@@ -36,9 +36,14 @@ export class Dialect {
     return name;
   }
 
-  /** SQL for one part of a join key: the column, qualified for the side it belongs to. */
+  /**
+   * SQL for one part of a join key: the column, qualified for the side it belongs to, TRUNCATED to
+   * the part's declared grain when it has one — so the two sides are compared at the unit the
+   * schema says they join on, whatever each side's column type is.
+   */
   keyPartExpr(part, qualify = (c) => c) {
-    return qualify(this.ident(part.column));
+    const col = qualify(this.ident(part.column));
+    return part.grain ? this.dateTrunc(part.grain, col) : col;
   }
 
   /**
@@ -48,6 +53,44 @@ export class Dialect {
    */
   compositeKeyExpr(parts, qualify = (c) => c) {
     return parts.map((p) => this.castExpr(this.keyPartExpr(p, qualify), 'string')).join(" || '|' || ");
+  }
+
+  /**
+   * The key of a pipeline `join` op, part by part, as BOTH sides render it — the single place the
+   * two sides of a join are derived, so no dialect can apply a part's grain to one side only.
+   * `onKeys` = a relationship declared in the schema (each side has its own column name, and a
+   * part may be truncated to the grain it is joined at); `on` = the plain shared-name form.
+   * `qualifyLeft` / `qualifyRight` place each side; the default leaves both bare.
+   */
+  joinKeyParts(op, qualifyLeft = (c) => c, qualifyRight = (c) => c) {
+    if (op.onKeys) {
+      return op.onKeys.left.map((lp, i) => ({
+        name: this.ident(lp.column),
+        left: this.keyPartExpr(lp, qualifyLeft),
+        right: this.keyPartExpr(op.onKeys.right[i], qualifyRight),
+      }));
+    }
+    return op.on.map((c) => ({ name: this.ident(c), left: qualifyLeft(this.ident(c)), right: qualifyRight(this.ident(c)) }));
+  }
+
+  /** True when a key part is compared as an EXPRESSION (a declared grain truncates it) rather than
+   *  as the bare column — so a form that can only equate bare columns (BigQuery's `USING`) would
+   *  quietly compare the untruncated values instead. */
+  joinKeyIsExpression(op) {
+    return !!op.onKeys && [...op.onKeys.left, ...op.onKeys.right].some((p) => p.grain);
+  }
+
+  /**
+   * The CTE form of a pipeline `join` op: base row plus exactly the attributes it asked for.
+   * `between` adds the validity window. Standard SQL, so both dialects join a declared
+   * relationship exactly the same way.
+   */
+  joinCte(prev, op) {
+    const eq = this.joinKeyParts(op, (c) => `base.${c}`, (c) => `j.${c}`)
+      .map((k) => `${k.left} = ${k.right}`).join(' AND ');
+    const btw = op.between ? ` AND base.${this.ident(op.between.value)} BETWEEN j.${this.ident(op.between.from)} AND j.${this.ident(op.between.to)}` : '';
+    const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
+    return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
   }
 
   isNumericType(type) { return isNumericType(type); }

@@ -3,6 +3,7 @@
 // and namespacing happens here; the renderer just serializes.
 
 import { jsonExtract, sqlLiteral, isNumericType, castExpr } from './dialect.js';
+import { NUMERIC_AGGS } from './catalog.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
@@ -44,7 +45,7 @@ function propExpr(catalog, modelKey, name, _spec) {
 /** SQL for a single event_data property condition (used for funnel-step scoping). */
 function propCond(catalog, modelKey, cond) {
   const found = factProp(catalog, modelKey, cond.property, 'where.property');
-  if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ event })`, 'where.property');
+  if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ source: '${modelKey}', event })`, 'where.property');
   const lhs = propExpr(catalog, modelKey, found.name, found.spec);
   switch (cond.op) {
     case 'eq': return `${lhs} = ${sqlLiteral(cond.value)}`;
@@ -103,8 +104,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     // an event property; numeric aggregations need a numeric type OR an explicit cast
     // (e.g. complete_time arrives as STRING upstream → add "cast": "numeric").
     const { name: propName, spec } = found;
-    const numericAgg = ['sum', 'average', 'median', 'min', 'max', 'percentile'].includes(decl.agg);
-    if (numericAgg && !isNumericType(spec.type) && !decl.cast) {
+    if (NUMERIC_AGGS.has(decl.agg) && !isNumericType(spec.type) && !decl.cast) {
       fail(`measure '${decl.name}': property '${field}' is type '${spec.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
     }
     valueExpr = propExpr(catalog, modelKey, propName, spec);
@@ -112,18 +112,16 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     // An AMOUNT the schema marks aggregatable on this source. The schema says only WHAT may be
     // aggregated (a column, or an expression over columns); the function is this caller's choice.
     const amount = catalog.aggregatableField(modelKey, field);
-    const numericAgg = ['sum', 'average', 'median', 'min', 'max', 'percentile'].includes(decl.agg);
-    if (numericAgg && amount.type && !isNumericType(amount.type) && !decl.cast) {
+    if (NUMERIC_AGGS.has(decl.agg) && amount.type && !isNumericType(amount.type) && !decl.cast) {
       fail(`measure '${decl.name}': '${field}' is type '${amount.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
     }
     valueExpr = amount.expr;
   } else {
     // a physical column of THIS model (an entity key like the player id, or any real column).
     // Anything else would compile into SQL the warehouse rejects — refuse it here, with the fix.
-    const columns = new Set((catalog.modelColumns(modelKey) || []).map((col) => col.name));
-    for (const parts of Object.values(catalog.entitiesOf(modelKey) || {})) for (const part of parts.key || []) columns.add(part.column);
-    const pe = catalog.getModel(modelKey).primary_entity;
-    if (pe && typeof pe === 'object') for (const part of pe.key || []) columns.add(part.column);
+    // The same set the measure `field` enum is built from (schema.js) — asked for once, here, so
+    // the tool cannot offer a field this then rejects.
+    const columns = new Set([...(catalog.modelColumns(modelKey) || []).map((col) => col.name), ...catalog.entityKeyColumns(modelKey)]);
     if (!columns.has(field)) {
       fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ model: '${modelKey}' }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
     }
@@ -141,16 +139,23 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
 }
 
 /** Resolve a dimension declaration to a dbt dimension object. */
+/**
+ * One declared dimension → its manifest form. `_task` / `_attribute` record what the caller
+ * DECLARED (the task it belongs to, the attribute name it was given) next to the namespaced name
+ * the manifest uses: they are read back when the tools describe or resolve the dimension, and are
+ * stripped before the manifest is written (see yaml-render). Recovering them from the generated
+ * identifier instead would mis-split the moment one task name is a prefix of another.
+ */
 function compileDimension(catalog, task, modelKey, decl) {
   if (decl.source === 'event_property') {
     if (!catalog.isFact(modelKey)) fail(`event_property dimensions are only valid on an events fact (${catalog.facts.join(', ')}), not on '${modelKey}'`, 'dimensions.source');
     const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
-    if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ event })`, 'dimensions.property');
+    if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ source: '${modelKey}', event })`, 'dimensions.property');
     if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
-    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name, found.spec) };
+    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name, found.spec), _task: task, _attribute: found.name };
   }
   if (decl.source === 'model_column') {
-    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column };
+    const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column, _task: task, _attribute: decl.column };
     if (dim.type === 'time') dim.type_params = { time_granularity: decl.grain || 'day' };
     return dim;
   }

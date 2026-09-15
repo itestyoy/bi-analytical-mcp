@@ -6,6 +6,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "lint:names": "node scripts/check-name-identity.mjs",
+    "pretest": "npm run lint:names",
     "test": "node --test test/unit/*.test.js",
     "test:integration": "node --test test/integration/*.test.js",
     "test:all": "node --test test/unit/*.test.js test/integration/*.test.js"

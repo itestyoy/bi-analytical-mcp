@@ -315,9 +315,9 @@ test('20. with an owner declared, both sides label the relationship consistently
 
 // ═══════════ D. MEMORY TARGETS ═══════════
 
-test('21. a finding recorded on events.ad_finished surfaces on that event', opts, async (t) => {
+test('21. a finding recorded on { source: events, name: ad_finished } surfaces on that event', opts, async (t) => {
   if (skip(t)) return;
-  const saved = await engine.memory({ action: 'record', note: 'ad_finished carries revenue; ad_started never does', targets: ['events.ad_finished'] });
+  const saved = await engine.memory({ action: 'record', note: 'ad_finished carries revenue; ad_started never does', targets: [{ source: 'events', name: 'ad_finished' }] });
   assert.deepEqual(saved.linked_to.map((l) => l.kind), ['event']);
   const v = await engine.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok((v.memory || []).some((m) => /ad_finished carries revenue/.test(m.note)), JSON.stringify(v.memory));
@@ -325,14 +325,14 @@ test('21. a finding recorded on events.ad_finished surfaces on that event', opts
 
 test('22. a finding on a qualified crash property surfaces on that property', opts, async (t) => {
   if (skip(t)) return;
-  await engine.memory({ action: 'record', note: 'ANR seconds are only on anr reports', targets: ['crashlytics.anr_duration_of_event_data'] });
+  await engine.memory({ action: 'record', note: 'ANR seconds are only on anr reports', targets: [{ source: 'crashlytics', name: 'anr_duration_of_event_data' }] });
   const v = await engine.semantic_index({ source: 'crashlytics', property: 'anr_duration_of_event_data' });
   assert.ok((v.memory || []).some((m) => /ANR seconds/.test(m.note)), JSON.stringify(v.memory));
 });
 
 test('23. a bare name carried by two sources is refused, naming both', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /ambiguous.*app_version.*app_version/s);
+  await assert.rejects(() => engine.memory({ action: 'record', note: 'x', targets: ['app_version'] }), /must be exactly one of: \{ source, name \} \| \{ term \}/);
 });
 
 // ═══════════ E. GROUNDING ═══════════
@@ -419,7 +419,7 @@ test('30. the model view lists clicks both as an attribute and as an amount', op
 
 // ═══════════ G. RESET IS A CLEAN SLATE ═══════════
 
-test('31. after a reset over a v1 database the indexer rebuilds from the warehouse: US 4 / GB 4 / DE 3 / BR 2', opts, async (t) => {
+test('31. over a database keyed the old way the indexer rebuilds from the warehouse: US 4 / GB 4 / DE 3 / BR 2', opts, async (t) => {
   if (skip(t)) return;
   const path = join(mkdtempSync(join(tmpdir(), 'aud-v1-')), 'vi.sqlite');
   const db = new DatabaseSync(path);
@@ -428,10 +428,9 @@ test('31. after a reset over a v1 database the indexer rebuilds from the warehou
   db.exec("INSERT INTO prop_stats VALUES ('users.country', 1, 99, 0, 1, 0, NULL)");
   db.exec("INSERT INTO prop_values VALUES ('users.country', 'ATLANTIS', 99)");
   db.close();
-  const store = openStore({ dbPath: path, reset: true });
+  const store = openStore({ dbPath: path });
   const index = new ValueIndex({ store });
-  index.migrateLegacyKeys(() => ({ source: 'users', property: 'country' }));
-  assert.equal(index.stats('users', 'country'), null, 'nothing resurrected');
+  assert.equal(index.stats('users', 'country'), null, 'the old rows are dropped, never mis-filed');
   const bi = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   await bi.refresh();
   const vals = Object.fromEntries(index.sampleValues('users', 'country', 10).map((v) => [v.value, v.freq]));
@@ -440,16 +439,19 @@ test('31. after a reset over a v1 database the indexer rebuilds from the warehou
   index.close();
 });
 
-test('32. the set-aside v1 tables are gone after the reset', opts, async (t) => {
+test('32. reset() over a fresh store leaves an empty index that the scan then fills', opts, async (t) => {
   if (skip(t)) return;
-  const path = join(mkdtempSync(join(tmpdir(), 'aud-v1b-')), 'vi.sqlite');
-  const db = new DatabaseSync(path);
-  db.exec('CREATE TABLE prop_values (property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(property, value))');
-  db.exec("INSERT INTO prop_values VALUES ('users.country', 'X', 1)");
-  db.close();
-  openStore({ dbPath: path, reset: true }).close?.();
-  const tables = new DatabaseSync(path).prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE '%_v1'").all();
-  assert.deepEqual(tables, []);
+  const path = join(mkdtempSync(join(tmpdir(), 'aud-reset-')), 'vi.sqlite');
+  let index = new ValueIndex({ store: openStore({ dbPath: path }) });
+  index.upsertProperty('users', 'country', { distinctCount: 1, totalCount: 99, nullCount: 0, values: [{ value: 'ATLANTIS', freq: 99 }] });
+  index.close();
+  index = new ValueIndex({ store: openStore({ dbPath: path, reset: true }) });
+  assert.equal(index.stats('users', 'country'), null, 'wiped');
+  const bi = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
+  await bi.refresh();
+  const vals = Object.fromEntries(index.sampleValues('users', 'country', 10).map((v) => [v.value, v.freq]));
+  assert.deepEqual(vals, { US: 4, GB: 4, DE: 3, BR: 2 });
+  index.close();
 });
 
 // ═══════════ H. NO ANCHOR ═══════════
@@ -468,9 +470,9 @@ test('34. meta.mcp.anchor is refused at load: there is no default source', opts,
   assert.throws(() => variant((M) => { M.fct_analytics_events.meta.mcp.anchor = true; }), /meta\.mcp\.anchor is no longer a schema key/);
 });
 
-test('35. an event accessor without a source is refused on a two-source catalog; named, it answers', opts, async (t) => {
+test('35. an event accessor without a source is refused; named, it answers', opts, async (t) => {
   if (skip(t)) return;
-  assert.throws(() => catalog.eventNames(), /a source is required: this catalog has 2 events sources/);
+  assert.throws(() => catalog.eventNames(), /a source is required/);
   assert.deepEqual([...catalog.eventNames('crashlytics')].sort(), ['anr', 'fatal_crash', 'non_fatal']);
 });
 
@@ -560,9 +562,9 @@ test('44. the run view tells users.app_version (1 distinct) from crashlytics.app
   assert.equal(rows.find((p) => p.source === 'crashlytics').distinct_count, 2);
 });
 
-test('45. the property view needs the source for a shared name, and answers per source', opts, async (t) => {
+test('45. the property view always takes the source, and answers per source', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.semantic_index({ property: 'app_version' }), /users.*crashlytics|crashlytics.*users/s);
+  await assert.rejects(() => engine.semantic_index({ property: 'app_version' }), /must be exactly one of: .*\{ source, property \}/);
   const u = await engine.semantic_index({ source: 'users', property: 'app_version' });
   // the seed writes '1.0'; dbt seed types the column numeric, so the warehouse value is 1
   assert.deepEqual(u.sample_values.map((v) => [String(v.value), v.freq]), [['1', 13]]);
@@ -628,9 +630,11 @@ test('51. { source: events, bundle: colorfit }: level_id populated (53), ad_type
   assert.ok(v.empty.includes('ad_type_of_event_data'));
 });
 
-test('52. naming a source without an app column is refused, pointing at the one that has it', opts, async (t) => {
+test('52. the app view offers only the sources that declare an app column', opts, async (t) => {
   if (skip(t)) return;
-  await assert.rejects(() => engine.semantic_index({ source: 'crashlytics', bundle: 'com.omg.colorfit' }), /declares no app\/bundle column.*events/s);
+  // not a refusal the engine writes: the view's `source` is enumerated from the sources that
+  // carry an app column, so naming one without it has no spelling.
+  await assert.rejects(() => engine.semantic_index({ source: 'crashlytics', bundle: 'com.omg.colorfit' }), /`source` must be one of: events/);
 });
 
 // ═══════════ P. NOTHING DECLARED — THE INDEX IS THE TRUTH ═══════════

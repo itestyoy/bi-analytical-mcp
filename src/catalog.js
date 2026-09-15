@@ -13,6 +13,9 @@ export { SUPPORTED_DIALECTS };
 // Aggregations a catalog measure may declare — dbt/MetricFlow's set. Any column or model
 // measure may use ANY of these; nothing here is specific to a role or a column name.
 export const MEASURE_AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'sum_boolean', 'median', 'percentile']);
+// The aggregations that compute a NUMBER out of the values — the ones a non-numeric field has to be
+// cast for. (count / count_distinct count rows, sum_boolean counts trues: any type will do.)
+export const NUMERIC_AGGS = new Set(['sum', 'average', 'median', 'min', 'max', 'percentile']);
 
 /**
  * Normalise one GOVERNED measure — the opt-in case where a declaration also fixes its
@@ -60,9 +63,27 @@ function normalizeAggregatable(name, decl, { model, column, type } = {}) {
 // that entity; `foreign` points at whichever model owns it; `natural` is the SCD-2 form.
 export const ENTITY_TYPES = new Set(['primary', 'unique', 'foreign', 'natural']);
 
-/** Normalise the PARTS of one key: a column name, or a list of them for a composite key. */
+// The grains a key part may be joined on — the ones both dialects can truncate to.
+export const KEY_PART_GRAINS = new Set(['day', 'week', 'month', 'quarter', 'year']);
+
+/**
+ * Normalise the PARTS of one key: a column name, or a list of them for a composite key. A part may
+ * be written as `{ column, grain }` — the grain is the unit the two sides are compared at, and BOTH
+ * sides render as the column TRUNCATED to it. That is what makes a per-day join a per-day join: a
+ * timestamp on one side and a date on the other otherwise compare raw and match (almost) nothing.
+ * A key part carries nothing else, so an unknown field is a mistake, not decoration.
+ */
 function normalizeKeyParts(raw, { where, columns }) {
-  const parts = (Array.isArray(raw) ? raw : [raw]).map((p) => (typeof p === 'string' ? { column: p } : { column: p?.column }));
+  const parts = (Array.isArray(raw) ? raw : [raw]).map((p) => {
+    if (typeof p === 'string') return { column: p };
+    for (const k of Object.keys(p || {})) {
+      if (k !== 'column' && k !== 'grain') throw new Error(`${where}: a key part takes 'column' and optionally 'grain' — '${k}' is not a key-part field`);
+    }
+    if (p?.grain !== undefined && !KEY_PART_GRAINS.has(p.grain)) {
+      throw new Error(`${where}: grain '${p.grain}' is not one of ${[...KEY_PART_GRAINS].join(', ')}`);
+    }
+    return { column: p?.column, ...(p?.grain ? { grain: p.grain } : {}) };
+  });
   if (!parts.length || parts.some((p) => !p.column)) {
     throw new Error(`${where}: 'key' needs a column name, or a list of them for a composite key`);
   }
@@ -97,7 +118,7 @@ function normalizeEntityKey(name, decl, { model, columns }) {
     return { type, variants }; // variants only: this side has no single canonical key
   }
   const parts = normalizeKeyParts(raw, { where, columns });
-  return { type, key: parts, ...(parts.length === 1 ? { column: parts[0].column } : {}), ...(Object.keys(variants).length ? { variants } : {}) };
+  return { type, key: parts, ...(Object.keys(variants).length ? { variants } : {}) };
 }
 
 // Native dbt `data_type`s that map to a MetricFlow time dimension.
@@ -128,19 +149,33 @@ function pipelineColumnType(cm, col) {
  * physical table lacks") can never surface anywhere downstream. Best-effort: a model
  * whose relation can't be introspected is left as declared. Returns { pruned }.
  */
-export async function groundCatalogToPhysical(catalog, runner, baseProjectDir) {
+export async function groundCatalogToPhysical(catalog, runner, baseProjectDir, log = () => {}) {
   if (!runner || !baseProjectDir || typeof runner.relationColumns !== 'function') return { pruned: {} };
   const phys = {};
-  for (const key of catalog.modelKeys()) {
+  const transient = [];
+  const keys = catalog.modelKeys();
+  for (const key of keys) {
     try {
       const r = await runner.relationColumns(baseProjectDir, catalog.getModel(key).dbt_model);
-      if (r && r.ok && Array.isArray(r.columns)) phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
-      // The relation cannot be introspected (not built, dropped, renamed, or dbt failed on it):
-      // the model is UNAVAILABLE — declared, but nothing in the warehouse backs it. Working on
-      // as declared would only move the failure to the first query.
-      else phys[key] = { unavailable: String(r?.stderr || r?.stdout || 'relation not found').replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').filter(Boolean).slice(-2).join(' ') || 'relation not found' };
-    } catch (e) { phys[key] = { unavailable: e?.message || 'introspection failed' }; }
+      if (r && r.ok && Array.isArray(r.columns)) { phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase())); continue; }
+      // dbt never got to ASK the warehouse (its own timeout, a signal, a spawn failure). That says
+      // nothing about the table, so it is not evidence of an absent one.
+      if (r?.killed || r?.signal || (r?.error && !r?.stderr)) { transient.push([key, r.error || `dbt was killed by ${r.signal}`]); continue; }
+      // dbt ran and could not introspect the relation (not built, dropped, renamed): the model is
+      // UNAVAILABLE — declared, but nothing in the warehouse backs it. Working on as declared would
+      // only move the failure to the first query.
+      phys[key] = { unavailable: String(r?.stderr || r?.stdout || 'relation not found').replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').filter(Boolean).slice(-2).join(' ') || 'relation not found' };
+    } catch (e) { transient.push([key, e?.message || 'introspection failed']); }
   }
+  // When NOT ONE model could be introspected, the thing that is unavailable is the warehouse (or
+  // dbt), not every table at once — a transient state a restart of the server cannot fix and must
+  // not be frozen into the catalog for its lifetime. Keep the catalog as declared and say so.
+  const failed = transient.length + Object.values(phys).filter((p) => p && p.unavailable).length;
+  if (keys.length && failed === keys.length) {
+    log(`catalog grounding SKIPPED: not one of the ${keys.length} models could be introspected — dbt or the warehouse is unreachable, so the catalog is served AS DECLARED and nothing is marked unavailable. First reason: ${transient[0]?.[1] || Object.values(phys)[0]?.unavailable}`);
+    return { pruned: {} };
+  }
+  for (const [key, why] of transient) log(`catalog grounding: '${key}' was NOT checked (dbt could not run: ${why}) — it stays as declared`);
   return catalog.groundToPhysical(phys);
 }
 
@@ -160,7 +195,8 @@ export function loadCatalog(path, opts = {}) {
   }
   // The warehouse dialect is runtime config, NOT catalog data: resolve it from
   // the environment / the dbt profile dbt actually runs with — never the YAML.
-  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, fallback: raw.warehouse_dialect });
+  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir, projectDir: opts.projectDir, fallback: raw.warehouse_dialect, report: (r) => { raw.dialect_fallback = r; } });
+  raw.python_runtime = resolvePythonRuntime({ profilesDir: opts.profilesDir, projectDir: opts.projectDir });
   if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
 }
@@ -183,7 +219,8 @@ export function loadCatalogFromProject(projectDir, opts = {}) {
     byRole.set(role, m.name);
   }
   const raw = dbtSchemaToCatalog({ models: mcpModels });
-  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir || projectDir, projectDir, fallback: raw.warehouse_dialect });
+  raw.warehouse_dialect = resolveDialect({ dialect: opts.dialect, profilesDir: opts.profilesDir || projectDir, projectDir, fallback: raw.warehouse_dialect, report: (r) => { raw.dialect_fallback = r; } });
+  raw.python_runtime = resolvePythonRuntime({ profilesDir: opts.profilesDir || projectDir, projectDir });
   if (opts.requireTimeRange != null) raw.require_time_range = !!opts.requireTimeRange; // runtime override (e.g. MCP_REQUIRE_TIME_RANGE)
   return new Catalog(raw);
 }
@@ -286,16 +323,22 @@ function collectSchemaModels(dir, acc) {
  *   3. the active dbt profile's output `type` (what dbt actually connects with)
  *   4. `fallback` (legacy catalogs) / 'postgres'
  */
-export function resolveDialect({ dialect, profilesDir, projectDir, fallback } = {}) {
-  const d = dialect || process.env.WAREHOUSE_DIALECT || dialectFromProfile(profilesDir, projectDir) || fallback || 'postgres';
+export function resolveDialect({ dialect, profilesDir, projectDir, fallback, report } = {}) {
+  const fromProfile = dialectFromProfile(profilesDir, projectDir);
+  const d = dialect || process.env.WAREHOUSE_DIALECT || fromProfile || fallback || 'postgres';
   if (!SUPPORTED_DIALECTS.has(d)) {
     throw new Error(`unsupported warehouse dialect '${d}' (supported: ${[...SUPPORTED_DIALECTS].join(', ')}). Set WAREHOUSE_DIALECT or fix the dbt profile output type.`);
   }
+  // dbt connects with an adapter this server writes no SQL for (duckdb, snowflake…), and nothing
+  // said otherwise: the SQL is then written in `d`'s dialect against that engine. It may well work
+  // — but it is a fact about this deployment, not a detail, so it is reported rather than assumed.
+  const profileType = String(profileOutput(profilesDir, projectDir)?.type || '').toLowerCase();
+  if (report && profileType && !fromProfile) report({ profile_type: profileType, rendering_as: d, explicit: !!(dialect || process.env.WAREHOUSE_DIALECT) });
   return d;
 }
 
-/** Read the adapter `type` from the dbt profile (the dialect dbt runs with). */
-function dialectFromProfile(profilesDir, projectDir) {
+/** The ACTIVE output of the dbt profile (the connection dbt runs with), or undefined. */
+export function profileOutput(profilesDir, projectDir) {
   try {
     let profileName;
     if (projectDir) {
@@ -309,11 +352,50 @@ function dialectFromProfile(profilesDir, projectDir) {
     const prof = (profileName && profiles[profileName]) || profiles[Object.keys(profiles).filter((k) => k !== 'config')[0]];
     if (!prof) return undefined;
     const target = process.env.DBT_TARGET || prof.target || Object.keys(prof.outputs || {})[0];
-    const type = prof.outputs?.[target]?.type;
-    return type && SUPPORTED_DIALECTS.has(type) ? type : undefined;
+    return prof.outputs?.[target] || undefined;
   } catch {
-    return undefined; // best-effort: fall back to env/default
+    return undefined; // best-effort
   }
+}
+
+/** Read the adapter `type` from the dbt profile (the dialect dbt runs with). */
+function dialectFromProfile(profilesDir, projectDir) {
+  const type = profileOutput(profilesDir, projectDir)?.type;
+  return type && SUPPORTED_DIALECTS.has(type) ? type : undefined;
+}
+
+/**
+ * Can dbt run PYTHON models on this profile? Decided the way dbt itself would decide — from the
+ * adapter and its settings in the active profile output — so the `python` pipeline stage is
+ * offered only where it can actually run:
+ *   - duckdb / snowflake / databricks: the adapter runs Python models as such;
+ *   - bigquery: only with a submission set up — `submission_method`, or a Dataproc/BigFrames region
+ *     (`dataproc_region` / `compute_region`) or cluster (`dataproc_cluster_name`);
+ *   - postgres and everything else: no Python models at all.
+ * MCP_PYTHON_MODELS=on|off overrides (on: the operator sets the submission per model via
+ * MCP_PYTHON_MODEL_CONFIG; off: hide the stage regardless). Returns { available, runtime?, reason? }.
+ */
+export function resolvePythonRuntime({ profilesDir, projectDir, env = process.env } = {}) {
+  // The operator's settings are read ONCE, here, and travel on the runtime: the tool schema, the
+  // stage's own validation and the compiled model then describe and do the same thing. (An embedder
+  // may override `config` on the catalog before the schemas are built — see Engine.)
+  let config = {};
+  try { config = JSON.parse(env.MCP_PYTHON_MODEL_CONFIG || '{}'); } catch { /* an unparseable pin is no pin */ }
+  const packages = String(env.MCP_PYTHON_PACKAGES || '');
+  const decided = (r) => ({ ...r, config, packages });
+  const force = String(env.MCP_PYTHON_MODELS || '').trim().toLowerCase();
+  if (/^(off|0|false|no)$/.test(force)) return decided({ available: false, reason: 'disabled by MCP_PYTHON_MODELS=off' });
+  const out = profileOutput(profilesDir, projectDir);
+  const type = String(out?.type || '').toLowerCase();
+  if (/^(on|1|true|yes)$/.test(force)) return decided({ available: true, runtime: type || 'unknown', forced: true });
+  if (!out) return decided({ available: false, reason: 'no dbt profile found — dbt Python models need an adapter that runs them (BigQuery with a submission set up, Snowflake, Databricks, DuckDB)' });
+  if (['duckdb', 'snowflake', 'databricks'].includes(type)) return decided({ available: true, runtime: type });
+  if (type === 'bigquery') {
+    const method = out.submission_method || (out.dataproc_cluster_name ? 'cluster' : (out.dataproc_region ? 'serverless' : (out.compute_region ? 'bigframes' : null)));
+    if (method) return decided({ available: true, runtime: 'bigquery', method });
+    return decided({ available: false, reason: 'the BigQuery profile has no Python submission set up: add submission_method (bigframes | serverless | cluster) with gcs_bucket and dataproc_region / compute_region to the profile output' });
+  }
+  return decided({ available: false, reason: `the '${type || 'unknown'}' adapter runs no dbt Python models` });
 }
 
 /**
@@ -407,7 +489,7 @@ export function dbtSchemaToCatalog(doc) {
           // column then supplies its key, which is the normal pairing. What must not pass is a
           // SECOND column claiming the identity, or a column claiming a different name than the
           // model declared: either way one of the two declarations would be dropped in silence.
-          const declaredName = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          const declaredName = primaryEntityName(m);
           if (primaryFromColumn) {
             throw new Error(`model '${model.name}': columns '${primaryFromColumn.column}' and '${col.name}' both declare a PRIMARY entity ('${primaryFromColumn.name}' and '${cm.entity.name}'). A model has exactly one identity — for a key that spans BOTH columns declare it once in meta.mcp.entities with a composite key; for a second join key use type: unique (still a join target) or foreign.`);
           }
@@ -415,10 +497,10 @@ export function dbtSchemaToCatalog(doc) {
             throw new Error(`model '${model.name}' declares meta.mcp.primary_entity '${declaredName}', but column '${col.name}' declares primary entity '${cm.entity.name}'. One of the two would be dropped — name the identity once.`);
           }
           primaryFromColumn = { name: cm.entity.name, column: col.name };
-          m.primary_entity = { name: cm.entity.name, column: col.name, key: ent.key };
+          m.primary_entity = { name: cm.entity.name, key: ent.key };
         } else {
           if (entities[cm.entity.name]) {
-            throw new Error(`model '${model.name}': entity '${cm.entity.name}' is declared on two columns ('${entities[cm.entity.name].column}' and '${col.name}'). One relationship has one key here — use meta.mcp.entities with a composite key if it spans both columns, or 'variants' if they are alternative keys for it.`);
+            throw new Error(`model '${model.name}': entity '${cm.entity.name}' is declared on two columns ('${(entities[cm.entity.name].key || []).map((p) => p.column).join(', ')}' and '${col.name}'). One relationship has one key here — use meta.mcp.entities with a composite key if it spans both columns, or 'variants' if they are alternative keys for it.`);
           }
           entities[cm.entity.name] = ent;
         }
@@ -429,8 +511,10 @@ export function dbtSchemaToCatalog(doc) {
         // On an events source the time axis is the event time, surfaced as the fact's own
         // time dimension. On any OTHER source (an install record, a daily spend table) the
         // axis is equally a groupable attribute — "installs by install day" — so it stays in
-        // the dimension list and everything reading dimensions keeps seeing it.
-        if (!isFact) dimensions[col.name] = { type: 'time', granularity: m.time.granularity };
+        // the dimension list and everything reading dimensions keeps seeing it. Unless the
+        // author opts out with meta.mcp.dimension: false, which means here exactly what it
+        // means on any other column: a real column that is not an attribute to group by.
+        if (!isFact && cm.dimension !== false) dimensions[col.name] = { type: 'time', granularity: m.time.granularity };
         continue;
       }
       // A column declared a MEASURE becomes an aggregatable amount of this model (any aggregation
@@ -471,14 +555,14 @@ export function dbtSchemaToCatalog(doc) {
       }
       // WHICH EVENTS CARRY A PROPERTY AND WHICH VALUES IT TAKES ARE MEASURED, NOT DECLARED. The
       // value index observes both per source and serves them everywhere (the { event },
-      // { property } and { search } views, the filter-value guard, the event-scope warnings). A
+      // { source, property } and { search } views, the filter-value guard, the event-scope warnings). A
       // declared list would only go stale in silence, so the schema no longer carries one: the
       // former meta.mcp.events / meta.mcp.values keys are refused with the replacement.
       if (cm.events !== undefined) {
         throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.events is no longer a schema key — which events carry a property is measured by the value index. To mark the column as an event-payload PROPERTY use meta.mcp.property: true (an array column needs only meta.mcp.array).`);
       }
       if (cm.values !== undefined || (cm.dimension && typeof cm.dimension === 'object' && cm.dimension.values !== undefined)) {
-        throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.values is no longer a schema key — a column's real values and their frequencies come from the value index (semantic_index({ property })). Remove it; put the MEANING of special values in the description instead.`);
+        throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.values is no longer a schema key — a column's real values and their frequencies come from the value index (semantic_index({ source, property })). Remove it; put the MEANING of special values in the description instead.`);
       }
       // Flattened event payload: on a FACT, a column marked meta.mcp.property (scalar) or
       // meta.mcp.array (array / array<struct>) is a per-event PROPERTY. These are REAL physical
@@ -556,17 +640,17 @@ export function dbtSchemaToCatalog(doc) {
         const ent = normalizeEntityKey(name, decl || {}, { model: model.name, columns: known });
         if (ent.type === 'primary') {
           if (ent.variants) throw new Error(`entity '${name}' of model '${model.name}': a primary entity is the model's single identity and cannot have variants; declare the alternatives as type: unique or foreign.`);
-          const prev = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          const prev = primaryEntityName(m);
           if (prev && prev !== name) throw new Error(`model '${model.name}' declares two primary entities ('${prev}' and '${name}'). A model has exactly one identity; declare the other key as type: unique (still a join target) or foreign.`);
-          m.primary_entity = { name, ...(ent.column ? { column: ent.column } : {}), key: ent.key };
+          m.primary_entity = { name, key: ent.key };
         } else {
           // The same name declared BOTH on a column and here: the model-level entry would win
           // by position in the file. Say so instead — the author has two keys for one
           // relationship and must state which it is.
           if (entities[name]) {
-            throw new Error(`model '${model.name}': entity '${name}' is declared both on column '${entities[name].column}' (meta.mcp.entity) and in meta.mcp.entities. Declare it in ONE place — meta.mcp.entities is the form that can carry a composite key or variants.`);
+            throw new Error(`model '${model.name}': entity '${name}' is declared both on column '${(entities[name].key || []).map((p) => p.column).join(', ')}' (meta.mcp.entity) and in meta.mcp.entities. Declare it in ONE place — meta.mcp.entities is the form that can carry a composite key or variants.`);
           }
-          const peName = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+          const peName = primaryEntityName(m);
           if (peName === name) {
             throw new Error(`model '${model.name}': '${name}' is already the model's PRIMARY entity, so it cannot also be declared in meta.mcp.entities — the semantic model would carry two entities of that name. Drop the duplicate, or give this key its own relationship name.`);
           }
@@ -592,14 +676,19 @@ export function dbtSchemaToCatalog(doc) {
   // identity of the semantic model and the join TARGET for that entity, so a second
   // claimant would silently hijack the join (e.g. a new fact stealing `user` from the
   // users dimension) and MetricFlow would reject the duplicate identity anyway.
-  const primaryEntityOwner = new Map();
+  // THE entity -> owning model map, built once here from the primary entities and extended below
+  // with the `unique` ones (after variant expansion, so an expanded name is checked too).
+  const ownerOf = new Map();
   for (const [key, m] of Object.entries(out.models)) {
-    const pe = typeof m.primary_entity === 'string' ? m.primary_entity : m.primary_entity?.name;
+    // A primary entity is written EITHER as a bare name (meta.mcp.primary_entity: event, the
+    // events-source form) or as an object with a key — both make the model the owner, so it is
+    // read through one accessor.
+    const pe = primaryEntityName(m);
     if (!pe) continue;
-    if (primaryEntityOwner.has(pe)) {
-      throw new Error(`models '${primaryEntityOwner.get(pe)}' and '${key}' both declare primary entity '${pe}'. A primary entity has exactly one owner (it is the join target for that entity) — give each model its own meta.mcp.primary_entity, e.g. 'event' for the analytics fact and 'crash' for a crash fact.`);
+    if (ownerOf.has(pe)) {
+      throw new Error(`models '${ownerOf.get(pe)}' and '${key}' both declare primary entity '${pe}'. A primary entity has exactly one owner (it is the join target for that entity) — give each model its own meta.mcp.primary_entity, e.g. 'event' for the analytics fact and 'crash' for a crash fact.`);
     }
-    primaryEntityOwner.set(pe, key);
+    ownerOf.set(pe, key);
   }
   // EXPAND KEY VARIANTS. A relationship may be carried by several alternative key columns on one
   // side (a crash row reporting one tracking id per ad format). Each variant becomes its own
@@ -625,7 +714,7 @@ export function dbtSchemaToCatalog(doc) {
           if (m.entities[name]) continue; // an explicit declaration wins over the expansion
           const parts = e.variants?.[v] || e.key;
           if (!parts) continue; // this side carries neither that variant nor a plain key
-          m.entities[name] = { type: e.type, key: parts, variant_of: rel, ...(parts.length === 1 ? { column: parts[0].column } : {}) };
+          m.entities[name] = { type: e.type, key: parts, variant_of: rel };
         }
         // A side declared ONLY as variants has no canonical key of its own.
         if (!e.key) delete m.entities[rel];
@@ -638,14 +727,6 @@ export function dbtSchemaToCatalog(doc) {
   // and every side of the same entity built from the same NUMBER of key parts — two sides with
   // different arity would compare a one-part key against a two-part one and silently match
   // nothing. Checked at load so a mistyped key fails here, not as an empty result set.
-  const ownerOf = new Map();
-  for (const [key, m] of Object.entries(out.models)) {
-    // A primary entity is written EITHER as a bare name (meta.mcp.primary_entity: event, the
-    // events-source form) or as an object with a key — both make the model the owner, so read
-    // it through the same accessor the owner index uses.
-    const pe = primaryEntityName(m);
-    if (pe) ownerOf.set(pe, key);
-  }
   for (const [key, m] of Object.entries(out.models)) {
     for (const [name, e] of Object.entries(m.entities || {})) {
       if (e.type !== 'unique') continue;
@@ -655,18 +736,30 @@ export function dbtSchemaToCatalog(doc) {
       ownerOf.set(name, key);
     }
   }
-  const arityOf = new Map();
+  // The SHAPE of a key is its parts in order, each with the grain it is compared at. Both the
+  // number of parts and the grain of each must agree across the sides: a grain declared on one
+  // side only truncates that side, so a day-truncated value is compared against a raw timestamp
+  // and the join matches (almost) nothing — silently, with a plausible-looking query.
+  const shapeOf = new Map();
+  const grainsOf = (parts) => parts.map((p) => p.grain || '-');
   for (const [key, m] of Object.entries(out.models)) {
     const all = [];
     const pe = m.primary_entity;
     if (pe && typeof pe === 'object' && pe.key) all.push([pe.name, pe.key]);
+    // variants are already expanded into their own '<relationship>_<variant>' entities above, each
+    // with its own key — so every side of every relationship is in this list exactly once.
     for (const [name, e] of Object.entries(m.entities || {})) if (e.key) all.push([name, e.key]);
     for (const [name, parts] of all) {
-      const prev = arityOf.get(name);
+      const prev = shapeOf.get(name);
       if (prev && prev.n !== parts.length) {
         throw new Error(`entity '${name}' is declared with ${prev.n} key part(s) on '${prev.model}' but ${parts.length} on '${key}'. Both sides of a join must be built from the same number of parts, in the same order.`);
       }
-      if (!prev) arityOf.set(name, { n: parts.length, model: key });
+      const grains = grainsOf(parts);
+      if (prev && String(prev.grains) !== String(grains)) {
+        const show = (g) => g.map((x, i) => `part ${i + 1}: ${x === '-' ? 'no grain' : x}`).join(', ');
+        throw new Error(`entity '${name}' is joined at a different grain on each side: ${show(prev.grains)} on '${prev.model}', but ${show(grains)} on '${key}'. A grain truncates the side that declares it, so declaring it on one side only compares a truncated value against a raw one and matches nothing — declare the same grain on both sides.`);
+      }
+      if (!prev) shapeOf.set(name, { n: parts.length, grains, model: key });
     }
   }
 
@@ -726,7 +819,7 @@ export function dbtSchemaToCatalog(doc) {
 }
 
 /** Logical name of a model's primary entity. */
-function primaryEntityName(model) {
+export function primaryEntityName(model) {
   const pe = model.primary_entity;
   return typeof pe === 'string' ? pe : pe?.name;
 }
@@ -735,6 +828,13 @@ export class Catalog {
   constructor(raw) {
     this.raw = raw;
     this.dialect = raw.warehouse_dialect;
+    // Whether dbt can run PYTHON models on the active profile (resolvePythonRuntime): the `python`
+    // pipeline stage exists in the tool schemas only when it can. A plain registry object without
+    // a profile is treated as "no runtime" unless it says otherwise.
+    this.pythonRuntime = raw.python_runtime || { available: false, reason: 'no dbt profile — Python models unavailable' };
+    // Set when dbt's adapter is one this server writes no SQL for, so the SQL is rendered in
+    // another dialect's syntax against it: { profile_type, rendering_as, explicit }.
+    this.dialectFallback = raw.dialect_fallback || null;
     this.models = raw.models || {};
     // `facts` = every events source; they are equal, each is addressed by name, and none is a
     // default. Declared by the schema converter, or derived here for a plain registry object:
@@ -822,7 +922,7 @@ export class Catalog {
       }
       const pe = m.primary_entity;
       if (pe && typeof pe === 'object') {
-        const parts = pe.key || (pe.column ? [{ column: pe.column }] : []);
+        const parts = pe.key || [];
         for (const part of parts) if (!has(part.column)) missing.push(`${part.column} (key of the primary entity '${pe.name}')`);
       }
       if (missing.length) { unavailable[key] = { reason: `the table lacks structural column(s): ${missing.join('; ')}`, missing: missing.map((x) => x.split(' ')[0]) }; continue; }
@@ -853,7 +953,7 @@ export class Catalog {
       // the warehouse instead of here. A relationship is one capability among several, so it is
       // dropped alone (unlike the primary key above, which is the model's identity).
       if (m.entities) for (const [name, e] of Object.entries(m.entities)) {
-        const parts = e.key || (e.column ? [{ column: e.column }] : []);
+        const parts = e.key || [];
         if (parts.some((p) => !has(p.column))) { delete m.entities[name]; gone.add(`entity:${name}`); }
       }
       // A model is SLOWLY-CHANGING only while it still HAS its window. If the validity columns
@@ -927,26 +1027,31 @@ export class Catalog {
     return !!(this._requireTimeRangeAll ?? this.models[source]?.require_time_range);
   }
 
-  /** The source a tool may assume when the caller omits it: the only one, else null (with
-   *  several events sources there is no default — the caller says which). */
-  defaultSource() {
-    return this.facts.length === 1 ? this.facts[0] : null;
+  /**
+   * Resolve the SOURCE an event accessor is asked about. The source is ALWAYS a separate argument
+   * and is always passed: there is no "default" fact to fall back to, in any catalog, and silently
+   * reading one source's vocabulary for another is exactly the mix-up the per-source design exists
+   * to prevent. An omitted source is a programming error, refused here at the accessor.
+   */
+  _fact(fact) {
+    if (!fact) throw new Error(`a source is required: sources are never mixed, so name the one you mean (${this.facts.join(', ')})`);
+    if (!this.facts.includes(fact)) throw new Error(`'${fact}' is not an events source. Events sources: ${this.facts.join(', ')}`);
+    return fact;
   }
 
   /**
-   * Resolve the SOURCE an event accessor is asked about. The source is always a separate
-   * argument; it may be omitted only when the catalog has exactly one events source. With
-   * several, an omitted source is a programming error — there is no "default" fact to fall back
-   * to, and silently reading one source's vocabulary for another is exactly the mix-up the
-   * per-source design exists to prevent — so it is refused here, at the accessor.
+   * The relationship `source` declares toward a model with the given ROLE — the structural way to
+   * ask "which key means per-user here", instead of assuming a relationship is literally named
+   * 'user'. Roles are the catalog's own vocabulary; relationship names are the author's.
    */
-  _fact(fact) {
-    if (fact) {
-      if (!this.facts.includes(fact)) throw new Error(`'${fact}' is not an events source. Events sources: ${this.facts.join(', ')}`);
-      return fact;
+  entityTowardRole(source, role) {
+    const m = this.models[source];
+    if (!m) return undefined;
+    for (const name of Object.keys(m.entities || {})) {
+      const target = this.joinTargetFor(name);
+      if (target && this.models[target]?.role === role) return name;
     }
-    if (this.facts.length === 1) return this.facts[0];
-    throw new Error(`a source is required: this catalog has ${this.facts.length} events sources (${this.facts.join(', ')}) and they are never mixed — name the one you mean`);
+    return undefined;
   }
 
   /** True when `key` is an events fact (has its own event vocabulary). */
@@ -1008,6 +1113,14 @@ export class Catalog {
     return [...new Set(this.facts.flatMap((f) => this.eventNames(f)))];
   }
 
+  /** Every name a source can be asked about in the { source, property } view: its payload
+   *  properties and its groupable attributes. The schema enumerates these PER SOURCE, so a name
+   *  that source does not carry is not expressible. */
+  propertyEnumFor(key) {
+    const m = this.getModel(key);
+    return [...new Set([...(this.facts.includes(key) ? this.eventProps(key) : []), ...Object.keys(m.dimensions || {})])];
+  }
+
   eventPropEnum() {
     return [...new Set(this.facts.flatMap((f) => this.eventProps(f)))];
   }
@@ -1060,6 +1173,20 @@ export class Catalog {
   eventProps(fact) {
     fact = this._fact(fact);
     return Object.keys(this.models[fact]?.properties || {});
+  }
+
+  /**
+   * What `name` is on `source`: 'property' for an events source's payload property, 'dimension'
+   * for a groupable attribute of any model, null when the source does not carry it. THE one place
+   * that answers "does this source have this attribute" — every resolver in the engine (value-index
+   * keys, the { source, property } view, memory targets) asks here, so a dimension is never asked for
+   * payload properties and no caller re-implements the rule.
+   */
+  attributeKind(source, name) {
+    const m = this.models[source];
+    if (!m || !name) return null;
+    if (this.facts.includes(source) && (m.properties || {})[name]) return 'property';
+    return (m.dimensions || {})[name] ? 'dimension' : null;
   }
 
   /** Full spec for one event_data property ({ type, items?, fields?, values?, description? }). */
@@ -1120,9 +1247,9 @@ export class Catalog {
     const m = this.getModel(key);
     const cols = [];
     const pe = m.primary_entity;
-    if (typeof pe === 'object') for (const p of pe.key || (pe.column ? [{ column: pe.column }] : [])) cols.push(p.column);
+    if (typeof pe === 'object') for (const p of pe.key || []) cols.push(p.column);
     for (const e of Object.values(m.entities || {})) {
-      for (const p of e.key || (e.column ? [{ column: e.column }] : [])) cols.push(p.column);
+      for (const p of e.key || []) cols.push(p.column);
     }
     return [...new Set(cols)];
   }
@@ -1132,8 +1259,8 @@ export class Catalog {
     const m = this.getModel(key);
     const out = {};
     const pe = m.primary_entity;
-    if (pe && typeof pe === 'object' && pe.name) out[pe.name] = { type: 'primary', key: pe.key || [{ column: pe.column }] };
-    for (const [name, e] of Object.entries(m.entities || {})) out[name] = { type: e.type, key: e.key || [{ column: e.column }] };
+    if (pe && typeof pe === 'object' && pe.name) out[pe.name] = { type: 'primary', key: pe.key || [] };
+    for (const [name, e] of Object.entries(m.entities || {})) out[name] = { type: e.type, key: e.key || [] };
     return out;
   }
 

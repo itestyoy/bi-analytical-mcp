@@ -70,14 +70,14 @@ test('semantic_index({ property }) surfaces per-app bundle_coverage', async () =
     bundleCoverage: [{ bundle: 'com.omg.words', rowCount: 1000, nonNull: 40 }, { bundle: 'com.omg.relax', rowCount: 500, nonNull: 0 }],
   });
   // DEFAULT (token-lean): ALL populated apps listed + an empty-app tally, not the full per-app list.
-  const prop = await e.semantic_index({ property: 'ad_type_of_event_data' });
+  const prop = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
   assert.equal(prop.bundle_coverage, undefined, 'full per-app list (incl. empties) is NOT dumped by default');
   assert.equal(prop.bundle_coverage_summary.populated_apps, 1);
   assert.equal(prop.bundle_coverage_summary.empty_apps, 1);
   assert.ok(prop.bundle_coverage_summary.populated.some((b) => b.bundle === 'com.omg.words'), 'lists every populated app');
   assert.ok(prop.recommendations.some((r) => /Always NULL for 1 of 2 app/i.test(r)), 'flags the empty count + how to drill');
   // include_coverage:true returns the FULL per-app split (nothing lost, just on demand).
-  const full = await e.semantic_index({ property: 'ad_type_of_event_data', include_coverage: true });
+  const full = await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data', include_coverage: true });
   assert.ok(Array.isArray(full.bundle_coverage), 'include_coverage returns the full per-app array');
   assert.equal(full.bundle_coverage.find((b) => b.bundle === 'com.omg.relax').non_null, 0, 'empty for relax');
 });
@@ -106,7 +106,7 @@ test('bundle is integrated as a helper across the index views', async () => {
   assert.ok(ev.recommendations.some((r) => /source: 'events', bundle:/.test(r)), 'events model view points at ITS bundle view');
 
   // { event }: with >1 app, flags that a property may be empty for some apps.
-  const evt = await e.semantic_index({ event: 'ad_finished' });
+  const evt = await e.semantic_index({ source: 'events', event: 'ad_finished' });
   assert.ok(evt.recommendations.some((r) => /bundle/.test(r)), JSON.stringify(evt.recommendations));
 
   // { search }: a query matching an app routes to its bundle view.
@@ -121,7 +121,7 @@ test('bundle is integrated as a helper across the index views', async () => {
 // { bundle } is a mutually-exclusive view + a guard when no app dimension is configured.
 test('semantic_index({ bundle }) view contract', async () => {
   const e = engine();
-  await assert.rejects(() => e.semantic_index({ bundle: 'x', property: 'ad_type_of_event_data' }), /at most ONE view/);
+  await assert.rejects(() => e.semantic_index({ bundle: 'x', property: 'ad_type_of_event_data' }), /must be exactly one of: .*\{ bundle \}/);
   // before any indexing, asking for a bundle returns the "not indexed yet" note (no apps).
   const none = await e.semantic_index({ bundle: 'whatever' });
   assert.ok(none.note && Array.isArray(none.bundles) && none.bundles.length === 0);
@@ -170,8 +170,8 @@ test('the same app in two sources is two apps: nothing is merged across sources'
   assert.equal(crashOnly.event_rows, 7);
   assert.equal(crashOnly.by_source, undefined);
 
-  // a source that declares no app column is refused with the ones that do
-  await assert.rejects(() => e.semantic_index({ source: 'users', bundle: 'com.omg.words' }), /not an events source/);
+  // a source that declares no app column is not in the view's `source` enum at all
+  await assert.rejects(() => e.semantic_index({ source: 'users', bundle: 'com.omg.words' }), /`source` must be one of: events/);
   // an app unknown on the named source is refused naming the source
   await assert.rejects(() => e.semantic_index({ source: 'crashlytics', bundle: 'com.omg.relax' }), /unknown app 'com.omg.relax' on source 'crashlytics'/);
 
@@ -183,5 +183,5 @@ test('the same app in two sources is two apps: nothing is merged across sources'
 test('naming a source that declares no app column is refused, listing the ones that do', async () => {
   const e = engine();
   await assert.rejects(() => e.semantic_index({ source: 'crashlytics', bundle: 'com.omg.words' }),
-    /source 'crashlytics' declares no app\/bundle column .* Sources with one: events/);
+    /`source` must be one of: events/);
 });

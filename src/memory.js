@@ -7,13 +7,27 @@
 // (see store.js) — this class holds the domain operations + the small in-JS filtering
 // (the note set is tiny), and no SQL.
 //
-// A canonical target key encodes the entity kind + key as "<kind>:<key>", e.g.
-//   property:ad_type_of_event_data | property:users.country | event:ad_finished |
-//   model:users | term:ad format   (a free phrase the user used that did not resolve)
-// — so a note found by search points straight back at the right semantic_index view.
+// A TARGET is stored as what it IS — { kind, source, name } for a property/attribute/event,
+// { kind, source } for a model, { kind, term } for a free phrase the user used. `targetKey` folds
+// one into a single string ONLY to look it up; nothing ever takes a key apart again. That is the
+// whole rule: a name may be assembled for an index, never dismantled to recover what it names.
 
 import { randomUUID } from 'node:crypto';
 import { rankFuzzy } from './fuzzy.js';
+
+/** The lookup key of a target: assembled from its parts, never parsed back. */
+export function targetKey(t) {
+  if (!t || typeof t !== 'object') return String(t); // a key from an older store: opaque, as-is
+  if (t.kind === 'term') return `term:${String(t.term).toLowerCase()}`;
+  if (t.kind === 'model') return `model:${t.source}`;
+  return `${t.kind}:${t.source}.${t.name}`;
+}
+
+/** The words of a target, for search and embedding — the parts, not the assembled key. */
+export function targetWords(t) {
+  if (!t || typeof t !== 'object') return String(t);
+  return t.kind === 'term' ? String(t.term) : [t.source, t.name].filter(Boolean).join('.');
+}
 
 // Cosine-similarity floor for a SEMANTIC hit to count (text-embedding-class models put
 // genuinely related-but-differently-worded texts well above this; noise stays below).
@@ -39,7 +53,7 @@ export class MemoryStore {
       e.question,
       e.note,
       ...(e.aliases || []),
-      ...(e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? t.slice(i + 1) : String(t); }),
+      ...(e.targets || []).map(targetWords),
     ].filter(Boolean).join('\n');
   }
 
@@ -49,6 +63,29 @@ export class MemoryStore {
     const entry = { id, note: String(note), question: question || null, targets, aliases, links, created_at: Date.now() };
     this.store.memory.add(entry);
     return entry;
+  }
+
+  /**
+   * Rewrite stored target keys in place. `rule(canon)` -> a replacement key, or null to keep it.
+   * Used ONCE at open to bring keys written by an older layout onto the current canonical form —
+   * the caller supplies the rule because only it holds the catalog. Returns { notes, targets }.
+   */
+  retarget(rule) {
+    let notes = 0; let targets = 0;
+    for (const e of this.all({ limit: 100000 })) {
+      let changed = false;
+      const next = [];
+      const seen = new Set();
+      for (const t of e.targets || []) {
+        const to = rule(t);
+        const keep = to || t;
+        if (to) { changed = true; targets += 1; }
+        const k = targetKey(keep);
+        if (!seen.has(k)) { seen.add(k); next.push(keep); }
+      }
+      if (changed && this.store.memory.setTargets(e.id, next)) notes += 1;
+    }
+    return { notes, targets };
   }
 
   get(id) { return this.store.memory.get(id); }
@@ -66,7 +103,7 @@ export class MemoryStore {
   forTargets(keys) {
     if (!keys || !keys.length) return [];
     const set = new Set(keys);
-    return this.all({ limit: 2000 }).filter((e) => (e.targets || []).some((t) => set.has(t)));
+    return this.all({ limit: 2000 }).filter((e) => (e.targets || []).some((t) => set.has(targetKey(t))));
   }
 
   /**

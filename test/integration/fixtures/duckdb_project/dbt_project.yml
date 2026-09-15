@@ -1,0 +1,20 @@
+# A minimal dbt project on DuckDB — the ONE adapter that runs dbt PYTHON models locally. Used only
+# to prove the rows a `python` pipeline stage produces (the SQL prep table → the Python model),
+# with the same generated files a BigQuery/Snowflake profile would receive.
+name: "test_project"
+version: "1.0.0"
+config-version: 2
+profile: "test_project"
+model-paths: ["models"]
+seed-paths: ["seeds"]
+target-path: "target"
+clean-targets: ["target", "dbt_packages"]
+models:
+  test_project:
+    +materialized: table
+seeds:
+  test_project:
+    fct_analytics_events:
+      +column_types:
+        device_time: timestamp
+        price_in_usd_of_event_data: double

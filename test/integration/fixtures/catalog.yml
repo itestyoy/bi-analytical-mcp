@@ -71,6 +71,7 @@ models:
         meta:
           mcp:
             entity: { name: session, type: foreign }
+            dimension: true
       - name: device_time
         data_type: timestamp
         description: "Event timestamp (the metric time axis)."

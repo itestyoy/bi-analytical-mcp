@@ -47,7 +47,7 @@ export class CatalogSearch {
       tiebreak: (p) => `${p.source}.${p.name}`,
     });
     // Dimension attributes of the non-fact models (users/experiments): { source, column } —
-    // the same pair the { property } drill-down takes.
+    // the same pair the { source, property } drill-down takes.
     const dimItems = [];
     // EVERY model's attributes, events sources included: a dimension that lives only on a fact
     // (the app column, a crash source's app_version) is as searchable as a users attribute.

@@ -537,11 +537,10 @@ const STAGES = {
         }
         between = { value: p.between.value, from: p.between.from, to: p.between.to };
       }
-      // A `between` predicate cannot be expressed with the BigQuery pipe `USING (...)` form, so it
-      // forces the chained-CTE `ON ...` assembly (both dialects render the same ON clause there).
-      // A per-side key expression cannot be written as the BigQuery pipe `USING (...)` form, so a
-      // `via` join takes the chained-CTE `ON ...` assembly — as a `between` predicate already does.
-      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys, requiresCte: true } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between, requiresCte: true } : {}) }, cols: out };
+      // Each dialect renders the projection `attrs` itself (a `j.col AS alias` list in the CTE
+      // form, a projecting subquery on the right side of a pipe JOIN), so the column set promised
+      // here is exactly what the next stage sees on either path.
+      return { op: { op: 'join', relation, alias: 'j', on, ...(onKeys ? { onKeys } : {}), attrs, kind: (p.kind || 'left').toUpperCase(), ...(between ? { between } : {}) }, cols: out };
     },
   },
 
@@ -668,6 +667,20 @@ function requireArrayCol(cols, name, op) {
 /** Register an additional stage from another module (e.g. match_recognize). */
 export function registerStage(name, def) { STAGES[name] = def; }
 
+/**
+ * Root-level `$defs` the stage schemas reference (`#/$defs/<name>`). A tool schema that embeds
+ * pipelineStageSchema() / stageSchemas() must carry these at ITS root — `$ref` resolves against
+ * the document it is embedded in, so the definitions cannot travel inside the stage fragment.
+ */
+export function stageDefs(catalog) {
+  return Object.assign({}, ...availableStages(catalog).map((s) => (typeof s.defs === 'function' ? s.defs() : {})));
+}
+
+/** A stage may declare `available(catalog)`: false hides it from the schemas and refuses it in a build. */
+function availableStages(catalog) {
+  return Object.values(STAGES).filter((s) => typeof s.available !== 'function' || s.available(catalog));
+}
+
 /** JSON-Schema oneOf for a named subset of stages (e.g. the funnel `prepare` field). */
 export function stageSchemas(catalog, names) {
   return { discriminator: { propertyName: 'stage' }, oneOf: names.map((n) => { if (!STAGES[n]) throw new Error(`no such stage: ${n}`); return STAGES[n].schema(catalog); }) };
@@ -685,9 +698,12 @@ function sourceColumns(catalog, key, physicalCols = null) {
     if (m.event_name?.column && !cols.has(m.event_name.column)) cols.set(m.event_name.column, { type: 'string' });
     if (m.time?.column && !cols.has(m.time.column)) cols.set(m.time.column, { type: 'time' });
     if (m.event_data_column && !cols.has(m.event_data_column)) cols.set(m.event_data_column, { type: 'json' });
-    for (const e of Object.values(m.entities || {})) if (e.column && !cols.has(e.column)) cols.set(e.column, { type: 'string' });
+    for (const e of Object.values(m.entities || {})) for (const p of e.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
   } else {
-    if (typeof m.primary_entity === 'object' && m.primary_entity.column && !cols.has(m.primary_entity.column)) cols.set(m.primary_entity.column, { type: 'string' });
+    // the primary entity's key can span several columns, and each of them is a real column of the
+    // relation — the same shape the fact branch above reads (the old single `.column` form is gone)
+    for (const p of (typeof m.primary_entity === 'object' && m.primary_entity.key) || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
+    for (const e of Object.values(m.entities || {})) for (const p of e.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
     for (const [name, dd] of Object.entries(m.dimensions || {})) if (!cols.has(name)) cols.set(name, { type: dd.type });
   }
   // GROUNDING: when the caller supplies the relation's PHYSICAL column names (lowercased),
@@ -697,8 +713,6 @@ function sourceColumns(catalog, key, physicalCols = null) {
   if (physicalCols) for (const name of [...cols.keys()]) if (!physicalCols.has(name.toLowerCase())) cols.delete(name);
   return cols;
 }
-
-/** Starting columns for the events anchor (so prepare/funnel pipelines run over it). */
 
 /** The scalar columns a `prepare` stage list adds (name -> { type }) — threads prep columns. */
 export function prepareColumns(catalog, dialectName, stages = [], source) {
@@ -715,7 +729,7 @@ export function prepareColumns(catalog, dialectName, stages = [], source) {
 export function pipelineStageSchema(catalog) {
   // discriminator on `stage` → a bad stage reports only THAT stage's requirements, not every
   // stage's (each stage schema pins stage:{const} + requires it), so errors stay actionable.
-  return { discriminator: { propertyName: 'stage' }, oneOf: Object.values(STAGES).map((s) => s.schema(catalog)) };
+  return { discriminator: { propertyName: 'stage' }, oneOf: availableStages(catalog).map((s) => s.schema(catalog)) };
 }
 
 // Fold stages -> { ops, cols } (validating column references along the way). `source`
@@ -728,6 +742,7 @@ function buildOps(catalog, d, baseColumns, stages, source) {
   for (const st of stages) {
     const def = STAGES[st.stage];
     if (!def) throw new Error(`unknown pipeline stage: ${st.stage}`);
+    if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : `the '${st.stage}' stage is not available on this warehouse`);
     const res = def.build({ d, catalog, cols, source }, st);
     ops.push(res.op);
     cols = res.cols;
@@ -735,45 +750,48 @@ function buildOps(catalog, d, baseColumns, stages, source) {
   return { ops, cols };
 }
 
-// Chained-CTE assembly (works for both dialects). A stage that renders itself
-// (op.render, e.g. match_recognize) contributes its own self-contained SELECT as
-// one CTE; all others use the dialect's stepCte.
-function assembleCteSql(d, dialectName, baseRelation, ops) {
-  let prev = baseRelation;
-  const ctes = [];
-  for (const op of ops) {
-    const name = `p${ctes.length}`;
-    const sql = op.render ? op.render(prev, dialectName) : d.stepCte(prev, op);
-    ctes.push({ name, sql });
-    prev = name;
-  }
-  const head = ctes.length ? `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\n` : '';
-  return `${head}SELECT * FROM ${prev}`;
-}
-
 /**
- * Lower a pipeline over an explicit base relation to one SQL text (chained-CTE
- * form). Used by the funnel: [...prepare, match_recognize].
+ * Render a full pipeline over a catalog `source` as a CHAIN of dbt models. Stages run in one SQL
+ * model until a `python` stage: that stage is a dbt Python model of its own, the SQL stages after
+ * it another SQL model reading it through ref, and so on — any number of python stages, anywhere
+ * (a python stage FIRST reads the source directly). dbt orders the chain from the refs; the last
+ * model carries the pipeline's name (`modelName`), the ones before it `<modelName>_s1`, `_s2`, ….
+ * SQL uses the dialect-native form (Postgres chained CTE, BigQuery `|>` pipe syntax) for the first
+ * model unless a stage requires CTE form (match_recognize on Postgres); later SQL models read a
+ * ref, so they are plain CTE chains.
+ * @returns { chain: [{ kind: 'sql'|'python', model, input, stages|stage, sql?, columns }], columns, sql }
+ *   `columns` = the final tracked column set (Map); `sql` = the LAST SQL model's text (the whole
+ *   pipeline when there is no python stage).
  */
-export function renderPipelineSql(catalog, dialectName, baseRelation, baseColumns, stages, source) {
-  const d = getDialect(dialectName);
-  const { ops } = buildOps(catalog, d, baseColumns, stages, source);
-  return assembleCteSql(d, dialectName, baseRelation, ops);
-}
-
-/**
- * Render a full pipeline over a catalog `source` to SQL for `dialectName`. The
- * dialect-native form is used (Postgres chained CTE, BigQuery `|>` pipe syntax)
- * unless a stage requires CTE form on THIS dialect (e.g. match_recognize on engines
- * without a native row-pattern operator — BigQuery DOES have `|> MATCH_RECOGNIZE`, so
- * it stays pipe; Postgres emulates it as a CTE, forcing chained-CTE assembly).
- * @returns { sql, columns } — columns is the final tracked column set (Map).
- */
-export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null } = {}) {
+export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null, modelName = 'pipe' } = {}) {
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
-  const baseRelation = `{{ ref('${m.dbt_model}') }}`;
-  const { ops, cols } = buildOps(catalog, d, sourceColumns(catalog, source, physicalCols), stages, source);
-  const sql = ops.some((o) => o.requiresCte) ? assembleCteSql(d, dialectName, baseRelation, ops) : d.renderPipeline(baseRelation, ops);
-  return { sql, columns: cols };
+  // Cut the stage list at every python stage.
+  const segments = []; let cur = [];
+  for (const st of stages) {
+    if (STAGES[st.stage]?.python) { if (cur.length) segments.push({ kind: 'sql', stages: cur }); segments.push({ kind: 'python', stage: st }); cur = []; } else cur.push(st);
+  }
+  if (cur.length || !segments.length) segments.push({ kind: 'sql', stages: cur });
+  let cols = sourceColumns(catalog, source, physicalCols);
+  let input = m.dbt_model; // what the segment's dbt.ref() / FROM names: the source, then the previous model
+  segments.forEach((seg, i) => {
+    seg.model = i === segments.length - 1 ? modelName : `${modelName}_s${i + 1}`;
+    seg.input = input;
+    const baseRelation = `{{ ref('${input}') }}`;
+    if (seg.kind === 'sql') {
+      const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source);
+      // Every SQL segment renders in the dialect's native form — BigQuery pipe syntax, a chain of
+      // CTEs on Postgres — whether it reads the source or the model a python stage produced.
+      seg.sql = d.renderPipeline(baseRelation, ops);
+      cols = next;
+    } else {
+      const def = STAGES[seg.stage.stage];
+      if (typeof def.available === 'function' && !def.available(catalog)) throw new Error(def.unavailableReason ? def.unavailableReason(catalog) : 'the python stage is not available on this warehouse');
+      cols = def.build({ d, catalog, cols, source }, seg.stage).cols;
+    }
+    seg.columns = cols;
+    input = seg.model;
+  });
+  const lastSql = [...segments].reverse().find((seg) => seg.kind === 'sql');
+  return { chain: segments, columns: cols, sql: lastSql ? lastSql.sql : null };
 }

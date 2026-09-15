@@ -17,6 +17,7 @@
 
 import { jsonExtract, sqlLiteral } from './dialect.js';
 import { registerStage, prepareColumns } from './pipeline.js';
+import { oneOfOr, strEnum } from './schema-kit.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
@@ -52,30 +53,33 @@ const factEventNames = (catalog, source, names) => (names || []).map((n) => cata
   hint: 'a funnel runs over ONE fact, so start the pipeline from the fact that owns the event',
 }));
 
-export function stepPredicate(catalog, step, dialect, col, prepCols = new Map(), source) {
+export function stepPredicate(catalog, step, dialect, prepCols = new Map(), source) {
   const m = catalog.getModel(source);
   const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
-  const evCol = col ? `${col}.${m.event_name.column}` : m.event_name.column;
-  const dataCol = col ? `${col}.${catalog.eventDataColumn(source)}` : catalog.eventDataColumn(source);
+  // Unqualified, for the same reason buildPrefilter is: the predicate applies to the single
+  // relation the pattern scans, and a payload property is rendered by catalog.propertyExpr, which
+  // carries no qualifier — so half of a qualified predicate would silently stay unqualified.
+  const evCol = m.event_name.column;
   const names = factEventNames(catalog, source, step.event_name);
   const ev = names.length === 1 ? `${evCol} = ${sqlLiteral(names[0])}` : `${evCol} IN (${names.map(sqlLiteral).join(', ')})`;
   const props = (step.where || []).map((c) => {
     // a prepare-derived column is referenced directly (it's a real column now)
     if (prepCols.has(c.property)) {
-      return comparePred(col ? `${col}.${c.property}` : c.property, c.op, c.value);
+      return comparePred(c.property, c.op, c.value);
     }
     const p = (m.properties || {})[c.property];
     if (!p) {
       // a physical model column (envelope/dimension column like bundle_id) → compare it
       // directly, so a step filter can use model columns without a separate where stage.
-      if (modelCols.has(c.property)) return comparePred(col ? `${col}.${c.property}` : c.property, c.op, c.value);
+      if (modelCols.has(c.property)) return comparePred(c.property, c.op, c.value);
       throw new Error(`unknown event property or column in step: ${c.property}`);
     }
     if (catalog.isComplexEventProp(c.property, source)) {
       throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (derive/unnest), not directly`);
     }
-    // the catalog's one rule for reading a property (flat column or JSON extract), qualified by `col`
-    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type, qualifier: col || undefined }), c.op, c.value);
+    // the catalog's one rule for reading a property: a flat column, or a JSON extract from the
+    // payload column — unqualified, like every other clause here
+    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value);
   });
   return [ev, ...props].join(' AND ');
 }
@@ -86,15 +90,17 @@ export function stepPredicate(catalog, step, dialect, col, prepCols = new Map(),
  * population only — it does NOT redefine steps. Event-level filters: time window,
  * event_name allowlist, event_data property conditions. To filter by USER
  * attributes, add a `join` (users) + `where` stage before match_recognize.
+ *
+ * Columns are referenced UNQUALIFIED: the filter always applies to the one relation being scanned,
+ * and a payload property is rendered by `catalog.propertyExpr`, which has no qualifier of its own —
+ * so a qualifier here would reach half the clauses and silently skip the rest.
  */
-export function buildPrefilter(catalog, spec, dialect, col, source) {
+export function buildPrefilter(catalog, spec, dialect, source) {
   const f = spec.filter;
   if (!f) return '';
   const m = catalog.getModel(source);
-  const q = (c) => (col ? `${col}.${c}` : c);
-  const evNameCol = q(m.event_name.column);
-  const timeCol = q(m.time.column);
-  const dataCol = q(catalog.eventDataColumn(source));
+  const evNameCol = m.event_name.column;
+  const timeCol = m.time.column;
   const clauses = [];
   if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
   if (f.time_range?.end) { const ex = dateEndExclusive(f.time_range.end); clauses.push(ex ? `${timeCol} < ${sqlLiteral(ex)}` : `${timeCol} <= ${sqlLiteral(f.time_range.end)}`); }
@@ -104,7 +110,7 @@ export function buildPrefilter(catalog, spec, dialect, col, source) {
     const p = (m.properties || {})[c.property];
     if (!p) {
       // physical model column (e.g. bundle_id) → direct comparison; no separate where needed.
-      if (modelCols.has(c.property)) { clauses.push(comparePred(q(c.property), c.op, c.value)); continue; }
+      if (modelCols.has(c.property)) { clauses.push(comparePred(c.property, c.op, c.value)); continue; }
       throw new Error(`unknown event property or column in filter.where: ${c.property}`);
     }
     clauses.push(comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value));
@@ -120,16 +126,40 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
     throw new Error(`match_recognize needs an events fact as the pipeline source; '${source}' is not one (facts: ${catalog.facts.join(', ')})`);
   }
   const m = catalog.getModel(source);
-  // Partition key is FLEXIBLE: the caller chooses any column(s) available at this
-  // point in the pipeline (event columns, or columns added by upstream derive/
-  // compute/join stages). Convenience aliases 'user'/'session' resolve to the
-  // catalog entity columns. Default = the user entity column.
-  const entityCol = (name) => m.entities?.[name]?.column;
-  const resolvePart = (p) => (p === 'user' || p === 'session') ? (entityCol(p) || p) : p;
+  // Partition key is FLEXIBLE: the caller chooses any column(s) available at this point in the
+  // pipeline (event columns, or ones added by upstream derive/compute/join), or names a
+  // RELATIONSHIP the source declares — { entity: 'user' } — and its key column is used. A
+  // relationship is named, never spelled as a bare magic word: nothing in here knows what any
+  // particular relationship is called.
+  const declared = Object.keys(m.entities || {});
+  const entityCol = (name, where) => {
+    const e = m.entities?.[name];
+    if (!e) throw new Error(`${where}: '${source}' declares no relationship '${name}' (declared: ${declared.join(', ') || 'none'})`);
+    const parts = e.key || [];
+    // A partition column is ONE real column of the row. A composite key, or a part truncated to a
+    // grain, is an expression — the caller partitions by the columns it means instead.
+    if (parts.length !== 1 || parts[0].grain) {
+      throw new Error(`${where}: relationship '${name}' of '${source}' is keyed by ${parts.map((x) => x.column).join(' + ') || 'nothing'}${parts.some((x) => x.grain) ? ' (truncated to a grain)' : ''}, which is an expression, not a column — partition by the column(s) you mean`);
+    }
+    return parts[0].column;
+  };
+  const resolvePart = (p, i) => {
+    const where = `partition_by[${i}]`;
+    if (p && typeof p === 'object') return entityCol(p.entity, where);
+    const s = String(p);
+    if (m.entities?.[s]) throw new Error(`${where}: '${s}' is a RELATIONSHIP of '${source}', not a column — write { entity: '${s}' } to partition by its key column`);
+    return s;
+  };
+  const asList = (v) => (Array.isArray(v) ? v : [v]);
   let partCols;
-  if (Array.isArray(spec.partition_by) && spec.partition_by.length) partCols = spec.partition_by.map(resolvePart);
-  else if (typeof spec.partition_by === 'string') partCols = [resolvePart(spec.partition_by)];
-  else { const u = entityCol('user'); if (!u) throw new Error('no default partition column; specify partition_by'); partCols = [u]; }
+  if (spec.partition_by != null && asList(spec.partition_by).length) partCols = asList(spec.partition_by).map(resolvePart);
+  else {
+    // Default: one sequence per USER — found through the role the catalog assigns the model the
+    // relationship points at, not through what that relationship happens to be called.
+    const ent = catalog.entityTowardRole(source, 'users');
+    if (!ent) throw new Error(`partition_by is required: '${source}' declares no relationship toward a users model to default to (declared: ${declared.join(', ') || 'none'})`);
+    partCols = [entityCol(ent, 'partition_by (default)')];
+  }
   if (availableCols) for (const c of partCols) if (!availableCols.has(c)) throw new Error(`partition_by column '${c}' is not available at the match_recognize stage`);
   // Order key (the sequence axis): caller may override; defaults to the event time.
   const timeCol = spec.order_by || m.time.column;
@@ -182,7 +212,7 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
     return out;
   });
 
-  const stepPreds = (d, col) => spec.steps.map((s) => stepPredicate(catalog, s, d, col, prepCols, source));
+  const stepPreds = (d) => spec.steps.map((s) => stepPredicate(catalog, s, d, prepCols, source));
   const rows = spec.rows || 'one_per_partition';
   return { m, fact: source, partCols, timeCol, mode, betweenSteps, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
 }
@@ -220,7 +250,7 @@ export function matchStepPostgres(r, fromRel, catalog) {
   if (r.mode === 'strict') {
     throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the Postgres equivalent");
   }
-  const preds = r.stepPreds('postgres', null);
+  const preds = r.stepPreds('postgres');
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
   const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : catalog.propertyExpr(r.fact, c.property, 'postgres', { type: c.type })}) AS ${c.id}`);
@@ -280,7 +310,7 @@ export function matchStepPostgres(r, fromRel, catalog) {
  *    partition via the outer QUALIFY (ROW_NUMBER ORDER BY t1 = 1) — the earliest-S1
  *    match, equivalent regardless of skip mode. */
 export function matchStepBigQuery(r, fromRel, catalog) {
-  const preds = r.stepPreds('bigquery', null);
+  const preds = r.stepPreds('bigquery');
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
@@ -317,7 +347,7 @@ ${defines.join(',\n')}
  *  pick becomes a ROW_NUMBER window + `|> WHERE`, and a final `|> SELECT` projects the
  *  output columns (dropping the internal t1..tn). */
 export function matchStepBigQueryPipe(r, spec, catalog) {
-  const preds = r.stepPreds('bigquery', null);
+  const preds = r.stepPreds('bigquery');
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
     ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
@@ -342,7 +372,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `secs_${m.name}`),
     ...r.propCaptures.map((c) => c.id),
   ];
-  const pre = buildPrefilter(catalog, spec, 'bigquery', null, r.fact);
+  const pre = buildPrefilter(catalog, spec, 'bigquery', r.fact);
   const lines = [];
   if (pre) lines.push(`|> WHERE ${pre}`);
   lines.push(`|> MATCH_RECOGNIZE (
@@ -375,6 +405,11 @@ function matchOutputColumns(r) {
 }
 
 /** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
+/** Every relationship name the events sources declare — what `partition_by: { entity }` may name. */
+function relationshipNames(catalog) {
+  return [...new Set(catalog.facts.flatMap((f) => Object.keys(catalog.getModel(f).entities || {})))].sort();
+}
+
 function matchRecognizeSchema(catalog) {
   const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
   const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: CMP }, value: {} } };
@@ -386,8 +421,19 @@ function matchRecognizeSchema(catalog) {
     properties: {
       stage: { const: 'match_recognize' },
       partition_by: {
-        type: 'array', items: { type: 'string', pattern: NAME }, minItems: 1,
-        description: 'Column(s) that define one independent sequence — choose them per the task from columns available at this point (event columns or ones added by upstream derive/compute/join), e.g. ["appsflyer_id"] per user, ["session_id"] per session, or a composite like ["appsflyer_id","level_id"] per user-per-level. The shorthand strings "user"/"session" resolve to the corresponding entity column. Defaults to the user column.',
+        type: 'array',
+        // A catalog whose sources declare no relationship offers only the column form — the
+        // { entity } branch is left out rather than carrying an empty vocabulary.
+        items: oneOfOr([
+          { title: 'a column', type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream derive/compute/join added).' },
+          ...(relationshipNames(catalog).length ? [{
+            title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
+            description: 'A relationship the source DECLARES — its key column is used, so you do not have to know which physical column carries it.',
+            properties: { entity: strEnum(relationshipNames(catalog), 'Name of a relationship declared by the pipeline\'s source (semantic_index({ model }) lists them).') },
+          }] : []),
+        ]),
+        minItems: 1,
+        description: 'What defines ONE independent sequence — per the task. Either column(s) available at this point, e.g. ["level_id"], or a declared relationship as { entity: "<name>" } whose key column is used, or a composite like [{ entity: "user" }, "level_id"] for one sequence per user-per-level. Defaults to the relationship this source declares toward the users model.',
       },
       order_by: { type: 'string', pattern: NAME, description: 'Column that orders events within each partition (the sequence axis). Defaults to the event time.' },
       mode: { enum: ['ordered', 'strict'], default: 'ordered', description: 'ordered = steps in order, other events may occur between them; strict = each step must be the immediately next event.' },
@@ -415,13 +461,12 @@ registerStage('match_recognize', {
     return {
       op: {
         op: 'match_recognize',
-        // BigQuery has a native `|> MATCH_RECOGNIZE` pipe operator, so the funnel stays
-        // pipe-form (bqPipe below). Other engines have no MATCH_RECOGNIZE → emulate it as
-        // a self-contained CTE (render), which forces the whole pipeline to CTE-form.
-        requiresCte: d.name !== 'bigquery',
+        // BigQuery has a native `|> MATCH_RECOGNIZE` pipe operator, so the funnel is a pipe step
+        // (bqPipe below). Other engines have no MATCH_RECOGNIZE → emulated as a self-contained
+        // SELECT (render), which the dialect places as one CTE of its chain.
         bqPipe: d.name === 'bigquery' ? matchStepBigQueryPipe(r, spec, catalog) : null,
         render: (prev, dn) => {
-          const pre = buildPrefilter(catalog, spec, dn, null, r.fact);
+          const pre = buildPrefilter(catalog, spec, dn, r.fact);
           const fromRel = pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev;
           return dn === 'bigquery' ? matchStepBigQuery(r, fromRel, catalog) : matchStepPostgres(r, fromRel, catalog);
         },

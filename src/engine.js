@@ -10,6 +10,7 @@ import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt-runner.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
+import { compilePythonStage, importAllowlist, runAstGate, frameProfile } from './python-model.js'; // registers the python pipeline stage
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline } from './pipeline.js';
@@ -18,13 +19,14 @@ import { rankFuzzy } from './fuzzy.js';
 import { buildGuide } from './guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
-import { MemoryStore } from './memory.js';
+import { MemoryStore, targetKey, targetWords } from './memory.js';
 import { openStore } from './store.js';
 import { buildProjection } from './projection.js';
+import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -34,30 +36,43 @@ export class Engine {
     this._ownsStore = !store;
     this.jobs = new JobManager({ store: this.store }); // persisted if the store is
     this.valueIndex = new ValueIndex({ store: this.store }); // real event-property values (background-populated)
-    // A value index written before sources were explicit keyed rows by one flat name; carry it
-    // over to (source, property) using the catalog to say who owns each old key. Idempotent and
-    // best-effort: the index is a rebuildable cache, so a failure here just means a re-scan.
-    try {
-      const moved = this.valueIndex.migrateLegacyKeys((key) => this._legacyIndexKeyOwner(key));
-      if (moved?.migrated || moved?.dropped) {
-        console.error(`[mcp] value index carried over to (source, property): ${moved.migrated} row(s) moved, ${moved.dropped} unplaceable row(s) dropped`);
-      }
-    } catch (e) { console.error(`[mcp] value-index carry-over skipped: ${e?.message || e}`); }
     // Memory is curated, non-re-derivable knowledge. By default it shares the store (and
     // survives reset). Point MCP_MEMORY_DB at a PERSISTENT volume to keep findings across
     // container restarts — then it lives in its own store, isolated from the value index.
     this._memoryStore = memoryDbPath ? openStore({ dbPath: memoryDbPath }) : null;
     this.memoryStore = new MemoryStore({ store: this._memoryStore || this.store, embedder }); // durable analyst findings, linked to catalog entities (the `memory` tool); embedder → semantic search
+    // Target keys written before a target carried its source ('property:ad_type_of_event_data')
+    // name an entity no source owns. Attributing one to a source now would be guessing which
+    // entity was meant, so each is demoted ONCE to a searchable term instead: the note stays
+    // findable, and every stored key that addresses a view is (kind, source, name).
+    try {
+      const moved = this.memoryStore.retarget((canon) => this._memoryCanonForward(canon));
+      if (moved.targets) console.error(`[mcp] memory targets stored structurally: ${moved.targets} target(s) on ${moved.notes} note(s)`);
+    } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
+    // Literal dbt.config extras the OPERATOR pins for every generated Python model (e.g.
+    // {"submission_method":"bigframes"}); the caller never decides where the compute runs. The
+    // catalog resolved them from the environment already — an injected value replaces them THERE,
+    // before the schemas are built, so the stage schema, its validation and the compiled model all
+    // describe the same runtime.
+    if (pythonModelConfig) catalog.pythonRuntime = { ...catalog.pythonRuntime, config: pythonModelConfig };
+    this.pythonModelConfig = catalog.pythonRuntime?.config || {};
     this.schemas = buildSchemas(catalog);
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
     // Constrain the recipe view to real ids when recipes are configured.
-    if (recipes && this.schemas.semantic_index?.properties?.recipe) this.schemas.semantic_index.properties.recipe.enum = recipes.ids();
+    // The recipe view offers the ids this server actually has — the schema says what exists.
+    if (recipes) {
+      const branch = (this.schemas.semantic_index?.oneOf || []).find((b) => b.properties?.recipe);
+      if (branch) branch.properties.recipe = { type: 'string', enum: recipes.ids(), description: branch.properties.recipe.description };
+    }
     this.validators = makeValidators(this.schemas);
     this.ctxs = contextManager || new ContextManager({});
     this.runner = runner; // optional; required for non-dry_run parse/query
+    // The interpreter that runs the static gate over a python stage's functions (a local syntax /
+    // safety check; the model itself runs where dbt sends it). The MetricFlow sidecar's Python.
+    this.pythonBin = pythonBin || process.env.PYTHON_BIN || runner?.pythonBin || 'python3';
   }
 
   // Internal helpers (no longer standalone tools — reached via semantic_index({ recipe })
@@ -70,13 +85,49 @@ export class Engine {
   get_recipe(input) {
     if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
     const r = this.recipes.get(input.id);
+    // A recipe ships as ONE payload for every catalog, but whether a join needs a point-in-time
+    // window is a property of THIS catalog's schema — so the payload is fitted to it before it is
+    // handed over, and what was fitted is said out loud.
+    const { payload, fitted } = this._fitRecipePipeline(r.register_payload);
     // A recipe is a reusable BUILDING BLOCK: a ready payload for a task family PLUS `hack`
     // — the generalizable technique to adapt it to a novel question.
     return {
       ...r,
+      ...(payload ? { register_payload: payload } : {}),
+      ...(fitted.length ? { fitted_to_catalog: fitted } : {}),
       naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
       building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question; feed a pipeline payload through build_native_model, a create_payload through create_semantic_model.',
     };
+  }
+
+  /**
+   * Fit a recipe's pipeline payload to THIS catalog. A recipe is written once for every
+   * deployment, but a join it declares may or may not need a point-in-time window: that depends on
+   * whether the joined model keeps several versions per key HERE. Left unfitted, the shipped
+   * payload runs as-is and fans out to every historical version — plausible numbers, inflated.
+   *
+   * Only the window is filled in, and only where the catalog says one is required; the moment it
+   * pins is the source's own event time, which is what `_joinCompletenessWarnings` recommends for
+   * a hand-written join. Every change is reported so the caller sees it rather than discovering a
+   * payload that does not match the recipe text.
+   */
+  _fitRecipePipeline(payload) {
+    const fitted = [];
+    const stages = payload?.pipeline?.stages;
+    if (!Array.isArray(stages)) return { payload: null, fitted };
+    const source = payload.pipeline.source;
+    const eventTime = source ? this.catalog.getModel(source)?.time?.column : null;
+    const next = stages.map((st) => {
+      if (st?.stage !== 'join' || st.between || !st.with || !eventTime) return st;
+      let m; try { m = this.catalog.getModel(st.with); } catch { return st; }
+      if (!m?.scd) return st;
+      const from = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'start')?.[0];
+      const to = Object.entries(m.dimensions || {}).find(([, d]) => d.validity === 'end')?.[0];
+      if (!from || !to) return st;
+      fitted.push(`join with '${st.with}': added between { value: '${eventTime}', from: '${from}', to: '${to}' } — '${st.with}' keeps several versions per key in this catalog, so without the window every row would match every historical version and the counts would inflate.`);
+      return { ...st, between: { value: eventTime, from, to } };
+    });
+    return { payload: fitted.length ? { ...payload, pipeline: { ...payload.pipeline, stages: next } } : null, fitted };
   }
 
   _validate(tool, input) {
@@ -84,82 +135,78 @@ export class Engine {
     if (!res.ok) throw new ToolError(`invalid input: ${res.errors.join('; ')}`, { stage: 'validate' });
   }
 
-  /** Every linkable catalog entity as a typed target candidate (events/props/attrs/models). */
-  _memoryTargetCandidates() {
-    const c = this.catalog;
-    const out = [];
-    for (const k of c.modelKeys()) out.push({ kind: 'model', key: k, canon: `model:${k}` });
-    for (const f of c.facts) {
-      for (const ev of c.eventNames(f)) out.push({ kind: 'event', key: `${f}.${ev}`, canon: `event:${f}.${ev}` });
-      for (const prop of c.eventProps(f)) out.push({ kind: 'property', key: `${f}.${prop}`, canon: `property:${f}.${prop}` });
+  /**
+   * One stored memory target brought onto the current form. Older stores kept a target as a STRING
+   * key ('property:ad_type', 'model:users'); a target is now the STRUCTURE it names, so the rewrite
+   * returns an OBJECT — otherwise one note ends up holding both shapes and the key's own prefix
+   * leaks into the text that is searched and embedded.
+   *
+   * A property/event key written without a source names no entity this catalog can address, and
+   * which one was meant is not recoverable from the name — so it becomes a searchable term rather
+   * than a guess. Returns null when the target is already structural.
+   */
+  _memoryCanonForward(stored) {
+    if (stored && typeof stored === 'object') return null; // already a target, not a legacy key
+    const raw = String(stored);
+    const i = raw.indexOf(':');
+    const kind = i > 0 ? raw.slice(0, i) : '';
+    const key = i > 0 ? raw.slice(i + 1) : raw;
+    if (kind === 'term') return memoryTarget('term', key).target;
+    const dot = key.indexOf('.');
+    // 'model:<source>' and the scoped 'property:<source>.<name>' name a real entity — keep what
+    // they name, as the structure.
+    if (kind === 'model' && this.catalog.models[key]) return memoryTarget('model', key).target;
+    if ((kind === 'property' || kind === 'event') && dot > 0) {
+      const source = key.slice(0, dot); const name = key.slice(dot + 1);
+      if (this.catalog.models[source]) return memoryTarget(kind, source, name).target;
     }
-    for (const k of c.modelKeys()) {
-      for (const col of Object.keys(c.getModel(k).dimensions || {})) out.push({ kind: 'property', key: `${k}.${col}`, canon: `property:${k}.${col}` });
-    }
-    return out;
+    return memoryTarget('term', key.toLowerCase()).target;
   }
 
   /**
-   * Resolve a memory TARGET string to a canonical, typed key so a saved finding links to a
-   * real semantic_index view. EXACT match first ('<model>.<column>' / model / event / event-
-   * property); if none, a FUZZY match against the catalog entities catches a near-miss name
-   * (a slight typo/variant still links instead of silently degrading); only a genuinely
-   * unrecognised string is kept as a free `term` (still searchable).
+   * Resolve a memory TARGET to a canonical, typed key so a saved finding links to a real
+   * semantic_index view. `{ source, name }` names an attribute, payload property or event of that
+   * source exactly; `{ source }` alone names the model; `{ term }` is a phrase the catalog has no
+   * entity for. There is no bare-name form: the source is always written, so nothing here has to
+   * be attributed to an owner, and a name that source does not carry is refused rather than
+   * fuzzily re-pointed at something else.
    */
   _resolveMemoryTarget(t) {
     const c = this.catalog;
-    const s = String(t).trim();
-    const dot = s.indexOf('.');
-    if (dot > 0) {
-      // The qualified '<source>.<name>' form — the one this tool emits back in linked_to — names
-      // an attribute, an event or an event property of that source exactly.
-      const mk = s.slice(0, dot); const col = s.slice(dot + 1);
-      if (c.models[mk]) {
-        if ((c.getModel(mk).dimensions || {})[col]) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
-        if (c.isFact(mk) && c.eventNames(mk).includes(col)) return { kind: 'event', key: `${mk}.${col}`, canon: `event:${mk}.${col}` };
-        if (c.isFact(mk) && c.eventProps(mk).includes(col)) return { kind: 'property', key: `${mk}.${col}`, canon: `property:${mk}.${col}` };
-      }
-    }
-    if (c.models[s]) return { kind: 'model', key: s, canon: `model:${s}` };
-    // A bare name is attributed to the source that declares it — when exactly one does. Two
-    // sources carrying the same name is reported, never guessed (the rule every other resolver
-    // here follows).
-    const owners = [];
-    for (const f of c.facts) {
-      if (c.eventNames(f).includes(s)) owners.push({ kind: 'event', key: `${f}.${s}`, canon: `event:${f}.${s}` });
-      if (c.eventProps(f).includes(s)) owners.push({ kind: 'property', key: `${f}.${s}`, canon: `property:${f}.${s}` });
-    }
-    for (const mk of c.modelKeys()) if ((c.getModel(mk).dimensions || {})[s]) owners.push({ kind: 'property', key: `${mk}.${s}`, canon: `property:${mk}.${s}` });
-    if (owners.length === 1) return owners[0];
-    if (owners.length > 1) throw new ToolError(`memory target '${s}' is ambiguous — it exists as ${owners.map((o) => `'${o.key}'`).join(', ')}. Qualify it as '<source>.<name>'.`, { stage: 'validate', field: 'targets' });
-    // Fuzzy fallback: a near-miss entity name links to the real entity (marked fuzzy) rather
-    // than becoming an orphan term. High threshold so only a confident match auto-links.
-    const [best] = rankFuzzy(s, this._memoryTargetCandidates(), { fields: (x) => [x.key], threshold: 0.82, limit: 1 });
-    if (best && best.item.key.toLowerCase() !== s.toLowerCase()) return { ...best.item, fuzzy: true, from: s };
-    return { kind: 'term', key: s, canon: `term:${s.toLowerCase()}` };
+    if (t && typeof t === 'object' && t.term !== undefined) return memoryTarget('term', String(t.term).trim());
+    const source = String(t?.source ?? '').trim(); const name = t?.name == null ? null : String(t.name).trim();
+    if (!c.models[source]) throw new ToolError(`memory target: unknown source '${source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(source)}`, { stage: 'validate', field: 'targets' });
+    if (!name) return memoryTarget('model', source);
+    if (c.attributeKind(source, name)) return memoryTarget('property', source, name);
+    if (c.isFact(source) && c.eventNames(source).includes(name)) return memoryTarget('event', source, name);
+    // The source is known, so a miss is a misspelling WITHIN it: suggest its own nearest names
+    // rather than linking to something the caller did not write.
+    const own = [...c.propertyEnumFor(source), ...(c.isFact(source) ? c.eventNames(source) : [])];
+    const near = rankFuzzy(name, own, { fields: (x) => [x], threshold: 0.7, limit: 3 }).map((m) => `'${m.item}'`);
+    throw new ToolError(`memory target: '${name}' is not a property, attribute or event of '${source}'.${near.length ? ` Did you mean: ${near.join(', ')}?` : ''} semantic_index({ model: '${source}' }) lists what it carries.`, { stage: 'validate', field: 'targets' });
   }
 
   /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
-  _memorySurfaceHint({ kind, key }) {
-    if (kind === 'property') return `semantic_index({ property: '${key}' })`;
-    if (kind === 'event') return `semantic_index({ event: '${key}' })`;
-    if (kind === 'model') return `semantic_index({ model: '${key}' })`;
-    return `semantic_index({ search: '${key}' })`; // term
+  _memorySurfaceHint({ kind, addressable: target }) {
+    if (kind === 'property') return `semantic_index({ source: '${target.source}', property: '${target.name}' })`;
+    if (kind === 'event') return `semantic_index({ source: '${target.source}', event: '${target.name}' })`;
+    if (kind === 'model') return `semantic_index({ model: '${target.source}' })`;
+    return `semantic_index({ search: '${target.term}' })`;
   }
 
-  /** Compact notes linked to any of `canonKeys`, for attaching to a semantic_index view. */
-  _memoryFor(canonKeys) {
-    return this.memoryStore.forTargets(canonKeys).map(memoryView);
+  /** Compact notes linked to any of these TARGETS, for attaching to a semantic_index view. */
+  _memoryFor(targets) {
+    return this.memoryStore.forTargets(targets.map(targetKey)).map(memoryView);
   }
 
   /**
    * Attach saved findings to a semantic_index view COMPACTLY (token-lean): the `cap` most recent,
    * each note truncated. Always leaves an explicit drill so nothing is lost — memory({ action:
    * 'list', target }) returns EVERY linked finding in full. `drillTarget` is the singular target
-   * string that view is about (a property/attribute/event/model key).
+   * that view is about — { source, name } for a property/attribute/event, { source } for a model.
    */
-  _attachMemory(out, canonKeys, drillTarget, { cap = 3 } = {}) {
-    const all = this.memoryStore.forTargets(canonKeys);
+  _attachMemory(out, targets, drillTarget, { cap = 3 } = {}) {
+    const all = this.memoryStore.forTargets(targets.map(targetKey));
     if (!all.length) return;
     const shown = all.slice(0, cap).map((e) => memoryCompact(e));
     out.memory = shown.map((s) => s.view);
@@ -168,7 +215,7 @@ export class Engine {
     if (hiddenCount > 0) out.memory_more = hiddenCount;
     if (hiddenCount > 0 || truncatedAny) {
       (out.next_actions ||= []).push({
-        call: `memory({ action: 'list', target: '${drillTarget}' })`,
+        call: `memory({ action: 'list', target: ${JSON.stringify(drillTarget)} })`,
         why: hiddenCount > 0
           ? `read all ${all.length} saved findings linked here IN FULL (only the ${shown.length} most recent are shown, truncated)`
           : `read the ${all.length} finding(s) above IN FULL (note text is truncated here)`,
@@ -180,7 +227,7 @@ export class Engine {
    * THE analyst memory tool. Save a FINDING the AI made (a vague phrasing tracked down to a
    * real field, a non-obvious gotcha, an associated source/link) and LINK it to the catalog
    * entities it concerns, so it surfaces back THROUGH semantic_index (the linked { model }/
-   * { event }/{ property } views and { search }) next time the same word/field comes up.
+   * { source, event }/{ source, property } views and { search }) next time the same word/field comes up.
    *   action:'record' → save a note (+ targets it is about, + aliases the user used, + links)
    *   action:'list'   → all notes, or those linked to one { target }
    *   action:'search' → notes matching a word (text / alias / target)
@@ -197,15 +244,14 @@ export class Engine {
       const resolved = (input.targets || []).map((t) => this._resolveMemoryTarget(t));
       const aliases = [...new Set((input.aliases || []).map((a) => String(a).trim()).filter(Boolean))];
       const links = (input.links || []).map((l) => (typeof l === 'string' ? { url: l } : { url: String(l.url), ...(l.title ? { title: String(l.title) } : {}) }));
-      const entry = this.memoryStore.record({ note, question, targets: resolved.map((r) => r.canon), aliases, links });
+      const entry = this.memoryStore.record({ note, question, targets: resolved.map((r) => r.target), aliases, links });
       return {
         saved: true,
         id: entry.id,
         note: entry.note,
         ...(question ? { question } : {}),
-        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.key, ...(r.fuzzy ? { fuzzy_resolved_from: r.from } : {}), surfaces_in: this._memorySurfaceHint(r) })),
-        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.key) } : {}),
-        ...(resolved.some((r) => r.fuzzy) ? { fuzzy_links_note: 'Some targets were not exact and were fuzzy-matched to the closest catalog entity (see fuzzy_resolved_from) — pass the exact name if a match is wrong.' } : {}),
+        linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, surfaces_in: this._memorySurfaceHint(r) })),
+        ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.addressable.term) } : {}),
         aliases, links,
         next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
       };
@@ -214,7 +260,7 @@ export class Engine {
     if (action === 'list') {
       if (input.target !== undefined) {
         const r = this._resolveMemoryTarget(input.target);
-        return { target: r.key, kind: r.kind, notes: this.memoryStore.forTargets([r.canon]).map(memoryView) };
+        return { target: r.addressable, kind: r.kind, notes: this.memoryStore.forTargets([targetKey(r.target)]).map(memoryView) };
       }
       return { total: this.memoryStore.counts().notes, notes: this.memoryStore.all({ limit: input.limit ?? 50 }).map(memoryView) };
     }
@@ -232,6 +278,22 @@ export class Engine {
     throw new ToolError(`unknown action '${action}'`, { stage: 'validate', field: 'action' });
   }
 
+  /**
+   * The context by id, checked against the catalog AS IT IS NOW. A context is a set of declarations
+   * over models, and a later grounding pass may have found that the warehouse no longer backs one
+   * of them — reported here with the grounding reason, not as a bare 'Unknown model' thrown from
+   * inside the renderer.
+   */
+  _ctx(id) {
+    let ctx;
+    try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'context_id' }); }
+    const gone = [...new Set([...(ctx.state.usedModels || []), ...Object.keys(ctx.state.additions || {})])].filter((k) => !this.catalog.models[k]);
+    if (gone.length) {
+      throw new ToolError(`context '${id}' was built over ${gone.map((k) => `'${k}'`).join(', ')}, which the catalog no longer serves${this.catalog.unavailableHint(gone[0])} Start a new context over the sources that are available (semantic_index() lists them).`, { stage: 'validate', field: 'context_id' });
+    }
+    return ctx;
+  }
+
   /** Map of task-local dimension name -> entity-qualified path (e.g. event__mon_product_id). */
   _taskDimMap(ctx) {
     const map = new Map();
@@ -242,19 +304,40 @@ export class Engine {
     return map;
   }
 
-  /** What a context can group / filter by, in the form the tools accept: [{ model, attribute, via? }] —
-   *  the catalog's reachable attributes plus the dimensions the task declared (by their bare name). */
-  _groupableRefs(ctx) {
-    const out = [...this.catalog.reachableAttributes()];
+  /**
+   * What a context can group / filter by, in the form the tools accept: [{ model, attribute, via? }]
+   * — the catalog's reachable attributes plus the dimensions the task declared.
+   *
+   * Split by whether the ref works RIGHT NOW: a query may only name a model the context has
+   * loaded, so an attribute of a model it has not is offered separately, with what to do about it.
+   * Publishing the whole catalog as `groupable` (and picking the example from it) produced calls
+   * the query path then refused — "needs model 'users', which is not loaded in this context".
+   */
+  _groupableSplit(ctx) {
+    const all = [...this.catalog.reachableAttributes()];
     const tasks = ctx.state.tasks || [];
     for (const [model, add] of Object.entries(ctx.state.additions || {})) {
       for (const d of add.dimensions || []) {
-        const t = tasks.find((tk) => d.name.startsWith(`${tk}_`));
-        const attribute = t ? d.name.slice(t.length + 1) : d.name;
-        if (!out.some((r) => r.model === model && r.attribute === attribute && !r.via)) out.push({ model, attribute });
+        const attribute = declaredAttribute(d, tasks);
+        if (!all.some((r) => r.model === model && r.attribute === attribute && !r.via)) all.push({ model, attribute });
       }
     }
-    return out;
+    const loaded = new Set(ctx.state.usedModels || []);
+    return { now: all.filter((r) => loaded.has(r.model)), afterLoading: all.filter((r) => !loaded.has(r.model)) };
+  }
+
+  /** The refs a query in THIS context may name today — what the tools publish as `groupable`. */
+  _groupableRefs(ctx) {
+    return this._groupableSplit(ctx).now;
+  }
+
+  /** One wording for "here is what you CAN name, and how to reach the rest", shared by every
+   *  not-reachable refusal so they never disagree about what is available. */
+  _reachableHint(ctx) {
+    const { now, afterLoading } = this._groupableSplit(ctx);
+    const show = (rs) => rs.slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ');
+    const models = [...new Set(afterLoading.map((r) => r.model))];
+    return `Reachable now: ${show(now) || '(none beyond metric_time)'}.${models.length ? ` Also in the catalog, once their model is loaded (use_base_models): ${show(afterLoading)}${afterLoading.length > 20 ? ', …' : ''}.` : ''}`;
   }
 
   /** All group-by/where dimension paths allowed for a context (bare + qualified). */
@@ -264,9 +347,29 @@ export class Engine {
     return set;
   }
 
-  /** Resolve a bare task-dim name to its entity-qualified MetricFlow path. */
-  _resolvePath(ctx, path) {
-    return this._taskDimMap(ctx).get(path) || path;
+  /** The structured spelling of a legacy `<entity>__<attribute>` / task-dimension path, for error messages. */
+  _suggestRef(ctx, path) {
+    const c = this.catalog;
+    const p = String(path);
+    if (p === 'metric_time') return "{ time: 'metric_time', grain: 'day' }";
+    // A PATH is a caller-typed legacy spelling, so reading it apart here is reading INPUT, not
+    // recovering something we discarded. Every segment but the last is a relationship hop: follow
+    // them to the model that actually carries the attribute, instead of assuming one hop.
+    if (p.includes('__')) {
+      const segs = p.split('__');
+      const attr = segs[segs.length - 1];
+      const hops = segs.slice(0, -1);
+      const model = c.joinTargetFor(hops[hops.length - 1]);
+      if (!model) return `{ model: '<the model that owns ${hops[hops.length - 1]}>', attribute: '${attr}' }`;
+      if (hops.length > 1) return `{ model: '${model}', attribute: '${attr}' } (reached through ${hops.join(' → ')})`;
+      const identity = c.primaryEntityName(model);
+      return `{ model: '${model}', attribute: '${attr}'${hops[0] !== identity ? `, via: '${hops[0]}'` : ''} }`;
+    }
+    for (const [model, add] of Object.entries(ctx.state.additions || {})) {
+      const d = (add.dimensions || []).find((x) => x.name === p);
+      if (d) return `{ model: '${model}', attribute: '${declaredAttribute(d, ctx.state.tasks || [])}' }`;
+    }
+    return `{ model: '<model>', attribute: '${p}' }`;
   }
 
   /**
@@ -277,25 +380,6 @@ export class Engine {
    * the relationship when the source carries several to the same model (key variants). A string
    * is returned unchanged, so both spellings flow through the same validation.
    */
-  /** The structured spelling of a legacy `<entity>__<attribute>` / task-dimension path, for error messages. */
-  _suggestRef(ctx, path) {
-    const c = this.catalog;
-    const p = String(path);
-    if (p === 'metric_time') return "{ time: 'metric_time', grain: 'day' }";
-    const i = p.indexOf('__');
-    if (i > 0) {
-      const ent = p.slice(0, i); const attr = p.slice(i + 2);
-      const model = c.joinTargetFor(ent);
-      if (model) { const identity = c.primaryEntityName(model); return `{ model: '${model}', attribute: '${attr}'${ent !== identity ? `, via: '${ent}'` : ''} }`; }
-      return `{ model: '<the model that owns ${ent}>', attribute: '${attr}' }`;
-    }
-    for (const [model, add] of Object.entries(ctx.state.additions || {})) {
-      const d = (add.dimensions || []).find((x) => x.name === p);
-      if (d) { const t = (ctx.state.tasks || []).find((tk) => p.startsWith(`${tk}_`)); return `{ model: '${model}', attribute: '${t ? p.slice(t.length + 1) : p}' }`; }
-    }
-    return `{ model: '<model>', attribute: '${p}' }`;
-  }
-
   _normalizeRef(ctx, ref, where = 'group_by') {
     if (typeof ref === 'string') {
       throw new ToolError(`${where}: an attribute is addressed by where it lives — { model, attribute } (plus via when several relationships lead there) — never by a path string. '${ref}' → ${this._suggestRef(ctx, ref)}.`, { stage: 'validate', field: where });
@@ -309,7 +393,7 @@ export class Engine {
     //    in create/update_semantic_model) → its task-namespaced name
     const tasks = ctx.state.tasks || [];
     for (const d of (ctx.state.additions?.[model]?.dimensions || [])) {
-      if (tasks.some((t) => d.name === `${t}_${attribute}`)) return this._taskDimMap(ctx).get(d.name) || d.name;
+      if (declaredAttribute(d, tasks) === attribute) return this._taskDimMap(ctx).get(d.name) || d.name;
     }
     if (!(target.dimensions || {})[attribute]) {
       const known = Object.keys(target.dimensions || {});
@@ -345,8 +429,8 @@ export class Engine {
    * dumping everything at once is wasteful. Call with NO arguments for a compact
    * OVERVIEW, then drill down:
    *   { model }    → one model's entities/time/dimensions (with real values) + physical columns
-   *   { event }    → only the properties POPULATED on that event (what you can use)
-   *   { property } → one property/attribute: spec + real value distribution + NULL
+   *   { source, event } → only the properties POPULATED on that event (what you can use)
+   *   { source, property } → one property/attribute: spec + real value distribution + NULL
    *                  coverage per event + indexing history (one page per column)
    *   { search }   → events/properties/attributes/VALUES/recipes matching a substring
    *   { recipe }   → one ready-made recipe by id (payload + example_queries + hack)
@@ -359,19 +443,10 @@ export class Engine {
    */
   async semantic_index(input = {}) {
     this._validate('semantic_index', input);
-    // STRICT view contract (nothing is ever silently ignored): at most ONE view key,
-    // and paging/ordering/recency params only on the views they apply to.
-    const views = ['run', 'status', 'guide', 'model', 'event', 'property', 'search', 'recipe', 'bundle'].filter((k) => input[k] !== undefined && input[k] !== false);
-    if (views.length > 1) {
-      throw new ToolError(`pass at most ONE view key (got: ${views.join(', ')}). Views: {} overview | { model } | { event } | { property } | { search } | { recipe } | { guide } | { bundle } | { status: true } | { run }`, { stage: 'validate', field: views[1] });
-    }
-    if (input.limit !== undefined && !(input.property || input.search)) throw new ToolError('limit only applies to the { property } and { search } views', { stage: 'validate', field: 'limit' });
-    for (const k of ['offset', 'order_by', 'direction']) {
-      if (input[k] !== undefined && !input.property) throw new ToolError(`${k} only applies to the { property } view`, { stage: 'validate', field: k });
-    }
-    if (input.recent !== undefined && !(input.status || input.run != null || input.property)) throw new ToolError('recent only applies to the { status }, { run } and { property } views', { stage: 'validate', field: 'recent' });
-    if (input.fuzzy !== undefined && !input.search) throw new ToolError('fuzzy only applies to the { search } view', { stage: 'validate', field: 'fuzzy' });
-
+    // The view contract IS the schema: one branch per view, each listing exactly the fields it
+    // takes and the vocabulary it accepts. Two views at once, a paging field on a view that does
+    // not page, a name a source does not carry — none of it can be written down, so none of it is
+    // re-checked here.
     const c = this.catalog;
     const AGG = ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'];
 
@@ -400,7 +475,6 @@ export class Engine {
         const u = c.unavailableModels()[k];
         return { key: k, role: u.role, dbt_model: u.dbt_model, unavailable: true, reason: u.reason, missing_columns: u.missing, note: `'${k}' is excluded from every tool until its table carries the structural column(s) above (or exists). Fix the warehouse table or the dbt schema, then restart the server.` };
       }
-      if (!c.models[k]) throw new ToolError(`unknown model '${k}'. Known models: ${c.modelKeys().join(', ')}`, { stage: 'validate', field: 'model' });
       const m = c.getModel(k);
       const descs = c.columnDescriptions(k);
       const out = { key: k, role: m.role, dbt_model: m.dbt_model, description: m.description, primary_entity: c.primaryEntityName(k), entities: m.entities, time: m.time?.column };
@@ -485,7 +559,7 @@ export class Engine {
           out.bundle_column = c.bundleColumn(k);
           out.bundle_note = `'${c.bundleColumn(k)}' identifies the app — group/filter by it to segment per app${apps.length ? `, and semantic_index({ bundle: '${apps[0].bundle}' }) shows which properties are populated vs EMPTY for an app (${apps.length} indexed)` : ''}.`;
         }
-        out.note = 'Events fact: payload fields are event-scoped properties (semantic_index({ event })). The `columns` above are what you can reference in a native pipeline; order windows/match_recognize by `time` (' + (m.time?.column || '?') + ').';
+        out.note = `Events fact: payload fields are event-scoped properties (semantic_index({ source: '${k}', event })). The \`columns\` above are what you can reference in a native pipeline; order windows/match_recognize by \`time\` (${m.time?.column || '?'}).`;
       } else {
         // Dimension attributes WITH their real indexed values (cardinality + top 3) — the index
         // keys them by (this model, column), so each source has its own value space.
@@ -509,12 +583,12 @@ export class Engine {
       out.recommendations = c.isFact(k)
         ? [
           `Drill into an event to see the properties it carries: semantic_index({ source: '${k}', event: '${c.eventNames(k)[0] || '<event_name>'}' }).`,
-          `Then inspect a property's real values + frequency distribution: semantic_index({ property: '<name>' }).`,
+          `Then inspect a property's real values + frequency distribution: semantic_index({ source: '${k}', property: '<name>' }).`,
           ...(apps.length ? [`Scoping to one app? semantic_index({ source: '${k}', bundle: '${apps[0].bundle}' }) lists which properties carry data for it vs are EMPTY.`] : []),
           `Recognise a value (an ad format, a status, ...)? Trace which property/event carries it: semantic_index({ search: '<value>' }).`,
         ]
         : [
-          `Drill into an attribute's full value/frequency distribution: semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
+          `Drill into an attribute's full value/frequency distribution: semantic_index({ source: '${k}', property: '${Object.keys(m.dimensions || {})[0] || '<column>'}' }).`,
           `Looking for a known attribute value? semantic_index({ search: '<value>' }) tells you where it occurs.`,
         ];
       // Concrete next calls (structured) for this model.
@@ -525,20 +599,20 @@ export class Engine {
           { call: "semantic_index({ search: '<value>' })", why: 'trace a value to the property/event that carries it' },
         ]
         : [
-          { call: `semantic_index({ property: '${k}.${Object.keys(m.dimensions || {})[0] || '<column>'}' })`, why: "drill an attribute's full value/frequency distribution" },
+          { call: `semantic_index({ source: '${k}', property: '${Object.keys(m.dimensions || {})[0] || '<column>'}' })`, why: "drill an attribute's full value/frequency distribution" },
           { call: "semantic_index({ search: '<value>' })", why: 'find where a known attribute value occurs' },
         ];
       // Saved findings about this model (memory tool) — surface them where they belong (compact).
-      this._attachMemory(out, [`model:${k}`], k);
+      this._attachMemory(out, [{ kind: 'model', source: k }], { source: k });
       return out;
     }
 
-    // ── { event }: the properties populated on this event (NULL on others) ──
+    // ── { source, event }: the properties populated on this event (NULL on others) ──
     if (input.event) {
       // The event belongs to ONE source; everything below (payload, coverage, indexed values)
-      // comes from that source only. `source` says which; a bare name that only one source
-      // declares resolves on its own, and an ambiguous one is reported rather than guessed.
-      const { fact, name: eventName } = this._resolveEventRef(input);
+      // comes from that source only. The schema pairs the two in one branch per source, so both
+      // arrive named and there is nothing to resolve.
+      const fact = input.source; const eventName = String(input.event);
       const numeric = new Set(c.eventNumericProps(fact));
       // DATA-DERIVED applicability: which properties are actually populated on this event (from the
       // value index), not the declared meta.mcp.events. A property with no coverage yet (unknown)
@@ -559,7 +633,7 @@ export class Engine {
       const pick = (withValues.length ? withValues : rows.filter((r) => !r.complex)).slice(0, 3);
       if (pick.length) recommendations.push(`Drill into a property's real values + full frequency distribution: ${pick.map((r) => `semantic_index({ source: '${fact}', property: '${r.name}' })`).join(', ')}.`);
       if (withValues.length) recommendations.push(`Spot a value you recognise in the samples above? Find every property/event it occurs in: semantic_index({ search: '<value>' }).`);
-      if (rows.some((r) => r.complex)) recommendations.push(`Complex (array/struct) properties carry nested values — semantic_index({ property }) shows the shape before you explore inside them.`);
+      if (rows.some((r) => r.complex)) recommendations.push(`Complex (array/struct) properties carry nested values — semantic_index({ source: '${fact}', property }) shows the shape before you explore inside them.`);
       if (!props.length) {
         // No payload at all (e.g. first_launch) is NOT a dead end: the event's value is
         // its OCCURRENCE — say what it is good for instead of returning an empty page.
@@ -567,9 +641,9 @@ export class Engine {
         const role = Object.entries(sem).find(([, ev]) => ev === eventName)?.[0];
         recommendations.push(`'${input.event}' carries no event-specific payload — its value is the occurrence itself${role ? ` (it is the ${role.replace(/_/g, ' ')})` : ''}: use it as a measure base (count / count_distinct of the user key, event_name: ['${input.event}']) for retention, conversion or funnel metrics.`);
       }
-      if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ property }).`);
+      if (!recommendations.length) recommendations.push(`Inspect any property's real values with semantic_index({ source: '${fact}', property }).`);
       // Per-app helper: these properties may be empty for some apps — point at the bundle view.
-      if (c.bundleColumn(fact) && this.valueIndex.bundles(fact).length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ bundle: '<app>' }) shows the populated-vs-empty split per app.`);
+      if (c.bundleColumn(fact) && this.valueIndex.bundles(fact).length > 1) recommendations.push(`Multiple apps emit events — a property here can be EMPTY for some of them; semantic_index({ source: '${fact}', bundle: '<app>' }) shows the populated-vs-empty split per app.`);
       const nextActions = [
         ...(pick.length ? [{ call: `semantic_index({ source: '${fact}', property: '${pick[0].name}' })`, why: "drill this property's real value distribution + completeness" }] : []),
         { call: "semantic_index({ search: '<value>' })", why: 'trace a value seen above to every property/event carrying it' },
@@ -583,21 +657,27 @@ export class Engine {
         next_actions: nextActions,
         recommendations: recommendations.slice(0, 4),
       };
-      this._attachMemory(eventOut, [`event:${fact}.${eventName}`, `event:${eventName}`], `${fact}.${eventName}`);
+      this._attachMemory(eventOut, [{ kind: 'event', source: fact, name: eventName }], { source: fact, name: eventName });
       return eventOut;
     }
 
-    // ── { property }: one property's full spec ──
+    // ── { source, property }: one property's full spec ──
     if (input.property) {
-      // The SOURCE is a separate argument, so a name never has to carry it. For convenience the
-      // '<model>.<column>' form is still accepted and split here, and a bare name is resolved to
-      // the source that declares it (ambiguity is reported, never guessed).
-      const { source: pSource, property: p } = this._resolvePropertyRef(input);
-      const isEventProp = c.isFact(pSource) && c.eventProps(pSource).includes(p);
-      if (!isEventProp) {
+      // The SOURCE is a separate argument and the view has no source-less spelling: the schema
+      // pairs each column with the model that carries it, so both arrive named.
+      const pSource = input.source; const p = String(input.property);
+      // The enum normally makes an unknown name unwritable — but a source that declares NOTHING
+      // yet (a table whose columns have not been introspected) has no enum to project, and the
+      // field degrades to an open string. Answer that with the catalog's own refusal instead of
+      // reading `.type` off a column that is not there.
+      const kind = c.attributeKind(pSource, p);
+      if (!kind) {
+        const known = c.propertyEnumFor(pSource);
+        throw new ToolError(`'${p}' is not a property or attribute of '${pSource}'.${known.length ? ` It carries: ${known.slice(0, 20).join(', ')}${known.length > 20 ? `, … (${known.length} in all)` : ''}.` : ' It declares no columns at all.'}`, { stage: 'validate', field: 'property' });
+      }
+      if (kind !== 'property') {
         const mk = pSource; const col = p;
         const dim = (c.getModel(mk).dimensions || {})[col];
-        if (!dim) throw new ToolError(`'${col}' is not a property or dimension of '${mk}'. See semantic_index({ model: '${mk}' }) for what it carries.`, { stage: 'validate', field: 'property' });
         const dDescs = c.columnDescriptions(mk);
         const { samples, value_stats } = this._valueListing(mk, col, input);
         // NULL coverage + indexing freshness make this ONE page the full truth about the
@@ -612,8 +692,10 @@ export class Engine {
         else recommendations.push('No values indexed yet (the background value index may not have run).');
         if (value_stats.values_capped) recommendations.push(`Only the top ${value_stats.indexed_value_count} of ${value_stats.distinct_count} distinct values are indexed — a RARE value may be absent; verify a "not found" with a direct query, do not assume it does not exist.`);
         recommendations.push(...nullRecs);
+        // A metric query names the attribute STRUCTURALLY — { model, attribute } — and the old
+        // '<entity>__<attr>' path string is refused by the schema, so it must not be recommended.
         recommendations.push(ent
-          ? `Group/filter by it in metric queries via '${ent}__${col}', or reference '${col}' after a pipeline join with:'${mk}'.`
+          ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}'${ent !== this.catalog.primaryEntityName(mk) ? `, via: '${ent}'` : ''} } (declare use_base_models: ['${mk}']), or reference '${col}' after a pipeline join with:'${mk}'.`
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
         const attrOut = {
           property: col, source: mk, model: mk, column: col, type: dim.type,
@@ -623,12 +705,11 @@ export class Engine {
           indexing: this._indexHistory(mk, col, input.recent ?? 3),
           recommendations: recommendations.slice(0, 3),
         };
-        this._attachMemory(attrOut, [`property:${mk}.${col}`, `property:${col}`], `${mk}.${col}`);
+        this._attachMemory(attrOut, [{ kind: 'property', source: mk, name: col }], { source: mk, name: col });
         return attrOut;
       }
       const propFact = pSource; const propName = p;
       const spec = c.eventPropertySpec(propName, propFact);
-      if (!spec) throw new ToolError(`unknown event property '${propName}' on '${propFact}'. Discover properties via semantic_index({ source, event }) or ({ search }).`, { stage: 'validate', field: 'property' });
       const numeric = c.eventNumericProps(propFact).includes(propName);
       const complex = c.isComplexEventProp(propName, propFact);
       // Applicability is DATA-DERIVED from the value index (which events actually carry this
@@ -718,7 +799,7 @@ export class Engine {
           if (empty.length && populated.length) out.recommendations = [...out.recommendations.slice(0, 3), `Always NULL for ${empty.length} of ${bcov.length} app(s); populated for ${populated.length}. Per-app split: semantic_index({ bundle: '<app>' }) or include_coverage:true.`];
         }
       }
-      this._attachMemory(out, [`property:${propFact}.${p}`, `property:${p}`], `${propFact}.${p}`);
+      this._attachMemory(out, [{ kind: 'property', source: propFact, name: p }], { source: propFact, name: p });
       return out;
     }
 
@@ -734,10 +815,6 @@ export class Engine {
       // events into every source that carries it, with its own row count and its own populated /
       // empty split in each — so the view NEVER merges sources: named, it answers for that one;
       // omitted, it answers for every source that saw the app, each in its own block.
-      if (input.source) {
-        if (!c.isFact(input.source)) throw new ToolError(`'${input.source}' is not an events source. Events sources: ${c.facts.join(', ')}`, { stage: 'validate', field: 'source' });
-        if (!c.bundleColumn(input.source)) throw new ToolError(`source '${input.source}' declares no app/bundle column (meta.mcp.dimension:{ bundle: true }). Sources with one: ${withBundle.join(', ')}`, { stage: 'validate', field: 'source' });
-      }
       // What was MEASURED is the truth here: every (source, app) the indexer recorded coverage for.
       const known = this.valueIndex.bundles(input.source || undefined);
       if (!known.length) {
@@ -858,6 +935,15 @@ export class Engine {
       // The events FACTS — independent and equal; none is a default. Every tool takes the
       // source as its own argument (optional only when there is exactly one).
       facts: c.facts,
+      // Whether a pipeline may end in a `python` stage (a dbt Python model on the warehouse runtime):
+      // decided from the dbt profile, so the stage is in the tool schemas only where it can run.
+      python_models: c.pythonRuntime?.available
+        ? { available: true, runtime: c.pythonRuntime.runtime, ...(c.pythonRuntime.method ? { submission_method: c.pythonRuntime.method } : {}), note: 'A pipeline may end in a `python` stage (build_native_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.' }
+        : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
+      // dbt connects with an adapter this server writes no SQL for, so the SQL is rendered in
+      // another dialect's syntax against it — true of this deployment, and worth knowing when SQL
+      // a pipeline generated is rejected by the engine that runs it.
+      ...(c.dialectFallback ? { dialect_note: `dbt connects with the '${c.dialectFallback.profile_type}' adapter, which this server writes no SQL for: pipelines are rendered as ${c.dialectFallback.rendering_as} SQL${c.dialectFallback.explicit ? ' (set explicitly)' : ''}. Supported natively: ${[...SUPPORTED_DIALECTS].join(', ')}.` } : {}),
       // Declared models the warehouse cannot back (a structural column or the table is missing):
       // excluded from every tool; the reason is here so the analyst can be told what to fix.
       ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ model }) on one shows what is missing.' } : {}),
@@ -899,7 +985,7 @@ export class Engine {
       views: [
         { view: 'model', arg: 'model key', when: "one model's columns/entities/time + dimension attributes with real sample values" },
         { view: 'event', arg: 'event name', when: 'the properties POPULATED on that event (what you can measure/group/filter)' },
-        { view: 'property', arg: 'property or "<model>.<column>"', when: "one column's full passport: real value distribution (paged), NULL coverage, per-app split, freshness" },
+        { view: 'property', arg: 'source + property', when: "one column's full passport: real value distribution (paged), NULL coverage, per-app split, freshness" },
         { view: 'search', arg: 'word/value', when: 'fuzzy find an event/property/attribute/VALUE/recipe/app by name or value' },
         ...(bundleList.length ? [{ view: 'bundle', arg: 'bundle id', when: 'which event properties are populated vs EMPTY for ONE app (skip the empty ones)' }] : []),
         ...(this.recipes ? [{ view: 'recipe', arg: 'recipe id', when: 'one ready-made task template in full (payload + example_queries + hack)' }] : []),
@@ -918,86 +1004,14 @@ export class Engine {
       recommendations: [
         `New to this dataset or unsure how to approach the question? semantic_index({ guide: true }) gives the workflow + IF/DO routing (which tool, in what order, with guardrails).`,
         `Start by inspecting an event's properties: semantic_index({ source: '${exFact}', event: '${exEvent || '<event_name>'}' }) — it lists each property with its real sample values + cardinality.`,
-        `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ property: '${userModel || 'users'}.${exAttr || 'country'}' }).`,
+        `Segmentation attributes live on the dimension models: semantic_index({ model: '${userModel || 'users'}' }) shows them with real values; drill one via semantic_index({ source: '${userModel || 'users'}', property: '${exAttr || 'country'}' }).`,
         ...(bundleList.length ? [`Working with ONE app? semantic_index({ source: '${bundleList[0].source}', bundle: '${bundleList[0].bundle}' }) lists which event properties carry data for it vs are EMPTY in that source (skip the empty ones); ${bundleList.length} app(s) are in the data.`] : []),
         `Looking for a known value (a country code, an experiment name, an ad format)? semantic_index({ search: '<value>' }) tells you exactly where it lives.`,
       ],
     };
   }
 
-  /**
-   * Resolve the { source?, event } arguments into an explicit (source, event) pair — the mirror
-   * of _resolvePropertyRef. Accepts the legacy '<source>.<event>' form too.
-   *
-   * _defaultSource(field) above answers the other half: which source to read when the caller
-   * omitted it — allowed only when the catalog has ONE events source, since with several every
-   * source is equal and the caller must name the one the question is about.
-   */
-  /** Who owns a value-index key written by the pre-source layout: a '<model>.<column>' name
-   *  belongs to that model, and a bare name to the source that declares it (an events source's
-   *  payload property, or a model's dimension). null when nothing in the catalog claims it. */
-  _legacyIndexKeyOwner(key) {
-    const c = this.catalog;
-    const dot = String(key).indexOf('.');
-    if (dot > 0) {
-      const mk = key.slice(0, dot); const col = key.slice(dot + 1);
-      if (c.models[mk] && ((c.getModel(mk).dimensions || {})[col] || c.eventProps(mk).includes(col))) return { source: mk, property: col };
-    }
-    for (const f of c.facts) if (c.eventProps(f).includes(key)) return { source: f, property: key };
-    const owner = c.modelKeys().find((k) => (c.getModel(k).dimensions || {})[key]);
-    return owner ? { source: owner, property: key } : null;
-  }
 
-  _defaultSource(field) {
-    const only = this.catalog.defaultSource();
-    if (only) return only;
-    throw new ToolError(`this catalog has several events sources (${this.catalog.facts.join(', ')}) — pass ${field} to say which one to read`, { stage: 'validate', field });
-  }
-
-  _resolveEventRef(input) {
-    const c = this.catalog;
-    const raw = String(input.event);
-    if (input.source) {
-      if (!c.isFact(input.source)) throw new ToolError(`'${input.source}' is not an events source. Events sources: ${c.facts.join(', ')}`, { stage: 'validate', field: 'source' });
-      if (!c.eventNames(input.source).includes(raw)) throw new ToolError(`unknown event '${raw}' on '${input.source}'. See semantic_index({ model: '${input.source}' }).known_events`, { stage: 'validate', field: 'event' });
-      return { fact: input.source, name: raw };
-    }
-    const dot = raw.indexOf('.');
-    if (dot > 0 && c.isFact(raw.slice(0, dot))) {
-      const fact = raw.slice(0, dot); const name = raw.slice(dot + 1);
-      if (c.eventNames(fact).includes(name)) return { fact, name };
-    }
-    const owners = c.facts.filter((f) => c.eventNames(f).includes(raw));
-    if (owners.length === 1) return { fact: owners[0], name: raw };
-    if (owners.length > 1) throw new ToolError(`event '${raw}' exists on ${owners.join(' and ')} — pass source to say which one.`, { stage: 'validate', field: 'source' });
-    throw new ToolError(`unknown event '${raw}'. semantic_index() lists each source's events under models[].known_events.`, { stage: 'validate', field: 'event' });
-  }
-
-  /**
-   * Resolve the { source?, property } arguments of the { property } view into an explicit
-   * (source, property) pair. `source` given → used as-is. Otherwise '<model>.<column>' is split
-   * (the form used before sources became explicit), and a bare name is attributed to the ONE
-   * source that declares it — an ambiguous name is reported, never guessed.
-   */
-  _resolvePropertyRef(input) {
-    const c = this.catalog;
-    const raw = String(input.property);
-    if (input.source) {
-      if (!c.models[input.source]) throw new ToolError(`unknown source '${input.source}'. Known sources: ${c.modelKeys().join(', ')}${c.unavailableHint(input.source)}`, { stage: 'validate', field: 'source' });
-      return { source: input.source, property: raw };
-    }
-    const dot = raw.indexOf('.');
-    if (dot > 0 && c.models[raw.slice(0, dot)]) return { source: raw.slice(0, dot), property: raw.slice(dot + 1) };
-    const owners = [...new Set([
-      ...c.facts.filter((f) => c.eventProps(f).includes(raw)),
-      ...c.modelKeys().filter((k) => (c.getModel(k).dimensions || {})[raw]),
-    ])];
-    if (owners.length === 1) return { source: owners[0], property: raw };
-    if (owners.length > 1) {
-      throw new ToolError(`'${raw}' exists on ${owners.join(' and ')} — pass source to say which one (each source keeps its own values).`, { stage: 'validate', field: 'source' });
-    }
-    throw new ToolError(`unknown property '${raw}'. Pass source + a property of it (semantic_index({ model }) lists what a source carries), or find it with semantic_index({ search }).`, { stage: 'validate', field: 'property' });
-  }
 
   /**
    * Pageable/orderable view of one indexed key's VALUES (limit/offset/order_by/direction)
@@ -1117,11 +1131,11 @@ export class Engine {
 
     const recommendations = [];
     if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in semantic_index may still be filling in.`);
-    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ property }) will show no sample_values until the first sync (it runs in the background at startup).`);
+    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ source, property }) will show no sample_values until the first sync (it runs in the background at startup).`);
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
-    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ property }).`);
+    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ source, property }).`);
     if (running.length) recommendations.push(`${running.length} query job(s) running — poll with get_query_result({ query_id }); semantic_index({ status }) lists them.`);
-    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ property: '${slowest[0].property}' }) for one property across syncs.`);
+    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ source: '${slowest[0].source}', property: '${slowest[0].property}' }) for one property across syncs.`);
     if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property — combined scan failed. Full reason in value_index.last_run_fallbacks[] (also semantic_index({ run: ${last.id} }).fallbacks).`);
     if (!recommendations.length) recommendations.push(`No active jobs and the value index is idle/current.`);
 
@@ -1161,25 +1175,23 @@ export class Engine {
     }
   }
 
-  /** Check that a group-by/where path's entity hops map to models loaded in the context. */
-  _checkPathLoaded(ctx, path) {
-    if (typeof path !== 'string' || !path.includes('__')) return; // local task dim or metric_time
-    const segs = path.split('__');
-    for (const entity of segs.slice(0, -1)) {
-      const model = this.catalog.primaryByEntity[entity];
-      if (!model) continue; // already pruned/validated elsewhere
-      // A fact is a hop like any other: a task built from one source does not load another
-      // source's semantic model, so a path onto that fact's attributes must be refused here
-      // with the fix, not left for MetricFlow to reject as an unknown entity.
-      if (!ctx.state.usedModels.includes(model)) {
-        throw new ToolError(
-          `path '${path}' needs model '${model}', which is not loaded in this context. ` +
-            `Recreate/update the task with use_base_models including '${model}'.`,
-          { stage: 'validate', field: path },
-        );
-      }
-    }
+  /**
+   * The model a reference resolves onto must be LOADED in this context: a task built from one
+   * source does not load another's semantic model, so MetricFlow would reject the entity. The
+   * model is taken from the reference the caller wrote — the compiled path is not read back.
+   */
+  _checkModelLoaded(ctx, ref) {
+    const model = ref?.model;
+    if (!model || !this.catalog.models[model]) return; // metric_time, a bare token, or already refused
+    if (ctx.state.usedModels?.includes(model)) return;
+    throw new ToolError(
+      `'${model}.${ref.attribute}' needs model '${model}', which is not loaded in this context. `
+        + `Recreate/update the task with use_base_models including '${model}'.`,
+      { stage: 'validate', field: 'model' },
+    );
   }
+
+
 
   /**
    * Register a derived dbt model from a declarative PIPELINE (source + ordered
@@ -1203,7 +1215,7 @@ export class Engine {
     this._validate('build_native_model', input);
     if (input.action === 'start') return this._draftStart(input);
     if (input.action === 'fork') return this._draftFork(input); // branches a NEW draft (no live draft required)
-    const ctx = this.ctxs.get(input.draft_id);
+    const ctx = this._ctx(input.draft_id);
     const draft = ctx.state.draft;
     if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
@@ -1251,7 +1263,7 @@ export class Engine {
    *  grounded to the physical relation (phantom catalog columns excluded). */
   _draftColumns(draft, physSet) {
     if (!draft.stages.length) return this._groundedDeclared(draft.source, physSet).cols;
-    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, draft.stages, { physicalCols: physSet });
+    const { columns } = renderPipeline(this.catalog, this.catalog.dialect, draft.source, this._draftEffectiveStages(draft), { physicalCols: physSet });
     return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   }
 
@@ -1293,8 +1305,8 @@ export class Engine {
   }
 
   async _draftStart(input) {
-    const ctx = input.draft_id ? this.ctxs.get(input.draft_id) : this.ctxs.create();
-    const source = input.source || this._defaultSource('source');
+    const ctx = input.draft_id ? this._ctx(input.draft_id) : this.ctxs.create();
+    const source = input.source;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [] };
     this.ctxs.touch(ctx.id);
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
@@ -1412,7 +1424,7 @@ export class Engine {
    * WITHOUT touching the original. after omitted → copy every step.
    */
   async _draftFork(input) {
-    const src = this.ctxs.get(input.draft_id);
+    const src = this._ctx(input.draft_id);
     const origin = src.state.draft || src.state.pipeline_origin; // live draft, or the snapshot a materialize left behind
     if (!origin) throw new ToolError(`context '${input.draft_id}' has no draft or built pipeline to fork — start one, or fork a context whose pipeline was materialized`, { stage: 'validate', field: 'draft_id' });
     const total = origin.stages.length;
@@ -1459,16 +1471,26 @@ export class Engine {
   async _draftCommit(ctx, draft, newStages, { changedStage = null, includeColumns = false, includeSteps = false, action = 'add_step', stepIndex = null } = {}) {
     const physSet = await this._physicalCols(draft.source);
     const before = this._draftColumns(draft, physSet); // columns BEFORE the change
+    // Validate what will actually be built: the draft's time_range becomes a leading where at
+    // materialize (as preview shows), so it counts here too — e.g. as the SQL stage a python stage needs.
+    const effective = this._draftEffectiveStages({ ...draft, stages: newStages });
+    const offset = effective.length - newStages.length;
+    let rendered = null;
     try {
-      if (newStages.length) renderPipeline(this.catalog, this.catalog.dialect, draft.source, newStages, { physicalCols: physSet });
+      // This render IS the validation and it returns the resulting columns, so the "after" state
+      // below reads them from here instead of rendering the same stages a second time.
+      if (newStages.length) rendered = renderPipeline(this.catalog, this.catalog.dialect, draft.source, effective, { physicalCols: physSet });
     } catch (e) {
       // Reject WITHOUT persisting; pinpoint which step broke so an edit in the middle is actionable.
-      const at = this._failingStepIndex(draft.source, newStages, physSet);
-      throw new ToolError(at ? `step ${at}: ${e.message}` : e.message, { stage: 'compile', field: 'stage' });
+      const at = this._failingStepIndex(draft.source, effective, physSet);
+      const step = at != null ? at - offset : null;
+      throw new ToolError(step ? `step ${step}: ${e.message}` : e.message, { stage: 'compile', field: 'stage' });
     }
     // Verify filter literals on the changed stage against the SOURCE's real values BEFORE persisting
     // — a wrong-cased/non-existent value ('organic' vs 'Organic') is flagged with the correct value.
     let filterWarnings = [];
+    // A python stage's bodies pass the static gate BEFORE the draft persists them.
+    if (changedStage && changedStage.stage === 'python') await this._gatePythonStage(changedStage);
     if (changedStage && changedStage.stage === 'where' && Array.isArray(changedStage.conditions)) {
       filterWarnings = this._guardFilterValues(changedStage.conditions
         .filter((cd) => cd && cd.column != null && Object.prototype.hasOwnProperty.call(cd, 'value'))
@@ -1476,7 +1498,9 @@ export class Engine {
     }
     draft.stages = newStages;
     this.ctxs.touch(ctx.id);
-    const after = this._draftColumns(draft, physSet);
+    const after = rendered
+      ? [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }))
+      : this._draftColumns(draft, physSet);
     const beforeNames = new Set(before.map((c) => c.name));
     const afterNames = new Set(after.map((c) => c.name));
     const removed = before.filter((c) => !afterNames.has(c.name)).map((c) => c.name);
@@ -1523,6 +1547,21 @@ export class Engine {
    * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
    * add the window (and fix it) instead of trusting a silently wrong join.
    */
+  /**
+   * The stage-level warnings for a WHOLE pipeline — the same judgements the incremental builder
+   * makes per step, applied to a pipeline submitted all at once. Both entry points must warn about
+   * the same stages: a recipe or a hand-written payload that goes straight through
+   * register_native_model is exactly where a silently-wrong join does the most damage, because
+   * nobody stepped through it.
+   */
+  _stageWarnings(source, stages = []) {
+    const draft = { source, stages };
+    return stages.flatMap((st) => [
+      ...this._joinCompletenessWarnings(st, draft),
+      ...this._funnelCompletionWarnings(st),
+    ]);
+  }
+
   _joinCompletenessWarnings(stage, draft = null) {
     if (!stage || stage.stage !== 'join' || stage.between) return [];
     let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
@@ -1580,31 +1619,7 @@ export class Engine {
   _valueKeyForColumn(sourceKey, column) {
     const c = this.catalog;
     if (!column) return null;
-    const at = { source: sourceKey, property: column };
-    if (c.isFact(sourceKey)) {
-      if (c.eventProps(sourceKey).includes(column)) return at; // event payload property
-      return (c.getModel(sourceKey).dimensions || {})[column] ? at : null; // envelope/app dimension
-    }
-    return (c.getModel(sourceKey)?.dimensions || {})[column] ? at : null;
-  }
-
-  /** Where a query_semantic_model dimension PATH (e.g. user__country) lives in the value index:
-   *  { source, property } or null. */
-  _valueKeyForPath(path) {
-    const c = this.catalog;
-    const i = String(path).indexOf('__');
-    if (i > 0) {
-      const entity = path.slice(0, i); const col = path.slice(i + 2);
-      // A path resolves on the model that OWNS the entity (the join target), never on a model
-      // that merely points at it with a foreign key — that one has no such attribute.
-      const mk = c.joinTargetFor(entity);
-      return mk && (c.getModel(mk).dimensions || {})[col] ? { source: mk, property: col } : null;
-    }
-    for (const fact of c.facts) {
-      if (c.eventProps(fact).includes(path)) return { source: fact, property: path };
-      if ((c.getModel(fact).dimensions || {})[path]) return { source: fact, property: path };
-    }
-    return null;
+    return c.attributeKind(sourceKey, column) ? { source: sourceKey, property: column } : null;
   }
 
   /**
@@ -1633,7 +1648,7 @@ export class Engine {
       }
     }
     if (errors.length) {
-      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ property }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
+      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ source, property }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
     }
     return warnings;
   }
@@ -1653,11 +1668,11 @@ export class Engine {
     if (!referenced.length) return [];
     const evCol = c.eventNameColumn(fact);
     const scoped = new Set(); let hasScope = false;
-    for (const st of draft.stages) if (st.stage === 'where') for (const c of st.conditions || []) if (c.column === evCol) { hasScope = true; (Array.isArray(c.value) ? c.value : [c.value]).forEach((v) => scoped.add(v)); }
+    for (const st of draft.stages) if (st.stage === 'where') for (const cond of st.conditions || []) if (cond.column === evCol) { hasScope = true; (Array.isArray(cond.value) ? cond.value : [cond.value]).forEach((v) => scoped.add(v)); }
     const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !evs.every((e) => scoped.has(e)); });
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
-    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ property: '${p}' }).event_coverage).`];
+    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ source: '${fact}', property: '${p}' }).event_coverage).`];
   }
 
   /**
@@ -1697,7 +1712,7 @@ export class Engine {
           if (!cell || cell.non_null === 0) empty.push(`${b} + ${ev}`); // missing cell = no rows for that combo
         }
         const total = scopedBundles.size * scopedEvents.size;
-        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ bundle: '${[...scopedBundles][0]}' }) or semantic_index({ property: '${p}' }).bundle_coverage / event_coverage.`);
+        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ bundle: '${[...scopedBundles][0]}' }) or semantic_index({ source: '${fact}', property: '${p}' }).bundle_coverage / event_coverage.`);
         else if (empty.length) warns.push(`'${p}' is empty for app+event ${fmt(empty)} (present for the other scoped pairs) — those rows contribute no '${p}'.`);
       } else if (scopedBundles.size) {
         const byB = new Map(this.valueIndex.bundleCoverage(fact, p).map((x) => [x.bundle, x]));
@@ -1707,7 +1722,7 @@ export class Engine {
       } else {
         const byE = new Map(this.valueIndex.coverage(fact, p).map((x) => [x.event_name, x]));
         const empty = [...scopedEvents].filter((ev) => byE.get(ev) && byE.get(ev).non_null === 0);
-        if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ property: '${p}' }).event_coverage).`);
+        if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ source: '${fact}', property: '${p}' }).event_coverage).`);
         else if (empty.length) warns.push(`'${p}' is empty on event(s) ${fmt(empty)} (populated on the other scoped event(s)).`);
       }
     }
@@ -1741,8 +1756,94 @@ export class Engine {
     const stages = this._draftEffectiveStages(draft);
     // Render ONLY the active warehouse dialect, so every response is consistent with where
     // the pipeline actually runs (bigquery → `|>`, postgres → CTEs). Grounded to physical.
-    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages, { physicalCols: physSet });
-    return { ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql };
+    const modelName = `pipe_${draft.name}_${ctx.id}`;
+    const rendered = renderPipeline(this.catalog, dialect, draft.source, stages, { physicalCols: physSet, modelName });
+    const models = this._chainModels(rendered.chain, { name: draft.name, pipeline: { source: draft.source } });
+    return {
+      ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql,
+      ...(models.length > 1 ? { models: models.map(({ yml, functions, bindings, ...m }) => m), note: `The pipeline builds as a chain of ${models.length} dbt models (each python stage is a model of its own, reading the previous one via dbt.ref); ${modelName} — the last — is the result.` } : {}),
+    };
+  }
+
+  /**
+   * The chain a pipeline renders to, as the caller sees it: one entry per dbt model, in build
+   * order, each with its input and — for a python model — the compiled code. `pipeline` is the
+   * declaration the file headers record.
+   */
+  _chainModels(chain, pipeline) {
+    return chain.map((seg) => (seg.kind === 'sql'
+      ? { model: seg.model, kind: 'sql', input: seg.input, stages: seg.stages.map((st) => st.stage), sql: seg.sql, columns: [...seg.columns.keys()] }
+      : (() => { const py = this._compilePythonStage(seg.stage, { modelName: seg.model, inputModel: seg.input, pipeline }); return { model: seg.model, kind: 'python', input: seg.input, runtime: py.runtime, packages: py.packages, steps: seg.stage.steps.map((st) => st.call), code: py.code, yml: py.yml, functions: py.functions, bindings: py.bindings, columns: [...seg.columns.keys()] }; })()));
+  }
+
+  /** Compile a python stage into its dbt model (structure only — the gate is separate). */
+  _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
+    try {
+      const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
+      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, pipeline, profile });
+    } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
+  }
+
+  /** The static gate over ONE python stage's function bodies (the incremental builder's path). */
+  async _gatePythonStage(stage) {
+    const compiled = this._compilePythonStage(stage, { modelName: 'm', inputModel: 'm_in', pipeline: null });
+    await this._gateCompiled([compiled]);
+    return compiled;
+  }
+
+  /**
+   * The static gate over the bodies of ALREADY-COMPILED python models — every stage of a chain in
+   * ONE interpreter run (the gate takes a list, and each function carries its own bindings, so the
+   * stages are still checked separately). Re-compiling a stage just to gate it would only repeat
+   * work the chain has done, and one interpreter start-up per stage is pure request latency.
+   */
+  async _gateCompiled(units) {
+    const functions = units.flatMap((u, i) => (u.functions || []).map((f) => ({ ...f, id: String(i), bindings: u.bindings || [] })));
+    if (!functions.length) return;
+    // Whether an unordered head()/tail() is fatal is a property of the RUNTIME (dbt's BigFrames
+    // wrapper runs with ordering_mode="partial" and raises OrderRequiredError there), so the
+    // profile decides and the gate enforces — the author hears it here, not from a traceback in
+    // the warehouse's notebook runtime.
+    const requireOrderForRowSlice = !!frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}).partialOrdering;
+    const gate = await runAstGate(this.pythonBin, functions, [], { requireOrderForRowSlice });
+    if (gate.ok) return;
+    const named = units.length > 1;
+    const lines = gate.errors.map((e) => {
+      const where = named && units[Number(e.id)]?.model ? `${units[Number(e.id)].model}: ` : '';
+      return `${where}${e.function} line ${e.line}${e.text ? ` (${e.text})` : ''}: ${e.message}`;
+    });
+    throw new ToolError(`python stage: functions rejected by the static gate:\n${lines.join('\n')}`, { stage: 'validate', field: 'functions', details: gate.errors });
+  }
+
+  /**
+   * Run `dbt run --select <select>` detached, with a lease on the context, as a background job:
+   * past queryTimeoutMs the caller gets a query_id to poll (get_query_result), otherwise the
+   * finished result. Used where a build is a cold start of minutes (a Python model).
+   */
+  async _runDetached(ctx, select, table) {
+    const dir = this.ctxs.dir(ctx.id);
+    const id = this.jobs.create({ contextId: ctx.id });
+    this.jobs.setTable(id, table);
+    this.ctxs.acquire(ctx.id);
+    let result = null;
+    const build = (async () => {
+      try {
+        result = await this.runner.run(dir, select);
+        if (!result.ok) this.jobs.fail(id, formatDbtError(result.stdout, result.stderr));
+        else this.jobs.ready(id);
+      } catch (e) {
+        result = { ok: false, stdout: '', stderr: e?.message || String(e) };
+        this.jobs.fail(id, e?.message || String(e));
+      } finally {
+        this.ctxs.release(ctx.id);
+      }
+    })().catch(() => {});
+    let timer;
+    const timed = new Promise((res) => { timer = setTimeout(() => res('timeout'), this.queryTimeoutMs); });
+    const winner = await Promise.race([build.then(() => 'done'), timed]);
+    clearTimeout(timer); // a finished build must not keep the process alive for the rest of the window
+    if (winner === 'timeout') return { status: 'running', query_id: id };
+    return { status: 'done', query_id: id, result };
   }
 
   async _draftMaterialize(ctx, draft) {
@@ -1771,7 +1872,7 @@ export class Engine {
    */
   async _registerPipeline(input) {
     const dialect = this.catalog.dialect;
-    const source = input.pipeline.source || this._defaultSource('pipeline.source');
+    const source = input.pipeline.source;
     // A pipeline-level time_range is applied as a leading WHERE on the source's time
     // column — one place to bound the window (parity with query_semantic_model).
     // Timezone-aware via _timeRangeConditions (boundaries are wall-clock in tr.timezone).
@@ -1795,30 +1896,62 @@ export class Engine {
     // phantom catalog column is rejected as "unknown column" here, not as a raw
     // warehouse error after the build.
     const physSet = await this._physicalCols(source);
-    const render = () => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet });
+    const render = (modelName) => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet, modelName });
+    // A pipeline renders as a CHAIN of dbt models: SQL stages until a python stage, that stage as a
+    // Python model reading the previous one (or the source), and so on; the last model carries
+    // the pipeline's name and is the result. Every python stage's bodies pass the static gate
+    // BEFORE anything else happens, so a refused declaration leaves nothing behind.
     if (input.dry_run) {
-      const out = render();
+      const out = render(`pipe_${input.name}`);
+      const built = this._chainModels(out.chain, input);
+      await this._gateCompiled(built.filter((m) => m.kind === 'python'));
+      const models = built.map(({ yml, functions, bindings, ...m }) => m);
+      const last = out.chain[out.chain.length - 1];
       const resp = {
-        kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: input.materialized || 'table', dialect,
+        kind: 'pipeline', dry_run: true, model: `pipe_${input.name}`, materialized: last.kind === 'python' ? 'table' : (input.materialized || 'table'), dialect,
         columns: [...out.columns.keys()],
         output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
         model_sql: out.sql,
+        ...(models.length > 1 ? { models } : {}),
+        ...(models.some((m) => m.kind === 'python') ? { python: models.filter((m) => m.kind === 'python') } : {}),
       };
+      // The same per-stage judgements the incremental builder makes: a dry run is exactly where a
+      // silently-wrong stage should be pointed out, BEFORE anything is built.
+      const dryWarnings = this._stageWarnings(source, stages);
+      if (dryWarnings.length) resp.warnings = dryWarnings;
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before materializing.
       const est = await this._estimateSourceRows(source, tr);
       if (est != null) resp.estimated_source_rows = est;
       return resp;
     }
-    const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
+    // Everything that can refuse the declaration runs BEFORE a context exists, so a refused one
+    // leaves nothing behind: the chain is laid out and its python bodies gated on this probe.
+    const probe = render('pipe');
+    await this._gateCompiled(this._chainModels(probe.chain, input).filter((m) => m.kind === 'python'));
+    const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
     const modelName = `pipe_${input.name}_${ctx.id}`;
-    const out = render();
-    const materialized = input.materialized || 'table';
+    const out = render(modelName);
+    const models = this._chainModels(out.chain, input);
+    const last = models[models.length - 1];
+    const hasPython = models.some((m) => m.kind === 'python');
+    // The last model takes the requested materialization when it is SQL; a Python model, and every
+    // model something else reads, is a table (a Python model reads a relation, a view would re-run
+    // the SQL through the runtime).
+    const materialized = last.kind === 'python' ? 'table' : (input.materialized || 'table');
     const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline });
-    this.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='${materialized}') }}\n${header}${out.sql}\n`);
+    // A rebuild under the same name must leave no stale model of the previous chain behind: dbt
+    // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
+    this.ctxs.removePipelineFiles(ctx.id, modelName);
+    for (const m of models) {
+      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `{{ config(materialized='${m === last ? materialized : 'table'}') }}\n${header}${m.sql}\n`);
+      else { this.ctxs.writeFile(ctx.id, `${m.model}.py`, m.code); this.ctxs.writeFile(ctx.id, `${m.model}.yml`, m.yml); }
+    }
+    const pyInfo = hasPython ? models.filter((m) => m.kind === 'python').map(({ yml, functions, bindings, ...m }) => m) : null;
+    const chainInfo = models.map((m) => ({ model: m.model, kind: m.kind, input: m.input, materialized: m === last ? materialized : 'table' }));
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
-    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()] };
+    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(models.length > 1 ? { chain: chainInfo } : {}), ...(hasPython ? { python: pyInfo.map(({ code, ...m }) => m) } : {}) };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);
     // Honest status: `executed` makes it unambiguous whether the model was actually built
@@ -1826,8 +1959,26 @@ export class Engine {
     let build = { ok: true, executed: false, reason: 'no runner configured — model written but not built/executed (dry/unit mode)' };
     let rows = []; let columns = [...out.columns.keys()];
     if (this.runner) {
-      const r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
-      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) } };
+      let r;
+      // Detached whenever the build can be SLOW, not merely when it is a chain: a pipeline whose
+      // only stage is `python` renders as ONE model and still pays the warehouse Python runtime's
+      // cold start — minutes during which a synchronous call just blocks with no query_id to poll.
+      if (hasPython || models.length > 1) {
+        // Select the chain's OWN models by name (space = dbt's union operator), in ref order —
+        // never `+model`, whose ancestor operator would also select the catalog's base tables and
+        // REBUILD them. A Python model is a cold start of minutes on the warehouse runtime, so the
+        // build runs detached and may hand back a query_id.
+        const bg = await this._runDetached(ctx, models.map((m) => m.model).join(' '), modelName);
+        if (bg.status === 'running') {
+          return {
+            context_id: ctx.id, kind: 'pipeline', ok: true, status: 'running', query_id: bg.query_id, model: modelName, materialized, dialect, models: chainInfo, ...(hasPython ? { python: pyInfo } : {}),
+            message: `dbt is building ${models.length > 1 ? `the chain of ${models.length} models` : 'the model'} (${hasPython ? 'Python models run on the warehouse runtime — a cold start' : 'SQL'}) (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}`,
+            read_with: { tool: 'get_query_result', query_id: bg.query_id, table: modelName },
+          };
+        }
+        r = bg.result;
+      } else r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
+      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: formatDbtError(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };
@@ -1837,6 +1988,8 @@ export class Engine {
       context_id: ctx.id, kind: 'pipeline', model: modelName, materialized, dialect,
       columns, output_columns: [...out.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
       row_count: rows.length, rows, model_sql: out.sql, build,
+      ...(models.length > 1 ? { models: chainInfo } : {}),
+      ...(hasPython ? { python: pyInfo } : {}),
       // Provenance: a custom pipeline (not a governed metric), its source, and how fresh
       // the underlying data is — so the rows are self-trustable. A sample stage makes the
       // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
@@ -1846,10 +1999,16 @@ export class Engine {
       // with get_query_result (NOT query_semantic_model, which is for metric queries).
       read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
       assumptions: [
-        `Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`,
+        ...(models.length > 1
+          ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
+          : [`Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`]),
         `Re-read or re-slice it with get_query_result (table: ${modelName}, optional transform).`,
       ],
       warnings: [
+        // The same per-stage judgements the incremental builder makes — a pipeline submitted all at
+        // once (a recipe payload, a hand-written one) gets them too, or a silently-wrong join
+        // reaches the caller as plausible numbers.
+        ...this._stageWarnings(source, stages),
         ...((this.runner && rows.length === 0)
           ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
           : []),
@@ -1931,15 +2090,16 @@ export class Engine {
   /** Delete a registered native model: remove its files + state and re-parse. */
   async delete_native_model(input) {
     this._validate('delete_native_model', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
     if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native (pipeline) model registered in this context' };
     const model = ctx.state.model;
-    this.ctxs.removeGeneratedFile(ctx.id, `${model}.sql`);
+    // a pipeline is a CHAIN of files (.sql / .py / .yml, plus `_sN` steps) — all of them go
+    const removedFiles = this.ctxs.removePipelineFiles(ctx.id, model);
     delete ctx.state.engine; delete ctx.state.model; delete ctx.state.native;
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (context({ action: 'drop' })) or the store cleans ephemeral objects" };
+    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (context({ action: 'drop' })) or the store cleans ephemeral objects" };
   }
 
   async create_semantic_model(input) {
@@ -1949,7 +2109,7 @@ export class Engine {
     if (input.dry_run) {
       const draft = { tasks: [], additions: {}, metrics: [], usedModels: [] };
       if (input.context_id && this.ctxs.has(input.context_id)) {
-        const cur = this.ctxs.get(input.context_id).state;
+        const cur = this._ctx(input.context_id).state;
         mergeCompiled(draft, { additions: clone(cur.additions), metrics: clone(cur.metrics), usedModels: [...cur.usedModels], task: null });
       }
       mergeCompiled(draft, compiled);
@@ -1957,15 +2117,16 @@ export class Engine {
       return { context_id: input.context_id || null, task: compiled.task, dry_run: true, yaml: render.yaml, semantic_models: render.semanticModels, metrics: render.metricNames, warnings: render.warnings || [] };
     }
 
-    const ctx = input.context_id ? this.ctxs.get(input.context_id) : this.ctxs.create();
+    const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
     mergeCompiled(ctx.state, compiled);
     const render = renderContext(this.catalog, ctx.state);
     const file = this.ctxs.writeYaml(ctx.id, render.yaml);
     this.ctxs.touch(ctx.id);
 
     const parse = await this._parse(ctx.id);
-    const groupable = this._groupableRefs(ctx);
-    const exRef = groupable.find((g) => g.model !== compiled.usedModels?.[0]) || groupable[0];
+    const { now: groupable, afterLoading } = this._groupableSplit(ctx);
+    // the example must be a call that RUNS in this context, so it comes from what is loaded
+    const exRef = groupable[0];
     const exText = exRef ? `{ model: '${exRef.model}', attribute: '${exRef.attribute}'${exRef.via ? `, via: '${exRef.via}'` : ''} }` : "{ time: 'metric_time', grain: 'day' }";
     return {
       context_id: ctx.id,
@@ -1976,6 +2137,10 @@ export class Engine {
       joined_models: ctx.state.usedModels,
       metrics: render.metricNames,
       groupable,
+      ...(afterLoading.length ? {
+        groupable_after_loading: afterLoading,
+        groupable_after_loading_note: `These attributes are reachable in the catalog but their model is not loaded in this context — add it with use_base_models: ['${afterLoading[0].model}'] (create/update) before naming them in group_by/where.`,
+      } : {}),
       parse,
       assumptions: this._assumptions(ctx),
       warnings: render.warnings || [],
@@ -1990,7 +2155,7 @@ export class Engine {
 
   async update_semantic_model(input) {
     this._validate('update_semantic_model', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
     const modelKey = input.semantic_model;
     // dry_run must NOT mutate the context (state or files): work on a clone.
     const state = input.dry_run ? clone(ctx.state) : ctx.state;
@@ -2012,7 +2177,22 @@ export class Engine {
       }
       add.measures = add.measures.filter((m) => !input.remove_measures.includes(m.name));
     }
-    if (input.remove_dimensions) add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(d.name));
+    if (input.remove_dimensions) {
+      // A dimension is named by its ATTRIBUTE — the name `groupable` offers and `add_dimensions`
+      // takes. What is STORED is the task-namespaced copy ('ret_country'), a name the caller is
+      // never shown, so matching on it made every removal a silent no-op that still reported
+      // success. Match on the attribute the dimension declares, and refuse a name that matches
+      // nothing rather than pretending to have removed it.
+      const tasks = state.tasks || [];
+      const attrOf = (d) => declaredAttribute(d, tasks);
+      for (const name of input.remove_dimensions) {
+        if (!add.dimensions.some((d) => attrOf(d) === name || d.name === name)) {
+          const have = [...new Set(add.dimensions.map(attrOf))];
+          throw new ToolError(`cannot remove dimension '${name}': '${modelKey}' carries no such dimension in this context.${have.length ? ` It has: ${have.join(', ')}.` : ' It has none.'}`, { stage: 'validate', field: 'remove_dimensions' });
+        }
+      }
+      add.dimensions = add.dimensions.filter((d) => !input.remove_dimensions.includes(attrOf(d)) && !input.remove_dimensions.includes(d.name));
+    }
 
     mergeCompiled(state, compiled);
     const render = renderContext(this.catalog, state);
@@ -2031,7 +2211,7 @@ export class Engine {
 
   async delete_semantic_model(input) {
     this._validate('delete_semantic_model', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
     const modelKey = input.semantic_model;
     const add = ctx.state.additions[modelKey];
     if (!add) return { context_id: ctx.id, removed: false, reason: 'no task additions for this model' };
@@ -2213,7 +2393,7 @@ export class Engine {
 
   async describe_context(input) {
     this._validate('describe_context', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
     // A pipeline-registered model is a normal dbt model whose rows are the result.
     // Report its model name and the output columns you can read. Read it via
     // get_query_result. The columns are grounded to the real relation below.
@@ -2253,7 +2433,7 @@ export class Engine {
 
   async query_semantic_model(input) {
     this._validate('query_semantic_model', input);
-    const ctx = this.ctxs.get(input.context_id);
+    const ctx = this._ctx(input.context_id);
 
     // A pipeline-registered model has no MetricFlow semantic model — its rows ARE
     // the result. Read/slice/sample them with get_query_result instead.
@@ -2278,8 +2458,8 @@ export class Engine {
         const tok = `metric_time__${g.grain || 'day'}`;
         groupBy.push(tok); rename.set(tok, `metric_time_${g.grain || 'day'}`); continue;
       }
-      if (!allowed.has(g)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' is not reachable in this context. Reachable: ${this._groupableRefs(ctx).slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ')}`, { stage: 'validate', field: 'group_by' });
-      this._checkPathLoaded(ctx, g);
+      if (!allowed.has(g)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' is not reachable in this context. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'group_by' });
+      this._checkModelLoaded(ctx, gRaw);
       const friendly = `${gRaw.model}_${gRaw.attribute}`;
       if (input.metrics.includes(friendly) || [...rename.values()].includes(friendly)) throw new ToolError(`group_by: '${gRaw.model}.${gRaw.attribute}' would produce a result column '${friendly}' that clashes with another column of this query — rename the metric or drop the duplicate.`, { stage: 'validate', field: 'group_by' });
       groupBy.push(g); rename.set(g, friendly); groupByResolved[`${gRaw.model}.${gRaw.attribute}`] = friendly;
@@ -2298,13 +2478,18 @@ export class Engine {
         if (p.field?.kind === 'dimension') {
           if (p.field.path != null) throw new ToolError(`where: a dimension is addressed by where it lives — { kind: 'dimension', model, attribute } — never by a path string. '${p.field.path}' → ${this._suggestRef(ctx, p.field.path)}.`, { stage: 'validate', field: 'where' });
           const label = `${p.field.model}.${p.field.attribute}`;
+          const refModel = p.field.model; const refAttr = p.field.attribute;
+          // The value-index key comes from the model the caller NAMED, while it is still here: a
+          // path carries no source, so recovering it afterwards loses the guard on any name two
+          // sources happen to share.
+          const at = this._valueKeyForColumn(p.field.model, p.field.attribute);
           p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
           delete p.field.model; delete p.field.attribute; delete p.field.via;
-          if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. Reachable: ${this._groupableRefs(ctx).slice(0, 20).map((r) => `${r.model}.${r.attribute}${r.via ? ` (via ${r.via})` : ''}`).join(', ')}`, { stage: 'validate', field: 'where' });
-          this._checkPathLoaded(ctx, p.field.path);
+          if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'where' });
+          this._checkModelLoaded(ctx, { model: refModel, attribute: refAttr });
           // Verify the filter literal against the column's REAL values (source-scoped):
           // reject a wrong-cased/non-existent value instead of filtering to nothing.
-          specs.push({ at: this._valueKeyForPath(p.field.path), op: p.op, value: p.value, where: `where ${p.field.path}` });
+          specs.push({ at, op: p.op, value: p.value, where: `where ${label}` });
         }
       });
       filterWarnings = this._guardFilterValues(specs); // throws on a case/typo/absent mismatch
@@ -2395,7 +2580,7 @@ export class Engine {
       if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (latest event time)${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
     }
     // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
-    if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ property }).');
+    if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ source, property }).');
     // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
     const distinctMeasures = new Set();
     for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
@@ -2437,12 +2622,17 @@ export class Engine {
   async _materialize(ctx, qopts, input, rename = new Map()) {
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     const dir = this.ctxs.dir(ctx.id);
-    const explain = await this.runner.query(dir, { ...qopts, explain: true });
+    // The TABLE is the deliverable here — get_query_result pages it and runs transforms OVER it —
+    // so it holds the whole result. `limit` is the caller's page size for reading rows back below,
+    // and baking it into the query would persist one page and let every later total be read off it
+    // as if it were the full answer.
+    const { limit: _page, ...full } = qopts;
+    const explain = await this.runner.query(dir, { ...full, explain: true });
     if (!explain.ok) return { ok: false, error: { stage: 'query', message: formatDbtError(explain.stdout, explain.stderr) } };
     // The persisted table is what get_query_result transforms address later, so its columns get
     // the caller-facing names (`<model>_<attribute>`, `metric_time_<grain>`), never `__`.
     const projected = rename.size
-      ? `select ${[...(qopts.groupBy || []).map((g) => (rename.has(g) ? `${g} as ${rename.get(g)}` : g)), ...qopts.metrics].join(', ')} from (\n${explain.sql}\n) _q`
+      ? `select ${[...(full.groupBy || []).map((g) => (rename.has(g) ? `${g} as ${rename.get(g)}` : g)), ...full.metrics].join(', ')} from (\n${explain.sql}\n) _q`
       : explain.sql;
 
     const id = this.jobs.create({ contextId: ctx.id });
@@ -2536,7 +2726,7 @@ export class Engine {
     // direct fetch by table (crash-resilient: works even if the job is gone).
     // Accepts a query-result table (qr_*) or a registered pipeline model (pipe_*).
     if (input.table) {
-      this.ctxs.get(input.context_id); // validate the context exists (throws otherwise)
+      this._ctx(input.context_id); // validate the context exists (throws otherwise)
       if (!/^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$/.test(input.table)) throw new ToolError(`invalid result table name: ${input.table}`, { stage: 'validate', field: 'table' });
       return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, transform, {}, offset, sample, samplePercent);
     }
@@ -2621,8 +2811,38 @@ function clone(x) {
 }
 
 /**
+ * A memory target, resolved: `kind` (property | event | model | term), the public `target` the
+ * tool speaks — { source, name } for a property/attribute/event, { source } for a model, { term }
+ * for a free phrase — plus the stored canonical key "<kind>:<source>.<name>" and the flat `key`
+ * the fuzzy matcher scores.
+ */
+/**
+ * The attribute a compiled dimension was DECLARED as. `_attribute` records it at compile time; a
+ * context persisted before that falls back to the longest task name the identifier starts with —
+ * longest, because one task name may be a prefix of another ('ret' and 'ret_v2') and the shorter
+ * one would leave part of the task name inside the attribute.
+ */
+function declaredAttribute(dim, tasks = []) {
+  if (dim._attribute) return dim._attribute;
+  const t = [...tasks].filter((tk) => dim.name.startsWith(`${tk}_`)).sort((a, b) => b.length - a.length)[0];
+  return t ? dim.name.slice(t.length + 1) : dim.name;
+}
+
+/**
+ * A resolved memory target: `target` is what gets STORED (the kind and its parts), `addressable` is
+ * the same thing as the tool speaks it back — what you hand to memory({ action: 'list', target })
+ * — and `label` is its words, for fuzzy matching and messages. Nothing here is ever re-parsed.
+ */
+function memoryTarget(kind, source, name = null) {
+  const addressable = kind === 'term' ? { term: source } : (name == null ? { source } : { source, name });
+  return { kind, target: { kind, ...addressable }, addressable, label: targetWords({ kind, ...addressable }) };
+}
+
+
+/**
  * Presentation shape for a stored memory note: decode the canonical "<kind>:<key>" targets
- * back into typed { kind, key } objects, expose the note/aliases/links, and stamp the time.
+ * back into their public { kind, source, name } form, expose the note/aliases/links, and stamp
+ * the time.
  */
 // Compact form of a saved finding for ATTACHING to a semantic_index view: id + a truncated note +
 // the date. The full text + question + about[] + aliases[] + links[] are fetched on demand via
@@ -2633,7 +2853,7 @@ function memoryCompact(e, maxLen = 220) {
   // Keep the semantically useful, usually-short parts inline (note/question/about); drop the long
   // search-metadata (aliases/links). The full untruncated note + aliases/links is one drill away
   // via memory({ action: 'list', target }).
-  const targets = (e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? { kind: t.slice(0, i), key: t.slice(i + 1) } : { kind: 'term', key: String(t) }; });
+  const targets = [...(e.targets || [])];
   return {
     view: {
       id: e.id,
@@ -2647,7 +2867,7 @@ function memoryCompact(e, maxLen = 220) {
 }
 
 function memoryView(e) {
-  const targets = (e.targets || []).map((t) => { const i = String(t).indexOf(':'); return i > 0 ? { kind: t.slice(0, i), key: t.slice(i + 1) } : { kind: 'term', key: String(t) }; });
+  const targets = [...(e.targets || [])];
   return {
     id: e.id,
     note: e.note,

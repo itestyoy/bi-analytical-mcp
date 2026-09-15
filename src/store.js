@@ -177,8 +177,6 @@ export class MemoryBackend {
       properties: () => [...allEntries()].map(({ source, property }) => ({ source, property })),
       // Drop everything stored for one property (a column gone from the table) — no full reindex.
       removeProperty: (source, property) => !!bySource.get(source)?.delete(property),
-      // Nothing persisted here, so there is no legacy schema to carry over.
-      migrateLegacyKeys: () => ({ migrated: 0, dropped: 0 }),
     };
 
     // Analyst memory: durable, curated findings (see memory.js). Kept as plain objects
@@ -187,6 +185,7 @@ export class MemoryBackend {
       add: (e) => { memory.set(e.id, { id: e.id, note: String(e.note), question: e.question ?? null, targets: [...(e.targets || [])], aliases: [...(e.aliases || [])], links: [...(e.links || [])], created_at: e.created_at ?? Date.now() }); return e.id; },
       get: (id) => { const e = memory.get(id); return e ? { ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] } : null; },
       remove: (id) => { vectors.delete(id); return memory.delete(id); },
+      setTargets: (id, targets) => { const e = memory.get(id); if (!e) return false; e.targets = [...targets]; return true; },
       all: ({ limit = 200 } = {}) => [...memory.values()].sort((a, b) => b.created_at - a.created_at || String(b.id).localeCompare(a.id)).slice(0, limit).map((e) => ({ ...e, targets: [...e.targets], aliases: [...e.aliases], links: [...e.links] })),
       counts: () => ({ notes: memory.size }),
       // ── semantic (vector) search: JS cosine over stored embeddings (no native dep) ──
@@ -211,7 +210,8 @@ export class MemoryBackend {
       all: () => [...runs].sort((a, b) => b.id - a.id),
       get: (id) => runs.find((x) => x.id === id) || null,
       recordProperty: (runId, p = {}) => {
-        const row = { run_id: runId, source: p.source ?? null, property: p.property, ms: p.ms ?? null, values_written: p.valuesWritten ?? null, distinct_count: p.distinctCount ?? null, total_count: p.totalCount ?? null, status: p.status ?? null, error: p.error ?? null, started_at: runs.find((x) => x.id === runId)?.started_at ?? null };
+        if (!p.source || !p.property) throw new Error('recordProperty needs both source and property — a run row is keyed by (run, source, property)');
+        const row = { run_id: runId, source: p.source, property: p.property, ms: p.ms ?? null, values_written: p.valuesWritten ?? null, distinct_count: p.distinctCount ?? null, total_count: p.totalCount ?? null, status: p.status ?? null, error: p.error ?? null, started_at: runs.find((x) => x.id === runId)?.started_at ?? null };
         const i = runProps.findIndex((x) => x.run_id === runId && x.source === row.source && x.property === p.property);
         if (i >= 0) runProps[i] = row; else runProps.push(row);
       },
@@ -236,23 +236,19 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
     // Every index table is keyed by (SOURCE, property): each catalog source — an events fact,
     // the users dimension — owns its own index space, so two facts may carry the same property
-    // name without sharing a row. A v1 database keyed rows by a single `property` text and
-    // encoded the source inside it ('users.country'); such tables are renamed aside here and
-    // carried over by values.migrateLegacyKeys(), which needs the catalog to say who owns a key.
-    // The test is the PRIMARY KEY, not the column list: a database that once received `source`
+    // name without sharing a row. A table keyed any other way is DROPPED and recreated: the value
+    // index is a rebuildable cache the background scan repopulates, so nothing is carried over.
+    // The test is the PRIMARY KEY, not the column list: a table that once received `source`
     // through ADD COLUMN still has the old key (SQLite cannot widen a key in place), and every
-    // ON CONFLICT(source, …) upsert against it is rejected. Such a table is as legacy as one
-    // without the column at all.
+    // ON CONFLICT(source, …) upsert against it is rejected.
     const keyedBySource = (table) => {
       const cols = db.prepare(`PRAGMA table_info(${table})`).all();
       if (!cols.length) return null; // no table yet
       const src = cols.find((c) => c.name === 'source');
       return !!(src && src.pk > 0); // pk = 1-based position within the PRIMARY KEY, 0 = not part of it
     };
-    for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage']) {
-      if (keyedBySource(t) === false) {
-        try { db.exec(`DROP TABLE IF EXISTS ${t}_v1`); db.exec(`ALTER TABLE ${t} RENAME TO ${t}_v1`); } catch { /* leave as-is; the scan repopulates */ }
-      }
+    for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_run_props']) {
+      if (keyedBySource(t) === false) db.exec(`DROP TABLE ${t}`);
     }
     db.exec('CREATE TABLE IF NOT EXISTS prop_values (source TEXT, property TEXT, value TEXT, freq INTEGER, PRIMARY KEY(source, property, value))');
     db.exec('CREATE TABLE IF NOT EXISTS prop_stats (source TEXT, property TEXT, distinct_count INTEGER, total_count INTEGER, null_count INTEGER, indexed_at INTEGER, PRIMARY KEY(source, property))');
@@ -275,16 +271,7 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS prop_bundle_event_coverage (source TEXT, property TEXT, bundle TEXT, event_name TEXT, row_count INTEGER, non_null INTEGER, PRIMARY KEY(source, property, bundle, event_name))');
     db.exec('CREATE TABLE IF NOT EXISTS index_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, started_at INTEGER, finished_at INTEGER, status TEXT, properties_indexed INTEGER, values_written INTEGER, errors INTEGER, error TEXT)');
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
-    // Per-property run rows are keyed by (run, SOURCE, property) like every other index table. A
-    // v1 database keyed them by (run, property) alone — and ADD COLUMN cannot widen a PRIMARY KEY,
-    // so the upsert's ON CONFLICT(run_id, source, property) would be rejected by SQLite on every
-    // write. Rename the old table aside (history is per-run diagnostics, not data worth carrying)
-    // and let the CREATE below make the correctly keyed one. Decided by the KEY, not by the
-    // column: a table that got `source` via ADD COLUMN but kept PRIMARY KEY(run_id, property) is
-    // exactly the one that rejects every write — and the one an "is the column there" test skips.
-    if (keyedBySource('index_run_props') === false) {
-      try { db.exec('DROP TABLE IF EXISTS index_run_props_v1'); db.exec('ALTER TABLE index_run_props RENAME TO index_run_props_v1'); } catch { /* leave as-is */ }
-    }
+    // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, source TEXT, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, source, property))');
     // Run-level events surfaced in semantic_index({ status })/({ run }), e.g. "a batch fell
     // back to per-property because the combined scan failed: <reason>".
@@ -400,46 +387,6 @@ export class SqliteBackend {
           }
         });
       },
-      /**
-       * Carry a v1 index (one flat `property` namespace) into the (source, property) schema.
-       * `resolve(oldKey)` -> { source, property } | null; the caller supplies it because only the
-       * catalog knows which source owns a key. A key it cannot place is DROPPED: the value index
-       * is a rebuildable cache, and the next scan repopulates it under the right source.
-       * Idempotent — the renamed v1 tables are dropped once their rows are moved.
-       */
-      migrateLegacyKeys(resolve) {
-        const legacy = ['prop_stats_v1', 'prop_values_v1', 'prop_coverage_v1', 'prop_bundle_coverage_v1', 'prop_bundle_event_coverage_v1']
-          .filter((t) => s._all(`PRAGMA table_info(${t})`).length);
-        if (!legacy.length || typeof resolve !== 'function') return { migrated: 0, dropped: 0 };
-        let migrated = 0; let dropped = 0;
-        const placed = new Map(); // oldKey -> { source, property } | null (resolved once)
-        const place = (key) => {
-          if (!placed.has(key)) placed.set(key, resolve(key) || null);
-          return placed.get(key);
-        };
-        const copy = (table, cols) => {
-          if (!s._all(`PRAGMA table_info(${table}_v1)`).length) return;
-          for (const r of s._all(`SELECT * FROM ${table}_v1`)) {
-            // A row that already names its source (the table got the column through ADD COLUMN
-            // but kept the old key) is placed by that source; only a bare v1 key is resolved.
-            const at = r.source ? { source: r.source, property: r.property } : place(r.property);
-            if (!at) { dropped += 1; continue; }
-            const names = ['source', 'property', ...cols];
-            const vals = [at.source, at.property, ...cols.map((c) => r[c] ?? null)];
-            s._run(`INSERT OR REPLACE INTO ${table} (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`, ...vals);
-            migrated += 1;
-          }
-        };
-        s._tx(() => {
-          copy('prop_stats', ['distinct_count', 'total_count', 'null_count', 'indexed_at', 'high_cardinality', 'data_watermark']);
-          copy('prop_values', ['value', 'freq']);
-          copy('prop_coverage', ['event_name', 'row_count', 'non_null']);
-          copy('prop_bundle_coverage', ['bundle', 'row_count', 'non_null']);
-          copy('prop_bundle_event_coverage', ['bundle', 'event_name', 'row_count', 'non_null']);
-          for (const t of legacy) s._run(`DROP TABLE IF EXISTS ${t}`);
-        });
-        return { migrated, dropped };
-      },
     };
 
     this.runs = {
@@ -451,7 +398,10 @@ export class SqliteBackend {
       get(id) { return s._get('SELECT * FROM index_runs WHERE id = ?', id) || null; },
       // per-property timing/coverage within a run
       recordProperty(runId, p = {}) {
-        s._run('INSERT INTO index_run_props (run_id, source, property, ms, values_written, distinct_count, total_count, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, source, property) DO UPDATE SET ms=excluded.ms, values_written=excluded.values_written, distinct_count=excluded.distinct_count, total_count=excluded.total_count, status=excluded.status, error=excluded.error', runId, p.source ?? null, p.property, p.ms ?? null, p.valuesWritten ?? null, p.distinctCount ?? null, p.totalCount ?? null, p.status ?? null, p.error ?? null);
+        // (run, source, property) is this table's PRIMARY KEY, and SQLite lets NULL into it without
+        // ever conflicting: a row missing its source would be inserted afresh on every write.
+        if (!p.source || !p.property) throw new Error('recordProperty needs both source and property — a run row is keyed by (run, source, property)');
+        s._run('INSERT INTO index_run_props (run_id, source, property, ms, values_written, distinct_count, total_count, status, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, source, property) DO UPDATE SET ms=excluded.ms, values_written=excluded.values_written, distinct_count=excluded.distinct_count, total_count=excluded.total_count, status=excluded.status, error=excluded.error', runId, p.source, p.property, p.ms ?? null, p.valuesWritten ?? null, p.distinctCount ?? null, p.totalCount ?? null, p.status ?? null, p.error ?? null);
       },
       properties(runId, { limit = 1000 } = {}) { return s._all('SELECT * FROM index_run_props WHERE run_id = ? ORDER BY ms DESC, property ASC LIMIT ?', runId, limit); },
       propertyHistory(source, property, { limit = 20 } = {}) { return s._all('SELECT p.*, r.started_at FROM index_run_props p JOIN index_runs r ON r.id = p.run_id WHERE p.source = ? AND p.property = ? ORDER BY p.run_id DESC LIMIT ?', source, property, limit); },
@@ -466,6 +416,7 @@ export class SqliteBackend {
       add(e) { s._run('INSERT INTO memory (id, note, question, targets, aliases, links, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)', e.id, String(e.note), e.question ?? null, JSON.stringify(e.targets || []), JSON.stringify(e.aliases || []), JSON.stringify(e.links || []), e.created_at ?? Date.now()); return e.id; },
       get(id) { return memRow(s._get('SELECT * FROM memory WHERE id = ?', id)); },
       remove(id) { if (s._vec) try { s._run('DELETE FROM memory_vec WHERE id = ?', id); } catch { /* no vec table */ } return s._run('DELETE FROM memory WHERE id = ?', id).changes > 0; },
+      setTargets(id, targets) { return s._run('UPDATE memory SET targets = ? WHERE id = ?', JSON.stringify(targets || []), id).changes > 0; },
       all({ limit = 200 } = {}) { return s._all('SELECT id, note, question, targets, aliases, links, created_at FROM memory ORDER BY created_at DESC, id DESC LIMIT ?', limit).map(memRow); },
       counts() { return { notes: Number(s._get('SELECT COUNT(*) AS n FROM memory').n) }; },
 
@@ -534,9 +485,6 @@ export class SqliteBackend {
   reset() {
     this._tx(() => {
       for (const t of ['jobs', 'prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_runs', 'index_run_props', 'index_run_notes']) this._run(`DELETE FROM ${t}`);
-      // A reset is a clean slate: the v1 tables set aside by the constructor would otherwise be
-      // carried back in by migrateLegacyKeys right after, resurrecting what was just wiped.
-      for (const t of ['prop_values', 'prop_stats', 'prop_coverage', 'prop_bundle_coverage', 'prop_bundle_event_coverage', 'index_run_props']) this._db.exec(`DROP TABLE IF EXISTS ${t}_v1`);
     });
   }
 

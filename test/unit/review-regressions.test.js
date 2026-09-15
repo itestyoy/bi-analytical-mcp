@@ -522,3 +522,22 @@ models:
 `);
   assert.throws(() => loadCatalog(file, {}), /bundle_id.*BOTH as an event_data property and as a groupable column/s);
 });
+
+// ── unnest read a payload column without checking it is still there ─────────────────────────
+// `derive` gained that check; `unnest` did not, so after a stage that changed the grain it emitted
+// a lateral join over a column the relation no longer has — a raw warehouse error at materialize
+// instead of a stage-time refusal at add_step.
+test('unnest is refused when the payload column it explodes is gone', async () => {
+  const e = engine();
+  const s = await e.build_native_model({ action: 'start', name: 'items', source: 'events' });
+  // the array property is readable while the rows are still events
+  const ok = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } });
+  assert.equal(ok.step_index, 1);
+  // …and after an aggregate collapses the grain, the same stage cannot read it any more
+  const agg = await e.build_native_model({ action: 'start', name: 'items2', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }] } });
+  await assert.rejects(
+    () => e.build_native_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } }),
+    /unknown column 'event_data' at this stage/,
+  );
+});

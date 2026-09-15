@@ -43,7 +43,7 @@ export class Dialect {
    */
   keyPartExpr(part, qualify = (c) => c) {
     const col = qualify(this.ident(part.column));
-    return part.grain ? this.dateTrunc(part.grain, col) : col;
+    return part.grain ? this.grainExpr(part.grain, col) : col;
   }
 
   /**
@@ -88,7 +88,13 @@ export class Dialect {
   joinCte(prev, op) {
     const eq = this.joinKeyParts(op, (c) => `base.${c}`, (c) => `j.${c}`)
       .map((k) => `${k.left} = ${k.right}`).join(' AND ');
-    const btw = op.between ? ` AND base.${this.ident(op.between.value)} BETWEEN j.${this.ident(op.between.from)} AND j.${this.ident(op.between.to)}` : '';
+    // The validity window, half-open at the END: a CURRENT version has no end yet (dbt snapshots
+    // write NULL into dbt_valid_to), and `BETWEEN … AND NULL` is never true — so the plain form
+    // dropped exactly the rows a "what is it NOW" question is about.
+    const btw = op.between
+      ? ` AND base.${this.ident(op.between.value)} >= j.${this.ident(op.between.from)}`
+        + ` AND (j.${this.ident(op.between.to)} IS NULL OR base.${this.ident(op.between.value)} <= j.${this.ident(op.between.to)})`
+      : '';
     const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
     return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;
   }
@@ -122,6 +128,14 @@ export class Dialect {
   fullDaysBetween(_fromExpr, _toExpr) { throw new Error('abstract fullDaysBetween'); }
   /** Truncate a timestamp/date to a granularity (day|week|month|quarter|year). */
   dateTrunc(_granularity, _expr) { throw new Error('abstract dateTrunc'); }
+
+  /**
+   * A join KEY truncated to its declared grain. Separate from `dateTrunc` because a key column's
+   * type is not declared anywhere — the two sides of a per-day join may be a DATE on one side and
+   * a TIMESTAMP on the other — so this form must work for both, while `dateTrunc` keeps serving
+   * the caller's own explicit truncation.
+   */
+  grainExpr(granularity, expr) { return this.dateTrunc(granularity, expr); }
   /** Extract a calendar part (dow|hour|day|week|month|quarter|year|doy) as a number. */
   datePart(_part, _expr) { throw new Error('abstract datePart'); }
   /** Current timestamp. */

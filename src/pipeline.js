@@ -419,6 +419,10 @@ const STAGES = {
       } else {
         throw new Error(`unnest: '${p.source}' is not an array event property of '${source}' nor an array column at this stage`);
       }
+      // The column it explodes must still be HERE, exactly as `derive`'s read must: after a stage
+      // that changed the grain (or on top of a materialized prefix built from one) the payload is
+      // gone, and the unnest would reference a column the relation does not have.
+      requireCol(cols, column);
       const type = p.field ? (p.type || 'string') : (isStruct ? 'json' : (p.type || 'string'));
       return { op: { op: 'unnest', column, key, as: p.as, field: p.field, type, encoding }, cols: addCol(cols, p.as, type) };
     },

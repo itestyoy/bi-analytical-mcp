@@ -12,8 +12,7 @@ export class PostgresDialect extends Dialect {
   jsonExtract(column, key, type = 'string') {
     this.ident(key);
     const base = `(${column}->>'${key}')`;
-    const ct = this.castType(type);
-    return ct ? `${base}::${ct}` : base;
+    return this.castType(type) ? this.castExpr(base, type) : base;
   }
 
   jsonArrayLength(column, key) {
@@ -35,8 +34,7 @@ export class PostgresDialect extends Dialect {
   jsonStructField(column, key, field, type = 'string') {
     this.ident(key); this.ident(field);
     const base = `(${column}->'${key}'->>'${field}')`;
-    const ct = this.castType(type);
-    return ct ? `${base}::${ct}` : base;
+    return this.castType(type) ? this.castExpr(base, type) : base;
   }
 
   arrayUnnest(prevAlias, column, key, alias, field, type = 'string', encoding = 'blob') {
@@ -45,8 +43,7 @@ export class PostgresDialect extends Dialect {
     const pa = prevAlias ? `${prevAlias}.` : '';
     // Native ARRAY column → unnest directly (no JSON parsing).
     if (key == null && encoding === 'native') {
-      const ct = this.castType(type);
-      return { join: `CROSS JOIN LATERAL unnest(${pa}${column}) AS ${e}`, element: ct ? `${e}::${ct}` : e };
+      return { join: `CROSS JOIN LATERAL unnest(${pa}${column}) AS ${e}`, element: this.castType(type) ? this.castExpr(e, type) : e };
     }
     // The jsonb array to explode: a key inside a json column (blob), or the flat STRING
     // column itself parsed as jsonb (encoding 'json').
@@ -55,14 +52,12 @@ export class PostgresDialect extends Dialect {
     if (field) {
       this.ident(field);
       const base = `(${e}->>'${field}')`;
-      const ct = this.castType(type);
-      return { join: `CROSS JOIN LATERAL jsonb_array_elements(${arr}) AS ${e}`, element: ct ? `${base}::${ct}` : base };
+      return { join: `CROSS JOIN LATERAL jsonb_array_elements(${arr}) AS ${e}`, element: this.castType(type) ? this.castExpr(base, type) : base };
     }
     if (type === 'json') { // bind the whole struct element as a jsonb column (multi-field extraction downstream)
       return { join: `CROSS JOIN LATERAL jsonb_array_elements(${arr}) AS ${e}`, element: e };
     }
-    const ct = this.castType(type);
-    return { join: `CROSS JOIN LATERAL jsonb_array_elements_text(${arr}) AS ${e}`, element: ct ? `${e}::${ct}` : e };
+    return { join: `CROSS JOIN LATERAL jsonb_array_elements_text(${arr}) AS ${e}`, element: this.castType(type) ? this.castExpr(e, type) : e };
   }
 
   /** STRING holding a JSON array → a native text[] array (so it can be unnested as native). */
@@ -77,8 +72,7 @@ export class PostgresDialect extends Dialect {
   jsonColumnField(column, field, type = 'string') {
     this.ident(field);
     const base = `(${column}->>'${field}')`;
-    const ct = this.castType(type);
-    return ct ? `${base}::${ct}` : base;
+    return this.castType(type) ? this.castExpr(base, type) : base;
   }
 
   // ── column-level complex primitives (a flattened payload column, no blob) ──
@@ -110,8 +104,7 @@ export class PostgresDialect extends Dialect {
   jsonColumnStructField(column, field, type = 'string') {
     this.ident(field);
     const base = `((${column})::jsonb->>'${field}')`;
-    const ct = this.castType(type);
-    return this._jsonbWhenValid(column, ct ? `${base}::${ct}` : base);
+    return this._jsonbWhenValid(column, this.castType(type) ? this.castExpr(base, type) : base);
   }
 
   // ── time / scalar / statistical ────────────────────────────────────────────
@@ -133,6 +126,14 @@ export class PostgresDialect extends Dialect {
     return `FLOOR(EXTRACT(EPOCH FROM ((${to})::timestamp - (${from})::timestamp)) / 86400.0)::int`;
   }
 
+  // Same reason as BigQuery's: a key column may be a DATE on one side and a TIMESTAMP on the
+  // other, so both are lifted to timestamp before truncating (Postgres coerces DATE silently, but
+  // the two dialects must derive a key the same way).
+  grainExpr(granularity, expr) {
+    if (!['day', 'week', 'month', 'quarter', 'year'].includes(granularity)) throw new Error(`grainExpr: bad granularity ${granularity}`);
+    return `date_trunc('${granularity}', (${expr})::timestamp)`;
+  }
+
   dateTrunc(granularity, expr) {
     if (!['day', 'week', 'month', 'quarter', 'year'].includes(granularity)) throw new Error(`dateTrunc: bad granularity ${granularity}`);
     return `date_trunc('${granularity}', ${expr})`;
@@ -149,11 +150,14 @@ export class PostgresDialect extends Dialect {
 
   // SAFE cast only (Postgres has no TRY_CAST): text is always safe; a numeric target returns NULL
   // for non-numeric input (guard with a numeric-literal regex, then route through numeric so e.g.
-  // '1.5'→int does not error). Never fails the query on a bad value.
+  // '1.5'→int does not error). Never fails the query on a bad value — which is why EVERY read that
+  // casts a JSON-derived value comes through here: a raw `::numeric` aborts the whole statement on
+  // the first row whose payload holds a word, while BigQuery's SAFE_CAST yields NULL for that row
+  // and results for the rest. The two dialects must answer the same question the same way.
   castExpr(expr, type) {
     const ct = this.castType(type);
     if (!ct || ct === 'text') return `(${expr})::text`;
-    return `(CASE WHEN (${expr})::text ~ '^\\s*-?[0-9]+(\\.[0-9]+)?\\s*$' THEN (${expr})::numeric${ct === 'numeric' ? '' : `::${ct}`} END)`;
+    return `(CASE WHEN (${expr})::text ~ '^\\s*[-+]?[0-9]+(\\.[0-9]+)?([eE][-+]?[0-9]+)?\\s*$' THEN (${expr})::numeric${ct === 'numeric' ? '' : `::${ct}`} END)`;
   }
 
   substringExpr(expr, start, len) { return `substring(${expr} from ${Number(start)}${len != null ? ` for ${Number(len)}` : ''})`; }

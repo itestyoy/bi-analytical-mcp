@@ -121,6 +121,16 @@ export class BigQueryDialect extends Dialect {
     return `TIMESTAMP_TRUNC(${expr}, ${g})`;
   }
 
+  // A join key's column type is not declared, and GoogleSQL has no DATE overload for
+  // TIMESTAMP_TRUNC (nor an implicit DATE→TIMESTAMP coercion), so a declared per-day key on a DATE
+  // column was rejected outright. DATE() accepts DATE, DATETIME and TIMESTAMP alike, and every
+  // grain a key may declare is a whole day or coarser, so the day is the right unit to compare at.
+  grainExpr(granularity, expr) {
+    const g = { day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR' }[granularity];
+    if (!g) throw new Error(`grainExpr: bad granularity ${granularity}`);
+    return `DATE_TRUNC(DATE(${expr}), ${g})`;
+  }
+
   datePart(part, expr) {
     const p = { dow: 'DAYOFWEEK', hour: 'HOUR', day: 'DAY', week: 'WEEK', month: 'MONTH', quarter: 'QUARTER', year: 'YEAR', doy: 'DAYOFYEAR' }[part];
     if (!p) throw new Error(`datePart: bad part ${part}`);

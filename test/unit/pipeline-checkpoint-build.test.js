@@ -213,3 +213,25 @@ test('a view prefix is called out (reading it re-runs its SQL), and describe_con
   assert.match(pv.checkpoint_note, /Every step is already materialized/);
   await assert.rejects(() => materialize(e, draft_id), /nothing to build/);
 });
+
+// Editing a step retires the prefixes at or after it and removes their files — but a build that is
+// STILL RUNNING hands its table back through get_query_result, which reads it by ref. Removing the
+// definition mid-build would make that result unreadable for good.
+test('an edit during a background build does not remove the files that build is producing', async (t) => {
+  if (skipNoPy(t)) return;
+  const runner = heldRunner();
+  const e = engine(runner);
+  const draft_id = await startedDraft(e);
+  const bg = await materialize(e, draft_id);
+  assert.equal(bg.status, 'running');
+
+  // an edit BELOW the pending prefix retires it (its table is not to be read as a prefix)…
+  const ed = await e.build_native_model({ action: 'edit_step', draft_id, index: 1, stage: AGG });
+  assert.deepEqual(ed.checkpoints_dropped.map((d) => d.model), [bg.model]);
+  assert.deepEqual(draftOf(e, draft_id).checkpoints, []);
+  // …but the model it is building stays on disk, so the job's own result is still readable
+  assert.ok(e.ctxs.hasPipelineModel(draft_id, bg.model), 'the running build keeps its definition');
+  runner.finish(true);
+  await settled();
+  assert.equal((await e.get_query_result({ query_id: bg.query_id })).status !== 'error', true);
+});

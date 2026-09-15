@@ -541,3 +541,19 @@ test('unnest is refused when the payload column it explodes is gone', async () =
     /unknown column 'event_data' at this stage/,
   );
 });
+
+// ── a prototype key resolved as a real field ────────────────────────────────────────────────
+// `attributeKind` looked a name up in a plain object, which also answers for Object.prototype, so
+// 'toString' / 'constructor' came back as a property or dimension and were then addressed as one.
+// The memory tool's target `name` is free text, which is how such a name reaches here.
+test('a prototype key is not a field of any source', () => {
+  const catalog = loadCatalog(CATALOG, {});
+  for (const name of ['toString', 'constructor', 'valueOf', 'hasOwnProperty', '__proto__']) {
+    for (const source of catalog.modelKeys()) {
+      assert.equal(catalog.attributeKind(source, name), null, `${source}.${name}`);
+    }
+  }
+  // …while the real ones still resolve, each as what it is
+  assert.equal(catalog.attributeKind('events', 'level_id_of_event_data'), 'property');
+  assert.equal(catalog.attributeKind('users', 'country'), 'dimension');
+});

@@ -1272,8 +1272,12 @@ export class Catalog {
   attributeKind(source, name) {
     const m = this.models[source];
     if (!m || !name) return null;
-    if (this.facts.includes(source) && (m.properties || {})[name]) return 'property';
-    return (m.dimensions || {})[name] ? 'dimension' : null;
+    // `has` on the OWN keys only: a plain-object lookup also answers for Object.prototype, so
+    // 'toString' / 'constructor' / 'valueOf' resolved as real fields and were then addressed
+    // as one (the memory tool's target `name` is free text, which is how they get in here).
+    const has = (bag, key) => !!bag && Object.prototype.hasOwnProperty.call(bag, key);
+    if (this.facts.includes(source) && has(m.properties, name)) return 'property';
+    return has(m.dimensions, name) ? 'dimension' : null;
   }
 
   /** Full spec for one event_data property ({ type, items?, fields?, values?, description? }). */

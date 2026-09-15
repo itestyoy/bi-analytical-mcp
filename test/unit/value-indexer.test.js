@@ -173,7 +173,7 @@ test('a field gone from the schema is pruned from the index on the next sync', a
 
   await bi.refresh();
 
-  assert.ok(!index.properties().includes('events.ghost_col'), 'orphan field pruned');
+  assert.ok(!index.properties().some((k) => k.source === 'events' && k.property === 'ghost_col'), 'orphan field pruned');
   assert.equal(index.stats('events', 'ghost_col'), null);
   assert.ok(index.stats('events', catalog.scalarEventProps('events')[0]) != null, 'valid fields stay indexed');
   index.close();

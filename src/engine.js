@@ -1305,10 +1305,20 @@ export class Engine {
   // scan (whatever it found) means the underlying data may have moved, and every checkpoint taken
   // before it is retired.
 
-  /** The value index's current run marker — a checkpoint built under a different one is stale. */
+  /**
+   * The value index's current run marker — a checkpoint built under a different one is stale.
+   * Cached on the index's own sync generation: reading the marker walks the run history, and the
+   * render plan asks for it a few times per add_step. A completed scan bumps the generation, which
+   * is exactly when the answer can change.
+   */
   _indexRunId() {
-    try { return this.valueIndex?.syncStatus?.({ recent: 1 })?.last_successful_run?.id ?? null; }
-    catch { return null; } // no index / unreadable status → nothing to compare against
+    const gen = this.valueIndex?.syncGeneration ? this.valueIndex.syncGeneration() : 0;
+    if (this._runIdCache?.gen === gen) return this._runIdCache.id;
+    let id = null;
+    try { id = this.valueIndex?.syncStatus?.({ recent: 1 })?.last_successful_run?.id ?? null; }
+    catch { id = null; } // no index / unreadable status → nothing to compare against
+    this._runIdCache = { gen, id };
+    return id;
   }
 
   /** null when the checkpoint is usable, { retire: why } when it never will be, { building } while its build runs. */
@@ -1323,8 +1333,11 @@ export class Engine {
       // one whose builder is gone, so waiting on it forever is wrong — retire it and rebuild.
       if (job.status !== 'ready') return this.jobs.isLive?.(cp.query_id) ? { building: cp.query_id } : { retire: `the build of ${cp.model} did not finish (its builder is gone)` };
     }
+    // A checkpoint built while the index had never completed a scan carries no marker: there is
+    // nothing to compare, and the first scan finishing is not evidence that the data moved (it
+    // observed the same data the prefix was built from). Only a marker that CHANGED retires it.
     const run = this._indexRunId();
-    if ((cp.index_run_id ?? null) !== run) return { retire: `the value index was refreshed after ${cp.model} was built, so the source data may have moved` };
+    if (cp.index_run_id != null && cp.index_run_id !== run) return { retire: `the value index was refreshed after ${cp.model} was built, so the source data may have moved` };
     return null;
   }
 
@@ -1337,7 +1350,7 @@ export class Engine {
     const retired = []; let checkpoint = null;
     for (let i = list.length - 1; i >= 0 && !checkpoint; i -= 1) {
       const st = this._checkpointState(list[i]);
-      if (st?.retire) { retired.push({ at: list[i].at, model: list[i].model, reason: st.retire }); continue; }
+      if (st?.retire) { retired.push({ ...list[i], reason: st.retire }); continue; }
       if (st?.building && forBuild) {
         throw new ToolError(
           `steps 1..${list[i].at} are still being materialized as ${list[i].model} — nothing can read that table yet, so a second build would only duplicate the work. `
@@ -1393,9 +1406,32 @@ export class Engine {
   _retireCheckpointFiles(ctx, checkpoints = []) {
     for (const cp of checkpoints) {
       if (cp.owner !== ctx.id) continue; // another context's model: not ours to remove
+      // The context's REGISTERED result keeps its definition even when the prefix it stood for is
+      // retired: `ctx.state.model` still advertises that table and get_query_result reads it
+      // through `{{ ref() }}`, which needs the file. A later build of the same name cleans it.
+      if (cp.model === ctx.state.model) continue;
+      // Nor one whose build is STILL RUNNING here: the job will hand its table back through
+      // get_query_result, which reads it by ref — removing the definition mid-build would make the
+      // result unreadable for good.
+      if (cp.query_id && this.jobs.isLive?.(cp.query_id) && this.jobs.get(cp.query_id)?.status === 'running') continue;
       if ((ctx.state.checkpoint_consumers?.[cp.model] || []).some((id) => this.ctxs.has(id))) continue;
-      this.ctxs.removePipelineFiles(ctx.id, cp.model);
+      this.ctxs.removePipelineModelFiles(ctx.id, cp.model); // this model only: later builds share its base name
+
     }
+  }
+
+  /**
+   * Accept a render plan's verdict on the draft's checkpoints — the ONE place that happens, so
+   * every path (an edit, a preview, a build) retires the same things, removes the same files and
+   * reports the same list. `reason` describes the positional drop; the stale ones carry their own.
+   */
+  _applyCheckpointPlan(ctx, draft, plan, reason = null) {
+    draft.checkpoints = plan.checkpoints;
+    this._retireCheckpointFiles(ctx, [...plan.dropped, ...plan.retired]);
+    return [
+      ...plan.dropped.map((cp) => ({ at: cp.at, model: cp.model, reason })),
+      ...plan.retired.map((cp) => ({ at: cp.at, model: cp.model, reason: cp.reason })),
+    ];
   }
 
   /** Columns available after a draft's accumulated stages (source columns when empty),
@@ -1447,7 +1483,7 @@ export class Engine {
   async _draftStart(input) {
     const ctx = input.draft_id ? this._ctx(input.draft_id) : this.ctxs.create();
     const source = input.source;
-    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [], checkpoints: [], builds: 0 };
+    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [], checkpoints: [] };
     this.ctxs.touch(ctx.id);
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
     // the catalog declares but the table lacks simply does not appear (a clean internal
@@ -1573,7 +1609,7 @@ export class Engine {
     const ctx = this.ctxs.create();
     const name = input.name || origin.name;
     // Deep-copy the kept stages so editing the fork can never mutate the source's stages.
-    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), checkpoints: [], builds: 0 };
+    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), checkpoints: [] };
     // A materialized prefix the fork KEEPS (at <= after) is inherited: the fork reads the SAME
     // table, so branching a variant on top of an expensive prefix costs only the new steps. The
     // owner's model definition is copied into this overlay so `{{ ref() }}` resolves here (a
@@ -1660,9 +1696,8 @@ export class Engine {
     draft.stages = newStages;
     // The edit is accepted: the checkpoints it invalidated (and any that went stale) go now, and
     // the files of the ones nobody else reads go with them.
-    const retiredNow = [...plan.dropped.map((cp) => ({ at: cp.at, model: cp.model, reason: `step ${dropFrom} was ${action === 'delete_step' ? 'deleted' : action === 'insert_step' ? 'shifted by an insert' : action === 'truncate' ? 'truncated away' : 'edited'}` })), ...plan.retired];
-    draft.checkpoints = plan.checkpoints;
-    this._retireCheckpointFiles(ctx, plan.dropped);
+    const why = `step ${dropFrom} was ${action === 'delete_step' ? 'deleted' : action === 'insert_step' ? 'shifted by an insert' : action === 'truncate' ? 'truncated away' : 'edited'}`;
+    const retiredNow = this._applyCheckpointPlan(ctx, draft, plan, why);
     this.ctxs.touch(ctx.id);
     const after = rendered
       ? [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }))
@@ -1926,15 +1961,19 @@ export class Engine {
     // Preview what materialize would ACTUALLY build: from the last live checkpoint when there is
     // one (the steps it baked are a table, not SQL to re-render), else the whole pipeline.
     const plan = this._renderPlan(draft);
-    draft.checkpoints = plan.checkpoints;
-    const seq = (draft.builds || 0) + 1;
-    const modelName = `pipe_${draft.name}_${ctx.id}${seq > 1 ? `_c${seq}` : ''}`;
+    const dropped = this._applyCheckpointPlan(ctx, draft, plan);
+    const modelName = this._nextPipelineModel(ctx, draft.name);
     // Render ONLY the active warehouse dialect, so every response is consistent with where
     // the pipeline actually runs (bigquery → `|>`, postgres → CTEs). Grounded to physical.
     const rendered = renderPipeline(this.catalog, dialect, draft.source, plan.stages, { physicalCols: physSet, modelName, from: plan.from });
     const models = this._chainModels(rendered.chain, { name: draft.name, pipeline: { source: draft.source } });
+    const hasPython = models.some((m) => m.kind === 'python');
     return {
-      ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })), model_sql: rendered.sql,
+      ...base, available_columns: [...rendered.columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' })),
+      // A chain that ends in a python model has no SQL of its own — its code is under `python`
+      // below. Reporting `model_sql: null` as THE preview said nothing about what would be built.
+      ...(rendered.sql ? { model_sql: rendered.sql } : {}),
+      ...(dropped.length ? { checkpoints_dropped: dropped } : {}),
       ...(plan.checkpoint ? {
         from_checkpoint: { at: plan.checkpoint.at, model: plan.checkpoint.model, built_at: plan.checkpoint.built_at },
         steps_recomputed: plan.stages.length,
@@ -1942,8 +1981,26 @@ export class Engine {
           ? `Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}; the SQL above is only what runs on top of it (${plan.stages.length} step(s)).`
           : `Every step is already materialized as ${plan.checkpoint.model} — add_step before materializing again (the SQL above would just copy that table).`,
       } : {}),
-      ...(models.length > 1 ? { models: models.map(({ yml, functions, bindings, ...m }) => m), note: `The pipeline builds as a chain of ${models.length} dbt models (each python stage is a model of its own, reading the previous one via dbt.ref); ${modelName} — the last — is the result.` } : {}),
+      ...(models.length > 1 || hasPython
+        ? {
+          models: models.map(({ yml, functions, bindings, code, ...m }) => m),
+          ...(hasPython ? { python: models.filter((m) => m.kind === 'python').map(({ yml, functions, bindings, ...m }) => m) } : {}),
+          note: `The pipeline builds as a chain of ${models.length} dbt model(s) (each python stage is a model of its own, reading the previous one via dbt.ref); ${modelName} — the last — is the result.`,
+        }
+        : {}),
     };
+  }
+
+  /**
+   * The name the NEXT build of this pipeline takes. The counter lives on the CONTEXT, not on the
+   * draft: a second draft of the same name in the same context would otherwise start over at the
+   * bare name and rebuild the very table an earlier build — possibly one a fork inherited — still
+   * stands for. Monotonic, so no name is ever reused.
+   */
+  _nextPipelineModel(ctx, name, { advance = false } = {}) {
+    const seq = (ctx.state.builds || 0) + 1;
+    if (advance) { ctx.state.builds = seq; }
+    return `pipe_${name}_${ctx.id}${seq > 1 ? `_c${seq}` : ''}`;
   }
 
   /**
@@ -2062,20 +2119,19 @@ export class Engine {
     // only the steps after it are rendered. Each build gets its own model name, so a rebuild never
     // overwrites the very table it is reading (nor one a fork inherited).
     const plan = this._renderPlan(draft, draft.stages, { forBuild: true });
-    draft.checkpoints = plan.checkpoints;
+    const retiredNow = this._applyCheckpointPlan(ctx, draft, plan);
     if (plan.checkpoint && !plan.stages.length) {
       throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_step first, or read the built table with get_query_result({ context_id: '${plan.checkpoint.owner}', table: '${plan.checkpoint.model}' })`, { stage: 'validate', field: 'draft_id' });
     }
-    const seq = (draft.builds || 0) + 1;
-    const suffix = seq > 1 ? `_c${seq}` : '';
-    draft.building = { started_at: new Date().toISOString(), model: `pipe_${draft.name}_${ctx.id}${suffix}` };
+    const modelName = this._nextPipelineModel(ctx, draft.name, { advance: true });
+    draft.building = { started_at: new Date().toISOString(), model: modelName };
     let result;
     try {
       result = await this._registerPipeline({
         name: draft.name, context_id: ctx.id, materialized: draft.materialized,
         pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
         from_checkpoint: plan.checkpoint ? { at: plan.checkpoint.at, model: plan.checkpoint.model, columns: plan.checkpoint.columns } : null,
-        model_suffix: suffix,
+        model_name: modelName,
       });
     } finally {
       delete draft.building; // a detached build hands the guard over to its pending checkpoint
@@ -2097,7 +2153,6 @@ export class Engine {
       rows: result.row_count ?? null, carries_source: this._carriesSource(draft.source, columns),
       ...(result.status === 'running' && result.query_id ? { query_id: result.query_id } : {}),
     };
-    draft.builds = seq;
     draft.checkpoints = [...draft.checkpoints.filter((cp) => cp.at < checkpoint.at), checkpoint];
     // Snapshot the built pipeline (with its checkpoints) so it can still be forked after a discard.
     ctx.state.pipeline_origin = { name: draft.name, source: draft.source, materialized: draft.materialized, time_range: draft.time_range || null, stages: draft.stages.map((s) => JSON.parse(JSON.stringify(s))), checkpoints: draft.checkpoints.map((cp) => JSON.parse(JSON.stringify(cp))) };
@@ -2109,7 +2164,7 @@ export class Engine {
       }
       // Why a build started from further back than the caller may expect (a failed/lost build, a
       // refreshed value index) — said on the result, not left to be guessed from the timing.
-      if (plan.retired.length) result.checkpoints_dropped = plan.retired;
+      if (retiredNow.length) result.checkpoints_dropped = retiredNow;
       result.checkpoint = { at: checkpoint.at, model: checkpoint.model, ...(checkpoint.carries_source ? { carries_source: checkpoint.carries_source } : {}) };
       // A VIEW is not a computed prefix: reading it re-runs its SQL, so continuing on top of one
       // saves nothing. Say it once, here, where the choice can still be changed.
@@ -2159,6 +2214,10 @@ export class Engine {
     // phantom catalog column is rejected as "unknown column" here, not as a raw
     // warehouse error after the build.
     const physSet = await this._physicalCols(source);
+    // Sampling is a property of the WHOLE declaration, not of the slice this build renders: a
+    // `sample` baked into the materialized prefix still makes every number downstream approximate,
+    // and dropping the flag would hand back a 1%-sampled figure as if it were exact.
+    const sampled = (input.pipeline.stages || []).find((st) => st.stage === 'sample') || null;
     const render = (modelName) => renderPipeline(this.catalog, dialect, source, stages, { physicalCols: physSet, modelName, from: from ? { model: from.model, columns: from.columns } : null });
     // A pipeline renders as a CHAIN of dbt models: SQL stages until a python stage, that stage as a
     // Python model reading the previous one (or the source), and so on; the last model carries
@@ -2193,9 +2252,10 @@ export class Engine {
     const probe = render('pipe');
     await this._gateCompiled(this._chainModels(probe.chain, input).filter((m) => m.kind === 'python'));
     const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
-    // Every build of the same draft gets its own name (`_c2`, `_c3`, …): a rebuild must never
-    // overwrite the table it reads as its checkpoint, nor one a fork inherited.
-    const modelName = `pipe_${input.name}_${ctx.id}${input.model_suffix || ''}`;
+    // The caller may pass the name: every build of a draft gets its own (`_c2`, `_c3`, …), because
+    // a rebuild must never overwrite the table it reads as its checkpoint, nor one a fork
+    // inherited. The all-at-once path has no such history and uses the plain name.
+    const modelName = input.model_name || `pipe_${input.name}_${ctx.id}`;
     const out = render(modelName);
     const models = this._chainModels(out.chain, input);
     const last = models[models.length - 1];
@@ -2260,8 +2320,8 @@ export class Engine {
       // Provenance: a custom pipeline (not a governed metric), its source, and how fresh
       // the underlying data is — so the rows are self-trustable. A sample stage makes the
       // result APPROXIMATE — flag it loudly with the safe/unsafe + how-to-get-exact note.
-      provenance: { tier: 'pipeline', source, data_freshness: await this._dataFreshness(source), ...(stages.some((s) => s.stage === 'sample') ? { approximate: true } : {}) },
-      ...(stages.some((s) => s.stage === 'sample') ? { sampling: samplingNote(stages.find((s) => s.stage === 'sample').percent ?? 10) } : {}),
+      provenance: { tier: 'pipeline', source, data_freshness: await this._dataFreshness(source), ...(sampled ? { approximate: true } : {}) },
+      ...(sampled ? { sampling: samplingNote(sampled.percent ?? 10) } : {}),
       // A4: how to read this result again — these rows are a pipeline model, re-read
       // with get_query_result (NOT query_semantic_model, which is for metric queries).
       read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
@@ -2365,7 +2425,7 @@ export class Engine {
     const consumers = this._checkpointConsumers(ctx.id); // forks reading a table built here
     const removedFiles = this.ctxs.removePipelineFiles(ctx.id, model.replace(/_c\d+$/, ''));
     delete ctx.state.engine; delete ctx.state.model; delete ctx.state.native;
-    if (ctx.state.draft) { ctx.state.draft.checkpoints = []; ctx.state.draft.builds = 0; } // their tables are gone with the files
+    if (ctx.state.draft) ctx.state.draft.checkpoints = []; // their tables are gone with the files
     delete ctx.state.checkpoint_consumers;
     for (const c of consumers) { // a fork that read one of these prefixes has to recompute it now
       const st = this.ctxs.get(c.consumer).state;
@@ -2526,19 +2586,14 @@ export class Engine {
     return this.ctxs.drop(input.context_id);
   }
 
-  /** Drafts in OTHER contexts that read a table this context materialized. */
+  /**
+   * Drafts in OTHER contexts that read a table this context materialized. The LINK is the context
+   * manager's (it also keeps the GC off such a context); this narrows it to the consumers whose
+   * draft still holds that prefix — a fork that has since edited past it reads it no more.
+   */
   _checkpointConsumers(id) {
-    if (!this.ctxs.has(id)) return [];
-    const map = this.ctxs.get(id).state.checkpoint_consumers || {};
-    const out = [];
-    for (const [model, ids] of Object.entries(map)) {
-      for (const consumer of ids) {
-        if (consumer === id || !this.ctxs.has(consumer)) continue;
-        const draft = this.ctxs.get(consumer).state.draft;
-        if ((draft?.checkpoints || []).some((cp) => cp.model === model)) out.push({ consumer, model });
-      }
-    }
-    return out;
+    return this.ctxs.checkpointConsumers(id)
+      .filter(({ consumer, model }) => (this.ctxs.get(consumer).state.draft?.checkpoints || []).some((cp) => cp.model === model));
   }
 
   list_contexts() {

@@ -299,6 +299,15 @@ export class ContextManager {
     return this.removeGeneratedWhere(id, pipelineFamilyMatcher(model));
   }
 
+  /**
+   * Remove ONE pipeline model (with its chain) and nothing else. Retiring a materialized prefix
+   * uses this, not the family form: the prefix's name is the BASE name of every later build, so the
+   * family matcher would take the current result's files with it.
+   */
+  removePipelineModelFiles(id, model) {
+    return this.removeGeneratedWhere(id, pipelineModelMatcher(model));
+  }
+
   /** The generated files of ONE pipeline model (its chain included), by name. */
   pipelineFiles(id, model) {
     const d = this.generatedDir(id);
@@ -362,11 +371,31 @@ export class ContextManager {
     const dropped = [];
     for (const c of [...this.contexts.values()]) {
       if (this.leases.get(c.id)) continue; // never reclaim a context with a live build
+      // …nor one whose materialized prefix another (live) context reads: dropping it would take
+      // that table with it, which is exactly what context({ action: 'drop' }) refuses to do
+      // without force. A consumer in use keeps this one's lastUsedAt fresh, so an owner is only
+      // held while its table is actually being read.
+      if (this.checkpointConsumers(c.id).length) continue;
       if (now - (c.lastUsedAt || c.createdAt) > maxIdleMs) {
         try { this.drop(c.id); dropped.push(c.id); } catch { /* in-flight; skip */ }
       }
     }
     return dropped;
+  }
+
+  /**
+   * Contexts that read a table THIS context materialized: [{ consumer, model }]. The link is
+   * recorded when a fork inherits a prefix; a consumer whose workspace is gone does not count.
+   */
+  checkpointConsumers(id) {
+    const map = this.contexts.get(id)?.state?.checkpoint_consumers || {};
+    const out = [];
+    for (const [model, ids] of Object.entries(map)) {
+      for (const consumer of ids) {
+        if (consumer !== id && this.contexts.has(consumer)) out.push({ consumer, model });
+      }
+    }
+    return out;
   }
 
   /** Tear down a whole context (waits on no in-flight leases). */

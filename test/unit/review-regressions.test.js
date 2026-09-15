@@ -149,3 +149,52 @@ test('a single python-model pipeline is built detached, like a chain', async (t)
   assert.ok(detached, `a lone python model hands back a query_id instead of blocking: ${JSON.stringify(out).slice(0, 300)}`);
   assert.equal(ran, 1, 'and the build did start');
 });
+
+// ── a funnel step filtering a JSON-BLOB payload property threw ReferenceError ───────────────
+// Removing the (always-null) `col` qualifier from stepPredicate left one reference to it behind.
+// A FLATTENED property short-circuits before that line, which is why the fixtures never hit it;
+// a property read out of the event_data JSON does reach it, and the whole funnel died with
+// "col is not defined" instead of building.
+test('a funnel step can filter a property read from the event_data blob', async () => {
+  const yaml = `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp:
+        role: events
+        primary_entity: event
+        known_events: [tutorial, level_completed]
+    columns:
+      - { name: event_id, data_type: string, meta: { mcp: { entity: { name: event, type: primary } } } }
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+      - name: event_data
+        data_type: jsonb
+        meta:
+          mcp:
+            is_event_data: true
+            properties:
+              step_id: { type: string }
+  - name: dim_users
+    meta: { mcp: { role: users } }
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
+      - { name: country, data_type: string }
+`;
+  const dir = mkdtempSync(join(tmpdir(), 'blob-'));
+  const file = join(dir, 'catalog.yml');
+  writeFileSync(file, yaml);
+  const e = new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) });
+  const funnel = {
+    stage: 'match_recognize',
+    partition_by: [{ entity: 'user' }],
+    steps: [
+      { name: 's1', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_1' }] },
+      { name: 's2', event_name: ['tutorial'], where: [{ property: 'step_id', op: 'eq', value: 'step_2' }] },
+    ],
+    metrics: [{ name: 'reached_s2', type: 'reached', step: 's2' }],
+  };
+  const out = await e.register_native_model({ name: 'blob_funnel', dry_run: true, pipeline: { source: 'events', stages: [funnel] } });
+  assert.ok(out.ok !== false, JSON.stringify(out.error || {}));
+});

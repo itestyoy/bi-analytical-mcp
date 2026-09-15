@@ -77,8 +77,9 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
     if (catalog.isComplexEventProp(c.property, source)) {
       throw new Error(`property '${c.property}' is array/struct; reference it via a prepare stage (derive/unnest), not directly`);
     }
-    // the catalog's one rule for reading a property (flat column or JSON extract), qualified by `col`
-    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type, qualifier: col || undefined }), c.op, c.value);
+    // the catalog's one rule for reading a property: a flat column, or a JSON extract from the
+    // payload column — unqualified, like every other clause here
+    return comparePred(catalog.propertyExpr(source, c.property, dialect, { type: p.type }), c.op, c.value);
   });
   return [ev, ...props].join(' AND ');
 }

@@ -212,7 +212,7 @@ test('a recipe payload is fitted to this catalog: an SCD join gets its validity 
     recipes: loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url))),
     contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
   });
-  const out = await e.semantic_index({ recipe: 'dn_retention_exact' });
+  const out = await e.semantic_index({ recipe: 'pipeline_age_offset_axis' });
   const joinStage = out.register_payload.pipeline.stages.find((s) => s.stage === 'join' && s.with === 'users');
   const u = e.catalog.getModel('users');
   assert.ok(u.scd, 'the fixture users model is slowly-changing (otherwise this test proves nothing)');

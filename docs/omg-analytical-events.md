@@ -112,7 +112,11 @@ dbt semantic model and verified by a query:
 9. Monetization — ARPU/ARPPU/payer-share/AOV/LTV by product/network/channel; ad revenue (`apd_ad_impression`).
 10. Economy — coin sources/sinks (`currency_income`/`currency_outcome`) by placement.
 
-> These map 1:1 to recipes (`config/recipes.json`) and are exercised by the
-> integration suites (`behavior-funnels.test.js`, `analytics-tasks.test.js`,
-> per-task families). The point: a fixed, **tested** way to build each model and
-> compute each metric, so the agent can assemble them reliably.
+> Each of these is ASSEMBLED from the technique recipes shipped in
+> `config/recipes.json` (a metric type, a join, a pipeline stage pattern — the
+> system layer is per technique, not per business task), and the assembled shapes
+> are exercised by the integration suites (`behavior-funnels.test.js`,
+> `analytics-tasks.test.js`). The point: a fixed, **tested** way to build each
+> model and compute each metric, so the agent can assemble them reliably — and a
+> deployment that wants the finished business shape as one call puts it in its own
+> recipe file (`RECIPES_PATH`).

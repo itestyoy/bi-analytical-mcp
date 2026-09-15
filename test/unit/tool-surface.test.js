@@ -95,13 +95,13 @@ test('context tool: list / describe / drop dispatch and strict fields', async ()
 test('semantic_index folds recipes: overview list + { recipe } payload', async () => {
   const e = engine();
   const overview = await e.semantic_index();
-  assert.ok(Array.isArray(overview.recipes) && overview.recipes.some((r) => r.id === 'nday_retention'), 'overview lists recipe ids');
-  const r = await e.semantic_index({ recipe: 'nday_retention' });
-  assert.equal(r.id, 'nday_retention');
+  assert.ok(Array.isArray(overview.recipes) && overview.recipes.some((r) => r.id === 'conversion_metric_window'), 'overview lists recipe ids');
+  const r = await e.semantic_index({ recipe: 'conversion_metric_window' });
+  assert.equal(r.id, 'conversion_metric_window');
   assert.ok(r.hack && (r.create_payload || r.register_payload), 'recipe payload + hack returned');
   assert.ok(r.naming_note.includes('namespaced'), 'carries the task-namespacing note');
   // recipe is a mutually-exclusive view; an unknown id is rejected by the enum.
-  await assert.rejects(() => e.semantic_index({ recipe: 'nday_retention', event: 'tutorial' }), /must be exactly one of: .*\{ recipe \}/);
+  await assert.rejects(() => e.semantic_index({ recipe: 'conversion_metric_window', event: 'tutorial' }), /must be exactly one of: .*\{ recipe \}/);
   await assert.rejects(() => e.semantic_index({ recipe: 'no_such_recipe' }), /invalid input/);
 });
 
@@ -129,7 +129,7 @@ test('a sampled pipeline flags the result approximate with guidance', async () =
 test('recipes have no standalone tool; get_recipe payload is framed as a building block', async () => {
   const names = buildToolDefs(engine()).map((d) => d.name);
   assert.ok(!names.includes('get_recipe') && !names.includes('list_recipes'), 'no standalone recipe tools');
-  const r = await engine().semantic_index({ recipe: 'nday_retention' });
+  const r = await engine().semantic_index({ recipe: 'conversion_metric_window' });
   assert.ok(r.building_block && r.hack, 'recipe is presented as a reusable building block (+ hack technique)');
 });
 
@@ -166,11 +166,11 @@ test('semantic_index({ guide }) serves the workflow + routing triggers + per-tas
   const g = await e.semantic_index({ guide: true });
   assert.ok(Array.isArray(g.workflow) && g.workflow.length >= 4, 'workflow steps present');
   assert.ok(Array.isArray(g.routing_triggers) && g.routing_triggers.every((t) => t.if && t.do), 'IF/DO routing triggers present');
-  assert.ok(g.tasks && Array.isArray(g.tasks.retention) && g.tasks.retention.some((r) => r.id === 'nday_retention'), 'per-task recipe families listed');
+  assert.ok(g.tasks && Array.isArray(g.tasks.metric_types) && g.tasks.metric_types.some((r) => r.id === 'conversion_metric_window'), 'per-family recipe listing present');
   // narrow to one family.
-  const gt = await e.semantic_index({ guide: 'retention' });
-  assert.equal(gt.task, 'retention');
-  assert.ok(gt.recipes.some((r) => r.id === 'retention_by_segment'));
+  const gt = await e.semantic_index({ guide: 'metric_types' });
+  assert.equal(gt.task, 'metric_types');
+  assert.ok(gt.recipes.some((r) => r.id === 'ratio_metric'));
   // overview points at the guide; guide is a mutually-exclusive view.
   const ov = await e.semantic_index();
   assert.ok(typeof ov.guide === 'string' && /guide/.test(ov.guide));

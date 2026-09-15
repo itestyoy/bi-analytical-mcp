@@ -52,7 +52,7 @@ before(async () => {
   engine = new Engine({ catalog, contextManager: ctxs, runner: backend, recipes });
 
   // Scenario A: build from the published recipe (tutorial step funnel)
-  await create(recipes.get('multistep_funnel').create_payload);
+  await create(recipes.get('funnel_from_event_property_steps').create_payload);
 
   // Scenario B: a level funnel keyed by level_id (event + property value)
   await create({

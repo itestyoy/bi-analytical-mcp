@@ -714,6 +714,13 @@ export function dbtSchemaToCatalog(doc) {
     if (Object.keys(entities).length) m.entities = entities;
     if (Object.keys(dimensions).length) m.dimensions = dimensions;
     if (Object.keys(columnDescriptions).length) m.column_descriptions = columnDescriptions;
+    // The role IS the source's identity, so two models cannot share one: the second used to
+    // silently REPLACE the first, and everything downstream — the tool enums, the value index,
+    // every join path — then described a table nobody meant. Several events sources are fine;
+    // each carries its own role name.
+    if (out.models[key]) {
+      throw new Error(`catalog models '${out.models[key].dbt_model}' and '${model.name}' both declare meta.mcp.role: '${key}' — the role is the source's IDENTITY, so exactly one model may carry it. Give one of them its own role name (several sources of the same kind are fine: events, crashlytics, …).`);
+    }
     out.models[key] = m;
   }
   if (!(out.facts || []).length) throw new Error('no events source: at least one model must declare an event_name (meta.mcp.is_event_name) or event_data (meta.mcp.is_event_data) column');

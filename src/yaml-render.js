@@ -118,7 +118,12 @@ export function renderBaseModel(catalog, key) {
   // install day, a daily spend table's spend day. It is the model's agg_time_dimension, exactly
   // as an events source's event_time is, and it is emitted by the dimension loop below (the
   // catalog keeps it there so it stays groupable); this only names it as the axis.
-  let timeDim = m.time?.column;
+  // It must be the NAME OF A DIMENSION THIS MODEL EMITS: dbt-semantic-interfaces rejects a
+  // manifest whose agg_time_dimension is not defined as a dimension, and the axis column can be
+  // opted out of grouping (meta.mcp.dimension: false) — then it is a column, not a dimension, and
+  // naming it here would break `dbt parse` for every context that merely loads the model. So the
+  // loop below chooses among what it actually emitted.
+  let timeDim = null;
   for (const [name, d] of Object.entries(m.dimensions || {})) {
     if (d.type === 'time') {
       const dim = { name, type: 'time', type_params: { time_granularity: d.granularity || 'day' } };
@@ -126,7 +131,8 @@ export function renderBaseModel(catalog, key) {
       // sibling of it; the top-level placement is what dbt rejected as an unexpected property.
       if (scd && d.validity) { dim.type_params.validity_params = d.validity === 'start' ? { is_start: true } : { is_end: true }; dim.expr = name; }
       sm.dimensions.push(dim);
-      if (!(scd && d.validity)) timeDim ||= name; // a validity bound is not the model's agg_time dimension
+      // the declared axis wins when it IS emitted; otherwise the first non-validity time dimension
+      if (!(scd && d.validity) && (name === m.time?.column || !timeDim)) timeDim = name;
     } else {
       sm.dimensions.push({ name, type: 'categorical' });
     }

@@ -13,7 +13,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { openStore } from '../../src/store.js';
-import { renderContext } from '../../src/yaml-render.js';
+import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (over = {}) => new Engine({
@@ -382,4 +382,73 @@ test('the submission is read from dbt_project.yml first, and its source is repor
     { modelName: 'm', inputModel: 'm_in', allow: importAllowlist({}, profile), config: {}, profile, submission: declared.method },
   );
   assert.equal(compiled.config.submission_method, 'serverless');
+});
+
+// ── agg_time_dimension named a COLUMN that was not a dimension ──────────────────────────────
+// The model's aggregation time axis was seeded from the time COLUMN and emitted unconditionally.
+// A time column may be opted out of grouping (meta.mcp.dimension: false) — then it is not a
+// dimension, and dbt-semantic-interfaces rejects the whole manifest ("agg_time_dimension … is not
+// defined as a dimension"), so `dbt parse` fails for EVERY context that merely loads the model.
+// Input-validation guard on what is rendered: the axis must be a dimension this model emits.
+const spendCatalog = (axisMeta) => {
+  const file = join(mkdtempSync(join(tmpdir(), 'aggtime-')), 'catalog.yml');
+  writeFileSync(file, `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp: { role: events, primary_entity: event, known_events: [login] }
+    columns:
+      - { name: user_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+  - name: fct_spend
+    meta:
+      mcp: { role: measures, primary_entity: { name: row, type: primary } }
+    columns:
+      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row, type: primary } } } }
+      - { name: spend_date, data_type: date, meta: { mcp: { ${axisMeta} } } }
+      - { name: channel, data_type: string, meta: { mcp: { dimension: true } } }
+      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+`);
+  return loadCatalog(file, {});
+};
+
+test('a time axis opted out of grouping is not named as agg_time_dimension', () => {
+  const optedOut = spendCatalog('is_time: true, dimension: false');
+  assert.equal(optedOut.getModel('measures').dimensions?.spend_date, undefined, 'the axis is not a dimension here');
+  assert.equal(renderBaseModel(optedOut, 'measures').defaults, undefined, 'so it is not named as the aggregation axis either');
+  // the ordinary shape is unchanged: the axis IS a dimension and IS named
+  const grouped = spendCatalog('is_time: true');
+  const rendered = renderBaseModel(grouped, 'measures');
+  assert.ok(rendered.dimensions.some((d) => d.name === 'spend_date' && d.type === 'time'));
+  assert.deepEqual(rendered.defaults, { agg_time_dimension: 'spend_date' });
+});
+
+// ── two models could claim the same role, and the second silently replaced the first ────────
+// The role IS the source's identity. A duplicate used to overwrite, so every tool enum, the value
+// index and every join path then described a table nobody meant — with no warning anywhere.
+test('two models declaring the same role are refused, naming both', () => {
+  const file = join(mkdtempSync(join(tmpdir(), 'dup-')), 'catalog.yml');
+  writeFileSync(file, `version: 2
+models:
+  - name: fct_events
+    meta:
+      mcp: { role: events, primary_entity: event, known_events: [login] }
+    columns:
+      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: true } } }
+      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }
+  - name: fct_spend_a
+    meta:
+      mcp: { role: measures, primary_entity: { name: row, type: primary } }
+    columns:
+      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row, type: primary } } } }
+      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+  - name: fct_spend_b
+    meta:
+      mcp: { role: measures, primary_entity: { name: row2, type: primary } }
+    columns:
+      - { name: row_id, data_type: string, meta: { mcp: { entity: { name: row2, type: primary } } } }
+      - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
+`);
+  assert.throws(() => loadCatalog(file, {}), /fct_spend_a.*fct_spend_b.*role.*measures/s);
 });

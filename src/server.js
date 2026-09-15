@@ -9,6 +9,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } fr
 import { existsSync, mkdirSync } from 'node:fs';
 import { loadCatalog, validateDbtProject, groundCatalogToPhysical } from './catalog.js';
 import { loadRecipes } from './recipes.js';
+import { assetPath } from './runtime-assets.js';
+import { frameProfile } from './python-model.js';
 import { ContextManager } from './context-manager.js';
 import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
@@ -187,8 +189,19 @@ export async function makeEngine(opts = {}) {
   // Fail fast if the dbt project doesn't implement the required macro(s) / model
   // nodes the server depends on (unless explicitly skipped, e.g. catalog-only dev).
   if (baseProjectDir && process.env.SKIP_PROJECT_VALIDATION !== '1') validateDbtProject(baseProjectDir, catalog);
-  const recipesPath = opts.recipesPath || process.env.RECIPES_PATH || join(process.cwd(), 'config', 'recipes.json');
-  const recipes = existsSync(recipesPath) ? loadRecipes(recipesPath) : undefined;
+  // Recipes come in TWO LAYERS, merged: the system file that ships with the server (technical and
+  // universal) and the deployment's own file(s) — RECIPES_PATH, comma-separated for several — with
+  // the deployment winning an id collision. Before this, RECIPES_PATH REPLACED the system set, so a
+  // deployment with its own recipes silently lost every shipped one.
+  const systemRecipes = assetPath('systemRecipes');
+  const deploymentRecipes = opts.recipesPath || process.env.RECIPES_PATH || '';
+  const recipes = (systemRecipes || deploymentRecipes)
+    ? loadRecipes(systemRecipes, deploymentRecipes, {
+      dialect: catalog.dialect,
+      python: !!catalog.pythonRuntime?.available,
+      runtime: frameProfile(catalog.pythonRuntime, catalog.pythonRuntime?.config || {}).key,
+    })
+    : undefined;
   const ctxs = new ContextManager({
     baseProjectDir,
     workspaceRoot: opts.workspaceRoot || process.env.MCP_WORKSPACE,

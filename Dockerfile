@@ -37,6 +37,9 @@ RUN npm ci --omit=dev || npm install --omit=dev
 # test/unit/runtime-assets.test.js checks that this COPY covers it.
 COPY src ./src
 COPY python ./python
+# …and config/, which carries the SYSTEM recipes (a deployment's own RECIPES_PATH is merged on top,
+# not instead) plus the sample catalog.
+COPY config ./config
 
 ENV HOST=0.0.0.0 \
     PORT=3000 \

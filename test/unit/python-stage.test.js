@@ -279,9 +279,9 @@ test('python stage: offered only where the dbt profile can run Python models; re
   assert.match(bq({ project: 'x' }).reason, /submission_method \(bigframes \| serverless \| cluster\)/);
   // method_declared says whether the profile SAID the submission or the settings only implied it —
   // an implied one must be written into each model's dbt.config, or dbt uses its own default
-  assert.deepEqual(bq({ project: 'x', submission_method: 'bigframes', gcs_bucket: 'b', compute_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'bigframes', method_declared: true, config: {}, packages: '' });
-  assert.deepEqual(bq({ project: 'x', gcs_bucket: 'b', dataproc_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'serverless', method_declared: false, config: {}, packages: '' });
-  assert.deepEqual(bq({ project: 'x', gcs_bucket: 'b', compute_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'bigframes', method_declared: false, config: {}, packages: '' });
+  assert.deepEqual(bq({ project: 'x', submission_method: 'bigframes', gcs_bucket: 'b', compute_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'bigframes', method_source: 'profile', method_declared: true, config: {}, packages: '' });
+  assert.deepEqual(bq({ project: 'x', gcs_bucket: 'b', dataproc_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'serverless', method_source: "inferred from the profile's settings", method_declared: false, config: {}, packages: '' });
+  assert.deepEqual(bq({ project: 'x', gcs_bucket: 'b', compute_region: 'us-central1' }), { available: true, runtime: 'bigquery', method: 'bigframes', method_source: "inferred from the profile's settings", method_declared: false, config: {}, packages: '' });
   // the operator's settings are resolved ONCE, here, and travel with the runtime — so the schema,
   // the stage's validation and the compiled model cannot describe different runtimes.
   const pinned = resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: { MCP_PYTHON_MODEL_CONFIG: '{"submission_method":"serverless"}', MCP_PYTHON_PACKAGES: 'shap=shap' } });

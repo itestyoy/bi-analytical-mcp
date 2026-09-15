@@ -938,7 +938,20 @@ export class Engine {
       // Whether a pipeline may end in a `python` stage (a dbt Python model on the warehouse runtime):
       // decided from the dbt profile, so the stage is in the tool schemas only where it can run.
       python_models: c.pythonRuntime?.available
-        ? { available: true, runtime: c.pythonRuntime.runtime, ...(c.pythonRuntime.method ? { submission_method: c.pythonRuntime.method } : {}), note: 'A pipeline may end in a `python` stage (build_native_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.' }
+        ? {
+          available: true,
+          runtime: c.pythonRuntime.runtime,
+          ...(c.pythonRuntime.method ? { submission_method: c.pythonRuntime.method } : {}),
+          // Where the submission came from, because it decides WHICH frame API the code must be
+          // written against. `submission_method` is a MODEL config — dbt's macro reads only that —
+          // so a value merely inferred from the profile's settings is a guess this server then
+          // writes into each generated model to make it true.
+          ...(c.pythonRuntime.method_source ? { submission_method_from: c.pythonRuntime.method_source } : {}),
+          ...(c.pythonRuntime.method && !c.pythonRuntime.method_declared
+            ? { submission_note: `Nothing declares the submission: '${c.pythonRuntime.method}' is inferred from the profile's settings, and this server writes it into every python model it generates so the frame API and the runtime agree. Declare it where dbt itself looks — dbt_project.yml, models: +submission_method — and direct \`dbt run\` outside this server matches too.` }
+            : {}),
+          note: 'A pipeline may end in a `python` stage (build_native_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.',
+        }
         : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
       // dbt connects with an adapter this server writes no SQL for, so the SQL is rendered in
       // another dialect's syntax against it — true of this deployment, and worth knowing when SQL

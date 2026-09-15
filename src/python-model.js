@@ -63,6 +63,12 @@ export function frameProfile(rt, config = {}) {
       // frame by another's Series) raises NullIndexError instead of aligning. The gate refuses the
       // unmistakable one; the rest is in `guide` and in the run-failure hints below.
       nullIndex: true,
+      // The submission this profile DESCRIBES. A deployment may resolve none (MCP_PYTHON_MODELS=on
+      // on a profile with no submission_method, a profile that only hints at one): the frame, the
+      // allowlist, the rules and the gate all then describe BigFrames while dbt, reading nothing,
+      // would fall back to its own default (serverless → PySpark) and the model would die in a
+      // Dataproc job. Writing the submission this profile stands for keeps the two the same.
+      submission: 'bigframes',
       // What a failed run of THIS runtime means, for the failures whose actionable part is one
       // class name. Declared here so `pythonRunHints` stays a matcher with no runtime inside it.
       runHints: [
@@ -278,7 +284,7 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
   const cfg = {
     materialized: 'table',
     ...(packages.size ? { packages: [...packages].sort() } : {}),
-    ...(submission ? { submission_method: submission } : {}),
+    ...((submission || profile.submission) ? { submission_method: submission || profile.submission } : {}),
     ...config,
   };
   const cfgArgs = Object.entries(cfg).map(([k, v]) => `${k}=${pyLiteral(v)}`).join(', ');

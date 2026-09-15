@@ -129,7 +129,11 @@ export class Engine {
     const stages = payload?.pipeline?.stages;
     if (!Array.isArray(stages)) return { payload: null, fitted };
     const source = payload.pipeline.source;
-    const eventTime = source ? this.catalog.getModel(source)?.time?.column : null;
+    // A recipe is shipped for every deployment, so it may name a source THIS catalog does not have.
+    // getModel throws on an unknown key, and the recipe view would then fail outright instead of
+    // showing the recipe (the caller can still read it and adapt it). Fitting is best-effort.
+    let eventTime = null;
+    if (source) { try { eventTime = this.catalog.getModel(source)?.time?.column || null; } catch { eventTime = null; } }
     const next = stages.map((st) => {
       if (st?.stage !== 'join' || st.between || !st.with || !eventTime) return st;
       let m; try { m = this.catalog.getModel(st.with); } catch { return st; }
@@ -401,6 +405,9 @@ export class Engine {
     const c = this.catalog;
     const { model, attribute, via } = ref;
     if (!c.models[model]) throw new ToolError(`${where}: unknown model '${model}'. Models: ${c.modelKeys().join(', ')}${c.unavailableHint(model)}`, { stage: 'validate', field: 'model' });
+    // A model the context never loaded is answered with the fix (use_base_models), not with the
+    // relationship refusal below: "not loaded" is the actual problem, and it is actionable.
+    this._checkModelLoaded(ctx, ref);
     const target = c.getModel(model);
     // 1. a dimension the TASK declared on this model (a payload property or a model column named
     //    in create/update_semantic_model) → its task-namespaced name
@@ -426,7 +433,10 @@ export class Engine {
     for (const src of sources) {
       for (const [ent] of Object.entries(c.entitiesOf(src))) if (c.joinTargetFor(ent) === model) candidates.add(ent);
     }
-    if (!candidates.size && own && c.joinTargetFor(own) === model) candidates.add(own); // reached under its identity
+    // …or under its own identity: a source CARRIES that relationship by name. (`joinTargetFor(own)`
+    // alone is tautological — `own` is this model's primary entity, so it always resolves back to
+    // it; the question is whether any source in this context points at it.)
+    if (!candidates.size && own && sources.some((src) => c.entitiesOf(src)[own])) candidates.add(own);
     if (via) {
       if (!candidates.has(via)) throw new ToolError(`${where}: '${via}' is not a relationship from this task's source(s) to '${model}'. Available: ${[...candidates].join(', ') || '(none)'}`, { stage: 'validate', field: 'via' });
       return `${via}__${attribute}`;

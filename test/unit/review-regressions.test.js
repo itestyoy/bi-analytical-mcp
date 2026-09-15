@@ -329,6 +329,21 @@ test('the resolved submission method is written into the model, not just reporte
     config: { submission_method: 'serverless' }, profile, submission: rt.method,
   });
   assert.equal(forced.config.submission_method, 'serverless');
+  // …and a deployment where NOTHING resolved a method (MCP_PYTHON_MODELS=on over a profile that
+  // carries none) still writes the submission this profile DESCRIBES: otherwise the frame, the
+  // allowlist, the rules and the gate all say BigFrames while dbt, reading no config, submits to
+  // its own default (serverless → PySpark) and the model dies in a Dataproc job.
+  const unresolved = compilePythonStage(stage, {
+    modelName: 'm', inputModel: 'in', allow: new Map(),
+    config: {}, profile: frameProfile({ runtime: 'bigquery' }, {}), submission: null,
+  });
+  assert.equal(unresolved.config.submission_method, 'bigframes');
+  // a runtime with no such config says nothing
+  const duck = compilePythonStage(stage, {
+    modelName: 'm', inputModel: 'in', allow: new Map(),
+    config: {}, profile: frameProfile({ runtime: 'duckdb' }, {}), submission: null,
+  });
+  assert.equal(duck.config.submission_method, undefined);
 
   // a profile that DECLARES the method is marked as such (nothing is being guessed there)
   writeFileSync(join(dir, 'profiles.yml'), [
@@ -451,4 +466,32 @@ models:
       - { name: cost, data_type: numeric, meta: { mcp: { measure: true } } }
 `);
   assert.throws(() => loadCatalog(file, {}), /fct_spend_a.*fct_spend_b.*role.*measures/s);
+});
+
+// ── the "no relationship to this model" refusal was unreachable ──────────────────────────────
+// It was guarded by `joinTargetFor(own) === model`, which is a tautology: `own` IS that model's
+// primary entity, so it always resolves back to it. Every unreachable attribute was therefore
+// accepted as `<own>__<attribute>` and died later inside MetricFlow, as an unknown entity.
+test('an attribute of a LOADED model no source can reach is refused here, not by MetricFlow', async () => {
+  const e = engine();
+  // measures on one events source; the OTHER events source is loaded, but nothing declares a
+  // relationship to it (two facts do not point at each other).
+  const out = await e.create_semantic_model({
+    name: 'evonly',
+    use_base_models: ['crashlytics', 'users'],
+    semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
+  });
+  await assert.rejects(
+    () => e.query_semantic_model({ context_id: out.context_id, metrics: ['evonly_n'], group_by: [{ model: 'crashlytics', attribute: 'app_version' }] }),
+    (err) => {
+      assert.match(err.message, /no source in this context declares a relationship to 'crashlytics'/);
+      assert.match(err.message, /relationships/, 'and says where to look');
+      return true;
+    },
+  );
+  // …while the REACHABLE model of the same context still resolves under its relationship (the fix
+  // closed no path; the warehouse-backed group-bys prove the rest).
+  const ctx = e.ctxs.get(out.context_id);
+  assert.equal(e._normalizeRef(ctx, { model: 'users', attribute: 'country' }), 'user__country');
 });

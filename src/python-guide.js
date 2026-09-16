@@ -1,5 +1,29 @@
-// The AUTHORING GUIDE for a python stage, per warehouse runtime. It is served TWICE from this one
-// source, so the two can never drift:
+// The AUTHORING GUIDE for a python stage, per warehouse runtime — and the one place the
+// FACT-DERIVED texts about a runtime are composed.
+//
+// WHERE EACH KIND OF TEXT LIVES (one source per fact; a reader must never be handed two lists that
+// can disagree):
+//   1. FACTS about the library — versions, signatures, which methods need an ordering or an index:
+//      config/bigframes-facts.json, EXTRACTED from the installed library by
+//      scripts/bigframes-facts.py. Nothing anywhere restates a fact in prose.
+//   2. RULES with their reasoning, and a do / avoid per operation: this file (the cookbook data
+//      below), rendered two ways — compact into the stage description (`pythonRulesText`) and in
+//      full through semantic_index({ guide: 'python' }) (`pythonAuthoringGuide`).
+//   3. FAILURE HINTS — what a class name means on this runtime: `bigframesRunHints()` here, built
+//      from the same fact sheet, carried by the frame profile and matched by `pythonRunHints`.
+//   4. THE REFERENCE a caller fetches mid-write: `pythonReferenceRecipes()` here — the extracted
+//      sheet published as recipes addressable by id (bf_ml_signatures, bf_frame_method_rules).
+//   5. RUNTIME MECHANICS — what dbt.ref() returns, how pandas is spelled, which ml library runs
+//      in-engine, the import allowlist, the build grace: the frame profile in src/python-model.js.
+//      Its one-line `ml` list comes from `mlClassesText()` here, not from a list kept there.
+//   6. STAGE MECHANICS in this server — where the stage sits in the chain, what the caller
+//      declares, what the server writes, the size limits: the `pythonStageSchema` description in
+//      src/python-model.js, which interpolates (2) rather than repeating it.
+//   7. WHEN to reach for a python stage at all: one routing trigger in src/guide.js.
+//   8. WORKED PAYLOADS per move: config/recipes.json (the bigframes family), each one a compiling
+//      payload; the server NUDGES on pipeline shape (src/engine.js) rather than refusing.
+//
+// The guide itself is served TWICE from this one source, so the two can never drift:
 //   - compressed, as the python stage's own DESCRIPTION (`pythonRulesText`) — why this runtime
 //     bites, an INDEX of the worked recipes (which one covers which move) with an instruction to
 //     study them, and how a stage is declared here; where a deployment ships no recipes there is
@@ -340,6 +364,65 @@ export function pythonRulesText(key, recipes = []) {
     + `THE RIGHT FORM PER OPERATION — ${lines.join('; ')}. `
     + `${book.stage_form || ''} `
     + `The same guide with the reasoning behind each rule and the full examples: semantic_index({ guide: "python" }).`;
+}
+
+/**
+ * THE ML LIBRARY'S CLASSES, grouped by module, from the extracted sheet — for the one line a frame
+ * profile needs ("modelling is this library, and these are its classes"). The PARAMETERS are not
+ * repeated there: they are in the reference recipe and in the guide's own rule, so a reader is
+ * never offered two lists that can disagree.
+ */
+export function mlClassesText() {
+  const per = FACTS?.ml || {};
+  const mods = Object.entries(per).map(([mod, entries]) => {
+    const names = Object.keys(entries).map((c) => c.replace(/\(\)$/, '()'));
+    return `${mod}.${names.join(' / ')}`;
+  });
+  return mods.length ? mods.join('; ') : null;
+}
+
+/**
+ * WHAT A FAILURE CLASS MEANS on this runtime — the hints a failed run is annotated with
+ * (`pythonRunHints` matches them; the frame profile carries them). They live HERE, next to the
+ * rules, because they state the same facts: the method lists come from the extracted sheet and the
+ * claims from its `rules`, so a hint can never name a method the guide does not, or the other way
+ * round. The hint says what the class name means and which forms do not hit it; HOW to write the
+ * code is the guide's job, and the signatures are the reference recipe's.
+ */
+export function bigframesRunHints() {
+  const claim = (id) => (FACTS?.rules || []).find((r) => r.id === id)?.claim || '';
+  return [
+    {
+      match: 'NullIndexError|Cannot implicitly align',
+      hint: 'About this runtime: the frame dbt.ref() returns carries NO INDEX, so two objects can only be combined while they share a root — the same frame, narrowed by a projection, a filter or a window. Anything re-read as its own query is a different root: a locally built frame, a groupby aggregate, a cache()d frame, and the output of bigframes.ml predict/transform. '
+        + `${claim('align_needs_common_root')} The traceback says which operation it was; the forms that do not need alignment are a merge on a key (a SQL join), a value computed from the SAME frame, and — for an estimator — returning ITS frame instead of assigning its column back (that output already carries the input columns). Worked forms: semantic_index({ recipe: "bf_lookup_via_merge" }) / ({ recipe: "bf_ml_predict_as_column" }).`,
+    },
+    {
+      match: 'OrderRequiredError',
+      hint: `About this runtime: it carries no row order (the dbt wrapper runs with ordering_mode="partial"), and the operations that need one are marked in the library — ${list(NEEDS_ORDER)}${BY_ARG.length ? `, and by argument ${list(BY_ARG)}` : ''}. sort_values (or sort_index) before the operation is what grants the ordering — nothing else does. The full list with the index-only ones: semantic_index({ recipe: "bf_frame_method_rules" }).`,
+    },
+    {
+      match: 'unexpected keyword argument|__init__\\(\\) got an unexpected',
+      hint: `About this runtime: ${claim('ml_is_bqml_not_sklearn')} Fetch the signature instead of guessing: semantic_index({ recipe: "bf_ml_signatures" }). Scaling is not a flag either — ${claim('ml_scaling_is_a_transformer')}`,
+    },
+    {
+      // The library's own words for it, so the matcher cannot fire on the word "pipeline" in
+      // our own build log: pipeline.py raises "Currently only two step (transform, estimator)
+      // pipelines are supported."
+      match: 'only two step|two step \\(transform',
+      hint: 'About this runtime: pipeline.Pipeline takes EXACTLY TWO steps, (transform, estimator), and raises NotImplementedError for anything else — several transformers go inside ONE compose.ColumnTransformer as that single transform step (semantic_index({ recipe: "bf_ml_categoricals_into_a_model" })). Feature work that is not a transformer belongs in a SQL stage before this one.',
+    },
+    {
+      // The runtime's own way of running out of room, which is a different failure from the
+      // warehouse killing a SQL query (that one is answered by sqlRunHints in src/pipeline.js).
+      match: 'MemoryError|out of memory|Resources exceeded|killed',
+      hint: 'About this runtime: the BigFrames frame itself does not hold rows — BigQuery does — so running out of memory here almost always means something LEFT BigQuery: to_pandas(), a locally built bpd.DataFrame from a large list, or a library (sklearn / scipy / statsmodels) that needs a pandas frame first. All of those are single-node in the notebook. Aggregate to the grain the analysis works on BEFORE converting — and better, in a SQL stage before this one.',
+    },
+    {
+      match: 'convert it to a BigFrames BigQuery function|remote_function',
+      hint: 'About this runtime: it runs no Python per row — a plain function passed to apply/map is attempted once as a vectorized expression over the whole column, and fails this way when it cannot be one. A CASE over columns (np.where) or a merge against a small frame is the form that compiles.',
+    },
+  ];
 }
 
 /**

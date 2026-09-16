@@ -62,6 +62,22 @@ const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']); // produce a sket
 const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
 /**
+ * WHAT A WAREHOUSE FAILURE MEANS FOR THE SHAPE OF A PIPELINE — the hint a failed SQL build is
+ * annotated with. The twin of `pythonRunHints` (src/python-model.js) on the SQL side, and kept just
+ * as thin: it names the shape that causes the failure and the stage form that does not, and points
+ * at the worked recipe rather than repeating it. Only failures whose fix really is a different
+ * pipeline shape belong here — a message we cannot act on is better left as the warehouse wrote it.
+ */
+export function sqlRunHints(text) {
+  const log = String(text || '');
+  const hints = [];
+  if (/Resources exceeded|memory limit|out of memory|exceeded .*memory/i.test(log)) {
+    hints.push('This is usually a GLOBAL ANALYTIC WINDOW: an OVER() with no PARTITION BY (a compute `window` stage without partition_by, or op=raw) keeps every row and attaches the value to each, so one worker holds the whole input — an exact percentile worst of all, since it must also order the values. Two passes instead: an `aggregate` stage with NO group_by gives ONE row of statistics, and a second pass applies them per row as literals (compute sub/div, least/greatest with { value }). Worked: semantic_index({ recipe: "agg_table_stat_no_global_window" }) and ({ recipe: "agg_scale_rows_by_literals" }). A window that really is per group needs its group in partition_by.');
+  }
+  return hints;
+}
+
+/**
  * What THIS warehouse's statistical aggregates are: exact, or a sketch. The dialect declares it
  * (`approximateStats`), because the same `percentile` is exact on one warehouse and approximate on
  * another — and a caller that reports "the P99" has to say which of the two it is holding.

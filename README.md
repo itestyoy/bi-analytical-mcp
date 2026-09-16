@@ -82,12 +82,23 @@ of the shipped set (your id wins on a collision).
 One family is deliberately NOT organised by business task: `bigframes` recipes
 (`bf_*`, offered only where dbt runs python models on that runtime) are one per
 APPROACH — the correct form of a single move on the frame `dbt.ref()` returns
-(a lookup, a per-group value, top-N, a threshold, an ml prediction, `cache()`),
-each carrying `approach` (the form that works) next to `instead_of` (the form
-that raises, and why). A real question combines several, so the python stage
-description is an INDEX of them — every id with the move it covers, under an
-instruction to study them before writing a function — and the code forms
+(a lookup, a per-group value, top-N, a threshold, `cache()`) and one per ML
+capability (an estimator's parameters and where scaling goes, a prediction per
+row, a supervised `fit(X, y)`, an evaluation with a split, PCA, categorical
+features) — each carrying `approach` (the form that works) next to `instead_of`
+(the form that raises, and why). A real question combines several, so the python
+stage description is an INDEX of them — every id with the move it covers, under
+an instruction to study them before writing a function — and the code forms
 themselves live in the recipes and in `semantic_index({ guide: "python" })`.
+
+Two entries in that family are GENERATED rather than written: a fact about an
+external library belongs to the library, so `scripts/bigframes-facts.py` reads
+the installed one into `config/bigframes-facts.json` and it is published as
+`bf_ml_signatures` (every `bigframes.ml` constructor, positional vs
+keyword-only) and `bf_frame_method_rules` (which methods need an ordering or an
+index, and the signatures that surprise) — fetchable by id mid-write, and the
+one source the guide, the failure hints and the recipes all render from. Where
+each python text lives is written at the top of `src/python-guide.js`.
 
 A deployment ADDS its own recipes via `RECIPES_PATH` (comma-separated files);
 the shipped ones stay, and an id collision lets an operator override one

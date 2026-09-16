@@ -81,6 +81,15 @@
   are dropped with a warning (count on an events source instead).
 - A/B significance is computed in JS via the `ab_test` tool over per-group
   aggregates (proportion → z-test; mean → Welch t-test).
+- A FACT ABOUT AN EXTERNAL LIBRARY IS GENERATED FROM THAT LIBRARY, NEVER WRITTEN IN PROSE (HARD
+  RULE). Signatures, which methods raise, what a class returns: extracted by a script into a
+  checked-in sheet (`scripts/bigframes-facts.py` → `config/bigframes-facts.json`), and every text
+  that states one renders it from there — the guide, the failure hints, the reference recipes, the
+  frame profile's one-liner. Two copies of a list is how one of them goes stale. Each kind of text
+  has ONE home, and the division is written at the top of `src/python-guide.js` (facts → rules →
+  hints → reference → runtime mechanics → stage mechanics → routing → worked payloads); a
+  description INTERPOLATES the rule instead of restating it, and `test/unit/python-surface-layering.test.js`
+  is the guard on that.
 - WHAT SQL CAN COMPUTE IS COMPUTED IN SQL (HARD RULE). A `python` stage carries ONLY
   what SQL cannot say — a statistical test, clustering, scoring, a forecast, a model.
   Everything else is SQL stages BEFORE it, and that INCLUDES PREPARING THE DATASET the

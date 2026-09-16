@@ -14,7 +14,7 @@ import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
-import { renderPipeline } from './pipeline.js';
+import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
 import { rankFuzzy } from './fuzzy.js';
 import { buildGuide } from './guide.js';
@@ -2114,12 +2114,43 @@ export class Engine {
     try {
       // Match the RAW output, not `message`: formatDbtError slices from the first dbt marker and
       // truncates, and the runtime's traceback — where the class name is — can fall outside that.
-      const hints = pythonRunHints(frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}), `${stderr || ''}\n${stdout || ''}`);
+      const raw = `${stderr || ''}\n${stdout || ''}`;
+      const hints = [
+        ...pythonRunHints(frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}), raw),
+        ...this._chainColumnHints(raw),
+      ];
       return hints.length ? `${message}\n\n${hints.join('\n')}` : message;
     } catch { return message; }
   }
 
+  /**
+   * A CHAIN failure that is neither the runtime's nor the SQL's fault but the declaration's:
+   * `output.columns` is a CLAIM about what the last step returns, and the stages after the python
+   * model are rendered against it. When the frame returns something else, the failure surfaces as
+   * an unknown column in the NEXT model — a message that reads like a typo in a stage.
+   *
+   * This is the chain's own fact (the engine owns the chain), so the hint lives here rather than in
+   * a runtime profile: the same mismatch happens on every python runtime.
+   */
+  _chainColumnHints(text) {
+    const log = String(text || '');
+    if (!/unknown column|Unrecognized name|column .* does not exist|no such column|Invalid column/i.test(log)) return [];
+    return ['If the failing column is one you declared in a python stage\'s `output.columns`, that declaration is what the SQL stages after it were rendered against — nothing projects the frame for you. The frame decides: make the last step return exactly those columns, or declare exactly what it returns. An estimator\'s output often has its OWN shape (a forecast, score(), PCA components), which is the case semantic_index({ recipe: "bf_ml_output_replaces_frame" }) works through; the response of a successful build reports the columns the table really has.'];
+  }
+
   /** Compile a python stage into its dbt model (structure only — the gate is separate). */
+  /**
+   * The same for a SQL build: the warehouse's message, plus the hint when the failure is one whose
+   * fix is a different pipeline shape (see sqlRunHints in src/pipeline.js).
+   */
+  _sqlRunMessage(stdout, stderr) {
+    const message = formatDbtError(stdout, stderr);
+    try {
+      const hints = sqlRunHints(`${stderr || ''}\n${stdout || ''}`);
+      return hints.length ? `${message}\n\n${hints.join('\n')}` : message;
+    } catch { return message; }
+  }
+
   _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
@@ -2415,7 +2446,7 @@ export class Engine {
         }
         r = bg.result;
       } else r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
-      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: hasPython ? this._pythonRunMessage(r.stdout, r.stderr) : formatDbtError(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
+      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: hasPython ? this._pythonRunMessage(r.stdout, r.stderr) : this._sqlRunMessage(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };
@@ -3151,7 +3182,7 @@ export class Engine {
     const build = (async () => {
       try {
         const r = await this.runner.run(dir, table);
-        if (!r.ok) this.jobs.fail(id, formatDbtError(r.stdout, r.stderr));
+        if (!r.ok) this.jobs.fail(id, this._sqlRunMessage(r.stdout, r.stderr));
         else this.jobs.ready(id);
       } catch (e) {
         this.jobs.fail(id, e?.message || String(e));

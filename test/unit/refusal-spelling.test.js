@@ -109,3 +109,23 @@ test('a stage with no `stage` field says the stage never arrived', () => {
     },
   );
 });
+
+// A mechanical rewrite of the schemas (`const: 'x'` → `enum: ['x']`, so the pinned value survives a
+// client that rewrites the schema for strict function calling) also rewrote an error MESSAGE that
+// happened to contain the word: `compute op 'const' needs a value` became `enum: [needs] value`.
+// The tool schema hides it (its own if/then requires `value` first), but every internal render —
+// preview, checkpoint, a recipe payload — goes through renderPipeline directly.
+test("the compute op 'const' says what it is missing, in words", () => {
+  assert.throws(
+    () => renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'compute', name: 'flag', op: 'const' }], { physicalCols: new Set(['player_id_of_internal']) }),
+    (e) => {
+      assert.match(e.message, /compute op 'const'/);
+      assert.match(e.message, /`value`/);
+      assert.ok(!/enum: \[/.test(e.message), 'the message is prose, not a mangled schema keyword');
+      return true;
+    },
+  );
+  // …and with the value it renders
+  const ok = renderPipeline(catalog, catalog.dialect, 'events', [{ stage: 'compute', name: 'flag', op: 'const', value: 1 }], { physicalCols: new Set(['player_id_of_internal']) });
+  assert.ok(ok.columns.has('flag'));
+});

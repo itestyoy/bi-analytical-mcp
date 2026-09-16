@@ -294,7 +294,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
     const cPg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
     assert.equal(cPg.pythonRuntime.available, false);
     const ePg = new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    const stagesPg = ePg.schemas.build_native_model.properties.stage.oneOf.map((st) => st.properties.stage.const);
+    const stagesPg = ePg.schemas.build_native_model.properties.stage.oneOf.map((st) => st.properties.stage.enum?.[0]);
     assert.ok(!stagesPg.includes('python'), `no python stage on postgres: ${stagesPg.join(', ')}`);
     assert.ok(!ePg.schemas.build_native_model.$defs?.py_block, 'and no py_block definition either');
     // …and a declaration naming it is refused with the reason, not with a warehouse error later
@@ -739,4 +739,25 @@ test('the SQL-vs-python division of labour is in the stage description and the g
   // the routing triggers say it too, for the caller that never opens the python guide
   const routing = JSON.stringify((await e.semantic_index({ guide: true })).routing_triggers);
   assert.match(routing, /computed in SQL/);
+});
+
+// The nudge has to be TRUE, not just well-meant. Two shapes it used to lie about: a python stage
+// that follows another python stage (it reads THAT model's table, not the source), and a pipeline
+// rendered from a materialized prefix (its first stage reads the built table). Both were reported
+// as "reads 'events' as it is".
+test('the preparation nudge does not fire where the stage reads a table rather than the source', () => {
+  const e = engine();
+  const nudges = (stages, opts) => e._stageWarnings('events', stages, opts).filter((w) => /as it is/.test(w));
+
+  // one python stage on the raw source: the one case the nudge is for
+  assert.equal(nudges([PY_STAGE]).length, 1);
+  // a SECOND python stage after it reads the first one's table — it is not the source any more
+  assert.equal(nudges([PY_STAGE, PY_STAGE]).length, 1, 'only the first stage may be nudged');
+  // …and the one that is nudged is the FIRST one
+  assert.match(e._stageWarnings('events', [PY_STAGE, PY_STAGE]).find((w) => /as it is/.test(w)), /'events'/);
+  // a pipeline continued from a materialized prefix starts at a built table: nothing to say
+  assert.deepEqual(nudges([PY_STAGE], { startsFromTable: true }), []);
+  assert.deepEqual(nudges([PY_STAGE, PY_STAGE], { startsFromTable: true }), []);
+  // a time_range is preparation (a leading WHERE on the source's time column)
+  assert.deepEqual(nudges([PY_STAGE], { timeRange: { start: '2026-01-01' } }), []);
 });

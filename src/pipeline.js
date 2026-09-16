@@ -317,7 +317,7 @@ const STAGES = {
       const ARITH = { add: '+', sub: '-', mul: '*', div: '/' };
       let expr; let type = 'numeric';
       if (p.op === 'const') {
-        if (p.value === undefined) throw new Error('enum: [needs] value');
+        if (p.value === undefined) throw new Error("compute op 'const' needs a `value` (the literal to place in the column)");
         expr = d.sqlLiteral(p.value);
         type = typeof p.value === 'number' ? 'numeric' : typeof p.value === 'boolean' ? 'boolean' : 'string';
       } else if (p.op === 'concat') {

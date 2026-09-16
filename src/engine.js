@@ -53,11 +53,14 @@ export class Engine {
     } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
-    // A build with a PYTHON model detaches almost at once instead: the warehouse Python runtime is
-    // a cold start of minutes, and the client in front of this call has its own timeout that we
-    // neither know nor control — so the query_id has to reach it long before that timeout, or the
-    // caller sees "the server is not responding" while the job it started keeps running.
-    this.pythonBuildGraceMs = pythonBuildGraceMs ?? Math.min(this.queryTimeoutMs, 5000);
+    // A build with a PYTHON model may detach much sooner — but HOW soon is the runtime's own
+    // property (`buildGraceMs` on its frame profile), not one number for everything: a remote
+    // runtime (BigFrames in a notebook, Spark on Dataproc, Snowpark) is minutes of cold start
+    // before the first row, and the client in front of this call has a timeout we neither know nor
+    // control, so the query_id must reach it long before that; a LOCAL runtime (duckdb) finishes
+    // in seconds, and detaching it would make every call asynchronous for nothing. An operator can
+    // still override for the deployment (PYTHON_BUILD_GRACE_SECONDS), which is what this field is.
+    this.pythonBuildGraceMs = pythonBuildGraceMs ?? null;
     // Literal dbt.config extras the OPERATOR pins for every generated Python model (e.g.
     // {"submission_method":"bigframes"}); the caller never decides where the compute runs. The
     // catalog resolved them from the environment already — an injected value replaces them THERE,
@@ -2133,6 +2136,16 @@ export class Engine {
     return { status: 'done', query_id: id, result };
   }
 
+  /**
+   * How long a build that runs a PYTHON model may hold the call: the operator's override when
+   * there is one, else what this runtime declares about itself, else the ordinary query window.
+   */
+  _pythonGraceMs() {
+    if (this.pythonBuildGraceMs != null) return this.pythonBuildGraceMs;
+    const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
+    return profile?.buildGraceMs ?? this.queryTimeoutMs;
+  }
+
   async _draftMaterialize(ctx, draft) {
     if (!draft.stages.length) throw new ToolError('draft has no stages to materialize — add_step at least one stage first', { stage: 'validate', field: 'draft_id' });
     // A build of THIS draft already in flight is never started twice. A retried call — the first
@@ -2328,7 +2341,7 @@ export class Engine {
         // never `+model`, whose ancestor operator would also select the catalog's base tables and
         // REBUILD them. A Python model is a cold start of minutes on the warehouse runtime, so the
         // build runs detached and may hand back a query_id.
-        const graceMs = hasPython ? this.pythonBuildGraceMs : this.queryTimeoutMs;
+        const graceMs = hasPython ? this._pythonGraceMs() : this.queryTimeoutMs;
         const bg = await this._runDetached(ctx, models.map((m) => m.model).join(' '), modelName, { graceMs });
         if (bg.status === 'running') {
           return {

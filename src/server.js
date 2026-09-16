@@ -213,10 +213,13 @@ export async function makeEngine(opts = {}) {
       ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
       : null;
   const queryTimeoutMs = (Number(process.env.QUERY_TIMEOUT_SECONDS) || 60) * 1000;
-  // A build that includes a PYTHON model hands back its query_id after this instead — seconds, not
-  // a minute: the caller's client has a timeout of its own, and a cold-starting warehouse runtime
-  // will outlast it. Raise it only if a deployment's python builds are genuinely quick.
-  const pythonBuildGraceMs = (Number(process.env.PYTHON_BUILD_GRACE_SECONDS) || 5) * 1000;
+  // A build that includes a PYTHON model may hand back its query_id much sooner — how soon is the
+  // RUNTIME's own property (a remote one cold-starts for minutes and must not hold the caller's
+  // client; a local one finishes in seconds and should just return the rows). This env var is the
+  // operator's override of that, and stays UNSET unless they set it.
+  const pythonBuildGraceMs = process.env.PYTHON_BUILD_GRACE_SECONDS
+    ? Number(process.env.PYTHON_BUILD_GRACE_SECONDS) * 1000
+    : undefined;
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
   // <workspaceRoot>/mcp.sqlite; pin it elsewhere (e.g. a persistent volume) via MCP_DB.
   const dbPath = opts.dbPath || process.env.MCP_DB || join(ctxs.workspaceRoot, 'mcp.sqlite');

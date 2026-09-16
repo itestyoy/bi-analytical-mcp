@@ -242,6 +242,23 @@ test('an edit during a background build does not remove the files that build is 
 // otherwise the client gives up first, reports the server as unresponsive, and the build it started
 // keeps running unseen (which is exactly what was observed: eight "connector isn't responding" in
 // one session, every job finishing fine). A pure-SQL build keeps the ordinary window.
+// WHOSE property the grace is. Not one number for every python model: a remote runtime is minutes
+// of cold start (hand back a job), a local one is seconds (just return the rows). So the runtime
+// declares it, and the operator can still override it for the whole deployment.
+test('the build grace comes from the runtime, with the operator override on top', async () => {
+  const e = (rt, over) => new Engine({
+    catalog: Object.assign(loadCatalog(CATALOG, {}), { pythonRuntime: rt }),
+    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grace2-')) }),
+    queryTimeoutMs: 60000, ...(over === undefined ? {} : { pythonBuildGraceMs: over }),
+  });
+  const remote = { available: true, runtime: 'bigquery', method: 'bigframes', config: {}, packages: '' };
+  const local = { available: true, runtime: 'duckdb', config: {}, packages: '' };
+  assert.equal(e(remote)._pythonGraceMs(), 5000, 'a notebook cold start must not hold the call');
+  assert.equal(e(local)._pythonGraceMs(), 60000, 'a local build finishes in seconds — returning rows beats a job id');
+  assert.equal(e(remote, 1000)._pythonGraceMs(), 1000, 'the operator override wins');
+  assert.equal(e(local, 1000)._pythonGraceMs(), 1000);
+});
+
 test('a python build detaches on its own short grace, an SQL build keeps the long one', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();

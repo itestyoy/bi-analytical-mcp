@@ -26,8 +26,9 @@ services:
       RECIPES_PATH: "/config/recipes.json"
       MCP_WORKSPACE: "/workspace"
       QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-120}"
-      # A python model on BigFrames cold-starts for minutes: hand back the query_id at once.
-      PYTHON_BUILD_GRACE_SECONDS: "${PYTHON_BUILD_GRACE_SECONDS:-5}"
+      # A python model on BigFrames cold-starts for minutes, so the build is handed back as a job
+      # after 5s by default (the runtime's own figure). Set this only to override it.
+      PYTHON_BUILD_GRACE_SECONDS: "${PYTHON_BUILD_GRACE_SECONDS:-}"
       CONTEXT_TTL_MS: "${CONTEXT_TTL_MS:-0}"
       # PERSISTENCE — keep the value index / job history / memory across restarts. The DBs live
       # on the named `mcp_workspace` volume (below), so they survive `docker compose restart/up`.

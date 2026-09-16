@@ -77,6 +77,14 @@ export function frameProfile(rt, config = {}) {
         { match: 'convert it to a BigFrames BigQuery function|remote_function', hint: 'About this runtime: it runs no Python per row — a plain function passed to apply/map is attempted once as a vectorized expression over the whole column, and fails this way when it cannot be one.' },
       ],
       packages: ['bigframes'],
+      // HOW LONG A BUILD MAY HOLD THE CALL before it is handed back as a job to poll. This is a
+      // property of the RUNTIME, like the frame type and the ML library: dbt starts a Colab
+      // Enterprise notebook, which is minutes of cold start before a single row is computed, and
+      // the client on the other end of our tool call has a timeout we neither know nor can raise.
+      // So: hand back the query_id in seconds. A runtime that declares nothing here keeps the
+      // ordinary query window, because for a LOCAL runtime (duckdb) the build is seconds and
+      // detaching it would make every call asynchronous for no reason.
+      buildGraceMs: 5000,
     };
   }
   if (runtime === 'bigquery' || runtime === 'databricks') {
@@ -88,6 +96,7 @@ export function frameProfile(rt, config = {}) {
       guide: 'RULES FOR PYSPARK: modelling = pyspark.ml (distributed), not sklearn (needs toPandas(), single-node on the driver); stay in pyspark.sql column expressions (F.col / F.when / groupBy.agg / Window); avoid Python UDFs and row iteration (they serialize every row through Python), and collect() / toPandas() on a large frame; df.pandas_api() keeps pandas syntax distributed.',
       packagesNote: 'On PySpark prefer pyspark (pyspark.ml) over sklearn / scipy / statsmodels: those need toPandas(), single-node.',
       packages: ['pyspark'],
+      buildGraceMs: 5000, // a Dataproc / job-cluster start is minutes, like BigFrames above
     };
   }
   if (runtime === 'snowflake') {
@@ -99,6 +108,7 @@ export function frameProfile(rt, config = {}) {
       guide: 'RULES FOR SNOWPARK: modelling = snowflake.ml.modeling (runs in the warehouse), not sklearn (needs to_pandas(), single-node); stay in Snowpark column expressions (F.col / F.when / group_by.agg / Window); avoid Python UDFs on rows and to_pandas() on a large frame.',
       packagesNote: 'On Snowpark prefer snowflake (snowflake.ml.modeling) over sklearn / scipy / statsmodels: those need to_pandas(), single-node.',
       packages: ['snowflake'],
+      buildGraceMs: 5000, // a Snowpark warehouse start is remote too — poll rather than hold the call
     };
   }
   if (runtime === 'duckdb') {

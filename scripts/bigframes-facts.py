@@ -41,6 +41,12 @@ import sys
 
 OUT = pathlib.Path(__file__).resolve().parent.parent / "config" / "bigframes-facts.json"
 CLASSES = {"DataFrame": "dataframe.py", "Series": "series.py"}
+# The ml modules whose estimators a python stage plausibly builds. bigframes.ml is a WRAPPER OVER
+# BQML, not a port of scikit-learn: each constructor takes the options its BQML model type has, under
+# BQML's names, and an sklearn parameter that has no BQML option simply does not exist (the observed
+# failure: KMeans(standardize_features=True) → TypeError). So the parameter lists are read from the
+# library and written down, per class, including which ones are KEYWORD-ONLY.
+ML_MODULES = ["cluster", "linear_model", "ensemble", "decomposition", "preprocessing", "impute", "compose", "pipeline", "model_selection", "forecasting"]
 # Signatures worth recording verbatim: each one is a parameter a caller is likely to reach for.
 SIGNATURES = {
     "DataFrame": ["std", "var", "quantile", "head", "nlargest", "peek", "cache", "sort_values", "merge", "join"],
@@ -106,7 +112,36 @@ def from_source(root: pathlib.Path) -> dict:
         facts["ordering_enforced_by_argument"][cls] = byarg
         facts["signatures"][cls] = sigs
         facts["where"][cls] = where
+    facts["ml"] = _ml_from_source(root)
     return {"version": version, "read_from": "source", **facts}
+
+
+def _params(fn: ast.FunctionDef) -> dict:
+    """Positional and keyword-only parameter names of a def, self dropped."""
+    return {
+        "positional": [a.arg for a in fn.args.args if a.arg != "self"],
+        "keyword_only": [a.arg for a in fn.args.kwonlyargs],
+    }
+
+
+def _ml_from_source(root: pathlib.Path) -> dict:
+    """Constructor parameters of every public bigframes.ml estimator, per module."""
+    out = {}
+    for mod in ML_MODULES:
+        f = root / "ml" / f"{mod}.py"
+        if not f.exists():
+            continue
+        tree = ast.parse(f.read_text())
+        entries = {}
+        for n in tree.body:
+            if isinstance(n, ast.ClassDef) and not n.name.startswith("_"):
+                init = next((b for b in n.body if isinstance(b, ast.FunctionDef) and b.name == "__init__"), None)
+                entries[n.name] = _params(init) if init else {"positional": [], "keyword_only": []}
+            elif isinstance(n, ast.FunctionDef) and not n.name.startswith("_"):
+                entries[f"{n.name}()"] = _params(n)
+        if entries:
+            out[mod] = entries
+    return out
 
 
 def from_installed() -> dict:
@@ -132,7 +167,39 @@ def from_installed() -> dict:
         facts["ordering_enforced_by_argument"][cls] = {}  # only visible in the source
         facts["signatures"][cls] = sigs
         facts["where"][cls] = {}
+    facts["ml"] = _ml_from_installed()
     return {"version": getattr(bf, "__version__", None), "read_from": "installed", **facts}
+
+
+def _ml_from_installed() -> dict:
+    out = {}
+    for mod_name in ML_MODULES:
+        try:
+            mod = importlib.import_module(f"bigframes.ml.{mod_name}")
+        except ImportError:
+            continue
+        entries = {}
+        for name, member in vars(mod).items():
+            if name.startswith("_") or getattr(member, "__module__", None) != mod.__name__:
+                continue
+            if inspect.isclass(member):
+                try:
+                    sig = inspect.signature(member.__init__)
+                except (TypeError, ValueError):
+                    continue
+                entries[name] = {
+                    "positional": [p.name for p in sig.parameters.values() if p.name != "self" and p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)],
+                    "keyword_only": [p.name for p in sig.parameters.values() if p.kind == p.KEYWORD_ONLY],
+                }
+            elif inspect.isfunction(member):
+                sig = inspect.signature(member)
+                entries[f"{name}()"] = {
+                    "positional": [p.name for p in sig.parameters.values() if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD)],
+                    "keyword_only": [p.name for p in sig.parameters.values() if p.kind == p.KEYWORD_ONLY],
+                }
+        if entries:
+            out[mod_name] = entries
+    return out
 
 
 # The rules that are NOT a list of method names: why alignment fails, what merge is, what an
@@ -188,6 +255,31 @@ RULES = [
                  "read of it, returning self. Objects derived BEFORE the call keep the old root, so "
                  "mixing them with the cached frame raises — derive everything after caching.",
         "evidence": "dataframe.py DataFrame._cached → Block.cached(force=…)",
+    },
+    {
+        "id": "ml_is_bqml_not_sklearn",
+        "claim": "bigframes.ml estimators are WRAPPERS OVER BQML, not a port of scikit-learn. A "
+                 "constructor accepts only the options its BQML model type has, under BQML's names "
+                 "(KMeans: n_clusters, init, init_col, distance_type, max_iter, tol, warm_start — "
+                 "and every one but the first is KEYWORD-ONLY). An sklearn parameter with no BQML "
+                 "option does not exist: KMeans(standardize_features=True), n_init, random_state, "
+                 "algorithm all raise TypeError: __init__() got an unexpected keyword argument. "
+                 "The parameter lists in `ml` here are the whole surface.",
+        "evidence": "ml/cluster.py KMeans.__init__ (keyword-only after n_clusters) and its "
+                    "_BQML_PARAMS_MAPPING / _bqml_options, which map each parameter to a BQML "
+                    "CREATE MODEL option",
+    },
+    {
+        "id": "ml_scaling_is_a_transformer",
+        "claim": "There is no scaling flag on an estimator. Scaling is its own transformer "
+                 "(preprocessing.StandardScaler / MaxAbsScaler / MinMaxScaler, none of which takes "
+                 "any parameter) used either on its own or as the FIRST step of ml.pipeline.Pipeline "
+                 "— which takes EXACTLY TWO steps, (transform, estimator), and raises "
+                 "NotImplementedError for anything else. Scaling done in SQL before the stage is "
+                 "equally valid and cheaper.",
+        "evidence": "ml/preprocessing.py StandardScaler.__init__(self); ml/pipeline.py "
+                    "Pipeline.__init__ (len(steps) != 2 → NotImplementedError, and the transform "
+                    "must be one of the listed transformers / ColumnTransformer)",
     },
     {
         "id": "peek_returns_pandas",

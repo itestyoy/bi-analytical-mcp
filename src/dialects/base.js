@@ -169,6 +169,13 @@ export class Dialect {
   jsonColumnStructField(_column, _field, _type) { throw new Error('abstract jsonColumnStructField'); }
   /** Statistical aggregate (stddev|variance|median|percentile) over a column. */
   statAggExpr(_fn, _columnSql, _q) { throw new Error('abstract statAggExpr'); }
+  /**
+   * Which of those this warehouse computes APPROXIMATELY. Declared, not guessed: a percentile that
+   * is exact on one warehouse is a sketch on another, and a caller that reports "the P99" has to
+   * know which of the two it got. It also decides cost — the exact form has to order the values,
+   * which is what puts a whole table in one worker's memory.
+   */
+  get approximateStats() { return []; }
   /** Approximate distinct count (HLL++ where available). */
   approxCountDistinct(_columnSql) { throw new Error('abstract approxCountDistinct'); }
   // ── HLL++ mergeable sketches (the additive distinct-count workflow) ─────────

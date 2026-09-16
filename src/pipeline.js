@@ -61,6 +61,35 @@ const AGG_FNS = ['sum', 'avg', 'min', 'max', 'count', 'count_distinct', 'approx_
 const SKETCH_FNS = new Set(['hll_init', 'hll_merge_partial']); // produce a sketch column
 const STAT_FNS = new Set(['stddev', 'variance', 'median', 'percentile']);
 
+/**
+ * WHAT A WAREHOUSE FAILURE MEANS FOR THE SHAPE OF A PIPELINE — the hint a failed SQL build is
+ * annotated with. The twin of `pythonRunHints` (src/python-model.js) on the SQL side, and kept just
+ * as thin: it names the shape that causes the failure and the stage form that does not, and points
+ * at the worked recipe rather than repeating it. Only failures whose fix really is a different
+ * pipeline shape belong here — a message we cannot act on is better left as the warehouse wrote it.
+ */
+export function sqlRunHints(text) {
+  const log = String(text || '');
+  const hints = [];
+  if (/Resources exceeded|memory limit|out of memory|exceeded .*memory/i.test(log)) {
+    hints.push('This is usually a GLOBAL ANALYTIC WINDOW: an OVER() with no PARTITION BY (a compute `window` stage without partition_by, or op=raw) keeps every row and attaches the value to each, so one worker holds the whole input — an exact percentile worst of all, since it must also order the values. Two passes instead: an `aggregate` stage with NO group_by gives ONE row of statistics, and a second pass applies them per row as literals (compute sub/div, least/greatest with { value }). Worked: semantic_index({ recipe: "agg_table_stat_no_global_window" }) and ({ recipe: "agg_scale_rows_by_literals" }). A window that really is per group needs its group in partition_by.');
+  }
+  return hints;
+}
+
+/**
+ * What THIS warehouse's statistical aggregates are: exact, or a sketch. The dialect declares it
+ * (`approximateStats`), because the same `percentile` is exact on one warehouse and approximate on
+ * another — and a caller that reports "the P99" has to say which of the two it is holding.
+ */
+function statAccuracyNote(catalog) {
+  let approx = [];
+  try { approx = getDialect(catalog?.dialect)?.approximateStats || []; } catch { approx = []; }
+  return approx.length
+    ? `ON THIS WAREHOUSE ${approx.join('/')} are APPROXIMATE (sketch-based, which is what makes them cheap on a large table) — say so when you report the number; the other measures are exact.`
+    : 'On this warehouse every measure here is exact.';
+}
+
 // A scalar operand: exactly one of a column reference, a literal value, or the
 // `now` token (current timestamp). Shared by `where`, `compute`, and `case`.
 const OPERAND = { type: 'object', additionalProperties: false, properties: { column: { type: 'string' }, value: {}, now: { type: 'boolean' } }, description: 'One of: { column }, { value }, or { now: true }.' };
@@ -247,7 +276,10 @@ const STAGES = {
         { if: { properties: { op: { enum: ['add', 'sub', 'mul', 'div'] } }, required: ['op'] }, then: { required: ['left', 'right'] } },
         { if: { properties: { op: { enum: ['round', 'floor', 'ceil', 'abs', 'cast', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'unix_date', 'date_trunc', 'date_part', 'hll_extract'] } }, required: ['op'] }, then: { required: ['column'] } },
         { if: { properties: { op: { const: 'concat' } }, required: ['op'] }, then: { required: ['parts'] } },
-        { if: { properties: { op: { enum: ['coalesce', 'least', 'greatest'] } }, required: ['op'] }, then: { required: ['columns'] } },
+        { if: { properties: { op: { const: 'coalesce' } }, required: ['op'] }, then: { required: ['columns'] } },
+        // least/greatest take EITHER form: `columns` (all columns) or `parts` (operands, so one side
+        // may be a literal — clamping at a threshold computed in an earlier pass).
+        { if: { properties: { op: { enum: ['least', 'greatest'] } }, required: ['op'] }, then: { anyOf: [{ title: 'all-columns form: { columns: ["a", "b"] }', required: ['columns'] }, { title: 'with a literal: { parts: [{ column: "a" }, { value: 12.5 }] }', required: ['parts'] }] } },
         { if: { properties: { op: { const: 'cast' } }, required: ['op'] }, then: { required: ['type'] } },
         { if: { properties: { op: { const: 'replace' } }, required: ['op'] }, then: { required: ['search', 'replacement'] } },
         { if: { properties: { op: { const: 'substring' } }, required: ['op'] }, then: { required: ['start'] } },
@@ -277,8 +309,8 @@ const STAGES = {
         // open side is a sentinel (e.g. 1970-01-01), which makes retention_day nonsensically huge.
         clamp_zero: { type: 'boolean', description: 'op=elapsed_days: fold negative (pre-`from`) and NULL (e.g. missing install_date) results to 0, so it is a clean day 0+. Default true; set false for the raw signed/NULL-able value.' },
         column: { type: 'string', description: 'Input column for round/floor/ceil/abs/cast/upper/lower/length/substring/trim/replace/date_trunc/date_part, and for window lag/lead/sum/avg/min/max.' },
-        columns: { type: 'array', items: { type: 'string' }, description: 'Inputs for coalesce/least/greatest.' },
-        parts: { type: 'array', items: OPERAND, minItems: 1, description: 'Operands (columns/literals) to concatenate for op=concat.' },
+        columns: { type: 'array', items: { type: 'string' }, description: 'Inputs for coalesce/least/greatest, all of them columns. To mix in a LITERAL (clamping a column at a threshold) use `parts` instead.' },
+        parts: { type: 'array', items: OPERAND, minItems: 1, description: 'Operands — columns and/or literals — for op=concat, and for least/greatest when one side is a constant: winsorizing at a threshold computed earlier is least with parts [{ column }, { value: <threshold> }].' },
         search: { type: 'string', description: 'Substring to find for op=replace.' },
         replacement: { type: 'string', description: 'Replacement string for op=replace.' },
         start: { type: 'integer', minimum: 1, description: '1-based start position for op=substring.' },
@@ -296,7 +328,7 @@ const STAGES = {
         else: OPERAND,
         // op=window
         fn: { enum: ['row_number', 'rank', 'dense_rank', 'lag', 'lead', 'sum', 'avg', 'count', 'min', 'max'], description: 'Window function for op=window.' },
-        partition_by: { type: 'array', items: { type: 'string' }, description: 'Window partition columns.' },
+        partition_by: { type: 'array', items: { type: 'string' }, description: 'Window partition columns. LEAVING IT OUT MAKES ONE GLOBAL WINDOW over every row, which one worker has to hold: on a large table that is how a query runs out of memory ("Resources exceeded during query execution"). A window is for a value computed WITHIN a group (per player, per day, per session) — for a table-wide number use an aggregate stage with no group_by (one row) and apply it as a literal afterwards.' },
         order_by: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } }, description: 'Window ordering.' },
         offset: { type: 'integer', minimum: 1, description: 'Row offset for window lag/lead (default 1).' },
         frame: {
@@ -337,8 +369,14 @@ const STAGES = {
       else if (p.op === 'ceil') expr = `ceil(${col()})`;
       else if (p.op === 'abs') expr = `abs(${col()})`;
       else if (p.op === 'coalesce') { const a = list(); expr = `coalesce(${[...a, ...(p.default !== undefined ? [d.sqlLiteral(p.default)] : [])].join(', ')})`; type = 'string'; }
-      else if (p.op === 'least') expr = `least(${list().join(', ')})`;
-      else if (p.op === 'greatest') expr = `greatest(${list().join(', ')})`;
+      else if (p.op === 'least' || p.op === 'greatest') {
+        // Clamping against a NUMBER (a threshold computed in an earlier pass) is the common case, so
+        // the operands may be literals as well as columns: `parts` takes operands, `columns` stays
+        // the shorthand for the all-columns form.
+        const args = p.parts?.length ? p.parts.map((o, i) => operand(o, `part[${i}]`)) : list();
+        if (!args.length) throw new Error(`compute op '${p.op}' needs \`columns\` (column names) or \`parts\` (columns and/or literals, e.g. a threshold)`);
+        expr = `${p.op}(${args.join(', ')})`;
+      }
       else if (p.op === 'cast') { expr = d.castExpr(col(), p.type || 'string'); type = p.type || 'string'; }
       else if (p.op === 'date_diff') { expr = d.dateDiff(p.unit, operand(p.from, 'from'), operand(p.to, 'to')); type = p.unit === 'day' ? 'int' : 'numeric'; }
       else if (p.op === 'elapsed_days') {
@@ -553,9 +591,17 @@ const STAGES = {
   },
 
   aggregate: {
-    schema: () => ({
+    schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'measures'],
-      description: 'Group rows and compute measures (COLLAPSES grain to the group keys). Measures: sum/avg/min/max/count/count_distinct, approx_count_distinct (fast approximate uniques on large data), and statistical stddev/variance/median/percentile(q). For totals, rates, distinct users (DAU/MAU), revenue, ARPU, distributions/percentiles.',
+      // The last two sentences are the memory lesson, and they are not decoration: a global
+      // analytic (`OVER ()` with no PARTITION BY) keeps every row and attaches the value to each,
+      // so a table of millions of rows lands in one worker — observed as "Resources exceeded during
+      // query execution", with analytic windows as the whole of the accounted memory, and it
+      // happened again after the exact percentile was removed, for plain AVG/STDDEV over the same
+      // global window. This stage is the cheap form of the same question.
+      description: `Group rows and compute measures (COLLAPSES grain to the group keys). Measures: sum/avg/min/max/count/count_distinct, approx_count_distinct (fast approximate uniques on large data), and statistical stddev/variance/median/percentile(q). For totals, rates, distinct users (DAU/MAU), revenue, ARPU, distributions/percentiles. `
+        + `A TABLE-WIDE NUMBER IS THIS STAGE WITH NO group_by — it returns ONE row (a threshold, a mean, a deviation) and is the memory-safe way to get one; an analytic OVER() with no PARTITION BY (op=window without partition_by, or raw SQL) instead keeps all the rows and attaches the value to each, which exhausts the query's memory on a large table ("Resources exceeded during query execution") — the exact percentile worst of all, because it also has to order the values. So: get the numbers here first, then apply them per row in a later pass as literals (compute sub/div/least with { value }). `
+        + `${statAccuracyNote(catalog)}`,
       properties: {
         stage: { enum: ['aggregate'] },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },

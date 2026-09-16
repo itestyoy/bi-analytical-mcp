@@ -157,6 +157,11 @@ export class BigQueryDialect extends Dialect {
   hllMergePartial(c) { return `HLL_COUNT.MERGE_PARTIAL(${c})`; }
   hllExtract(c) { return `HLL_COUNT.EXTRACT(${c})`; }
 
+  // APPROX_QUANTILES is a sketch: the value comes back without ordering the whole column, which is
+  // both why it is cheap on a large table and why it is not the exact quantile. Declared so the
+  // stage can say so and an answer can be labelled honestly.
+  get approximateStats() { return ['median', 'percentile']; }
+
   statAggExpr(fn, c, q) {
     switch (fn) {
       case 'stddev': return `STDDEV(${c})`;

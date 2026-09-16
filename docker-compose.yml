@@ -27,7 +27,8 @@ services:
       RECIPES_PATH: "/config/recipes.json"
       # Persisted per-context workspace (named volume below).
       MCP_WORKSPACE: "/workspace"
-      QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-60}"
+      # How long a build holds the tool call before handing back a query_id to poll (max 30).
+      QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-20}"
       CONTEXT_TTL_MS: "${CONTEXT_TTL_MS:-0}"
       # PERSISTENCE — value index / job history / memory survive a restart (SQLite on the
       # mcp_workspace volume; reset OFF by default). Needs Node >= 22.5 (image is node:22-slim).

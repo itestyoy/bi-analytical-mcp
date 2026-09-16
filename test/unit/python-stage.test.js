@@ -356,7 +356,10 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
 // do/don't list that keeps the work in the warehouse — only the rules of THIS warehouse.
 test('python stage: descriptions name this platform\'s in-engine ML library and rules (BigFrames → bigframes.ml, never sklearn)', () => {
   const bq = frameProfile({ runtime: 'bigquery', method: 'bigframes' });
-  assert.match(bq.ml, /bigframes\.ml\.cluster\.KMeans/);
+  // the classes are rendered from the extracted fact sheet (module.Class), never kept as a list
+  // in the profile — see test/unit/python-surface-layering.test.js
+  assert.match(bq.ml, /bigframes\.ml/);
+  assert.match(bq.ml, /cluster\.KMeans/);
   assert.match(bq.guide, /NEVER sklearn/);
   assert.match(bq.guide, /stay in COLUMN EXPRESSIONS/);
   assert.match(bq.guide, /apply\/map/);
@@ -595,8 +598,15 @@ test('the stage description and the guide send the caller to this deployment\'s 
   for (const id of ids) {
     const r = await e.semantic_index({ recipe: id });
     const body = r.recipe || r;
-    assert.ok(body.register_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
-    assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
+    if (body.reference) {
+      // A generated REFERENCE entry (the library's own signatures / method preconditions) is
+      // offered in the same index so it can be fetched mid-write; it declares no model.
+      assert.ok(body.reference.version, `${id} must name the version it was read from`);
+      assert.ok(body.approach && body.instead_of && body.hack, `${id} must say how to use the reference`);
+    } else {
+      assert.ok(body.register_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
+      assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
+    }
   }
 
   // a deployment with no python recipes says nothing about them
@@ -729,8 +739,10 @@ test('the SQL-vs-python division of labour is in the stage description and the g
   const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.enum?.[0] === 'python')
     || e.schemas.build_native_model.properties.stage.anyOf?.find((b) => b.properties?.stage?.enum?.[0] === 'python');
   assert.match(py.description, /WHAT BELONGS HERE/);
-  assert.match(py.description, /PREPARING the table this analysis reads/);
+  assert.match(py.description, /the preparation of the table this analysis reads/);
   assert.match(py.description, /never the raw source/);
+  // …and it is there ONCE, because the description renders the guide's rule instead of restating it
+  assert.equal(py.description.split('never the raw source').length - 1, 1);
 
   const g = await e.semantic_index({ guide: 'python' });
   const first = g.rules[0];

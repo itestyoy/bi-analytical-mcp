@@ -1,5 +1,29 @@
-// The AUTHORING GUIDE for a python stage, per warehouse runtime. It is served TWICE from this one
-// source, so the two can never drift:
+// The AUTHORING GUIDE for a python stage, per warehouse runtime — and the one place the
+// FACT-DERIVED texts about a runtime are composed.
+//
+// WHERE EACH KIND OF TEXT LIVES (one source per fact; a reader must never be handed two lists that
+// can disagree):
+//   1. FACTS about the library — versions, signatures, which methods need an ordering or an index:
+//      config/bigframes-facts.json, EXTRACTED from the installed library by
+//      scripts/bigframes-facts.py. Nothing anywhere restates a fact in prose.
+//   2. RULES with their reasoning, and a do / avoid per operation: this file (the cookbook data
+//      below), rendered two ways — compact into the stage description (`pythonRulesText`) and in
+//      full through semantic_index({ guide: 'python' }) (`pythonAuthoringGuide`).
+//   3. FAILURE HINTS — what a class name means on this runtime: `bigframesRunHints()` here, built
+//      from the same fact sheet, carried by the frame profile and matched by `pythonRunHints`.
+//   4. THE REFERENCE a caller fetches mid-write: `pythonReferenceRecipes()` here — the extracted
+//      sheet published as recipes addressable by id (bf_ml_signatures, bf_frame_method_rules).
+//   5. RUNTIME MECHANICS — what dbt.ref() returns, how pandas is spelled, which ml library runs
+//      in-engine, the import allowlist, the build grace: the frame profile in src/python-model.js.
+//      Its one-line `ml` list comes from `mlClassesText()` here, not from a list kept there.
+//   6. STAGE MECHANICS in this server — where the stage sits in the chain, what the caller
+//      declares, what the server writes, the size limits: the `pythonStageSchema` description in
+//      src/python-model.js, which interpolates (2) rather than repeating it.
+//   7. WHEN to reach for a python stage at all: one routing trigger in src/guide.js.
+//   8. WORKED PAYLOADS per move: config/recipes.json (the bigframes family), each one a compiling
+//      payload; the server NUDGES on pipeline shape (src/engine.js) rather than refusing.
+//
+// The guide itself is served TWICE from this one source, so the two can never drift:
 //   - compressed, as the python stage's own DESCRIPTION (`pythonRulesText`) — why this runtime
 //     bites, an INDEX of the worked recipes (which one covers which move) with an instruction to
 //     study them, and how a stage is declared here; where a deployment ships no recipes there is
@@ -52,6 +76,27 @@ const NEEDS_INDEX = needs('requires_index');
 const BY_ARG = Object.entries(FACTS?.ordering_enforced_by_argument?.Series || {}).map(([name, why]) => `${name} (${why.join(', ')})`);
 const VERSION = FACTS?.version ? `bigframes ${FACTS.version}` : 'this runtime';
 const list = (xs, n = 99) => xs.slice(0, n).join(', ');
+
+// The CONSTRUCTOR SURFACE of the ml estimators, read from the library. bigframes.ml wears the
+// scikit-learn API but wraps BQML: a constructor takes the options its BQML model type has, and an
+// sklearn parameter that has no BQML option is a TypeError — observed as
+// KMeans(standardize_features=True). So the parameters are listed, not described, and `*` marks
+// where keyword-only begins (a positional call past it is the same TypeError).
+const mlSig = (mod, cls) => {
+  const p = FACTS?.ml?.[mod]?.[cls];
+  if (!p) return null;
+  const kw = p.keyword_only || [];
+  const params = [...(p.positional || []), ...(kw.length ? ['*', ...kw] : [])];
+  return `${mod}.${cls.replace(/\(\)$/, '')}(${params.join(', ')})`;
+};
+/** Every extracted estimator, one signature per entry — the full surface, for the long guide. */
+const ML_SIGNATURES = Object.entries(FACTS?.ml || {})
+  .flatMap(([mod, entries]) => Object.keys(entries).map((cls) => mlSig(mod, cls)))
+  .filter(Boolean);
+/** The few a stage reaches for most, for the compact text. */
+const ML_KEY_SIGNATURES = [['cluster', 'KMeans'], ['decomposition', 'PCA'], ['linear_model', 'LinearRegression'], ['ensemble', 'RandomForestClassifier'], ['preprocessing', 'StandardScaler'], ['pipeline', 'Pipeline'], ['model_selection', 'train_test_split()']]
+  .map(([mod, cls]) => mlSig(mod, cls))
+  .filter(Boolean);
 
 const BIGFRAMES = {
   // The one paragraph that STAYS in the stage description when the worked recipes carry the forms:
@@ -108,9 +153,14 @@ const BIGFRAMES = {
       why: 'array_agg / array_length / array_to_string for arrays, struct() to build a STRUCT column, unix_micros / unix_millis / unix_seconds for epochs, and sql_scalar() to inject a single-column SQL expression that the pandas API cannot say. All of it still compiles to SQL and stays in BigQuery.',
     },
     {
-      rule: 'Modelling is bigframes.ml — the scikit-learn API executed as BigQuery ML.',
-      short: 'modelling is bigframes.ml (the scikit-learn API run as BigQuery ML: fit trains IN BigQuery, predict returns a frame) — NEVER sklearn/scipy/statsmodels, which need to_pandas() and run single-node: preprocessing.StandardScaler|MinMaxScaler|MaxAbsScaler|KBinsDiscretizer|LabelEncoder|OneHotEncoder, compose.ColumnTransformer, cluster.KMeans, decomposition.PCA, ensemble.XGB*|RandomForest*, linear_model.*, forecasting.ARIMAPlus, llm.GeminiTextGenerator, model_selection.train_test_split|KFold|cross_validate, metrics, pipeline.Pipeline',
-      why: 'fit() trains inside BigQuery and predict() returns a BigFrames frame, so the data never leaves. sklearn / scipy / statsmodels would first need to_pandas() and then run single-node in the notebook. Available: preprocessing (StandardScaler, MinMaxScaler, MaxAbsScaler, KBinsDiscretizer, LabelEncoder, OneHotEncoder), compose.ColumnTransformer, cluster.KMeans, decomposition.PCA, ensemble (XGB*, RandomForest*), linear_model (LinearRegression, LogisticRegression), forecasting.ARIMAPlus, llm.GeminiTextGenerator, model_selection (train_test_split, KFold, cross_validate), metrics, pipeline.Pipeline.',
+      rule: 'Modelling is bigframes.ml — the scikit-learn API executed as BigQuery ML, with BQML\'s PARAMETERS.',
+      short: `modelling is bigframes.ml (the scikit-learn API run as BigQuery ML: fit trains IN BigQuery, predict returns a frame) — NEVER sklearn/scipy/statsmodels, which need to_pandas() and run single-node. BUT THE PARAMETERS ARE BQML'S, NOT SKLEARN'S: an argument sklearn has and BQML does not simply does not exist (KMeans(standardize_features=...), n_init, random_state → TypeError: unexpected keyword argument), and everything after \`*\` is KEYWORD-ONLY — ${list(ML_KEY_SIGNATURES)}; there is no scaling flag on an estimator: scaling is a transformer of its own (preprocessing.StandardScaler(), no parameters), alone or as the FIRST of pipeline.Pipeline's EXACTLY TWO steps (transform, estimator) — or done in SQL before the stage. Every extracted signature is listed in semantic_index({ guide: "python" }), and offered as a reference recipe of its own where this deployment ships recipes`,
+      why: `fit() trains inside BigQuery and predict() returns a BigFrames frame, so the data never leaves; sklearn / scipy / statsmodels would first need to_pandas() and then run single-node in the notebook. The trap is the API's resemblance: these classes are WRAPPERS OVER BQML — each constructor maps its parameters to CREATE MODEL options (cluster.py _BQML_PARAMS_MAPPING / _bqml_options), so the surface is BQML's, and a familiar sklearn argument with no BQML option raises TypeError. The signatures below are extracted from ${VERSION}, not remembered, and are also fetchable on their own with semantic_index({ recipe: "bf_ml_signatures" }): ${list(ML_SIGNATURES)}. Pipeline takes exactly two steps, (transform, estimator), and raises NotImplementedError for anything else.`,
+      consequences: [
+        'Before passing a parameter, check it against the signature list — the resemblance to scikit-learn is where the TypeError comes from, and the list is the whole surface in this version.',
+        'Standardizing features is not a flag: preprocessing.StandardScaler() (which takes no parameters at all) either on its own, or as the first of Pipeline\'s two steps. Scaling already done in a SQL stage before this one is just as valid and cheaper.',
+        'A transformer and an estimator both RETURN their own re-read frame (see the alignment rule) — feed it to the next step or return it; do not assign its columns back into df.',
+      ],
     },
   ],
   examples: [
@@ -210,16 +260,16 @@ const BIGFRAMES = {
     {
       task: 'Cluster / segment rows (KMeans)',
       line: 'clustering: m = KMeans(n_clusters=4); m.fit(X); out = m.predict(df) → RETURN out (it already carries every input column + CENTROID_ID) — do NOT assign df["segment"] = m.predict(X)[...]',
-      do: ['from bigframes.ml.cluster import KMeans  (declare it in `imports`)', 'model = KMeans(n_clusters=4)', 'model.fit(df[["sessions", "playtime", "revenue"]])', 'out = model.predict(df)', 'return out'],
-      avoid: ['df["segment"] = model.predict(df[["sessions", "playtime", "revenue"]])["CENTROID_ID"]'],
-      why: 'predict wraps its input in a BigQuery ML table function and RE-READS the result as a new query, so the frame it returns has a different root than df — assigning its column into df is a cross-frame alignment and raises NullIndexError. It is also unnecessary: that output already contains every input column with the prediction appended (CENTROID_ID for clustering, predicted_<label> for a supervised model), so return it and declare those columns in output.columns. The same holds for preprocessing transform/fit_transform.',
+      do: ['from bigframes.ml.cluster import KMeans  (declare it in `imports`)', 'model = KMeans(n_clusters=4)  # and only the parameters in the signature: init, init_col, distance_type, max_iter, tol, warm_start', 'model.fit(df[["sessions", "playtime", "revenue"]])', 'out = model.predict(df)', 'return out'],
+      avoid: ['df["segment"] = model.predict(df[["sessions", "playtime", "revenue"]])["CENTROID_ID"]', 'model = KMeans(n_clusters=4, standardize_features=True)  # TypeError: no such parameter here'],
+      why: 'predict wraps its input in a BigQuery ML table function and RE-READS the result as a new query, so the frame it returns has a different root than df — assigning its column into df is a cross-frame alignment and raises NullIndexError. It is also unnecessary: that output already contains every input column with the prediction appended (CENTROID_ID for clustering, predicted_<label> for a supervised model), so return it and declare those columns in output.columns. The same holds for preprocessing transform/fit_transform. The second `avoid` is the other half: the constructor is BQML\'s, so a scikit-learn argument it does not have (standardize_features, n_init, random_state, algorithm) is a TypeError — scale with preprocessing.StandardScaler(), or in a SQL stage before this one.',
     },
     {
       task: 'Scale / encode features before a model',
       line: 'scaling: scaled = StandardScaler().fit_transform(df[[...]]) → a NEW frame (feed it to fit, or return it); do not assign its columns into df',
       do: ['from bigframes.ml.preprocessing import StandardScaler  (declare it in `imports`)', 'scaled = StandardScaler().fit_transform(df[["sessions", "playtime"]])', 'model.fit(scaled)', 'return model.predict(df)'],
       avoid: ['df["sessions_scaled"] = StandardScaler().fit_transform(df[["sessions"]])["sessions"]'],
-      why: 'The preprocessing transformers are BigQuery ML too — same API as scikit-learn, no data movement — and like predict they return their own re-read frame, so use it as the next step\'s input rather than assigning it back.',
+      why: 'The preprocessing transformers are BigQuery ML too — same API as scikit-learn, no data movement — and like predict they return their own re-read frame, so use it as the next step\'s input rather than assigning it back. StandardScaler() takes NO parameters, and there is no scaling flag on the estimator to use instead. To have BQML do both in one model, pipeline.Pipeline([("scale", StandardScaler()), ("model", KMeans(n_clusters=4))]) — EXACTLY two steps, (transform, estimator); a third raises NotImplementedError.',
     },
     {
       task: 'Train and evaluate with a split',
@@ -314,6 +364,127 @@ export function pythonRulesText(key, recipes = []) {
     + `THE RIGHT FORM PER OPERATION — ${lines.join('; ')}. `
     + `${book.stage_form || ''} `
     + `The same guide with the reasoning behind each rule and the full examples: semantic_index({ guide: "python" }).`;
+}
+
+/**
+ * THE ML LIBRARY'S CLASSES, grouped by module, from the extracted sheet — for the one line a frame
+ * profile needs ("modelling is this library, and these are its classes"). The PARAMETERS are not
+ * repeated there: they are in the reference recipe and in the guide's own rule, so a reader is
+ * never offered two lists that can disagree.
+ */
+export function mlClassesText() {
+  const per = FACTS?.ml || {};
+  const mods = Object.entries(per).map(([mod, entries]) => {
+    const names = Object.keys(entries).map((c) => c.replace(/\(\)$/, '()'));
+    return `${mod}.${names.join(' / ')}`;
+  });
+  return mods.length ? mods.join('; ') : null;
+}
+
+/**
+ * WHAT A FAILURE CLASS MEANS on this runtime — the hints a failed run is annotated with
+ * (`pythonRunHints` matches them; the frame profile carries them). They live HERE, next to the
+ * rules, because they state the same facts: the method lists come from the extracted sheet and the
+ * claims from its `rules`, so a hint can never name a method the guide does not, or the other way
+ * round. The hint says what the class name means and which forms do not hit it; HOW to write the
+ * code is the guide's job, and the signatures are the reference recipe's.
+ */
+export function bigframesRunHints() {
+  const claim = (id) => (FACTS?.rules || []).find((r) => r.id === id)?.claim || '';
+  return [
+    {
+      match: 'NullIndexError|Cannot implicitly align',
+      hint: 'About this runtime: the frame dbt.ref() returns carries NO INDEX, so two objects can only be combined while they share a root — the same frame, narrowed by a projection, a filter or a window. Anything re-read as its own query is a different root: a locally built frame, a groupby aggregate, a cache()d frame, and the output of bigframes.ml predict/transform. '
+        + `${claim('align_needs_common_root')} The traceback says which operation it was; the forms that do not need alignment are a merge on a key (a SQL join), a value computed from the SAME frame, and — for an estimator — returning ITS frame instead of assigning its column back (that output already carries the input columns). Worked forms: semantic_index({ recipe: "bf_lookup_via_merge" }) / ({ recipe: "bf_ml_predict_as_column" }).`,
+    },
+    {
+      match: 'OrderRequiredError',
+      hint: `About this runtime: it carries no row order (the dbt wrapper runs with ordering_mode="partial"), and the operations that need one are marked in the library — ${list(NEEDS_ORDER)}${BY_ARG.length ? `, and by argument ${list(BY_ARG)}` : ''}. sort_values (or sort_index) before the operation is what grants the ordering — nothing else does. The full list with the index-only ones: semantic_index({ recipe: "bf_frame_method_rules" }).`,
+    },
+    {
+      match: 'unexpected keyword argument|__init__\\(\\) got an unexpected',
+      hint: `About this runtime: ${claim('ml_is_bqml_not_sklearn')} Fetch the signature instead of guessing: semantic_index({ recipe: "bf_ml_signatures" }). Scaling is not a flag either — ${claim('ml_scaling_is_a_transformer')}`,
+    },
+    {
+      // The library's own words for it, so the matcher cannot fire on the word "pipeline" in
+      // our own build log: pipeline.py raises "Currently only two step (transform, estimator)
+      // pipelines are supported."
+      match: 'only two step|two step \\(transform',
+      hint: 'About this runtime: pipeline.Pipeline takes EXACTLY TWO steps, (transform, estimator), and raises NotImplementedError for anything else — several transformers go inside ONE compose.ColumnTransformer as that single transform step (semantic_index({ recipe: "bf_ml_categoricals_into_a_model" })). Feature work that is not a transformer belongs in a SQL stage before this one.',
+    },
+    {
+      // The runtime's own way of running out of room, which is a different failure from the
+      // warehouse killing a SQL query (that one is answered by sqlRunHints in src/pipeline.js).
+      match: 'MemoryError|out of memory|Resources exceeded|killed',
+      hint: 'About this runtime: the BigFrames frame itself does not hold rows — BigQuery does — so running out of memory here almost always means something LEFT BigQuery: to_pandas(), a locally built bpd.DataFrame from a large list, or a library (sklearn / scipy / statsmodels) that needs a pandas frame first. All of those are single-node in the notebook. Aggregate to the grain the analysis works on BEFORE converting — and better, in a SQL stage before this one.',
+    },
+    {
+      match: 'convert it to a BigFrames BigQuery function|remote_function',
+      hint: 'About this runtime: it runs no Python per row — a plain function passed to apply/map is attempted once as a vectorized expression over the whole column, and fails this way when it cannot be one. A CASE over columns (np.where) or a merge against a small frame is the form that compiles.',
+    },
+  ];
+}
+
+/**
+ * REFERENCE ENTRIES — the extracted facts offered as fetchable recipes.
+ *
+ * The long guide carries these lists inside its reasoning, which is the wrong place to look
+ * something up mid-write: a caller about to pass a parameter wants the signature, not the essay.
+ * So the same fact sheet is also published as two REFERENCE recipes, addressable by id
+ * (semantic_index({ recipe: 'bf_ml_signatures' })) and filtered by the ordinary capability rules —
+ * they are offered only where this deployment submits to BigFrames.
+ *
+ * They are GENERATED from config/bigframes-facts.json, never hand-written: the version they name is
+ * the version they were read from, and a library upgrade regenerates both the sheet and these.
+ * An operator can still override either id in their own recipe file (a later id wins in
+ * loadRecipes), which is why these carry origin 'generated' rather than 'system'.
+ */
+export function pythonReferenceRecipes() {
+  if (!FACTS?.ml && !FACTS?.requires_ordering) return [];
+  const version = FACTS?.version ? `bigframes ${FACTS.version}` : 'the installed bigframes';
+  const out = [];
+  if (FACTS?.ml) {
+    out.push({
+      id: 'bf_ml_signatures',
+      task_type: 'bigframes',
+      requires: 'python_models',
+      runtime: 'bigframes',
+      title: `REFERENCE: every bigframes.ml constructor and its parameters (${version})`,
+      when_to_use: 'Before passing ANY parameter to an estimator or a transformer — and the moment a run fails with "TypeError: __init__() got an unexpected keyword argument".',
+      approach: 'Read the signature of the class you are about to build and pass only what is in it. `positional` may be given positionally or by name; everything in `keyword_only` must be named. A parameter that is not in either list does not exist in this version — no matter what scikit-learn accepts.',
+      instead_of: 'Passing a scikit-learn parameter by analogy: KMeans(standardize_features=True), n_init, random_state, algorithm. bigframes.ml wraps BigQuery ML, so a constructor takes the options its BQML model type has and nothing else.',
+      reference: { library: 'bigframes', version: FACTS.version || null, of: 'ml constructors', signatures: FACTS.ml },
+      notes: 'Extracted from the library itself (scripts/bigframes-facts.py → config/bigframes-facts.json), so this is that version\'s surface rather than a memory of the docs — the CONSTRUCTORS. What the methods return is not a parameter list and is written per capability in the worked recipes: a prediction per row (bf_ml_predict_as_column, bf_ml_supervised_fit_predict), an output that replaces the frame (bf_ml_reduce_dimensions, bf_ml_output_replaces_frame), an evaluation (bf_ml_evaluate_with_split), categorical features (bf_ml_categoricals_into_a_model), parameters and scaling (bf_ml_estimator_params). Two facts that are not parameters either: a transformer/estimator RETURNS its own re-read frame (assigning its column back raises NullIndexError), and pipeline.Pipeline takes EXACTLY TWO steps, (transform, estimator). KMeans, PCA and ARIMAPlus also carry detect_anomalies(X, *, contamination) — its output columns are BigQuery ML\'s, so read them off the first run rather than assuming them.',
+      hack: 'Scaling, splitting and encoding are steps of their own, not flags on the estimator — anything the signature lacks is either another object (a transformer) or work for a SQL stage before the python one.',
+      origin: 'generated',
+    });
+  }
+  if (FACTS?.requires_ordering || FACTS?.requires_index) {
+    out.push({
+      id: 'bf_frame_method_rules',
+      task_type: 'bigframes',
+      requires: 'python_models',
+      runtime: 'bigframes',
+      title: `REFERENCE: which DataFrame/Series methods need an ordering or an index, and the signatures that surprise (${version})`,
+      when_to_use: 'Before using a positional / ordered / index-based method on the frame dbt.ref() returns, and when a run fails with OrderRequiredError or NullIndexError.',
+      approach: 'Look the method up in the lists below. `requires_ordering` raises OrderRequiredError until the frame is explicitly ordered — sort_values (or sort_index) is what grants that, nothing else. `requires_index` raises NullIndexError here, full stop: this frame has no index at all. `ordering_enforced_by_argument` is the middle case — the method is allowed once the named argument is set (unique(keep_order=False), nlargest(keep="all")).',
+      instead_of: 'Trying the pandas form and reading the traceback: head/tail/nlargest on an unsorted frame, loc/at/idxmax on an indexless one, Series.map(dict) for a lookup (use merge), std(ddof=0) (this version\'s std takes no parameters).',
+      reference: {
+        library: 'bigframes',
+        version: FACTS.version || null,
+        of: 'frame method preconditions',
+        requires_ordering: FACTS.requires_ordering || {},
+        requires_index: FACTS.requires_index || {},
+        ordering_enforced_by_argument: FACTS.ordering_enforced_by_argument || {},
+        signatures: FACTS.signatures || {},
+        rules: (FACTS.rules || []).map((r) => ({ id: r.id, claim: r.claim })),
+      },
+      notes: 'The lists come from the library\'s own decorators (@validations.requires_index / @requires_ordering) and the signatures from its source, so they are exact for this version. The reasoning behind each, with a do / avoid per operation, is semantic_index({ guide: "python" }).',
+      hack: 'Two questions before every line: does this need a ROW ORDER (then sort first), and does it combine TWO objects (then they must share a root, or be merged on a key).',
+      origin: 'generated',
+    });
+  }
+  return out;
 }
 
 /** The runtime keys a written cookbook exists for (for tests and for the guide's own listing). */

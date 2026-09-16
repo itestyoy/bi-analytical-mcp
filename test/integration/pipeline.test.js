@@ -444,3 +444,59 @@ test('pipeline unpivot: fold revenue+n into rows; US revenue row = 35', opts, as
   const usRows = r.rows.filter((x) => String(x.country) === 'US');
   assert.equal(usRows.length, 2);
 });
+
+// THE TWO-PASS LADDER that replaces a global analytic window. Pass 1 collapses the table to ONE row
+// of statistics (an aggregate with no group_by — no window, no ordering, nothing held in a single
+// worker's memory). Pass 2 puts those numbers back on the rows as LITERALS: `least` clamps at the
+// threshold and sub/div give the z-score. Both passes are asserted on the seed's real numbers.
+//
+// The shape matters because the alternative fails in production: AVG/STDDEV/PERCENTILE_CONT over
+// `OVER ()` keeps every row and attaches the value to each, which exhausted a query's memory on
+// ~6.3M rows ("Resources exceeded during query execution") even after the exact percentile was
+// removed.
+test('a table-wide statistic is ONE row, and its numbers scale the rows as literals', opts, async (t) => {
+  if (skip(t)) return;
+  const perPlayer = [
+    { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
+    { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
+    { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] },
+  ];
+
+  // PASS 1 — one row: the count, the mean, the max. No group_by, no window.
+  const stats = await run([...perPlayer, {
+    stage: 'aggregate',
+    measures: [
+      { name: 'players', fn: 'count' },
+      { name: 'revenue_avg', fn: 'avg', column: 'revenue' },
+      { name: 'revenue_max', fn: 'max', column: 'revenue' },
+      { name: 'revenue_median', fn: 'median', column: 'revenue' },
+    ],
+  }]);
+  assert.equal(stats.ok, true, JSON.stringify(stats));
+  assert.equal(stats.rows.length, 1, 'a table-wide statistic is exactly one row');
+  const players = num(stats.rows[0].players);
+  const mean = num(stats.rows[0].revenue_avg);
+  const max = num(stats.rows[0].revenue_max);
+  // the seed: total IAP revenue is US 35 + GB 25 + BR 25 = 85, spread over the paying players
+  assert.ok(players >= 2, `expected several payers, got ${players}`);
+  assert.ok(Math.abs(mean * players - 85) < 1e-6, `the mean times the count is the total: ${mean} * ${players}`);
+
+  // PASS 2 — those numbers as literals: clamp at a threshold, then centre and scale. The clamp is
+  // set BELOW the maximum on purpose, so the winsorizing is visible in the numbers.
+  const cap = max - 1;
+  const rows = await run([...perPlayer,
+    { stage: 'compute', name: 'revenue_capped', op: 'least', parts: [{ column: 'revenue' }, { value: cap }] },
+    { stage: 'compute', name: 'revenue_floored', op: 'greatest', parts: [{ column: 'revenue_capped' }, { value: 1 }] },
+    { stage: 'compute', name: 'centered', op: 'sub', left: { column: 'revenue_capped' }, right: { value: mean } },
+    { stage: 'compute', name: 'revenue_z', op: 'div', left: { column: 'centered' }, right: { value: 10 } },
+  ]);
+  assert.equal(rows.ok, true, JSON.stringify(rows));
+  assert.equal(rows.rows.length, players, 'pass 2 keeps one row per player');
+  for (const row of rows.rows) {
+    const revenue = num(row.revenue);
+    assert.equal(num(row.revenue_capped), Math.min(revenue, cap), `least(revenue, ${cap}) on ${revenue}`);
+    assert.equal(num(row.revenue_floored), Math.max(Math.min(revenue, cap), 1));
+    assert.ok(Math.abs(num(row.revenue_z) - (Math.min(revenue, cap) - mean) / 10) < 1e-6, `z of ${revenue}`);
+  }
+  assert.ok(rows.rows.some((row) => num(row.revenue_capped) < num(row.revenue)), 'at least one row was actually clamped');
+});

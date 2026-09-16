@@ -21,7 +21,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { registerStage } from './pipeline.js';
-import { pythonRulesText } from './python-guide.js';
+import { pythonRulesText, mlClassesText, bigframesRunHints } from './python-guide.js';
 
 // the gate script is a non-JS runtime asset — see src/runtime-assets.js for why it is resolved there
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -51,7 +51,10 @@ export function frameProfile(rt, config = {}) {
       key: 'bigframes',
       native: 'a BigFrames DataFrame — bigframes.pandas, the pandas API compiled to BigQuery SQL and executed in BigQuery (import bigframes.pandas as bpd for constructors)',
       pandas: 'df.to_pandas()',
-      ml: 'bigframes.ml — the scikit-learn API run as BigQuery ML (model.fit trains in BigQuery, model.predict returns a BigFrames frame): bigframes.ml.cluster.KMeans; linear_model.LinearRegression / LogisticRegression; ensemble.XGBRegressor / XGBClassifier / RandomForestRegressor / RandomForestClassifier; decomposition.PCA; forecasting.ARIMAPlus; preprocessing.StandardScaler / MinMaxScaler / MaxAbsScaler / OneHotEncoder / LabelEncoder / KBinsDiscretizer; compose.ColumnTransformer; pipeline.Pipeline; model_selection.train_test_split / KFold / cross_validate; metrics',
+      // The CLASSES come from the extracted fact sheet (src/python-guide.js → mlClassesText),
+      // never from a list written here: a hand-kept copy is how a signature drifts from the library.
+      // The PARAMETERS are not restated in this line at all — they are the reference recipe's.
+      ml: `bigframes.ml — the scikit-learn API run as BigQuery ML (model.fit trains in BigQuery, model.predict returns a BigFrames frame)${mlClassesText() ? `: ${mlClassesText()}` : ''}`,
       guide: pythonRulesText('bigframes', rt?.recipes || []),
       packagesNote: 'On BigFrames prefer bigframes (bigframes.ml) over sklearn / scipy / statsmodels: those run only after df.to_pandas(), single-node.',
       // Two things this frame does NOT have — no row order (dbt's wrapper runs with
@@ -65,17 +68,13 @@ export function frameProfile(rt, config = {}) {
       // would fall back to its own default (serverless → PySpark) and the model would die in a
       // Dataproc job. Writing the submission this profile stands for keeps the two the same.
       submission: 'bigframes',
-      // What a failure of THIS runtime MEANS, for the failures whose actionable part is one class
-      // name. A fact about the runtime, NOT a diagnosis of the code: which operation raised it is
-      // in the traceback, and we cannot know from here which line the author meant — so nothing
-      // here prescribes a rewrite. The stage's rules (`guide`) say how to write it; this only says
-      // what the class name is about. Declared here so `pythonRunHints` stays a matcher with no
+      // WHAT A FAILURE CLASS MEANS on this runtime — a fact about the runtime, NOT a diagnosis of
+      // the code: which operation raised it is in the traceback, and nothing here can know which
+      // line the author meant, so no hint prescribes a rewrite. Composed next to the rules and the
+      // extracted method lists (src/python-guide.js → bigframesRunHints), so a hint can never name
+      // a method or a claim the guide does not, and `pythonRunHints` stays a matcher with no
       // runtime inside it.
-      runHints: [
-        { match: 'NullIndexError|Cannot implicitly align', hint: 'About this runtime: the frame dbt.ref() returns carries NO INDEX, so two objects can only be combined while they share a root — the same frame, narrowed by a projection, a filter or a window. Anything re-read as its own query is a different root: a locally built frame, a groupby aggregate, a cache()d frame, and the output of bigframes.ml predict/transform. The traceback says which operation it was; the forms that do not need alignment are a merge on a key (a SQL join), a value computed from the SAME frame, and — for an estimator — returning ITS frame instead of assigning its column back (that output already carries the input columns).' },
-        { match: 'OrderRequiredError', hint: 'About this runtime: it carries no row order (the dbt wrapper runs with ordering_mode="partial"), and the operations that need one are marked in the library: head, tail, iat, rolling, expanding, shift, diff, pct_change, cumsum/cumprod/cummin/cummax, rank, sample, melt, unstack, reset_index, ffill/bfill, idxmin/idxmax, and nlargest/nsmallest/unique unless keep="all"/keep_order=False. sort_values (or sort_index) before the operation is what grants the ordering — nothing else does.' },
-        { match: 'convert it to a BigFrames BigQuery function|remote_function', hint: 'About this runtime: it runs no Python per row — a plain function passed to apply/map is attempted once as a vectorized expression over the whole column, and fails this way when it cannot be one.' },
-      ],
+      runHints: bigframesRunHints(),
       packages: ['bigframes'],
       // HOW LONG A BUILD MAY HOLD THE CALL before it is handed back as a job to poll. This is a
       // property of the RUNTIME, like the frame type and the ML library: dbt starts a Colab
@@ -408,9 +407,15 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   const MOD = '^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$';
   const preinstalled = [...allow].filter(([, pip]) => !pip).map(([k]) => k);
   const installed = [...allow].filter(([, pip]) => pip).map(([k, pip]) => `${k} (dbt installs ${pip})`);
+  // WHAT THIS DESCRIPTION IS FOR, and what it deliberately does NOT say (see the layering in
+  // src/python-guide.js): the MECHANICS of the stage in this server — where it sits in the chain,
+  // what the frame is, what the caller declares, what the server writes, the limits. What belongs
+  // in a python stage at all, what this runtime's frame raises and the worked forms per move come
+  // from ONE place, `profile.guide` (the compact rendering of the cookbook, recipe index
+  // included), interpolated below. Restating any of it here is how the two start to disagree.
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
-    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. WHAT BELONGS HERE AND WHAT DOES NOT: only what SQL cannot say — a statistical test, clustering, scoring, a forecast, a model. Everything else is a SQL stage BEFORE this one, and that INCLUDES PREPARING the table this analysis reads: scope to the events and the time window, extract the payload columns, join the attributes, aggregate to the grain the analysis works on. This stage receives a PREPARED table at that grain, never the raw source — a SQL stage computes exactly and cheaply where the data already lives, this model is a separate dbt model on the warehouse's python runtime (a cold start, and its frame has that runtime's own limits), and a SQL stage stays readable to whoever reads the pipeline next while a function is readable only to whoever wrote it. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}.` : ''} ${profile.guide} The last step's return value IS this model's table: declare output.columns so the SQL stages that follow know its columns. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies pass a static allowlist first (own names + declared imports + public attributes); what the code may reach ON the warehouse is decided by that runtime and dbt's own credentials. SIZE: up to 30 functions, 400 lines per function body, 500 characters per line, 50 steps and 20 imports — a real analysis fits, so if a stage is refused it is not for being big. The pipeline's last model is the result — read it with get_query_result as usual.`,
+    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}.` : ''} ${profile.guide} The last step's return value IS this model's table: declare output.columns so the SQL stages that follow know its columns. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies pass a static allowlist first (own names + declared imports + public attributes); what the code may reach ON the warehouse is decided by that runtime and dbt's own credentials. SIZE: up to 30 functions, 400 lines per function body, 500 characters per line, 50 steps and 20 imports — a real analysis fits, so if a stage is refused it is not for being big. The pipeline's last model is the result — read it with get_query_result as usual.`,
     properties: {
       stage: { enum: ['python'] },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },

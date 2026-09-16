@@ -1,7 +1,7 @@
 // Tool engine: validates inputs against catalog-derived schemas, compiles
 // declarations, renders YAML, drives dbt/mf within isolated contexts.
 
-import { buildSchemas } from './schema.js';
+import { buildSchemas, MAX_WAIT_SECONDS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
@@ -14,7 +14,7 @@ import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
-import { renderPipeline } from './pipeline.js';
+import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
 import { rankFuzzy } from './fuzzy.js';
 import { buildGuide } from './guide.js';
@@ -52,7 +52,14 @@ export class Engine {
       if (moved.targets) console.error(`[mcp] memory targets stored structurally: ${moved.targets} target(s) on ${moved.notes} note(s)`);
     } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
-    this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
+    // HOW LONG AN SQL BUILD MAY HOLD THE CALL before it is handed back as a job to poll. It is not
+    // a query timeout — nothing is cancelled when it expires; the build runs on and the caller gets
+    // a query_id. The number is bounded by a timeout we do NOT own: the client in front of this
+    // tool call gives up on its own schedule, reports the server as unresponsive, and the build it
+    // started keeps running unseen. 20s sits inside the usual client limits and still lets a chain
+    // whose work is SQL return the ROWS instead of a job id. A build with a PYTHON model has its
+    // own, shorter grace (see below).
+    this.queryTimeoutMs = queryTimeoutMs ?? 20000;
     // A build with a PYTHON model may detach much sooner — but HOW soon is the runtime's own
     // property (`buildGraceMs` on its frame profile), not one number for everything: a remote
     // runtime (BigFrames in a notebook, Spark on Dataproc, Snowpark) is minutes of cold start
@@ -1759,7 +1766,7 @@ export class Engine {
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
         ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
-        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this._draftStepRecommendations(changedStage, after)] : []),
+        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this._globalWindowWarnings(changedStage), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;
@@ -1792,6 +1799,7 @@ export class Engine {
       ...this._joinCompletenessWarnings(st, draft),
       ...this._funnelCompletionWarnings(st),
       ...this._pythonPreparationWarnings(st, draft, i),
+      ...this._globalWindowWarnings(st),
     ]);
   }
 
@@ -1820,6 +1828,32 @@ export class Engine {
     return [`This python stage reads ${src} as it is: no stage before it narrows or reduces the data.`
       + ` A python stage is for what SQL cannot say (a statistical test, clustering, scoring, a forecast); everything else — scoping to the events${time ? ` and a time window on ${time}` : ''}, extracting the payload columns, joining the attributes, aggregating to the grain your analysis works on — is cheaper and exact as stages BEFORE this one, and the python model then starts from a small prepared table.`
       + ` If the analysis really is per source row (a model scoring every row), this shape is right and there is nothing to change.`];
+  }
+
+  /**
+   * A GLOBAL ANALYTIC WINDOW: `OVER ()` with no PARTITION BY. It keeps every row and attaches the
+   * value to each, so one worker has to hold the whole input — observed on a table of ~6.3M rows as
+   * "Resources exceeded during query execution" with analytic windows accounting for all of the
+   * memory, and again after the exact percentile in it was replaced, for plain AVG/STDDEV over the
+   * same global window. An exact percentile is the worst case, because it also has to order the
+   * values.
+   *
+   * The cheap form of the same question is an `aggregate` stage with no group_by: ONE row with the
+   * thresholds and the statistics, applied per row afterwards as literals. So this says that, and
+   * refuses nothing: a global window over an already-aggregated handful of rows is harmless, and
+   * from here there is no way to know how many rows arrive.
+   */
+  _globalWindowWarnings(stage) {
+    if (stage?.stage !== 'compute') return [];
+    const windowed = stage.op === 'window' && !(stage.partition_by || []).length;
+    // Raw SQL is where this actually came from: the built-in window op is only reachable through
+    // `partition_by`, but `op: 'raw'` carries whatever the caller wrote.
+    const rawGlobal = stage.op === 'raw' && /\bover\s*\(\s*(order\s+by[^)]*)?\)/i.test(String(stage.sql || ''));
+    if (!windowed && !rawGlobal) return [];
+    const what = windowed ? `the window function '${stage.fn}' has no partition_by` : `the raw expression for '${stage.name}' uses OVER () with no PARTITION BY`;
+    return [`Global analytic window: ${what}, so it is computed over EVERY row at once and the value is attached to each. One worker has to hold the whole input for that, which is how a large table runs out of memory ("Resources exceeded during query execution") — an exact percentile worst of all, since it must also order the values.`
+      + ` If the number is TABLE-WIDE (a threshold, a mean, a deviation), compute it in an \`aggregate\` stage with no group_by — one row, no ordering — and apply it per row in a later pass as a literal (compute sub/div, or least/greatest with { value }).`
+      + ` If it is per group (per player, per day, per session), name those columns in partition_by. A global window over an already-aggregated handful of rows is fine as it is.`];
   }
 
   _joinCompletenessWarnings(stage, draft = null) {
@@ -2080,12 +2114,43 @@ export class Engine {
     try {
       // Match the RAW output, not `message`: formatDbtError slices from the first dbt marker and
       // truncates, and the runtime's traceback — where the class name is — can fall outside that.
-      const hints = pythonRunHints(frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}), `${stderr || ''}\n${stdout || ''}`);
+      const raw = `${stderr || ''}\n${stdout || ''}`;
+      const hints = [
+        ...pythonRunHints(frameProfile(this.catalog.pythonRuntime || {}, this.pythonModelConfig || {}), raw),
+        ...this._chainColumnHints(raw),
+      ];
       return hints.length ? `${message}\n\n${hints.join('\n')}` : message;
     } catch { return message; }
   }
 
+  /**
+   * A CHAIN failure that is neither the runtime's nor the SQL's fault but the declaration's:
+   * `output.columns` is a CLAIM about what the last step returns, and the stages after the python
+   * model are rendered against it. When the frame returns something else, the failure surfaces as
+   * an unknown column in the NEXT model — a message that reads like a typo in a stage.
+   *
+   * This is the chain's own fact (the engine owns the chain), so the hint lives here rather than in
+   * a runtime profile: the same mismatch happens on every python runtime.
+   */
+  _chainColumnHints(text) {
+    const log = String(text || '');
+    if (!/unknown column|Unrecognized name|column .* does not exist|no such column|Invalid column/i.test(log)) return [];
+    return ['If the failing column is one you declared in a python stage\'s `output.columns`, that declaration is what the SQL stages after it were rendered against — nothing projects the frame for you. The frame decides: make the last step return exactly those columns, or declare exactly what it returns. An estimator\'s output often has its OWN shape (a forecast, score(), PCA components), which is the case semantic_index({ recipe: "bf_ml_output_replaces_frame" }) works through; the response of a successful build reports the columns the table really has.'];
+  }
+
   /** Compile a python stage into its dbt model (structure only — the gate is separate). */
+  /**
+   * The same for a SQL build: the warehouse's message, plus the hint when the failure is one whose
+   * fix is a different pipeline shape (see sqlRunHints in src/pipeline.js).
+   */
+  _sqlRunMessage(stdout, stderr) {
+    const message = formatDbtError(stdout, stderr);
+    try {
+      const hints = sqlRunHints(`${stderr || ''}\n${stdout || ''}`);
+      return hints.length ? `${message}\n\n${hints.join('\n')}` : message;
+    } catch { return message; }
+  }
+
   _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
@@ -2134,9 +2199,10 @@ export class Engine {
    * The grace is NOT one number for everything. A build that is expected to be slow should hand
    * back its query_id almost at once: the caller in front of us is a tool call inside another
    * agent's client, and that client has a timeout of its own which we do not know and cannot
-   * raise. Waiting 60s on a BigQuery Python model means the client gives up first and reports the
-   * server as unresponsive — while the job it started runs on to completion, invisible. Handing
-   * back the id in a few seconds keeps the poll in the caller's hands, where it belongs.
+   * raise. Holding a BigQuery Python model for the ordinary window means the client gives up first
+   * and reports the server as unresponsive — while the job it started runs on to completion,
+   * invisible. Handing back the id in a few seconds keeps the poll in the caller's hands, where it
+   * belongs.
    */
   async _runDetached(ctx, select, table, { graceMs = this.queryTimeoutMs } = {}) {
     const dir = this.ctxs.dir(ctx.id);
@@ -2380,7 +2446,7 @@ export class Engine {
         }
         r = bg.result;
       } else r = await this.runner.run(this.ctxs.dir(ctx.id), modelName);
-      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: hasPython ? this._pythonRunMessage(r.stdout, r.stderr) : formatDbtError(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
+      if (!r.ok) return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'run', message: hasPython ? this._pythonRunMessage(r.stdout, r.stderr) : this._sqlRunMessage(r.stdout, r.stderr) }, ...(models.length > 1 ? { models: chainInfo } : {}), ...(hasPython ? { python: pyInfo } : {}) };
       const show = await this.runner.show(this.ctxs.dir(ctx.id), `SELECT * FROM {{ ref('${modelName}') }}`, 200);
       if (show.ok) { rows = show.rows; columns = show.columns || columns; }
       else return { context_id: ctx.id, kind: 'pipeline', ok: false, error: { stage: 'show', message: formatDbtError(show.stdout, show.stderr) } };
@@ -2816,16 +2882,21 @@ export class Engine {
   }
 
   /**
-   * Bounded wait (0–60s) so the AI can pace background-job polling: wait an
+   * Bounded wait (0–MAX_WAIT_SECONDS) so the AI can pace background-job polling: wait an
    * interval, then poll get_query_result, repeat until ready. Purely a timer.
+   *
+   * The ceiling is the same one every other number here answers to: the wait happens INSIDE a tool
+   * call, so a caller that asks for a minute gets a dropped connection rather than a minute. The
+   * cap is reported back (`cap_seconds`) so the pacing can be planned from the answer instead of
+   * from the description.
    */
   async time(input) {
     this._validate('time', input);
     const requested = Number(input.seconds) || 0;
-    const seconds = Math.min(Math.max(requested, 0), 60); // clamp to [0, 60]
+    const seconds = Math.min(Math.max(requested, 0), MAX_WAIT_SECONDS); // clamp to [0, MAX_WAIT_SECONDS]
     const startedAt = new Date().toISOString();
     await new Promise((resolve) => { setTimeout(resolve, seconds * 1000); });
-    return { ok: true, waited_seconds: seconds, requested_seconds: requested, clamped: requested > 60, started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
+    return { ok: true, waited_seconds: seconds, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
   }
 
   async describe_context(input) {
@@ -3111,7 +3182,7 @@ export class Engine {
     const build = (async () => {
       try {
         const r = await this.runner.run(dir, table);
-        if (!r.ok) this.jobs.fail(id, formatDbtError(r.stdout, r.stderr));
+        if (!r.ok) this.jobs.fail(id, this._sqlRunMessage(r.stdout, r.stderr));
         else this.jobs.ready(id);
       } catch (e) {
         this.jobs.fail(id, e?.message || String(e));

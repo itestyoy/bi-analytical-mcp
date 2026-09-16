@@ -2241,6 +2241,178 @@
       ]
     },
     {
+      "id": "agg_table_stat_no_global_window",
+      "task_type": "pipeline",
+      "title": "A table-wide threshold / mean / deviation — one row from an aggregate, never a global window",
+      "when_to_use": "You need a number ABOUT the whole table before you can process its rows: a P99 cut-off, a mean and a deviation to standardize by, a max to normalize against.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd_of_event_data"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [],
+      "approach": "Prepare the grain you are asking about (here: revenue per player), then ONE `aggregate` stage with NO group_by: it returns a single row with every statistic you need — the percentile, the mean, the deviation, the max — computed once. Read that row, and use the numbers in the next pass (see agg_scale_rows_by_literals).",
+      "instead_of": "The same statistics as analytic windows on every row — `PERCENTILE_CONT(x, 0.99) OVER ()`, `AVG(x) OVER ()`, `STDDEV_POP(x) OVER ()` (a compute `window` stage with no partition_by, or op=raw). A window with no PARTITION BY is ONE window over the whole input: every row is kept and the value is attached to each, so a single worker holds the lot. On a table of millions of rows that is \"Resources exceeded during query execution\" — and it stays broken after the percentile is removed, because plain AVG/STDDEV over the same global window are just as heavy.",
+      "notes": "Say which kind of number you are reporting: on BigQuery `percentile`/`median` here are APPROX_QUANTILES — a sketch, which is exactly why they need no ordering and no global memory; on Postgres they are exact (percentile_cont). The stage description states this per warehouse. An exact percentile over a huge table is the one form that needs a total order, so it is the most expensive thing you can ask for — take the approximate one unless the difference changes a decision, and label it.",
+      "hack": "Two passes instead of one query: pass 1 collapses the table to ONE row of statistics (no group_by, no window, no ordering), pass 2 uses those numbers as literals on the rows. Anything you were tempted to write as OVER () belongs in pass 1; a window is only for a value within a group — per player, per day, per session — and then partition_by names that group.",
+      "register_payload": {
+        "name": "table_wide_stats",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "column": "event_name",
+                  "op": "eq",
+                  "value": "iap_purchase_completed"
+                }
+              ]
+            },
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "measures": [
+                {
+                  "name": "players",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue_p99",
+                  "fn": "percentile",
+                  "q": 0.99,
+                  "column": "revenue"
+                },
+                {
+                  "name": "revenue_avg",
+                  "fn": "avg",
+                  "column": "revenue"
+                },
+                {
+                  "name": "revenue_sd",
+                  "fn": "stddev",
+                  "column": "revenue"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "agg_scale_rows_by_literals",
+      "task_type": "pipeline",
+      "title": "Winsorize and standardize rows by numbers you already computed — plain arithmetic, no window",
+      "when_to_use": "Pass 2 after agg_table_stat_no_global_window: clamp outliers at a threshold and turn an amount into a z-score before clustering / scoring.",
+      "required_events": [
+        "iap_purchase_completed"
+      ],
+      "required_properties": [
+        "price_in_usd_of_event_data"
+      ],
+      "required_user_attrs": [],
+      "metric_types": [],
+      "approach": "Put the numbers from pass 1 in as LITERALS: `least` with parts [{ column }, { value: <p99> }] clamps at the threshold, then `sub` and `div` against { value: <mean> } / { value: <deviation> } give the z-score. Every row is then independent arithmetic — no window, no ordering, no global memory — and the result is the feature table a python stage (or a segmentation) reads.",
+      "instead_of": "Recomputing the same statistics per row with AVG/STDDEV/PERCENTILE_CONT OVER () — the global window that exhausts the query's memory. Also: a `sample` stage to make the window affordable, which changes the answer instead of the shape of the query.",
+      "notes": "The literals belong to the window of data pass 1 measured — re-run pass 1 when the period or the filter changes, or the z-scores quietly describe a different population. Keep them in the model's description (build_native_model's `description`) so the next reader knows where the numbers came from. div guards against a zero deviation by itself (a NULL, not a division error).",
+      "hack": "A number about the whole table enters the row-level query as a constant. Pass 1 (one row of statistics) → pass 2 (arithmetic per row with those constants): the pair replaces every OVER () that had no PARTITION BY, and each pass stays a plain dbt model.",
+      "register_payload": {
+        "name": "scaled_player_features",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "where",
+              "conditions": [
+                {
+                  "column": "event_name",
+                  "op": "eq",
+                  "value": "iap_purchase_completed"
+                }
+              ]
+            },
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "revenue_capped",
+              "op": "least",
+              "parts": [
+                {
+                  "column": "revenue"
+                },
+                {
+                  "value": 100
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "revenue_centered",
+              "op": "sub",
+              "left": {
+                "column": "revenue_capped"
+              },
+              "right": {
+                "value": 12.5
+              }
+            },
+            {
+              "stage": "compute",
+              "name": "revenue_z",
+              "op": "div",
+              "left": {
+                "column": "revenue_centered"
+              },
+              "right": {
+                "value": 8.25
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
       "id": "pipeline_age_offset_axis",
       "task_type": "pipeline",
       "title": "An age axis: join an anchor date, then date_diff",
@@ -3476,6 +3648,131 @@
       "hack": "Feature table in SQL → fit/predict in one python stage → the estimator's OWN frame out → profile it in SQL. The shape holds for every estimator; only the class and the appended column change."
     },
     {
+      "id": "bf_ml_estimator_params",
+      "task_type": "bigframes",
+      "title": "An estimator's parameters are BQML's, not scikit-learn's — and scaling is a step, not a flag",
+      "when_to_use": "Before passing any parameter to a bigframes.ml estimator, and whenever features must be standardized for a distance-based model (KMeans, PCA).",
+      "approach": "Pass only the parameters the signature has, and let a TRANSFORMER do the scaling: `Pipeline([(\"scale\", StandardScaler()), (\"model\", KMeans(n_clusters=4))])`, fit it, return what predict gives back. KMeans is (n_clusters, *, init, init_col, distance_type, max_iter, tol, warm_start) — everything after the `*` is keyword-only; StandardScaler() takes no parameters at all; Pipeline takes EXACTLY TWO steps, (transform, estimator).",
+      "instead_of": "`KMeans(n_clusters=4, standardize_features=True)` → TypeError: __init__() got an unexpected keyword argument. bigframes.ml wears the scikit-learn API but wraps BigQuery ML: a constructor takes the options its BQML model type has, so an sklearn-only argument (standardize_features, n_init, random_state, algorithm) does not exist here. A third Pipeline step raises NotImplementedError.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for the signature of the class you are about to build (every bigframes.ml constructor, extracted from the installed library), and semantic_index({ guide: \"python\" }) for the frame rules this recipe rests on.",
+      "register_payload": {
+        "name": "ml_estimator_params",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "python",
+              "imports": [
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.cluster",
+                  "names": [
+                    "KMeans"
+                  ]
+                },
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.preprocessing",
+                  "names": [
+                    "StandardScaler"
+                  ]
+                },
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.pipeline",
+                  "names": [
+                    "Pipeline"
+                  ]
+                }
+              ],
+              "functions": [
+                {
+                  "name": "segment",
+                  "params": [
+                    "df",
+                    "features",
+                    "k"
+                  ],
+                  "body": [
+                    "steps = [(\"scale\", StandardScaler()), (\"model\", KMeans(n_clusters=k))]",
+                    "pipe = Pipeline(steps)",
+                    "pipe.fit(df[features])",
+                    "out = pipe.predict(df)",
+                    "return out"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "segment",
+                  "args": {
+                    "features": [
+                      "events",
+                      "revenue"
+                    ],
+                    "k": 3
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "events",
+                  "revenue",
+                  "CENTROID_ID"
+                ]
+              }
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "CENTROID_ID"
+              ],
+              "measures": [
+                {
+                  "name": "players",
+                  "fn": "count"
+                },
+                {
+                  "name": "avg_revenue",
+                  "fn": "avg",
+                  "column": "revenue"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "notes": "Why the resemblance misleads: each estimator maps its parameters to BQML CREATE MODEL options (cluster.py _BQML_PARAMS_MAPPING / _bqml_options), so the surface is BQML's and nothing else is accepted — and the parameters after the first are keyword-only, so a positional call fails the same way. The signatures are extracted from the installed library (config/bigframes-facts.json) and published as a fetchable reference — semantic_index({ recipe: \"bf_ml_signatures\" }) — so they are this version's, not a memory of the docs. Standardizing in a SQL stage before the python stage is equally valid and cheaper — compute the mean and the deviation as a ONE-ROW aggregate and apply them as literals (see agg_table_stat_no_global_window); then the estimator needs no transformer at all.",
+      "hack": "Read the signature, pass only what is in it, and express anything it lacks as a step of its own (a transformer) or as SQL before the stage. The same holds for every estimator: only the class and its option names change."
+    },
+    {
       "id": "bf_ml_output_replaces_frame",
       "task_type": "bigframes",
       "title": "An estimator whose output REPLACES the frame — declare its columns",
@@ -3581,6 +3878,554 @@
       },
       "notes": "The declared columns above are what ARIMA_PLUS.FORECAST produces; verify them on the first run (the result reports its columns) and rename in a following SQL stage if you want your own names. This is the same rule as the prediction recipe seen from the other side: an estimator hands back a frame of its own, and the stage returns THAT — the difference is only whether its shape is your rows (predict) or something else entirely (a forecast, a score, metrics). History IS the input: one row per period, no gaps. One model per series — a per-segment forecast is one model per segment, not one call.",
       "hack": "Whenever an estimator's output is its own table (forecast, score, metrics, transform), the stage's output.columns describes THAT table — and the SQL after it works on those names."
+    },
+    {
+      "id": "bf_ml_supervised_fit_predict",
+      "task_type": "bigframes",
+      "title": "A supervised model — fit(X, y) with a LABEL, and the predicted_<label> column it returns",
+      "when_to_use": "Predicting a number (spend, days to churn) or a class (will pay, will churn) per row: regression and classification.",
+      "approach": "Label and features are SEPARATE arguments: `model.fit(df[features], df[[label]])` — the label is a FRAME (double brackets), not a Series. Predict on the features only (`model.predict(df.drop(columns=[label]))`) and return that frame: it carries every column you passed plus `predicted_<label>` (and, for a classifier, `predicted_<label>_probs`, an array of {label, prob}). Declare those names in `output.columns` and profile them in a SQL stage after.",
+      "instead_of": "`model.fit(df)` with the label still inside the features (it then predicts itself), a Series as y, or assigning `df[\"pred\"] = model.predict(...)` — predict re-reads its result, so the assignment raises NullIndexError. Also sklearn's LogisticRegression/RandomForest: they need to_pandas() and run single-node.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for the estimator's own parameters, and semantic_index({ guide: \"python\" }) for the frame rules this recipe rests on.",
+      "register_payload": {
+        "name": "ml_supervised",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "is_payer",
+              "op": "case",
+              "type": "int",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "revenue",
+                      "op": "gt",
+                      "value": 0
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              }
+            },
+            {
+              "stage": "python",
+              "imports": [
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.linear_model",
+                  "names": [
+                    "LogisticRegression"
+                  ]
+                }
+              ],
+              "functions": [
+                {
+                  "name": "classify",
+                  "params": [
+                    "df",
+                    "features",
+                    "label"
+                  ],
+                  "body": [
+                    "model = LogisticRegression()",
+                    "model.fit(df[features], df[[label]])",
+                    "feats = df.drop(columns=[label])",
+                    "out = model.predict(feats)",
+                    "return out"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "classify",
+                  "args": {
+                    "features": [
+                      "events",
+                      "revenue"
+                    ],
+                    "label": "is_payer"
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "events",
+                  "revenue",
+                  "predicted_is_payer",
+                  "predicted_is_payer_probs"
+                ]
+              }
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "predicted_is_payer"
+              ],
+              "measures": [
+                {
+                  "name": "players",
+                  "fn": "count"
+                },
+                {
+                  "name": "avg_revenue",
+                  "fn": "avg",
+                  "column": "revenue"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "notes": "The label column must be OUT of the features, or the model learns the answer from itself. A classifier's `predicted_<label>_probs` is an ARRAY of structs — pass it through or unnest it, do not aggregate it as a number. Training here is a BQML CREATE MODEL: it is charged as a query and the model lives in the dataset for the session. How good the model is is a separate question — see bf_ml_evaluate_with_split; a prediction without an evaluation is a number with no error bar.",
+      "hack": "Prepare ONE table in SQL where the label is a column next to the features, then fit(features, label) and return the prediction frame. The same shape covers every supervised estimator — LinearRegression, LogisticRegression, XGB*, RandomForest* — only the class and the predicted column's name change."
+    },
+    {
+      "id": "bf_ml_evaluate_with_split",
+      "task_type": "bigframes",
+      "title": "How good is the model — train_test_split, then score() as a one-row metrics table",
+      "when_to_use": "Before reporting any prediction: an honest error/accuracy figure, measured on rows the model did not train on.",
+      "approach": "Split inside BigQuery — `X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2)` — fit on the train half and return `model.score(X_test, y_test)`: ONE row of metrics, which is the stage's whole output. Regression gives mean_absolute_error, mean_squared_error, mean_squared_log_error, median_absolute_error, r2_score, explained_variance; classification gives precision, recall, accuracy, f1_score, log_loss, roc_auc. Declare exactly those in `output.columns`.",
+      "instead_of": "Scoring on the training rows (an accuracy that means nothing), splitting with a pandas train_test_split after to_pandas(), or reporting a prediction with no error figure at all.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for train_test_split's own parameters (test_size, train_size, random_state, stratify, shuffle), and semantic_index({ guide: \"python\" }) for the frame rules.",
+      "register_payload": {
+        "name": "ml_model_score",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "is_payer",
+              "op": "case",
+              "type": "int",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "revenue",
+                      "op": "gt",
+                      "value": 0
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              }
+            },
+            {
+              "stage": "python",
+              "imports": [
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.linear_model",
+                  "names": [
+                    "LogisticRegression"
+                  ]
+                },
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.model_selection",
+                  "names": [
+                    "train_test_split"
+                  ]
+                }
+              ],
+              "functions": [
+                {
+                  "name": "evaluate",
+                  "params": [
+                    "df",
+                    "features",
+                    "label",
+                    "test_size"
+                  ],
+                  "body": [
+                    "X = df[features]",
+                    "y = df[[label]]",
+                    "X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size)",
+                    "model = LogisticRegression()",
+                    "model.fit(X_train, y_train)",
+                    "out = model.score(X_test, y_test)",
+                    "return out"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "evaluate",
+                  "args": {
+                    "features": [
+                      "events",
+                      "revenue"
+                    ],
+                    "label": "is_payer",
+                    "test_size": 0.2
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "precision",
+                  "recall",
+                  "accuracy",
+                  "f1_score",
+                  "log_loss",
+                  "roc_auc"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "notes": "The metric names are the model type's, so declare the set that matches yours (the six above are the classifier's; a regressor returns the error/r2 set). score() returns ONE row — this is the output-replaces-the-frame case, so nothing downstream should expect the input columns. KFold and cross_validate live in the same module when one split is not enough. A split is random: pass random_state for a repeatable number, and stratify for a rare class.",
+      "hack": "Split, fit on one half, score on the other, return the metrics frame. It is the same three lines for every estimator — and it is what turns a prediction into a result you can report."
+    },
+    {
+      "id": "bf_ml_reduce_dimensions",
+      "task_type": "bigframes",
+      "title": "Many correlated features into a few — PCA, whose output REPLACES the frame",
+      "when_to_use": "A feature table with many overlapping columns before clustering or a model: compress it to a few components, or find how much of the variance the first ones carry.",
+      "approach": "`pca = PCA(n_components=2); pca.fit(df[features]); out = pca.predict(df[features]); return out` — the result is `principal_component_1 … principal_component_N`, NOT your rows with columns added, so `output.columns` names exactly those. `pca.explained_variance_ratio_` is a frame of its own (principal_component_id, explained_variance_ratio) — return THAT instead when the question is how much variance the components carry.",
+      "instead_of": "Expecting the input columns back (the SQL stages after it would then reference columns that do not exist), or assigning a component into df (a cross-frame assignment → NullIndexError). Also sklearn's PCA: it needs to_pandas() and runs single-node.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for PCA's parameters (n_components, svd_solver), and semantic_index({ guide: \"python\" }) for the frame rules.",
+      "register_payload": {
+        "name": "ml_pca_components",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                },
+                {
+                  "name": "max_price",
+                  "fn": "max",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "python",
+              "imports": [
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.decomposition",
+                  "names": [
+                    "PCA"
+                  ]
+                }
+              ],
+              "functions": [
+                {
+                  "name": "reduce",
+                  "params": [
+                    "df",
+                    "features",
+                    "k"
+                  ],
+                  "body": [
+                    "model = PCA(n_components=k)",
+                    "model.fit(df[features])",
+                    "out = model.predict(df[features])",
+                    "return out"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "reduce",
+                  "args": {
+                    "features": [
+                      "events",
+                      "revenue",
+                      "max_price"
+                    ],
+                    "k": 2
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "principal_component_1",
+                  "principal_component_2"
+                ]
+              }
+            },
+            {
+              "stage": "aggregate",
+              "measures": [
+                {
+                  "name": "rows",
+                  "fn": "count"
+                },
+                {
+                  "name": "pc1_sd",
+                  "fn": "stddev",
+                  "column": "principal_component_1"
+                },
+                {
+                  "name": "pc2_sd",
+                  "fn": "stddev",
+                  "column": "principal_component_2"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "notes": "Scale first when the features live on different scales (StandardScaler as the first of Pipeline's two steps, or the mean/deviation applied in SQL — see agg_scale_rows_by_literals): PCA follows variance, so an unscaled large column dominates the components. Whether a column you passed but did not train on (a player id) comes back alongside the components is BQML's pass-through behaviour — verify it on the first run (the result reports its columns) rather than assuming it. Components are not features with meaning: name them by what they correlate with before reporting anything about them.",
+      "hack": "Fit on the feature matrix, return what predict gives back, and declare ITS columns. Anything whose output is its own table — PCA, a forecast, score(), a transformer — is declared the same way."
+    },
+    {
+      "id": "bf_ml_categoricals_into_a_model",
+      "task_type": "bigframes",
+      "title": "Categorical features into a model — a ColumnTransformer as the first of Pipeline's two steps",
+      "when_to_use": "Features that are not numbers (country, platform, media source, an event name) alongside numeric ones in one model.",
+      "approach": "Put the encoding in the model, not in your code: `ColumnTransformer([(\"num\", StandardScaler(), [<numeric columns>]), (\"cat\", OneHotEncoder(), [<categorical columns>])])` as step one, the estimator as step two, and `Pipeline` over exactly those two. Fit the pipeline on the prepared table and return `pipe.predict(...)` — the encoded columns stay inside the model and never reach your output.",
+      "instead_of": "Hand-rolled dummies with np.where / a lookup frame per value (a cross-frame alignment → NullIndexError, and a column per value you have to keep in step), a THIRD Pipeline step (NotImplementedError — it takes exactly two), or LabelEncoder on a nominal column, which invents an order between its values.",
+      "requires": "python_models",
+      "runtime": "bigframes",
+      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for the transformers' parameters (OneHotEncoder(drop, min_frequency, max_categories), KBinsDiscretizer(n_bins, strategy), and the scalers, which take none), and semantic_index({ guide: \"python\" }) for the frame rules.",
+      "register_payload": {
+        "name": "ml_categorical_features",
+        "pipeline": {
+          "source": "events",
+          "stages": [
+            {
+              "stage": "derive",
+              "name": "price",
+              "op": "extract",
+              "source": "price_in_usd_of_event_data",
+              "type": "numeric"
+            },
+            {
+              "stage": "join",
+              "with": "users",
+              "via": "user",
+              "attrs": [
+                "country"
+              ]
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "player_id_of_internal",
+                "country"
+              ],
+              "measures": [
+                {
+                  "name": "events",
+                  "fn": "count"
+                },
+                {
+                  "name": "revenue",
+                  "fn": "sum",
+                  "column": "price"
+                }
+              ]
+            },
+            {
+              "stage": "compute",
+              "name": "is_payer",
+              "op": "case",
+              "type": "int",
+              "cases": [
+                {
+                  "when": [
+                    {
+                      "column": "revenue",
+                      "op": "gt",
+                      "value": 0
+                    }
+                  ],
+                  "then": {
+                    "value": 1
+                  }
+                }
+              ],
+              "else": {
+                "value": 0
+              }
+            },
+            {
+              "stage": "python",
+              "imports": [
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.compose",
+                  "names": [
+                    "ColumnTransformer"
+                  ]
+                },
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.preprocessing",
+                  "names": [
+                    "StandardScaler",
+                    "OneHotEncoder"
+                  ]
+                },
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.linear_model",
+                  "names": [
+                    "LogisticRegression"
+                  ]
+                },
+                {
+                  "package": "bigframes",
+                  "submodule": "ml.pipeline",
+                  "names": [
+                    "Pipeline"
+                  ]
+                }
+              ],
+              "functions": [
+                {
+                  "name": "classify_with_categoricals",
+                  "params": [
+                    "df",
+                    "numeric",
+                    "categorical",
+                    "label"
+                  ],
+                  "body": [
+                    "prep = ColumnTransformer([(\"num\", StandardScaler(), numeric), (\"cat\", OneHotEncoder(), categorical)])",
+                    "pipe = Pipeline([(\"prep\", prep), (\"model\", LogisticRegression())])",
+                    "pipe.fit(df[numeric + categorical], df[[label]])",
+                    "out = pipe.predict(df.drop(columns=[label]))",
+                    "return out"
+                  ]
+                }
+              ],
+              "steps": [
+                {
+                  "call": "classify_with_categoricals",
+                  "args": {
+                    "numeric": [
+                      "events",
+                      "revenue"
+                    ],
+                    "categorical": [
+                      "country"
+                    ],
+                    "label": "is_payer"
+                  }
+                }
+              ],
+              "output": {
+                "columns": [
+                  "player_id_of_internal",
+                  "country",
+                  "events",
+                  "revenue",
+                  "predicted_is_payer",
+                  "predicted_is_payer_probs"
+                ]
+              }
+            },
+            {
+              "stage": "aggregate",
+              "group_by": [
+                "country",
+                "predicted_is_payer"
+              ],
+              "measures": [
+                {
+                  "name": "players",
+                  "fn": "count"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "notes": "Pipeline accepts ONE transform step and ONE estimator; a ColumnTransformer is how several transformers fit into that one slot. Its entries are (name, transformer, columns) and the transformers allowed inside it are the preprocessing/impute ones plus SQLScalarColumnTransformer, which carries a scalar SQL expression when nothing else fits. A high-cardinality column (a campaign id, a device model) is a column per value inside the model — cut it down first (min_frequency / max_categories on OneHotEncoder, or a CASE in a SQL stage that keeps the top values and folds the rest into 'other').",
+      "hack": "Encoding belongs to the model, so it is applied identically at training and at prediction. Numeric columns through a scaler, categorical through OneHotEncoder, both inside one ColumnTransformer, that transformer plus the estimator inside Pipeline — and the stage returns the prediction frame."
     },
     {
       "id": "bf_cache_expensive_intermediate",

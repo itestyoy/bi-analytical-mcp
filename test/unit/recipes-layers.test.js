@@ -32,7 +32,12 @@ test('a deployment file ADDS to the system recipes instead of replacing them', (
   // each side is labelled, so the caller can tell what came from where
   const byId = Object.fromEntries(merged.summary().map((r) => [r.id, r.origin]));
   assert.equal(byId.my_domain_recipe, 'deployment');
-  assert.equal(byId[system.ids()[0]], 'system');
+  // …and a recipe that came from the system FILE says so. (The set also carries generated
+  // REFERENCE entries — a library's extracted signatures, published as fetchable recipes — whose
+  // origin is 'generated'; they are not from either file.)
+  const fromSystemFile = system.summary().find((r) => !r.requires || r.origin === 'system');
+  assert.equal(byId[fromSystemFile.id], 'system');
+  assert.ok(merged.summary().some((r) => r.origin === 'generated'), 'the generated reference entries are labelled as such');
 });
 
 test('a deployment may OVERRIDE a system recipe by reusing its id', () => {

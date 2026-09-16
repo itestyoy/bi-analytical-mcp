@@ -18,6 +18,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { graceMsFromEnv, MAX_BUILD_GRACE_SECONDS } from '../../src/server.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 process.env.MCP_PYTHON_MODELS = 'on'; // the fixture loads without a dbt profile; a python stage is what makes a build detach
@@ -249,12 +250,12 @@ test('the build grace comes from the runtime, with the operator override on top'
   const e = (rt, over) => new Engine({
     catalog: Object.assign(loadCatalog(CATALOG, {}), { pythonRuntime: rt }),
     contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grace2-')) }),
-    queryTimeoutMs: 60000, ...(over === undefined ? {} : { pythonBuildGraceMs: over }),
+    queryTimeoutMs: 20000, ...(over === undefined ? {} : { pythonBuildGraceMs: over }),
   });
   const remote = { available: true, runtime: 'bigquery', method: 'bigframes', config: {}, packages: '' };
   const local = { available: true, runtime: 'duckdb', config: {}, packages: '' };
   assert.equal(e(remote)._pythonGraceMs(), 5000, 'a notebook cold start must not hold the call');
-  assert.equal(e(local)._pythonGraceMs(), 60000, 'a local build finishes in seconds — returning rows beats a job id');
+  assert.equal(e(local)._pythonGraceMs(), 20000, 'a local build finishes in seconds — it keeps the ordinary window, returning rows beats a job id');
   assert.equal(e(remote, 1000)._pythonGraceMs(), 1000, 'the operator override wins');
   assert.equal(e(local, 1000)._pythonGraceMs(), 1000);
 });
@@ -294,4 +295,33 @@ test('a python build detaches on its own short grace, an SQL build keeps the lon
   const done = await runSync(sqlBuild, runner);
   assert.notEqual(done.status, 'running', 'an SQL build returns its rows, not a job id');
   assert.equal(done.build?.executed, true);
+});
+
+// THE CEILING ON WHAT A DEPLOYMENT MAY CONFIGURE. Both windows are bounded by a timeout this server
+// does not own — the client that made the call gives up on its own schedule — so an operator's 120s
+// cannot be honoured: it is capped, out loud. Input validation on the environment, nothing else.
+test('the operator cannot configure a window longer than the ceiling', () => {
+  assert.equal(MAX_BUILD_GRACE_SECONDS, 30);
+  // unset / empty / unparseable → the fallback for that knob; a null fallback means "the runtime decides"
+  assert.equal(graceMsFromEnv(undefined, 20, 'QUERY_TIMEOUT_SECONDS'), 20000);
+  assert.equal(graceMsFromEnv('', 20, 'QUERY_TIMEOUT_SECONDS'), 20000);
+  assert.equal(graceMsFromEnv('not-a-number', 20, 'QUERY_TIMEOUT_SECONDS'), 20000);
+  assert.equal(graceMsFromEnv('0', 20, 'QUERY_TIMEOUT_SECONDS'), 20000);
+  assert.equal(graceMsFromEnv(undefined, null, 'PYTHON_BUILD_GRACE_SECONDS'), undefined, 'unset leaves the python grace to the runtime');
+  // a value inside the ceiling is taken as it is…
+  assert.equal(graceMsFromEnv('10', 20, 'QUERY_TIMEOUT_SECONDS'), 10000);
+  assert.equal(graceMsFromEnv('30', 20, 'QUERY_TIMEOUT_SECONDS'), 30000);
+  // …and one above it is capped, for both knobs
+  assert.equal(graceMsFromEnv('120', 20, 'QUERY_TIMEOUT_SECONDS'), MAX_BUILD_GRACE_SECONDS * 1000);
+  assert.equal(graceMsFromEnv('600', null, 'PYTHON_BUILD_GRACE_SECONDS'), MAX_BUILD_GRACE_SECONDS * 1000);
+});
+
+// The default an Engine built with no window at all uses: the SQL grace, which must be the same
+// number the deployment defaults to (docs and compose say 20s).
+test('an Engine with no configured window uses the default SQL grace', () => {
+  const e = new Engine({
+    catalog: loadCatalog(CATALOG, {}),
+    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grace3-')) }),
+  });
+  assert.equal(e.queryTimeoutMs, 20000);
 });

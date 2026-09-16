@@ -75,6 +75,9 @@ function describe(e, ctx = {}) {
     case 'enum': {
       // A long enum is the schema being exact; a long MESSAGE is just noise — name enough to act on.
       const vals = e.params.allowedValues;
+      // A ONE-value enum is a pinned value (a discriminator: which stage, which action, which
+      // source). "must be one of: python" reads like a list that lost its other items.
+      if (vals.length === 1) return `${at} must be ${JSON.stringify(vals[0])}`;
       const used = valueAt(ctx.input, e.instancePath);
       const alt = otherSpelling(used, vals);
       return `${at} must be one of: ${vals.slice(0, 15).join(', ')}${vals.length > 15 ? `, … (${vals.length} in all)` : ''}`

@@ -294,7 +294,7 @@ test('a task dimension is reported under its declared attribute even when one ta
 // magic word means a relationship, and nothing in the engine knows what any relationship is called.
 test('match_recognize partition_by: a column, or { entity } from the declared relationships', async () => {
   const e = engine();
-  const st = e.schemas.build_native_model.properties.stage.oneOf.find((s) => s.properties?.stage?.const === 'match_recognize');
+  const st = e.schemas.build_native_model.properties.stage.oneOf.find((s) => s.properties?.stage?.enum?.[0] === 'match_recognize');
   const branches = st.properties.partition_by.items.oneOf;
   const entityBranch = branches.find((b) => b.type === 'object');
   assert.ok(entityBranch, 'the entity form is in the schema, not only in prose');

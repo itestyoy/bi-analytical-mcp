@@ -37,7 +37,7 @@ function whereItemSchema(catalog, modelKey) {
 }
 
 function measureFieldSchema(catalog, modelKey) {
-  const opts = [{ const: '*', title: 'rows' }];
+  const opts = [{ enum: ['*'], title: 'rows' }];
   const keys = catalog.entityKeyColumns(modelKey);
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
   if (catalog.isFact(modelKey)) {
@@ -62,7 +62,7 @@ function dimensionItemSchema(catalog, modelKey) {
       required: ['source', 'column'],
       description: 'A dimension taken directly from a physical column of the model.',
       properties: {
-        source: { const: 'model_column', description: 'Use a physical table column as the dimension.' },
+        source: { enum: ['model_column'], description: 'Use a physical table column as the dimension.' },
         column: { type: 'string', enum: cols, description: 'Physical column name to expose as a dimension.' },
         as_type: { enum: ['categorical', 'time'], default: 'categorical', description: 'Whether to treat the column as a categorical attribute or a time dimension (enables time grains).' },
         grain: { enum: catalog.timeGranularities(), description: 'Time granularity when as_type=time (day/week/month/quarter/year).' },
@@ -78,9 +78,9 @@ function dimensionItemSchema(catalog, modelKey) {
       required: ['source', 'property'],
       description: 'A dimension taken from an event_data property (e.g. level_id, product_id) so you can group/filter by it.',
       properties: {
-        source: { const: 'event_property', description: 'Take the dimension from an event_data property.' },
+        source: { enum: ['event_property'], description: 'Take the dimension from an event_data property.' },
         property: strEnum(catalog.scalarEventProps(modelKey), `Scalar event_data property to expose as a dimension. NB: only populated on specific events (see semantic_index({ source: '${modelKey}', event })); NULL on others.`),
-        as_type: { const: 'categorical', default: 'categorical', description: 'event_data dimensions are always categorical.' },
+        as_type: { enum: ['categorical'], default: 'categorical', description: 'event_data dimensions are always categorical.' },
         label: { type: 'string', description: D.label },
       },
     });
@@ -94,7 +94,7 @@ function dimensionItemSchema(catalog, modelKey) {
 // already fixed by `semantic_model`. Field names are still catalog-constrained;
 // exact model/field coupling is re-checked in compile.
 function genericMeasureField(catalog) {
-  const opts = [{ const: '*', title: 'rows' }];
+  const opts = [{ enum: ['*'], title: 'rows' }];
   const keys = [...new Set(catalog.modelKeys().flatMap((k) => catalog.entityKeyColumns(k)))];
   if (keys.length) opts.push({ type: 'string', enum: keys, title: 'entity_key' });
   const props = catalog.scalarEventPropEnum();
@@ -136,8 +136,8 @@ function genericDimensionItem(catalog) {
     type: 'object',
     description: 'A dimension to add to the target semantic model (a column or an event_data property).',
     oneOf: [
-      { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { const: 'model_column', description: 'Use a physical table column.' }, column: strEnum(cols, 'Physical column name.'), as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
-      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { const: 'event_property', description: 'Extract from event_data JSON.' }, property: strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: only populated on specific events (see semantic_index({ source, event })); NULL on others.'), as_type: { const: 'categorical', description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
+      { title: 'model_column', type: 'object', additionalProperties: false, required: ['source', 'column'], description: 'Dimension from a physical column.', properties: { source: { enum: ['model_column'], description: 'Use a physical table column.' }, column: strEnum(cols, 'Physical column name.'), as_type: { enum: ['categorical', 'time'], description: 'Categorical attribute or time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain when as_type=time.' }, label: { type: 'string', description: D.label } } },
+      { title: 'event_property', type: 'object', additionalProperties: false, required: ['source', 'property'], description: 'Dimension from a scalar event_data JSON property.', properties: { source: { enum: ['event_property'], description: 'Extract from event_data JSON.' }, property: strEnum(catalog.scalarEventPropEnum(), 'Scalar event_data property of the target semantic model\'s own source. NB: only populated on specific events (see semantic_index({ source, event })); NULL on others.'), as_type: { enum: ['categorical'], description: 'Always categorical.' }, label: { type: 'string', description: D.label } } },
     ],
   };
 }
@@ -175,7 +175,7 @@ function measureItemSchema(catalog, modelKey) {
 function semanticModelBranch(catalog, modelKey) {
   const dimItem = dimensionItemSchema(catalog, modelKey);
   const props = withoutEmpty({
-    from: { const: modelKey, description: `Source model this semantic model is built from ("${modelKey}").` },
+    from: { enum: [modelKey], description: `Source model this semantic model is built from ("${modelKey}").` },
     dimensions: dimItem && { type: 'array', items: dimItem, description: 'Dimensions (columns or event_data properties) to expose for grouping/filtering.' },
     measures: { type: 'array', items: measureItemSchema(catalog, modelKey), description: 'Measures (aggregations) defined on this model; metrics reference these by name.' },
   });
@@ -243,8 +243,8 @@ function predicateDefs(catalog) {
       _reachable_attributes: catalog.reachableAttributes(),
       description: 'The field a condition applies to: an attribute addressed by where it lives ({ kind: "dimension", model, attribute }) or the metric time axis.',
       oneOf: [
-        { type: 'object', additionalProperties: false, required: ['kind', 'model', 'attribute'], description: 'A dimension addressed by WHERE IT LIVES: { kind: "dimension", model: "users", attribute: "country" } — the join path is resolved from the schema (add via when the source has several relationships to that model).', properties: { kind: { const: 'dimension', description: 'Filter on a dimension.' }, model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column) on that model.' }, via: { type: 'string', description: 'Optional relationship name when several lead to the model.' } } },
-        { type: 'object', additionalProperties: false, required: ['kind'], description: 'The metric time axis.', properties: { kind: { const: 'metric_time', description: 'Filter on the metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain to bucket by.' } } },
+        { type: 'object', additionalProperties: false, required: ['kind', 'model', 'attribute'], description: 'A dimension addressed by WHERE IT LIVES: { kind: "dimension", model: "users", attribute: "country" } — the join path is resolved from the schema (add via when the source has several relationships to that model).', properties: { kind: { enum: ['dimension'], description: 'Filter on a dimension.' }, model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column) on that model.' }, via: { type: 'string', description: 'Optional relationship name when several lead to the model.' } } },
+        { type: 'object', additionalProperties: false, required: ['kind'], description: 'The metric time axis.', properties: { kind: { enum: ['metric_time'], description: 'Filter on the metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain to bucket by.' } } },
       ],
     },
     predicate: {
@@ -371,7 +371,7 @@ export function buildSchemas(catalog) {
         description: 'How to break the metrics down. Two forms only: { time: "metric_time", grain } for a time series, and { model, attribute } for an attribute addressed by WHERE IT LIVES — the join path is resolved from the schema (add via: "<relationship>" when the source carries several relationships to that model). The owning model must be in use_base_models. No path strings.',
         items: {
           oneOf: [
-            { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { const: 'metric_time', description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
+            { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
             { type: 'object', additionalProperties: false, required: ['model', 'attribute'], description: 'An attribute addressed by where it lives: { model: "users", attribute: "country" }. semantic_index() lists every one under groupable_attributes; create_semantic_model returns the context\'s under groupable. The response echoes the resolved column under group_by_resolved.', properties: { model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column or task dimension) on that model, as semantic_index({ model }) lists it.' }, via: { type: 'string', description: 'Optional: the relationship to reach the model through, when there are several (key variants).' } } },
           ],
         },
@@ -530,11 +530,11 @@ function semanticIndexSchema(catalog) {
     model: { enum: [...models, ...unavailable], description: 'The model to describe.' },
     search: { type: 'string', description: 'The word or phrase to look for.' },
     fuzzy: { type: 'boolean', description: 'Enable typo/approximate matching (default true); false = exact substring only.' },
-    status: { const: true, description: 'Ask for the operational state.' },
+    status: { enum: [true], description: 'Ask for the operational state.' },
     run: { type: 'integer', minimum: 1, description: 'Run id, from the status view.' },
     bundle: { type: 'string', description: 'The app/bundle id; the overview lists them.' },
     recipe: { type: 'string', description: 'Recipe id, from the overview.' },
-    guide: { type: ['boolean', 'string'], description: 'true for the whole guide, a task family name, or "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation).' },
+    guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: 'true for the whole guide, a task family name, or "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation).' },
   };
 
   const branches = [
@@ -545,12 +545,12 @@ function semanticIndexSchema(catalog) {
     // one branch per source: an event name belongs to the source that declares it, so a pairing
     // that source does not have cannot be written down.
     ...catalog.facts.map((f) => view('{ source, event }', `VIEW { source: '${f}', event }: the properties POPULATED on that event of '${f}'.`, ['source', 'event'], {
-      source: { const: f, description: `The events source '${f}'.` },
+      source: { enum: [f], description: `The events source '${f}'.` },
       event: eventRef(f),
     })),
     // A column is ALWAYS asked for within its source — one branch per model, no source-less form.
     ...models.map((k) => view('{ source, property }', `VIEW { source: '${k}', property }: one column of '${k}' — its meaning, real value distribution (pageable), NULL coverage and indexing freshness.`, ['source', 'property'], {
-      source: { const: k, description: `The source '${k}'.` },
+      source: { enum: [k], description: `The source '${k}'.` },
       property: propRef(k),
       ...paging,
     })),
@@ -666,7 +666,7 @@ function memorySchema(catalog) {
   const branch = (act, props, required, desc) => ({
     type: 'object', additionalProperties: false, required: ['action', ...required],
     title: act, description: desc,
-    properties: { action: { const: act }, ...props },
+    properties: { action: { enum: [act] }, ...props },
   });
 
   return {
@@ -745,7 +745,7 @@ function abTestSchema() {
       type: 'object', additionalProperties: false, required: ['metric', 'control', 'variants'],
       description: branchDesc,
       properties: {
-        metric: { const: metric },
+        metric: { enum: [metric] },
         confidence, alternative, correction,
         family_p_values: familyP,
         ...extraProps,
@@ -837,7 +837,7 @@ function sampleSizeSchema() {
     type: 'object', additionalProperties: false,
     required: ['metric', dispersionField],
     description: branchDesc,
-    properties: { metric: { const: metric }, [dispersionField]: dispersion[metric], mde, n, power, confidence, alternative },
+    properties: { metric: { enum: [metric] }, [dispersionField]: dispersion[metric], mde, n, power, confidence, alternative },
     oneOf: exactlyOneOfMdeN,
   });
   // Typed top-level `properties` (union of both metrics' fields) sits alongside the oneOf so

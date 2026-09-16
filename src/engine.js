@@ -1759,7 +1759,7 @@ export class Engine {
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
         ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
-        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._draftStepRecommendations(changedStage, after)] : []),
+        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range }, draft.stages.indexOf(changedStage)), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;
@@ -1786,12 +1786,35 @@ export class Engine {
    * register_native_model is exactly where a silently-wrong join does the most damage, because
    * nobody stepped through it.
    */
-  _stageWarnings(source, stages = []) {
-    const draft = { source, stages };
-    return stages.flatMap((st) => [
+  _stageWarnings(source, stages = [], { timeRange = null } = {}) {
+    const draft = { source, stages, timeRange };
+    return stages.flatMap((st, i) => [
       ...this._joinCompletenessWarnings(st, draft),
       ...this._funnelCompletionWarnings(st),
+      ...this._pythonPreparationWarnings(st, draft, i),
     ]);
+  }
+
+  /**
+   * A python stage that reads the SOURCE as it is. Everything SQL can say belongs in a stage
+   * before it — including the preparation of the table the analysis reads — so a python stage with
+   * nothing in front of it is the shape worth questioning.
+   *
+   * What this looks at is the PIPELINE's shape, not the code: whether any earlier stage narrows or
+   * reduces the data at all. It is a recommendation and not a refusal, because the shape is
+   * sometimes right — a model that scores every source row genuinely wants the source — and from
+   * here there is no way to tell that apart from handing the raw table over by habit.
+   */
+  _pythonPreparationWarnings(stage, draft = null, index = 0) {
+    if (stage?.stage !== 'python') return [];
+    const REDUCES = new Set(['where', 'derive', 'compute', 'join', 'aggregate', 'match_recognize', 'project', 'limit', 'unnest', 'sample', 'pivot', 'unpivot', 'window', 'order_by']);
+    const before = (draft?.stages || []).slice(0, index);
+    if (draft?.timeRange || before.some((st) => REDUCES.has(st?.stage))) return [];
+    const src = draft?.source ? `'${draft.source}'` : 'the source';
+    const time = (draft?.source && this.catalog.getModel(draft.source)?.time?.column) || null;
+    return [`This python stage reads ${src} as it is: no stage before it narrows or reduces the data.`
+      + ` A python stage is for what SQL cannot say (a statistical test, clustering, scoring, a forecast); everything else — scoping to the events${time ? ` and a time window on ${time}` : ''}, extracting the payload columns, joining the attributes, aggregating to the grain your analysis works on — is cheaper and exact as stages BEFORE this one, and the python model then starts from a small prepared table.`
+      + ` If the analysis really is per source row (a model scoring every row), this shape is right and there is nothing to change.`];
   }
 
   _joinCompletenessWarnings(stage, draft = null) {
@@ -2285,7 +2308,7 @@ export class Engine {
       };
       // The same per-stage judgements the incremental builder makes: a dry run is exactly where a
       // silently-wrong stage should be pointed out, BEFORE anything is built.
-      const dryWarnings = this._stageWarnings(source, stages);
+      const dryWarnings = this._stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null });
       if (dryWarnings.length) resp.warnings = dryWarnings;
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before materializing.
@@ -2382,7 +2405,7 @@ export class Engine {
         // The same per-stage judgements the incremental builder makes — a pipeline submitted all at
         // once (a recipe payload, a hand-written one) gets them too, or a silently-wrong join
         // reaches the caller as plausible numbers.
-        ...this._stageWarnings(source, stages),
+        ...this._stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null }),
         ...((this.runner && rows.length === 0)
           ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
           : []),

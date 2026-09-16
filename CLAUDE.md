@@ -81,6 +81,19 @@
   are dropped with a warning (count on an events source instead).
 - A/B significance is computed in JS via the `ab_test` tool over per-group
   aggregates (proportion → z-test; mean → Welch t-test).
+- WHAT SQL CAN COMPUTE IS COMPUTED IN SQL (HARD RULE). A `python` stage carries ONLY
+  what SQL cannot say — a statistical test, clustering, scoring, a forecast, a model.
+  Everything else is SQL stages BEFORE it, and that INCLUDES PREPARING THE DATASET the
+  python analysis reads: scoping to the events and the time window, extracting the
+  payload columns, joining the attributes, aggregating to the grain the analysis works
+  on. The python stage receives a prepared table at that grain, never a raw source —
+  SQL runs where the data lives and is exact, a python model is a separate dbt model on
+  the warehouse's python runtime (cold start, and its frame carries that runtime's own
+  limits), and a SQL stage stays readable to the next reader. This is stated in the
+  stage description, the python guide, the routing triggers and the recipes (every
+  shipped one prepares in SQL first), and the server NUDGES when a python stage has
+  nothing before it — a recommendation, never a refusal: the shape is legitimate when
+  the analysis really is per source row.
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

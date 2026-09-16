@@ -118,3 +118,22 @@ test('the runtime hints send a failed run to the form that works', () => {
   // a pandas runtime has a real index and a real order: it says none of this
   assert.deepEqual(pythonRunHints(frameProfile({ runtime: 'duckdb' }), 'NullIndexError'), []);
 });
+
+// The recipes are the worked form of the rule that everything SQL can compute is computed in SQL:
+// each one prepares its table in SQL stages and leaves the python stage with the part SQL cannot
+// say. A recipe that handed the raw source to python would teach the opposite of the guide.
+test('every bigframes recipe prepares its table in SQL before the python stage', () => {
+  const REDUCES = new Set(['where', 'derive', 'compute', 'join', 'aggregate', 'match_recognize', 'project', 'limit', 'unnest', 'pivot', 'unpivot', 'window', 'order_by']);
+  const bf = recipes.list.filter((r) => r.runtime === 'bigframes');
+  assert.ok(bf.length >= 10, 'precondition: the bigframes family is shipped');
+  for (const r of bf) {
+    const stages = r.register_payload.pipeline.stages;
+    const at = stages.findIndex((s) => s.stage === 'python');
+    assert.ok(at > 0, `${r.id}: the python stage is first — nothing prepares its input`);
+    const before = stages.slice(0, at).map((s) => s.stage);
+    assert.ok(before.some((s) => REDUCES.has(s)), `${r.id}: stages before python (${before.join(', ') || 'none'}) do not narrow or reduce anything`);
+    // …and the python stage declares what it hands on, so the SQL stages after it have columns
+    const py = stages[at];
+    assert.ok(py.output?.columns?.length, `${r.id}: the python stage declares no output columns`);
+  }
+});

@@ -119,7 +119,7 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
 
 test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
   const e = engine();
-  const items = e.schemas.register_native_model.properties.pipeline.properties.stages.items.oneOf.find((s) => s.properties.stage.const === 'python');
+  const items = e.schemas.register_native_model.properties.pipeline.properties.stages.items.oneOf.find((s) => s.properties.stage.enum?.[0] === 'python');
   assert.deepEqual(items.properties.imports.items.properties.package.enum, [...importAllowlist().keys()], 'the enum IS the allowlist');
   assert.ok(items.properties.imports.items.properties.package.enum.includes('sklearn'));
   await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels/);
@@ -193,7 +193,7 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   const e = new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } });
   const pkgEnum = () => e.schemas.register_native_model.properties.pipeline.properties.stages.items.oneOf
-    .find((x) => x.properties?.stage?.const === 'python').properties.imports.items.properties.package.enum;
+    .find((x) => x.properties?.stage?.enum?.[0] === 'python').properties.imports.items.properties.package.enum;
   assert.ok(pkgEnum().includes('pyspark'), `the schema offers the pinned runtime's packages: ${pkgEnum().join(', ')}`);
   assert.ok(!pkgEnum().includes('bigframes'), 'and not the default submission\'s');
   const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'pyspark', submodule: 'sql.functions', as: 'F' }] }] } }));
@@ -251,7 +251,7 @@ test('python stage: the body schema is a recursive $ref to $defs.py_block hoiste
     assert.ok(root.$defs?.py_block, `${tool} carries $defs.py_block at its root`);
     assert.deepEqual(root.$defs.py_block.items.anyOf[1], { $ref: '#/$defs/py_block' }, 'the block refers to itself');
     const stages = tool === 'build_native_model' ? root.properties.stage.oneOf : root.properties.pipeline.properties.stages.items.oneOf;
-    const py = stages.find((st) => st.properties.stage.const === 'python');
+    const py = stages.find((st) => st.properties.stage.enum?.[0] === 'python');
     assert.equal(py.properties.functions.items.properties.body.$ref, '#/$defs/py_block');
   }
   // twelve levels deep validates and renders — deeper than any unrolled schema allowed
@@ -306,7 +306,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
     // with the duckdb profile it is there, and the overview names the runtime
     const cDuck = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     const eDuck = new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    assert.ok(eDuck.schemas.build_native_model.properties.stage.oneOf.some((st) => st.properties.stage.const === 'python'));
+    assert.ok(eDuck.schemas.build_native_model.properties.stage.oneOf.some((st) => st.properties.stage.enum?.[0] === 'python'));
     assert.ok(eDuck.schemas.build_native_model.$defs.py_block);
     assert.deepEqual((await eDuck.semantic_index({})).python_models.runtime, 'duckdb');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
@@ -344,7 +344,7 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
   try {
     const c = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     const e = new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    const py = e.schemas.build_native_model.properties.stage.oneOf.find((st) => st.properties.stage.const === 'python');
+    const py = e.schemas.build_native_model.properties.stage.oneOf.find((st) => st.properties.stage.enum?.[0] === 'python');
     assert.equal(py.properties.frame, undefined, 'no frame option');
     assert.match(py.description, /DuckDBPyRelation/);
     assert.match(py.description, /converting to pandas is a deliberate, single-node choice you make inside a function, never done for you/);
@@ -377,7 +377,7 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   try {
     const c = loadCatalog(CATALOG, { profilesDir: dir, dialect: 'bigquery' });
     const e = new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    const py = e.schemas.build_native_model.properties.stage.oneOf.find((st) => st.properties.stage.const === 'python');
+    const py = e.schemas.build_native_model.properties.stage.oneOf.find((st) => st.properties.stage.enum?.[0] === 'python');
     assert.match(py.description, /MODELLING: bigframes\.ml/);
     assert.match(py.description, /RULES FOR BIGFRAMES/);
     assert.match(py.properties.functions.items.properties.body.description, /Modelling: bigframes\.ml/);
@@ -531,7 +531,7 @@ test('the stage description itself carries the runtime rules and the right form 
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pydesc-')) }), pythonBin: PY });
-  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
+  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.enum?.[0] === 'python');
 
   // every rule of the guide is represented in the description…
   const guide = await e.semantic_index({ guide: 'python' });
@@ -568,7 +568,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec-')) }), recipes, pythonBin: PY });
 
-  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
+  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.enum?.[0] === 'python');
   assert.match(py.description, /STUDY THE RECIPES FIRST/, 'the description INSISTS on reading them');
   const entries = recipes.entriesRequiring('python_models');
   for (const { id, title } of entries) {
@@ -603,7 +603,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
   const bare = loadCatalog(CATALOG, {});
   bare.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e2 = new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec2-')) }), pythonBin: PY });
-  const py2 = e2.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.const === 'python');
+  const py2 = e2.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.enum?.[0] === 'python');
   assert.ok(!py2.description.includes('STUDY THE RECIPES FIRST'));
   for (const { id } of entries) assert.ok(!py2.description.includes(id), 'no recipe of another deployment is advertised');
   // …and with nothing to point at, the description carries the forms itself instead of dropping them
@@ -673,4 +673,70 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
   const dry = await engine().register_native_model({ name: 'bigpy3', dry_run: true, pipeline: { source: 'events', stages: [AGG, big] } });
   assert.equal(dry.dry_run, true, JSON.stringify(dry.error || {}).slice(0, 300));
   assert.equal(dry.python?.length, 1, 'one python model in the chain');
+});
+
+// WHAT BELONGS IN A PYTHON STAGE AT ALL. Everything SQL can compute is computed in SQL — including
+// the preparation of the table the analysis reads — so a python stage with nothing in front of it
+// hands the raw source to a runtime that is slower, costlier and full of its own limits. The server
+// says so, and only says so: the shape is legitimate when the analysis really is per source row
+// (a model scoring every event), and from here there is no way to tell those apart.
+test('a python stage with no preparation before it is told so; one after an SQL stage is not', async (t) => {
+  if (skipNoPy(t)) return;
+  const nudge = (res) => (res.recommendations || res.warnings || []).filter((w) => /reads .* as it is/.test(w));
+
+  // 1. python FIRST, on the raw source → the nudge, and it names what belongs in SQL
+  const e = engine();
+  const raw = await e.build_native_model({ action: 'start', name: 'raw_py', source: 'events' });
+  const added = await e.build_native_model({ action: 'add_step', draft_id: raw.draft_id, stage: PY_STAGE });
+  const [said] = nudge(added);
+  assert.ok(said, `expected the preparation nudge, got: ${JSON.stringify(added.recommendations || [])}`);
+  assert.match(said, /'events'/, 'it names the source being read raw');
+  assert.match(said, /aggregating to the grain/, 'and what belongs in a stage before it');
+  assert.match(said, /device_time/, 'including the time column of that source');
+  assert.match(said, /nothing to change/, 'and it stays a recommendation, not a verdict');
+
+  // 2. the same stage after an aggregate → nothing to say
+  const prepared = await e.build_native_model({ action: 'start', name: 'prep_py', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: prepared.draft_id, stage: AGG });
+  const after = await e.build_native_model({ action: 'add_step', draft_id: prepared.draft_id, stage: PY_STAGE });
+  assert.deepEqual(nudge(after), [], 'an aggregate before the stage IS the preparation');
+
+  // 3. a where alone counts too — narrowing is preparation
+  const scoped = await e.build_native_model({ action: 'start', name: 'scoped_py', source: 'events' });
+  await e.build_native_model({ action: 'add_step', draft_id: scoped.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] } });
+  await e.build_native_model({ action: 'add_step', draft_id: scoped.draft_id, stage: AGG });
+  const scopedPy = await e.build_native_model({ action: 'add_step', draft_id: scoped.draft_id, stage: PY_STAGE });
+  assert.deepEqual(nudge(scopedPy), []);
+
+  // 4. the all-at-once path says the same thing (a recipe payload, a hand-written one)
+  const dry = await engine().register_native_model({ name: 'raw_py2', dry_run: true, pipeline: { source: 'events', stages: [PY_STAGE] } });
+  assert.ok(nudge(dry).length === 1, `register should nudge too: ${JSON.stringify(dry.warnings || [])}`);
+  // …and a pipeline-level time_range is preparation: it is a leading WHERE on the source's time
+  const windowed = await engine().register_native_model({
+    name: 'raw_py3', dry_run: true,
+    pipeline: { source: 'events', time_range: { start: '2026-01-01', end: '2026-01-05' }, stages: [PY_STAGE] },
+  });
+  assert.deepEqual(nudge(windowed), []);
+});
+
+// The rule has to reach the caller BEFORE it writes anything, so it is in the stage description and
+// in the guide — not only in the response to a stage already written.
+test('the SQL-vs-python division of labour is in the stage description and the guide', async (t) => {
+  if (skipNoPy(t)) return;
+  const catalog = loadCatalog(CATALOG, {});
+  catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
+  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'sqlfirst-')) }), pythonBin: PY });
+  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.enum?.[0] === 'python')
+    || e.schemas.build_native_model.properties.stage.anyOf?.find((b) => b.properties?.stage?.enum?.[0] === 'python');
+  assert.match(py.description, /WHAT BELONGS HERE/);
+  assert.match(py.description, /PREPARING the table this analysis reads/);
+  assert.match(py.description, /never the raw source/);
+
+  const g = await e.semantic_index({ guide: 'python' });
+  const first = g.rules[0];
+  assert.match(first.rule, /ONLY what SQL cannot say/, 'it is the FIRST rule, before the runtime traps');
+  assert.match(first.why, /COST AND EXACTNESS|READABILITY/, 'and it says why, so it does not read as taste');
+  // the routing triggers say it too, for the caller that never opens the python guide
+  const routing = JSON.stringify((await e.semantic_index({ guide: true })).routing_triggers);
+  assert.match(routing, /computed in SQL/);
 });

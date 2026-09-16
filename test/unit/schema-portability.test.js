@@ -73,7 +73,7 @@ test('every union branch is closed and named, which is what makes anyOf as stric
   for (const [name, schema] of Object.entries(schemas)) {
     for (const { key, branches } of unionsOf(schema)) {
       for (const [i, b] of branches.entries()) {
-        if (b.$ref || b.const !== undefined || b.type === 'string' || b.type === 'number') continue; // a value union, not a shape union
+        if (b.$ref || b.const !== undefined || b.enum !== undefined || b.type === 'string' || b.type === 'number') continue; // a value union, not a shape union
         if (b.type !== 'object') continue;
         assert.equal(b.additionalProperties, false, `${name}: ${key}[${i}] is an open object branch — an unknown field would be accepted by SOME branch`);
       }
@@ -125,3 +125,63 @@ test('semantic_index accepts one view at a time and refuses a name without its s
     { source: 'users', event: 'first_launch' },        // an events name on a non-events source
   ]) assert.equal(check(bad).ok, false, `should refuse ${JSON.stringify(bad)}`);
 });
+
+// THE DOCUMENTED BUDGETS. A client that rewrites our schema for strict function calling is also
+// subject to caps: ~5000 object properties per schema, 10 levels of nesting, 1000 enum values,
+// 120 000 characters across property names and enum/const values, and a single enum with more than
+// 250 values must stay under 15 000 characters. Our schemas are catalog-derived, so they GROW with
+// the deployment's catalog — an events source with 150 payload properties is one enum per view.
+// This is the only place that can notice the ceiling before a caller on the other side does, so it
+// measures the real production catalog too, not just the fixture.
+const BUDGET = { properties: 5000, depth: 10, enumValues: 1000, chars: 120000, bigEnum: 250, bigEnumChars: 15000 };
+
+/** Instance nesting: only properties/items add a level; a union branch is an alternative, not a level. */
+const depthOf = (n, d = 0) => {
+  if (!n || typeof n !== 'object') return d;
+  if (n.$ref) return d + 1; // a recursive $ref (py_block) counts one level, then repeats
+  let max = d;
+  for (const b of [...(n.anyOf || []), ...(n.oneOf || []), ...(n.allOf || [])]) max = Math.max(max, depthOf(b, d));
+  if (n.then) max = Math.max(max, depthOf(n.then, d));
+  if (n.properties) for (const v of Object.values(n.properties)) max = Math.max(max, depthOf(v, d + 1));
+  if (n.items) max = Math.max(max, depthOf(n.items, d + 1));
+  return max;
+};
+
+const budgetOf = (schema) => {
+  const m = { properties: 0, enumValues: 0, chars: 0, worstEnum: 0, worstEnumChars: 0, depth: depthOf(schema) };
+  const walk = (n) => {
+    if (Array.isArray(n)) return n.forEach(walk);
+    if (!n || typeof n !== 'object') return;
+    if (Array.isArray(n.enum)) {
+      const chars = n.enum.reduce((s, v) => s + String(v).length, 0);
+      m.enumValues += n.enum.length; m.chars += chars;
+      if (n.enum.length > m.worstEnum) { m.worstEnum = n.enum.length; m.worstEnumChars = chars; }
+    }
+    if (n.const !== undefined) m.chars += String(n.const).length;
+    if (n.properties) {
+      const keys = Object.keys(n.properties);
+      m.properties += keys.length; m.chars += keys.join('').length;
+      for (const k of keys) walk(n.properties[k]);
+    }
+    for (const [k, v] of Object.entries(n)) if (k !== 'properties' && v && typeof v === 'object') walk(v);
+  };
+  walk(schema);
+  return m;
+};
+
+for (const [label, path] of [['fixture', CATALOG], ['production', fileURLToPath(new URL('../../config/catalog.yml', import.meta.url))]]) {
+  test(`every tool schema stays inside the documented budgets (${label} catalog)`, () => {
+    const tools = buildSchemas(loadCatalog(path, {}));
+    for (const [name, schema] of Object.entries(tools)) {
+      const m = budgetOf(schema);
+      const at = (metric, budget) => `${name}: ${metric} = ${m[metric]}, budget ${budget} (${label} catalog). A catalog this big has to be split or the enums narrowed — a client that rewrites this schema for strict function calling is capped here.`;
+      assert.ok(m.properties <= BUDGET.properties, at('properties', BUDGET.properties));
+      assert.ok(m.depth <= BUDGET.depth, at('depth', BUDGET.depth));
+      assert.ok(m.enumValues <= BUDGET.enumValues, at('enumValues', BUDGET.enumValues));
+      assert.ok(m.chars <= BUDGET.chars, at('chars', BUDGET.chars));
+      if (m.worstEnum > BUDGET.bigEnum) {
+        assert.ok(m.worstEnumChars <= BUDGET.bigEnumChars, `${name}: its largest enum has ${m.worstEnum} values and ${m.worstEnumChars} characters — over ${BUDGET.bigEnum} values the total must stay under ${BUDGET.bigEnumChars}`);
+      }
+    }
+  });
+}

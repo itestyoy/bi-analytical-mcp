@@ -172,7 +172,7 @@ const STAGES = {
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
       description: 'Keep only rows where all conditions hold (ANDed). Each condition compares two operands — each a column, a literal constant, or the current time (now). Shorthand `{column, op, value}` = column vs constant; or `{left, op, right}` for column-vs-column / constant-vs-column. Use it to scope to an event, a segment, or a value range — at any point in the pipeline, including after a window or aggregate to filter on a computed column.',
       properties: {
-        stage: { const: 'where' },
+        stage: { enum: ['where'] },
         conditions: { type: 'array', minItems: 1, items: CONDITION },
       },
     }),
@@ -189,7 +189,7 @@ const STAGES = {
       ],
       description: 'Add ONE scalar column from an event property — `extract` a scalar value, or `array_length`/`contains`/`struct_field` for array/struct properties. Surfaces a payload field so it can be filtered, grouped, or aggregated. For math/time/CASE/window over EXISTING columns, use `compute`.',
       properties: {
-        stage: { const: 'derive' },
+        stage: { enum: ['derive'] },
         name: { type: 'string', pattern: NAME },
         op: { enum: ['extract', 'array_length', 'contains', 'struct_field'] },
         source: propEnum(catalog.eventPropEnum(), 'event_data property the value derives from — one of the PIPELINE SOURCE\'s own properties (a property of another source is rejected, naming the source that has it).'),
@@ -265,7 +265,7 @@ const STAGES = {
       ],
       description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, string fns, date functions (date_diff/date_trunc/date_part/unix_date/elapsed_days), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running & rolling aggregates). Each op enforces its required params at the schema level.',
       properties: {
-        stage: { const: 'compute' },
+        stage: { enum: ['compute'] },
         name: { type: 'string', pattern: NAME },
         op: { enum: ['const', 'add', 'sub', 'mul', 'div', 'round', 'floor', 'ceil', 'abs', 'coalesce', 'least', 'greatest', 'cast', 'concat', 'upper', 'lower', 'length', 'substring', 'trim', 'replace', 'json_field', 'json_parse_array', 'element_at', 'array_last', 'raw', 'hll_extract', 'date_diff', 'date_trunc', 'date_part', 'unix_date', 'elapsed_days', 'case', 'window'] },
         field: { type: 'string', description: 'Struct field name for op=json_field — extract one field from a column holding a JSON OBJECT: an unnested array-of-struct element, or a flattened payload column that holds JSON (e.g. a crash report\'s custom keys).' },
@@ -317,7 +317,7 @@ const STAGES = {
       const ARITH = { add: '+', sub: '-', mul: '*', div: '/' };
       let expr; let type = 'numeric';
       if (p.op === 'const') {
-        if (p.value === undefined) throw new Error('const: needs value');
+        if (p.value === undefined) throw new Error('enum: [needs] value');
         expr = d.sqlLiteral(p.value);
         type = typeof p.value === 'number' ? 'numeric' : typeof p.value === 'boolean' ? 'boolean' : 'string';
       } else if (p.op === 'concat') {
@@ -396,7 +396,7 @@ const STAGES = {
       type: 'object', additionalProperties: false, required: ['stage', 'source', 'as'],
       description: 'Explode an array property into one row per element (CHANGES GRAIN; rows without the array drop out). For per-element analysis (e.g. items collected, rewards granted). For arrays of structs: bind a single struct `field`, or omit `field` to bind the whole element and pull multiple fields from it downstream with compute op=json_field.',
       properties: {
-        stage: { const: 'unnest' },
+        stage: { enum: ['unnest'] },
         source: { type: 'string', description: 'Array/struct to explode: an array event property (see semantic_index), or a pipeline column produced by compute op=json_parse_array. A flat ARRAY column unnests directly; a JSON-string column is parsed first.' },
         as: { type: 'string', pattern: NAME },
         field: { type: 'string', description: 'For array-of-struct: a single struct field to bind. Omit to bind the whole struct element (a JSON column) for multi-field extraction via compute json_field.' },
@@ -434,7 +434,7 @@ const STAGES = {
       description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ model }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
       anyOf: [{ required: ['via'] }, { required: ['on'] }],
       properties: {
-        stage: { const: 'join' },
+        stage: { enum: ['join'] },
         with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join (any model but the pipeline\'s own source).' },
         via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ model }) lists each model\'s relationships, their key columns and what they point at.' },
         on: {
@@ -557,7 +557,7 @@ const STAGES = {
       type: 'object', additionalProperties: false, required: ['stage', 'measures'],
       description: 'Group rows and compute measures (COLLAPSES grain to the group keys). Measures: sum/avg/min/max/count/count_distinct, approx_count_distinct (fast approximate uniques on large data), and statistical stddev/variance/median/percentile(q). For totals, rates, distinct users (DAU/MAU), revenue, ARPU, distributions/percentiles.',
       properties: {
-        stage: { const: 'aggregate' },
+        stage: { enum: ['aggregate'] },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
         measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], allOf: [{ if: { properties: { fn: { const: 'percentile' } }, required: ['fn'] }, then: { required: ['q'] } }, { if: { properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile'] } }, required: ['fn'] }, then: { required: ['column'] } }], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'Aggregate: sum/avg/min/max/count/count_distinct; statistical stddev/variance/median/percentile. For DISTINCT counts PREFER the HLL sketch path — approx_count_distinct (one-shot HLL++), or hll_init (build a sketch per group) → hll_merge (combine sketches): high accuracy AND mergeable, so a distinct count re-aggregates across time buckets / segments and composes incrementally (exact count_distinct is NOT additive across groups — use it only for an exact integer on a small set).' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
       },
@@ -578,7 +578,7 @@ const STAGES = {
       type: 'object', additionalProperties: false, required: ['stage', 'on', 'fn', 'value_column', 'values'],
       description: 'Turn listed values of `on` into columns, each aggregating `value_column` (the values must be listed explicitly). For dashboard-ready matrices (e.g. revenue as one column per country, or retention day as columns).',
       properties: {
-        stage: { const: 'pivot' },
+        stage: { enum: ['pivot'] },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Row keys kept (empty = one row).' },
         on: { type: 'string', description: 'Column whose values become columns.' },
         fn: { enum: ['sum', 'avg', 'min', 'max', 'count'] },
@@ -601,7 +601,7 @@ const STAGES = {
       type: 'object', additionalProperties: false, required: ['stage', 'columns', 'name_as', 'value_as'],
       description: 'Fold the listed columns into rows of (name_as, value_as), keeping the rest. For wide→long/tidy reshaping, or turning a pivoted (metric-per-column) result back into rows.',
       properties: {
-        stage: { const: 'unpivot' },
+        stage: { enum: ['unpivot'] },
         columns: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Columns to fold into rows.' },
         keep: { type: 'array', items: { type: 'string' }, description: 'Columns to keep as-is (default: none).' },
         name_as: { type: 'string', pattern: NAME },
@@ -623,13 +623,13 @@ const STAGES = {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'keys'],
       description: 'Sort rows. For rankings/leaderboards (pair with limit) and stable output ordering.',
-      properties: { stage: { const: 'order_by' }, keys: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } } },
+      properties: { stage: { enum: ['order_by'] }, keys: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string' }, direction: { enum: ['asc', 'desc'] } } } } },
     }),
     build: ({ cols }, p) => { p.keys.forEach((k) => requireCol(cols, k.key)); return { op: { op: 'order_by', keys: p.keys.map((k) => ({ key: k.key, dir: k.direction })) }, cols }; },
   },
 
   limit: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'n'], description: 'Cap the number of rows. For top-N (after order_by) or previews.', properties: { stage: { const: 'limit' }, n: { type: 'integer', minimum: 1, maximum: 1000000 } } }),
+    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'n'], description: 'Cap the number of rows. For top-N (after order_by) or previews.', properties: { stage: { enum: ['limit'] }, n: { type: 'integer', minimum: 1, maximum: 1000000 } } }),
     build: ({ cols }, p) => ({ op: { op: 'limit', n: p.n }, cols }),
   },
 
@@ -638,7 +638,7 @@ const STAGES = {
       type: 'object', additionalProperties: false, required: ['stage', 'percent'],
       description: 'Keep roughly `percent`% of rows, chosen at random — a fast, APPROXIMATE read of the population for a first estimate / where-to-dig signal on large data (no need to scan everything just to see the direction). Put it early. The result is flagged `approximate` with safe/unsafe guidance; re-run WITHOUT this stage for any exact number you will act on (sampling error flips rates near 0/1, small segments, distinct counts).',
       properties: {
-        stage: { const: 'sample' },
+        stage: { enum: ['sample'] },
         percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate share of rows to keep (0 < percent <= 100).' },
       },
     }),
@@ -646,7 +646,7 @@ const STAGES = {
   },
 
   project: {
-    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'columns'], description: 'Keep only these columns (drop the rest). Trims the output to the columns of interest.', properties: { stage: { const: 'project' }, columns: { type: 'array', minItems: 1, items: { type: 'string' } } } }),
+    schema: () => ({ type: 'object', additionalProperties: false, required: ['stage', 'columns'], description: 'Keep only these columns (drop the rest). Trims the output to the columns of interest.', properties: { stage: { enum: ['project'] }, columns: { type: 'array', minItems: 1, items: { type: 'string' } } } }),
     build: ({ cols }, p) => { p.columns.forEach((c) => requireCol(cols, c)); const out = new Map(); for (const c of p.columns) out.set(c, cols.get(c) || { type: 'string' }); return { op: { op: 'project', cols: p.columns }, cols: out }; },
   },
 };

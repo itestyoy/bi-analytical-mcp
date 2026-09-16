@@ -634,7 +634,9 @@ test('52. the app view offers only the sources that declare an app column', opts
   if (skip(t)) return;
   // not a refusal the engine writes: the view's `source` is enumerated from the sources that
   // carry an app column, so naming one without it has no spelling.
-  await assert.rejects(() => engine.semantic_index({ source: 'crashlytics', bundle: 'com.omg.colorfit' }), /`source` must be one of: events/);
+  // One source carries an app column here, so the refusal PINS it ("must be \"events\""); with
+  // several it lists them.
+  await assert.rejects(() => engine.semantic_index({ source: 'crashlytics', bundle: 'com.omg.colorfit' }), /`source` must be ("events"|one of: events)/);
 });
 
 // ═══════════ P. NOTHING DECLARED — THE INDEX IS THE TRUTH ═══════════

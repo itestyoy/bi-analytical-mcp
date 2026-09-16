@@ -182,6 +182,8 @@ test('the same app in two sources is two apps: nothing is merged across sources'
 
 test('naming a source that declares no app column is refused, listing the ones that do', async () => {
   const e = engine();
+  // In this fixture exactly ONE source carries an app column, so the refusal pins it rather than
+  // listing ("must be \"events\""); with several it reads "must be one of: …".
   await assert.rejects(() => e.semantic_index({ source: 'crashlytics', bundle: 'com.omg.words' }),
-    /`source` must be one of: events/);
+    /`source` must be ("events"|one of: events)/);
 });

@@ -2758,7 +2758,7 @@
           ]
         }
       },
-      "notes": "The dict keys must have the SAME type as the column they join on — bpd.DataFrame turns Python strings into STRING, so a numeric key needs numbers, not \"1\". how=\"left\" keeps unmatched rows with NULL; how=\"inner\" drops them, which is a different question.",
+      "notes": "The dict keys must have the SAME type as the column they join on — bpd.DataFrame turns Python strings into STRING, so a numeric key needs numbers, not \"1\". how=\"left\" keeps unmatched rows with NULL; how=\"inner\" drops them, which is a different question. If a merge is awkward (a big mapping, a key that needs normalising), the alternatives in order are: build the lookup as a SQL stage BEFORE the python one and let the pipeline join it, or set_index on both sides around the operation. `df.join(other, on=…)` is NOT the same as merge: join goes through the align path and needs an index.",
       "hack": "Any \"value from somewhere else\" is a merge: a dict, a groupby result, a second table, a threshold per group. Build the other side as a frame with the key as a COLUMN, then merge."
     },
     {
@@ -2857,8 +2857,8 @@
       "task_type": "bigframes",
       "title": "Distinct values — a groupby, not unique()",
       "when_to_use": "A distinct list of ids, of (user, level) pairs, of values a column takes.",
-      "approach": "`uniq = df.groupby([\"k\"], as_index=False).size().drop(columns=\"size\")` — the documented replacement for this runtime.",
-      "instead_of": "`df[\"k\"].unique()` / `df.drop_duplicates(subset=[\"k\"])` — both are unsupported in partial ordering mode.",
+      "approach": "De-duplicate in place: `uniq = df.drop_duplicates(subset=[\"k\"])[[\"k\"]]` — or, for one column, `df[\"k\"].unique(keep_order=False)`.",
+      "instead_of": "`df[\"k\"].unique()` with no argument — its default keep_order=True demands a row ordering and raises OrderRequiredError.",
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
@@ -2922,16 +2922,16 @@
           ]
         }
       },
-      "notes": "size() is what makes it a groupby rather than an aggregate over a column — drop it afterwards, or keep it and you have the counts for free. In a SQL stage the same thing is an aggregate with no measures; prefer that when you are not already in python.",
-      "hack": "De-duplication is a GROUPING, not a row operation: group by the columns that define uniqueness, keep one row per group."
+      "notes": "drop_duplicates needs no ordering: it compiles to a ROW_NUMBER over a partition by the key, so which duplicate survives is arbitrary — for a distinct LIST that is exactly right, and for \"keep the newest row per key\" it is not (sort first, or aggregate). unique(keep_order=False) is the aggregate form (ANY_VALUE per key). A groupby on the key is the third form and the one to use when the counts are wanted too.",
+      "hack": "De-duplication is a GROUPING, not a row operation: name the columns that define uniqueness and keep one row per group. Nothing here needs the row order unless you want to choose WHICH row survives."
     },
     {
       "id": "bf_top_n_needs_order",
       "task_type": "bigframes",
       "title": "Top-N and anything positional — sort_values first",
       "when_to_use": "Top/bottom N, \"the largest\", \"the first row per group\", anything positional.",
-      "approach": "`top = df.sort_values(\"x\", ascending=False).head(10)` — or `df.nlargest(10, \"x\")`, which orders by itself.",
-      "instead_of": "`df.head(10)` on an unsorted frame (its rows differ between runs) and `df.iloc[:10]` (raises OrderRequiredError).",
+      "approach": "Say what \"first\" means, then take rows: `top = df.sort_values(\"x\", ascending=False).head(10)`.",
+      "instead_of": "`df.head(10)` / `df.tail(10)` / `df.iloc[:10]` on an unsorted frame, and `df.nlargest(10, \"x\")` — every one of them raises OrderRequiredError here (nlargest only escapes it with keep=\"all\", because ties then need no tie-break).",
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
@@ -3001,8 +3001,8 @@
           ]
         }
       },
-      "notes": "This frame has no row order of its own, so \"the first N\" is only defined after a sort. For a quick LOOK at the data during development use peek(n) instead — it returns an arbitrary sample and is the cheaper call.",
-      "hack": "Order is data: state it (sort_values / nlargest) wherever the answer depends on it, and never rely on the order rows happen to arrive in."
+      "notes": "This frame has no row order of its own, so \"the first N\" is undefined until a sort defines it — and the library refuses rather than returning an arbitrary slice: head, tail, iat, sample, rank, melt, unstack, reset_index and every cum*/shift/diff/rolling are marked as needing an ordering. sort_values is what grants it (the sorted node reports itself as explicitly ordered), and it grants it to everything after. For a quick LOOK at data use peek(n) — it needs no ordering, but it returns pandas, so it is for inspection only, never the stage result.",
+      "hack": "Order is data: state it with sort_values wherever the answer depends on position, and never rely on the order rows happen to arrive in. One sort is enough for the whole function."
     },
     {
       "id": "bf_order_dependent_series",
@@ -3103,8 +3103,8 @@
       "task_type": "bigframes",
       "title": "A statistic OF the frame back ON it — a broadcast scalar",
       "when_to_use": "z-score, share of total, distance from the mean, normalisation.",
-      "approach": "An aggregate OF the frame applied back TO it: `df[\"z\"] = (df[\"x\"] - df[\"x\"].mean()) / df[\"x\"].std(ddof=0)`; `df[\"share\"] = df[\"x\"] / df[\"x\"].sum()`.",
-      "instead_of": "Computing the statistic in one frame and joining it in from another — unnecessary here, and it needs an index.",
+      "approach": "An aggregate OF the frame applied back TO it: `df[\"z\"] = (df[\"x\"] - df[\"x\"].mean()) / df[\"x\"].std()`; `df[\"share\"] = df[\"x\"] / df[\"x\"].sum()`.",
+      "instead_of": "Computing the statistic in another frame and joining it in (it is a different root, so it needs a merge), and `std(ddof=…)` — this Series.std takes NO parameters at all, so passing ddof is a TypeError.",
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
@@ -3150,7 +3150,7 @@
                     "share_as"
                   ],
                   "body": [
-                    "df[z_as] = (df[column] - df[column].mean()) / df[column].std(ddof=0)",
+                    "df[z_as] = (df[column] - df[column].mean()) / df[column].std()",
                     "df[share_as] = df[column] / df[column].sum()",
                     "return df"
                   ]
@@ -3179,8 +3179,8 @@
           ]
         }
       },
-      "notes": "mean()/sum()/std() of the SAME frame come back as scalars and broadcast over its rows — one statement, no alignment. ddof=0 is the population deviation, ddof=1 the sample one; say which you used when reporting a z-score.",
-      "hack": "Whole-frame statistic → scalar → column. Safe for mean, sum, std, min, max, count and a single quantile."
+      "notes": "mean()/sum()/std()/min()/max()/count() of the SAME frame come back as real scalars and broadcast over its rows — one statement, no alignment. std() here is the SAMPLE deviation (N-1) and has no ddof: if you need the population form, write it out — ((s - s.mean()) ** 2).mean() ** 0.5 — and say which one the number is. quantile(q) with a single q is a scalar too; with a list it becomes an indexed Series, which this frame cannot align.",
+      "hack": "Whole-frame statistic → scalar → column. Safe for mean, sum, std, var, min, max, count and a single quantile; anything that returns a SERIES (several quantiles, a groupby aggregate) has to be merged back instead."
     },
     {
       "id": "bf_threshold_from_distribution",
@@ -3354,16 +3354,16 @@
           ]
         }
       },
-      "notes": "A mask built from the SAME frame (df[df[\"x\"] > 0]) is always fine — this rule is only about a condition that lives in another object. An inner merge on the key IS the semi-join SQL would run; dropping the helper column keeps the output clean.",
+      "notes": "A mask built from the SAME frame (df[df[\"x\"] > 0], and any & / | of such masks) is always fine — this rule is only about a condition that lives in another object. An inner merge on the key IS the semi-join SQL would run; dropping the helper column keeps the output clean. Watch the root: a mask taken before a cache() or from an estimator's output belongs to a different expression, and using it here raises.",
       "hack": "\"Keep the rows that are in X\" = build X as a frame of keys and inner-merge it. Same move for \"exclude\": merge with how=\"left\" and keep the NULLs."
     },
     {
       "id": "bf_ml_predict_as_column",
       "task_type": "bigframes",
-      "title": "An ml prediction back as a column (bigframes.ml)",
+      "title": "A prediction per row — return the estimator's frame, do not assign its column",
       "when_to_use": "Clustering, scoring, classification, a predicted value per row.",
-      "approach": "Fit and predict INSIDE BigQuery, then take the prediction column off the result: `model.fit(X); df[\"segment\"] = model.predict(X)[\"CENTROID_ID\"]`. Scale first when the algorithm is distance-based.",
-      "instead_of": "sklearn / scipy — they need `to_pandas()` first and then run single-node in the notebook; and a per-row Python scoring function, which this runtime cannot execute.",
+      "approach": "Fit inside BigQuery, then RETURN what predict gives you: `model.fit(scaled); out = model.predict(df); return out` — that frame already holds every input column plus the prediction (CENTROID_ID for clustering, predicted_<label> for a supervised model). Declare those columns in `output.columns`.",
+      "instead_of": "`df[\"segment\"] = model.predict(X)[\"CENTROID_ID\"]` — predict re-reads its result as a NEW query, so its frame has a different root than df and the assignment raises NullIndexError. Also sklearn/scipy: they need to_pandas() first and then run single-node.",
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
@@ -3420,16 +3420,14 @@
                   "params": [
                     "df",
                     "features",
-                    "k",
-                    "as_"
+                    "k"
                   ],
                   "body": [
-                    "scaler = StandardScaler()",
-                    "scaled = scaler.fit_transform(df[features])",
+                    "scaled = StandardScaler().fit_transform(df[features])",
                     "model = KMeans(n_clusters=k)",
                     "model.fit(scaled)",
-                    "df[as_] = model.predict(scaled)[\"CENTROID_ID\"]",
-                    "return df"
+                    "out = model.predict(df)",
+                    "return out"
                   ]
                 }
               ],
@@ -3441,8 +3439,7 @@
                       "events",
                       "revenue"
                     ],
-                    "k": 3,
-                    "as_": "segment"
+                    "k": 3
                   }
                 }
               ],
@@ -3451,14 +3448,14 @@
                   "player_id_of_internal",
                   "events",
                   "revenue",
-                  "segment"
+                  "CENTROID_ID"
                 ]
               }
             },
             {
               "stage": "aggregate",
               "group_by": [
-                "segment"
+                "CENTROID_ID"
               ],
               "measures": [
                 {
@@ -3475,8 +3472,8 @@
           ]
         }
       },
-      "notes": "predict() returns BigQuery ML's own columns — CENTROID_ID for clustering, predicted_<label> for a supervised model — which is why it is subscripted. The prediction is a column of the SAME frame, so nothing needs aligning. A SQL stage after it profiles the groups: the segment number alone answers nothing.",
-      "hack": "Feature table in SQL → fit/predict in one python stage → prediction as a column → profile in SQL. The shape holds for every estimator; only the class and the output column change."
+      "notes": "predict/transform/fit_transform all go through the same path: the input is wrapped in a BigQuery ML table function whose output \"includes all input columns, with new columns appended\", and the result is read back as its own query. So the prediction never has to be carried over — return the output frame and let the SQL stages after it do the grouping. Scale first when the algorithm is distance-based; the scaler returns its own frame the same way, so feed it to fit rather than assigning it back.",
+      "hack": "Feature table in SQL → fit/predict in one python stage → the estimator's OWN frame out → profile it in SQL. The shape holds for every estimator; only the class and the appended column change."
     },
     {
       "id": "bf_ml_output_replaces_frame",
@@ -3582,7 +3579,7 @@
           ]
         }
       },
-      "notes": "The declared columns above are what ARIMA_PLUS.FORECAST produces; verify them on the first run (the result reports its columns) and rename in a following SQL stage if you want your own names. History IS the input: one row per period, no gaps. One model per series — a per-segment forecast is one model per segment, not one call.",
+      "notes": "The declared columns above are what ARIMA_PLUS.FORECAST produces; verify them on the first run (the result reports its columns) and rename in a following SQL stage if you want your own names. This is the same rule as the prediction recipe seen from the other side: an estimator hands back a frame of its own, and the stage returns THAT — the difference is only whether its shape is your rows (predict) or something else entirely (a forecast, a score, metrics). History IS the input: one row per period, no gaps. One model per series — a per-segment forecast is one model per segment, not one call.",
       "hack": "Whenever an estimator's output is its own table (forecast, score, metrics, transform), the stage's output.columns describes THAT table — and the SQL after it works on those names."
     },
     {
@@ -3590,8 +3587,8 @@
       "task_type": "bigframes",
       "title": "An expensive intermediate read twice — cache()",
       "when_to_use": "One heavy join or aggregate feeding several outputs in the same function.",
-      "approach": "Materialize it once: `joined = df.merge(other, on=\"k\"); joined.cache()` and derive everything from `joined`.",
-      "instead_of": "Deriving several results from the same expensive expression without caching — execution is deferred, so each dependent result re-runs the whole thing.",
+      "approach": "Materialize it once, then derive everything from the cached object: `joined = df.merge(other, on=\"k\"); joined.cache()` — and only after that build the results that read it.",
+      "instead_of": "Deriving several results from the same expensive expression without caching (deferred execution re-runs it per dependent result), and mixing objects taken BEFORE the cache with the cached frame — cache() swaps the object's node for a read of the temporary table, so a mask or column taken earlier belongs to the old expression and combining them raises NullIndexError.",
       "requires": "python_models",
       "runtime": "bigframes",
       "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
@@ -3668,8 +3665,8 @@
           ]
         }
       },
-      "notes": "cache() writes a temporary BigQuery table — you pay for its storage, so use it for an intermediate that is genuinely read more than once (a join, a heavy groupby), not for every line. It is a hint about REUSE, not a speed-up of a single pass.",
-      "hack": "Deferred execution means \"written once\" is not \"computed once\". If two or more results read the same intermediate, cache it."
+      "notes": "cache() writes a temporary BigQuery table you pay to store, so use it for an intermediate that is genuinely read more than once (a join, a heavy groupby), not for every line. It returns self and replaces the node in place — which is why the order matters: cache first, derive after.",
+      "hack": "Deferred execution means \"written once\" is not \"computed once\". If two or more results read the same intermediate, cache it — and take everything downstream from the object you cached."
     },
     {
       "id": "bf_sql_only_function",

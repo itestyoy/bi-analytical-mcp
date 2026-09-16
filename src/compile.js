@@ -285,6 +285,9 @@ export function compileDeclaration(catalog, decl) {
 
   return {
     task,
+    // What the caller said this task is for, carried through so the context can report it
+    // (mergeCompiled → state.task_notes). It changes no SQL and no YAML.
+    ...(decl.description ? { description: decl.description } : {}),
     additions,
     metrics,
     usedModels: [...usedModels],

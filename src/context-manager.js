@@ -77,6 +77,9 @@ export function mergeCompiled(state, compiled) {
   }
   for (const k of compiled.usedModels || []) if (!state.usedModels.includes(k)) state.usedModels.push(k);
   if (compiled.task && !state.tasks.includes(compiled.task)) state.tasks.push(compiled.task);
+  // The caller's own words about the task, kept BESIDE `tasks` (which stays a list of names —
+  // stripping a measure's namespace reads it, see declaredAttribute).
+  if (compiled.task && compiled.description) (state.task_notes ||= {})[compiled.task] = compiled.description;
   return state;
 }
 
@@ -169,6 +172,13 @@ export class ContextManager {
     return [...this.contexts.values()].map((c) => ({
       context_id: c.id,
       tasks: c.state.tasks || [],
+      // What the caller said this context is FOR. A listing of ids, task names and metric names
+      // says what is in a context, never why it exists — which is the thing you need when several
+      // drafts are open and one of them is the one to continue.
+      ...(Object.keys(c.state.task_notes || {}).length ? { task_notes: c.state.task_notes } : {}),
+      ...(c.state.native?.description || c.state.draft?.description
+        ? { description: c.state.native?.description || c.state.draft?.description }
+        : {}),
       semantic_models: Object.keys(c.state.additions || {}),
       metrics: (c.state.metrics || []).map((m) => m.name),
       age_ms: now - c.createdAt,

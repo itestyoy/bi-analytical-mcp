@@ -28,7 +28,7 @@ import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, pythonBuildGraceMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -53,6 +53,14 @@ export class Engine {
     } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
     this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
+    // A build with a PYTHON model may detach much sooner — but HOW soon is the runtime's own
+    // property (`buildGraceMs` on its frame profile), not one number for everything: a remote
+    // runtime (BigFrames in a notebook, Spark on Dataproc, Snowpark) is minutes of cold start
+    // before the first row, and the client in front of this call has a timeout we neither know nor
+    // control, so the query_id must reach it long before that; a LOCAL runtime (duckdb) finishes
+    // in seconds, and detaching it would make every call asynchronous for nothing. An operator can
+    // still override for the deployment (PYTHON_BUILD_GRACE_SECONDS), which is what this field is.
+    this.pythonBuildGraceMs = pythonBuildGraceMs ?? null;
     // Literal dbt.config extras the OPERATOR pins for every generated Python model (e.g.
     // {"submission_method":"bigframes"}); the caller never decides where the compute runs. The
     // catalog resolved them from the environment already — an injected value replaces them THERE,
@@ -71,8 +79,12 @@ export class Engine {
     // Constrain the recipe view to real ids when recipes are configured.
     // The recipe view offers the ids this server actually has — the schema says what exists.
     if (recipes) {
-      const branch = (this.schemas.semantic_index?.oneOf || []).find((b) => b.properties?.recipe);
-      if (branch) branch.properties.recipe = { type: 'string', enum: recipes.ids(), description: branch.properties.recipe.description };
+      const si = this.schemas.semantic_index;
+      const branch = (si?.anyOf || si?.oneOf || []).find((b) => b.properties?.recipe);
+      const withIds = (prop) => ({ type: 'string', enum: recipes.ids(), description: prop.description });
+      if (branch) branch.properties.recipe = withIds(branch.properties.recipe);
+      // …and in the flat root map too, which is what a client that strips the union is left with.
+      if (si?.properties?.recipe) si.properties.recipe = withIds(si.properties.recipe);
     }
     // An empty vocabulary (a source with no events yet, a model with no groupable column) renders
     // as `enum: []` / `oneOf: []`, which ajv refuses — and it refuses the WHOLE schema, so the
@@ -1496,7 +1508,7 @@ export class Engine {
   async _draftStart(input) {
     const ctx = input.draft_id ? this._ctx(input.draft_id) : this.ctxs.create();
     const source = input.source;
-    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [], checkpoints: [] };
+    ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: input.time_range || null, stages: [], checkpoints: [], ...(input.description ? { description: input.description } : {}) };
     this.ctxs.touch(ctx.id);
     // The referenceable columns are SILENTLY grounded to the physical relation: a column
     // the catalog declares but the table lacks simply does not appear (a clean internal
@@ -1505,6 +1517,7 @@ export class Engine {
     const { cols } = this._groundedDeclared(source, physSet);
     const resp = {
       draft_id: ctx.id, action: 'start', name: input.name, source, materialized: ctx.state.draft.materialized,
+      ...(ctx.state.draft.description ? { description: ctx.state.draft.description } : {}),
       steps: [], column_count: cols.length,
       next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response shows only the columns that stage added/removed (use include_columns:true or preview for the full list).',
       recommendations: [
@@ -1622,7 +1635,8 @@ export class Engine {
     const ctx = this.ctxs.create();
     const name = input.name || origin.name;
     // Deep-copy the kept stages so editing the fork can never mutate the source's stages.
-    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), checkpoints: [] };
+    const description = input.description || origin.description;
+    ctx.state.draft = { name, source: origin.source, materialized: origin.materialized || 'table', time_range: origin.time_range || null, stages: origin.stages.slice(0, after).map((s) => JSON.parse(JSON.stringify(s))), checkpoints: [], ...(description ? { description } : {}) };
     // A materialized prefix the fork KEEPS (at <= after) is inherited: the fork reads the SAME
     // table, so branching a variant on top of an expensive prefix costs only the new steps. The
     // owner's model definition is copied into this overlay so `{{ ref() }}` resolves here (a
@@ -1745,7 +1759,7 @@ export class Engine {
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
         ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
-        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._draftStepRecommendations(changedStage, after)] : []),
+        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;
@@ -1772,12 +1786,40 @@ export class Engine {
    * register_native_model is exactly where a silently-wrong join does the most damage, because
    * nobody stepped through it.
    */
-  _stageWarnings(source, stages = []) {
-    const draft = { source, stages };
-    return stages.flatMap((st) => [
+  _stageWarnings(source, stages = [], { timeRange = null, startsFromTable = false } = {}) {
+    const draft = { source, stages, timeRange, startsFromTable };
+    return stages.flatMap((st, i) => [
       ...this._joinCompletenessWarnings(st, draft),
       ...this._funnelCompletionWarnings(st),
+      ...this._pythonPreparationWarnings(st, draft, i),
     ]);
+  }
+
+  /**
+   * A python stage that reads the SOURCE as it is. Everything SQL can say belongs in a stage
+   * before it — including the preparation of the table the analysis reads — so a python stage with
+   * nothing in front of it is the shape worth questioning.
+   *
+   * What this looks at is the PIPELINE's shape, not the code: whether any earlier stage narrows or
+   * reduces the data at all. It is a recommendation and not a refusal, because the shape is
+   * sometimes right — a model that scores every source row genuinely wants the source — and from
+   * here there is no way to tell that apart from handing the raw table over by habit.
+   */
+  _pythonPreparationWarnings(stage, draft = null, index = 0) {
+    if (stage?.stage !== 'python') return [];
+    // Starting from a materialized prefix: the stages in this array begin at a BUILT table, so
+    // nothing here reads the source and there is nothing to say.
+    if (draft?.startsFromTable) return [];
+    // Every stage kind that leaves the data narrower, smaller or otherwise no longer the source —
+    // INCLUDING a python stage, which is a model of its own: what follows it reads its table.
+    const REDUCES = new Set(['where', 'derive', 'compute', 'join', 'aggregate', 'match_recognize', 'project', 'limit', 'unnest', 'sample', 'pivot', 'unpivot', 'window', 'order_by', 'python']);
+    const before = (draft?.stages || []).slice(0, index);
+    if (draft?.timeRange || before.some((st) => REDUCES.has(st?.stage))) return [];
+    const src = draft?.source ? `'${draft.source}'` : 'the source';
+    const time = (draft?.source && this.catalog.getModel(draft.source)?.time?.column) || null;
+    return [`This python stage reads ${src} as it is: no stage before it narrows or reduces the data.`
+      + ` A python stage is for what SQL cannot say (a statistical test, clustering, scoring, a forecast); everything else — scoping to the events${time ? ` and a time window on ${time}` : ''}, extracting the payload columns, joining the attributes, aggregating to the grain your analysis works on — is cheaper and exact as stages BEFORE this one, and the python model then starts from a small prepared table.`
+      + ` If the analysis really is per source row (a model scoring every row), this shape is right and there is nothing to change.`];
   }
 
   _joinCompletenessWarnings(stage, draft = null) {
@@ -2086,10 +2128,17 @@ export class Engine {
 
   /**
    * Run `dbt run --select <select>` detached, with a lease on the context, as a background job:
-   * past queryTimeoutMs the caller gets a query_id to poll (get_query_result), otherwise the
-   * finished result. Used where a build is a cold start of minutes (a Python model).
+   * past `graceMs` the caller gets a query_id to poll (get_query_result), otherwise the finished
+   * result. Used where a build is a cold start of minutes (a Python model).
+   *
+   * The grace is NOT one number for everything. A build that is expected to be slow should hand
+   * back its query_id almost at once: the caller in front of us is a tool call inside another
+   * agent's client, and that client has a timeout of its own which we do not know and cannot
+   * raise. Waiting 60s on a BigQuery Python model means the client gives up first and reports the
+   * server as unresponsive — while the job it started runs on to completion, invisible. Handing
+   * back the id in a few seconds keeps the poll in the caller's hands, where it belongs.
    */
-  async _runDetached(ctx, select, table) {
+  async _runDetached(ctx, select, table, { graceMs = this.queryTimeoutMs } = {}) {
     const dir = this.ctxs.dir(ctx.id);
     const id = this.jobs.create({ contextId: ctx.id });
     this.jobs.setTable(id, table);
@@ -2108,11 +2157,21 @@ export class Engine {
       }
     })().catch(() => {});
     let timer;
-    const timed = new Promise((res) => { timer = setTimeout(() => res('timeout'), this.queryTimeoutMs); });
+    const timed = new Promise((res) => { timer = setTimeout(() => res('timeout'), graceMs); });
     const winner = await Promise.race([build.then(() => 'done'), timed]);
     clearTimeout(timer); // a finished build must not keep the process alive for the rest of the window
     if (winner === 'timeout') return { status: 'running', query_id: id };
     return { status: 'done', query_id: id, result };
+  }
+
+  /**
+   * How long a build that runs a PYTHON model may hold the call: the operator's override when
+   * there is one, else what this runtime declares about itself, else the ordinary query window.
+   */
+  _pythonGraceMs() {
+    if (this.pythonBuildGraceMs != null) return this.pythonBuildGraceMs;
+    const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
+    return profile?.buildGraceMs ?? this.queryTimeoutMs;
   }
 
   async _draftMaterialize(ctx, draft) {
@@ -2142,6 +2201,8 @@ export class Engine {
     try {
       result = await this._registerPipeline({
         name: draft.name, context_id: ctx.id, materialized: draft.materialized,
+        ...(draft.description ? { description: draft.description } : {}), // the draft's note travels to the model it builds
+
         pipeline: { source: draft.source, time_range: draft.time_range || undefined, stages: draft.stages },
         from_checkpoint: plan.checkpoint ? { at: plan.checkpoint.at, model: plan.checkpoint.model, columns: plan.checkpoint.columns } : null,
         model_name: modelName,
@@ -2252,7 +2313,7 @@ export class Engine {
       };
       // The same per-stage judgements the incremental builder makes: a dry run is exactly where a
       // silently-wrong stage should be pointed out, BEFORE anything is built.
-      const dryWarnings = this._stageWarnings(source, stages);
+      const dryWarnings = this._stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from });
       if (dryWarnings.length) resp.warnings = dryWarnings;
       // A5: cheap volume estimate — COUNT(*) over the SOURCE within the window only
       // (no full materialize). Lets the caller size the scan before materializing.
@@ -2279,7 +2340,7 @@ export class Engine {
     const materialized = last.kind === 'python' ? 'table' : (input.materialized || 'table');
     // The header records the WHOLE declaration; when this model only computes the tail, it also
     // says which built relation the earlier steps are, so the file is readable on its own.
-    const header = sqlConfigHeader('pipeline_model', { name: input.name, pipeline: input.pipeline, ...(from ? { continues: { model: from.model, after_step: from.at } } : {}) });
+    const header = sqlConfigHeader('pipeline_model', { name: input.name, ...(input.description ? { description: input.description } : {}), pipeline: input.pipeline, ...(from ? { continues: { model: from.model, after_step: from.at } } : {}) });
     // A rebuild under the same name must leave no stale model of the previous chain behind: dbt
     // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
     this.ctxs.removePipelineFiles(ctx.id, modelName);
@@ -2291,7 +2352,7 @@ export class Engine {
     const chainInfo = models.map((m) => ({ model: m.model, kind: m.kind, input: m.input, materialized: m === last ? materialized : 'table' }));
     ctx.state.engine = 'pipeline';
     ctx.state.model = modelName;
-    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(models.length > 1 ? { chain: chainInfo } : {}), ...(hasPython ? { python: pyInfo.map(({ code, ...m }) => m) } : {}) };
+    ctx.state.native = { model: modelName, materialized, kind: 'pipeline', columns: [...out.columns.keys()], ...(input.description ? { description: input.description } : {}), ...(models.length > 1 ? { chain: chainInfo } : {}), ...(hasPython ? { python: pyInfo.map(({ code, ...m }) => m) } : {}) };
     if (!ctx.state.tasks?.includes(input.name)) (ctx.state.tasks ||= []).push(input.name);
     this.ctxs.touch(ctx.id);
     // Honest status: `executed` makes it unambiguous whether the model was actually built
@@ -2308,11 +2369,12 @@ export class Engine {
         // never `+model`, whose ancestor operator would also select the catalog's base tables and
         // REBUILD them. A Python model is a cold start of minutes on the warehouse runtime, so the
         // build runs detached and may hand back a query_id.
-        const bg = await this._runDetached(ctx, models.map((m) => m.model).join(' '), modelName);
+        const graceMs = hasPython ? this._pythonGraceMs() : this.queryTimeoutMs;
+        const bg = await this._runDetached(ctx, models.map((m) => m.model).join(' '), modelName, { graceMs });
         if (bg.status === 'running') {
           return {
             context_id: ctx.id, kind: 'pipeline', ok: true, status: 'running', query_id: bg.query_id, model: modelName, materialized, dialect, models: chainInfo, ...(hasPython ? { python: pyInfo } : {}),
-            message: `dbt is building ${models.length > 1 ? `the chain of ${models.length} models` : 'the model'} (${hasPython ? 'Python models run on the warehouse runtime — a cold start' : 'SQL'}) (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}`,
+            message: `dbt is building ${models.length > 1 ? `the chain of ${models.length} models` : 'the model'} (${hasPython ? 'a Python model runs on the warehouse runtime — a cold start of minutes, so this was handed back after ' : 'SQL, longer than '}${graceMs / 1000}s); poll get_query_result with query_id — the result table is ${modelName}. The build continues on its own: calling materialize again does NOT start a second one (it is refused while this build is in flight), so poll rather than retry.`,
             read_with: { tool: 'get_query_result', query_id: bg.query_id, table: modelName },
           };
         }
@@ -2348,7 +2410,7 @@ export class Engine {
         // The same per-stage judgements the incremental builder makes — a pipeline submitted all at
         // once (a recipe payload, a hand-written one) gets them too, or a silently-wrong join
         // reaches the caller as plausible numbers.
-        ...this._stageWarnings(source, stages),
+        ...this._stageWarnings(source, stages, { timeRange: input.pipeline?.time_range || null, startsFromTable: !!from }),
         ...((this.runner && rows.length === 0)
           ? [`0 rows — usually a scoping bug, not a real empty result: an over-narrow where, a property that is NULL on the events you kept, or${tr && (tr.start || tr.end) ? ' a time_range that misses the data (a date-only `end` is the whole day, next-day-exclusive)' : ' an event filter that matches nothing'}. Re-check the stages / widen the window.`]
           : []),
@@ -2788,13 +2850,13 @@ export class Engine {
         context_id: ctx.id,
         engine: 'pipeline',
         tasks: ctx.state.tasks || [],
-        models: [{ model: n.model, materialized: n.materialized, columns }],
+        models: [{ model: n.model, materialized: n.materialized, ...(n.description ? { description: n.description } : {}), columns }],
         columns,
         // A draft that already materialized something is still OPEN: say which steps are a table
         // already, so continuing it is an informed choice rather than a rediscovery.
         ...(draft ? {
           draft: {
-            name: draft.name, source: draft.source, steps: this._draftSteps(draft),
+            name: draft.name, source: draft.source, ...(draft.description ? { description: draft.description } : {}), steps: this._draftSteps(draft),
             checkpoints: (draft.checkpoints || []).map((cp) => ({ at: cp.at, model: cp.model, owner: cp.owner, built_at: cp.built_at, ...(cp.carries_source ? { carries_source: cp.carries_source } : {}) })),
           },
         } : {}),
@@ -2804,10 +2866,25 @@ export class Engine {
       };
     }
     const additions = ctx.state.additions || {};
+    // An OPEN draft lives here too, before anything is materialized — and it used to be invisible:
+    // describe reported the (empty) governed side and said nothing about the pipeline being built.
+    // Several drafts are the normal case, so this is what tells them apart.
+    const openDraft = ctx.state.draft;
     return {
       context_id: ctx.id,
       engine: 'core',
       tasks: ctx.state.tasks || [],
+      ...(openDraft ? {
+        draft: {
+          name: openDraft.name, source: openDraft.source,
+          ...(openDraft.description ? { description: openDraft.description } : {}),
+          steps: this._draftSteps(openDraft),
+          ...(openDraft.building ? { building: openDraft.building } : {}),
+        },
+      } : {}),
+      // Per task, what its author said it computes — a name namespaces the metrics, it does not
+      // explain them.
+      ...(Object.keys(ctx.state.task_notes || {}).length ? { task_notes: ctx.state.task_notes } : {}),
       semantic_models: Object.keys(additions),
       measures: Object.values(additions).flatMap((a) => a.measures.map((m) => m.name)),
       metrics: (ctx.state.metrics || []).map((m) => m.name),

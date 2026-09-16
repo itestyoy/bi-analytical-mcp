@@ -235,3 +235,63 @@ test('an edit during a background build does not remove the files that build is 
   await settled();
   assert.equal((await e.get_query_result({ query_id: bg.query_id })).status !== 'error', true);
 });
+
+// WHO waits, and for how long. A build that includes a python model is a cold start of minutes on
+// the warehouse runtime, and the client that made this tool call has a timeout of its own that the
+// server neither knows nor can raise. So a python build must hand back its query_id in SECONDS —
+// otherwise the client gives up first, reports the server as unresponsive, and the build it started
+// keeps running unseen (which is exactly what was observed: eight "connector isn't responding" in
+// one session, every job finishing fine). A pure-SQL build keeps the ordinary window.
+// WHOSE property the grace is. Not one number for every python model: a remote runtime is minutes
+// of cold start (hand back a job), a local one is seconds (just return the rows). So the runtime
+// declares it, and the operator can still override it for the whole deployment.
+test('the build grace comes from the runtime, with the operator override on top', async () => {
+  const e = (rt, over) => new Engine({
+    catalog: Object.assign(loadCatalog(CATALOG, {}), { pythonRuntime: rt }),
+    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grace2-')) }),
+    queryTimeoutMs: 60000, ...(over === undefined ? {} : { pythonBuildGraceMs: over }),
+  });
+  const remote = { available: true, runtime: 'bigquery', method: 'bigframes', config: {}, packages: '' };
+  const local = { available: true, runtime: 'duckdb', config: {}, packages: '' };
+  assert.equal(e(remote)._pythonGraceMs(), 5000, 'a notebook cold start must not hold the call');
+  assert.equal(e(local)._pythonGraceMs(), 60000, 'a local build finishes in seconds — returning rows beats a job id');
+  assert.equal(e(remote, 1000)._pythonGraceMs(), 1000, 'the operator override wins');
+  assert.equal(e(local, 1000)._pythonGraceMs(), 1000);
+});
+
+test('a python build detaches on its own short grace, an SQL build keeps the long one', async (t) => {
+  if (skipNoPy(t)) return;
+  const runner = heldRunner();
+  const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grace-')) });
+  // A long ordinary window (so an SQL build would sit and wait) and a short python one.
+  const e = new Engine({
+    catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, runner, pythonBin: PY,
+    queryTimeoutMs: 30000, pythonBuildGraceMs: 30,
+  });
+
+  // python in the pipeline → detached, with a job to poll, long before the 30s window
+  const py = await startedDraft(e, 'grace_py');
+  const started = Date.now();
+  const out = await materialize(e, py);
+  assert.equal(out.status, 'running', JSON.stringify(out).slice(0, 200));
+  assert.ok(out.query_id, 'the caller gets a job id to poll');
+  assert.equal(out.read_with?.tool, 'get_query_result');
+  assert.ok(Date.now() - started < 10000, 'handed back in seconds, not after the query window');
+  // the message tells the caller not to retry the build (a retry is refused while it is in flight)
+  assert.match(out.message, /does NOT start a second one|already in flight/i);
+  const retry = await materialize(e, py).catch((err) => err);
+  // refused, and the refusal sends the caller to the job rather than to a second build
+  assert.match(String(retry.message || retry), /already in flight|still being materialized/);
+  assert.match(String(retry.message || retry), /get_query_result/);
+  assert.equal(runner.held.length, 1, 'still ONE build for the same pipeline');
+  runner.finish(true);
+  await settled();
+
+  // …and the same pipeline without a python stage waits for its result instead of detaching
+  const { draft_id: sql } = await e.build_native_model({ action: 'start', name: 'grace_sql', source: 'events' });
+  await add(e, sql, AGG);
+  const sqlBuild = materialize(e, sql);
+  const done = await runSync(sqlBuild, runner);
+  assert.notEqual(done.status, 'running', 'an SQL build returns its rows, not a job id');
+  assert.equal(done.build?.executed, true);
+});

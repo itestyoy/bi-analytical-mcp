@@ -449,7 +449,7 @@ function matchRecognizeSchema(catalog) {
     type: 'object', additionalProperties: false, required: ['stage', 'steps'],
     description: 'An ordered funnel / path detector: it matches the step sequence INDEPENDENTLY within each partition, ordered by `order_by`. Output granularity is set by `rows`: one_per_partition (default) = one row per partition from its first match (counts players); one_per_match = one row per occurrence of the start step (counts situations). OUTPUT COLUMNS (all available to downstream join/where/aggregate stages): the `partition_by` column(s) are CARRIED THROUGH unchanged (e.g. the user key, so you can join dim_users after); plus first_seen_at, furthest_step_name, completed, one reached_<step> boolean per step, secs_<metric> for each avg_seconds_between metric, and one column per captured property. For funnels, conversion, and time-between-steps.',
     properties: {
-      stage: { const: 'match_recognize' },
+      stage: { enum: ['match_recognize'] },
       partition_by: {
         type: 'array',
         // A catalog whose sources declare no relationship offers only the column form — the

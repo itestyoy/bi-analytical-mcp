@@ -26,6 +26,11 @@ export const RUNTIME_ASSETS = {
     repoPath: 'config/recipes.json',
     why: 'the SYSTEM recipes — the technical, universal task templates every deployment gets, merged under the deployment\'s own file (RECIPES_PATH). Resolved from the server\'s directory so it survives being started from another cwd.',
   },
+  bigframesFacts: {
+    path: join(ROOT, 'config', 'bigframes-facts.json'),
+    repoPath: 'config/bigframes-facts.json',
+    why: 'the facts the python-stage guide states about the BigFrames runtime, EXTRACTED from that library (scripts/bigframes-facts.py) instead of written from its prose — which method raises without an index, which without an ordering, and what the signatures actually take. Without it the guide still renders, minus those lists.',
+  },
   mfSidecar: {
     path: join(ROOT, 'python', 'mf_sidecar.py'),
     repoPath: 'python/mf_sidecar.py',

@@ -72,11 +72,19 @@ export function frameProfile(rt, config = {}) {
       // what the class name is about. Declared here so `pythonRunHints` stays a matcher with no
       // runtime inside it.
       runHints: [
-        { match: 'NullIndexError|Cannot implicitly align', hint: 'About this runtime: the frame dbt.ref() returns carries NO INDEX, so an operation that needs to align two objects fails this way (and reset_index(drop=True) does not create one). The traceback above says which operation it was.' },
-        { match: 'OrderRequiredError', hint: 'About this runtime: it carries no row order (the dbt wrapper runs with ordering_mode="partial"), so taking rows off a frame that was not explicitly sorted fails this way.' },
+        { match: 'NullIndexError|Cannot implicitly align', hint: 'About this runtime: the frame dbt.ref() returns carries NO INDEX, so two objects can only be combined while they share a root — the same frame, narrowed by a projection, a filter or a window. Anything re-read as its own query is a different root: a locally built frame, a groupby aggregate, a cache()d frame, and the output of bigframes.ml predict/transform. The traceback says which operation it was; the forms that do not need alignment are a merge on a key (a SQL join), a value computed from the SAME frame, and — for an estimator — returning ITS frame instead of assigning its column back (that output already carries the input columns).' },
+        { match: 'OrderRequiredError', hint: 'About this runtime: it carries no row order (the dbt wrapper runs with ordering_mode="partial"), and the operations that need one are marked in the library: head, tail, iat, rolling, expanding, shift, diff, pct_change, cumsum/cumprod/cummin/cummax, rank, sample, melt, unstack, reset_index, ffill/bfill, idxmin/idxmax, and nlargest/nsmallest/unique unless keep="all"/keep_order=False. sort_values (or sort_index) before the operation is what grants the ordering — nothing else does.' },
         { match: 'convert it to a BigFrames BigQuery function|remote_function', hint: 'About this runtime: it runs no Python per row — a plain function passed to apply/map is attempted once as a vectorized expression over the whole column, and fails this way when it cannot be one.' },
       ],
       packages: ['bigframes'],
+      // HOW LONG A BUILD MAY HOLD THE CALL before it is handed back as a job to poll. This is a
+      // property of the RUNTIME, like the frame type and the ML library: dbt starts a Colab
+      // Enterprise notebook, which is minutes of cold start before a single row is computed, and
+      // the client on the other end of our tool call has a timeout we neither know nor can raise.
+      // So: hand back the query_id in seconds. A runtime that declares nothing here keeps the
+      // ordinary query window, because for a LOCAL runtime (duckdb) the build is seconds and
+      // detaching it would make every call asynchronous for no reason.
+      buildGraceMs: 5000,
     };
   }
   if (runtime === 'bigquery' || runtime === 'databricks') {
@@ -88,6 +96,7 @@ export function frameProfile(rt, config = {}) {
       guide: 'RULES FOR PYSPARK: modelling = pyspark.ml (distributed), not sklearn (needs toPandas(), single-node on the driver); stay in pyspark.sql column expressions (F.col / F.when / groupBy.agg / Window); avoid Python UDFs and row iteration (they serialize every row through Python), and collect() / toPandas() on a large frame; df.pandas_api() keeps pandas syntax distributed.',
       packagesNote: 'On PySpark prefer pyspark (pyspark.ml) over sklearn / scipy / statsmodels: those need toPandas(), single-node.',
       packages: ['pyspark'],
+      buildGraceMs: 5000, // a Dataproc / job-cluster start is minutes, like BigFrames above
     };
   }
   if (runtime === 'snowflake') {
@@ -99,6 +108,7 @@ export function frameProfile(rt, config = {}) {
       guide: 'RULES FOR SNOWPARK: modelling = snowflake.ml.modeling (runs in the warehouse), not sklearn (needs to_pandas(), single-node); stay in Snowpark column expressions (F.col / F.when / group_by.agg / Window); avoid Python UDFs on rows and to_pandas() on a large frame.',
       packagesNote: 'On Snowpark prefer snowflake (snowflake.ml.modeling) over sklearn / scipy / statsmodels: those need to_pandas(), single-node.',
       packages: ['snowflake'],
+      buildGraceMs: 5000, // a Snowpark warehouse start is remote too — poll rather than hold the call
     };
   }
   if (runtime === 'duckdb') {
@@ -400,9 +410,9 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   const installed = [...allow].filter(([, pip]) => pip).map(([k, pip]) => `${k} (dbt installs ${pip})`);
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
-    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}.` : ''} ${profile.guide} The last step's return value IS this model's table: declare output.columns so the SQL stages that follow know its columns. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies pass a static allowlist first (own names + declared imports + public attributes); what the code may reach ON the warehouse is decided by that runtime and dbt's own credentials. The pipeline's last model is the result — read it with get_query_result as usual.`,
+    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. For what SQL cannot do: statistics, clustering, scoring, forecasting. WHAT BELONGS HERE AND WHAT DOES NOT: only what SQL cannot say — a statistical test, clustering, scoring, a forecast, a model. Everything else is a SQL stage BEFORE this one, and that INCLUDES PREPARING the table this analysis reads: scope to the events and the time window, extract the payload columns, join the attributes, aggregate to the grain the analysis works on. This stage receives a PREPARED table at that grain, never the raw source — a SQL stage computes exactly and cheaply where the data already lives, this model is a separate dbt model on the warehouse's python runtime (a cold start, and its frame has that runtime's own limits), and a SQL stage stays readable to whoever reads the pipeline next while a function is readable only to whoever wrote it. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}.` : ''} ${profile.guide} The last step's return value IS this model's table: declare output.columns so the SQL stages that follow know its columns. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies pass a static allowlist first (own names + declared imports + public attributes); what the code may reach ON the warehouse is decided by that runtime and dbt's own credentials. SIZE: up to 30 functions, 400 lines per function body, 500 characters per line, 50 steps and 20 imports — a real analysis fits, so if a stage is refused it is not for being big. The pipeline's last model is the result — read it with get_query_result as usual.`,
     properties: {
-      stage: { const: 'python' },
+      stage: { enum: ['python'] },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
       imports: {
         type: 'array', maxItems: 20,

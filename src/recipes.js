@@ -15,6 +15,7 @@
 // only the ones this deployment can actually run. Fetching one by id still works and says so.
 
 import { readFileSync, existsSync } from 'node:fs';
+import { pythonReferenceRecipes } from './python-guide.js';
 
 /** Load one recipe file (a `{ recipes: [...] }` document). Missing file → no entries. */
 function readFile(path, origin) {
@@ -30,6 +31,11 @@ function readFile(path, origin) {
 export function loadRecipes(system, deployment = [], caps = null) {
   const paths = Array.isArray(deployment) ? deployment : String(deployment || '').split(/[,:]/).filter(Boolean);
   const merged = new Map();
+  // GENERATED first: the reference entries built from the extracted fact sheet (a library's real
+  // signatures and method preconditions). They are recipes so they can be FETCHED BY ID mid-write
+  // instead of read out of a long guide, and they answer to the same capability rules as the rest.
+  // Seeded before the files so a system or deployment entry with the same id overrides them.
+  for (const r of pythonReferenceRecipes()) merged.set(r.id, r);
   for (const r of readFile(system, 'system')) merged.set(r.id, r);
   for (const p of paths) for (const r of readFile(p, 'deployment')) merged.set(r.id, r);
   return new Recipes([...merged.values()], caps);

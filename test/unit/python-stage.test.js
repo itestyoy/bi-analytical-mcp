@@ -595,8 +595,15 @@ test('the stage description and the guide send the caller to this deployment\'s 
   for (const id of ids) {
     const r = await e.semantic_index({ recipe: id });
     const body = r.recipe || r;
-    assert.ok(body.register_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
-    assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
+    if (body.reference) {
+      // A generated REFERENCE entry (the library's own signatures / method preconditions) is
+      // offered in the same index so it can be fetched mid-write; it declares no model.
+      assert.ok(body.reference.version, `${id} must name the version it was read from`);
+      assert.ok(body.approach && body.instead_of && body.hack, `${id} must say how to use the reference`);
+    } else {
+      assert.ok(body.register_payload?.pipeline?.stages?.some((st) => st.stage === 'python'), `${id} must contain a python stage`);
+      assert.ok(body.hack && body.notes && body.read_first, `${id} must carry the technique, the caveats and the read-first pointer`);
+    }
   }
 
   // a deployment with no python recipes says nothing about them

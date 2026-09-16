@@ -124,7 +124,9 @@ test('the runtime hints send a failed run to the form that works', () => {
 // say. A recipe that handed the raw source to python would teach the opposite of the guide.
 test('every bigframes recipe prepares its table in SQL before the python stage', () => {
   const REDUCES = new Set(['where', 'derive', 'compute', 'join', 'aggregate', 'match_recognize', 'project', 'limit', 'unnest', 'pivot', 'unpivot', 'window', 'order_by']);
-  const bf = recipes.list.filter((r) => r.runtime === 'bigframes');
+  // a REFERENCE entry (the generated signature/method sheets) declares no pipeline — it is the
+  // library's own surface, not a model to build
+  const bf = recipes.list.filter((r) => r.runtime === 'bigframes' && !r.reference);
   assert.ok(bf.length >= 10, 'precondition: the bigframes family is shipped');
   for (const r of bf) {
     const stages = r.register_payload.pipeline.stages;
@@ -136,4 +138,66 @@ test('every bigframes recipe prepares its table in SQL before the python stage',
     const py = stages[at];
     assert.ok(py.output?.columns?.length, `${r.id}: the python stage declares no output columns`);
   }
+});
+
+// THE ML SURFACE. bigframes.ml wears the scikit-learn API but wraps BigQuery ML, and that
+// resemblance is where the failure came from: KMeans(standardize_features=True) — an sklearn
+// argument with no BQML option — is a TypeError, and it was passed because nothing we hand the
+// model said what the constructor actually takes. So the signatures are extracted per class, and
+// the check below is generated FROM them: any keyword the guide or a recipe prescribes to a class
+// the fact sheet knows must exist in that class's signature.
+test('the ml constructor signatures are extracted, and nothing prescribes a keyword outside them', () => {
+  const km = FACTS.ml.cluster.KMeans;
+  assert.deepEqual(km.positional, ['n_clusters'], 'precondition: only n_clusters is positional');
+  assert.deepEqual(km.keyword_only, ['init', 'init_col', 'distance_type', 'max_iter', 'tol', 'warm_start']);
+  assert.ok(!km.positional.includes('standardize_features') && !km.keyword_only.includes('standardize_features'), 'precondition: the parameter that failed does not exist');
+  assert.deepEqual(FACTS.ml.preprocessing.StandardScaler, { positional: [], keyword_only: [] }, 'scaling takes no parameters at all');
+  assert.deepEqual(FACTS.ml.pipeline.Pipeline.positional, ['steps']);
+
+  // What is PRESCRIBED: the guide's `do` lines and each recipe's approach/hack/function bodies.
+  const prescribed = [
+    ...(guide.examples || []).flatMap((ex) => ex.do || []),
+    ...recipes.list.filter((r) => r.runtime === 'bigframes').flatMap((r) => [
+      r.approach, r.hack,
+      ...(r.register_payload?.pipeline?.stages || []).filter((st) => st.stage === 'python').flatMap((st) => (st.functions || []).flatMap((f) => (f.body || []))),
+    ]),
+  ].filter(Boolean).join('\n');
+
+  const known = new Map();
+  for (const entries of Object.values(FACTS.ml)) {
+    for (const [cls, params] of Object.entries(entries)) {
+      if (cls.endsWith('()')) continue; // a function, not a constructor
+      known.set(cls, new Set([...(params.positional || []), ...(params.keyword_only || [])]));
+    }
+  }
+  for (const [cls, allowed] of known) {
+    const call = new RegExp(`\\b${cls}\\(([^)]*)\\)`, 'g');
+    for (const m of prescribed.matchAll(call)) {
+      for (const kw of m[1].matchAll(/(\w+)\s*=/g)) {
+        assert.ok(allowed.has(kw[1]), `${cls}(${kw[1]}=…) is prescribed, but this version's signature has only: ${[...allowed].join(', ')}`);
+      }
+    }
+  }
+  // …and the guide NAMES the real signature, so the caller can check before passing anything
+  assert.match(allText, /n_clusters, \*, init, init_col, distance_type, max_iter, tol, warm_start/);
+  assert.match(allText, /standardize_features/, 'the parameter that failed is named as the one that does not exist');
+  assert.match(allText, /TypeError/);
+});
+
+test('the failing form is named as failing, and the fix is a transformer, not a flag', () => {
+  const r = recipes.get('bf_ml_estimator_params');
+  assert.match(r.instead_of, /standardize_features/);
+  assert.match(r.instead_of, /TypeError/);
+  assert.match(r.approach, /StandardScaler\(\)/);
+  assert.ok(!/standardize_features/.test(r.approach), 'the approach never passes it');
+  // Pipeline's own limit, from the library
+  const rule = FACTS.rules.find((x) => x.id === 'ml_scaling_is_a_transformer');
+  assert.ok(rule && /Pipeline\.__init__/.test(rule.evidence));
+  assert.match(allText, /EXACTLY TWO steps|exactly two steps/);
+  // the runtime hint sends a failed run to the signature rather than to a rewrite of the algorithm
+  const hints = pythonRunHints(bq, "TypeError: KMeans.__init__() got an unexpected keyword argument 'standardize_features'");
+  assert.equal(hints.length, 1);
+  assert.match(hints[0], /BQML/);
+  assert.match(hints[0], /n_clusters/);
+  assert.deepEqual(pythonRunHints(frameProfile({ runtime: 'duckdb' }), 'unexpected keyword argument'), [], 'a local runtime says none of this');
 });

@@ -50,6 +50,17 @@ for (const r of recipes.list) {
     // dbt python models. It is still checked where it can rot — the payload must COMPILE for a
     // deployment that does run them: the stages render, the chain is laid out, the function bodies
     // pass the static gate and the declared output columns propagate to the SQL stages after it.
+    // A REFERENCE entry (generated from an extracted fact sheet) is not a payload to build: it is
+    // the library's own surface, offered by id so it can be fetched mid-write. What can rot here is
+    // its content — an empty sheet, or a version it cannot name.
+    if (r.reference) {
+      assert.ok(r.reference.version, `${r.id}: a reference must name the version it was read from`);
+      assert.ok(Object.keys(r.reference).length > 3, `${r.id}: the reference carries no lists`);
+      assert.ok(r.approach && r.instead_of && r.hack, `${r.id}: a reference still says how to use it`);
+      assert.ok(!r.register_payload, `${r.id}: a reference declares no model`);
+      return;
+    }
+
     if (r.requires === 'python_models') {
       const pyCatalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), {});
       pyCatalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery deployment resolves
@@ -79,7 +90,10 @@ for (const r of recipes.list) {
     if (r.register_payload) {
       const out = await engine.register_native_model(r.register_payload);
       assert.equal(out.build.ok, true, `build failed for ${r.id}: ${JSON.stringify(out.error || out.build)}`);
-      assert.ok(Array.isArray(out.rows) && out.rows.length >= 2, `${r.id} expected >=2 group rows`);
+      // A recipe that feeds a two-group test needs its groups; one that collapses the table to a
+      // single row of statistics (the table-wide aggregate) is correct at exactly one row.
+      const least = (r.ab_test || r.srm_check) ? 2 : 1;
+      assert.ok(Array.isArray(out.rows) && out.rows.length >= least, `${r.id} expected >=${least} row(s), got ${out.rows?.length}`);
       if (r.ab_test) {
         const map = r.ab_test;
         const arms = out.rows.map((row) => {

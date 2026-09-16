@@ -1766,7 +1766,7 @@ export class Engine {
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
         ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
-        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this._draftStepRecommendations(changedStage, after)] : []),
+        ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this._globalWindowWarnings(changedStage), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };
     if (includeColumns) resp.available_columns = after;
@@ -1799,6 +1799,7 @@ export class Engine {
       ...this._joinCompletenessWarnings(st, draft),
       ...this._funnelCompletionWarnings(st),
       ...this._pythonPreparationWarnings(st, draft, i),
+      ...this._globalWindowWarnings(st),
     ]);
   }
 
@@ -1827,6 +1828,32 @@ export class Engine {
     return [`This python stage reads ${src} as it is: no stage before it narrows or reduces the data.`
       + ` A python stage is for what SQL cannot say (a statistical test, clustering, scoring, a forecast); everything else — scoping to the events${time ? ` and a time window on ${time}` : ''}, extracting the payload columns, joining the attributes, aggregating to the grain your analysis works on — is cheaper and exact as stages BEFORE this one, and the python model then starts from a small prepared table.`
       + ` If the analysis really is per source row (a model scoring every row), this shape is right and there is nothing to change.`];
+  }
+
+  /**
+   * A GLOBAL ANALYTIC WINDOW: `OVER ()` with no PARTITION BY. It keeps every row and attaches the
+   * value to each, so one worker has to hold the whole input — observed on a table of ~6.3M rows as
+   * "Resources exceeded during query execution" with analytic windows accounting for all of the
+   * memory, and again after the exact percentile in it was replaced, for plain AVG/STDDEV over the
+   * same global window. An exact percentile is the worst case, because it also has to order the
+   * values.
+   *
+   * The cheap form of the same question is an `aggregate` stage with no group_by: ONE row with the
+   * thresholds and the statistics, applied per row afterwards as literals. So this says that, and
+   * refuses nothing: a global window over an already-aggregated handful of rows is harmless, and
+   * from here there is no way to know how many rows arrive.
+   */
+  _globalWindowWarnings(stage) {
+    if (stage?.stage !== 'compute') return [];
+    const windowed = stage.op === 'window' && !(stage.partition_by || []).length;
+    // Raw SQL is where this actually came from: the built-in window op is only reachable through
+    // `partition_by`, but `op: 'raw'` carries whatever the caller wrote.
+    const rawGlobal = stage.op === 'raw' && /\bover\s*\(\s*(order\s+by[^)]*)?\)/i.test(String(stage.sql || ''));
+    if (!windowed && !rawGlobal) return [];
+    const what = windowed ? `the window function '${stage.fn}' has no partition_by` : `the raw expression for '${stage.name}' uses OVER () with no PARTITION BY`;
+    return [`Global analytic window: ${what}, so it is computed over EVERY row at once and the value is attached to each. One worker has to hold the whole input for that, which is how a large table runs out of memory ("Resources exceeded during query execution") — an exact percentile worst of all, since it must also order the values.`
+      + ` If the number is TABLE-WIDE (a threshold, a mean, a deviation), compute it in an \`aggregate\` stage with no group_by — one row, no ordering — and apply it per row in a later pass as a literal (compute sub/div, or least/greatest with { value }).`
+      + ` If it is per group (per player, per day, per session), name those columns in partition_by. A global window over an already-aggregated handful of rows is fine as it is.`];
   }
 
   _joinCompletenessWarnings(stage, draft = null) {

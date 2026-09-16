@@ -50,14 +50,19 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 - `DBT_PROJECT_DIR` — host path to your dbt project (mounted at `/dbt_project`; used as both `DBT_BASE_PROJECT` and `DBT_PROFILES_DIR`; the catalog is discovered from its model YAMLs).
 - `CONFIG_DIR` — host path mounted read-only at `/config` for optional `recipes.json` (and a standalone `catalog.yml` if you set `CATALOG_PATH`).
 - `CATALOG_PATH` — optional; set to a standalone catalog file instead of project discovery.
-- `QUERY_TIMEOUT_SECONDS`, `CONTEXT_TTL_MS` — query/GC tuning.
-- `PYTHON_BUILD_GRACE_SECONDS` — how long a build that includes a **Python** model may hold the tool
-  call before it hands back a `query_id` to poll. Unset, the RUNTIME decides: a remote one (BigFrames
-  in a Colab Enterprise notebook, Spark on Dataproc, Snowpark) hands it back after 5 s, because it
-  cold-starts for minutes and the calling client's own timeout — which the server cannot raise —
-  would expire first (the caller sees "the server is not responding" while the build it started keeps
-  running); a local one (DuckDB) keeps `QUERY_TIMEOUT_SECONDS`, because it finishes in seconds and
-  returning the rows beats returning a job id. Set this to override both.
+- `QUERY_TIMEOUT_SECONDS` — how long an **SQL** build may hold the tool call before it hands back a
+  `query_id` to poll (default **20 s**). It cancels nothing: past it the build runs on in the
+  background and the caller polls `get_query_result`. **Values above 30 s are capped at 30**, with a
+  line on stderr saying so — a longer wait inside one tool call outlives the calling client's own
+  timeout, which this server cannot raise, and the caller then sees "the server is not responding"
+  while the build it started keeps running unseen.
+- `CONTEXT_TTL_MS` — context GC tuning.
+- `PYTHON_BUILD_GRACE_SECONDS` — the same window for a build that includes a **Python** model, which
+  is a different figure. Unset, the RUNTIME decides: a remote one (BigFrames in a Colab Enterprise
+  notebook, Spark on Dataproc, Snowpark) hands the `query_id` back after 5 s, because it cold-starts
+  for minutes; a local one (DuckDB) keeps `QUERY_TIMEOUT_SECONDS`, because it finishes in seconds and
+  returning the rows beats returning a job id. Set this to override both; the same 30 s ceiling
+  applies.
 - `DBT_PG_HOST/PORT/USER/PASSWORD/DBNAME/SCHEMA` — warehouse connection, consumed by your `profiles.yml` via `env_var(...)`.
 
 Your `profiles.yml` should read the connection from env, e.g.:

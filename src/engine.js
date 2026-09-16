@@ -1,7 +1,7 @@
 // Tool engine: validates inputs against catalog-derived schemas, compiles
 // declarations, renders YAML, drives dbt/mf within isolated contexts.
 
-import { buildSchemas } from './schema.js';
+import { buildSchemas, MAX_WAIT_SECONDS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
@@ -52,7 +52,14 @@ export class Engine {
       if (moved.targets) console.error(`[mcp] memory targets stored structurally: ${moved.targets} target(s) on ${moved.notes} note(s)`);
     } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
     this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
-    this.queryTimeoutMs = queryTimeoutMs ?? 60000; // materialize -> background after this
+    // HOW LONG AN SQL BUILD MAY HOLD THE CALL before it is handed back as a job to poll. It is not
+    // a query timeout — nothing is cancelled when it expires; the build runs on and the caller gets
+    // a query_id. The number is bounded by a timeout we do NOT own: the client in front of this
+    // tool call gives up on its own schedule, reports the server as unresponsive, and the build it
+    // started keeps running unseen. 20s sits inside the usual client limits and still lets a chain
+    // whose work is SQL return the ROWS instead of a job id. A build with a PYTHON model has its
+    // own, shorter grace (see below).
+    this.queryTimeoutMs = queryTimeoutMs ?? 20000;
     // A build with a PYTHON model may detach much sooner — but HOW soon is the runtime's own
     // property (`buildGraceMs` on its frame profile), not one number for everything: a remote
     // runtime (BigFrames in a notebook, Spark on Dataproc, Snowpark) is minutes of cold start
@@ -2134,9 +2141,10 @@ export class Engine {
    * The grace is NOT one number for everything. A build that is expected to be slow should hand
    * back its query_id almost at once: the caller in front of us is a tool call inside another
    * agent's client, and that client has a timeout of its own which we do not know and cannot
-   * raise. Waiting 60s on a BigQuery Python model means the client gives up first and reports the
-   * server as unresponsive — while the job it started runs on to completion, invisible. Handing
-   * back the id in a few seconds keeps the poll in the caller's hands, where it belongs.
+   * raise. Holding a BigQuery Python model for the ordinary window means the client gives up first
+   * and reports the server as unresponsive — while the job it started runs on to completion,
+   * invisible. Handing back the id in a few seconds keeps the poll in the caller's hands, where it
+   * belongs.
    */
   async _runDetached(ctx, select, table, { graceMs = this.queryTimeoutMs } = {}) {
     const dir = this.ctxs.dir(ctx.id);
@@ -2816,16 +2824,21 @@ export class Engine {
   }
 
   /**
-   * Bounded wait (0–60s) so the AI can pace background-job polling: wait an
+   * Bounded wait (0–MAX_WAIT_SECONDS) so the AI can pace background-job polling: wait an
    * interval, then poll get_query_result, repeat until ready. Purely a timer.
+   *
+   * The ceiling is the same one every other number here answers to: the wait happens INSIDE a tool
+   * call, so a caller that asks for a minute gets a dropped connection rather than a minute. The
+   * cap is reported back (`cap_seconds`) so the pacing can be planned from the answer instead of
+   * from the description.
    */
   async time(input) {
     this._validate('time', input);
     const requested = Number(input.seconds) || 0;
-    const seconds = Math.min(Math.max(requested, 0), 60); // clamp to [0, 60]
+    const seconds = Math.min(Math.max(requested, 0), MAX_WAIT_SECONDS); // clamp to [0, MAX_WAIT_SECONDS]
     const startedAt = new Date().toISOString();
     await new Promise((resolve) => { setTimeout(resolve, seconds * 1000); });
-    return { ok: true, waited_seconds: seconds, requested_seconds: requested, clamped: requested > 60, started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
+    return { ok: true, waited_seconds: seconds, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
   }
 
   async describe_context(input) {

@@ -25,7 +25,8 @@ services:
       DBT_PROFILES_DIR: "/dbt_project"
       RECIPES_PATH: "/config/recipes.json"
       MCP_WORKSPACE: "/workspace"
-      QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-120}"
+      # How long an SQL build holds the tool call before handing back a query_id to poll (max 30).
+      QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-20}"
       # A python model on BigFrames cold-starts for minutes, so the build is handed back as a job
       # after 5s by default (the runtime's own figure). Set this only to override it.
       PYTHON_BUILD_GRACE_SECONDS: "${PYTHON_BUILD_GRACE_SECONDS:-}"

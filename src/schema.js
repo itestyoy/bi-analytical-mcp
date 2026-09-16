@@ -271,6 +271,12 @@ function predicateDefs(catalog) {
   };
 }
 
+// The ceiling on the pacing timer (`time`). A wait happens INSIDE a tool call, so it is bounded by
+// the same thing a build's grace is bounded by: the client's own timeout, which this server neither
+// knows nor can raise. Asking for more than this returns after the cap, with `clamped: true`.
+// Declared here because both the schema text and the engine's clamp must say the same number.
+export const MAX_WAIT_SECONDS = 30;
+
 export function buildSchemas(catalog) {
   const modelKeys = catalog.modelKeys();
   const create = {
@@ -480,9 +486,9 @@ export function buildSchemas(catalog) {
     semantic_index: semanticIndexSchema(catalog),
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
-      description: 'Wait for `seconds` (capped at 60), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.',
+      description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.`,
       properties: {
-        seconds: { type: 'number', minimum: 0, maximum: 86400, description: 'Seconds to wait; the actual wait is capped at 60 (larger values are clamped, with clamped:true in the result).' },
+        seconds: { type: 'number', minimum: 0, maximum: 86400, description: `Seconds to wait; the actual wait is capped at ${MAX_WAIT_SECONDS} (larger values are clamped, with clamped:true and cap_seconds in the result).` },
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
       },
     },

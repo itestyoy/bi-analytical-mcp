@@ -14,6 +14,7 @@ import { frameProfile } from './python-model.js';
 import { ContextManager } from './context-manager.js';
 import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
+import { MAX_WAIT_SECONDS } from './schema.js';
 import { BackgroundIndexer } from './value-index.js';
 import { createEmbedder } from './embeddings.js';
 
@@ -27,7 +28,7 @@ const TOOL_DESCRIPTIONS = {
   context: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, cascade for dependent metrics).',
   memory: 'DURABLE analyst memory — remember what you FOUND OUT so it comes back through semantic_index. After you resolve something non-obvious (a vague request tracked down to a real field, a gotcha, a useful source), record:"action" it: `note` the finding, `question` the ORIGINAL business question it answers (in the stakeholder\'s words — embedded with the note so a future similar question retrieves this insight by meaning), `targets` the catalog entities it is about, each as { source, name } (a property, attribute or event of that source — e.g. { source: "events", name: "ad_type_of_event_data" }, { source: "users", name: "country" }) or { source } for a model, `aliases` the words the user actually used ("ad format") — give them in BOTH the original language and English so search works cross-language, `links` any sources. The note then surfaces inline on the linked semantic_index views ({ model }/{ source, event }/{ source, property }) and in semantic_index({ search }) — so the next fuzzy phrasing resolves straight to the right field instead of re-investigating. RECORD ONE ATOMIC FINDING PER NOTE: when studying a topic or a document, split it into several small single-fact notes (each with its own targets/aliases) rather than dumping a whole topic into one big note — atomic notes link precisely and retrieve far better; an over-long note matches poorly and may fail to index. action: list (all, or one { target }) | search (by word — typo-tolerant fuzzy, and SEMANTIC/meaning-based when embeddings are enabled) | forget (by id).',
   experiment: 'The A/B EXPERIMENT lifecycle in one tool (action-driven): plan → check_split → analyze. action:"plan" = power/sample-size (required users, or the MDE at a given n) BEFORE running. action:"check_split" = Sample-Ratio-Mismatch χ² guardrail; p < 0.001 means randomization/logging is broken and the result is INVALID — run it BEFORE trusting any lift. action:"analyze" = the significance test on PRE-AGGREGATED per-group stats (metric: proportion → two-proportion z-test; mean → Welch t-test; ratio → delta-method; cuped → variance reduction), returning lift (+ relative-lift CI), p-value, CI, significance, and a multiplicity-adjusted p-value per variant; sequential:true adds an always-valid p for live peeking. Compute the per-group aggregates first with a pipeline. Field names are exact: use `baseline` (NOT baseline_rate) and `confidence` (NOT alpha); there is no `allocation` field (use check_split.expected_ratio). For proportion, each group needs `conversions` (0..n; conversions > n is rejected). Examples — plan: {action:"plan",metric:"proportion",baseline:0.1,mde:0.02}; check_split: {action:"check_split",groups:[{label:"control",n:5000},{label:"variant_b",n:5020}]}; analyze: {action:"analyze",metric:"proportion",control:{n:5000,conversions:500},variants:[{label:"variant_b",n:5020,conversions:580}],correction:"holm"}.',
-  time: 'Wait for `seconds` (capped at 60), then return — a pure timer that touches no data. Use it to PACE polling: after query_semantic_model({ materialize:true }) (or a long build) returns a query_id, call time to wait, then poll get_query_result; repeat until ready.',
+  time: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return — a pure timer that touches no data. Use it to PACE polling: after query_semantic_model({ materialize:true }) (or a long build) returns a query_id, call time to wait, then poll get_query_result; repeat until ready.`,
 };
 
 // Human-readable display names for the tools (MCP `title` / annotations.title). The `name` stays
@@ -176,6 +177,35 @@ function errorResult(message, stage, field) {
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
 }
 
+// THE CEILING ON WHAT A DEPLOYMENT MAY CONFIGURE. Both grace windows (how long an SQL build and how
+// long a Python build may hold the tool call before handing back a query_id) are bounded by a
+// timeout this server does not own: the client that made the call gives up on its own schedule,
+// reports the server as unresponsive, and the build it started runs on unseen. So a value above the
+// ceiling is not honoured — it is capped, out loud, and the operator sees why.
+//
+// The cap lives HERE, on the environment, and not in the Engine constructor: the Engine is a
+// library, and a caller that embeds it can legitimately hand a long window to a LOCAL build
+// (test/integration/python-stage.test.js gives a DuckDB Python build 600s, where waiting for rows
+// beats polling for a job). Capping in the constructor would make those builds asynchronous.
+export const MAX_BUILD_GRACE_SECONDS = 30;
+
+/**
+ * Seconds from the environment → ms, capped at MAX_BUILD_GRACE_SECONDS. An unset, empty or
+ * unparseable value falls back to `fallbackSeconds`; a fallback of null means "unset" (the runtime
+ * decides), which is what the Python grace needs.
+ */
+export function graceMsFromEnv(raw, fallbackSeconds, name = 'grace') {
+  const asked = Number(raw);
+  if (raw === undefined || raw === null || String(raw).trim() === '' || !Number.isFinite(asked) || asked <= 0) {
+    return fallbackSeconds == null ? undefined : fallbackSeconds * 1000;
+  }
+  if (asked > MAX_BUILD_GRACE_SECONDS) {
+    console.error(`[mcp] ${name}=${raw}s is above the ceiling — using ${MAX_BUILD_GRACE_SECONDS}s: a longer wait inside one tool call outlives the calling client's own timeout, which this server cannot raise. The build still finishes in the background; poll it with get_query_result.`);
+    return MAX_BUILD_GRACE_SECONDS * 1000;
+  }
+  return asked * 1000;
+}
+
 export async function makeEngine(opts = {}) {
   const baseProjectDir = opts.baseProjectDir || process.env.DBT_BASE_PROJECT;
   // Catalog source precedence: explicit CATALOG_PATH (a standalone catalog file) →
@@ -212,14 +242,12 @@ export async function makeEngine(opts = {}) {
     : baseProjectDir
       ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
       : null;
-  const queryTimeoutMs = (Number(process.env.QUERY_TIMEOUT_SECONDS) || 60) * 1000;
+  const queryTimeoutMs = graceMsFromEnv(process.env.QUERY_TIMEOUT_SECONDS, 20, 'QUERY_TIMEOUT_SECONDS');
   // A build that includes a PYTHON model may hand back its query_id much sooner — how soon is the
   // RUNTIME's own property (a remote one cold-starts for minutes and must not hold the caller's
   // client; a local one finishes in seconds and should just return the rows). This env var is the
   // operator's override of that, and stays UNSET unless they set it.
-  const pythonBuildGraceMs = process.env.PYTHON_BUILD_GRACE_SECONDS
-    ? Number(process.env.PYTHON_BUILD_GRACE_SECONDS) * 1000
-    : undefined;
+  const pythonBuildGraceMs = graceMsFromEnv(process.env.PYTHON_BUILD_GRACE_SECONDS, null, 'PYTHON_BUILD_GRACE_SECONDS');
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
   // <workspaceRoot>/mcp.sqlite; pin it elsewhere (e.g. a persistent volume) via MCP_DB.
   const dbPath = opts.dbPath || process.env.MCP_DB || join(ctxs.workspaceRoot, 'mcp.sqlite');

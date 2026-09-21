@@ -88,7 +88,11 @@ export class Engine {
     if (recipes) {
       const si = this.schemas.semantic_index;
       const branch = (si?.anyOf || si?.oneOf || []).find((b) => b.properties?.recipe);
-      const withIds = (prop) => ({ type: 'string', enum: recipes.ids(), description: prop.description });
+      // The ids are injected AFTER the schemas were built and folded, so the two sites that take
+      // a recipe id would each carry the whole list again (~1.4 KB apiece on a real recipe set).
+      // They share one definition instead — the same fold the built schemas get, applied here.
+      si.$defs = { ...(si.$defs || {}), recipe_ids: { type: 'string', enum: recipes.ids() } };
+      const withIds = (prop) => ({ $ref: '#/$defs/recipe_ids', ...(prop.description ? { description: prop.description } : {}) });
       if (branch) branch.properties.recipe = withIds(branch.properties.recipe);
       // …and in the flat root map too, which is what a client that strips the union is left with.
       if (si?.properties?.recipe) si.properties.recipe = withIds(si.properties.recipe);

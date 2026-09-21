@@ -282,9 +282,17 @@ export function buildSchemas(catalog) {
   const create = {
     type: 'object',
     additionalProperties: false,
-    required: ['name', 'metrics'],
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express, read back with get_query_result), use build_native_model instead.',
+    // No root `required`: the two modes require different things, and the allOf below says which
+    // (create → name + metrics, update → context_id + semantic_model), so a caller is never told
+    // to supply a field the mode it asked for does not take.
+
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). TWO MODES: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express, read back with get_query_result), use build_native_model instead.',
+    allOf: [
+      { if: { properties: { action: { const: 'update' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'] } },
+      { if: { not: { properties: { action: { const: 'update' } }, required: ['action'] } }, then: { required: ['name', 'metrics'] } },
+    ],
     properties: {
+      action: { enum: ['create', 'update'], description: 'create (default) = declare a task: name + semantic_models + metrics. update = change the task already in this context: the add_*/remove_* fields below, on one `semantic_model`.' },
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
       description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ action: "describe" | "list" }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
@@ -293,6 +301,17 @@ export function buildSchemas(catalog) {
       metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
       include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false). The YAML is always written to the context files regardless; omit it to keep responses small.' },
+      // action: 'update' — the incremental path. Same vocabulary as above (that is why the two are
+      // one tool: two schemas meant two copies of every enum in every listing).
+      semantic_model: { type: 'string', enum: modelKeys, description: 'action:"update" — which model\'s semantic model to change.' },
+      add_dimensions: { type: 'array', items: genericDimensionItem(catalog), description: 'action:"update" — dimensions to add.' },
+      remove_dimensions: { type: 'array', items: { type: 'string' }, description: 'action:"update" — dimensions to remove, by the ATTRIBUTE they declare (the name `groupable` shows).' },
+      add_measures: { type: 'array', items: genericMeasureItem(catalog), description: 'action:"update" — measures to add.' },
+      remove_measures: { type: 'array', items: { type: 'string' }, description: 'action:"update" — measures to remove; refused while a metric depends on one, unless cascade.' },
+      add_metrics: { type: 'array', items: metricSchema(), description: 'action:"update" — metrics to add.' },
+      remove_metrics: { type: 'array', items: { type: 'string' }, description: 'action:"update" — metrics to remove.' },
+      task: { type: 'string', description: 'action:"update" — the task the additions belong to (defaults to the context\'s first task).' },
+      cascade: { type: 'boolean', description: 'action:"update" — also remove the metrics that depend on a removed measure.' },
     },
   };
 

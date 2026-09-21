@@ -2581,6 +2581,10 @@ export class Engine {
 
   async create_semantic_model(input) {
     this._validate('create_semantic_model', input);
+    // Two modes, one tool: declaring a task from scratch, and adding to / removing from the task
+    // already in a context. They share this schema (and therefore its vocabularies, which is the
+    // whole reason they are one tool) but not their bodies.
+    if (input.action === 'update') return this._updateSemanticModel(input);
     const compiled = this._compile(input);
 
     if (input.dry_run) {
@@ -2630,8 +2634,19 @@ export class Engine {
     };
   }
 
+  /**
+   * The INCREMENTAL path on an existing task. It is reachable two ways and the body is one: as
+   * create_semantic_model({ action: 'update', … }) — the mode the tool listing advertises — and as
+   * update_semantic_model({ … }), kept callable for a client that learned that name, but no longer
+   * advertised, because the two schemas repeat the same vocabulary and the listing is what every
+   * request carries.
+   */
   async update_semantic_model(input) {
     this._validate('update_semantic_model', input);
+    return this._updateSemanticModel(input);
+  }
+
+  async _updateSemanticModel(input) {
     const ctx = this._ctx(input.context_id);
     const modelKey = input.semantic_model;
     // dry_run must NOT mutate the context (state or files): work on a clone.

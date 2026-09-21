@@ -113,9 +113,14 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   if (skip(t)) return;
   // the protocol advertises the tools an assistant needs…
   const tools = (await client.listTools()).tools.map((x) => x.name);
-  for (const needed of ['semantic_index', 'create_semantic_model', 'query_semantic_model', 'build_native_model', 'get_query_result', 'update_semantic_model', 'experiment']) {
+  for (const needed of ['semantic_index', 'create_semantic_model', 'query_semantic_model', 'build_native_model', 'get_query_result', 'experiment']) {
     assert.ok(tools.includes(needed), `${needed} is advertised`);
   }
+  // …and only those: editing a task is a MODE of create_semantic_model, not a tool of its own —
+  // two tools meant the deployment's whole vocabulary twice in every listing.
+  assert.ok(!tools.includes('update_semantic_model'), 'the update tool is folded into create_semantic_model');
+  const createTool = (await client.listTools()).tools.find((x) => x.name === 'create_semantic_model');
+  assert.deepEqual(createTool.inputSchema.properties.action.enum, ['create', 'update']);
   // …the overview names the four sources…
   const overview = await call('semantic_index', {});
   const models = JSON.stringify(overview.models || overview);
@@ -429,13 +434,22 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   assert.ok(tooEarly.error.message.length > 0, JSON.stringify(tooEarly));
 
   // add a second amount from the SAME source, choosing its aggregation here and now.
-  const grown = await call('update_semantic_model', {
+  const grown = await call('create_semantic_model', {
+    action: 'update',
     context_id: ctx,
     semantic_model: 'acquisition',
     add_measures: [{ name: 'clicks', agg: 'sum', field: 'clicks' }],
     add_metrics: [{ name: 'clicks', type: 'simple', measure: { name: 'clicks' } }],
   });
   assert.equal(grown.parse?.ok, true, JSON.stringify(grown.parse));
+  // the old name is no longer advertised but still answers, so a client that learned it keeps working
+  const legacy = await call('update_semantic_model', {
+    context_id: ctx,
+    semantic_model: 'acquisition',
+    add_measures: [{ name: 'impressions', agg: 'sum', field: 'impressions' }],
+    add_metrics: [{ name: 'impressions', type: 'simple', measure: { name: 'impressions' } }],
+  });
+  assert.equal(legacy.parse?.ok, true, JSON.stringify(legacy.parse));
 
   const after = await call('query_semantic_model', { context_id: ctx, metrics: ['e2e_grow_cost', 'e2e_grow_clicks'] });
   assert.equal(after.ok, true, JSON.stringify(after.error));

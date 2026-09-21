@@ -83,3 +83,41 @@ test('update: semantic_model must be a known model key', () => {
   assert.equal(v('update_semantic_model', { context_id: 'ctx123', semantic_model: 'ghost' }).ok, false);
   assert.ok(v('update_semantic_model', { context_id: 'ctx123', semantic_model: 'events', add_measures: [{ name: 'x', agg: 'count', field: '*' }] }).ok);
 });
+
+// TWO MODES, ONE TOOL. Declaring a task and editing the task already in a context used to be two
+// tools with the same catalog vocabulary in both — and a listing carries every tool's schema on
+// every request, so the deployment's payload properties were shipped twice over. They are one tool
+// now, picked by `action`, and the old name stays callable for a client that learned it.
+//
+// Input-validation checks: what each mode requires, and that neither mode is asked for the other's
+// fields.
+test('create_semantic_model: the create mode and the update mode require their own fields', () => {
+  const validators = makeValidators(buildSchemas(catalog));
+  const check = (input) => validateInput(validators.create_semantic_model, input);
+  const TASK = {
+    name: 'rev',
+    semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
+    metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
+  };
+
+  assert.equal(check(TASK).ok, true, JSON.stringify(check(TASK).errors));
+  assert.equal(check({ ...TASK, action: 'create' }).ok, true, 'the default mode can be named explicitly');
+
+  // create mode: the declaration is what is required — and the refusal says so
+  const bare = check({ semantic_models: [] });
+  assert.equal(bare.ok, false);
+  assert.match(bare.errors.join(' | '), /name/);
+  assert.match(bare.errors.join(' | '), /metrics/);
+
+  // update mode: a context and the model being changed, and NOT name/metrics
+  assert.equal(check({
+    action: 'update', context_id: 'ctxabc123456', semantic_model: 'events',
+    add_measures: [{ name: 'purchases', agg: 'count', field: '*' }],
+  }).ok, true);
+  const noModel = check({ action: 'update', context_id: 'ctxabc123456' });
+  assert.equal(noModel.ok, false);
+  assert.match(noModel.errors.join(' | '), /semantic_model/);
+  assert.ok(!/'name'/.test(noModel.errors.join(' | ')), 'the update mode is never asked for the create mode\'s fields');
+  // …and a model this catalog does not have is still refused by the schema
+  assert.equal(check({ action: 'update', context_id: 'ctxabc123456', semantic_model: 'no_such_model' }).ok, false);
+});

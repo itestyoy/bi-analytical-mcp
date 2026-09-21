@@ -10,6 +10,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildToolDefs } from '../../src/server.js';
 import { renderContext } from '../../src/yaml-render.js';
+import { stageBranch } from '../helpers/stage-schema.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -294,7 +295,7 @@ test('a task dimension is reported under its declared attribute even when one ta
 // magic word means a relationship, and nothing in the engine knows what any relationship is called.
 test('match_recognize partition_by: a column, or { entity } from the declared relationships', async () => {
   const e = engine();
-  const st = e.schemas.build_native_model.properties.stage.oneOf.find((s) => s.properties?.stage?.enum?.[0] === 'match_recognize');
+  const st = stageBranch(e.schemas.build_native_model, 'match_recognize');
   const branches = st.properties.partition_by.items.oneOf;
   const entityBranch = branches.find((b) => b.type === 'object');
   assert.ok(entityBranch, 'the entity form is in the schema, not only in prose');

@@ -6,7 +6,12 @@ import addFormats from 'ajv-formats';
 export function makeValidators(schemas) {
   // discriminator:true → for our `metric` unions, errors come from the SELECTED branch
   // only (not every branch), so messages stay focused and actionable.
-  const ajv = new Ajv({ allErrors: true, strict: false, discriminator: true });
+  // verbose:true attaches the failing SCHEMA NODES to each error (`schema`, `parentSchema`). The
+  // refusals are built from those nodes — a union's branch titles, the sibling field names behind
+  // "here that field is called 'q'" — and since the schemas fold repeated subtrees into `$defs`,
+  // ajv's schemaPath is relative to the folded subschema, not to the tool root. The nodes are
+  // unambiguous where a pointer would have to guess its base.
+  const ajv = new Ajv({ allErrors: true, strict: false, discriminator: true, verbose: true });
   addFormats(ajv);
   const validators = {};
   for (const [tool, schema] of Object.entries(schemas)) {
@@ -68,7 +73,7 @@ function describe(e, ctx = {}) {
     case 'additionalProperties': {
       const used = e.params.additionalProperty;
       // A field this path spells differently: say its name here rather than only that it is unknown.
-      const node = ctx.schema ? atPointer(ctx.schema, e.schemaPath.replace(/\/additionalProperties$/, '')) : null;
+      const node = deref(ctx.schema, e.parentSchema) || (ctx.schema ? atPointer(ctx.schema, e.schemaPath.replace(/\/additionalProperties$/, '')) : null);
       const alt = otherSpelling(used, Object.keys(node?.properties || {}));
       return `${at} has an unexpected property '${used}'${alt ? ` — here that field is called '${alt}' (${used} is the other path's spelling)` : ''}`;
     }
@@ -104,14 +109,29 @@ function describe(e, ctx = {}) {
   }
 }
 
-/** Resolve a `#/a/b` schema pointer against the compiled schema. */
-function atPointer(schema, pointer) {
+/**
+ * Resolve a `#/a/b` schema pointer against the compiled schema, FOLLOWING `$ref` on the way.
+ *
+ * The tool schemas fold repeated subtrees into `#/$defs` before they are handed out (a 5 KB
+ * vocabulary offered at three sites, the whole stage union offered as both `stage` and `stages`),
+ * so ajv's schemaPath now walks through refs. A reader that stopped at the first `{ $ref }` would
+ * silently lose what the refusal is built from — the branch titles of a union, the sibling field
+ * names behind "here that field is called 'q'" — so it jumps instead.
+ */
+function atPointer(schema, pointer, depth = 0) {
+  const deref = (node) => (node && typeof node === 'object' && node.$ref && depth < 20 ? atPointer(schema, node.$ref, depth + 1) : node);
   let node = schema;
   for (const seg of String(pointer).replace(/^#\/?/, '').split('/').filter(Boolean)) {
-    node = node?.[seg];
+    node = deref(node);
+    node = node?.[seg.replace(/~1/g, '/').replace(/~0/g, '~')];
     if (node === undefined) return undefined;
   }
-  return node;
+  return deref(node);
+}
+
+/** A node as written, or what it points at when the fold replaced it with a `$ref`. */
+function deref(root, node) {
+  return node && typeof node === 'object' && node.$ref ? atPointer(root, node.$ref) : node;
 }
 
 /** What a branch of a union is CALLED, for "expected one of: …". */
@@ -151,7 +171,8 @@ function narrowUnions(schema, raw) {
     const weight = (e) => ({ required: 10, type: 6, additionalProperties: 6 }[e.keyword] ?? 1);
     const score = (es) => es.reduce((n, e) => n + weight(e), 0);
     const best = [...byBranch.entries()].sort((a, b) => score(a[1]) - score(b[1]))[0];
-    const branches = atPointer(schema, u.schemaPath) || [];
+    // The branches as ajv saw them (verbose), each resolved if it is itself a folded `$ref`.
+    const branches = (Array.isArray(u.schema) ? u.schema : atPointer(schema, u.schemaPath) || []).map((b) => deref(schema, b));
     const names = [...new Set(branches.map(branchTitle).filter(Boolean))];
     const label = { ...u, keyword: 'oneOfNamed', params: { names } };
     kept = [...kept.filter((e) => !e.schemaPath.startsWith(base) && e !== u), label, ...best[1]];

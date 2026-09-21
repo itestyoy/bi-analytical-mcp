@@ -29,6 +29,7 @@ import { Engine } from '../../src/engine.js';
 import { frameProfile, pythonRunHints } from '../../src/python-model.js';
 import { pythonAuthoringGuide, mlClassesText } from '../../src/python-guide.js';
 import { buildGuide } from '../../src/guide.js';
+import { stageBranch } from '../helpers/stage-schema.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -39,8 +40,7 @@ const engine = () => {
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', method: 'bigframes', config: {}, packages: '' };
   return new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'layer-')) }) });
 };
-const stageDescription = (e) => e.schemas.build_native_model.properties.stage.oneOf
-  .find((b) => b.properties?.stage?.enum?.[0] === 'python').description;
+const stageDescription = (e) => stageBranch(e.schemas.build_native_model, 'python').description;
 
 const occurrences = (text, probe) => text.split(probe).length - 1;
 
@@ -60,12 +60,13 @@ test('the stage description states the SQL-first rule ONCE, through the guide it
 test('the estimator list in the frame profile comes from the extracted sheet', () => {
   const bq = frameProfile({ runtime: 'bigquery', method: 'bigframes' });
   const classes = mlClassesText();
-  assert.ok(classes && bq.ml.includes(classes), 'the profile renders the generated list rather than keeping its own');
+  assert.equal(bq.mlClasses, classes, 'the profile renders the generated list rather than keeping its own');
+  assert.ok(!bq.ml.includes(classes), 'and the one-liner that goes into the stage description does not carry it');
   // every module the sheet knows is named, and nothing is named that the sheet does not know
   for (const mod of Object.keys(FACTS.ml)) assert.match(classes, new RegExp(`\\b${mod}\\.`), `${mod} is missing from the generated list`);
   for (const cls of Object.keys(FACTS.ml.cluster)) assert.match(classes, new RegExp(cls));
-  // …and the profile line does NOT restate parameters: those live in the reference recipe
-  assert.ok(!/n_clusters/.test(bq.ml), 'parameters belong to bf_ml_signatures, not to this one-liner');
+  // …and neither field restates parameters: those live in the reference recipe
+  assert.ok(!/n_clusters/.test(`${bq.ml}${bq.mlClasses}`), 'parameters belong to bf_ml_signatures, not to a profile line');
 });
 
 test('a failure hint names the same methods and claims as the fact sheet, and points at a recipe', () => {

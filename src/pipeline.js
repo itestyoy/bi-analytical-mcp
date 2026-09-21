@@ -734,7 +734,13 @@ export function registerStage(name, def) { STAGES[name] = def; }
  * the document it is embedded in, so the definitions cannot travel inside the stage fragment.
  */
 export function stageDefs(catalog) {
-  return Object.assign({}, ...availableStages(catalog).map((s) => (typeof s.defs === 'function' ? s.defs() : {})));
+  return {
+    ...Object.assign({}, ...availableStages(catalog).map((s) => (typeof s.defs === 'function' ? s.defs() : {}))),
+    // THE STAGE UNION ITSELF, once. A tool that takes both one stage and a list of them embedded
+    // the whole union TWICE — with this catalog that was ~49 KB of schema repeated verbatim, half
+    // of everything the client is handed before it reads a single word. Both sites now point here.
+    pipeline_stage: pipelineStageSchema(catalog),
+  };
 }
 
 /** A stage may declare `available(catalog)`: false hides it from the schemas and refuses it in a build. */

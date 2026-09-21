@@ -185,3 +185,48 @@ for (const [label, path] of [['fixture', CATALOG], ['production', fileURLToPath(
     }
   });
 }
+
+// THE FOLD. Repeated subtrees are lifted into `#/$defs` before the schemas leave the process (see
+// foldRepeats / foldVocabularies in src/schema.js): with the production catalog the stage union
+// alone was ~49 KB of schema handed over twice in one tool, and one source's payload vocabulary
+// ~5 KB handed over three times in each of two tools. Nothing a reader sees is lost — the folded
+// node keeps its own description — but a ref that does not resolve IS lost, so that is checked
+// here, together with the rule that a definition exists only because something repeated.
+test('every $ref resolves inside its own tool, and every definition earns its place', () => {
+  const refsOf = (node, out = []) => {
+    if (Array.isArray(node)) node.forEach((n) => refsOf(n, out));
+    else if (node && typeof node === 'object') {
+      if (typeof node.$ref === 'string') out.push(node.$ref);
+      for (const v of Object.values(node)) refsOf(v, out);
+    }
+    return out;
+  };
+  const at = (doc, ref) => String(ref).replace(/^#\//, '').split('/').reduce((n, k) => n?.[decodeURIComponent(k)], doc);
+
+  for (const [name, schema] of Object.entries(schemas)) {
+    const refs = refsOf(schema);
+    for (const ref of refs) {
+      assert.match(ref, /^#\//, `${name}: only local refs (${ref})`);
+      assert.ok(at(schema, ref) !== undefined, `${name}: ${ref} points at nothing — the client would be handed a hole`);
+    }
+    for (const key of Object.keys(schema.$defs || {})) {
+      const used = refs.filter((r) => r === `#/$defs/${key}`).length;
+      assert.ok(used >= 1, `${name}: $defs.${key} is defined and never referenced`);
+    }
+  }
+  // …and the fold actually happened where it was worth it: the stage union is ONE definition that
+  // both the single-stage and the list-of-stages field point at.
+  const bnm = schemas.build_native_model;
+  assert.ok(bnm.$defs?.pipeline_stage, 'the stage union is a definition');
+  assert.equal(bnm.properties.stage.$ref, '#/$defs/pipeline_stage');
+  assert.equal(bnm.properties.stages.items.$ref, '#/$defs/pipeline_stage');
+});
+
+// The point of the fold is SIZE — what every request carries before a word of the conversation.
+// The ceiling is deliberately loose (it grows with the catalog), but it is a ceiling: a tool that
+// doubles because a description grew unchecked should fail here, not in production.
+test('the tool surface stays within its size budget on the production catalog', () => {
+  const tools = buildSchemas(loadCatalog(fileURLToPath(new URL('../../config/catalog.yml', import.meta.url)), {}));
+  const total = Object.values(tools).reduce((n, s) => n + JSON.stringify(s).length, 0);
+  assert.ok(total < 220000, `the tool schemas are ${total} characters — they were ~150k after the fold; something is being dumped into every request again`);
+});

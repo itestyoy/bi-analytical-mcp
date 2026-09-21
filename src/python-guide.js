@@ -102,7 +102,11 @@ const BIGFRAMES = {
   // The one paragraph that STAYS in the stage description when the worked recipes carry the forms:
   // what is different about this frame and what it costs to ignore. Everything specific — the form
   // per move, the reasoning per rule — is behind the recipe index and the full guide.
-  headline: 'FIRST, WHAT BELONGS HERE: only what SQL cannot say — a statistical test, clustering, scoring, a forecast, a model. Everything else is a SQL stage BEFORE this one, and that INCLUDES preparing the table this analysis reads (scope to the events and the time window, extract the payload columns, join the attributes, aggregate to the analysis grain): this stage should receive a PREPARED table at that grain, never the raw source — the SQL runs where the data lives and is exact, while this model is a separate dbt model on the warehouse\'s python runtime with a cold start and the frame limits below. What makes it different, and what ignoring it costs: the frame dbt.ref() hands you has NO INDEX and NO ROW ORDER (dbt runs with ordering_mode="partial"), so pandas code that reads correctly either raises (NullIndexError, OrderRequiredError) or silently answers a different question — a lookup with map, a groupby result assigned back, a head() without a sort, a Series taken from another frame; execution is DEFERRED and re-runs per dependent result; a per-row Python function is not something BigQuery can execute; and to_pandas() leaves BigQuery for a single node. None of it is refused before the run: nothing here can know which line you meant, so the cost of guessing is a failed build or a wrong number.',
+  // THE COMPACT FORM, and deliberately so: this string goes into the stage DESCRIPTION, which every
+  // caller is handed on every request whether or not it will write python. It names what belongs
+  // here and what this frame is, and sends the reader to the guide for the reasoning and to the
+  // recipes for the code. The long version of the same rule is rules[0] below.
+  headline: 'WHAT BELONGS HERE: only what SQL cannot say — a statistical test, clustering, scoring, a forecast, a model. Everything else, INCLUDING preparing the table this analysis reads (scope, payload columns, joins, the aggregation to the analysis grain), is a SQL stage BEFORE this one: this stage receives a PREPARED table at that grain, never the raw source.',
   runs_where: 'dbt runs this model in a Colab Enterprise notebook: the BigFrames library turns your DataFrame operations into BigQuery SQL and BigQuery executes it. Nothing runs row by row in Python, and nothing is transferred out of BigQuery unless you ask for it with to_pandas().',
   rules: [
     {
@@ -284,7 +288,9 @@ const BIGFRAMES = {
       why: 'Only after aggregating: to_pandas() downloads everything it is given into the notebook runtime.',
     },
   ],
-  stage_form: 'IN THIS SERVER you do not write the model: you declare `imports` ({ package: "bigframes", submodule: "pandas", as: "bpd" } / { package: "bigframes", submodule: "ml.cluster", names: ["KMeans"] } / { package: "bigframes", submodule: "bigquery", as: "bbq" } / { package: "numpy", as: "np" }), your own `functions` over `df` — the frame dbt.ref() returns, untouched — and the ordered `steps`; the server writes def model(dbt, session), dbt.ref(), dbt.config(submission_method="bigframes", materialized=…, packages=[…]) and the return. What the LAST step returns is this model\'s table, so declare output.columns for the SQL stages after it.',
+  // (The mechanics of declaring a stage in THIS server — imports / functions / steps, what the
+  // server writes, output.columns — are the stage description's job, layer 6 of the list at the
+  // top of this file, and the guide's `dbt` bullets below say what the generated model carries.)
   dbt: [
     'The server writes the dbt model around your functions: def model(dbt, session), dbt.ref() of the previous model (or the source when your stage is first), dbt.config(...) and the return. You declare imports, functions and the ordered steps — nothing else.',
     'dbt.config carries submission_method="bigframes" (which is what makes dbt run this on BigFrames rather than its default submission), materialized="table", and the packages your imports need.',
@@ -347,12 +353,9 @@ export function pythonRulesText(key, recipes = []) {
   // the index itself with an insistence on reading it, and how to declare the stage in this server.
   if (index.length) {
     return `RULES FOR ${key.toUpperCase()} — ${book.runs_where} ${book.headline || ''} `
-      + `SO: DO NOT WRITE A FUNCTION FROM MEMORY — STUDY THE RECIPES FIRST. `
-      + `This deployment ships one worked, COMPILING payload PER MOVE (not per business task), each showing the form that works next to the form that raises and the technique to generalise it: `
-      + `${index.map((r) => `${r.id}${r.title ? `: ${r.title}` : ''}`).join('; ')}. `
-      + `Fetch each with semantic_index({ recipe: "<id>" }) and adapt it. A real question needs SEVERAL of them (a feature table, a threshold, a prediction, a cached intermediate), so read every move yours involves before writing — one glance at the nearest id is not reading it. They are also listed together under \`tasks\` in semantic_index({ guide: true }). `
-      + `EVERY RULE with the reasoning behind it, and a do / avoid / why for each operation: semantic_index({ guide: "python" }) — read it before your first python stage. `
-      + `${book.stage_form || ''}`;
+      + `THIS FRAME IS NOT PANDAS: no index, no row order and deferred execution, so pandas code that reads correctly either raises (NullIndexError, OrderRequiredError) or answers a different question — and the modelling library wears scikit-learn's API over BigQuery ML, with BQML's parameters. `
+      + `SO DO NOT WRITE A FUNCTION FROM MEMORY. semantic_index({ guide: "python" }) carries every rule with the reasoning and a do / avoid per operation, and it indexes ${index.length} worked, COMPILING recipes — one per move (a lookup, a per-group value, a top-N, a threshold, a prediction, an estimator's parameters, a cached intermediate), each showing the form that works next to the form that raises. Fetch the ones your question needs with semantic_index({ recipe: "<id>" }); their ids are in that guide and in the overview. A real question needs several. `
+      + 'The mechanics of declaring the stage here — imports, functions, steps, output.columns — are on the stage description above.';
   }
 
   // WITHOUT recipes (a deployment that ships none) there is nothing to point at, so the description
@@ -362,7 +365,6 @@ export function pythonRulesText(key, recipes = []) {
   return `RULES FOR ${key.toUpperCase()} — ${book.runs_where} `
     + `${rules.map((r, i) => `(${i + 1}) ${r}`).join('; ')}. `
     + `THE RIGHT FORM PER OPERATION — ${lines.join('; ')}. `
-    + `${book.stage_form || ''} `
     + `The same guide with the reasoning behind each rule and the full examples: semantic_index({ guide: "python" }).`;
 }
 

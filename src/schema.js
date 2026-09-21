@@ -282,9 +282,17 @@ export function buildSchemas(catalog) {
   const create = {
     type: 'object',
     additionalProperties: false,
-    required: ['name', 'metrics'],
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express, read back with get_query_result), use build_native_model instead.',
+    // No root `required`: the two modes require different things, and the allOf below says which
+    // (create → name + metrics, update → context_id + semantic_model), so a caller is never told
+    // to supply a field the mode it asked for does not take.
+
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). TWO MODES: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express, read back with get_query_result), use build_native_model instead.',
+    allOf: [
+      { if: { properties: { action: { const: 'update' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'] } },
+      { if: { not: { properties: { action: { const: 'update' } }, required: ['action'] } }, then: { required: ['name', 'metrics'] } },
+    ],
     properties: {
+      action: { enum: ['create', 'update'], description: 'create (default) = declare a task: name + semantic_models + metrics. update = change the task already in this context: the add_*/remove_* fields below, on one `semantic_model`.' },
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
       description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ action: "describe" | "list" }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
@@ -293,6 +301,17 @@ export function buildSchemas(catalog) {
       metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
       include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false). The YAML is always written to the context files regardless; omit it to keep responses small.' },
+      // action: 'update' — the incremental path. Same vocabulary as above (that is why the two are
+      // one tool: two schemas meant two copies of every enum in every listing).
+      semantic_model: { type: 'string', enum: modelKeys, description: 'action:"update" — which model\'s semantic model to change.' },
+      add_dimensions: { type: 'array', items: genericDimensionItem(catalog), description: 'action:"update" — dimensions to add.' },
+      remove_dimensions: { type: 'array', items: { type: 'string' }, description: 'action:"update" — dimensions to remove, by the ATTRIBUTE they declare (the name `groupable` shows).' },
+      add_measures: { type: 'array', items: genericMeasureItem(catalog), description: 'action:"update" — measures to add.' },
+      remove_measures: { type: 'array', items: { type: 'string' }, description: 'action:"update" — measures to remove; refused while a metric depends on one, unless cascade.' },
+      add_metrics: { type: 'array', items: metricSchema(), description: 'action:"update" — metrics to add.' },
+      remove_metrics: { type: 'array', items: { type: 'string' }, description: 'action:"update" — metrics to remove.' },
+      task: { type: 'string', description: 'action:"update" — the task the additions belong to (defaults to the context\'s first task).' },
+      cascade: { type: 'boolean', description: 'action:"update" — also remove the metrics that depend on a removed measure.' },
     },
   };
 
@@ -314,7 +333,7 @@ export function buildSchemas(catalog) {
         properties: {
           source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads. Always named: each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
           time_range: { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages — avoids hand-written device_time literals and keeps whole-session windows intact.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
-          stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Ordered pipe stages; each transforms the previous output.' },
+          stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Ordered pipe stages; each transforms the previous output.' },
         },
       },
     },
@@ -352,8 +371,8 @@ export function buildSchemas(catalog) {
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
       source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads (start only, and REQUIRED there). Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
       time_range: trProp,
-      stage: { ...pipelineStageSchema(catalog), description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
-      stages: { type: 'array', minItems: 1, items: pipelineStageSchema(catalog), description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
+      stage: { $ref: '#/$defs/pipeline_stage', description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
+      stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
       index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index) for edit_step / insert_step / delete_step. insert_step places the stage BEFORE this position (count+1 appends).' },
       after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — for truncate (drop the rest) and fork (copy that prefix into the new draft). 0 = none; omit on fork to copy all steps.' },
       include_columns: { type: 'boolean', description: 'start/add_step/edit ops: also return the FULL available_columns list. Off by default — the per-step response returns only the diff (columns_added + columns_removed_count, with the removed names only when short) to avoid re-dumping the whole schema each step; use preview for the full list too.' },
@@ -437,7 +456,7 @@ export function buildSchemas(catalog) {
     },
   };
 
-  return {
+  const tools = {
     create_semantic_model: create,
     // Stage schemas may reference root-level definitions (the recursive python body): hoist them.
     register_native_model: withStageDefs(registerModel, catalog),
@@ -498,7 +517,125 @@ export function buildSchemas(catalog) {
     srm_check: srmCheckSchema(),
     sample_size: sampleSizeSchema(),
   };
+  // Every tool schema is written with its vocabulary SPELLED OUT where it is accepted — that is
+  // what makes a refusal able to say which mode the caller was closest to. Repeating a 5 KB list
+  // of payload properties three times in one tool is the transport paying for that authoring
+  // choice, so the repetition is folded out HERE, after the schemas are written and before they
+  // leave: identical subtrees become one `$defs` entry the sites point at. Authoring is unchanged,
+  // validation is unchanged (ajv resolves the ref), and the client is handed each list once.
+  return Object.fromEntries(Object.entries(tools).map(([name, schema]) => [name, foldRepeats(foldVocabularies(schema))]));
 }
+
+/**
+ * Fold IDENTICAL subtrees of one schema into `#/$defs` and point every occurrence at the one copy.
+ * Purely a transport saving: the folded node carries its own description, so nothing a reader sees
+ * is lost, and ajv validates through the ref exactly as it did inline.
+ *
+ * Only SCHEMA POSITIONS are folded — the value of a `properties` entry, a branch of a union, an
+ * `items`. A raw array (an `enum`'s values, a `required` list) is never replaced: `$ref` is a
+ * schema, and `enum: { $ref }` is not a schema at all. The saving on a vocabulary comes from
+ * folding the little object that CARRIES the enum, which is what repeats anyway.
+ *
+ * Largest repetition first, so a big list is extracted before the structures that contain it.
+ */
+const MIN_FOLD = 300;
+const SCHEMA_MAPS = ['properties', 'patternProperties', '$defs', 'definitions'];
+const SCHEMA_LISTS = ['oneOf', 'anyOf', 'allOf', 'prefixItems'];
+const SCHEMA_KEYS = ['items', 'additionalProperties', 'not', 'if', 'then', 'else', 'contains', 'propertyNames'];
+
+/**
+ * Fold a repeated VOCABULARY — the same `enum` list offered at several sites under different
+ * descriptions (a source's payload properties are the measure's `field`, the dimension's `expr`
+ * and the filter's `property`). The values move to one `$defs` entry and each site keeps its own
+ * sentence: `{ $ref, description }`. On the production catalog one such list is ~5 KB and appears
+ * three times per tool, in two tools.
+ *
+ * Only a node that is NOTHING BUT a typed vocabulary is folded (type/enum/description/title), so
+ * no other constraint can be lost on the way into the ref.
+ */
+const VOCAB_KEYS = new Set(['type', 'enum', 'description', 'title']);
+function foldVocabularies(schema, { minSize = MIN_FOLD } = {}) {
+  const counts = new Map();
+  const keyOf = (n) => (n.enum && Object.keys(n).every((k) => VOCAB_KEYS.has(k)) ? JSON.stringify([n.type || null, n.enum]) : null);
+  eachSchema(schema, (n) => { const k = keyOf(n); if (k && k.length >= minSize) counts.set(k, (counts.get(k) || 0) + 1); });
+  const shared = [...counts.entries()].filter(([, n]) => n > 1).map(([k]) => k);
+  if (!shared.length) return schema;
+  const $defs = { ...(schema.$defs || {}) };
+  const names = new Map();
+  for (const k of shared) {
+    const [type, values] = JSON.parse(k);
+    const name = defName({ enum: values }, Object.keys($defs));
+    $defs[name] = { ...(type ? { type } : {}), enum: values };
+    names.set(k, name);
+  }
+  const fold = (n) => {
+    const k = keyOf(n);
+    const name = k && names.get(k);
+    return name ? { $ref: `#/$defs/${name}`, ...(n.description ? { description: n.description } : {}) } : n;
+  };
+  return { ...mapSchemas(schema, (n) => (n === schema ? n : fold(n))), $defs: Object.fromEntries(Object.entries($defs).map(([k, v]) => [k, v.enum ? v : mapSchemas(v, fold)])) };
+}
+
+export function foldRepeats(schema, { minSize = MIN_FOLD, maxDefs = 40 } = {}) {
+  let out = schema;
+  for (let i = 0; i < maxDefs; i += 1) {
+    const counts = new Map();
+    eachSchema(out, (n) => { const j = JSON.stringify(n); if (j.length >= minSize) counts.set(j, (counts.get(j) || 0) + 1); });
+    let best = null;
+    for (const [json, n] of counts) {
+      if (n < 2) continue;
+      const waste = (n - 1) * json.length;
+      if (!best || waste > best.waste) best = { json, waste };
+    }
+    if (!best) break;
+    const def = JSON.parse(best.json);
+    const key = defName(def, Object.keys(out.$defs || {}));
+    const ref = { $ref: `#/$defs/${key}` };
+    const fold = (n) => (JSON.stringify(n) === best.json ? ref : n);
+    const $defs = Object.fromEntries(Object.entries(out.$defs || {}).map(([k, v]) => [k, mapSchemas(v, fold)]));
+    out = { ...mapSchemas(out, (n) => (n === out ? n : fold(n))), $defs: { ...$defs, [key]: def } };
+  }
+  return out;
+}
+
+/** Visit every schema-position node of a document, the root included. */
+function eachSchema(node, visit) {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return;
+  visit(node);
+  for (const k of SCHEMA_MAPS) if (node[k] && typeof node[k] === 'object') for (const v of Object.values(node[k])) eachSchema(v, visit);
+  for (const k of SCHEMA_LISTS) if (Array.isArray(node[k])) for (const v of node[k]) eachSchema(v, visit);
+  for (const k of SCHEMA_KEYS) if (node[k] && typeof node[k] === 'object' && !Array.isArray(node[k])) eachSchema(node[k], visit);
+}
+
+/** The same traversal, rebuilding the document: `fn` may return a replacement for a node. */
+function mapSchemas(node, fn) {
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return node;
+  const replaced = fn(node);
+  if (replaced !== node) return replaced;
+  const out = { ...node };
+  for (const k of SCHEMA_MAPS) if (out[k] && typeof out[k] === 'object') out[k] = Object.fromEntries(Object.entries(out[k]).map(([kk, v]) => [kk, mapSchemas(v, fn)]));
+  for (const k of SCHEMA_LISTS) if (Array.isArray(out[k])) out[k] = out[k].map((v) => mapSchemas(v, fn));
+  for (const k of SCHEMA_KEYS) if (out[k] && typeof out[k] === 'object' && !Array.isArray(out[k])) out[k] = mapSchemas(out[k], fn);
+  return out;
+}
+
+/**
+ * A readable name for a folded definition — what it IS, not `shared_3`: the vocabulary it pins,
+ * the stage it describes, or its first field.
+ */
+function defName(node, taken) {
+  const base = node.enum?.length ? `enum_${node.enum[0]}`
+    : node.properties?.stage?.enum?.[0] ? `stage_${node.properties.stage.enum[0]}`
+      : node.items?.$ref ? `list_${String(node.items.$ref).split('/').pop()}`
+        : node.properties ? `obj_${Object.keys(node.properties)[0]}`
+          : node.oneOf || node.anyOf ? 'union'
+            : 'shared';
+  const key = String(base).replace(/[^A-Za-z0-9_]/g, '_').slice(0, 48);
+  let name = key; let n = 2;
+  while (taken.includes(name)) { name = `${key}_${n}`; n += 1; }
+  return name;
+}
+
 
 /**
  * THE exploration tool, as ONE BRANCH PER VIEW. Each view lists exactly the fields it takes and the

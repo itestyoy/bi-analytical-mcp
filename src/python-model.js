@@ -54,7 +54,14 @@ export function frameProfile(rt, config = {}) {
       // The CLASSES come from the extracted fact sheet (src/python-guide.js → mlClassesText),
       // never from a list written here: a hand-kept copy is how a signature drifts from the library.
       // The PARAMETERS are not restated in this line at all — they are the reference recipe's.
-      ml: `bigframes.ml — the scikit-learn API run as BigQuery ML (model.fit trains in BigQuery, model.predict returns a BigFrames frame)${mlClassesText() ? `: ${mlClassesText()}` : ''}`,
+      ml: 'bigframes.ml — the scikit-learn API run as BigQuery ML (model.fit trains IN BigQuery, model.predict returns a BigFrames frame), with BQML\'s own parameters',
+      // The CLASS LIST is a separate field because it belongs to a different reader: the long guide
+      // prints it, and the stage DESCRIPTION only names the library and points at the reference
+      // recipe (every constructor, extracted from the installed version). Where this deployment
+      // ships no recipes there is nothing to point at, so the description inlines the list instead
+      // — the same fallback the rules use.
+      mlClasses: mlClassesText(),
+      mlReference: (rt?.recipes || []).some((r) => (r?.id || r) === 'bf_ml_signatures') ? 'bf_ml_signatures' : null,
       guide: pythonRulesText('bigframes', rt?.recipes || []),
       packagesNote: 'On BigFrames prefer bigframes (bigframes.ml) over sklearn / scipy / statsmodels: those run only after df.to_pandas(), single-node.',
       // Two things this frame does NOT have — no row order (dbt's wrapper runs with
@@ -415,7 +422,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   // included), interpolated below. Restating any of it here is how the two start to disagree.
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
-    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against that API — the work then stays in the warehouse engine; converting to pandas is a deliberate, single-node choice you make inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}.` : ''} ${profile.guide} The last step's return value IS this model's table: declare output.columns so the SQL stages that follow know its columns. Declare imports (allowlisted), your own functions (def f(df, …) → return frame) and the ordered steps calling them; dbt.ref / dbt.config / return are written by the server. Bodies pass a static allowlist first (own names + declared imports + public attributes); what the code may reach ON the warehouse is decided by that runtime and dbt's own credentials. SIZE: up to 30 functions, 400 lines per function body, 500 characters per line, 50 steps and 20 imports — a real analysis fits, so if a stage is refused it is not for being big. The pipeline's last model is the result — read it with get_query_result as usual.`,
+    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against THAT API; converting to pandas is a deliberate, single-node choice made inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}${profile.mlReference ? ` — every class and its parameters: semantic_index({ recipe: "${profile.mlReference}" })` : (profile.mlClasses ? `: ${profile.mlClasses}` : '')}.` : ''} ${profile.guide} You declare imports (allowlisted), your own functions over the frame and the ordered steps; the server writes dbt.ref / dbt.config / return. The LAST step's return value is this model's table — declare output.columns for the SQL stages after it. Bodies pass a static allowlist first (own names + declared imports + public attributes). SIZE: 30 functions, 400 body lines each, 500 chars per line, 50 steps, 20 imports — a real analysis fits, so a refusal is never about size. Read the result with get_query_result as usual.`,
     properties: {
       stage: { enum: ['python'] },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },

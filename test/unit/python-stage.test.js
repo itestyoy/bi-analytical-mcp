@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { stageUnion, stageBranch, stageNames } from '../helpers/stage-schema.js';
 import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate, pythonRunHints } from '../../src/python-model.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
@@ -119,7 +120,7 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
 
 test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
   const e = engine();
-  const items = e.schemas.register_native_model.properties.pipeline.properties.stages.items.oneOf.find((s) => s.properties.stage.enum?.[0] === 'python');
+  const items = stageUnion(e.schemas.register_native_model, 'stages').find((s) => s.properties.stage.enum?.[0] === 'python');
   assert.deepEqual(items.properties.imports.items.properties.package.enum, [...importAllowlist().keys()], 'the enum IS the allowlist');
   assert.ok(items.properties.imports.items.properties.package.enum.includes('sklearn'));
   await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels/);
@@ -192,7 +193,7 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
   const e = new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } });
-  const pkgEnum = () => e.schemas.register_native_model.properties.pipeline.properties.stages.items.oneOf
+  const pkgEnum = () => stageUnion(e.schemas.register_native_model, 'stages')
     .find((x) => x.properties?.stage?.enum?.[0] === 'python').properties.imports.items.properties.package.enum;
   assert.ok(pkgEnum().includes('pyspark'), `the schema offers the pinned runtime's packages: ${pkgEnum().join(', ')}`);
   assert.ok(!pkgEnum().includes('bigframes'), 'and not the default submission\'s');
@@ -250,7 +251,7 @@ test('python stage: the body schema is a recursive $ref to $defs.py_block hoiste
     const root = e.schemas[tool];
     assert.ok(root.$defs?.py_block, `${tool} carries $defs.py_block at its root`);
     assert.deepEqual(root.$defs.py_block.items.anyOf[1], { $ref: '#/$defs/py_block' }, 'the block refers to itself');
-    const stages = tool === 'build_native_model' ? root.properties.stage.oneOf : root.properties.pipeline.properties.stages.items.oneOf;
+    const stages = stageUnion(root, tool === 'build_native_model' ? 'stage' : 'stages');
     const py = stages.find((st) => st.properties.stage.enum?.[0] === 'python');
     assert.equal(py.properties.functions.items.properties.body.$ref, '#/$defs/py_block');
   }
@@ -294,7 +295,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
     const cPg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
     assert.equal(cPg.pythonRuntime.available, false);
     const ePg = new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    const stagesPg = ePg.schemas.build_native_model.properties.stage.oneOf.map((st) => st.properties.stage.enum?.[0]);
+    const stagesPg = stageNames(ePg.schemas.build_native_model);
     assert.ok(!stagesPg.includes('python'), `no python stage on postgres: ${stagesPg.join(', ')}`);
     assert.ok(!ePg.schemas.build_native_model.$defs?.py_block, 'and no py_block definition either');
     // …and a declaration naming it is refused with the reason, not with a warehouse error later
@@ -306,7 +307,7 @@ test('python stage: offered only where the dbt profile can run Python models; re
     // with the duckdb profile it is there, and the overview names the runtime
     const cDuck = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     const eDuck = new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    assert.ok(eDuck.schemas.build_native_model.properties.stage.oneOf.some((st) => st.properties.stage.enum?.[0] === 'python'));
+    assert.ok(stageNames(eDuck.schemas.build_native_model).includes('python'));
     assert.ok(eDuck.schemas.build_native_model.$defs.py_block);
     assert.deepEqual((await eDuck.semantic_index({})).python_models.runtime, 'duckdb');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
@@ -344,10 +345,10 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
   try {
     const c = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     const e = new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    const py = e.schemas.build_native_model.properties.stage.oneOf.find((st) => st.properties.stage.enum?.[0] === 'python');
+    const py = stageBranch(e.schemas.build_native_model, 'python');
     assert.equal(py.properties.frame, undefined, 'no frame option');
     assert.match(py.description, /DuckDBPyRelation/);
-    assert.match(py.description, /converting to pandas is a deliberate, single-node choice you make inside a function, never done for you/);
+    assert.match(py.description, /converting to pandas is a deliberate, single-node choice/);
     assert.ok(py.properties.imports.items.properties.package.enum.includes('duckdb'));
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
@@ -359,7 +360,10 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   // the classes are rendered from the extracted fact sheet (module.Class), never kept as a list
   // in the profile — see test/unit/python-surface-layering.test.js
   assert.match(bq.ml, /bigframes\.ml/);
-  assert.match(bq.ml, /cluster\.KMeans/);
+  // the CLASSES are their own field: the long guide prints them, the stage description only names
+  // the library and points at the generated reference (see python-surface-layering.test.js)
+  assert.match(bq.mlClasses, /cluster\.KMeans/);
+  assert.ok(!/cluster\.KMeans/.test(bq.ml), 'the one-liner does not carry the list');
   assert.match(bq.guide, /NEVER sklearn/);
   assert.match(bq.guide, /stay in COLUMN EXPRESSIONS/);
   assert.match(bq.guide, /apply\/map/);
@@ -380,7 +384,7 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   try {
     const c = loadCatalog(CATALOG, { profilesDir: dir, dialect: 'bigquery' });
     const e = new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    const py = e.schemas.build_native_model.properties.stage.oneOf.find((st) => st.properties.stage.enum?.[0] === 'python');
+    const py = stageBranch(e.schemas.build_native_model, 'python');
     assert.match(py.description, /MODELLING: bigframes\.ml/);
     assert.match(py.description, /RULES FOR BIGFRAMES/);
     assert.match(py.properties.functions.items.properties.body.description, /Modelling: bigframes\.ml/);
@@ -534,7 +538,7 @@ test('the stage description itself carries the runtime rules and the right form 
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pydesc-')) }), pythonBin: PY });
-  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.enum?.[0] === 'python');
+  const py = stageBranch(e.schemas.build_native_model, 'python');
 
   // every rule of the guide is represented in the description…
   const guide = await e.semantic_index({ guide: 'python' });
@@ -542,8 +546,11 @@ test('the stage description itself carries the runtime rules and the right form 
   // …and so is the right form for every task the guide has an example for
   for (const ex of guide.examples) assert.ok(py.description.includes(ex.line), `form missing from the description: ${ex.line.slice(0, 40)}…`);
   // the declaration form the caller actually writes is there too
-  assert.match(py.description, /you declare `imports`/);
-  assert.match(py.description, /submission_method="bigframes"/);
+  assert.match(py.description, /You declare imports \(allowlisted\), your own functions/);
+  // what dbt.config carries is not something the caller writes, so it lives in the guide's `dbt`
+  // bullets rather than in the string every request is handed
+  const dbtNotes = (await e.semantic_index({ guide: 'python' })).dbt.join(' ');
+  assert.match(dbtNotes, /submission_method="bigframes"/);
   // the BODY description does not repeat it — one copy per tool surface
   const body = py.properties.functions.items.properties.body.description;
   assert.ok(!body.includes('THE RIGHT FORM PER TASK'), 'the rules live in one place');
@@ -571,14 +578,23 @@ test('the stage description and the guide send the caller to this deployment\'s 
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec-')) }), recipes, pythonBin: PY });
 
-  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.enum?.[0] === 'python');
-  assert.match(py.description, /STUDY THE RECIPES FIRST/, 'the description INSISTS on reading them');
+  const py = stageBranch(e.schemas.build_native_model, 'python');
   const entries = recipes.entriesRequiring('python_models');
-  for (const { id, title } of entries) {
-    assert.ok(py.description.includes(id), `recipe ${id} is not named in the stage description`);
-    assert.ok(py.description.includes(title), `recipe ${id} is named without its move (${title}) — the caller cannot tell which one it needs`);
-  }
+  // The description INSISTS on reading them and says how many there are and how to fetch one — but
+  // it no longer LISTS them: every caller is handed this string on every request, and the ids with
+  // the move each covers belong one call away, in the guide. (Progressive disclosure: the schema
+  // stays small, the detail arrives when it is asked for.)
+  assert.match(py.description, /DO NOT WRITE A FUNCTION FROM MEMORY/, 'the description INSISTS on reading them');
+  assert.ok(py.description.includes(`${entries.length} worked`), 'it says how many there are');
   assert.match(py.description, /semantic_index\(\{ recipe: "<id>" \}\)/, 'and the description says HOW to fetch one');
+  // The one id it may name is the REFERENCE (the library's own signatures), because that lookup is
+  // what a caller needs mid-write; the worked recipes are fetched from the guide's index.
+  const named = entries.map((r) => r.id).filter((id) => py.description.includes(id));
+  assert.deepEqual(named, named.filter((id) => id === 'bf_ml_signatures'), `the worked recipe ids are dumped into every request: ${named.join(', ')}`);
+  // …and the guide, one call away, names every id with the move it covers
+  const pyGuide = await e.semantic_index({ guide: 'python' });
+  assert.deepEqual(pyGuide.recipes.ids, entries.map((r) => r.id));
+  for (const { id, title } of entries) assert.ok(pyGuide.recipes.moves.includes(`${id}: ${title}`), `${id} is listed without its move`);
   // …and it is an INDEX, not a manual: the per-operation code forms live in the recipes and the
   // full guide now, so the description no longer repeats them (that is what makes it shorter).
   assert.ok(!py.description.includes('THE RIGHT FORM PER OPERATION'), 'the forms are in the recipes, not inlined here');
@@ -613,7 +629,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
   const bare = loadCatalog(CATALOG, {});
   bare.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e2 = new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec2-')) }), pythonBin: PY });
-  const py2 = e2.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.enum?.[0] === 'python');
+  const py2 = stageBranch(e2.schemas.build_native_model, 'python');
   assert.ok(!py2.description.includes('STUDY THE RECIPES FIRST'));
   for (const { id } of entries) assert.ok(!py2.description.includes(id), 'no recipe of another deployment is advertised');
   // …and with nothing to point at, the description carries the forms itself instead of dropping them
@@ -736,8 +752,7 @@ test('the SQL-vs-python division of labour is in the stage description and the g
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'sqlfirst-')) }), pythonBin: PY });
-  const py = e.schemas.build_native_model.properties.stage.oneOf.find((b) => b.properties?.stage?.enum?.[0] === 'python')
-    || e.schemas.build_native_model.properties.stage.anyOf?.find((b) => b.properties?.stage?.enum?.[0] === 'python');
+  const py = stageBranch(e.schemas.build_native_model, 'python');
   assert.match(py.description, /WHAT BELONGS HERE/);
   assert.match(py.description, /the preparation of the table this analysis reads/);
   assert.match(py.description, /never the raw source/);

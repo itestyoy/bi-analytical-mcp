@@ -26,6 +26,7 @@ import { openStore } from './store.js';
 import { buildProjection } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
+import { detached, currentSignal } from './request-context.js';
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, pythonBuildGraceMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
@@ -1324,7 +1325,9 @@ export class Engine {
     this._inFlight ??= new Map();
     let p = this._inFlight.get(key);
     if (!p) {
-      p = (async () => work())().finally(() => { if (this._inFlight.get(key) === p) this._inFlight.delete(key); });
+      // detached: this read serves every caller waiting on it, so it must not die with the first
+      // one's cancellation (src/request-context.js).
+      p = detached(async () => work()).finally(() => { if (this._inFlight.get(key) === p) this._inFlight.delete(key); });
       p.catch(() => {}); // it finishes unobserved after a timeout — never an unhandled rejection
       this._inFlight.set(key, p);
     }
@@ -2961,8 +2964,15 @@ export class Engine {
     const requested = Number(input.seconds) || 0;
     const seconds = Math.min(Math.max(requested, 0), MAX_WAIT_SECONDS); // clamp to [0, MAX_WAIT_SECONDS]
     const startedAt = new Date().toISOString();
-    await new Promise((resolve) => { setTimeout(resolve, seconds * 1000); });
-    return { ok: true, waited_seconds: seconds, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
+    // a cancelled call (the client gave up, a task was cancelled) stops waiting at once
+    const signal = currentSignal();
+    let cancelled = false;
+    await new Promise((resolve) => {
+      const t = setTimeout(resolve, seconds * 1000);
+      signal?.addEventListener?.('abort', () => { cancelled = true; clearTimeout(t); resolve(); }, { once: true });
+    });
+    const waited = cancelled ? Math.round((Date.now() - Date.parse(startedAt)) / 100) / 10 : seconds;
+    return { ok: true, waited_seconds: waited, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, ...(cancelled ? { cancelled: true } : {}), started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
   }
 
   async describe_context(input) {

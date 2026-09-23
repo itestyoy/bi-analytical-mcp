@@ -11,6 +11,11 @@ typed semantic objects whose column/property/event names come from a **catalog**
 product-analytics events and crash reports — a user-attributes dimension, and optional
 dimension models such as experiment assignments).
 
+Protocol: both eras of MCP on one endpoint — the legacy session protocol (2025-11-25 and earlier)
+and the stateless 2026-07-28 revision — plus the **Tasks**, **Skills** and **Apps** extensions,
+active for a client that declares them and invisible to one that does not (the tools themselves
+are the same for every client). See [`docs/DOCKER.md`](docs/DOCKER.md#protocol-two-eras-on-one-endpoint-three-extensions).
+
 Design docs:
 - [`docs/dbt-semantic-layer-spec.md`](docs/dbt-semantic-layer-spec.md) — dbt SL spec
 - [`docs/dbt-semantic-model-mcp-tool-design.md`](docs/dbt-semantic-model-mcp-tool-design.md) — tool design

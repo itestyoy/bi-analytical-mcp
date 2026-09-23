@@ -86,6 +86,21 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
   for minutes; a local one (DuckDB) keeps `QUERY_TIMEOUT_SECONDS`, because it finishes in seconds and
   returning the rows beats returning a job id. Set this to override both; the same 30 s ceiling
   applies.
+- `MCP_ALLOWED_ORIGINS` — comma-separated browser origins allowed to call the endpoint. The spec
+  requires a server to validate `Origin` (DNS-rebinding protection): a request **without** an Origin
+  (every native client, every hosted connector calling from its backend) always passes, a loopback
+  origin (`http://localhost:…`, the MCP Inspector) passes, and any other origin gets **403** unless it
+  is listed here (`*` allows all — do not use it on a machine that also runs a browser).
+- `MCP_ALLOWED_HOSTS` — optional comma-separated `host:port` values the `Host` header must match
+  (a second fence against DNS rebinding). Unset = no Host check, which is what you want behind a proxy.
+- `MCP_SESSION_IDLE_SECONDS` (default 3600) / `MCP_MAX_SESSIONS` (default 500) — a legacy session
+  unused for that long is closed, and at most that many are held (least recently used first). A
+  client whose session was reclaimed gets the 404 that makes it re-initialize.
+- `MCP_TASK_AFTER_MS` (default 3000) — for a client that declared the Tasks extension, a call that
+  has not finished in this long comes back as a task the host polls; `MCP_TASK_TTL_SECONDS` (default
+  3600) — how long a finished task stays readable.
+- `MCP_PROGRESS_INTERVAL_MS` (default 5000) — how often a call that carries a `progressToken` hears
+  it is still working (clients may reset their request timeout on it).
 - `DBT_PG_HOST/PORT/USER/PASSWORD/DBNAME/SCHEMA` — warehouse connection, consumed by your `profiles.yml` via `env_var(...)`.
 
 Your `profiles.yml` should read the connection from env, e.g.:
@@ -115,6 +130,42 @@ analytics:
   that keeps sending the dead id still gets a fresh session on its next call. Both answers are a
   JSON-RPC error body, not an HTML page. (Before that, an unknown id was a 400: the client could only
   retry the same doomed request, and the connector had to be removed and re-added by hand.)
+
+## Protocol: two eras on one endpoint, three extensions
+`/mcp` speaks both generations of MCP, chosen per request:
+
+- **Legacy (2025-11-25 and earlier)** — `initialize`, then an `Mcp-Session-Id` on every call. What
+  most clients speak today.
+- **Modern (2026-07-28)** — stateless: no `initialize`, no session; every request carries its
+  protocol version and the client's capabilities in `_meta`, and mirrors method and target into
+  `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` headers (checked against the body —
+  HeaderMismatch `-32020`). `server/discover` answers with the supported versions, capabilities and
+  instructions; list results carry `ttlMs`/`cacheScope`; an unknown version is `-32022` naming the
+  supported ones. A modern client that probes a legacy-only server gets the fallback the spec
+  describes, and a legacy client is served as before.
+
+On top of the core, three extensions are declared and served — they switch on the moment a client
+declares them, and the plain tools stay exactly as they were for every client that does not:
+
+- **Tasks** (`io.modelcontextprotocol/tasks`; and the 2025-11-25 experimental tasks on legacy
+  sessions) — a call that outlives its request becomes a task the HOST polls; a build the engine
+  hands back as a `query_id` is followed to its end, so the task's result is the rows. Cancelling a
+  task stops its dbt process.
+- **Skills** (`io.modelcontextprotocol/skills`) — the analyst procedure, every recipe and (where
+  python models run) the python-stage guide, served as Agent Skills (`skills/list`, `skills/get`,
+  files via `resources/read` with sha256 digests). Generated at startup from the same objects
+  `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy.
+- **Apps** (`io.modelcontextprotocol/ui`) — `query_semantic_model`, `get_query_result` and
+  `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view`):
+  a sortable, filterable table with paging, a chart when the rows are a time series or a breakdown,
+  the A/B result with its interval, the sample-size plan. (`semantic_index` has no view on purpose:
+  it is the most frequent call and a view on every exploration step would bury the conversation.) The data reaches the view as `structuredContent`,
+  sent only to a host that declared the extension (the host keeps it out of the model's context).
+
+In both eras: `Origin` is validated (403), every refusal is a JSON-RPC error body (never an HTML
+page — including a body that is not JSON, `-32700`), a client's cancellation (or a closed stream)
+stops the call's dbt process, calls with a `progressToken` get heartbeats, and every tool declares
+`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`.
 
 ## BigQuery
 BigQuery is a managed warehouse — there's no local DB service. Use the dedicated

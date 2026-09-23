@@ -28,7 +28,7 @@ const RULES = [
     why: "taking a generated name apart — carry what it encodes next to it instead",
     allow: {
       'engine.js': ["p.split('__')"], // _suggestRef: reads a path the CALLER typed, to answer with the structured form
-      'server.js': ["String(name).split('_')"], // titleFromName: formatting a tool name for humans, not resolving anything
+      'mcp-surface.js': ["String(name).split('_')"], // titleFromName: formatting a tool name for humans, not resolving anything
     },
   },
   {

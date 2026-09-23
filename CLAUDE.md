@@ -107,6 +107,15 @@
   nothing before it — a recommendation, never a refusal: the shape is legitimate when
   the analysis really is per source row.
 
+## Protocol surface
+- ONE SURFACE, TWO ERAS. `/mcp` serves the legacy session protocol (SDK, `initialize`) and the
+  stateless 2026-07-28 revision (`src/mcp-modern.js`). WHAT is offered — tool definitions, how a call
+  runs, resources, skills, the Apps view, tasks — lives once in `src/mcp-surface.js` (+ `tasks.js`,
+  `skills.js`, `apps.js`); an era module only translates the wire. A new capability is added to the
+  surface, never to one era.
+- Skills and the Apps view RENDER existing objects (buildGuide, `engine.get_recipe`, the python
+  guide, a tool's result); they never carry text or numbers of their own.
+
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model
   against the warehouse (PGlite + dbt + MetricFlow).

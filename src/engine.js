@@ -1303,22 +1303,64 @@ export class Engine {
   }
 
   /**
+   * A BEST-EFFORT WAREHOUSE READ INSIDE AN INTERACTIVE CALL — WITH A DEADLINE OF OUR OWN.
+   *
+   * Several answers are ENRICHED from the warehouse: the physical column set that grounds a
+   * source, the freshness of its time column, a row estimate. Each is an extra — the answer is
+   * complete without it — but each is a dbt round trip, and dbt's own timeout is the build
+   * timeout (10 minutes by default): long enough that the FIRST such call after a restart, when
+   * the dbt process is cold and the warehouse has not been touched yet, outlives the timeout of
+   * the client in front of the call. The client then reports a generic tool failure, the caller
+   * retries, the retry hits the cache the abandoned call primed, and the difference looks like
+   * whatever argument happened to change between the two.
+   *
+   * So the wait is bounded HERE, by the same grace a build gets (queryTimeoutMs, itself capped
+   * below any client's patience): when it expires the caller gets `fallback` — the documented
+   * "this could not be known" value every one of these already has a path for — while the read
+   * runs on in the background and primes the cache for the next call. Concurrent callers share
+   * one in-flight read, so a burst of tool calls cannot spawn a dbt process each.
+   */
+  async _bestEffort(key, work, fallback = null) {
+    this._inFlight ??= new Map();
+    let p = this._inFlight.get(key);
+    if (!p) {
+      p = (async () => work())().finally(() => { if (this._inFlight.get(key) === p) this._inFlight.delete(key); });
+      p.catch(() => {}); // it finishes unobserved after a timeout — never an unhandled rejection
+      this._inFlight.set(key, p);
+    }
+    let timer;
+    const expired = Symbol('expired');
+    // NOT unref'd: a tool call is in flight, and the process must stay alive to answer it. The
+    // timer is cleared the moment the race settles, so it never outlives the call.
+    const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(expired), this.queryTimeoutMs); });
+    try {
+      const v = await Promise.race([p, deadline]);
+      if (v !== expired) return v;
+      console.error(`[mcp] warehouse enrichment '${key}' is still running after ${this.queryTimeoutMs / 1000}s — answering without it; it will be cached for the next call`);
+      return fallback;
+    } catch { return fallback; } finally { clearTimeout(timer); }
+  }
+
+  /**
    * Physical column NAMES (lowercased Set) of a source's relation, via the same
    * introspection semantic_index({ model }) uses — cached per source. null when it
-   * cannot be known (no runner / relation not built / introspection failed), in which
-   * case the catalog's declared columns are used as-is (grounding is skipped).
+   * cannot be known (no runner / relation not built / introspection failed / slower than
+   * the grace), in which case the catalog's declared columns are used as-is (grounding
+   * is skipped).
    */
   async _physicalCols(source) {
     if (!this.runner || !this.ctxs.baseProjectDir) return null;
     this._physColCache ??= new Map();
     if (this._physColCache.has(source)) return this._physColCache.get(source);
-    let set = null;
-    try {
-      const r = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
-      if (r.ok && Array.isArray(r.columns)) set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
-    } catch { /* introspection unavailable → grounding skipped */ }
-    this._physColCache.set(source, set);
-    return set;
+    return this._bestEffort(`columns:${source}`, async () => {
+      let set = null;
+      try {
+        const r = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
+        if (r.ok && Array.isArray(r.columns)) set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
+      } catch { /* introspection unavailable → grounding skipped */ }
+      this._physColCache.set(source, set);
+      return set;
+    });
   }
 
   /** Declared source columns GROUNDED to physical truth: { cols, phantom } where phantom
@@ -2495,7 +2537,8 @@ export class Engine {
    * partition metadata, or an orchestration mark — and it is scoped to THIS model's relation.
    * Recomputed ONCE PER INDEX SCAN: the cache is keyed on the value-index sync generation, so a
    * completed background scan invalidates it and the next read re-queries MAX(time) — tied to the
-   * scan, not a wall-clock timer. Best-effort: null with no runner/time column, or if it fails.
+   * scan, not a wall-clock timer. Best-effort: null with no runner/time column, if it fails, or if
+   * it is slower than the interactive grace (_bestEffort) — the next call reads the primed cache.
    */
   async _dataFreshness(sourceKey) {
     const base = this.ctxs.baseProjectDir;
@@ -2506,20 +2549,22 @@ export class Engine {
     const gen = this.valueIndex?.syncGeneration ? this.valueIndex.syncGeneration() : 0;
     const hit = this._freshCache.get(sourceKey);
     if (hit && hit.gen === gen) return hit.value; // re-query only after the next index scan completes
-    let latest = null;
-    try {
-      const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}`, 1);
-      if (r.ok && r.rows?.[0]?.latest != null) latest = String(r.rows[0].latest);
-    } catch { /* freshness is best-effort */ }
-    this._freshCache.set(sourceKey, { value: latest, gen });
-    return latest;
+    return this._bestEffort(`freshness:${sourceKey}:${gen}`, async () => {
+      let latest = null;
+      try {
+        const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}`, 1);
+        if (r.ok && r.rows?.[0]?.latest != null) latest = String(r.rows[0].latest);
+      } catch { /* freshness is best-effort */ }
+      this._freshCache.set(sourceKey, { value: latest, gen });
+      return latest;
+    });
   }
 
   /**
    * A5: a cheap pre-run volume estimate — COUNT(*) over a source model within an
    * optional time window (the same window the pipeline will apply). Lets the caller
    * gauge the scan before materializing. Best-effort: returns null when there is no
-   * runner / base project, or the count fails.
+   * runner / base project, the count fails, or it is slower than the interactive grace.
    */
   async _estimateSourceRows(sourceKey, tr) {
     const base = this.ctxs.baseProjectDir;
@@ -2535,11 +2580,13 @@ export class Engine {
       else if (r.end) cl.push(`${tcol} <= ${sqlLiteral(r.end)}`);
       if (cl.length) where = ` WHERE ${cl.join(' AND ')}`;
     }
-    try {
-      const r = await this.runner.show(base, `SELECT COUNT(*) AS n FROM {{ ref('${m.dbt_model}') }}${where}`, 1);
-      if (r.ok && r.rows?.[0]) return Number(r.rows[0].n);
-    } catch { /* estimate is best-effort */ }
-    return null;
+    return this._bestEffort(`rows:${sourceKey}:${where}`, async () => {
+      try {
+        const r = await this.runner.show(base, `SELECT COUNT(*) AS n FROM {{ ref('${m.dbt_model}') }}${where}`, 1);
+        if (r.ok && r.rows?.[0]) return Number(r.rows[0].n);
+      } catch { /* estimate is best-effort */ }
+      return null;
+    });
   }
 
   /**
@@ -2928,8 +2975,10 @@ export class Engine {
       const n = ctx.state.native || {};
       let columns = n.columns || [];
       if (this.runner && n.model) {
-        const cols = await this.runner.relationColumns(this.ctxs.dir(ctx.id), n.model);
-        if (cols.ok) {
+        // Bounded like every other warehouse enrichment: a slow introspection leaves the
+        // declared columns standing rather than holding the whole description hostage.
+        const cols = await this._bestEffort(`context-columns:${ctx.id}:${n.model}`, () => this.runner.relationColumns(this.ctxs.dir(ctx.id), n.model));
+        if (cols?.ok) {
           const names = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
           const declared = (n.columns || []).filter((col) => names.has(String(col).toLowerCase()));
           columns = declared.length ? declared : cols.columns.map((col) => col.name);

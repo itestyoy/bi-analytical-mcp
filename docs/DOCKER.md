@@ -73,7 +73,12 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
   background and the caller polls `get_query_result`. **Values above 30 s are capped at 30**, with a
   line on stderr saying so — a longer wait inside one tool call outlives the calling client's own
   timeout, which this server cannot raise, and the caller then sees "the server is not responding"
-  while the build it started keeps running unseen.
+  while the build it started keeps running unseen. The same window bounds the WAREHOUSE READS that
+  merely enrich an answer — the physical column set a source is grounded to, the freshness of its
+  time column, a row estimate: past it the call answers without that extra (exactly as it does when
+  there is no runner at all) while the read finishes in the background and is cached for the next
+  call. Otherwise the first such call after a restart, with a cold dbt process, would sit on dbt's
+  own 10-minute timeout (`DBT_TIMEOUT_SECONDS`) and the client would report a generic tool failure.
 - `CONTEXT_TTL_MS` — context GC tuning.
 - `PYTHON_BUILD_GRACE_SECONDS` — the same window for a build that includes a **Python** model, which
   is a different figure. Unset, the RUNTIME decides: a remote one (BigFrames in a Colab Enterprise

@@ -7,16 +7,13 @@
 // runToCompletion follows a detached build until it is ready) and its result is exactly the
 // CallToolResult the call would have returned had it finished in time.
 //
-// ONE registry, two wire formats — the protocol has had two incompatible designs:
-//   * 2025-11-25 experimental tasks (legacy sessions): the client opts in per call with
-//     `params.task`; tasks/get, tasks/result (blocks until terminal), tasks/list, tasks/cancel. The
-//     SDK implements those methods over a TaskStore — `legacyStore()` is that store, over this
-//     registry.
-//   * the Tasks extension `io.modelcontextprotocol/tasks` (SEP-2663, 2026-07-28): the SERVER
-//     decides per call; tasks/get returns the result inline, tasks/update carries input, tasks/cancel
-//     is an ack; no list. `modern()` is that projection; src/mcp-modern.js serves it.
+// The protocol form is the Tasks extension `io.modelcontextprotocol/tasks` (SEP-2663, protocol
+// 2026-07-28): the SERVER decides per call; a client that declared the extension may get a
+// CreateTaskResult instead of the result; tasks/get returns the result inline, tasks/update carries
+// input, tasks/cancel is an ack; there is no list. (The 2025-11-25 "experimental tasks" were a
+// different, wire-incompatible design; the extension replaces them and is what this serves.)
 //
-// What a task promises, in both: the id is unguessable (a random UUID — it is the bearer of the
+// What a task promises: the id is unguessable (a random UUID — it is the bearer of the
 // caller's result); it exists before the CreateTaskResult is sent (it is created synchronously in
 // this process); a tool error is a COMPLETED task whose result has isError (only a protocol fault
 // is `failed`); a cancellation stops the work it can (the dbt process of the call) and the status
@@ -40,10 +37,11 @@ export class TaskRegistry {
   }
 
   /**
-   * Create a task and start `run(signal)` → Promise<CallToolResult>. `owner` scopes listing and
-   * access (the legacy session id; modern requests carry no identity beyond the id itself).
+   * Create a task and start `run(signal)` → Promise<CallToolResult>. The id is the only handle:
+   * the protocol carries no caller identity, so an unguessable id is what keeps one caller's task
+   * from another (and there is deliberately no list).
    */
-  create({ owner = null, ttlMs, run, ctl: given }) {
+  create({ ttlMs, run, ctl: given }) {
     this.sweep();
     if (this.tasks.size >= this.maxTasks) throw Object.assign(new Error(`too many tasks in flight (${this.maxTasks}) — wait for some to finish`), { code: -32603 });
     const now = new Date().toISOString();
@@ -58,7 +56,6 @@ export class TaskRegistry {
       lastUpdatedAt: now,
       ttlMs: Number.isFinite(ttlMs) && ttlMs > 0 ? Math.min(ttlMs, this.ttlMs) : this.ttlMs,
       pollIntervalMs: this.pollIntervalMs,
-      owner,
       ctl,
       result: undefined,
       error: undefined,
@@ -89,18 +86,17 @@ export class TaskRegistry {
     t.waiters.clear();
   }
 
-  /** The task, or null when unknown, expired, or owned by someone else. */
-  get(taskId, owner = null) {
+  /** The task, or null when unknown or expired. */
+  get(taskId) {
     const t = this.tasks.get(taskId);
     if (!t) return null;
-    if (t.owner && owner !== undefined && owner !== null && t.owner !== owner) return null;
     if (this._expired(t)) { this.tasks.delete(taskId); return null; }
     return t;
   }
 
   /** Ask the work to stop. Cooperative: the status becomes `cancelled` unless it already ended. */
-  cancel(taskId, owner = null, reason = 'Cancelled by the client.') {
-    const t = this.get(taskId, owner);
+  cancel(taskId, reason = 'Cancelled by the client.') {
+    const t = this.get(taskId);
     if (!t) return null;
     if (!isTerminal(t.status)) {
       t.ctl.abort(new Error(reason));
@@ -123,11 +119,6 @@ export class TaskRegistry {
     });
   }
 
-  list(owner = null) {
-    this.sweep();
-    return [...this.tasks.values()].filter((t) => !owner || t.owner === owner);
-  }
-
   _expired(t) {
     // TTL runs from creation (both designs say so); a task still working is never dropped.
     return isTerminal(t.status) && Date.parse(t.createdAt) + t.ttlMs < Date.now();
@@ -142,10 +133,8 @@ export class TaskRegistry {
     for (const t of this.tasks.values()) if (!isTerminal(t.status)) t.ctl.abort(new Error('server shutting down'));
   }
 
-  // ── projections ──────────────────────────────────────────────────────────────────────────
-
   /** The Tasks extension's DetailedTask (SEP-2663): result/error inline on terminal states. */
-  modern(t) {
+  detailed(t) {
     return {
       taskId: t.taskId,
       status: t.status,
@@ -156,47 +145,6 @@ export class TaskRegistry {
       pollIntervalMs: t.pollIntervalMs,
       ...(t.status === 'completed' ? { result: t.result } : {}),
       ...(t.status === 'failed' ? { error: t.error } : {}),
-    };
-  }
-
-  /** The 2025-11-25 experimental Task (ttl / pollInterval; the result comes from tasks/result). */
-  legacy(t) {
-    return {
-      taskId: t.taskId,
-      status: t.status,
-      statusMessage: t.statusMessage,
-      createdAt: t.createdAt,
-      lastUpdatedAt: t.lastUpdatedAt,
-      ttl: t.ttlMs,
-      pollInterval: t.pollIntervalMs,
-    };
-  }
-
-  /**
-   * The SDK's TaskStore over this registry — what the SDK's own tasks/get, tasks/result,
-   * tasks/list and tasks/cancel handlers read (2025-11-25). Tasks are CREATED by the tools/call
-   * handler (it has the work to run), never through `createTask` here.
-   */
-  legacyStore() {
-    const reg = this;
-    const need = (id, sid) => { const t = reg.get(id, sid); if (!t) throw new Error(`Task not found: ${id}`); return t; };
-    return {
-      async createTask() { throw new Error('tasks are created by the tools/call handler'); },
-      async getTask(taskId, sessionId) { const t = reg.get(taskId, sessionId); return t ? reg.legacy(t) : null; },
-      async storeTaskResult(taskId, status, result, sessionId) { reg._finish(need(taskId, sessionId), status, status === 'completed' ? { result, statusMessage: 'The call finished.' } : { error: result, statusMessage: 'The call failed.' }); },
-      async getTaskResult(taskId, sessionId) {
-        const t = need(taskId, sessionId);
-        if (t.status === 'completed') return t.result;
-        if (t.status === 'failed') return { content: [{ type: 'text', text: JSON.stringify({ ok: false, error: t.error }) }], isError: true };
-        return { content: [{ type: 'text', text: JSON.stringify({ ok: false, status: t.status, message: t.statusMessage }) }], isError: true };
-      },
-      async updateTaskStatus(taskId, status, statusMessage, sessionId) {
-        if (status === 'cancelled') { reg.cancel(taskId, sessionId, statusMessage || 'Cancelled by the client.'); return; }
-        const t = need(taskId, sessionId);
-        if (isTerminal(t.status)) return;
-        t.status = status; t.statusMessage = statusMessage || t.statusMessage; t.lastUpdatedAt = new Date().toISOString(); reg._wake(t);
-      },
-      async listTasks(cursor, sessionId) { return { tasks: reg.list(sessionId || null).map((t) => reg.legacy(t)) }; },
     };
   }
 }

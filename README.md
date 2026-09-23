@@ -11,10 +11,10 @@ typed semantic objects whose column/property/event names come from a **catalog**
 product-analytics events and crash reports — a user-attributes dimension, and optional
 dimension models such as experiment assignments).
 
-Protocol: both eras of MCP on one endpoint — the legacy session protocol (2025-11-25 and earlier)
-and the stateless 2026-07-28 revision — plus the **Tasks**, **Skills** and **Apps** extensions,
-active for a client that declares them and invisible to one that does not (the tools themselves
-are the same for every client). See [`docs/DOCKER.md`](docs/DOCKER.md#protocol-two-eras-on-one-endpoint-three-extensions).
+Protocol: MCP **2026-07-28** on the official TypeScript SDK v2 (which also answers clients that
+still open with the 2025 handshake — no second code path here), plus the **Tasks**, **Skills** and
+**Apps** extensions, active for a client that declares them and invisible to one that does not.
+See [`docs/DOCKER.md`](docs/DOCKER.md#protocol-mcp-2026-07-28-on-the-official-sdk-plus-three-extensions).
 
 Design docs:
 - [`docs/dbt-semantic-layer-spec.md`](docs/dbt-semantic-layer-spec.md) — dbt SL spec

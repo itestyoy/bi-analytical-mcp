@@ -101,13 +101,14 @@ export class Engine {
     // An empty vocabulary (a source with no events yet, a model with no groupable column) renders
     // as `enum: []` / `oneOf: []`, which ajv refuses — and it refuses the WHOLE schema, so the
     // server would not start and the message would point at a branch instead of at the catalog.
-    // schema-kit keeps those constructs from being built; this is the backstop that names the
-    // offender if one ever gets in another way.
+    // A key left `undefined` is the other unusable construct: not JSON, and a client that validates
+    // the tool list as objects rejects the whole list. schema-kit keeps both from being built; this
+    // is the backstop that names the offender if one ever gets in another way.
     for (const [tool, schema] of Object.entries(this.schemas)) {
       const bad = assertSchemaSound(schema, `#/${tool}`);
       if (bad.length) {
-        throw new Error(`the catalog produced an unusable tool schema (an empty vocabulary): ${bad.join('; ')}. `
-          + `A source with no known events, or a model with nothing groupable, must render as an open field — see src/schema-kit.js.`);
+        throw new Error(`the catalog produced an unusable tool schema: ${bad.join('; ')}. `
+          + `A source with no known events, or a model with nothing groupable, must render as an open field; an optional key is omitted, never set to undefined — see src/schema-kit.js.`);
       }
     }
     this.validators = makeValidators(this.schemas);

@@ -1,16 +1,11 @@
-// WHAT THIS SERVER OFFERS, INDEPENDENT OF THE PROTOCOL REVISION IT IS ASKED IN.
-//
-// The server speaks two eras of MCP on one endpoint (src/server.js routes between them):
-//   * LEGACY (2025-11-25 and earlier) — an `initialize` handshake and an Mcp-Session-Id, served by
-//     the SDK's Server + StreamableHTTPServerTransport;
-//   * MODERN (2026-07-28) — stateless: every request carries its protocol version and the client's
-//     capabilities in `_meta`, served by src/mcp-modern.js.
-// Both are thin: WHAT the tools are, how a call runs, which resources and skills exist, how a
-// task is tracked — all of it lives here, once, so the two eras can only differ in wire format.
+// WHAT THIS SERVER OFFERS: the tool definitions, how one call runs, and the services behind the
+// MCP surface (tasks, skills, the Apps view). src/mcp-server.js registers it on the official SDK's
+// Server; the SDK owns the protocol — both revisions a client may speak, the wire format, the
+// envelope and header rules — so nothing here knows which revision a request came in.
 
 import { MAX_WAIT_SECONDS } from './schema.js';
 import { withSignal } from './request-context.js';
-import { appsSurface, clientSupportsUi } from './apps.js';
+import { appsSurface, viewMeta } from './apps.js';
 import { buildSkills } from './skills.js';
 import { TaskRegistry } from './tasks.js';
 
@@ -128,18 +123,16 @@ function titleFromName(name) {
 }
 
 /**
- * The advertised tools. `ui` — the client renders MCP Apps, so the tools whose results have a
- * view carry `_meta.ui.resourceUri` (a client without it gets exactly the text-only tool; the
- * spec asks servers to check before advertising). `legacyTasks` — the client speaks the
- * 2025-11-25 experimental tasks, so the tools declare `execution.taskSupport`.
+ * The advertised tools. A tool whose result has an Apps view carries `_meta.ui` for every client,
+ * as the official ext-apps `registerAppTool` does: a host without the extension ignores it, so the
+ * list is the same for everyone (and cacheable as such).
  */
-export function buildToolDefs(engine, { ui = false, legacyTasks = false } = {}) {
-  const apps = appsSurface();
+export function buildToolDefs(engine) {
   return Object.entries(engine.schemas)
     .filter(([name]) => !HIDDEN_TOOLS.has(name))
     .map(([name, inputSchema]) => {
       const title = TOOL_TITLES[name] || titleFromName(name);
-      const view = ui ? apps.viewFor(name) : null;
+      const meta = viewMeta(name);
       // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
       // read the older annotations location. `name` remains the stable programmatic identifier.
       return {
@@ -148,8 +141,7 @@ export function buildToolDefs(engine, { ui = false, legacyTasks = false } = {}) 
         description: TOOL_DESCRIPTIONS[name] || name,
         inputSchema,
         annotations: { title, openWorldHint: false, ...(TOOL_BEHAVIOUR[name] || {}) },
-        ...(legacyTasks ? { execution: { taskSupport: 'optional' } } : {}),
-        ...(view ? { _meta: { ui: { resourceUri: view } } } : {}),
+        ...(meta ? { _meta: meta } : {}),
       };
     });
 }
@@ -163,13 +155,13 @@ export function isCallableTool(engine, name) {
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 
-/** A tool's return value as an MCP CallToolResult. `structured` adds `structuredContent` — sent
- *  only to a client that renders MCP Apps: there it feeds the view and is NOT added to the model's
- *  context (Apps spec, Data Passing), elsewhere it would be the same payload twice. */
-export function toCallToolResult(result, { structured = false } = {}) {
+/** A tool's return value as an MCP CallToolResult: the JSON as text (what the model reads) and the
+ *  same value as `structuredContent` (what a program — the Apps view — reads; the spec asks for
+ *  both, and a host that uses the structured copy does not add it to the model's context). */
+export function toCallToolResult(result) {
   return {
     content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-    ...(structured && isPlainObject(result) ? { structuredContent: result } : {}),
+    ...(isPlainObject(result) ? { structuredContent: result } : {}),
   };
 }
 
@@ -183,7 +175,7 @@ const PROGRESS_EVERY_MS = Number(process.env.MCP_PROGRESS_INTERVAL_MS) || 5000;
  * tool. `signal` stops the processes the call started; `onProgress(params)` receives heartbeats.
  * Returns { result: CallToolResult, raw } — `raw` is the engine's value (null on error).
  */
-export async function runTool(engine, name, args, { signal, onProgress, structured = false, progressEveryMs = PROGRESS_EVERY_MS } = {}) {
+export async function runTool(engine, name, args, { signal, onProgress, progressEveryMs = PROGRESS_EVERY_MS } = {}) {
   const started = Date.now();
   logLine(name, `▶ call ${summarizeArgs(args)}`);
   if (!isCallableTool(engine, name)) {
@@ -201,7 +193,7 @@ export async function runTool(engine, name, args, { signal, onProgress, structur
   try {
     const raw = await withSignal(signal, () => (ASYNC_TOOLS.has(name) ? engine[name](args || {}) : Promise.resolve().then(() => engine[name](args || {}))));
     logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(raw)}`);
-    return { result: toCallToolResult(raw, { structured }), raw };
+    return { result: toCallToolResult(raw), raw };
   } catch (err) {
     const cancelled = !!signal?.aborted;
     logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} in ${Date.now() - started}ms: ${err?.message || String(err)}${err?.field ? ` (field: ${err.field})` : ''}`);
@@ -227,18 +219,18 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
  * Run a tool call TO ITS END: when the engine detaches a build (a query_id), follow the job until
  * it is ready or failed and return what get_query_result returns then. This is what a task runs.
  */
-export async function runToCompletion(engine, name, args, { signal, structured = false, pollMs = 2000 } = {}) {
-  const first = await runTool(engine, name, args, { signal, structured });
+export async function runToCompletion(engine, name, args, { signal, pollMs = 2000 } = {}) {
+  const first = await runTool(engine, name, args, { signal });
   if (!isDetachedJob(first.raw)) return first;
   let job = first.raw;
   while (isDetachedJob(job)) {
     await sleep(pollMs, signal);
     job = await withSignal(signal, () => engine.get_query_result({ query_id: first.raw.query_id }));
   }
-  return { result: toCallToolResult(job, { structured }), raw: job };
+  return { result: toCallToolResult(job), raw: job };
 }
 
-export { TOOL_DESCRIPTIONS, TOOL_TITLES, SERVER_DESCRIPTION, SERVER_SUMMARY, HIDDEN_TOOLS, clientSupportsUi };
+export { TOOL_DESCRIPTIONS, TOOL_TITLES, SERVER_DESCRIPTION, SERVER_SUMMARY, HIDDEN_TOOLS };
 export const SERVER_INFO = { name: 'dbt-semantic-mcp', version: '0.1.0', description: SERVER_SUMMARY };
 
 // ── console logging (to stderr) so every tool call is visible in the logs ──────
@@ -273,9 +265,9 @@ export function errorResult(message, stage, field) {
 }
 
 /**
- * The services behind both eras for one engine: the task registry, the skills, the Apps view and
- * the resource space they share. Built once per engine (servicesFor caches it), so every session
- * and every stateless request sees the same tasks and the same digests.
+ * The services behind the MCP server for one engine: the task registry, the skills, the Apps view
+ * and the resource space they share. Built once per engine (servicesFor caches it): the SDK builds
+ * a server per request, and every one of them must see the same tasks and the same digests.
  */
 export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs = PROGRESS_EVERY_MS, taskAfterMs = Number(process.env.MCP_TASK_AFTER_MS) || 3000 } = {}) {
   const apps = appsSurface();
@@ -294,6 +286,8 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     apps,
     skills,
     tasks,
+    // built once: the SDK builds a server per request, and the definitions never change
+    toolDefs: buildToolDefs(engine),
     // how often a call with a progressToken hears it is alive; how long a call may run inline
     // before it becomes a task (for a client that declared the Tasks extension)
     progressEveryMs,

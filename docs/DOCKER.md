@@ -86,16 +86,13 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
   for minutes; a local one (DuckDB) keeps `QUERY_TIMEOUT_SECONDS`, because it finishes in seconds and
   returning the rows beats returning a job id. Set this to override both; the same 30 s ceiling
   applies.
-- `MCP_ALLOWED_ORIGINS` — comma-separated browser origins allowed to call the endpoint. The spec
-  requires a server to validate `Origin` (DNS-rebinding protection): a request **without** an Origin
-  (every native client, every hosted connector calling from its backend) always passes, a loopback
-  origin (`http://localhost:…`, the MCP Inspector) passes, and any other origin gets **403** unless it
-  is listed here (`*` allows all — do not use it on a machine that also runs a browser).
-- `MCP_ALLOWED_HOSTS` — optional comma-separated `host:port` values the `Host` header must match
-  (a second fence against DNS rebinding). Unset = no Host check, which is what you want behind a proxy.
-- `MCP_SESSION_IDLE_SECONDS` (default 3600) / `MCP_MAX_SESSIONS` (default 500) — a legacy session
-  unused for that long is closed, and at most that many are held (least recently used first). A
-  client whose session was reclaimed gets the 404 that makes it re-initialize.
+- `MCP_ALLOWED_ORIGINS` — comma-separated browser origin HOSTNAMES allowed to call the endpoint
+  (port-agnostic, e.g. `console.example.com`). The spec requires a server to validate `Origin`
+  (DNS-rebinding protection): a request **without** an Origin (every native client, every hosted
+  connector calling from its backend) always passes, a loopback origin (`localhost`, `127.0.0.1`,
+  the MCP Inspector) passes, and any other origin gets **403** unless it is listed here.
+- `MCP_ALLOWED_HOSTS` — optional comma-separated hostnames the `Host` header must match (a second
+  fence against DNS rebinding). Unset = no Host check, which is what you want behind a proxy.
 - `MCP_TASK_AFTER_MS` (default 3000) — for a client that declared the Tasks extension, a call that
   has not finished in this long comes back as a task the host polls; `MCP_TASK_TTL_SECONDS` (default
   3600) — how long a finished task stays readable.
@@ -123,49 +120,49 @@ analytics:
 - The image bundles the `dbt` + `mf` (MetricFlow) CLIs (see `requirements.txt`); swap `dbt-postgres` for your adapter (e.g. `dbt-bigquery`) and rebuild.
 - For an external/managed warehouse, delete the `warehouse` service and set the `DBT_PG_*` (or your profile's) vars to point at it.
 - A dbt project (or an explicit `CATALOG_PATH`) is required — the image bakes no catalog. With a project mounted, build/query work via the bundled `dbt`/`mf` runner.
-- **Restarting the container ends every MCP session, and clients recover by themselves.** Sessions
-  (`Mcp-Session-Id`) live in the process, so a redeploy makes every id a client is holding unknown.
-  An unknown id is answered with **404** — the status the spec reserves for exactly this, and the one
-  that makes a client open a new session — and `initialize` ignores the header entirely, so a client
-  that keeps sending the dead id still gets a fresh session on its next call. Both answers are a
-  JSON-RPC error body, not an HTML page. (Before that, an unknown id was a 400: the client could only
-  retry the same doomed request, and the connector had to be removed and re-added by hand.)
+- **Restarting the container loses nothing a client holds.** The server keeps no sessions (the SDK
+  serves each request from a fresh server instance), so a client connected before a deploy keeps
+  calling after it with no new handshake; a stale `Mcp-Session-Id` is ignored. (This replaced a
+  session table that lived in the process: after a restart, clients got errors for a session id the
+  new process had never issued until the connector was re-added by hand.)
 
-## Protocol: two eras on one endpoint, three extensions
-`/mcp` speaks both generations of MCP, chosen per request:
+## Protocol: MCP 2026-07-28 on the official SDK, plus three extensions
+The server is built on the official MCP TypeScript SDK **v2** (`@modelcontextprotocol/server`), the
+stable line that implements protocol revision **2026-07-28**. The same SDK — not a second code path
+in this server — also answers clients that still open with the 2025 `initialize` handshake, which
+is what today's hosts send; the SDK calls those two request shapes "eras", decides per request, and
+serves both from one server factory (`createMcpHandler` → `src/mcp-server.js`). Nothing to configure.
 
-- **Legacy (2025-11-25 and earlier)** — `initialize`, then an `Mcp-Session-Id` on every call. What
-  most clients speak today.
-- **Modern (2026-07-28)** — stateless: no `initialize`, no session; every request carries its
-  protocol version and the client's capabilities in `_meta`, and mirrors method and target into
-  `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` headers (checked against the body —
-  HeaderMismatch `-32020`). `server/discover` answers with the supported versions, capabilities and
-  instructions; list results carry `ttlMs`/`cacheScope`; an unknown version is `-32022` naming the
-  supported ones. A modern client that probes a legacy-only server gets the fallback the spec
-  describes, and a legacy client is served as before.
+What the SDK handles per the 2026-07-28 spec: `server/discover`, the per-request `_meta` envelope,
+`MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` header checks (HeaderMismatch `-32020`),
+`resultType` and `ttlMs`/`cacheScope` on results, `-32022` for an unknown version, progress on the
+request's own stream, cancellation when the stream closes.
 
-On top of the core, three extensions are declared and served — they switch on the moment a client
-declares them, and the plain tools stay exactly as they were for every client that does not:
+Three extensions are declared and served; each switches on the moment a client declares it, and
+the plain tools stay exactly as they were for every client that does not:
 
-- **Tasks** (`io.modelcontextprotocol/tasks`; and the 2025-11-25 experimental tasks on legacy
-  sessions) — a call that outlives its request becomes a task the HOST polls; a build the engine
-  hands back as a `query_id` is followed to its end, so the task's result is the rows. Cancelling a
-  task stops its dbt process.
+- **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
+  finished in `MCP_TASK_AFTER_MS` comes back as a task (`resultType: "task"`) the HOST polls; a build
+  the engine hands back as a `query_id` is followed to its end, so the task's result is the rows.
+  `tasks/cancel` stops the call's dbt process. (The TypeScript SDK does not implement this extension
+  yet and routes `tasks/get` / `tasks/cancel` as methods of the older revision, so those two are
+  answered in front of it — `src/mcp-tasks.js`, with the SDK's own request classifier — until it does.)
 - **Skills** (`io.modelcontextprotocol/skills`) — the analyst procedure, every recipe and (where
   python models run) the python-stage guide, served as Agent Skills (`skills/list`, `skills/get`,
   files via `resources/read` with sha256 digests). Generated at startup from the same objects
   `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy.
 - **Apps** (`io.modelcontextprotocol/ui`) — `query_semantic_model`, `get_query_result` and
-  `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view`):
+  `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`):
   a sortable, filterable table with paging, a chart when the rows are a time series or a breakdown,
   the A/B result with its interval, the sample-size plan. (`semantic_index` has no view on purpose:
-  it is the most frequent call and a view on every exploration step would bury the conversation.) The data reaches the view as `structuredContent`,
-  sent only to a host that declared the extension (the host keeps it out of the model's context).
+  it is the most frequent call and a view on every exploration step would bury the conversation.)
+  The view is built like the official MCP Apps examples — the ext-apps `App` class, host theme and
+  style variables, Chart.js, one self-contained file from vite (`npm run build:app`, output checked
+  in under `src/apps/result-view/dist/`).
 
-In both eras: `Origin` is validated (403), every refusal is a JSON-RPC error body (never an HTML
-page — including a body that is not JSON, `-32700`), a client's cancellation (or a closed stream)
-stops the call's dbt process, calls with a `progressToken` get heartbeats, and every tool declares
-`readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint`.
+Also: `Origin` is always validated (403), every refusal is a JSON-RPC error body (including a body
+that is not JSON, `-32700`), every tool declares `readOnlyHint` / `destructiveHint` /
+`idempotentHint` / `openWorldHint`, and every result carries `structuredContent` next to its text.
 
 ## BigQuery
 BigQuery is a managed warehouse — there's no local DB service. Use the dedicated

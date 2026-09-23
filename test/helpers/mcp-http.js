@@ -1,14 +1,15 @@
-// A real HTTP server around a real Engine, for the protocol tests: both eras on one endpoint, the
-// way a client meets them. No warehouse — the tools these tests call (time, experiment,
-// semantic_index) compute in-process.
+// A real HTTP server around a real Engine, for the protocol tests — served the way production
+// serves it (src/server.js createApp: the SDK v2 handler), reached the way a client reaches it:
+// through the OFFICIAL client (@modelcontextprotocol/client) in either protocol revision, or with
+// raw requests where a test is about the wire itself. No warehouse — the tools these tests call
+// (time, experiment, semantic_index) compute in-process.
 
 import { createServer } from 'node:http';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
@@ -19,7 +20,6 @@ import { createServices } from '../../src/mcp-surface.js';
 
 export const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 export const V = '2026-07-28';
-export const UI_CAPS = { extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] } } };
 export const TASK_CAPS = { extensions: { 'io.modelcontextprotocol/tasks': {} } };
 
 export function makeEngine({ recipes = true } = {}) {
@@ -38,8 +38,21 @@ export async function startServer({ engine = makeEngine(), services: serviceOpts
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const url = `http://127.0.0.1:${server.address().port}/mcp`;
   let seq = 0;
+  const clients = [];
 
-  /** A 2026-07-28 request, with the headers a conforming client sends (override any; null drops one). */
+  /**
+   * The official client. `era: 'legacy'` — the 2025 initialize handshake (the client's default,
+   * what today's hosts speak); `era: 'modern'` — pinned to 2026-07-28 (server/discover, per-request
+   * envelope). `capabilities` are the client's own.
+   */
+  async function client({ era = 'legacy', capabilities = {} } = {}) {
+    const c = new Client({ name: `test-${era}`, version: '0' }, { capabilities, ...(era === 'modern' ? { versionNegotiation: { mode: { pin: V } } } : {}) });
+    await c.connect(new StreamableHTTPClientTransport(new URL(url)));
+    clients.push(c);
+    return c;
+  }
+
+  /** A raw 2026-07-28 request with the headers a conforming client sends (null drops one). */
   async function modern(method, params = {}, { caps = {}, headers = {}, meta = {}, signal } = {}) {
     const name = params.name ?? params.uri ?? params.taskId;
     const all = {
@@ -50,7 +63,7 @@ export async function startServer({ engine = makeEngine(), services: serviceOpts
       ...(name !== undefined ? { 'mcp-name': String(name) } : {}),
       ...headers,
     };
-    for (const k of Object.keys(all)) if (all[k] === null) delete all[k]; // null = send without it
+    for (const k of Object.keys(all)) if (all[k] === null) delete all[k];
     const res = await fetch(url, {
       method: 'POST',
       signal,
@@ -69,15 +82,14 @@ export async function startServer({ engine = makeEngine(), services: serviceOpts
   /** A raw POST to the endpoint. */
   const post = (body, headers = {}) => fetch(url, { method: 'POST', headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream', ...headers }, body: typeof body === 'string' ? body : JSON.stringify(body) });
 
-  /** A legacy (initialize + session) client through the SDK. */
-  async function legacyClient(capabilities = {}) {
-    const client = new Client({ name: 'legacy-test', version: '0' }, { capabilities });
-    await client.connect(new StreamableHTTPClientTransport(new URL(url)));
-    return client;
-  }
-
   return {
-    url, engine, services, app, modern, post, legacyClient,
-    async stop() { await new Promise((resolve) => server.close(resolve)); app.locals.close(); services.close(); engine.close?.(); },
+    url, engine, services, app, client, modern, post,
+    async stop() {
+      for (const c of clients) await c.close().catch(() => {});
+      await app.locals.close();
+      await new Promise((resolve) => { server.closeAllConnections?.(); server.close(resolve); });
+      services.close();
+      engine.close?.();
+    },
   };
 }

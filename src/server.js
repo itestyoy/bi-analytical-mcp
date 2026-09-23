@@ -1,21 +1,15 @@
 // Streamable-HTTP MCP server exposing the declarative dbt Semantic Layer tools.
 //
-// DUAL-ERA on one endpoint (/mcp): a legacy client opens a session with `initialize` and is served
-// by the SDK's Server (protocol 2025-11-25 and earlier); a modern client sends stateless requests
-// that carry their protocol version in `_meta` and is served by src/mcp-modern.js (2026-07-28).
-// What the server offers — tools, resources, skills, the Apps view, tasks — is one surface
-// (src/mcp-surface.js) that both eras project.
+// Built on the official MCP SDK v2 (@modelcontextprotocol/server), which implements protocol
+// revision 2026-07-28 and serves every earlier revision from the same factory: `createMcpHandler`
+// builds a fresh server per request (src/mcp-server.js) and decides by itself how the request is
+// spoken — there is no second code path here for an older client, and no session state to lose on
+// a restart.
 
-import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
-import express from 'express';
-import { z } from 'zod';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import {
-  CallToolRequestSchema, ListToolsRequestSchema, ListResourcesRequestSchema, ListResourceTemplatesRequestSchema,
-  ReadResourceRequestSchema, McpError, ErrorCode, isInitializeRequest,
-} from '@modelcontextprotocol/sdk/types.js';
+import { createMcpHandler } from '@modelcontextprotocol/server';
+import { toNodeHandler } from '@modelcontextprotocol/node';
+import { createMcpExpressApp } from '@modelcontextprotocol/express';
 import { mkdirSync } from 'node:fs';
 import { loadCatalog, validateDbtProject, groundCatalogToPhysical } from './catalog.js';
 import { loadRecipes } from './recipes.js';
@@ -26,97 +20,16 @@ import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
 import { BackgroundIndexer } from './value-index.js';
 import { createEmbedder } from './embeddings.js';
-import { buildToolDefs, runTool, runToCompletion, isCallableTool, clientSupportsUi, servicesFor, SERVER_INFO, logLine } from './mcp-surface.js';
-import { releasableSignal } from './request-context.js';
-import { UI_EXTENSION, APP_MIME } from './apps.js';
-import { SKILLS_EXTENSION } from './skills.js';
-import { isModernRequest, modernHandler } from './mcp-modern.js';
+import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
+import { createMcpServer } from './mcp-server.js';
+import { answerTaskRequest } from './mcp-tasks.js';
 
 export { buildToolDefs };
 
-// skills/list and skills/get on a LEGACY session: the extension defines them for every revision
-// (2026-07-28 only adds caching hints), and the SDK dispatches a custom method by its schema.
-const SkillsListRequestSchema = z.object({ method: z.literal('skills/list'), params: z.object({ cursor: z.string().optional() }).passthrough().optional() });
-const SkillsGetRequestSchema = z.object({ method: z.literal('skills/get'), params: z.object({ uri: z.string() }).passthrough() });
-
-/**
- * The LEGACY (session) server for one connection. Everything it answers comes from the shared
- * services; what is legacy-specific is only the wire: `initialize` capabilities, the 2025-11-25
- * experimental tasks (`params.task`, tasks/result — the SDK serves those over our registry),
- * resource-not-found as -32002.
- */
-export function makeMcpServer(engine, services = servicesFor(engine)) {
-  const server = new Server(SERVER_INFO, {
-    capabilities: {
-      tools: {},
-      resources: {},
-      tasks: { list: {}, cancel: {}, requests: { tools: { call: {} } } },
-      extensions: {
-        [UI_EXTENSION]: { mimeTypes: [APP_MIME] },
-        ...(services.skills ? { [SKILLS_EXTENSION]: {} } : {}),
-      },
-    },
-    instructions: services.instructions,
-    taskStore: services.tasks.legacyStore(),
-  });
-  const ui = () => clientSupportsUi(server.getClientCapabilities());
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = buildToolDefs(engine, { ui: ui(), legacyTasks: true });
-    logLine('list_tools', `→ ${tools.length} tools`);
-    return { tools };
-  });
-
-  server.setRequestHandler(CallToolRequestSchema, async (req, extra) => {
-    const { name, arguments: args, task } = req.params;
-    const structured = ui();
-    // 2025-11-25 experimental tasks: the CLIENT asked for a task — the call runs to its end in the
-    // background and the SDK's tasks/get / tasks/result / tasks/cancel read it from the registry
-    if (task && isCallableTool(engine, name)) {
-      const t = services.tasks.create({
-        owner: extra.sessionId || null,
-        ttlMs: task.ttl,
-        run: (signal) => runToCompletion(engine, name, args, { signal, structured, pollMs: services.tasks.pollIntervalMs }).then((r) => r.result),
-      });
-      logLine(name, `↪ task ${t.taskId}`);
-      return { task: services.tasks.legacy(t) };
-    }
-    // The call's cancellation reaches its dbt processes only while the call is in flight: a build
-    // handed back as a query_id is meant to outlive the call, and a later abort (the session being
-    // torn down) must not reach it.
-    const cancel = releasableSignal(extra.signal);
-    const token = extra._meta?.progressToken;
-    try {
-      const { result } = await runTool(engine, name, args, {
-        signal: cancel.signal,
-        structured,
-        onProgress: token !== undefined ? (p) => extra.sendNotification({ method: 'notifications/progress', params: { progressToken: token, ...p } }) : undefined,
-        progressEveryMs: services.progressEveryMs,
-      });
-      return result;
-    } finally {
-      cancel.release();
-    }
-  });
-
-  server.setRequestHandler(ListResourcesRequestSchema, async () => ({ resources: services.resources() }));
-  server.setRequestHandler(ListResourceTemplatesRequestSchema, async () => ({ resourceTemplates: services.templates() }));
-  server.setRequestHandler(ReadResourceRequestSchema, async (req) => {
-    const contents = services.read(req.params.uri);
-    // -32002 is this era's resource-not-found (2026-07-28 moved it to -32602)
-    if (!contents) throw new McpError(-32002, `Resource not found: ${req.params.uri}`, { uri: req.params.uri });
-    return { contents };
-  });
-  if (services.skills) {
-    server.setRequestHandler(SkillsListRequestSchema, async () => ({ skills: services.skills.list() }));
-    server.setRequestHandler(SkillsGetRequestSchema, async (req) => {
-      const s = services.skills.get(req.params.uri);
-      if (!s) throw new McpError(ErrorCode.InvalidParams, `Not a skill this server serves: ${req.params.uri}`);
-      return { skill: s };
-    });
-  }
-
-  return server;
+/** One MCP server over this engine — what the HTTP handler builds per request, and what an
+ *  in-process client (the tests) connects to directly. */
+export function makeMcpServer(engine, services = servicesFor(engine), { era } = {}) {
+  return createMcpServer(services, { era });
 }
 
 // THE CEILING ON WHAT A DEPLOYMENT MAY CONFIGURE. Both grace windows (how long an SQL build and how
@@ -247,152 +160,59 @@ export async function makeEngine(opts = {}) {
   return engine;
 }
 
-// ── what the HTTP endpoint accepts before anything reaches the protocol ────────────────────
+// ── the HTTP endpoint ──────────────────────────────────────────────────────────────────────
 
 /** "a, b ,c" → ['a','b','c'] (empty → []). */
 const csv = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
 
-/**
- * The Origin rule (Streamable HTTP, both eras: "Servers MUST validate the Origin header … If the
- * Origin header is present and invalid, servers MUST respond with HTTP 403"). A request without an
- * Origin is not a browser page and passes — that is every native client and every hosted connector
- * calling from its own backend. A browser page passes only from a loopback origin (the MCP
- * Inspector, a local tool) or an origin the operator listed in MCP_ALLOWED_ORIGINS. "Same origin as
- * the Host header" is deliberately NOT a rule: under DNS rebinding the attacker's page and the Host
- * header agree, which is exactly the attack.
- */
-export function originAllowed(origin, allowed = []) {
-  if (origin === undefined || origin === null || origin === '') return true;
-  if (allowed.includes('*') || allowed.includes(origin)) return true;
-  try {
-    const { hostname } = new URL(origin);
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]' || hostname === '::1';
-  } catch { return false; }
-}
+// Hostnames a browser page may call from without being listed: the loopback names (the MCP
+// Inspector, a local tool). The SDK's Express app validates Origin by hostname.
+const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
 
+/**
+ * The Express app: `createMcpExpressApp` (the SDK's app factory — JSON body parsing, Host/Origin
+ * validation) with `createMcpHandler` mounted on /mcp.
+ *
+ * Origin is ALWAYS validated ("Servers MUST validate the Origin header"): a request without one —
+ * every native client, every hosted connector calling from its backend — passes; a browser page
+ * passes from a loopback origin or one listed in MCP_ALLOWED_ORIGINS; anything else is 403. (The
+ * SDK arms that check by itself only for a loopback bind, and a container binds 0.0.0.0 — so the
+ * list is passed explicitly.) MCP_ALLOWED_HOSTS adds the Host check.
+ */
 export function createApp(engine, opts = {}) {
   const services = opts.services || servicesFor(engine);
-  const allowedOrigins = opts.allowedOrigins ?? csv(process.env.MCP_ALLOWED_ORIGINS);
-  // Optional second fence against DNS rebinding: the Host header must be one the operator named.
-  // Off by default — behind a proxy the Host is whatever the proxy forwards.
+  const allowedOrigins = [...LOOPBACK, ...(opts.allowedOrigins ?? csv(process.env.MCP_ALLOWED_ORIGINS))];
   const allowedHosts = opts.allowedHosts ?? csv(process.env.MCP_ALLOWED_HOSTS);
-  const sessionIdleMs = opts.sessionIdleMs ?? (Number(process.env.MCP_SESSION_IDLE_SECONDS) || 3600) * 1000;
-  const maxSessions = opts.maxSessions ?? (Number(process.env.MCP_MAX_SESSIONS) || 500);
-
-  const app = express();
-  const rpcError = (res, status, code, message, data) => res.status(status).json({ jsonrpc: '2.0', error: { code, message, ...(data !== undefined ? { data } : {}) }, id: null });
-
-  // The fences come BEFORE the body is parsed: a refused request costs nothing.
-  app.use('/mcp', (req, res, next) => {
-    if (!originAllowed(req.headers.origin, allowedOrigins)) {
-      return rpcError(res, 403, -32000, `Forbidden: Origin '${req.headers.origin}' is not allowed. A browser page may call this server only from a loopback origin or one listed in MCP_ALLOWED_ORIGINS.`);
-    }
-    if (allowedHosts.length && !allowedHosts.includes(String(req.headers.host || '').toLowerCase())) {
-      return rpcError(res, 403, -32000, `Forbidden: Host '${req.headers.host}' is not allowed (MCP_ALLOWED_HOSTS).`);
-    }
-    return next();
+  const app = createMcpExpressApp({
+    host: opts.host ?? process.env.HOST ?? '127.0.0.1',
+    allowedOrigins,
+    ...(allowedHosts.length ? { allowedHosts } : {}),
+    jsonLimit: '4mb',
   });
-  app.use(express.json({ limit: '4mb' }));
-  // No authentication: run behind your own network boundary / proxy as needed.
-
-  // ── LEGACY sessions (2025-11-25 and earlier) ──
-  // THE SESSIONS LIVE IN THIS PROCESS, so every deploy invalidates the ids already in clients'
-  // hands — and what the client does about that is decided by the STATUS CODE. The spec is exact:
-  // an unknown session id is 404, and only a 404 makes a client start a new session ("When a
-  // client receives HTTP 404 in response to a request containing an Mcp-Session-Id, it MUST start
-  // a new session by sending a new InitializeRequest without a session ID attached"). A 400 says
-  // "your request was malformed", which the client can only answer by retrying the same request —
-  // which is how one user spent 16 minutes getting an error on every call after a restart, with a
-  // healthy server, until the connector was re-added by hand.
-  //
-  // A session nobody uses is closed after MCP_SESSION_IDLE_SECONDS, and at most MCP_MAX_SESSIONS
-  // are held (the least recently used goes first): a client that re-initializes without DELETE —
-  // most of them, after a network blip — would otherwise leave a server and a transport behind
-  // for the life of the process. A client whose session was reclaimed gets the same 404 and
-  // re-initializes; the spec lets a server end a session at any time.
-  const sessions = new Map(); // sessionId -> { transport, lastSeen }
-  const gone = (res) => rpcError(res, 404, -32001, 'Session not found: this server restarted or the session expired. Start a new session by sending initialize (the Mcp-Session-Id header is ignored on initialize).');
-  const noSession = (res) => rpcError(res, 400, -32000, 'Bad Request: Mcp-Session-Id header is required — send initialize first (or send stateless 2026-07-28 requests with the protocol version in params._meta).');
-  const isInit = (body) => (Array.isArray(body) ? body.some(isInitializeRequest) : isInitializeRequest(body));
-  const closeSession = async (sid) => {
-    const s = sessions.get(sid);
-    if (!s) return;
-    sessions.delete(sid);
-    try { await s.transport.close(); } catch { /* closing is the point; a failed close is not the caller's problem */ }
-  };
-  const live = (sid) => {
-    const s = sid ? sessions.get(sid) : undefined;
-    if (s) s.lastSeen = Date.now();
-    return s?.transport;
-  };
-  const sweep = setInterval(() => {
-    const cutoff = Date.now() - sessionIdleMs;
-    for (const [sid, s] of sessions) if (s.lastSeen < cutoff) closeSession(sid);
-  }, Math.max(1000, Math.min(sessionIdleMs, 60000)));
-  sweep.unref?.();
-
-  const modern = modernHandler(services);
-
-  app.post('/mcp', async (req, res) => {
-    const sid = req.headers['mcp-session-id'];
-
-    // INITIALIZATION IS OUTSIDE THE SESSION RULES ("Servers that require a session ID SHOULD
-    // respond to requests without an Mcp-Session-Id header (other than initialization) with 400"),
-    // so a stale header never blocks a client from getting a new session. It is ignored even when
-    // it names a LIVE session: re-initializing replaces that session (the old transport is closed
-    // rather than left behind), which is one more way out of the trap and costs nothing.
-    if (isInit(req.body)) {
-      if (sid && sessions.has(sid)) await closeSession(sid);
-      if (sessions.size >= maxSessions) {
-        const oldest = [...sessions.entries()].sort((a, b) => a[1].lastSeen - b[1].lastSeen)[0];
-        if (oldest) await closeSession(oldest[0]);
-      }
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id) => { sessions.set(id, { transport, lastSeen: Date.now() }); },
-      });
-      transport.onclose = () => { if (transport.sessionId && sessions.get(transport.sessionId)?.transport === transport) sessions.delete(transport.sessionId); };
-      const server = makeMcpServer(engine, services);
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-      return;
-    }
-
-    const transport = live(sid);
-    if (transport) { await transport.handleRequest(req, res, req.body); return; }
-    // ── MODERN (2026-07-28): stateless, no session. A stale Mcp-Session-Id is ignored, as that
-    // revision tells a server to. ──
-    if (isModernRequest(req)) { await modern(req, res); return; }
-    (sid ? gone : noSession)(res);
+  const handler = createMcpHandler(({ era }) => createMcpServer(services, { era }), {
+    onerror: (e) => logLine('mcp', `✗ ${e?.message || e}`),
   });
-
-  // The stream (GET) and the explicit teardown (DELETE) answer the same way: an id this process
-  // does not know is 404 — never the Express default HTML page, which a client cannot parse.
-  const sessionEndpoint = async (req, res) => {
-    const sid = req.headers['mcp-session-id'];
-    const transport = live(sid);
-    if (!transport) { (sid ? gone : noSession)(res); return; }
-    await transport.handleRequest(req, res);
-  };
-  app.get('/mcp', sessionEndpoint);
-  app.delete('/mcp', sessionEndpoint);
+  const node = toNodeHandler(handler);
+  app.all('/mcp', (req, res) => {
+    if (answerTaskRequest(services.tasks, req, res)) return;
+    void node(req, res, req.body);
+  });
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
-  // EVERY failure on the MCP endpoint is a JSON-RPC error a client can parse — including the ones
-  // raised before the protocol sees the request: a body that is not JSON (-32700, the JSON-RPC
-  // parse error), a body over the size limit, and anything a handler throws. Express' default is
-  // an HTML page, the same trap as a 400 for a dead session.
+  // EVERY failure on the endpoint is a JSON-RPC error a client can parse, including the ones raised
+  // before the protocol sees the request: a body that is not JSON (-32700, the JSON-RPC parse
+  // error), a body over the size limit. Express' default is an HTML page.
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
     if (res.headersSent) { res.end(); return; }
-    if (err?.type === 'entity.parse.failed') return rpcError(res, 400, -32700, `Parse error: the body is not valid JSON (${err.message})`);
-    if (err?.type === 'entity.too.large') return rpcError(res, 413, -32600, `Invalid Request: the body is larger than the ${err.limit ? `${Math.round(err.limit / 1024 / 1024)} MB` : 'configured'} limit`);
+    const reply = (status, code, message) => res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
+    if (err?.type === 'entity.parse.failed') return reply(400, -32700, `Parse error: the body is not valid JSON (${err.message})`);
+    if (err?.type === 'entity.too.large') return reply(413, -32600, 'Invalid Request: the body is larger than the 4 MB limit');
     logLine('http', `✗ ${req.method} ${req.path}: ${err?.stack || err}`);
-    return rpcError(res, err?.status && err.status < 500 ? err.status : 500, -32603, `Internal error: ${err?.message || err}`);
+    return reply(err?.status && err.status < 500 ? err.status : 500, -32603, `Internal error: ${err?.message || err}`);
   });
 
-  app.locals.close = () => { clearInterval(sweep); for (const sid of [...sessions.keys()]) closeSession(sid); };
-  app.locals.sessions = sessions;
+  app.locals.close = () => handler.close();
   return app;
 }
 

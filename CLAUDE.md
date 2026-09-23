@@ -108,13 +108,15 @@
   the analysis really is per source row.
 
 ## Protocol surface
-- ONE SURFACE, TWO ERAS. `/mcp` serves the legacy session protocol (SDK, `initialize`) and the
-  stateless 2026-07-28 revision (`src/mcp-modern.js`). WHAT is offered — tool definitions, how a call
-  runs, resources, skills, the Apps view, tasks — lives once in `src/mcp-surface.js` (+ `tasks.js`,
-  `skills.js`, `apps.js`); an era module only translates the wire. A new capability is added to the
-  surface, never to one era.
+- THE OFFICIAL SDK OWNS THE PROTOCOL. The server is built on `@modelcontextprotocol/server` v2
+  (protocol 2026-07-28; it also serves clients that open with the 2025 `initialize`, from the same
+  factory). `src/mcp-server.js` only says WHAT is offered — tools, resources, skills, the Apps view,
+  tasks — using `src/mcp-surface.js` (+ `tasks.js`, `skills.js`, `apps.js`). Do NOT hand-roll wire
+  behaviour the SDK provides (headers, envelope, discover, sessions, error codes); the one exception
+  is `src/mcp-tasks.js`, which exists only until the SDK serves the Tasks extension.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine.get_recipe`, the python
-  guide, a tool's result); they never carry text or numbers of their own.
+  guide, a tool's result); they never carry text or numbers of their own. The Apps view follows the
+  official ext-apps templates; its build is checked in and held to its sources by a test.
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

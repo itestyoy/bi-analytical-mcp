@@ -19,7 +19,10 @@
 
 /** A string constrained to `values` — or an open string when the catalog offers none. */
 export function strEnum(values, description) {
-  return values?.length ? { type: 'string', enum: values, description } : { type: 'string', description };
+  // a missing description is an ABSENT key, never `description: undefined` — that is not JSON, and
+  // a client validating the tool list as an object (not as parsed text) rejects the whole list
+  const desc = description === undefined ? {} : { description };
+  return values?.length ? { type: 'string', enum: values, ...desc } : { type: 'string', ...desc };
 }
 
 /** A choice between `branches` — or undefined when there is nothing to choose between. */
@@ -46,7 +49,12 @@ export function assertSchemaSound(schema, path = '#') {
     for (const k of ['oneOf', 'anyOf', 'allOf']) {
       if (Array.isArray(node[k]) && node[k].length === 0) bad.push(`${at}/${k} is empty`);
     }
-    for (const [k, v] of Object.entries(node)) walk(v, `${at}/${k}`);
+    for (const [k, v] of Object.entries(node)) {
+      // `undefined` is not a JSON value: dropped by serialization, rejected by a client that
+      // validates the list as objects (the SDK's in-memory transport does)
+      if (v === undefined) bad.push(`${at}/${k} is undefined`);
+      else walk(v, `${at}/${k}`);
+    }
   };
   walk(schema, path);
   return bad;

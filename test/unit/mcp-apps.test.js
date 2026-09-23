@@ -1,17 +1,21 @@
 // MCP APPS — a tool result rendered as an interactive view in the host's conversation.
 //
-// Two halves. The protocol half (lifecycle): the tools whose results have a view carry
-// `_meta.ui.resourceUri` for a host that declared the extension and NOT for one that did not (the
-// spec asks servers to check); the resource is `text/html;profile=mcp-app` and is a complete
-// document; `structuredContent` — which the host gives the view and keeps out of the model's
-// context — is sent only to a host that renders it. The data half: the view model
+// Two halves. The protocol half (lifecycle): the viewed tools carry the view in both spellings the
+// official ext-apps `registerAppTool` writes (`_meta.ui.resourceUri` and the flat `ui/resourceUri`
+// older hosts read), for every client in either protocol revision; the resource is one
+// `text/html;profile=mcp-app` document; the result carries `structuredContent` next to its text;
+// and the checked-in build of the view is the build of its sources. The data half: the view model
 // (src/apps/result-view-model.js, the function the page runs) turns a result into the numbers the
 // chart draws, and those are the numbers in the result.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { startServer, UI_CAPS } from '../helpers/mcp-http.js';
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { startServer } from '../helpers/mcp-http.js';
 import { buildViewModel } from '../../src/apps/result-view-model.js';
+import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
 
 let s;
 before(async () => { s = await startServer(); });
@@ -19,34 +23,41 @@ after(async () => { await s.stop(); });
 
 const VIEWED = ['query_semantic_model', 'get_query_result', 'experiment'];
 
-test('the viewed tools carry the view only for a host that declared the extension (both eras)', async () => {
-  const withUi = (await s.modern('tools/list', {}, { caps: UI_CAPS })).body.result.tools;
-  const without = (await s.modern('tools/list')).body.result.tools;
-  for (const t of withUi) assert.equal(t._meta?.ui?.resourceUri, VIEWED.includes(t.name) ? 'ui://betti/result-view' : undefined, t.name);
-  assert.ok(without.every((t) => !t._meta?.ui), 'no view for a host that cannot render it');
-
-  const legacyUi = await s.legacyClient(UI_CAPS);
-  const legacyPlain = await s.legacyClient();
-  try {
-    assert.equal((await legacyUi.listTools()).tools.find((t) => t.name === 'experiment')._meta?.ui?.resourceUri, 'ui://betti/result-view');
-    assert.equal((await legacyPlain.listTools()).tools.find((t) => t.name === 'experiment')._meta?.ui, undefined);
-  } finally { await legacyUi.close(); await legacyPlain.close(); }
+test('the viewed tools carry the view in both spellings, for every client in both eras', async () => {
+  for (const era of ['legacy', 'modern']) {
+    const c = await s.client({ era });
+    for (const t of (await c.listTools()).tools) {
+      const want = VIEWED.includes(t.name) ? RESULT_VIEW_URI : undefined;
+      assert.equal(t._meta?.ui?.resourceUri, want, `${era} ${t.name}`);
+      assert.equal(t._meta?.['ui/resourceUri'], want, `${era} ${t.name} (flat key)`);
+    }
+  }
 });
 
-test('the view resource is an mcp-app HTML document', async () => {
-  const [c] = (await s.modern('resources/read', { uri: 'ui://betti/result-view' })).body.result.contents;
-  assert.equal(c.mimeType, 'text/html;profile=mcp-app');
-  assert.ok(c.text.startsWith('<!DOCTYPE html>') && c.text.trimEnd().endsWith('</html>'));
-  assert.ok((await s.modern('resources/list')).body.result.resources.some((r) => r.uri === 'ui://betti/result-view'));
+test('the view resource is one mcp-app HTML document, listed and readable in both eras', async () => {
+  for (const era of ['legacy', 'modern']) {
+    const c = await s.client({ era });
+    assert.ok((await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI && r.mimeType === 'text/html;profile=mcp-app'), era);
+    const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
+    assert.equal(content.mimeType, 'text/html;profile=mcp-app');
+    assert.ok(content.text.startsWith('<!DOCTYPE html>') && /<\/html>\s*$/.test(content.text), `${era}: a complete document`);
+  }
 });
 
-test('structuredContent goes to a host that renders it, and equals the text the model reads', async () => {
+test('the result carries structuredContent equal to the text the model reads (both eras)', async () => {
   const args = { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 };
-  const ui = (await s.modern('tools/call', { name: 'experiment', arguments: args }, { caps: UI_CAPS })).body.result;
-  const plain = (await s.modern('tools/call', { name: 'experiment', arguments: args })).body.result;
-  assert.deepEqual(ui.structuredContent, JSON.parse(ui.content[0].text));
-  assert.equal(ui.structuredContent.n_per_group, 3841);
-  assert.equal(plain.structuredContent, undefined);
+  for (const era of ['legacy', 'modern']) {
+    const r = await (await s.client({ era })).callTool({ name: 'experiment', arguments: args });
+    assert.deepEqual(r.structuredContent, JSON.parse(r.content[0].text), era);
+    assert.equal(r.structuredContent.n_per_group, 3841, era);
+  }
+});
+
+test('the checked-in view is the build of its sources (npm run build:app)', async () => {
+  const { build } = await import('vite');
+  const out = mkdtempSync(join(tmpdir(), 'view-build-'));
+  await build({ configFile: new URL('../../src/apps/result-view/vite.config.js', import.meta.url).pathname, build: { outDir: out, emptyOutDir: true }, logLevel: 'silent' });
+  assert.equal(readFileSync(join(out, 'mcp-app.html'), 'utf8'), readFileSync(RESULT_VIEW_FILE, 'utf8'), 'rebuild the view: npm run build:app');
 });
 
 test('view model: a time series by segment is one line per segment, with the rows\' numbers', () => {

@@ -155,17 +155,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The lift interval stretches with its card; strokes keep their width */
-.interval {
-  display: block;
-  width: 100%;
-  height: 24px;
-
-  line {
-    vector-effect: non-scaling-stroke;
-  }
-}
-
 /* A status never relies on color alone: an icon and a label carry it */
 .status {
   font-size: var(--font-text-sm-size);
@@ -189,6 +178,245 @@
     content: "•";
     color: var(--color-text-tertiary);
   }
+}
+
+/*
+ * A/B result: one full-width card per variant, stacked, so the intervals share one horizontal scale
+ * and line up. Inside a card: the verdict (header), the numbers (figures), the interval (plot), the
+ * test's fine print (meta) — the order a reader asks in. Significance changes the accent, never the
+ * meaning: the chip always says it in words and with an icon.
+ */
+.ab-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+}
+
+.ab-summary {
+  margin: 0;
+  font-size: var(--font-text-sm-size);
+  font-weight: var(--font-weight-medium);
+  color: var(--color-text-secondary);
+}
+
+.ab-card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  padding: var(--spacing-md);
+  border: var(--border-width-regular) solid var(--color-border-secondary);
+  border-radius: var(--border-radius-lg);
+  background-color: var(--color-background-primary);
+
+  &.ab-card-increase,
+  &.ab-card-decrease {
+    border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border-secondary));
+  }
+}
+
+.ab-card-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing-xs) var(--spacing-sm);
+}
+
+.ab-card-title {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--font-text-md-size);
+  line-height: var(--font-text-md-line-height);
+  font-weight: var(--font-weight-semibold);
+  overflow-wrap: anywhere;
+}
+
+.ab-card-vs {
+  font-weight: var(--font-weight-normal);
+  color: var(--color-text-secondary);
+}
+
+.verdict {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: 2px var(--spacing-sm);
+  border-radius: 999px;
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  font-weight: var(--font-weight-semibold);
+  white-space: nowrap;
+
+  &.verdict-increase,
+  &.verdict-decrease {
+    color: var(--color-text-on-accent);
+    background-color: var(--color-accent);
+  }
+
+  &.verdict-no_difference {
+    color: var(--color-text-secondary);
+    background-color: var(--color-background-secondary);
+    box-shadow: inset 0 0 0 var(--border-width-regular) var(--color-border-secondary);
+  }
+}
+
+.verdict-icon {
+  font-weight: var(--font-weight-bold);
+}
+
+/*
+ * The lift leads; the two groups follow as ONE pair, so on a narrow card they wrap under the lift
+ * together instead of splitting 2 + 1. Figures take their natural width — spread across a wide
+ * card, numbers that belong together would drift apart.
+ */
+.figures {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--spacing-md) calc(var(--spacing-lg) * 2);
+}
+
+.figure-pair {
+  display: flex;
+  gap: var(--spacing-lg);
+
+  .figure + .figure {
+    padding-left: var(--spacing-lg);
+    border-left: var(--border-width-regular) solid var(--color-border-secondary);
+  }
+}
+
+.figure {
+  min-width: 0;
+
+  > * {
+    margin: 0;
+  }
+}
+
+.figure-label {
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+  color: var(--color-text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.figure-value {
+  font-size: var(--font-heading-md-size);
+  line-height: var(--font-heading-md-line-height);
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+.figure-lead .figure-value {
+  font-size: var(--font-heading-xl-size);
+  line-height: var(--font-heading-xl-line-height);
+}
+
+.figure-sub {
+  font-size: var(--font-text-sm-size);
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Interval plot, in HTML so it stretches with the card and its labels stay crisp */
+.ci-plot {
+  --ci-color: var(--color-text-tertiary);
+
+  &.ci-significant {
+    --ci-color: var(--color-accent);
+  }
+}
+
+.ci-track {
+  position: relative;
+  height: 20px;
+
+  /* the axis itself */
+  &::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    border-top: var(--border-width-regular) solid var(--color-border-secondary);
+  }
+}
+
+.ci-zero {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  border-left: var(--border-width-regular) dashed var(--color-text-tertiary);
+}
+
+.ci-range {
+  position: absolute;
+  top: 50%;
+  height: 6px;
+  transform: translateY(-50%);
+  border-radius: 3px;
+  background-color: color-mix(in srgb, var(--ci-color) 55%, transparent);
+}
+
+.ci-point {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  background-color: var(--ci-color);
+  /* a ring in the surface color keeps the dot readable over the bar and the zero line */
+  box-shadow: 0 0 0 2px var(--color-background-primary);
+}
+
+.ci-axis {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: var(--spacing-sm);
+  margin-top: 2px;
+  font-size: var(--font-text-xs-size);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+
+  > :last-child {
+    text-align: right;
+  }
+}
+
+.ab-card-meta {
+  margin: 0;
+  padding-top: var(--spacing-sm);
+  border-top: var(--border-width-regular) solid var(--color-border-secondary);
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The server's advice, folded under the result */
+.notes {
+  font-size: var(--font-text-sm-size);
+  color: var(--color-text-secondary);
+
+  summary {
+    cursor: pointer;
+    font-weight: var(--font-weight-medium);
+  }
+
+  summary:focus-visible {
+    outline: calc(var(--border-width-regular) * 2) solid var(--color-ring-primary);
+    outline-offset: var(--border-width-regular);
+    border-radius: var(--border-radius-sm);
+  }
+}
+
+.notes-list {
+  margin: var(--spacing-xs) 0 0;
+  padding-left: var(--spacing-lg);
 }
 
 /* Table */
@@ -352,5 +580,9 @@
 
   .card-value {
     font-size: var(--font-heading-md-size);
+  }
+
+  .ab-card {
+    padding: var(--spacing-sm);
   }
 }

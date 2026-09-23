@@ -2,9 +2,8 @@
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
 // WHAT to render: a table (always, for rows), a chart when the data has a shape a chart shows
-// better than a table does, an A/B card, a value distribution. It is one self-contained function
-// on purpose: the page inlines its source (Function.prototype.toString), so the browser runs the
-// exact code the unit tests run in node — there is no second copy to drift.
+// better than a table does, an A/B card, a value distribution. The view imports it and the unit
+// tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
 // Everything below is data in, data out: no DOM, no module scope.
 
@@ -33,19 +32,68 @@ export function buildViewModel(toolName, result, toolInput) {
 
   // ── A/B: significance per variant (experiment analyze) ──
   if (toolName === 'experiment' && Array.isArray(result.results)) {
-    const variants = result.results.map((r) => ({
-      variant: r.variant,
-      control_value: num(r.control_rate ?? r.control_mean ?? r.control_value),
-      variant_value: num(r.variant_rate ?? r.variant_mean ?? r.variant_value),
-      lift: num(r.absolute_lift ?? r.lift),
-      relative_lift: num(r.relative_lift),
-      ci: Array.isArray(r.confidence_interval) ? r.confidence_interval.map(num) : null,
-      relative_ci: Array.isArray(r.relative_lift_ci) ? r.relative_lift_ci.map(num) : null,
-      p_value: num(r.p_value),
-      p_value_adjusted: num(r.p_value_adjusted),
-      significant: r.significant_adjusted ?? r.significant ?? null,
-    }));
-    return { kind: 'experiment', title: `A/B result · ${result.metric || ''}`.trim(), metric: result.metric, confidence: num(result.confidence), control: result.control || 'control', correction: result.correction || null, variants, notes: result.recommendations || [] };
+    // group sizes are the caller's input, not part of the test result: matched by label, else by
+    // position (results come back in the order the variants went in)
+    const input = isObj(toolInput) ? toolInput : {};
+    const inVariants = Array.isArray(input.variants) ? input.variants : [];
+    const nControl = num(input.control?.n);
+    const variants = result.results.map((r, i) => {
+      const lift = num(r.absolute_lift ?? r.lift);
+      const relative = num(r.relative_lift);
+      const ci = Array.isArray(r.confidence_interval) ? r.confidence_interval.map(num) : null;
+      const relativeCi = Array.isArray(r.relative_lift_ci) ? r.relative_lift_ci.map(num) : null;
+      const adjusted = num(r.p_value_adjusted);
+      const significant = !!(r.significant_adjusted ?? r.significant);
+      // the interval is drawn in the SAME unit as the headline: relative when both the relative lift
+      // and its interval exist, absolute otherwise — never a relative number over an absolute bar
+      const useRelative = relative !== null && relativeCi && relativeCi.every((v) => v !== null);
+      const effect = useRelative
+        ? { unit: 'relative', point: relative, lo: relativeCi[0], hi: relativeCi[1] }
+        : lift !== null && ci && ci.every((v) => v !== null) ? { unit: 'absolute', point: lift, lo: ci[0], hi: ci[1] } : null;
+      const inV = inVariants.find((v) => isObj(v) && v.label === r.variant) ?? inVariants[i];
+      return {
+        variant: r.variant,
+        control_value: num(r.control_rate ?? r.control_mean ?? r.control_ratio ?? r.control_value),
+        variant_value: num(r.variant_rate ?? r.variant_mean ?? r.variant_ratio ?? r.variant_value),
+        n_control: nControl,
+        n_variant: num(inV?.n),
+        lift,
+        relative_lift: relative,
+        ci,
+        relative_ci: relativeCi,
+        effect,
+        p_value: num(r.p_value),
+        p_value_adjusted: adjusted,
+        p_value_sequential: num(r.p_value_sequential),
+        significant,
+        // a significant result has a direction; whether that direction is GOOD depends on the
+        // metric (conversion up is good, crash rate up is not), which the test does not know
+        verdict: !significant ? 'no_difference' : (lift ?? 0) >= 0 ? 'increase' : 'decrease',
+        variance_reduction: num(r.variance_reduction),
+      };
+    });
+    // one symmetric scale for every variant, so their intervals line up and compare at a glance
+    const extent = Math.max(0, ...variants.flatMap((v) => (v.effect ? [Math.abs(v.effect.lo), Math.abs(v.effect.hi), Math.abs(v.effect.point)] : [])));
+    const nice = (x) => {
+      if (!(x > 0)) return 1;
+      const p = 10 ** Math.floor(Math.log10(x));
+      return [1, 2, 2.5, 5, 10].map((m) => m * p).find((m) => m >= x);
+    };
+    const metricLabel = { proportion: 'conversion rate', mean: 'mean', ratio: 'ratio', cuped: 'mean (CUPED-adjusted)' }[result.metric] || result.metric || 'metric';
+    return {
+      kind: 'experiment',
+      title: `A/B test · ${metricLabel}`,
+      metric: result.metric,
+      metric_label: metricLabel,
+      confidence: num(result.confidence),
+      alternative: result.alternative || null,
+      control: result.control || 'control',
+      correction: result.correction && result.correction !== 'none' ? result.correction : null,
+      variants,
+      significant_count: variants.filter((v) => v.significant).length,
+      scale: nice(extent * 1.1),
+      notes: result.recommendations || [],
+    };
   }
   // ── A/B: sample-ratio check ──
   if (toolName === 'experiment' && Array.isArray(result.groups) && 'srm_detected' in result) {

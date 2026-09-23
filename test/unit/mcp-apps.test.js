@@ -95,6 +95,32 @@ test('view model: the A/B card carries the test\'s own numbers', async () => {
   assert.equal(v.p_value, r.results[0].p_value);
 });
 
+test('view model: each A/B variant carries its verdict, its interval in the headline\'s unit, its group sizes, on one shared scale', async () => {
+  const args = { action: 'analyze', metric: 'proportion', control: { n: 5000, conversions: 500 }, variants: [{ label: 'b', n: 5020, conversions: 580 }, { label: 'c', n: 4980, conversions: 470 }] };
+  const r = await s.engine.experiment(args);
+  const m = buildViewModel('experiment', r, args);
+  const [b, c] = m.variants;
+  const [rb, rc] = r.results;
+  assert.equal(m.significant_count, r.results.filter((x) => x.significant_adjusted).length);
+  // the verdict follows the multiplicity-corrected significance and the sign of the lift
+  assert.equal(b.verdict, rb.significant_adjusted ? (rb.absolute_lift >= 0 ? 'increase' : 'decrease') : 'no_difference');
+  assert.equal(c.verdict, rc.significant_adjusted ? (rc.absolute_lift >= 0 ? 'increase' : 'decrease') : 'no_difference');
+  // the plotted interval is the RELATIVE one, the same unit as the headline lift
+  assert.deepEqual(b.effect, { unit: 'relative', point: rb.relative_lift, lo: rb.relative_lift_ci[0], hi: rb.relative_lift_ci[1] });
+  // group sizes come from the call's input, matched to the variant
+  assert.deepEqual([b.n_control, b.n_variant, c.n_variant], [5000, 5020, 4980]);
+  // one scale holds every interval of every variant
+  for (const v of m.variants) assert.ok(Math.abs(v.effect.lo) <= m.scale && Math.abs(v.effect.hi) <= m.scale);
+});
+
+test('view model: a mean with no relative interval plots the absolute one', async () => {
+  const args = { action: 'analyze', metric: 'mean', control: { n: 4000, mean: 0, stddev: 1 }, variants: [{ label: 'v', n: 4000, mean: 0.1, stddev: 1 }] };
+  const r = await s.engine.experiment(args);
+  const [v] = buildViewModel('experiment', r, args).variants;
+  assert.equal(r.results[0].relative_lift_ci, null);
+  assert.deepEqual(v.effect, { unit: 'absolute', point: r.results[0].absolute_lift, lo: r.results[0].confidence_interval[0], hi: r.results[0].confidence_interval[1] });
+});
+
 test('view model: a sample-size plan carries the plan\'s own numbers', async () => {
   const r = await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
   const m = buildViewModel('experiment', r);

@@ -1,8 +1,14 @@
 /**
  * @file Query Result view — three cards inside the host's conversation: a CHART (a time series or a
- * breakdown, its rows folded underneath as a data table with filter, sorting and paging), an A/B
- * TEST (a stat card per variant), a FUNNEL (steps, conversion, the biggest drop). Any other result
- * draws nothing: the tool's text answer is the whole reply.
+ * breakdown, its rows folded underneath as a data table with filter and sorting), an A/B TEST (a
+ * stat card per variant), a FUNNEL (steps, conversion, the biggest drop). Any other result draws
+ * nothing: the tool's text answer is the whole reply.
+ *
+ * IT ONLY DRAWS. The one input is the tool result the host delivers (ontoolresult); the view calls
+ * no server tool, reads no resource, sends no message to the model and opens no link — and has no
+ * network at all (the page's CSP, and the resource's declared `csp`). Everything interactive here —
+ * sorting, filtering, the legend, fullscreen — works on the data already in the page or on the
+ * host's own frame.
  *
  * WHAT to show is decided by buildViewModel (src/apps/result-view-model.js), a pure function the
  * unit tests run in node on real tool results; this file only draws it. Structure follows the
@@ -56,8 +62,6 @@ const cardsSection = document.getElementById('cards-section');
 const dataLabel = document.getElementById('data-label');
 const filterInput = document.getElementById('filter');
 const tableCount = document.getElementById('table-count');
-const prevPageBtn = document.getElementById('prev-page-btn');
-const nextPageBtn = document.getElementById('next-page-btn');
 const tableEl = document.getElementById('table');
 const notesEl = document.getElementById('notes');
 const notesList = document.getElementById('notes-list');
@@ -67,8 +71,6 @@ const fullscreenBtn = document.getElementById('fullscreen-btn');
 document.getElementById('filter-icon').append(icon('search'));
 document.getElementById('notes-chevron').append(icon('chevron-down'));
 document.getElementById('data-chevron').append(icon('chevron-down'));
-prevPageBtn.prepend(icon('chevron-left'));
-nextPageBtn.append(icon('chevron-right'));
 
 // App state
 const state = {
@@ -359,11 +361,6 @@ chartCanvas.addEventListener('mouseleave', () => { chartTooltip.hidden = true; }
 function renderTable(model) {
   dataLabel.textContent = `Data · ${integerFormat.format(model.rows.length)} row${model.rows.length === 1 ? '' : 's'}`;
   filterInput.value = state.filter;
-  const canCall = !!app.getHostCapabilities()?.serverTools;
-  nextPageBtn.hidden = !(model.nextPage && canCall);
-  prevPageBtn.hidden = !(model.prevPage && canCall);
-  nextPageBtn.disabled = false;
-  prevPageBtn.disabled = false;
   drawRows(model);
 }
 
@@ -426,25 +423,6 @@ filterInput.addEventListener('input', () => {
   state.filter = filterInput.value;
   if (state.model?.columns) drawRows(state.model);
 });
-
-async function goToPage(target, btn) {
-  if (!target) return;
-  btn.disabled = true;
-  try {
-    log.info('Fetching a page:', target.arguments);
-    const result = await app.callServerTool(target);
-    state.toolInput = target.arguments;
-    state.lastResult = result;
-    render(result);
-  } catch (e) {
-    log.error(e);
-    btn.disabled = false;
-    showAlert({ title: 'The page could not be fetched', description: e.message, variant: 'destructive', iconName: 'circle-alert' });
-  }
-}
-
-nextPageBtn.addEventListener('click', () => goToPage(state.model?.nextPage, nextPageBtn));
-prevPageBtn.addEventListener('click', () => goToPage(state.model?.prevPage, prevPageBtn));
 
 // ── A/B result ────────────────────────────────────────────────────────────────────────────────
 //

@@ -609,30 +609,11 @@
   }
 }
 
-.data-table-footer {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: space-between;
-  gap: calc(var(--space) * 2);
-}
-
 .data-table-count {
-  flex: 1;
   font-size: var(--font-text-sm-size);
   line-height: var(--font-text-sm-line-height);
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
-}
-
-.data-table-pager {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--space) * 2);
-
-  &:not(:has(.btn:not([hidden]))) {
-    display: none;
-  }
 }
 
 .empty-cell {

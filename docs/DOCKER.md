@@ -154,10 +154,14 @@ the plain tools stay exactly as they were for every client that does not:
 - **Apps** (`io.modelcontextprotocol/ui`) — `query_semantic_model`, `get_query_result` and
   `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`),
   and it draws exactly three cards: a CHART (a time series or a breakdown, its rows folded underneath
-  as a filterable, sortable, pageable table), an A/B TEST (a stat card per variant: lift, interval,
+  as a filterable, sortable table), an A/B TEST (a stat card per variant: lift, interval,
   verdict, the groups), a FUNNEL (steps, share of the first and of the previous, the biggest drop).
   Every other result — a failure, a build still running, SQL, a sample-size plan, a split check,
   rows with no chart shape — draws nothing (the view reports 0px) and the text answer stands alone.
+  The view ONLY DRAWS: it reads the result the host hands it and nothing else. Every tool declares
+  `_meta.ui.visibility: ["model"]` (a view may not call it), the view resource declares an empty
+  `csp` (no connect, resource or frame origin) and the page carries the same Content-Security-Policy
+  itself, and the view's code calls no server tool, resource, model message or link.
   (`semantic_index` has no view on purpose: it is the most frequent call and a view on every
   exploration step would bury the conversation.) The view is built like the official MCP Apps
   examples — the ext-apps `App` class, host theme and style variables, shadcn/ui components,

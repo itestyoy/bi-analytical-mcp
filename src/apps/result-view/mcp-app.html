@@ -4,6 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light dark">
+  <!-- The view only draws: no network of any kind (fetch, XHR, WebSocket, remote script, image,
+       frame, form). Inline script and styles are the single-file build itself and the host's
+       theme; fonts may come from the host's own stylesheet. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data: https:; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
   <title>Query Result</title>
 </head>
 <body>
@@ -45,13 +49,7 @@
               <tbody></tbody>
             </table>
           </div>
-          <div class="data-table-footer">
-            <p id="table-count" class="data-table-count"></p>
-            <div class="data-table-pager">
-              <button id="prev-page-btn" class="btn btn-outline btn-sm" type="button" hidden>Previous</button>
-              <button id="next-page-btn" class="btn btn-outline btn-sm" type="button" hidden>Next</button>
-            </div>
-          </div>
+          <p id="table-count" class="data-table-count"></p>
         </div>
       </details>
     </section>

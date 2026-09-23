@@ -18,6 +18,9 @@ export default defineConfig({
     emptyOutDir: true,
     cssMinify: true,
     minify: true,
+    // no modulepreload polyfill: it is a fetch() of preload links — the single file has none, and
+    // the view carries no network code at all
+    modulePreload: { polyfill: false },
     rollupOptions: { input: join(root, 'mcp-app.html') },
   },
 });

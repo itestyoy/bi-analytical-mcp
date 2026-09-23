@@ -10,7 +10,7 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer } from '../helpers/mcp-http.js';
@@ -31,6 +31,24 @@ test('the viewed tools carry the view in both spellings, for every client in bot
       assert.equal(t._meta?.ui?.resourceUri, want, `${era} ${t.name}`);
       assert.equal(t._meta?.['ui/resourceUri'], want, `${era} ${t.name} (flat key)`);
     }
+  }
+});
+
+test('the view only draws: every tool is model-only, the view declares no network, its code calls nothing back', async () => {
+  for (const era of ['legacy', 'modern']) {
+    const c = await s.client({ era });
+    // a host refuses a view's tools/call to a tool that is not visible to "app"
+    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, ['model'], `${era} ${t.name}`);
+    const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
+    assert.deepEqual(content._meta?.ui?.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, `${era}: no origin of any kind`);
+  }
+  // the view's own code: no App method that reaches the server or the model, no network API
+  const REACHES_OUT = /\b(callServerTool|readServerResource|listServerResources|createSamplingMessage|sendMessage|updateModelContext|openLink|downloadFile|sendLog|fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)\s*\(/;
+  const dir = new URL('../../src/apps/result-view/src/', import.meta.url).pathname;
+  const sources = [...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f)), new URL('../../src/apps/result-view-model.js', import.meta.url).pathname];
+  for (const file of sources) {
+    const hit = readFileSync(file, 'utf8').match(REACHES_OUT);
+    assert.equal(hit, null, `${file} calls ${hit?.[1]}`);
   }
 });
 
@@ -77,15 +95,10 @@ test('view model: a time series by segment is one line per segment, with the row
   assert.equal(m.rows.length, 4);
 });
 
-test('view model: a category and an amount is a bar per category; paging carries the next offset', () => {
+test('view model: a category and an amount is a bar per category', () => {
   const m = buildViewModel('get_query_result', { status: 'ready', columns: [{ name: 'country' }, { name: 'users' }], rows: [{ country: 'US', users: 100 }, { country: 'DE', users: 37 }], page: { limit: 2, offset: 0, has_more: true } }, { query_id: 'q-9', limit: 2 });
   assert.equal(m.kind, 'chart', 'a breakdown sorted by size is a chart, not a funnel');
   assert.deepEqual(m.chart.bars, [{ label: 'US', value: 100 }, { label: 'DE', value: 37 }]);
-  assert.deepEqual(m.nextPage, { name: 'get_query_result', arguments: { query_id: 'q-9', limit: 2, offset: 2 } });
-  assert.equal(m.prevPage, null); // the first page has nothing before it
-  const second = buildViewModel('get_query_result', { status: 'ready', columns: [{ name: 'country' }, { name: 'users' }], rows: [{ country: 'FR', users: 5 }], page: { limit: 2, offset: 2, has_more: false } }, { query_id: 'q-9', limit: 2, offset: 2 });
-  assert.equal(second.nextPage, null);
-  assert.deepEqual(second.prevPage, { name: 'get_query_result', arguments: { query_id: 'q-9', limit: 2, offset: 0 } });
 });
 
 test('view model: the A/B card carries the test\'s own numbers', async () => {

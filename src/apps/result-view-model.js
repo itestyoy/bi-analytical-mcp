@@ -177,15 +177,6 @@ export function buildViewModel(toolName, result, toolInput) {
     }
 
     const page = isObj(result.page) ? { limit: num(result.page.limit), offset: num(result.page.offset) ?? 0, has_more: !!result.page.has_more } : null;
-    // what re-fetching the NEXT page takes: the same call with a larger offset — only for
-    // get_query_result, the one tool whose rows are a stored result that pages without recomputing
-    const nextPage = toolName === 'get_query_result' && page?.has_more && isObj(toolInput)
-      ? { name: 'get_query_result', arguments: { ...toolInput, offset: (page.offset || 0) + (page.limit || rows.length) } }
-      : null;
-    // and the PREVIOUS one: the same call stepped back by a page, never before the first row
-    const prevPage = toolName === 'get_query_result' && page && page.offset > 0 && isObj(toolInput)
-      ? { name: 'get_query_result', arguments: { ...toolInput, offset: Math.max(0, page.offset - (page.limit || rows.length)) } }
-      : null;
     if (!chart) return none('no_chart_shape');
     return {
       kind: 'chart',
@@ -196,8 +187,6 @@ export function buildViewModel(toolName, result, toolInput) {
       sampled: !!result.sampled,
       approximate: !!result.approximate || !!result.provenance?.approximate,
       page,
-      nextPage,
-      prevPage,
       chart,
     };
   }

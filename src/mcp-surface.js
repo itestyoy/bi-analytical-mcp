@@ -123,9 +123,10 @@ function titleFromName(name) {
 }
 
 /**
- * The advertised tools. A tool whose result has an Apps view carries `_meta.ui` for every client,
- * as the official ext-apps `registerAppTool` does: a host without the extension ignores it, so the
- * list is the same for everyone (and cacheable as such).
+ * The advertised tools. Every tool carries `_meta.ui` for every client — its visibility (model
+ * only), and for a tool whose result has an Apps view, the view — as the official ext-apps
+ * `registerAppTool` does: a host without the extension ignores it, so the list is the same for
+ * everyone (and cacheable as such).
  */
 export function buildToolDefs(engine) {
   return Object.entries(engine.schemas)
@@ -141,7 +142,7 @@ export function buildToolDefs(engine) {
         description: TOOL_DESCRIPTIONS[name] || name,
         inputSchema,
         annotations: { title, openWorldHint: false, ...(TOOL_BEHAVIOUR[name] || {}) },
-        ...(meta ? { _meta: meta } : {}),
+        _meta: meta,
       };
     });
 }

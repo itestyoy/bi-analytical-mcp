@@ -163,6 +163,9 @@ export function toCallToolResult(result) {
   return {
     content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
     ...(isPlainObject(result) ? { structuredContent: result } : {}),
+    // a result the engine RETURNED as a failure ({ ok: false, error }) — a build that failed, a
+    // query the warehouse refused — is a tool execution error like a thrown one (spec: isError)
+    ...(isPlainObject(result) && result.ok === false ? { isError: true } : {}),
   };
 }
 
@@ -212,8 +215,10 @@ export function isDetachedJob(raw) {
 
 const sleep = (ms, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) { reject(signal.reason || new Error('cancelled')); return; }
-  const t = setTimeout(resolve, ms);
-  signal?.addEventListener?.('abort', () => { clearTimeout(t); reject(signal.reason || new Error('cancelled')); }, { once: true });
+  // the abort hook goes when the timer fires: a poll loop of hundreds of sleeps keeps no listener
+  const onAbort = () => { clearTimeout(t); reject(signal.reason || new Error('cancelled')); };
+  const t = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve(); }, ms);
+  signal?.addEventListener?.('abort', onAbort, { once: true });
 });
 
 /**
@@ -224,9 +229,18 @@ export async function runToCompletion(engine, name, args, { signal, pollMs = 200
   const first = await runTool(engine, name, args, { signal });
   if (!isDetachedJob(first.raw)) return first;
   let job = first.raw;
-  while (isDetachedJob(job)) {
-    await sleep(pollMs, signal);
-    job = await withSignal(signal, () => engine.get_query_result({ query_id: first.raw.query_id }));
+  // Following the job has the same contract as the call itself: its failure — the job ended in
+  // error (a result with ok:false → isError), or the poll threw (the table vanished, a warehouse
+  // error) — is a TOOL error the caller reads, never a protocol fault or a 'completed' success.
+  try {
+    while (isDetachedJob(job)) {
+      await sleep(pollMs, signal);
+      job = await withSignal(signal, () => engine.get_query_result({ query_id: first.raw.query_id }));
+    }
+  } catch (err) {
+    const cancelled = !!signal?.aborted;
+    logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} while following ${first.raw.query_id}: ${err?.message || String(err)}`);
+    return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : (err?.stage || 'query'), err?.field), raw: null };
   }
   return { result: toCallToolResult(job), raw: job };
 }

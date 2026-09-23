@@ -108,3 +108,45 @@ test('a task follows a build the engine handed back as a query_id, and returns t
   assert.deepEqual(result.structuredContent.rows, rows);
   assert.equal(polls, 3);
 });
+
+test('a followed build that FAILS is a tool error, not a completed success', async () => {
+  const engine = {
+    schemas: { query_semantic_model: {} },
+    async query_semantic_model() { return { ok: true, status: 'running', query_id: 'q-2', table: 't' }; },
+    async get_query_result({ query_id }) { return { ok: false, status: 'error', query_id, error: { stage: 'materialize', message: 'dbt run failed' } }; },
+  };
+  const { result } = await runToCompletion(engine, 'query_semantic_model', {}, { pollMs: 5 });
+  assert.equal(result.isError, true);
+  assert.equal(payload(result).error.message, 'dbt run failed');
+});
+
+test('a poll that THROWS while following a build is a tool error the caller reads', async () => {
+  const engine = {
+    schemas: { query_semantic_model: {} },
+    async query_semantic_model() { return { ok: true, status: 'running', query_id: 'q-3', table: 't' }; },
+    async get_query_result() { throw Object.assign(new Error('relation "qr_x" does not exist'), { stage: 'query' }); },
+  };
+  const { result, raw } = await runToCompletion(engine, 'query_semantic_model', {}, { pollMs: 5 });
+  assert.equal(raw, null);
+  assert.equal(result.isError, true);
+  assert.equal(payload(result).error.stage, 'query');
+  assert.match(payload(result).error.message, /does not exist/);
+});
+
+test('following a long build leaves no abort listener behind on the task\'s signal', async () => {
+  let polls = 0;
+  const engine = {
+    schemas: { query_semantic_model: {} },
+    async query_semantic_model() { return { ok: true, status: 'running', query_id: 'q-4', table: 't' }; },
+    async get_query_result({ query_id }) { polls += 1; return polls < 40 ? { ok: true, status: 'running', query_id } : { ok: true, status: 'ready', query_id, rows: [] }; },
+  };
+  const ctl = new AbortController();
+  let live = 0;
+  const add = ctl.signal.addEventListener.bind(ctl.signal);
+  const remove = ctl.signal.removeEventListener.bind(ctl.signal);
+  ctl.signal.addEventListener = (type, fn, o) => { if (type === 'abort') live += 1; add(type, fn, o); };
+  ctl.signal.removeEventListener = (type, fn, o) => { if (type === 'abort') live -= 1; remove(type, fn, o); };
+  await runToCompletion(engine, 'query_semantic_model', {}, { pollMs: 1, signal: ctl.signal });
+  assert.equal(polls, 40);
+  assert.ok(live <= 1, `listeners still attached after 40 polls: ${live}`);
+});

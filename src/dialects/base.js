@@ -6,6 +6,7 @@
 //   2. Lowering a logical pipeline (an ordered op IR) to SQL — Postgres lowers to
 //      a chained-CTE; BigQuery lowers to native pipe syntax. The op IR is shared;
 //      only the assembly differs, so a stage is written once and runs on both.
+import { inertLiteral } from '../jinja-inert.js';
 
 const NUMERIC_TYPES = new Set(['int', 'integer', 'numeric', 'float', 'double', 'bigint']);
 const TIME_TYPES = new Set(['date', 'timestamp', 'timestamptz', 'timestamp_ntz', 'timestamp_tz', 'datetime', 'time']);
@@ -27,7 +28,8 @@ export class Dialect {
     if (value === null || value === undefined) return 'NULL';
     if (typeof value === 'number') return String(value);
     if (typeof value === 'boolean') return value ? 'TRUE' : 'FALSE';
-    return `'${String(value).replace(/'/g, "''")}'`;
+    // a literal lands in a file dbt renders as Jinja: an opener in the value never reaches the file
+    return inertLiteral(String(value), (v) => `'${v.replace(/'/g, "''")}'`);
   }
 
   /** Validate a SQL identifier (column/alias/json key) — guards injection. */
@@ -81,6 +83,16 @@ export class Dialect {
   }
 
   /**
+   * A row's time inside a version's validity window — the ONE spelling every join form uses.
+   * Half-open at the END: a CURRENT version has no end yet (dbt snapshots write NULL into
+   * dbt_valid_to), and `BETWEEN … AND NULL` is never true — the plain form drops exactly the rows a
+   * "what is it NOW" question is about.
+   */
+  validityWindow(value, from, to) {
+    return `${value} >= ${from} AND (${to} IS NULL OR ${value} <= ${to})`;
+  }
+
+  /**
    * The CTE form of a pipeline `join` op: base row plus exactly the attributes it asked for.
    * `between` adds the validity window. Standard SQL, so both dialects join a declared
    * relationship exactly the same way.
@@ -88,12 +100,8 @@ export class Dialect {
   joinCte(prev, op) {
     const eq = this.joinKeyParts(op, (c) => `base.${c}`, (c) => `j.${c}`)
       .map((k) => `${k.left} = ${k.right}`).join(' AND ');
-    // The validity window, half-open at the END: a CURRENT version has no end yet (dbt snapshots
-    // write NULL into dbt_valid_to), and `BETWEEN … AND NULL` is never true — so the plain form
-    // dropped exactly the rows a "what is it NOW" question is about.
     const btw = op.between
-      ? ` AND base.${this.ident(op.between.value)} >= j.${this.ident(op.between.from)}`
-        + ` AND (j.${this.ident(op.between.to)} IS NULL OR base.${this.ident(op.between.value)} <= j.${this.ident(op.between.to)})`
+      ? ` AND ${this.validityWindow(`base.${this.ident(op.between.value)}`, `j.${this.ident(op.between.from)}`, `j.${this.ident(op.between.to)}`)}`
       : '';
     const attrs = op.attrs.map((a) => `j.${this.ident(a.column)} AS ${this.ident(a.as)}`);
     return `SELECT base.*${attrs.length ? `, ${attrs.join(', ')}` : ''} FROM ${prev} base ${op.kind || 'LEFT'} JOIN ${op.relation} j ON ${eq}${btw}`;

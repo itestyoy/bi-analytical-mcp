@@ -202,11 +202,14 @@ export class Engine {
     if (kind === 'term') return memoryTarget('term', key).target;
     const dot = key.indexOf('.');
     // 'model:<source>' and the scoped 'property:<source>.<name>' name a real entity — keep what
-    // they name, as the structure.
-    if (kind === 'model' && this.catalog.models[key]) return memoryTarget('model', key).target;
+    // they name, as the structure. A model the CATALOG DECLARES counts even when grounding set it
+    // aside this run (its table was being rebuilt, the warehouse blinked): the migration is
+    // one-way, and demoting its notes to terms would lose the link for good once the table is back.
+    const declared = (m) => !!(this.catalog.models[m] || this.catalog.unavailable?.[m]);
+    if (kind === 'model' && declared(key)) return memoryTarget('model', key).target;
     if ((kind === 'property' || kind === 'event') && dot > 0) {
       const source = key.slice(0, dot); const name = key.slice(dot + 1);
-      if (this.catalog.models[source]) return memoryTarget(kind, source, name).target;
+      if (declared(source)) return memoryTarget(kind, source, name).target;
     }
     return memoryTarget('term', key.toLowerCase()).target;
   }
@@ -755,8 +758,15 @@ export class Engine {
         recommendations.push(...nullRecs);
         // A metric query names the attribute STRUCTURALLY — { model, attribute } — and the old
         // '<entity>__<attr>' path string is refused by the schema, so it must not be recommended.
+        // `via` is needed exactly where the query resolver asks for it: a source carrying SEVERAL
+        // relationships to this model. Which source the caller will query from is not known here,
+        // so each such source is named with its choices — the same candidates the resolver lists.
+        const several = c.modelKeys().filter((src) => src !== mk)
+          .map((src) => [src, Object.keys(c.entitiesOf(src)).filter((e) => c.joinTargetFor(e) === mk)])
+          .filter(([, rels]) => rels.length > 1);
+        const viaHint = several.length ? `; from ${several.map(([src, rels]) => `'${src}' add via: one of ${rels.map((r) => `'${r}'`).join(', ')}`).join(', from ')}` : '';
         recommendations.push(ent
-          ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}'${ent !== this.catalog.primaryEntityName(mk) ? `, via: '${ent}'` : ''} } (declare use_base_models: ['${mk}']), or reference '${col}' after a pipeline join with:'${mk}'.`
+          ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}' } (declare use_base_models: ['${mk}']${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
         const attrOut = {
           property: col, source: mk, model: mk, column: col, type: dim.type,
@@ -2438,16 +2448,19 @@ export class Engine {
       return resp;
     }
     // Everything that can refuse the declaration runs BEFORE a context exists, so a refused one
-    // leaves nothing behind: the chain is laid out and its python bodies gated on this probe.
-    const probe = render('pipe');
-    await this._gateCompiled(this._chainModels(probe.chain, input).filter((m) => m.kind === 'python'));
-    const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
+    // leaves nothing behind. The context id is CHOSEN first (a new one is not created yet), so the
+    // chain is laid out ONCE, under its final names, and its python bodies are gated on that very
+    // layout — one render, one compile per python stage.
+    const existing = input.context_id ? this._ctx(input.context_id) : null;
+    const ctxId = existing ? existing.id : this.ctxs.newId();
     // The caller may pass the name: every build of a draft gets its own (`_c2`, `_c3`, …), because
     // a rebuild must never overwrite the table it reads as its checkpoint, nor one a fork
     // inherited. The all-at-once path has no such history and uses the plain name.
-    const modelName = input.model_name || `pipe_${input.name}_${ctx.id}`;
+    const modelName = input.model_name || `pipe_${input.name}_${ctxId}`;
     const out = render(modelName);
     const models = this._chainModels(out.chain, input);
+    await this._gateCompiled(models.filter((m) => m.kind === 'python'));
+    const ctx = existing || this.ctxs.create(ctxId);
     const last = models[models.length - 1];
     const hasPython = models.some((m) => m.kind === 'python');
     // The last model takes the requested materialization when it is SQL; a Python model, and every

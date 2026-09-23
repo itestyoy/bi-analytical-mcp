@@ -257,6 +257,28 @@ test('grounding: dbt that never ran leaves the model as declared', async () => {
   assert.ok(catalog.modelKeys().includes('experiments'), 'still offered — nothing was learned about it');
 });
 
+// A warehouse error that is not about the table — a quota, an expired credential, a rate limit —
+// arrives the same way (dbt ran, exited non-zero, printed a message). It says nothing about the
+// relation, so it must not exclude the model for the whole process lifetime.
+test('grounding: a quota / auth / network error dbt printed leaves the model as declared', async () => {
+  for (const message of [
+    'Runtime Error\n  403 Quota exceeded: Your project exceeded quota for concurrent queries.',
+    'Runtime Error\n  Database Error: password authentication failed for user "dbt"',
+    'Runtime Error\n  connection to server at "10.0.0.5", port 5432 failed: Connection timed out',
+  ]) {
+    const catalog = loadCatalog(CATALOG, {});
+    const full = physicalSets(catalog);
+    const runner = { relationColumns: async (_dir, model) => {
+      const key = catalog.modelKeys().find((k) => catalog.getModel(k).dbt_model === model);
+      if (key === 'experiments') return { ok: false, stdout: message, stderr: '', error: 'dbt exited with code 2', killed: false, signal: null };
+      return { ok: true, columns: [...full[key]].map((name) => ({ name })) };
+    } };
+    const { unavailable } = await groundCatalogToPhysical(catalog, runner, '/tmp/x');
+    assert.equal(unavailable.experiments, undefined, message);
+    assert.ok(catalog.modelKeys().includes('experiments'), `still offered after: ${message.split('\n')[1]}`);
+  }
+});
+
 test('grounding: losing EVERY events source is a load failure, not a silent empty catalog', () => {
   const catalog = loadCatalog(CATALOG, {});
   const phys = physicalSets(catalog);

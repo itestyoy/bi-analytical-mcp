@@ -112,7 +112,8 @@ export class TaskRegistry {
   waitForChange(t, ms, signal) {
     if (isTerminal(t.status)) return Promise.resolve();
     return new Promise((resolve) => {
-      const done = () => { clearTimeout(timer); t.waiters.delete(done); resolve(); };
+      // every way out removes every hook, so a long wait loop leaves no listener behind
+      const done = () => { clearTimeout(timer); t.waiters.delete(done); signal?.removeEventListener?.('abort', done); resolve(); };
       const timer = setTimeout(done, ms);
       t.waiters.add(done);
       signal?.addEventListener?.('abort', done, { once: true });

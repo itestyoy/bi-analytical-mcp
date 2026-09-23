@@ -150,6 +150,11 @@ function pipelineColumnType(cm, col) {
  * physical table lacks") can never surface anywhere downstream. Best-effort: a model
  * whose relation can't be introspected is left as declared. Returns { pruned }.
  */
+// How the adapters word "this relation is not there": Postgres/Redshift/DuckDB `relation … does not
+// exist`, BigQuery `Not found: Table …`, Snowflake `… does not exist or not authorized`, Databricks
+// `TABLE_OR_VIEW_NOT_FOUND`, dbt's own `… depends on a node named '…' which was not found`.
+const RELATION_ABSENT = /does not exist|doesn't exist|not found|no such table|unknown table|could not find|table_or_view_not_found/i;
+
 export async function groundCatalogToPhysical(catalog, runner, baseProjectDir, log = () => {}) {
   if (!runner || !baseProjectDir || typeof runner.relationColumns !== 'function') return { pruned: {} };
   const phys = {};
@@ -164,10 +169,15 @@ export async function groundCatalogToPhysical(catalog, runner, baseProjectDir, l
       // by stream: dbt ran means dbt printed — and it prints its diagnostics to STDOUT, leaving
       // stderr empty, so "error and no stderr" would have called every missing relation transient.
       if (r?.killed || r?.signal || (r?.error && !r?.stdout && !r?.stderr)) { transient.push([key, r.error || `dbt was killed by ${r.signal}`]); continue; }
-      // dbt ran and could not introspect the relation (not built, dropped, renamed): the model is
-      // UNAVAILABLE — declared, but nothing in the warehouse backs it. Working on as declared would
-      // only move the failure to the first query.
-      phys[key] = { unavailable: String(r?.stderr || r?.stdout || 'relation not found').replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').filter(Boolean).slice(-2).join(' ') || 'relation not found' };
+      const said = String(r?.stderr || r?.stdout || '').replace(/\x1b\[[0-9;]*m/g, '').trim().split('\n').filter(Boolean).slice(-2).join(' ');
+      // dbt ran and REPORTED the relation absent (not built, dropped, renamed, not a node of the
+      // project): the model is UNAVAILABLE — declared, but nothing in the warehouse backs it, and
+      // working on as declared would only move the failure to the first query. Anything else dbt
+      // printed — a quota, an expired credential, a rate limit, a network blip — is the warehouse
+      // being unwell, not evidence about this table, so it must not exclude the model for the
+      // process lifetime: it stays as declared, like a dbt that never ran.
+      if (!RELATION_ABSENT.test(said)) { transient.push([key, said || r?.error || 'introspection failed']); continue; }
+      phys[key] = { unavailable: said || 'relation not found' };
     } catch (e) { transient.push([key, e?.message || 'introspection failed']); }
   }
   // When NOT ONE model could be introspected, the thing that is unavailable is the warehouse (or

@@ -29,7 +29,8 @@ function readFile(path, origin) {
  * `system` and `deployment` are paths; deployment may be a list.
  */
 export function loadRecipes(system, deployment = [], caps = null) {
-  const paths = Array.isArray(deployment) ? deployment : String(deployment || '').split(/[,:]/).filter(Boolean);
+  // comma-separated, as documented — a colon belongs to paths ('C:\deploy\…', '/mnt/vol:ro/…')
+  const paths = Array.isArray(deployment) ? deployment : String(deployment || '').split(',').map((p) => p.trim()).filter(Boolean);
   const merged = new Map();
   // GENERATED first: the reference entries built from the extracted fact sheet (a library's real
   // signatures and method preconditions). They are recipes so they can be FETCHED BY ID mid-write

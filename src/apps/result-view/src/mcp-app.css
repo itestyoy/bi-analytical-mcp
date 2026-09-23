@@ -198,9 +198,21 @@
   border-color: var(--border);
 }
 
+/*
+ * Soft, tinted badges for a STATE (a significant result, a broken split): the hue carries it, a
+ * solid black or red slab would shout louder than the numbers it annotates. Text is the hue pulled
+ * toward the foreground, so it keeps its contrast in both themes.
+ */
+.badge-accent {
+  color: color-mix(in oklab, var(--color-series-1) 75%, var(--foreground));
+  border-color: color-mix(in oklab, var(--color-series-1) 25%, transparent);
+  background-color: color-mix(in oklab, var(--color-series-1) 12%, transparent);
+}
+
 .badge-destructive {
-  color: #fff;
-  background-color: var(--destructive);
+  color: color-mix(in oklab, var(--destructive) 85%, var(--foreground));
+  border-color: color-mix(in oklab, var(--destructive) 25%, transparent);
+  background-color: color-mix(in oklab, var(--destructive) 10%, transparent);
 }
 
 /* ── Card (shadcn: Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent) ──── */

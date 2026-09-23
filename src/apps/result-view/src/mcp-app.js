@@ -508,8 +508,8 @@ prevPageBtn.addEventListener('click', () => goToPage(state.model?.prevPage, prev
 // cards compare at a glance.
 
 const VERDICTS = {
-  increase: { icon: 'trending-up', text: 'Significant increase', variant: 'default' },
-  decrease: { icon: 'trending-down', text: 'Significant decrease', variant: 'default' },
+  increase: { icon: 'trending-up', text: 'Significant increase', variant: 'accent' },
+  decrease: { icon: 'trending-down', text: 'Significant decrease', variant: 'accent' },
   no_difference: { icon: 'minus', text: 'Not significant', variant: 'outline' },
 };
 
@@ -550,7 +550,7 @@ function renderExperiment(model) {
     confidenceLabel ? badge(`${confidenceLabel} confidence`, 'outline') : null,
     model.alternative && model.alternative !== 'two_sided' ? badge(`one-sided · ${model.alternative}`, 'outline') : null,
     model.correction ? badge(`${correctionName(model.correction)} correction`, 'outline') : null,
-    k > 1 ? badge(`${model.significant_count} of ${k} significant`, model.significant_count ? 'default' : 'secondary') : null,
+    k > 1 ? badge(`${model.significant_count} of ${k} significant`, model.significant_count ? 'accent' : 'secondary') : null,
   );
 
   const isRate = model.metric === 'proportion';

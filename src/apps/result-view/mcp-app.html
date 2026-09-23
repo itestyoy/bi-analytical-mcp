@@ -9,8 +9,14 @@
 <body>
   <main class="main">
     <header class="header">
-      <h1 id="title" class="title">Query Result</h1>
-      <p id="subtitle" class="subtitle">Waiting for the result…</p>
+      <div class="header-text">
+        <h1 id="title" class="title">Query Result</h1>
+        <p id="subtitle" class="subtitle">Waiting for the result…</p>
+      </div>
+      <button id="fullscreen-btn" class="icon-btn" type="button" title="Enter fullscreen" aria-label="Enter fullscreen" hidden>
+        <svg id="expand-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <svg id="compress-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" hidden><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
     </header>
 
     <p id="notice" class="notice" hidden></p>

@@ -53,6 +53,9 @@ const filterInput = document.getElementById('filter');
 const nextPageBtn = document.getElementById('next-page-btn');
 const tableEl = document.getElementById('table');
 const rawEl = document.getElementById('raw');
+const fullscreenBtn = document.getElementById('fullscreen-btn');
+const expandIcon = document.getElementById('expand-icon');
+const compressIcon = document.getElementById('compress-icon');
 
 // App state
 const state = {
@@ -62,6 +65,7 @@ const state = {
   chart: null,
   sort: null, // { index, dir: 1 | -1 }
   filter: '',
+  displayMode: 'inline',
 };
 
 // ── formatting ────────────────────────────────────────────────────────────────────────────────
@@ -326,9 +330,21 @@ nextPageBtn.addEventListener('click', async () => {
 
 // ── cards: A/B result, sample-ratio check, sample-size plan ───────────────────────────────────
 
-function card(label, value, ...details) {
+/**
+ * A card is one or more BLOCKS: the first carries the label and the headline value, the rest group
+ * the details. A wide card lays the blocks side by side, a narrow one stacks them (CSS grid), so a
+ * single card spanning the whole width does not leave its right half empty.
+ */
+function card(label, value, ...blocks) {
   const node = el('article', 'card');
-  node.append(el('p', 'card-label', label), el('p', 'card-value', value));
+  const [first = [], ...rest] = blocks;
+  node.append(block(el('p', 'card-label', label), el('p', 'card-value', value), ...first));
+  for (const b of rest) if (b.some(Boolean)) node.append(block(...b));
+  return node;
+}
+
+function block(...details) {
+  const node = el('div', 'card-block');
   for (const d of details) if (d) node.append(d instanceof Node ? d : el('p', 'card-detail', d));
   return node;
 }
@@ -347,6 +363,7 @@ function intervalSvg(ci) {
   const X = (v) => W / 2 + (v / span) * (W / 2 - 6);
   const svg = document.createElementNS(NS, 'svg');
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('preserveAspectRatio', 'none'); // stretches with the card; strokes do not (CSS)
   svg.setAttribute('class', 'interval');
   svg.setAttribute('role', 'img');
   svg.setAttribute('aria-label', `absolute lift interval ${formatPoints(ci[0])} to ${formatPoints(ci[1])}`);
@@ -366,11 +383,15 @@ function renderExperiment(model) {
     cardsSection.append(card(
       `${v.variant} vs ${model.control} · relative lift`,
       lift,
-      v.relative_ci ? `interval ${formatPercent(v.relative_ci[0])} … ${formatPercent(v.relative_ci[1])}` : null,
-      intervalSvg(v.ci),
-      v.ci ? `absolute ${formatPoints(v.ci[0])} … ${formatPoints(v.ci[1])} (dashed line = no effect)` : null,
-      `${value(v.control_value)} → ${value(v.variant_value)}`,
-      status(v.significant ? 'good' : 'neutral', `${v.significant ? 'significant' : 'not significant'} · p = ${formatNumber(p)}`),
+      [
+        v.relative_ci ? `interval ${formatPercent(v.relative_ci[0])} … ${formatPercent(v.relative_ci[1])}` : null,
+        status(v.significant ? 'good' : 'neutral', `${v.significant ? 'significant' : 'not significant'} · p = ${formatNumber(p)}`),
+      ],
+      [
+        intervalSvg(v.ci),
+        v.ci ? `absolute ${formatPoints(v.ci[0])} … ${formatPoints(v.ci[1])} (dashed line = no effect)` : null,
+        `${model.control} ${value(v.control_value)} → ${v.variant} ${value(v.variant_value)}`,
+      ],
     ));
   }
   cardsSection.hidden = false;
@@ -380,7 +401,7 @@ function renderExperiment(model) {
 function renderSrm(model) {
   subtitleEl.textContent = `p = ${formatNumber(model.p_value)}`;
   cardsSection.append(card('Sample-ratio check', model.srm_detected ? 'Mismatch' : 'Healthy',
-    status(model.srm_detected ? 'bad' : 'good', model.srm_detected ? 'the split is broken — do not trust the lift' : 'the observed split matches the expected one')));
+    [status(model.srm_detected ? 'bad' : 'good', model.srm_detected ? 'the split is broken — do not trust the lift' : 'the observed split matches the expected one')]));
   cardsSection.hidden = false;
   renderTable({ columns: [{ name: 'group', type: 'category' }, { name: 'observed', type: 'number' }, { name: 'expected', type: 'number' }], rows: model.groups.map((g) => [g.label, g.observed, g.expected]) });
 }
@@ -389,6 +410,54 @@ function renderPlan(model) {
   for (const f of model.figures) cardsSection.append(card(f.label, f.percent ? formatPercent(f.value) : formatNumber(f.value)));
   cardsSection.hidden = false;
 }
+
+// ── display mode ──────────────────────────────────────────────────────────────────────────────
+
+/**
+ * The container's size decides the layout, never a width baked in here. A FIXED height (fullscreen,
+ * or a host that pins it) switches to the fill layout — the table takes the remaining space and
+ * scrolls inside; a flexible height lets the content size the iframe (the App reports it).
+ */
+function applyContainer(ctx) {
+  const dims = ctx.containerDimensions;
+  const fixedHeight = dims && 'height' in dims && typeof dims.height === 'number';
+  mainEl.classList.toggle('fill', state.displayMode === 'fullscreen' || fixedHeight);
+  document.documentElement.style.maxHeight = dims && 'maxHeight' in dims && dims.maxHeight ? `${dims.maxHeight}px` : '';
+}
+
+function updateFullscreenButton() {
+  const modes = app.getHostContext()?.availableDisplayModes ?? [];
+  const isFullscreen = state.displayMode === 'fullscreen';
+  // offered only where the host can do it — the same rule as the official map and PDF views
+  fullscreenBtn.hidden = !modes.includes(isFullscreen ? 'inline' : 'fullscreen');
+  // SVG elements have no `hidden` property — the attribute is what the stylesheet matches
+  expandIcon.toggleAttribute('hidden', isFullscreen);
+  compressIcon.toggleAttribute('hidden', !isFullscreen);
+  const label = isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen';
+  fullscreenBtn.title = label;
+  fullscreenBtn.setAttribute('aria-label', label);
+}
+
+async function toggleFullscreen() {
+  const mode = state.displayMode === 'fullscreen' ? 'inline' : 'fullscreen';
+  if (!app.getHostContext()?.availableDisplayModes?.includes(mode)) return;
+  try {
+    const result = await app.requestDisplayMode({ mode });
+    // the host answers with the mode it actually applied; the context change follows it
+    handleHostContextChanged({ displayMode: result.mode });
+  } catch (e) {
+    log.error('Display mode change failed:', e);
+  }
+}
+
+fullscreenBtn.addEventListener('click', toggleFullscreen);
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && state.displayMode === 'fullscreen') {
+    e.preventDefault();
+    void toggleFullscreen();
+  }
+});
 
 // ── host context ──────────────────────────────────────────────────────────────────────────────
 
@@ -411,6 +480,15 @@ function handleHostContextChanged(ctx) {
   if (ctx.toolInfo?.tool?.name) {
     state.toolName = ctx.toolInfo.tool.name;
   }
+  if (ctx.displayMode) {
+    state.displayMode = ctx.displayMode;
+  }
+  if (ctx.displayMode || ctx.containerDimensions) {
+    applyContainer({ ...app.getHostContext(), ...ctx });
+  }
+  if (ctx.displayMode || ctx.availableDisplayModes) {
+    updateFullscreenButton();
+  }
   // colors come from CSS variables: a theme change re-draws the chart in the new ones
   if ((ctx.theme || ctx.styles) && state.chart && state.lastResult) {
     render(state.lastResult);
@@ -418,7 +496,7 @@ function handleHostContextChanged(ctx) {
 }
 
 // 1. Create app instance
-const app = new App({ name: 'Query Result', version: '1.0.0' });
+const app = new App({ name: 'Query Result', version: '1.0.0' }, { availableDisplayModes: ['inline', 'fullscreen'] });
 
 // 2. Register handlers BEFORE connecting
 app.onteardown = async () => {

@@ -74,6 +74,11 @@
   box-sizing: border-box;
 }
 
+/* `hidden` wins over any display a class sets (a grid or flex section, an SVG icon) */
+[hidden] {
+  display: none !important;
+}
+
 html, body {
   margin: 0;
   font-family: var(--font-sans);

@@ -138,6 +138,7 @@ function render(result) {
   resetSections();
   titleEl.textContent = model.title;
   subtitleEl.textContent = '';
+  subtitleEl.classList.remove('chips');
 
   switch (model.kind) {
     case 'running':
@@ -359,15 +360,15 @@ function status(kind, text) {
 
 // ── A/B result ────────────────────────────────────────────────────────────────────────────────
 //
-// Read top to bottom, each variant answers three questions in order: DID it change anything (the
-// verdict, with an icon and words — never color alone), BY HOW MUCH (the lift and its interval, in
-// one unit), and ON WHAT (the two groups' values and sizes). All variants share one interval scale,
-// so a row further right is a larger effect.
+// A card per variant, built from UI parts rather than sentences: a header with the verdict badge,
+// a hero row (the lift, large, beside its interval plot), and a row of stat tiles (label → value).
+// The test's settings are chips under the title. Every variant shares one interval scale, so the
+// stacked cards compare at a glance.
 
 const formatSignedPercent = (v, digits = 1) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${Math.abs(v * 100).toFixed(digits)}%`;
-const correctionName = (c) => ({ holm: 'Holm', bh: 'Benjamini–Hochberg', bonferroni: 'Bonferroni' }[c] || c);
-const formatP = (p) => (p < 0.001 ? '< 0.001' : p.toFixed(3));
 const formatSignedNumber = (v) => `${v > 0 ? '+' : v < 0 ? '−' : ''}${formatNumber(Math.abs(v))}`;
+const correctionName = (c) => ({ holm: 'Holm', bh: 'Benjamini–Hochberg', bonferroni: 'Bonferroni' }[c] || c);
+const formatP = (p) => (p < 0.001 ? '<0.001' : p.toFixed(3));
 
 const VERDICTS = {
   increase: { icon: '↑', text: 'Significant increase' },
@@ -375,17 +376,23 @@ const VERDICTS = {
   no_difference: { icon: '≈', text: 'No significant difference' },
 };
 
-function verdictChip(verdict) {
-  const v = VERDICTS[verdict];
-  const chip = el('span', `verdict verdict-${verdict}`);
-  chip.append(el('span', 'verdict-icon', v.icon), el('span', null, v.text));
-  return chip;
+function chip(text, className = '') {
+  return el('span', `chip ${className}`.trim(), text);
 }
 
-function figure(label, value, sub, { lead = false } = {}) {
-  const node = el('div', lead ? 'figure figure-lead' : 'figure');
-  node.append(el('p', 'figure-label', label), el('p', 'figure-value', value));
-  if (sub) node.append(el('p', 'figure-sub', sub));
+function verdictBadge(verdict) {
+  const v = VERDICTS[verdict];
+  const badge = el('span', `badge badge-${verdict}`);
+  badge.append(el('span', 'badge-icon', v.icon), el('span', null, v.text));
+  return badge;
+}
+
+/** A stat tile: a small label over one value, an optional short caption under it. */
+function stat(label, value, caption, { title } = {}) {
+  const node = el('div', 'stat');
+  node.append(el('span', 'stat-label', label), el('span', 'stat-value', value));
+  if (caption) node.append(el('span', 'stat-caption', caption));
+  if (title) node.title = title;
   return node;
 }
 
@@ -400,14 +407,14 @@ function intervalPlot(v, scale, fmt, confidenceLabel) {
   const range = el('div', 'ci-range');
   range.style.left = pos(e.lo);
   range.style.right = `calc(100% - ${pos(e.hi)})`;
+  range.title = `${confidenceLabel} CI ${fmt(e.lo)} … ${fmt(e.hi)}`;
   const point = el('div', 'ci-point');
   point.style.left = pos(e.point);
   point.title = `estimate ${fmt(e.point)}`;
-  range.title = `${confidenceLabel} interval ${fmt(e.lo)} … ${fmt(e.hi)}`;
   track.append(el('div', 'ci-zero'), range, point);
-  const axis = el('div', 'ci-axis');
   const tick = e.unit === 'relative' ? (x) => formatSignedPercent(x, Number.isInteger(Math.round(x * 1e6) / 1e4) ? 0 : 1) : fmt;
-  axis.append(el('span', null, tick(-scale)), el('span', 'ci-axis-zero', '0 · no effect'), el('span', null, tick(scale)));
+  const axis = el('div', 'ci-axis');
+  axis.append(el('span', null, tick(-scale)), el('span', null, '0'), el('span', null, tick(scale)));
   plot.append(track, axis);
   return plot;
 }
@@ -415,24 +422,19 @@ function intervalPlot(v, scale, fmt, confidenceLabel) {
 function renderExperiment(model) {
   const confidenceLabel = model.confidence !== null ? `${Math.round(model.confidence * 100)}%` : '';
   const k = model.variants.length;
-  subtitleEl.textContent = [
-    `${confidenceLabel} confidence`.trim(),
-    model.alternative && model.alternative !== 'two_sided' ? `one-sided (${model.alternative})` : null,
-    model.correction ? `${correctionName(model.correction)} correction${k > 1 ? ` across ${k} variants` : ''}` : null,
-  ].filter(Boolean).join(' · ');
+  subtitleEl.append(...[
+    confidenceLabel ? chip(`${confidenceLabel} confidence`) : null,
+    model.alternative && model.alternative !== 'two_sided' ? chip(`one-sided · ${model.alternative}`) : null,
+    model.correction ? chip(`${correctionName(model.correction)} correction`) : null,
+    k > 1 ? chip(`${model.significant_count} of ${k} significant`, model.significant_count ? 'chip-accent' : '') : null,
+  ].filter(Boolean));
+  subtitleEl.classList.add('chips');
 
   const isRate = model.metric === 'proportion';
   const value = (x) => (x === null ? '—' : isRate ? formatPercent(x) : formatNumber(x));
-  const size = (n) => (n === null ? null : `n = ${integerFormat.format(n)}`);
+  const size = (n) => (n === null ? null : `${integerFormat.format(n)} users`);
 
   cardsSection.className = 'ab-list';
-  if (k > 1) {
-    const s = model.significant_count;
-    cardsSection.append(el('p', 'ab-summary', s === 0
-      ? `None of the ${k} variants differs significantly from ${model.control}.`
-      : `${s} of ${k} variants differ${s === 1 ? 's' : ''} significantly from ${model.control}.`));
-  }
-
   for (const v of model.variants) {
     const e = v.effect;
     const fmt = e?.unit === 'relative' ? (x) => formatSignedPercent(x) : isRate ? (x) => formatPoints(x) : formatSignedNumber;
@@ -440,30 +442,33 @@ function renderExperiment(model) {
 
     const header = el('header', 'ab-card-header');
     const name = el('h2', 'ab-card-title', v.variant);
-    name.append(el('span', 'ab-card-vs', ` vs ${model.control}`));
-    header.append(name, verdictChip(v.verdict));
+    name.append(el('span', 'ab-card-vs', `vs ${model.control}`));
+    header.append(name, verdictBadge(v.verdict));
 
-    const figures = el('div', 'figures');
-    const pair = el('div', 'figure-pair');
-    pair.append(figure(model.control, value(v.control_value), size(v.n_control)), figure(v.variant, value(v.variant_value), size(v.n_variant)));
-    figures.append(
-      e
-        ? figure(e.unit === 'relative' ? 'Relative lift' : 'Lift', fmt(e.point), `${confidenceLabel} CI ${fmt(e.lo)} to ${fmt(e.hi)}`, { lead: true })
-        : figure('Lift', v.lift === null ? '—' : formatSignedNumber(v.lift), null, { lead: true }),
-      pair,
+    // hero: the lift, large, and where its interval lies against "no effect"
+    const hero = el('div', 'ab-hero');
+    const lift = el('div', 'ab-lift');
+    lift.append(
+      el('span', 'ab-lift-label', e?.unit === 'relative' ? 'Relative lift' : 'Lift'),
+      el('span', 'ab-lift-value', e ? fmt(e.point) : v.lift === null ? '—' : formatSignedNumber(v.lift)),
     );
-
-    node.append(header, figures);
-    if (e) node.append(intervalPlot(v, model.scale, fmt, confidenceLabel));
+    if (v.lift !== null && e?.unit === 'relative') lift.append(el('span', 'ab-lift-caption', isRate ? formatPoints(v.lift) : formatSignedNumber(v.lift)));
+    hero.append(lift);
+    if (e) hero.append(intervalPlot(v, model.scale, fmt, confidenceLabel));
 
     const p = v.p_value_adjusted ?? v.p_value;
-    const meta = [
-      p !== null ? `p ${p < 0.001 ? '' : '= '}${formatP(p)}${v.p_value_adjusted !== null && v.p_value !== null && formatP(v.p_value_adjusted) !== formatP(v.p_value) ? ` (${correctionName(model.correction)}-adjusted; raw ${formatP(v.p_value)})` : ''}` : null,
-      v.p_value_sequential !== null ? `always-valid p ${v.p_value_sequential < 0.001 ? '' : '= '}${formatP(v.p_value_sequential)}` : null,
-      e?.unit === 'relative' && v.lift !== null ? `absolute ${isRate ? formatPoints(v.lift) : formatSignedNumber(v.lift)}` : null,
-      v.variance_reduction !== null ? `variance reduced by ${formatPercent(v.variance_reduction)}` : null,
-    ].filter(Boolean);
-    if (meta.length) node.append(el('p', 'ab-card-meta', meta.join(' · ')));
+    const rawDiffers = v.p_value_adjusted !== null && v.p_value !== null && formatP(v.p_value_adjusted) !== formatP(v.p_value);
+    const stats = el('div', 'stats');
+    stats.append(...[
+      stat(model.control, value(v.control_value), size(v.n_control)),
+      stat(v.variant, value(v.variant_value), size(v.n_variant)),
+      e ? stat(`${confidenceLabel} CI`, `${fmt(e.lo)} to ${fmt(e.hi)}`) : null,
+      p !== null ? stat(v.p_value_adjusted !== null ? 'p-value (adj.)' : 'p-value', formatP(p), rawDiffers ? `raw ${formatP(v.p_value)}` : null, { title: v.p_value_adjusted !== null ? `${correctionName(model.correction)}-adjusted` : undefined }) : null,
+      v.p_value_sequential !== null ? stat('Always-valid p', formatP(v.p_value_sequential)) : null,
+      v.variance_reduction !== null ? stat('Variance cut', formatPercent(v.variance_reduction), 'CUPED') : null,
+    ].filter(Boolean));
+
+    node.append(header, hero, stats);
     cardsSection.append(node);
   }
   cardsSection.hidden = false;

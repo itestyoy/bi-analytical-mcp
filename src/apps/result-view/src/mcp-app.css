@@ -180,23 +180,39 @@
   }
 }
 
+/* Chips: the test's settings, under the title */
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-xs) !important;
+}
+
+.chip {
+  padding: 1px var(--spacing-sm);
+  border-radius: 999px;
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+  color: var(--color-text-secondary);
+  background-color: var(--color-background-secondary);
+  box-shadow: inset 0 0 0 var(--border-width-regular) var(--color-border-secondary);
+  white-space: nowrap;
+
+  &.chip-accent {
+    color: var(--color-accent);
+    box-shadow: inset 0 0 0 var(--border-width-regular) color-mix(in srgb, var(--color-accent) 50%, transparent);
+    background-color: color-mix(in srgb, var(--color-accent) 8%, var(--color-background-primary));
+  }
+}
+
 /*
- * A/B result: one full-width card per variant, stacked, so the intervals share one horizontal scale
- * and line up. Inside a card: the verdict (header), the numbers (figures), the interval (plot), the
- * test's fine print (meta) — the order a reader asks in. Significance changes the accent, never the
- * meaning: the chip always says it in words and with an icon.
+ * A/B result: one full-width card per variant, stacked so the intervals share one horizontal scale
+ * and line up. Card = header (name + verdict badge) → hero (lift + interval plot) → stat tiles.
  */
 .ab-list {
   display: flex;
   flex-direction: column;
   gap: var(--spacing-sm);
-}
-
-.ab-summary {
-  margin: 0;
-  font-size: var(--font-text-sm-size);
-  font-weight: var(--font-weight-medium);
-  color: var(--color-text-secondary);
 }
 
 .ab-card {
@@ -226,6 +242,9 @@
 .ab-card-title {
   margin: 0;
   min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-xs);
   font-size: var(--font-text-md-size);
   line-height: var(--font-text-md-line-height);
   font-weight: var(--font-weight-semibold);
@@ -233,89 +252,74 @@
 }
 
 .ab-card-vs {
+  font-size: var(--font-text-sm-size);
   font-weight: var(--font-weight-normal);
-  color: var(--color-text-secondary);
+  color: var(--color-text-tertiary);
 }
 
-.verdict {
+/* The verdict badge says it in words and with an icon — color is never the only signal */
+.badge {
   display: inline-flex;
   align-items: center;
   gap: var(--spacing-xs);
   padding: 2px var(--spacing-sm);
   border-radius: 999px;
-  font-size: var(--font-text-sm-size);
-  line-height: var(--font-text-sm-line-height);
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
   font-weight: var(--font-weight-semibold);
   white-space: nowrap;
 
-  &.verdict-increase,
-  &.verdict-decrease {
+  &.badge-increase,
+  &.badge-decrease {
     color: var(--color-text-on-accent);
     background-color: var(--color-accent);
   }
 
-  &.verdict-no_difference {
+  &.badge-no_difference {
     color: var(--color-text-secondary);
     background-color: var(--color-background-secondary);
     box-shadow: inset 0 0 0 var(--border-width-regular) var(--color-border-secondary);
   }
 }
 
-.verdict-icon {
+.badge-icon {
   font-weight: var(--font-weight-bold);
 }
 
-/*
- * The lift leads; the two groups follow as ONE pair, so on a narrow card they wrap under the lift
- * together instead of splitting 2 + 1. Figures take their natural width — spread across a wide
- * card, numbers that belong together would drift apart.
- */
-.figures {
+/* Hero: the lift beside its interval; on a narrow card the plot drops under the number */
+.ab-hero {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
-  gap: var(--spacing-md) calc(var(--spacing-lg) * 2);
+  align-items: center;
+  gap: var(--spacing-sm) var(--spacing-lg);
 }
 
-.figure-pair {
+.ab-lift {
   display: flex;
-  gap: var(--spacing-lg);
-
-  .figure + .figure {
-    padding-left: var(--spacing-lg);
-    border-left: var(--border-width-regular) solid var(--color-border-secondary);
-  }
+  flex-direction: column;
+  min-width: 7.5em;
 }
 
-.figure {
-  min-width: 0;
-
-  > * {
-    margin: 0;
-  }
-}
-
-.figure-label {
+.ab-lift-label,
+.stat-label {
   font-size: var(--font-text-xs-size);
   line-height: var(--font-text-xs-line-height);
+  font-weight: var(--font-weight-medium);
   color: var(--color-text-secondary);
   overflow-wrap: anywhere;
 }
 
-.figure-value {
-  font-size: var(--font-heading-md-size);
-  line-height: var(--font-heading-md-line-height);
-  font-weight: var(--font-weight-semibold);
+.ab-lift-value {
+  font-size: var(--font-heading-xl-size);
+  line-height: var(--font-heading-xl-line-height);
+  font-weight: var(--font-weight-bold);
   font-variant-numeric: tabular-nums;
 }
 
-.figure-lead .figure-value {
-  font-size: var(--font-heading-xl-size);
-  line-height: var(--font-heading-xl-line-height);
-}
-
-.figure-sub {
-  font-size: var(--font-text-sm-size);
+.ab-lift-caption,
+.stat-caption {
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
   color: var(--color-text-secondary);
   font-variant-numeric: tabular-nums;
 }
@@ -323,6 +327,8 @@
 /* Interval plot, in HTML so it stretches with the card and its labels stay crisp */
 .ci-plot {
   --ci-color: var(--color-text-tertiary);
+  flex: 1 1 220px;
+  min-width: 0;
 
   &.ci-significant {
     --ci-color: var(--color-accent);
@@ -331,7 +337,7 @@
 
 .ci-track {
   position: relative;
-  height: 20px;
+  height: 24px;
 
   /* the axis itself */
   &::before {
@@ -355,17 +361,17 @@
 .ci-range {
   position: absolute;
   top: 50%;
-  height: 6px;
+  height: 8px;
   transform: translateY(-50%);
-  border-radius: 3px;
-  background-color: color-mix(in srgb, var(--ci-color) 55%, transparent);
+  border-radius: 4px;
+  background-color: color-mix(in srgb, var(--ci-color) 45%, transparent);
 }
 
 .ci-point {
   position: absolute;
   top: 50%;
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
   transform: translate(-50%, -50%);
   border-radius: 50%;
   background-color: var(--ci-color);
@@ -376,9 +382,9 @@
 .ci-axis {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
-  gap: var(--spacing-sm);
   margin-top: 2px;
   font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
   color: var(--color-text-tertiary);
   font-variant-numeric: tabular-nums;
 
@@ -387,13 +393,27 @@
   }
 }
 
-.ab-card-meta {
-  margin: 0;
-  padding-top: var(--spacing-sm);
-  border-top: var(--border-width-regular) solid var(--color-border-secondary);
-  font-size: var(--font-text-xs-size);
-  line-height: var(--font-text-xs-line-height);
-  color: var(--color-text-secondary);
+/* Stat tiles: equal columns on a wide card, two per row on a phone */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 128px), 1fr));
+  gap: var(--spacing-xs);
+}
+
+.stat {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--spacing-sm);
+  border-radius: var(--border-radius-md);
+  background-color: var(--color-background-secondary);
+}
+
+.stat-value {
+  font-size: var(--font-text-md-size);
+  line-height: var(--font-text-md-line-height);
+  font-weight: var(--font-weight-semibold);
   font-variant-numeric: tabular-nums;
 }
 
@@ -584,5 +604,9 @@
 
   .ab-card {
     padding: var(--spacing-sm);
+  }
+
+  .stats {
+    grid-template-columns: 1fr 1fr;
   }
 }

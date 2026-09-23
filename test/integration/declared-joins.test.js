@@ -57,6 +57,7 @@ import { makeMcpServer } from '../../src/server.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { startPglite } from './pglite-harness.js';
+import { mcp, setMcp } from '../helpers/catalog-doc.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -131,13 +132,13 @@ before(async () => {
   // source, not on the one above: a validity window and an owned key cannot coexist, and the
   // catalog rejects that combination outright (see the unit guards).
   M.fct_experiment_assignments.columns.push({ name: 'ghost_pair_id', data_type: 'string' });
-  M.fct_experiment_assignments.meta.mcp.entities = { ghost_pair: { type: 'unique', key: ['ghost_pair_id', 'player_id_of_internal'] } };
-  M.fct_analytics_events.meta.mcp.entities.ghost_pair = { type: 'foreign', key: ['event_id', 'player_id_of_internal'] };
+  mcp(M.fct_experiment_assignments).entities = { ghost_pair: { type: 'unique', key: ['ghost_pair_id', 'player_id_of_internal'] } };
+  mcp(M.fct_analytics_events).entities.ghost_pair = { type: 'foreign', key: ['event_id', 'player_id_of_internal'] };
   // (c) HALF a window: the start column is real, the end column is missing
   M.dim_users.columns.find((c) => c.name === 'install_time_valid_until').name = 'ghost_valid_end';
   // (d) a variant of a working relationship, on a missing column
   M.fct_crashlytics_events.columns.push({ name: 'ghost_tracking_id', data_type: 'string' });
-  M.fct_crashlytics_events.meta.mcp.entities.ad_funnel.variants.ghost = { key: ['ghost_tracking_id', 'player_id_of_internal'] };
+  mcp(M.fct_crashlytics_events).entities.ad_funnel.variants.ghost = { key: ['ghost_tracking_id', 'player_id_of_internal'] };
 
   const phantomPath = join(mkdtempSync(join(tmpdir(), 'phantom-')), 'catalog.yml');
   writeFileSync(phantomPath, yaml.dump(doc));
@@ -163,8 +164,8 @@ before(async () => {
   // source, so it is the join TARGET and its attributes get a governed path. See section K.
   const od = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
   const OM = Object.fromEntries(od.models.map((x) => [x.name, x]));
-  OM.fct_crashlytics_events.meta.mcp.entities = { ad_funnel: { type: 'unique', key: ['rewarded_tracking_id', 'player_id_of_internal'] } };
-  OM.fct_analytics_events.meta.mcp.entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
+  mcp(OM.fct_crashlytics_events).entities = { ad_funnel: { type: 'unique', key: ['rewarded_tracking_id', 'player_id_of_internal'] } };
+  mcp(OM.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
   const ownerPath = join(mkdtempSync(join(tmpdir(), 'owner-')), 'catalog.yml');
   writeFileSync(ownerPath, yaml.dump(od));
   ownerCatalog = loadCatalog(ownerPath, { profilesDir: BASE, projectDir: BASE });
@@ -191,8 +192,8 @@ before(async () => {
         description: 'The one ad funnel this crash report belongs to; unique per report.',
       });
     }
-    M.fct_crashlytics_events.meta.mcp.entities = { ad_funnel: { type: 'unique', key: crashKey } };
-    M.fct_analytics_events.meta.mcp.entities.ad_funnel = { type: 'foreign', key: eventKey };
+    mcp(M.fct_crashlytics_events).entities = { ad_funnel: { type: 'unique', key: crashKey } };
+    mcp(M.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: eventKey };
     const at = join(mkdtempSync(join(tmpdir(), 'owned-')), 'catalog.yml');
     writeFileSync(at, yaml.dump(d));
     return loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
@@ -1456,11 +1457,11 @@ const perDayCatalog = (grain) => {
   const d = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
   const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
   const day = (column) => (grain ? { column, grain } : column);
-  M.fct_player_acquisition.meta.mcp.entities = {
-    ...(M.fct_player_acquisition.meta.mcp.entities || {}),
+  mcp(M.fct_player_acquisition).entities = {
+    ...(mcp(M.fct_player_acquisition).entities || {}),
     player_day: { type: 'unique', key: ['player_id_of_internal', day('spend_date')] },
   };
-  M.fct_analytics_events.meta.mcp.entities.player_day = { type: 'foreign', key: ['player_id_of_internal', day('device_time')] };
+  mcp(M.fct_analytics_events).entities.player_day = { type: 'foreign', key: ['player_id_of_internal', day('device_time')] };
   const at = join(mkdtempSync(join(tmpdir(), `perday-${grain || 'raw'}-`)), 'catalog.yml');
   writeFileSync(at, yaml.dump(d));
   return loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
@@ -1505,7 +1506,7 @@ test('35. a key part takes column + grain, and nothing else', opts, async (t) =>
   const bad = (part) => () => {
     const d = yaml.load(readFileSync(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), 'utf8'));
     const M = Object.fromEntries(d.models.map((x) => [x.name, x]));
-    M.fct_analytics_events.meta.mcp.entities.player_day = { type: 'foreign', key: ['player_id_of_internal', part] };
+    mcp(M.fct_analytics_events).entities.player_day = { type: 'foreign', key: ['player_id_of_internal', part] };
     const at = join(mkdtempSync(join(tmpdir(), 'badpart-')), 'catalog.yml');
     writeFileSync(at, yaml.dump(d));
     return loadCatalog(at, { profilesDir: BASE, projectDir: BASE });

@@ -44,6 +44,7 @@ import { Engine } from '../../src/engine.js';
 import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
 import { openStore } from '../../src/store.js';
 import { startPglite } from './pglite-harness.js';
+import { mcp, setMcp } from '../helpers/catalog-doc.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -130,14 +131,14 @@ before(async () => {
   evCrashCtx = both.context_id;
 
   ({ engine: ownerEngine } = variant((M) => {
-    M.fct_crashlytics_events.meta.mcp.entities = { ad_funnel: { type: 'unique', key: ['rewarded_tracking_id', 'player_id_of_internal'] } };
-    M.fct_analytics_events.meta.mcp.entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
+    mcp(M.fct_crashlytics_events).entities = { ad_funnel: { type: 'unique', key: ['rewarded_tracking_id', 'player_id_of_internal'] } };
+    mcp(M.fct_analytics_events).entities.ad_funnel = { type: 'foreign', key: ['tracking_id', 'player_id_of_internal'] };
   }));
   ownerCtx = (await evtsTask(ownerEngine, 'aown', { use_base_models: ['crashlytics', 'users'] })).context_id;
 
   ({ engine: bothEngine } = variant((M) => {
     const clicks = M.fct_player_acquisition.columns.find((c) => c.name === 'clicks');
-    clicks.meta = { mcp: { measure: true, dimension: {} } };
+    setMcp(clicks, { measure: true, dimension: {} });
   }));
   const bt = await bothEngine.create_semantic_model({
     name: 'aclk',
@@ -147,7 +148,7 @@ before(async () => {
   assert.equal(bt.parse.ok, true, JSON.stringify(bt.parse));
   bothCtx = bt.context_id;
 
-  ({ engine: renamedEngine } = variant((M) => { M.fct_analytics_events.meta.mcp.role = 'analytics'; }));
+  ({ engine: renamedEngine } = variant((M) => { mcp(M.fct_analytics_events).role = 'analytics'; }));
 }, opts);
 
 after(async () => { backend?.close(); engine?.valueIndex?.close?.(); if (pg) await pg.stop(); });
@@ -363,7 +364,7 @@ test('25. a measure over the pruned amount is refused at validation, not in the 
 test('26. a governed measure whose column is missing is pruned; the surviving one answers 17.50', opts, async (t) => {
   if (skip(t)) return;
   const { catalog: cat, engine: eng } = variant((M) => {
-    M.fct_player_acquisition.meta.mcp.measures.ghost_total = { expr: 'ghost_cost', agg: 'sum', unit: 'usd' };
+    mcp(M.fct_player_acquisition).measures.ghost_total = { expr: 'ghost_cost', agg: 'sum', unit: 'usd' };
   });
   const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
   assert.ok(pruned.acquisition.includes('measure:ghost_total'), JSON.stringify(pruned));
@@ -467,7 +468,7 @@ test("33. an events source whose role is not called 'events' loads and counts 18
 
 test('34. meta.mcp.anchor is refused at load: there is no default source', opts, async (t) => {
   if (skip(t)) return;
-  assert.throws(() => variant((M) => { M.fct_analytics_events.meta.mcp.anchor = true; }), /meta\.mcp\.anchor is no longer a schema key/);
+  assert.throws(() => variant((M) => { mcp(M.fct_analytics_events).anchor = true; }), /meta\.mcp\.anchor is no longer a schema key/);
 });
 
 test('35. an event accessor without a source is refused; named, it answers', opts, async (t) => {
@@ -665,9 +666,9 @@ test('55. values come from the index with their frequencies: win 20 / lose 5', o
 
 test('56. a catalog that still declares events: or values: is refused with the replacement', opts, async (t) => {
   if (skip(t)) return;
-  assert.throws(() => variant((M) => { M.fct_analytics_events.columns.find((c) => c.name === 'result_of_event_data').meta.mcp.events = ['level_completed']; }),
+  assert.throws(() => variant((M) => { mcp(M.fct_analytics_events.columns.find((c) => c.name === 'result_of_event_data')).events = ['level_completed']; }),
     /meta\.mcp\.events is no longer a schema key.*meta\.mcp\.property: true/s);
-  assert.throws(() => variant((M) => { M.dim_users.columns.find((c) => c.name === 'platform').meta = { mcp: { values: ['ios', 'android'] } }; }),
+  assert.throws(() => variant((M) => { setMcp(M.dim_users.columns.find((c) => c.name === 'platform'), { values: ['ios', 'android'] }); }),
     /meta\.mcp\.values is no longer a schema key/);
 });
 

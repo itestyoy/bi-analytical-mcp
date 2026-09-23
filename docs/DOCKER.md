@@ -24,23 +24,41 @@ project-specific is supplied at runtime via compose volumes + env.
 | Per-context workspace (generated models, results, jobs) | named volume `mcp_workspace` → `/workspace` | persisted |
 
 ### Catalog = your dbt model YAMLs
-Tag your two source models in their normal dbt schema YAML under `meta.mcp` — the
+Tag your source models in their normal dbt schema YAML under `config.meta.mcp` — the
 server discovers them (no separate catalog file). Exactly ONE model per role:
 ```yaml
 models:
   - name: fct_analytics_events
-    meta: { mcp: { key: events, role: fact, anchor: true, primary_entity: event, known_events: [...] } }
+    config:
+      meta: { mcp: { role: events, primary_entity: event, known_events: [...] } }
     columns:
-      - { name: appsflyer_id, data_type: string, meta: { mcp: { entity: { name: user, type: foreign } } } }
-      - { name: device_time,  data_type: timestamp, meta: { mcp: { is_time: true } } }
-      - { name: event_name,   data_type: string, meta: { mcp: { is_event_name: true } } }
-      - { name: event_data,   data_type: json,   meta: { mcp: { is_event_data: true, properties: { ... } } } }
+      - name: appsflyer_id
+        data_type: string
+        config: { meta: { mcp: { entity: { name: user, type: foreign } } } }
+      - name: device_time
+        data_type: timestamp
+        config: { meta: { mcp: { is_time: true } } }
+      - name: event_name
+        data_type: string
+        config: { meta: { mcp: { is_event_name: true } } }
+      - name: event_data
+        data_type: json
+        config: { meta: { mcp: { is_event_data: true, properties: { ... } } } }
   - name: dim_users
-    meta: { mcp: { key: users, role: dimension } }
+    config:
+      meta: { mcp: { role: users } }
     columns:
-      - { name: appsflyer_id, data_type: string, meta: { mcp: { entity: { name: user, type: primary } } } }
-      - { name: country, data_type: string }
+      - name: appsflyer_id
+        data_type: string
+        config: { meta: { mcp: { entity: { name: user, type: primary } } } }
+      - name: country
+        data_type: string
 ```
+`meta` sits under `config:` because **dbt 1.10 moved it there**: dbt Core 1.11 still reads the old
+top-level `meta:` and only warns, but dbt Fusion calls that key unknown (`UnusedConfigKey`, dbt1060)
+and drops it — which would leave this server with an empty catalog. The loader accepts both places
+(`config` wins per key), and `python3 scripts/meta-to-config.py --check <path>` moves an existing
+project (`--write` to apply; it keeps your comments and verifies the result before writing).
 Two models claiming the same role is a config error. Prefer a standalone catalog
 file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 

@@ -213,11 +213,14 @@ export function loadCatalog(path, opts = {}) {
 export function loadCatalogFromProject(projectDir, opts = {}) {
   const models = [];
   for (const mp of readModelPaths(projectDir)) collectSchemaModels(join(projectDir, mp), models);
-  const mcpModels = models.filter((m) => m.meta?.mcp && (m.meta.mcp.role || m.meta.mcp.key));
-  if (!mcpModels.length) throw new Error(`no MCP-tagged models found under ${projectDir} (tag a dbt model with meta.mcp.role + meta.mcp.key)`);
+  // `meta` may sit at the top level (dbt ≤ 1.9) or under `config:` (dbt 1.10+, and the only place
+  // Fusion reads) — mcpMetaOf takes it from either.
+  const mcpModels = models.filter((m) => { const mcp = mcpMetaOf(m); return mcp && (mcp.role || mcp.key); });
+  if (!mcpModels.length) throw new Error(`no MCP-tagged models found under ${projectDir} (tag a dbt model with config.meta.mcp.role + role's key; the pre-1.10 top-level meta.mcp is read too)`);
   const byRole = new Map();
   for (const m of mcpModels) {
-    const role = m.meta.mcp.role || m.meta.mcp.key;
+    const declared = mcpMetaOf(m);
+    const role = declared.role || declared.key;
     if (byRole.has(role)) throw new Error(`config error: more than one model declares role '${role}' (${byRole.get(role)} and ${m.name}); exactly one model per role`);
     byRole.set(role, m.name);
   }
@@ -454,6 +457,34 @@ export function resolvePythonRuntime({ profilesDir, projectDir, env = process.en
 }
 
 /**
+ * WHERE `meta` LIVES IN A dbt SCHEMA FILE — both places, because dbt moved it.
+ *
+ * Up to dbt 1.9 a model or a column carried `meta:` as a property of its own. dbt 1.10 moved it
+ * under `config:`; 1.11 still reads the old place and only warns (PropertyMovedToConfigDeprecation),
+ * but dbt Fusion treats the top-level key as unknown (UnusedConfigKey, dbt1060) and DROPS it. A
+ * catalog read from a Fusion-parsed project would then have no roles, no dimensions and no
+ * measures at all — the whole MCP surface is in that block.
+ *
+ * So this reader takes it from either place, with `config.meta` winning key by key (dbt's own
+ * precedence) for a project caught half-way through the move. Everything downstream keeps reading
+ * `meta.mcp`, because this is the only door the two shapes come through.
+ */
+export function mcpMetaOf(node) {
+  const legacy = node?.meta?.mcp;
+  const moved = node?.config?.meta?.mcp;
+  if (!legacy) return moved;
+  if (!moved) return legacy;
+  return { ...legacy, ...moved };
+}
+
+/** The same node with its MCP block in ONE place, so the rest of this file reads `meta.mcp`. */
+function withNormalizedMeta(node) {
+  const mcp = mcpMetaOf(node);
+  if (!mcp || node.meta?.mcp === mcp) return node;
+  return { ...node, meta: { ...(node.meta || {}), mcp } };
+}
+
+/**
  * Transform a dbt model-schema document into the internal catalog registry.
  * MCP semantics are read from `meta.mcp` at the model level (key/role/
  * primary_entity/known_events/measures) and the column level (entity/is_time/
@@ -463,12 +494,15 @@ export function dbtSchemaToCatalog(doc) {
   // warehouse_dialect is intentionally NOT read from the catalog here; loadCatalog
   // resolves it from env/profile. `fallback` carries any legacy value if present.
   const out = { warehouse_dialect: doc.warehouse_dialect, models: {} };
-  for (const model of doc.models || []) {
+  for (const raw of doc.models || []) {
+    // dbt 1.10 moved `meta` under `config:` — on the model and on every column. Both shapes are
+    // folded into one here (see mcpMetaOf), so nothing below has to know which file it came from.
+    const model = { ...withNormalizedMeta(raw), ...(raw.columns ? { columns: raw.columns.map(withNormalizedMeta) } : {}) };
     const mcp = model.meta?.mcp || {};
     // The ROLE is the logical name — the dbt model can be named anything. (`key`
     // is still accepted as a legacy alias.) Nothing is hardcoded to a specific name.
     const key = mcp.role || mcp.key;
-    if (!key) throw new Error(`catalog model '${model.name}' is missing meta.mcp.role`);
+    if (!key) throw new Error(`catalog model '${model.name}' is missing config.meta.mcp.role (dbt 1.10+ keeps meta under config:; the pre-1.10 top-level meta.mcp is still read)`);
     const m = { dbt_model: model.name };
     if (model.description) m.description = model.description;
     if (mcp.role) m.role = mcp.role;

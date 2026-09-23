@@ -85,6 +85,13 @@ analytics:
 - The image bundles the `dbt` + `mf` (MetricFlow) CLIs (see `requirements.txt`); swap `dbt-postgres` for your adapter (e.g. `dbt-bigquery`) and rebuild.
 - For an external/managed warehouse, delete the `warehouse` service and set the `DBT_PG_*` (or your profile's) vars to point at it.
 - A dbt project (or an explicit `CATALOG_PATH`) is required — the image bakes no catalog. With a project mounted, build/query work via the bundled `dbt`/`mf` runner.
+- **Restarting the container ends every MCP session, and clients recover by themselves.** Sessions
+  (`Mcp-Session-Id`) live in the process, so a redeploy makes every id a client is holding unknown.
+  An unknown id is answered with **404** — the status the spec reserves for exactly this, and the one
+  that makes a client open a new session — and `initialize` ignores the header entirely, so a client
+  that keeps sending the dead id still gets a fresh session on its next call. Both answers are a
+  JSON-RPC error body, not an HTML page. (Before that, an unknown id was a 400: the client could only
+  retry the same doomed request, and the connector had to be removed and re-added by hand.)
 
 ## BigQuery
 BigQuery is a managed warehouse — there's no local DB service. Use the dedicated

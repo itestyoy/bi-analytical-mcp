@@ -317,29 +317,55 @@ export function createApp(engine) {
   // No authentication: run behind your own network boundary / proxy as needed.
   const transports = {}; // sessionId -> transport
 
+  // THE SESSIONS LIVE IN THIS PROCESS, so every deploy invalidates the ids already in clients'
+  // hands — and what the client does about that is decided by the STATUS CODE. The spec is exact:
+  // an unknown session id is 404, and only a 404 makes a client start a new session ("When a
+  // client receives HTTP 404 in response to a request containing an Mcp-Session-Id, it MUST start
+  // a new session by sending a new InitializeRequest without a session ID attached"). A 400 says
+  // "your request was malformed", which the client can only answer by retrying the same request —
+  // which is how one user spent 16 minutes getting an error on every call after a restart, with a
+  // healthy server, until the connector was re-added by hand.
+  const rpcError = (res, status, code, message) => res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
+  const gone = (res) => rpcError(res, 404, -32001, 'Session not found: this server restarted or the session expired. Start a new session by sending initialize (the Mcp-Session-Id header is ignored on initialize).');
+  const noSession = (res) => rpcError(res, 400, -32000, 'Bad Request: Mcp-Session-Id header is required — send initialize first.');
+  const isInit = (body) => (Array.isArray(body) ? body.some(isInitializeRequest) : isInitializeRequest(body));
+
   app.post('/mcp', async (req, res) => {
     const sid = req.headers['mcp-session-id'];
-    let transport = sid ? transports[sid] : undefined;
-    if (!transport) {
-      if (sid || !isInitializeRequest(req.body)) {
-        res.status(400).json({ jsonrpc: '2.0', error: { code: -32000, message: 'No valid session; send initialize first.' }, id: null });
-        return;
+
+    // INITIALIZATION IS OUTSIDE THE SESSION RULES ("Servers that require a session ID SHOULD
+    // respond to requests without an Mcp-Session-Id header (other than initialization) with 400"),
+    // so a stale header never blocks a client from getting a new session. It is ignored even when
+    // it names a LIVE session: re-initializing replaces that session (the old transport is closed
+    // rather than left behind), which is one more way out of the trap and costs nothing.
+    if (isInit(req.body)) {
+      if (sid && transports[sid]) {
+        const previous = transports[sid];
+        delete transports[sid];
+        try { await previous.close(); } catch { /* replacing it is the point; a failed close is not the caller's problem */ }
       }
-      transport = new StreamableHTTPServerTransport({
+      const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (id) => { transports[id] = transport; },
       });
       transport.onclose = () => { if (transport.sessionId) delete transports[transport.sessionId]; };
       const server = makeMcpServer(engine);
       await server.connect(transport);
+      await transport.handleRequest(req, res, req.body);
+      return;
     }
+
+    const transport = sid ? transports[sid] : undefined;
+    if (!transport) { (sid ? gone : noSession)(res); return; }
     await transport.handleRequest(req, res, req.body);
   });
 
+  // The stream (GET) and the explicit teardown (DELETE) answer the same way: an id this process
+  // does not know is 404 — never the Express default HTML page, which a client cannot parse.
   const sessionEndpoint = async (req, res) => {
     const sid = req.headers['mcp-session-id'];
-    const transport = sid && transports[sid];
-    if (!transport) { res.status(400).send('Invalid or missing session id'); return; }
+    const transport = sid ? transports[sid] : undefined;
+    if (!transport) { (sid ? gone : noSession)(res); return; }
     await transport.handleRequest(req, res);
   };
   app.get('/mcp', sessionEndpoint);

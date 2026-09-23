@@ -1,4 +1,9 @@
 /*
+ * Components, after shadcn/ui (new-york v4 registry): Card, Badge, Button, Input, Table (the
+ * data-table pattern), Alert, Accordion/Collapsible, Chart tooltip and legend. Each block names the
+ * shadcn component it follows; values are that component's Tailwind classes spelled as CSS, over
+ * the semantic tokens in global.css (which read the host's variables).
+ *
  * Layout is fluid at every size: nothing has a fixed width, the chart's height follows its width
  * (never the iframe's height — with a flexible-height container that would feed back into the size
  * the host gives us), and a FIXED-height container (fullscreen, or a host that pins the height)
@@ -6,347 +11,768 @@
  */
 .main {
   width: 100%;
-  padding: var(--spacing-md);
+  padding: calc(var(--space) * 4);
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-md);
-
-  > * {
-    margin-top: 0;
-    margin-bottom: 0;
-  }
+  gap: calc(var(--space) * 4);
 }
 
-/* Header */
-.header {
+.icon {
+  width: 1rem;
+  height: 1rem;
+  flex-shrink: 0;
+}
+
+/* ── Page header ─────────────────────────────────────────────────────────────────────────── */
+.page-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--spacing-sm);
+  gap: calc(var(--space) * 3);
 }
 
-.header-text {
+.page-header-text {
   min-width: 0;
-
-  > * {
-    margin: 0;
-  }
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 1.5);
 }
 
-.title {
-  font-size: var(--font-heading-md-size);
-  line-height: var(--font-heading-md-line-height);
+.page-title {
+  font-size: var(--font-text-lg-size);
+  line-height: var(--font-text-lg-line-height);
   font-weight: var(--font-weight-semibold);
+  letter-spacing: -0.025em;
   overflow-wrap: anywhere;
 }
 
-.subtitle {
+.page-description {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--space) * 1.5);
   font-size: var(--font-text-sm-size);
   line-height: var(--font-text-sm-line-height);
-  color: var(--color-text-secondary);
+  color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 }
 
-.icon-btn {
+/* ── Button (shadcn: base + default / outline / ghost, sizes default / sm / icon) ───────────── */
+.btn {
+  display: inline-flex;
   flex-shrink: 0;
-  display: flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  padding: 0;
-  border: var(--border-width-regular) solid var(--color-border-primary);
+  gap: calc(var(--space) * 2);
+  height: 2.25rem;
+  padding: calc(var(--space) * 2) calc(var(--space) * 4);
+  border: var(--border-width-regular) solid transparent;
   border-radius: var(--border-radius-md);
-  color: var(--color-text-secondary);
-  background-color: var(--color-background-primary);
+  font-family: inherit;
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  color: var(--primary-foreground);
+  background-color: var(--primary);
   cursor: pointer;
+  outline: none;
+  transition: background-color 0.15s, color 0.15s, box-shadow 0.15s;
 
   &:hover {
-    color: var(--color-text-primary);
-    background-color: var(--color-background-secondary);
+    background-color: color-mix(in oklab, var(--primary) 90%, transparent);
   }
 
   &:focus-visible {
-    outline: calc(var(--border-width-regular) * 2) solid var(--color-ring-primary);
-    outline-offset: var(--border-width-regular);
+    border-color: var(--ring);
+    box-shadow: 0 0 0 3px var(--ring-soft);
+  }
+
+  &:disabled {
+    pointer-events: none;
+    opacity: 0.5;
+  }
+
+  .icon {
+    pointer-events: none;
   }
 }
 
-/* Sections */
-.section {
-  min-width: 0;
-  padding: var(--spacing-sm) var(--spacing-md) var(--spacing-md);
-  border: var(--border-width-regular) solid var(--color-border-secondary);
-  border-radius: var(--border-radius-lg);
-  background-color: var(--color-background-secondary);
+.btn-outline {
+  color: var(--foreground);
+  border-color: var(--border);
+  background-color: var(--background);
+  box-shadow: var(--shadow-xs);
+
+  &:hover {
+    background-color: var(--accent);
+  }
 }
 
-.section-title {
-  margin: var(--spacing-xs) 0 var(--spacing-sm);
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .btn-outline {
+    border-color: var(--input);
+    background-color: color-mix(in oklab, var(--input) 30%, transparent);
+
+    &:hover {
+      background-color: color-mix(in oklab, var(--input) 50%, transparent);
+    }
+  }
+}
+
+:root[data-theme="dark"] .btn-outline {
+  border-color: var(--input);
+  background-color: color-mix(in oklab, var(--input) 30%, transparent);
+
+  &:hover {
+    background-color: color-mix(in oklab, var(--input) 50%, transparent);
+  }
+}
+
+.btn-ghost {
+  color: var(--foreground);
+  background-color: transparent;
+
+  &:hover {
+    background-color: var(--accent);
+  }
+}
+
+.btn-sm {
+  height: 2rem;
+  gap: calc(var(--space) * 1.5);
+  padding: 0 calc(var(--space) * 3);
+
+  &:has(> svg) {
+    padding: 0 calc(var(--space) * 2.5);
+  }
+}
+
+.btn-icon {
+  width: 2.25rem;
+  height: 2.25rem;
+  padding: 0;
+}
+
+.btn-icon-sm {
+  width: 2rem;
+  height: 2rem;
+  padding: 0;
+}
+
+/* ── Badge (shadcn: base + default / secondary / outline / destructive) ────────────────────── */
+.badge {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--space) * 1);
+  width: fit-content;
+  padding: calc(var(--space) * 0.5) calc(var(--space) * 2);
+  border: var(--border-width-regular) solid transparent;
+  border-radius: var(--border-radius-full);
   font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+  font-weight: var(--font-weight-medium);
+  white-space: nowrap;
+  overflow: hidden;
+
+  .icon {
+    width: 0.75rem;
+    height: 0.75rem;
+  }
+}
+
+.badge-default {
+  color: var(--primary-foreground);
+  background-color: var(--primary);
+}
+
+.badge-secondary {
+  color: var(--foreground);
+  background-color: var(--muted);
+}
+
+.badge-outline {
+  color: var(--foreground);
+  border-color: var(--border);
+}
+
+.badge-destructive {
+  color: #fff;
+  background-color: var(--destructive);
+}
+
+/* ── Card (shadcn: Card, CardHeader, CardTitle, CardDescription, CardAction, CardContent) ──── */
+.card {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 6);
+  padding: calc(var(--space) * 6) 0;
+  border: var(--border-width-regular) solid var(--border);
+  border-radius: var(--border-radius-xl);
+  color: var(--foreground);
+  background-color: var(--card);
+  box-shadow: var(--shadow-sm);
+}
+
+.card-header {
+  display: grid;
+  grid-auto-rows: min-content;
+  grid-template-rows: auto auto;
+  align-items: start;
+  gap: calc(var(--space) * 2);
+  padding: 0 calc(var(--space) * 6);
+
+  &:has(> .card-action) {
+    grid-template-columns: 1fr auto;
+  }
+}
+
+.card-title {
+  min-width: 0;
+  font-size: var(--font-text-md-size);
+  line-height: 1;
   font-weight: var(--font-weight-semibold);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-text-secondary);
   overflow-wrap: anywhere;
 }
 
-/* Chart: the height follows the width, within bounds */
+.card-description {
+  min-width: 0;
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.card-subline {
+  grid-column: 1 / -1;
+  font-variant-numeric: tabular-nums;
+}
+
+.card-action {
+  grid-column-start: 2;
+  grid-row: 1 / span 2;
+  align-self: start;
+  justify-self: end;
+}
+
+.card-content {
+  min-width: 0;
+  padding: 0 calc(var(--space) * 6);
+}
+
+.card-footer {
+  display: flex;
+  align-items: center;
+  padding: 0 calc(var(--space) * 6);
+}
+
+/* the headline number of a stat card (shadcn dashboard "section cards": text-2xl → text-3xl) */
+.card-title-stat {
+  font-size: 1.5rem;
+  line-height: 2rem;
+  font-weight: var(--font-weight-semibold);
+  font-variant-numeric: tabular-nums;
+}
+
+@container card (min-width: 250px) {
+  .card-title-stat {
+    font-size: var(--font-heading-xl-size);
+    line-height: var(--font-heading-xl-line-height);
+  }
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
+  gap: calc(var(--space) * 4);
+
+  > .card {
+    container: card / inline-size;
+  }
+}
+
+/* ── Alert (shadcn: base + default / destructive, AlertTitle, AlertDescription) ─────────────── */
+.alert {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1rem 1fr;
+  align-items: start;
+  column-gap: calc(var(--space) * 3);
+  row-gap: calc(var(--space) * 0.5);
+  width: 100%;
+  padding: calc(var(--space) * 3) calc(var(--space) * 4);
+  border: var(--border-width-regular) solid var(--border);
+  border-radius: var(--border-radius-lg);
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  color: var(--foreground);
+  background-color: var(--card);
+
+  > .icon {
+    transform: translateY(0.125rem);
+    color: currentColor;
+  }
+
+  &.alert-destructive {
+    color: var(--destructive);
+
+    .alert-description {
+      color: color-mix(in oklab, var(--destructive) 90%, transparent);
+    }
+  }
+}
+
+.alert-title {
+  grid-column-start: 2;
+  min-height: 1rem;
+  font-weight: var(--font-weight-medium);
+  letter-spacing: -0.025em;
+  overflow-wrap: anywhere;
+}
+
+.alert-description {
+  grid-column-start: 2;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+
+  code {
+    font-size: var(--font-text-xs-size);
+  }
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: translateY(0.125rem) rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+}
+
+/* ── Chart (shadcn charts: no vertical grid, no axis/tick lines, muted ticks; tooltip, legend) ─ */
 .chart-container {
   position: relative;
   width: 100%;
-  aspect-ratio: 12 / 5;
+  aspect-ratio: 16 / 7;
   min-height: 180px;
-  max-height: 360px;
-}
-
-/*
- * Cards (A/B result, sample-ratio check, sample-size plan). auto-fit, not auto-fill: empty tracks
- * collapse, so ONE card (a single-variant A/B test) spans the whole width, and several share a row
- * down to one per row on a narrow screen. min(100%, …) keeps a card from overflowing a container
- * narrower than its minimum.
- */
-.cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
-  gap: var(--spacing-sm);
-}
-
-.card {
-  min-width: 0;
-  padding: var(--spacing-sm) var(--spacing-md);
-  border: var(--border-width-regular) solid var(--color-border-secondary);
-  border-radius: var(--border-radius-lg);
-  background-color: var(--color-background-secondary);
-  /* a wide card lays its blocks side by side, a narrow one stacks them */
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-  column-gap: var(--spacing-lg);
-  row-gap: var(--spacing-sm);
-  align-items: start;
-}
-
-.card-block {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--spacing-xs);
-
-  > * {
-    margin: 0;
-  }
-}
-
-.card-label {
+  max-height: 340px;
   font-size: var(--font-text-xs-size);
-  color: var(--color-text-secondary);
 }
 
-.card-value {
-  font-size: var(--font-heading-xl-size);
-  line-height: var(--font-heading-xl-line-height);
-  font-weight: var(--font-weight-semibold);
-  font-variant-numeric: tabular-nums;
-}
-
-.card-detail {
-  font-size: var(--font-text-sm-size);
-  color: var(--color-text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-/* A status never relies on color alone: an icon and a label carry it */
-.status {
-  font-size: var(--font-text-sm-size);
-  font-weight: var(--font-weight-semibold);
-
-  &::before {
-    margin-right: var(--spacing-xs);
-  }
-
-  &.status-good::before {
-    content: "✓";
-    color: var(--color-text-success);
-  }
-
-  &.status-bad::before {
-    content: "✕";
-    color: var(--color-text-danger);
-  }
-
-  &.status-neutral::before {
-    content: "•";
-    color: var(--color-text-tertiary);
-  }
-}
-
-/* Chips: the test's settings, under the title */
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--spacing-xs);
-  margin-top: var(--spacing-xs) !important;
-}
-
-.chip {
-  padding: 1px var(--spacing-sm);
-  border-radius: 999px;
+.chart-tooltip {
+  position: absolute;
+  z-index: 1;
+  display: grid;
+  min-width: 8rem;
+  align-items: start;
+  gap: calc(var(--space) * 1.5);
+  padding: calc(var(--space) * 1.5) calc(var(--space) * 2.5);
+  border: var(--border-width-regular) solid color-mix(in oklab, var(--border) 50%, transparent);
+  border-radius: var(--border-radius-lg);
   font-size: var(--font-text-xs-size);
   line-height: var(--font-text-xs-line-height);
-  color: var(--color-text-secondary);
-  background-color: var(--color-background-secondary);
-  box-shadow: inset 0 0 0 var(--border-width-regular) var(--color-border-secondary);
+  background-color: var(--background);
+  box-shadow: var(--shadow-lg);
+  pointer-events: none;
   white-space: nowrap;
+}
 
-  &.chip-accent {
-    color: var(--color-accent);
-    box-shadow: inset 0 0 0 var(--border-width-regular) color-mix(in srgb, var(--color-accent) 50%, transparent);
-    background-color: color-mix(in srgb, var(--color-accent) 8%, var(--color-background-primary));
+.chart-tooltip-label {
+  font-weight: var(--font-weight-medium);
+}
+
+.chart-tooltip-items {
+  display: grid;
+  gap: calc(var(--space) * 1.5);
+}
+
+.chart-tooltip-item {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--space) * 2);
+}
+
+.chart-indicator {
+  flex-shrink: 0;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 2px;
+}
+
+.chart-tooltip-value {
+  display: flex;
+  flex: 1;
+  justify-content: space-between;
+  gap: calc(var(--space) * 4);
+  line-height: 1;
+}
+
+.chart-tooltip-name {
+  color: var(--muted-foreground);
+}
+
+.chart-tooltip-number {
+  font-family: var(--font-mono);
+  font-weight: var(--font-weight-medium);
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--space) * 1.5) calc(var(--space) * 4);
+  padding-top: calc(var(--space) * 3);
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+}
+
+.chart-legend-item {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--space) * 1.5);
+  padding: 0;
+  border: 0;
+  font: inherit;
+  color: var(--foreground);
+  background: none;
+  cursor: pointer;
+
+  .chart-indicator {
+    width: 0.5rem;
+    height: 0.5rem;
+  }
+
+  &[aria-pressed="false"] {
+    color: var(--muted-foreground);
+    text-decoration: line-through;
+
+    .chart-indicator {
+      opacity: 0.35;
+    }
+  }
+
+  &:focus-visible {
+    outline: none;
+    border-radius: var(--border-radius-sm);
+    box-shadow: 0 0 0 3px var(--ring-soft);
   }
 }
 
-/*
- * A/B result: one full-width card per variant, stacked so the intervals share one horizontal scale
- * and line up. Card = header (name + verdict badge) → hero (lift + interval plot) → stat tiles.
- */
-.ab-list {
+/* ── Input (shadcn Input, with a leading search icon) ───────────────────────────────────── */
+.input-group {
+  position: relative;
   display: flex;
-  flex-direction: column;
-  gap: var(--spacing-sm);
+  align-items: center;
+  width: 100%;
+  max-width: 24rem;
 }
 
-.ab-card {
+.input-icon {
+  position: absolute;
+  left: calc(var(--space) * 3);
+  display: flex;
+  color: var(--muted-foreground);
+  pointer-events: none;
+}
+
+.input {
+  width: 100%;
+  min-width: 0;
+  height: 2.25rem;
+  padding: calc(var(--space) * 1) calc(var(--space) * 3);
+  border: var(--border-width-regular) solid var(--input);
+  border-radius: var(--border-radius-md);
+  font-family: inherit;
+  font-size: var(--font-text-sm-size);
+  color: var(--foreground);
+  background-color: transparent;
+  box-shadow: var(--shadow-xs);
+  outline: none;
+  transition: color 0.15s, box-shadow 0.15s;
+
+  .input-icon + & {
+    padding-left: calc(var(--space) * 9);
+  }
+
+  &::placeholder {
+    color: var(--muted-foreground);
+  }
+
+  &:focus-visible {
+    border-color: var(--ring);
+    box-shadow: 0 0 0 3px var(--ring-soft);
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .input {
+    background-color: color-mix(in oklab, var(--input) 30%, transparent);
+  }
+}
+
+:root[data-theme="dark"] .input {
+  background-color: color-mix(in oklab, var(--input) 30%, transparent);
+}
+
+/* ── Data table (shadcn Table + the data-table toolbar / sortable header / pagination) ──────── */
+.data-table {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--spacing-md);
-  padding: var(--spacing-md);
-  border: var(--border-width-regular) solid var(--color-border-secondary);
-  border-radius: var(--border-radius-lg);
-  background-color: var(--color-background-primary);
+  gap: calc(var(--space) * 3);
+}
 
-  &.ab-card-increase,
-  &.ab-card-decrease {
-    border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-border-secondary));
+.data-table-toolbar {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--space) * 2);
+}
+
+/* wide rows scroll sideways inside their own box; the page never scrolls horizontally */
+.table-container {
+  position: relative;
+  max-height: 420px;
+  overflow: auto;
+  border: var(--border-width-regular) solid var(--border);
+  border-radius: var(--border-radius-md);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  font-variant-numeric: tabular-nums;
+
+  tr {
+    border-bottom: var(--border-width-regular) solid var(--border);
+    transition: background-color 0.15s;
+  }
+
+  tbody tr:last-child {
+    border-bottom: 0;
+  }
+
+  tbody tr:hover {
+    background-color: color-mix(in oklab, var(--muted) 50%, transparent);
+  }
+
+  th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    height: 2.5rem;
+    padding: 0 calc(var(--space) * 2);
+    text-align: left;
+    vertical-align: middle;
+    font-weight: var(--font-weight-medium);
+    white-space: nowrap;
+    color: var(--foreground);
+    background-color: var(--background);
+    /* the sticky header keeps its rule while rows scroll under it */
+    box-shadow: inset 0 calc(var(--border-width-regular) * -1) 0 var(--border);
+  }
+
+  td {
+    padding: calc(var(--space) * 2);
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+
+  .num {
+    text-align: right;
+  }
+
+  .null {
+    color: var(--muted-foreground);
+    font-style: italic;
   }
 }
 
-.ab-card-header {
+/* sortable header: a ghost button with the arrow icon (shadcn DataTableColumnHeader) */
+.sort-btn {
+  height: 2rem;
+  margin: 0 calc(var(--space) * -2);
+  padding: 0 calc(var(--space) * 2);
+  gap: calc(var(--space) * 1.5);
+  font-weight: var(--font-weight-medium);
+
+  .icon {
+    color: var(--muted-foreground);
+  }
+
+  [aria-sort] & .icon {
+    color: var(--foreground);
+  }
+
+  .num & {
+    flex-direction: row-reverse;
+  }
+}
+
+.data-table-footer {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--spacing-xs) var(--spacing-sm);
+  gap: calc(var(--space) * 2);
 }
 
-.ab-card-title {
-  margin: 0;
-  min-width: 0;
-  display: flex;
-  align-items: baseline;
-  gap: var(--spacing-xs);
-  font-size: var(--font-text-md-size);
-  line-height: var(--font-text-md-line-height);
-  font-weight: var(--font-weight-semibold);
-  overflow-wrap: anywhere;
-}
-
-.ab-card-vs {
+.data-table-count {
+  flex: 1;
   font-size: var(--font-text-sm-size);
-  font-weight: var(--font-weight-normal);
-  color: var(--color-text-tertiary);
+  line-height: var(--font-text-sm-line-height);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
 }
 
-/* The verdict badge says it in words and with an icon — color is never the only signal */
-.badge {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--spacing-xs);
-  padding: 2px var(--spacing-sm);
-  border-radius: 999px;
-  font-size: var(--font-text-xs-size);
-  line-height: var(--font-text-xs-line-height);
-  font-weight: var(--font-weight-semibold);
-  white-space: nowrap;
-
-  &.badge-increase,
-  &.badge-decrease {
-    color: var(--color-text-on-accent);
-    background-color: var(--color-accent);
-  }
-
-  &.badge-no_difference {
-    color: var(--color-text-secondary);
-    background-color: var(--color-background-secondary);
-    box-shadow: inset 0 0 0 var(--border-width-regular) var(--color-border-secondary);
-  }
-}
-
-.badge-icon {
-  font-weight: var(--font-weight-bold);
-}
-
-/* Hero: the lift beside its interval; on a narrow card the plot drops under the number */
-.ab-hero {
+.data-table-pager {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: var(--spacing-sm) var(--spacing-lg);
+  gap: calc(var(--space) * 2);
+
+  &:not(:has(.btn:not([hidden]))) {
+    display: none;
+  }
 }
 
-.ab-lift {
+.empty-cell {
+  height: 6rem;
+  text-align: center;
+  color: var(--muted-foreground);
+}
+
+/* ── Code block (raw JSON / SQL) ───────────────────────────────────────────────────────────── */
+.code-block {
+  min-width: 0;
+  border: var(--border-width-regular) solid var(--border);
+  border-radius: var(--border-radius-lg);
+  background-color: color-mix(in oklab, var(--muted) 50%, transparent);
+  overflow: hidden;
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(var(--space) * 1) calc(var(--space) * 1) calc(var(--space) * 1) calc(var(--space) * 4);
+  border-bottom: var(--border-width-regular) solid var(--border);
+}
+
+.code-block-label {
+  font-size: var(--font-text-xs-size);
+  font-weight: var(--font-weight-medium);
+  color: var(--muted-foreground);
+}
+
+.code-block-body {
+  margin: 0;
+  padding: calc(var(--space) * 4);
+  font-size: var(--font-text-xs-size);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+}
+
+/* ── Collapsible notes (shadcn Accordion item) ─────────────────────────────────────────────── */
+.collapsible {
+  border-bottom: var(--border-width-regular) solid var(--border);
+}
+
+.collapsible-trigger {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: calc(var(--space) * 4);
+  padding: calc(var(--space) * 4) 0;
+  border-radius: var(--border-radius-md);
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  font-weight: var(--font-weight-medium);
+  list-style: none;
+  cursor: pointer;
+  outline: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+
+  &:hover span:first-child {
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    box-shadow: 0 0 0 3px var(--ring-soft);
+  }
+}
+
+.collapsible-chevron {
+  display: flex;
+  color: var(--muted-foreground);
+  transform: translateY(0.125rem);
+  transition: transform 0.2s;
+
+  [open] > summary & {
+    transform: translateY(0.125rem) rotate(180deg);
+  }
+}
+
+.collapsible-content {
+  margin: 0;
+  padding: 0 0 calc(var(--space) * 4) calc(var(--space) * 5);
+  display: grid;
+  gap: calc(var(--space) * 1);
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  color: var(--muted-foreground);
+}
+
+/* ── A/B result: a stat card per variant (shadcn dashboard "section cards") ───────────────── */
+.ab-list {
   display: flex;
   flex-direction: column;
-  min-width: 7.5em;
+  gap: calc(var(--space) * 4);
 }
 
-.ab-lift-label,
-.stat-label {
-  font-size: var(--font-text-xs-size);
-  line-height: var(--font-text-xs-line-height);
-  font-weight: var(--font-weight-medium);
-  color: var(--color-text-secondary);
-  overflow-wrap: anywhere;
+.ab-card {
+  container: card / inline-size;
 }
 
-.ab-lift-value {
-  font-size: var(--font-heading-xl-size);
-  line-height: var(--font-heading-xl-line-height);
-  font-weight: var(--font-weight-bold);
-  font-variant-numeric: tabular-nums;
-}
 
-.ab-lift-caption,
-.stat-caption {
-  font-size: var(--font-text-xs-size);
-  line-height: var(--font-text-xs-line-height);
-  color: var(--color-text-secondary);
-  font-variant-numeric: tabular-nums;
-}
-
-/* Interval plot, in HTML so it stretches with the card and its labels stay crisp */
+/* Interval plot: a range bar, the estimate, the no-effect line — HTML, so it stretches crisply */
 .ci-plot {
-  --ci-color: var(--color-text-tertiary);
-  flex: 1 1 220px;
-  min-width: 0;
+  --ci-color: var(--muted-foreground);
 
   &.ci-significant {
-    --ci-color: var(--color-accent);
+    --ci-color: var(--color-series-1);
   }
 }
 
 .ci-track {
   position: relative;
-  height: 24px;
+  height: 1.5rem;
 
-  /* the axis itself */
   &::before {
     content: "";
     position: absolute;
     left: 0;
     right: 0;
     top: 50%;
-    border-top: var(--border-width-regular) solid var(--color-border-secondary);
+    border-top: var(--border-width-regular) solid var(--border);
   }
 }
 
@@ -355,37 +781,37 @@
   left: 50%;
   top: 0;
   bottom: 0;
-  border-left: var(--border-width-regular) dashed var(--color-text-tertiary);
+  border-left: var(--border-width-regular) dashed var(--muted-foreground);
 }
 
 .ci-range {
   position: absolute;
   top: 50%;
-  height: 8px;
+  height: 0.5rem;
   transform: translateY(-50%);
-  border-radius: 4px;
-  background-color: color-mix(in srgb, var(--ci-color) 45%, transparent);
+  border-radius: var(--border-radius-full);
+  background-color: color-mix(in oklab, var(--ci-color) 40%, transparent);
 }
 
 .ci-point {
   position: absolute;
   top: 50%;
-  width: 14px;
-  height: 14px;
+  width: 0.875rem;
+  height: 0.875rem;
   transform: translate(-50%, -50%);
   border-radius: 50%;
   background-color: var(--ci-color);
   /* a ring in the surface color keeps the dot readable over the bar and the zero line */
-  box-shadow: 0 0 0 2px var(--color-background-primary);
+  box-shadow: 0 0 0 2px var(--card);
 }
 
 .ci-axis {
   display: grid;
   grid-template-columns: 1fr auto 1fr;
-  margin-top: 2px;
+  margin-top: calc(var(--space) * 1);
   font-size: var(--font-text-xs-size);
   line-height: var(--font-text-xs-line-height);
-  color: var(--color-text-tertiary);
+  color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
 
   > :last-child {
@@ -393,21 +819,33 @@
   }
 }
 
-/* Stat tiles: equal columns on a wide card, two per row on a phone */
-.stats {
+/* Key figures: a divided grid under a top rule (1px gaps over the border color make the lines,
+   so they stay right however the cells wrap) */
+.stat-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 128px), 1fr));
-  gap: var(--spacing-xs);
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+  gap: var(--border-width-regular);
+  margin-bottom: calc(var(--space) * -6);
+  border-top: var(--border-width-regular) solid var(--border);
+  border-radius: 0 0 var(--border-radius-xl) var(--border-radius-xl);
+  background-color: var(--border);
+  overflow: hidden;
 }
 
 .stat {
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: var(--spacing-sm);
-  border-radius: var(--border-radius-md);
-  background-color: var(--color-background-secondary);
+  gap: calc(var(--space) * 1);
+  padding: calc(var(--space) * 3) calc(var(--space) * 6) calc(var(--space) * 4);
+  background-color: var(--card);
+}
+
+.stat-label {
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
 }
 
 .stat-value {
@@ -417,149 +855,14 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* The server's advice, folded under the result */
-.notes {
-  font-size: var(--font-text-sm-size);
-  color: var(--color-text-secondary);
-
-  summary {
-    cursor: pointer;
-    font-weight: var(--font-weight-medium);
-  }
-
-  summary:focus-visible {
-    outline: calc(var(--border-width-regular) * 2) solid var(--color-ring-primary);
-    outline-offset: var(--border-width-regular);
-    border-radius: var(--border-radius-sm);
-  }
-}
-
-.notes-list {
-  margin: var(--spacing-xs) 0 0;
-  padding-left: var(--spacing-lg);
-}
-
-/* Table */
-.toolbar {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--spacing-sm);
-  align-items: center;
-  margin: var(--spacing-xs) 0 var(--spacing-sm);
-}
-
-.filter {
-  flex: 1 1 160px;
-  min-width: 0;
-  padding: var(--spacing-xs) var(--spacing-sm);
-  border: var(--border-width-regular) solid var(--color-border-primary);
-  border-radius: var(--border-radius-md);
-  font-family: inherit;
-  font-size: var(--font-text-sm-size);
-  color: var(--color-text-primary);
-  background-color: var(--color-background-primary);
-
-  &:focus-visible {
-    outline: calc(var(--border-width-regular) * 2) solid var(--color-ring-primary);
-    outline-offset: var(--border-width-regular);
-  }
-}
-
-.btn {
-  padding: var(--spacing-xs) var(--spacing-md);
-  border: none;
-  border-radius: var(--border-radius-md);
-  font-family: inherit;
-  font-size: var(--font-text-sm-size);
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-on-accent);
-  background-color: var(--color-accent);
-  cursor: pointer;
-
-  &:hover {
-    background-color: color-mix(in srgb, var(--color-accent) 85%, var(--color-background-inverse));
-  }
-
-  &:focus-visible {
-    outline: calc(var(--border-width-regular) * 2) solid var(--color-ring-primary);
-    outline-offset: var(--border-width-regular);
-  }
-
-  &:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-}
-
-/* wide rows scroll sideways inside their own box; the page never scrolls horizontally */
-.table-container {
-  max-height: 420px;
-  overflow: auto;
-  border: var(--border-width-regular) solid var(--color-border-secondary);
-  border-radius: var(--border-radius-md);
-  background-color: var(--color-background-primary);
-}
-
-.table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--font-text-sm-size);
-  font-variant-numeric: tabular-nums;
-
-  th, td {
-    padding: var(--spacing-xs) var(--spacing-sm);
-    border-bottom: var(--border-width-regular) solid var(--color-border-secondary);
-    text-align: left;
-    white-space: nowrap;
-  }
-
-  th {
-    position: sticky;
-    top: 0;
-    font-weight: var(--font-weight-semibold);
-    color: var(--color-text-secondary);
-    background-color: var(--color-background-secondary);
-    cursor: pointer;
-    user-select: none;
-  }
-
-  .num {
-    text-align: right;
-  }
-
-  .null {
-    color: var(--color-text-tertiary);
-    font-style: italic;
-  }
-}
-
-.notice {
-  padding: var(--spacing-sm) var(--spacing-md);
-  border-radius: var(--border-radius-md);
-  font-size: var(--font-text-sm-size);
-  color: var(--color-text-info);
-  background-color: var(--color-background-info);
-
-  &.notice-error {
-    color: var(--color-text-danger);
-  }
-}
-
-.raw {
-  margin: 0;
-  padding: var(--spacing-sm) var(--spacing-md);
-  border: var(--border-width-regular) solid var(--color-border-secondary);
-  border-radius: var(--border-radius-md);
+.stat-caption {
   font-size: var(--font-text-xs-size);
-  white-space: pre-wrap;
-  word-break: break-word;
-  background-color: var(--color-background-secondary);
+  line-height: var(--font-text-xs-line-height);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
 }
 
-/*
- * Fixed height: fullscreen, or a host that pins the container's height. The view fills it; the
- * table (or the raw text) takes what is left and scrolls inside, the page itself never scrolls.
- */
+/* ── Fixed height: fullscreen, or a host that pins the container's height ──────────────────── */
 .main.fill {
   height: 100vh;
   overflow: hidden;
@@ -567,8 +870,6 @@
   #table-section:not([hidden]) {
     flex: 1;
     min-height: 0;
-    display: flex;
-    flex-direction: column;
   }
 
   .table-container {
@@ -576,8 +877,19 @@
     max-height: none;
   }
 
-  .raw {
+  #raw-section:not([hidden]) {
     flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .code-block-body {
+    flex: 1;
+    min-height: 0;
+  }
+
+  #cards-section:not([hidden]) {
     min-height: 0;
     overflow: auto;
   }
@@ -587,26 +899,35 @@
   }
 }
 
-/* A narrow chat bubble or a phone: tighter paddings and a smaller headline */
+/* ── A narrow chat bubble or a phone: shadcn's p-4 instead of p-6 inside cards ─────────────── */
 @media (max-width: 480px) {
   .main {
-    padding: var(--spacing-sm);
-    gap: var(--spacing-sm);
+    padding: calc(var(--space) * 3);
+    gap: calc(var(--space) * 3);
   }
 
-  .section {
-    padding: var(--spacing-xs) var(--spacing-sm) var(--spacing-sm);
+  .card {
+    gap: calc(var(--space) * 4);
+    padding: calc(var(--space) * 4) 0;
   }
 
-  .card-value {
-    font-size: var(--font-heading-md-size);
+  .card-header,
+  .card-content,
+  .card-footer {
+    padding: 0 calc(var(--space) * 4);
   }
 
-  .ab-card {
-    padding: var(--spacing-sm);
-  }
-
-  .stats {
+  .stat-grid {
     grid-template-columns: 1fr 1fr;
+    margin-bottom: calc(var(--space) * -4);
+  }
+
+  .stat {
+    padding: calc(var(--space) * 3) calc(var(--space) * 4);
+  }
+
+  /* an odd tile out takes the whole row instead of leaving an empty cell */
+  .stat:last-child:nth-child(odd) {
+    grid-column: 1 / -1;
   }
 }

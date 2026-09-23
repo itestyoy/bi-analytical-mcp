@@ -116,7 +116,9 @@
   is `src/mcp-tasks.js`, which exists only until the SDK serves the Tasks extension.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine.get_recipe`, the python
   guide, a tool's result); they never carry text or numbers of their own. The Apps view follows the
-  official ext-apps templates; its build is checked in and held to its sources by a test.
+  official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Input, Table,
+  Alert, Accordion, Chart) over the HOST's style variables, whose fallbacks are the shadcn neutral
+  theme; its build is checked in and held to its sources by a test.
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

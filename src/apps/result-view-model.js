@@ -183,6 +183,10 @@ export function buildViewModel(toolName, result, toolInput) {
     const nextPage = toolName === 'get_query_result' && page?.has_more && isObj(toolInput)
       ? { name: 'get_query_result', arguments: { ...toolInput, offset: (page.offset || 0) + (page.limit || rows.length) } }
       : null;
+    // and the PREVIOUS one: the same call stepped back by a page, never before the first row
+    const prevPage = toolName === 'get_query_result' && page && page.offset > 0 && isObj(toolInput)
+      ? { name: 'get_query_result', arguments: { ...toolInput, offset: Math.max(0, page.offset - (page.limit || rows.length)) } }
+      : null;
     return {
       kind: 'table',
       title: result.table || (toolName === 'query_semantic_model' ? 'Metric query' : 'Result'),
@@ -193,6 +197,7 @@ export function buildViewModel(toolName, result, toolInput) {
       approximate: !!result.approximate || !!result.provenance?.approximate,
       page,
       nextPage,
+      prevPage,
       chart,
     };
   }

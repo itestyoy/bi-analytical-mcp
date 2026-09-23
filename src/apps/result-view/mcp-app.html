@@ -8,32 +8,38 @@
 </head>
 <body>
   <main class="main">
-    <header class="header">
-      <div class="header-text">
-        <h1 id="title" class="title">Query Result</h1>
-        <p id="subtitle" class="subtitle">Waiting for the result…</p>
+    <header class="page-header">
+      <div class="page-header-text">
+        <h1 id="title" class="page-title">Query Result</h1>
+        <div id="subtitle" class="page-description">Waiting for the result…</div>
       </div>
-      <button id="fullscreen-btn" class="icon-btn" type="button" title="Enter fullscreen" aria-label="Enter fullscreen" hidden>
-        <svg id="expand-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        <svg id="compress-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" hidden><path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-      </button>
+      <button id="fullscreen-btn" class="btn btn-outline btn-icon" type="button" title="Enter fullscreen" aria-label="Enter fullscreen" hidden></button>
     </header>
 
-    <p id="notice" class="notice" hidden></p>
+    <div id="notice" class="alert" role="status" hidden></div>
 
-    <section id="chart-section" class="section" hidden>
-      <h2 id="chart-title" class="section-title">Chart</h2>
-      <div class="chart-container">
-        <canvas id="chart" role="img"></canvas>
+    <section id="chart-section" class="card" hidden>
+      <div class="card-header">
+        <h2 id="chart-title" class="card-title">Chart</h2>
+        <p id="chart-description" class="card-description"></p>
+      </div>
+      <div class="card-content">
+        <div class="chart-container">
+          <canvas id="chart" role="img"></canvas>
+          <div id="chart-tooltip" class="chart-tooltip" hidden></div>
+        </div>
+        <div id="chart-legend" class="chart-legend" hidden></div>
       </div>
     </section>
 
-    <section id="cards-section" class="cards" hidden></section>
+    <section id="cards-section" hidden></section>
 
-    <section id="table-section" class="section" hidden>
-      <div class="toolbar">
-        <input id="filter" class="filter" type="search" placeholder="Filter rows…" aria-label="Filter rows">
-        <button id="next-page-btn" class="btn" type="button" hidden>Next page</button>
+    <section id="table-section" class="data-table" hidden>
+      <div class="data-table-toolbar">
+        <label class="input-group">
+          <span class="input-icon" id="filter-icon"></span>
+          <input id="filter" class="input" type="search" placeholder="Filter rows…" aria-label="Filter rows">
+        </label>
       </div>
       <div class="table-container">
         <table id="table" class="table">
@@ -41,13 +47,26 @@
           <tbody></tbody>
         </table>
       </div>
+      <div class="data-table-footer">
+        <p id="table-count" class="data-table-count"></p>
+        <div class="data-table-pager">
+          <button id="prev-page-btn" class="btn btn-outline btn-sm" type="button" hidden>Previous</button>
+          <button id="next-page-btn" class="btn btn-outline btn-sm" type="button" hidden>Next</button>
+        </div>
+      </div>
     </section>
 
-    <pre id="raw" class="raw" hidden></pre>
+    <div id="raw-section" class="code-block" hidden>
+      <div class="code-block-header">
+        <span id="raw-label" class="code-block-label">JSON</span>
+        <button id="copy-btn" class="btn btn-ghost btn-icon-sm" type="button" title="Copy" aria-label="Copy"></button>
+      </div>
+      <pre id="raw" class="code-block-body"></pre>
+    </div>
 
-    <details id="notes" class="notes" hidden>
-      <summary>Notes</summary>
-      <ul id="notes-list" class="notes-list"></ul>
+    <details id="notes" class="collapsible" hidden>
+      <summary class="collapsible-trigger"><span>Notes</span><span id="notes-chevron" class="collapsible-chevron"></span></summary>
+      <ul id="notes-list" class="collapsible-content"></ul>
     </details>
   </main>
   <script type="module" src="./src/mcp-app.js"></script>

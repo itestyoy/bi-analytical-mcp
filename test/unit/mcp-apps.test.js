@@ -81,6 +81,10 @@ test('view model: a category and an amount is a bar per category; paging carries
   const m = buildViewModel('get_query_result', { status: 'ready', columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'start', users: 100 }, { step: 'finish', users: 37 }], page: { limit: 2, offset: 0, has_more: true } }, { query_id: 'q-9', limit: 2 });
   assert.deepEqual(m.chart.bars, [{ label: 'start', value: 100 }, { label: 'finish', value: 37 }]);
   assert.deepEqual(m.nextPage, { name: 'get_query_result', arguments: { query_id: 'q-9', limit: 2, offset: 2 } });
+  assert.equal(m.prevPage, null); // the first page has nothing before it
+  const second = buildViewModel('get_query_result', { status: 'ready', columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'x', users: 5 }], page: { limit: 2, offset: 2, has_more: false } }, { query_id: 'q-9', limit: 2, offset: 2 });
+  assert.equal(second.nextPage, null);
+  assert.deepEqual(second.prevPage, { name: 'get_query_result', arguments: { query_id: 'q-9', limit: 2, offset: 0 } });
 });
 
 test('view model: the A/B card carries the test\'s own numbers', async () => {

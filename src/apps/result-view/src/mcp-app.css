@@ -7,7 +7,7 @@
  * Layout is fluid at every size: nothing has a fixed width, the chart's height follows its width
  * (never the iframe's height — with a flexible-height container that would feed back into the size
  * the host gives us), and a FIXED-height container (fullscreen, or a host that pins the height)
- * switches to a fill-and-scroll layout where the table takes the remaining space.
+ * switches to a fill layout: the view takes the frame and its cards scroll inside it.
  */
 .main {
   width: 100%;
@@ -296,16 +296,6 @@
   }
 }
 
-.card-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 220px), 1fr));
-  gap: calc(var(--space) * 4);
-
-  > .card {
-    container: card / inline-size;
-  }
-}
-
 /* ── Alert (shadcn: base + default / destructive, AlertTitle, AlertDescription) ─────────────── */
 .alert {
   position: relative;
@@ -353,22 +343,6 @@
 
   code {
     font-size: var(--font-text-xs-size);
-  }
-}
-
-.spin {
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: translateY(0.125rem) rotate(360deg);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .spin {
-    animation: none;
   }
 }
 
@@ -667,37 +641,119 @@
   color: var(--muted-foreground);
 }
 
-/* ── Code block (raw JSON / SQL) ───────────────────────────────────────────────────────────── */
-.code-block {
-  min-width: 0;
-  border: var(--border-width-regular) solid var(--border);
-  border-radius: var(--border-radius-lg);
-  background-color: color-mix(in oklab, var(--muted) 50%, transparent);
-  overflow: hidden;
+/* ── The chart card's rows, folded at its foot (an Accordion item as the card footer) ────────── */
+.card-data {
+  margin-bottom: calc(var(--space) * -6);
+  border-top: var(--border-width-regular) solid var(--border);
+
+  > .data-table {
+    padding: 0 calc(var(--space) * 6) calc(var(--space) * 6);
+  }
 }
 
-.code-block-header {
+.card-data-trigger {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: calc(var(--space) * 1) calc(var(--space) * 1) calc(var(--space) * 1) calc(var(--space) * 4);
-  border-bottom: var(--border-width-regular) solid var(--border);
+  gap: calc(var(--space) * 4);
+  padding: calc(var(--space) * 3) calc(var(--space) * 6);
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  font-weight: var(--font-weight-medium);
+  list-style: none;
+  cursor: pointer;
+  outline: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+
+  &:hover span:first-child {
+    text-decoration: underline;
+  }
+
+  &:focus-visible {
+    box-shadow: inset 0 0 0 3px var(--ring-soft);
+  }
 }
 
-.code-block-label {
+/* ── Funnel: ordered steps, a share bar each, the carry-over between them ──────────────────── */
+.funnel {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  --funnel-indent: calc(1.5rem + var(--space) * 3);
+}
+
+.funnel-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: calc(var(--space) * 3);
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  font-variant-numeric: tabular-nums;
+}
+
+.funnel-index {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  border-radius: var(--border-radius-full);
   font-size: var(--font-text-xs-size);
   font-weight: var(--font-weight-medium);
   color: var(--muted-foreground);
+  background-color: var(--muted);
 }
 
-.code-block-body {
-  margin: 0;
-  padding: calc(var(--space) * 4);
+.funnel-label {
+  font-weight: var(--font-weight-medium);
+  overflow-wrap: anywhere;
+}
+
+.funnel-value {
+  font-weight: var(--font-weight-semibold);
+}
+
+.funnel-share {
+  min-width: 3.5rem;
+  text-align: right;
+  color: var(--muted-foreground);
+}
+
+.funnel-track {
+  height: 0.5rem;
+  margin: calc(var(--space) * 2) 0 0 var(--funnel-indent);
+  border-radius: var(--border-radius-full);
+  background-color: var(--muted);
+  overflow: hidden;
+}
+
+.funnel-fill {
+  height: 100%;
+  border-radius: var(--border-radius-full);
+  background-color: var(--color-series-1);
+}
+
+.funnel-link {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--space) * 2);
+  padding: calc(var(--space) * 2.5) 0 calc(var(--space) * 2.5) var(--funnel-indent);
   font-size: var(--font-text-xs-size);
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow: auto;
+  line-height: var(--font-text-xs-line-height);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+
+  > .icon {
+    width: 0.75rem;
+    height: 0.75rem;
+  }
 }
 
 /* ── Collapsible notes (shadcn Accordion item) ─────────────────────────────────────────────── */
@@ -760,7 +816,7 @@
   gap: calc(var(--space) * 4);
 }
 
-.ab-card {
+.ab-list > .card {
   container: card / inline-size;
 }
 
@@ -877,34 +933,9 @@
 /* ── Fixed height: fullscreen, or a host that pins the container's height ──────────────────── */
 .main.fill {
   height: 100vh;
-  overflow: hidden;
 
-  #table-section:not([hidden]) {
-    flex: 1;
-    min-height: 0;
-  }
-
-  .table-container {
-    flex: 1;
-    max-height: none;
-  }
-
-  #raw-section:not([hidden]) {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-  }
-
-  .code-block-body {
-    flex: 1;
-    min-height: 0;
-  }
-
-  #cards-section:not([hidden]) {
-    min-height: 0;
-    overflow: auto;
-  }
+  /* the cards scroll inside the fixed frame; the page itself never does */
+  overflow-y: auto;
 
   .chart-container {
     max-height: 40vh;
@@ -927,6 +958,18 @@
   .card-content,
   .card-footer {
     padding: 0 calc(var(--space) * 4);
+  }
+
+  .card-data {
+    margin-bottom: calc(var(--space) * -4);
+
+    > .data-table {
+      padding: 0 calc(var(--space) * 4) calc(var(--space) * 4);
+    }
+  }
+
+  .card-data-trigger {
+    padding: calc(var(--space) * 3) calc(var(--space) * 4);
   }
 
   .stat-grid {

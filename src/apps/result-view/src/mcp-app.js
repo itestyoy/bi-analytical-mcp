@@ -1,8 +1,8 @@
 /**
- * @file Query Result view — renders the result of query_semantic_model, get_query_result and
- * experiment inside the host's conversation: a data table with filter, sorting and paging, a chart
- * when the rows are a time series or a breakdown, the A/B result as a stat card per variant, the
- * sample-ratio check, the sample-size plan.
+ * @file Query Result view — three cards inside the host's conversation: a CHART (a time series or a
+ * breakdown, its rows folded underneath as a data table with filter, sorting and paging), an A/B
+ * TEST (a stat card per variant), a FUNNEL (steps, conversion, the biggest drop). Any other result
+ * draws nothing: the tool's text answer is the whole reply.
  *
  * WHAT to show is decided by buildViewModel (src/apps/result-view-model.js), a pure function the
  * unit tests run in node on real tool results; this file only draws it. Structure follows the
@@ -53,16 +53,12 @@ const chartCanvas = document.getElementById('chart');
 const chartTooltip = document.getElementById('chart-tooltip');
 const chartLegend = document.getElementById('chart-legend');
 const cardsSection = document.getElementById('cards-section');
-const tableSection = document.getElementById('table-section');
+const dataLabel = document.getElementById('data-label');
 const filterInput = document.getElementById('filter');
 const tableCount = document.getElementById('table-count');
 const prevPageBtn = document.getElementById('prev-page-btn');
 const nextPageBtn = document.getElementById('next-page-btn');
 const tableEl = document.getElementById('table');
-const rawSection = document.getElementById('raw-section');
-const rawLabel = document.getElementById('raw-label');
-const rawEl = document.getElementById('raw');
-const copyBtn = document.getElementById('copy-btn');
 const notesEl = document.getElementById('notes');
 const notesList = document.getElementById('notes-list');
 const fullscreenBtn = document.getElementById('fullscreen-btn');
@@ -70,7 +66,7 @@ const fullscreenBtn = document.getElementById('fullscreen-btn');
 // static icons
 document.getElementById('filter-icon').append(icon('search'));
 document.getElementById('notes-chevron').append(icon('chevron-down'));
-copyBtn.append(icon('copy'));
+document.getElementById('data-chevron').append(icon('chevron-down'));
 prevPageBtn.prepend(icon('chevron-left'));
 nextPageBtn.append(icon('chevron-right'));
 
@@ -104,9 +100,9 @@ const formatPercent = (value) => (value === null || value === undefined ? '—' 
 const sign = (v) => (v > 0 ? '+' : v < 0 ? '−' : '');
 const formatPoints = (v) => `${sign(v)}${Math.abs(v * 100).toFixed(2)} pp`;
 const formatSignedPercent = (v, digits = 1) => `${sign(v)}${Math.abs(v * 100).toFixed(digits)}%`;
+const formatShare = (v) => (v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`);
 const formatSignedNumber = (v) => `${sign(v)}${formatNumber(Math.abs(v))}`;
 const formatP = (p) => (p < 0.001 ? '<0.001' : p.toFixed(3));
-const pLabel = (p) => (p < 0.001 ? 'p < 0.001' : `p = ${p.toFixed(3)}`);
 const correctionName = (c) => ({ holm: 'Holm', bh: 'Benjamini–Hochberg', bonferroni: 'Bonferroni' }[c] || c);
 
 /**
@@ -169,8 +165,8 @@ function payloadOf(result) {
 }
 
 /** shadcn Alert: an icon, a title and a description; `destructive` for a failure. */
-function showAlert({ title, description, variant = 'default', iconName = 'info', spin = false }) {
-  noticeEl.replaceChildren(icon(iconName, spin ? 'icon spin' : 'icon'), el('p', 'alert-title', title));
+function showAlert({ title, description, variant = 'default', iconName = 'info' }) {
+  noticeEl.replaceChildren(icon(iconName), el('p', 'alert-title', title));
   if (description) {
     const d = el('div', 'alert-description');
     if (description instanceof Node) d.append(description);
@@ -187,7 +183,7 @@ function setDescription(...parts) {
 }
 
 function resetSections() {
-  for (const section of [noticeEl, chartSection, cardsSection, tableSection, rawSection, notesEl]) section.hidden = true;
+  for (const section of [noticeEl, chartSection, cardsSection, notesEl]) section.hidden = true;
   cardsSection.replaceChildren();
   cardsSection.className = '';
   notesList.replaceChildren();
@@ -204,76 +200,26 @@ function render(result) {
   const model = buildViewModel(state.toolName, payloadOf(result), state.toolInput);
   state.model = model;
   resetSections();
+  // only the three cards are drawn; any other result leaves the view empty (and the iframe at 0px)
+  mainEl.hidden = !['chart', 'experiment', 'funnel'].includes(model.kind);
+  if (mainEl.hidden) return;
   titleEl.textContent = model.title;
   setDescription();
 
-  switch (model.kind) {
-    case 'running': {
-      titleEl.textContent = 'Building the result';
-      setDescription(badge('running', 'secondary'));
-      const d = el('span', null, `${model.message} `);
-      d.append(el('code', null, model.query_id));
-      showAlert({ title: 'Working in the background', description: d, iconName: 'loader-circle', spin: true });
-      break;
-    }
-    case 'error':
-      titleEl.textContent = 'The call failed';
-      if (model.stage) setDescription(badge(`stage: ${model.stage}`, 'outline'));
-      showAlert({ title: model.stage ? `Failed at ${model.stage}` : 'Failed', description: model.message, variant: 'destructive', iconName: 'circle-alert' });
-      break;
-    case 'experiment':
-      renderExperiment(model);
-      break;
-    case 'srm':
-      renderSrm(model);
-      break;
-    case 'plan':
-      renderPlan(model);
-      break;
-    case 'distribution':
-      setDescription(
-        model.distinct !== null ? badge(`${formatNumber(model.distinct)} distinct`, 'secondary') : null,
-        model.total !== null ? badge(`${formatNumber(model.total)} rows`, 'secondary') : null,
-      );
-      renderChart({ type: 'bar', x: 'value', y: 'freq', bars: model.bars }, model.title);
-      renderTable(model);
-      break;
-    case 'table':
-      renderTableResult(model);
-      break;
-    case 'sql':
-      renderCode('SQL', model.sql);
-      break;
-    default:
-      renderCode('JSON', JSON.stringify(model.json, null, 2));
-  }
+  if (model.kind === 'experiment') renderExperiment(model);
+  else if (model.kind === 'funnel') renderFunnel(model);
+  else renderChartResult(model);
 }
 
-function renderTableResult(model) {
+function renderChartResult(model) {
   setDescription(
     badge(`${formatNumber(model.row_count)} row${model.row_count === 1 ? '' : 's'}`, 'secondary'),
     model.sampled ? badge('random sample', 'outline') : null,
     model.approximate ? badge('approximate', 'outline') : null,
   );
-  if (model.chart) renderChart(model.chart, model.chart.y || 'Series');
+  renderChart(model.chart, model.chart.y || 'Series');
   renderTable(model);
 }
-
-function renderCode(label, text) {
-  rawLabel.textContent = label;
-  rawEl.textContent = text;
-  rawSection.hidden = false;
-}
-
-copyBtn.addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(rawEl.textContent);
-    copyBtn.replaceChildren(icon('check'));
-    setTimeout(() => copyBtn.replaceChildren(icon('copy')), 1500);
-  } catch (e) {
-    log.error('Copy failed:', e);
-  }
-});
 
 // ── chart (shadcn charts: horizontal grid only, no axis or tick lines, HTML tooltip and legend) ─
 
@@ -411,7 +357,7 @@ chartCanvas.addEventListener('mouseleave', () => { chartTooltip.hidden = true; }
 // ── data table (shadcn data-table: filter input, sortable headers, count + pager footer) ──────
 
 function renderTable(model) {
-  tableSection.hidden = false;
+  dataLabel.textContent = `Data · ${integerFormat.format(model.rows.length)} row${model.rows.length === 1 ? '' : 's'}`;
   filterInput.value = state.filter;
   const canCall = !!app.getHostCapabilities()?.serverTools;
   nextPageBtn.hidden = !(model.nextPage && canCall);
@@ -597,34 +543,62 @@ function renderExperiment(model) {
   showNotes(model.notes);
 }
 
+// ── funnel ────────────────────────────────────────────────────────────────────────────────────
+//
+// One card: the overall conversion as the headline, then the steps in order — each with its count,
+// its share of the first step and a bar of that share; between two steps, the share that carried
+// on, and the step that lost the most is marked.
+
+function renderFunnel(model) {
+  const n = model.steps.length;
+  const first = model.steps[0];
+  const last = model.steps[n - 1];
+  setDescription(badge(`${n} steps`, 'secondary'), model.measure ? badge(model.measure, 'outline') : null);
+
+  const list = el('ol', 'funnel');
+  model.steps.forEach((step, i) => {
+    const worst = i === model.biggest_drop;
+    const item = el('li', `funnel-step${worst ? ' funnel-step-worst' : ''}`);
+    if (i > 0) {
+      const link = el('div', 'funnel-link');
+      link.append(icon('arrow-down'), el('span', null, `${formatShare(step.of_previous)} continued`));
+      if (worst) link.append(badge(`Biggest drop · −${formatShare(1 - step.of_previous)}`, 'destructive'));
+      item.append(link);
+    }
+    const head = el('div', 'funnel-head');
+    head.append(
+      el('span', 'funnel-index', String(i + 1)),
+      el('span', 'funnel-label', step.label),
+      el('span', 'funnel-value', formatNumber(step.value)),
+      el('span', 'funnel-share', formatShare(step.of_first)),
+    );
+    const track = el('div', 'funnel-track');
+    track.setAttribute('role', 'img');
+    track.setAttribute('aria-label', `${step.label}: ${formatShare(step.of_first)} of ${first.label}`);
+    const fill = el('div', 'funnel-fill');
+    fill.style.width = `${Math.max(0.5, step.of_first * 100).toFixed(2)}%`;
+    track.append(fill);
+    item.append(head, track);
+    list.append(item);
+  });
+
+  const content = el('div', 'card-content');
+  content.append(list);
+  cardsSection.className = 'ab-list';
+  cardsSection.append(card({
+    description: 'Overall conversion',
+    title: formatShare(model.overall),
+    titleClass: 'card-title card-title-stat',
+    subline: `${formatNumber(first.value)} → ${formatNumber(last.value)} · ${first.label} → ${last.label}`,
+  }, content));
+  cardsSection.hidden = false;
+}
+
 /** The server's advice is for whoever acts next — kept, but folded under the result. */
 function showNotes(notes) {
   if (!notes?.length) return;
   notesList.replaceChildren(...notes.map((n) => el('li', null, n)));
   notesEl.hidden = false;
-}
-
-// ── sample-ratio check, sample-size plan ──────────────────────────────────────────────────────
-
-function renderSrm(model) {
-  setDescription(badge(pLabel(model.p_value), 'outline'));
-  cardsSection.className = 'card-grid';
-  cardsSection.append(card({
-    description: 'Observed split vs the expected one',
-    title: model.srm_detected ? 'Mismatch' : 'Healthy',
-    titleClass: 'card-title card-title-stat',
-    action: model.srm_detected ? badge('Do not trust the lift', 'destructive', 'circle-x') : badge('Split is sound', 'outline', 'circle-check'),
-  }));
-  cardsSection.hidden = false;
-  renderTable({ columns: [{ name: 'group', type: 'category' }, { name: 'observed', type: 'number' }, { name: 'expected', type: 'number' }], rows: model.groups.map((g) => [g.label, g.observed, g.expected]) });
-}
-
-function renderPlan(model) {
-  cardsSection.className = 'card-grid';
-  for (const f of model.figures) {
-    cardsSection.append(card({ description: f.label, title: f.percent ? formatPercent(f.value) : formatNumber(f.value), titleClass: 'card-title card-title-stat' }));
-  }
-  cardsSection.hidden = false;
 }
 
 // ── display mode ──────────────────────────────────────────────────────────────────────────────
@@ -727,8 +701,10 @@ app.ontoolresult = (result) => {
   render(result);
 };
 
-app.ontoolcancelled = (params) => {
-  showAlert({ title: 'The call was cancelled', description: params.reason || null, iconName: 'circle-x' });
+app.ontoolcancelled = () => {
+  // a cancelled call has no result to draw
+  resetSections();
+  mainEl.hidden = true;
 };
 
 app.onerror = log.error;

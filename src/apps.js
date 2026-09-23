@@ -35,7 +35,7 @@ const RESOURCE = {
   uri: RESULT_VIEW_URI,
   name: 'result-view',
   title: 'Query Result',
-  description: 'Interactive view of a query result: a sortable, filterable table with paging, a chart when the rows form a time series or a breakdown, the A/B result with its interval, the sample-size plan.',
+  description: 'Interactive card for a result: a chart (time series or breakdown, rows folded underneath), an A/B test (lift, interval, verdict per variant), or a funnel (steps, conversion, biggest drop). Other results draw nothing.',
   mimeType: RESOURCE_MIME_TYPE,
   _meta: { ui: { prefersBorder: true } },
 };

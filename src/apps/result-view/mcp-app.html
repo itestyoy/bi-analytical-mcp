@@ -7,11 +7,11 @@
   <title>Query Result</title>
 </head>
 <body>
-  <main class="main">
+  <main class="main" hidden>
     <header class="page-header">
       <div class="page-header-text">
         <h1 id="title" class="page-title">Query Result</h1>
-        <div id="subtitle" class="page-description">Waiting for the result…</div>
+        <div id="subtitle" class="page-description"></div>
       </div>
       <button id="fullscreen-btn" class="btn btn-outline btn-icon" type="button" title="Enter fullscreen" aria-label="Enter fullscreen" hidden></button>
     </header>
@@ -30,39 +30,33 @@
         </div>
         <div id="chart-legend" class="chart-legend" hidden></div>
       </div>
+      <details id="data" class="card-data">
+        <summary class="card-data-trigger"><span id="data-label">Data</span><span id="data-chevron" class="collapsible-chevron"></span></summary>
+        <div class="data-table">
+          <div class="data-table-toolbar">
+            <label class="input-group">
+              <span class="input-icon" id="filter-icon"></span>
+              <input id="filter" class="input" type="search" placeholder="Filter rows…" aria-label="Filter rows">
+            </label>
+          </div>
+          <div class="table-container">
+            <table id="table" class="table">
+              <thead></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="data-table-footer">
+            <p id="table-count" class="data-table-count"></p>
+            <div class="data-table-pager">
+              <button id="prev-page-btn" class="btn btn-outline btn-sm" type="button" hidden>Previous</button>
+              <button id="next-page-btn" class="btn btn-outline btn-sm" type="button" hidden>Next</button>
+            </div>
+          </div>
+        </div>
+      </details>
     </section>
 
     <section id="cards-section" hidden></section>
-
-    <section id="table-section" class="data-table" hidden>
-      <div class="data-table-toolbar">
-        <label class="input-group">
-          <span class="input-icon" id="filter-icon"></span>
-          <input id="filter" class="input" type="search" placeholder="Filter rows…" aria-label="Filter rows">
-        </label>
-      </div>
-      <div class="table-container">
-        <table id="table" class="table">
-          <thead></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="data-table-footer">
-        <p id="table-count" class="data-table-count"></p>
-        <div class="data-table-pager">
-          <button id="prev-page-btn" class="btn btn-outline btn-sm" type="button" hidden>Previous</button>
-          <button id="next-page-btn" class="btn btn-outline btn-sm" type="button" hidden>Next</button>
-        </div>
-      </div>
-    </section>
-
-    <div id="raw-section" class="code-block" hidden>
-      <div class="code-block-header">
-        <span id="raw-label" class="code-block-label">JSON</span>
-        <button id="copy-btn" class="btn btn-ghost btn-icon-sm" type="button" title="Copy" aria-label="Copy"></button>
-      </div>
-      <pre id="raw" class="code-block-body"></pre>
-    </div>
 
     <details id="notes" class="collapsible" hidden>
       <summary class="collapsible-trigger"><span>Notes</span><span id="notes-chevron" class="collapsible-chevron"></span></summary>

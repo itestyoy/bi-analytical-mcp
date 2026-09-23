@@ -152,13 +152,17 @@ the plain tools stay exactly as they were for every client that does not:
   files via `resources/read` with sha256 digests). Generated at startup from the same objects
   `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy.
 - **Apps** (`io.modelcontextprotocol/ui`) — `query_semantic_model`, `get_query_result` and
-  `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`):
-  a sortable, filterable table with paging, a chart when the rows are a time series or a breakdown,
-  the A/B result with its interval, the sample-size plan. (`semantic_index` has no view on purpose:
-  it is the most frequent call and a view on every exploration step would bury the conversation.)
-  The view is built like the official MCP Apps examples — the ext-apps `App` class, host theme and
-  style variables, Chart.js, one self-contained file from vite (`npm run build:app`, output checked
-  in under `src/apps/result-view/dist/`).
+  `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`),
+  and it draws exactly three cards: a CHART (a time series or a breakdown, its rows folded underneath
+  as a filterable, sortable, pageable table), an A/B TEST (a stat card per variant: lift, interval,
+  verdict, the groups), a FUNNEL (steps, share of the first and of the previous, the biggest drop).
+  Every other result — a failure, a build still running, SQL, a sample-size plan, a split check,
+  rows with no chart shape — draws nothing (the view reports 0px) and the text answer stands alone.
+  (`semantic_index` has no view on purpose: it is the most frequent call and a view on every
+  exploration step would bury the conversation.) The view is built like the official MCP Apps
+  examples — the ext-apps `App` class, host theme and style variables, shadcn/ui components,
+  Chart.js, one self-contained file from vite (`npm run build:app`, output checked in under
+  `src/apps/result-view/dist/`).
 
 Also: `Origin` is always validated (403), every refusal is a JSON-RPC error body (including a body
 that is not JSON, `-32700`), every tool declares `readOnlyHint` / `destructiveHint` /

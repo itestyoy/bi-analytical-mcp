@@ -1,8 +1,10 @@
 // THE MODEL OF WHAT THE RESULT VIEW SHOWS — a pure function from a tool result to a view.
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
-// WHAT to render: a table (always, for rows), a chart when the data has a shape a chart shows
-// better than a table does, an A/B card, a value distribution. The view imports it and the unit
+// WHAT to render, and there are exactly three cards: a CHART (a time series or a breakdown, with its
+// rows folded underneath), an A/B TEST, a FUNNEL. Anything else — a failure, a build still running,
+// an explained query's SQL, a plan, a split check, rows with no chart shape — is `none`: the view
+// draws nothing and the tool's text result speaks for itself. The view imports it and the unit
 // tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
 // Everything below is data in, data out: no DOM, no module scope.
@@ -19,16 +21,12 @@ export function buildViewModel(toolName, result, toolInput) {
   const ISO_DAY = /^\d{4}-\d{2}-\d{2}([T ][\d:.]+(Z|[+-]\d{2}:?\d{2})?)?$/;
   const isTimeName = (n) => /^metric_time|(_|^)(date|day|week|month|quarter|year|time|ts|hour)(__|$|_)/i.test(n);
 
-  if (!isObj(result)) return { kind: 'json', title: toolName || 'Result', json: result };
+  if (!isObj(result)) return { kind: 'none', reason: 'not_an_object' };
 
   // a build that is still running, or one that failed, says so — there is nothing to plot
-  if (result.status === 'running' && result.query_id) {
-    return { kind: 'running', title: 'Building…', query_id: result.query_id, message: result.message || 'The result is being built in the background.' };
-  }
-  if (result.ok === false || (result.error && !result.rows)) {
-    const e = result.error || {};
-    return { kind: 'error', title: 'Error', message: e.message || String(result.error || 'the call failed'), stage: e.stage || null };
-  }
+  const none = (reason) => ({ kind: 'none', reason });
+  if (result.status === 'running' && result.query_id) return none('running');
+  if (result.ok === false || (result.error && !result.rows)) return none('error');
 
   // ── A/B: significance per variant (experiment analyze) ──
   if (toolName === 'experiment' && Array.isArray(result.results)) {
@@ -95,45 +93,11 @@ export function buildViewModel(toolName, result, toolInput) {
       notes: result.recommendations || [],
     };
   }
-  // ── A/B: sample-ratio check ──
-  if (toolName === 'experiment' && Array.isArray(result.groups) && 'srm_detected' in result) {
-    return { kind: 'srm', title: 'Sample-ratio check', p_value: num(result.p_value), srm_detected: !!result.srm_detected, groups: result.groups.map((g) => ({ label: g.label, observed: num(g.observed), expected: num(g.expected) })) };
-  }
+  // a split check, a sample-size plan, an explained query: text results, no card
+  if (toolName === 'experiment') return none('experiment');
+  if (typeof result.sql === 'string' && !Array.isArray(result.rows)) return none('sql');
 
-  // ── A/B: a sample-size plan ──
-  if (toolName === 'experiment' && ('n_per_group' in result || 'mde' in result)) {
-    const figures = [
-      { label: 'users per group', value: num(result.n_per_group) },
-      { label: 'users in total', value: num(result.total_n) },
-      { label: 'baseline', value: num(result.baseline), percent: result.metric === 'proportion' },
-      { label: 'detectable effect (absolute)', value: num(result.mde), percent: result.metric === 'proportion' },
-      { label: 'power', value: num(result.power), percent: true },
-      { label: 'confidence', value: num(result.confidence), percent: true },
-    ].filter((f) => f.value !== null);
-    return { kind: 'plan', title: `Sample-size plan · ${result.metric || ''}`.trim(), figures };
-  }
-  // ── an explained query: its SQL is the result ──
-  if (typeof result.sql === 'string' && !Array.isArray(result.rows)) {
-    return { kind: 'sql', title: 'Query plan', sql: result.sql };
-  }
-
-  // ── a value distribution (semantic_index { source, property }) ──
-  if (Array.isArray(result.samples) && result.samples.length && result.samples.every((s) => isObj(s) && 'value' in s)) {
-    const bars = result.samples.map((s) => ({ label: s.value === null ? '∅ (NULL)' : String(s.value), value: num(s.freq ?? s.count) ?? 0 }));
-    const stats = result.value_stats || {};
-    return {
-      kind: 'distribution',
-      title: `${result.property || result.name || 'Values'}${result.source ? ` · ${result.source}` : ''}`,
-      bars,
-      total: num(stats.total_count),
-      distinct: num(stats.distinct_count),
-      has_more: !!stats.has_more,
-      columns: [{ name: 'value', type: 'category' }, { name: 'freq', type: 'number' }],
-      rows: bars.map((b) => [b.label, b.value]),
-    };
-  }
-
-  // ── rows: a table, and a chart when the rows have a shape ──
+  // ── rows: a funnel, or a chart (with the rows folded under it) — or nothing ──
   if (Array.isArray(result.rows)) {
     const names = Array.isArray(result.columns) && result.columns.length
       ? result.columns.map((c) => (isObj(c) ? c.name : String(c)))
@@ -147,10 +111,45 @@ export function buildViewModel(toolName, result, toolInput) {
       return { name, type: time ? 'time' : numeric ? 'number' : 'category' };
     });
 
-    let chart = null;
     const timeIdx = columns.findIndex((c) => c.type === 'time');
     const numIdx = columns.map((c, i) => (c.type === 'number' ? i : -1)).filter((i) => i >= 0);
     const catIdx = columns.map((c, i) => (c.type === 'category' ? i : -1)).filter((i) => i >= 0);
+    const title = result.table || (toolName === 'query_semantic_model' ? 'Metric query' : 'Result');
+
+    // ── a FUNNEL: ordered steps whose counts never grow. Recognised only on an explicit signal —
+    // step-like names, or ordinal step labels — so a breakdown sorted by size never becomes one.
+    // Two shapes: ONE row with a count column per step (a metric query over step measures), or a
+    // row per step (a pipeline's step × users).
+    const STEP_NAME = /step|stage|funnel|reached|level/i;
+    const nonIncreasing = (vs) => vs.length >= 2 && vs[0] > 0 && vs.every((v, i) => v !== null && v >= 0 && (i === 0 || v <= vs[i - 1]));
+    const funnelOf = (labels, values, measure) => {
+      const first = values[0];
+      const steps = labels.map((label, i) => ({
+        label,
+        value: values[i],
+        of_first: values[i] / first,
+        of_previous: i === 0 ? null : values[i - 1] > 0 ? values[i] / values[i - 1] : null,
+      }));
+      // the step that loses the largest share of the users who reached the one before it
+      let worst = null;
+      for (let i = 1; i < steps.length; i++) if (steps[i].of_previous !== null && (worst === null || steps[i].of_previous < steps[worst].of_previous)) worst = i;
+      return { kind: 'funnel', title, measure, steps, overall: values[values.length - 1] / first, biggest_drop: worst };
+    };
+    if (rows.length === 1 && timeIdx < 0 && catIdx.length === 0) {
+      const counts = numIdx.filter((i) => Number.isInteger(num(rows[0][i])));
+      // the column names are the steps' names, shown as they are (they are the caller's metrics)
+      const stepLike = counts.length >= 2 && counts.every((i) => STEP_NAME.test(names[i]));
+      const values = counts.map((i) => num(rows[0][i]));
+      if (stepLike && nonIncreasing(values)) return funnelOf(counts.map((i) => names[i]), values, null);
+    }
+    if (timeIdx < 0 && catIdx.length === 1 && numIdx.length >= 1 && rows.length >= 2 && rows.length <= 20) {
+      const labels = rows.map((r) => (r[catIdx[0]] === null ? '∅' : String(r[catIdx[0]])));
+      const values = rows.map((r) => num(r[numIdx[0]]));
+      const stepLike = STEP_NAME.test(names[catIdx[0]]) || /funnel/i.test(title) || labels.every((l) => /^\s*\d+\s*[._:)\-\s]/.test(l));
+      if (stepLike && nonIncreasing(values)) return funnelOf(labels, values, names[numIdx[0]]);
+    }
+
+    let chart = null;
     if (timeIdx >= 0 && numIdx.length && rows.length >= 2) {
       // one line per numeric column — or, with exactly one numeric column and one category, one
       // line per category value (the long "time × segment × value" shape a group-by returns)
@@ -173,7 +172,7 @@ export function buildViewModel(toolName, result, toolInput) {
         chart = { type: 'line', x: names[timeIdx], y: numIdx.length === 1 ? names[numIdx[0]] : null, series, folded: Math.max(0, numIdx.length - MAX_SERIES) };
       }
     } else if (timeIdx < 0 && catIdx.length === 1 && numIdx.length >= 1 && rows.length >= 1 && rows.length <= 50) {
-      // one category and an amount: a bar per category (a funnel's steps, a segment breakdown)
+      // one category and an amount: a bar per category (a segment breakdown)
       chart = { type: 'bar', x: names[catIdx[0]], y: names[numIdx[0]], bars: rows.map((r) => ({ label: r[catIdx[0]] === null ? '∅' : String(r[catIdx[0]]), value: num(r[numIdx[0]]) ?? 0 })) };
     }
 
@@ -187,9 +186,10 @@ export function buildViewModel(toolName, result, toolInput) {
     const prevPage = toolName === 'get_query_result' && page && page.offset > 0 && isObj(toolInput)
       ? { name: 'get_query_result', arguments: { ...toolInput, offset: Math.max(0, page.offset - (page.limit || rows.length)) } }
       : null;
+    if (!chart) return none('no_chart_shape');
     return {
-      kind: 'table',
-      title: result.table || (toolName === 'query_semantic_model' ? 'Metric query' : 'Result'),
+      kind: 'chart',
+      title,
       columns,
       rows,
       row_count: rows.length,
@@ -202,5 +202,5 @@ export function buildViewModel(toolName, result, toolInput) {
     };
   }
 
-  return { kind: 'json', title: toolName || 'Result', json: result };
+  return none('no_rows');
 }

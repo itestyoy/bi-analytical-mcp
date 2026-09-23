@@ -68,7 +68,7 @@ test('view model: a time series by segment is one line per segment, with the row
     { metric_time__day: '2024-01-02', country: 'US', dau: '11' },
   ];
   const m = buildViewModel('query_semantic_model', { columns: [{ name: 'metric_time__day' }, { name: 'country' }, { name: 'dau' }], rows });
-  assert.equal(m.kind, 'table');
+  assert.equal(m.kind, 'chart');
   assert.deepEqual(m.columns.map((c) => c.type), ['time', 'category', 'number']);
   assert.equal(m.chart.type, 'line');
   const byName = Object.fromEntries(m.chart.series.map((x) => [x.name, x.points]));
@@ -78,11 +78,12 @@ test('view model: a time series by segment is one line per segment, with the row
 });
 
 test('view model: a category and an amount is a bar per category; paging carries the next offset', () => {
-  const m = buildViewModel('get_query_result', { status: 'ready', columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'start', users: 100 }, { step: 'finish', users: 37 }], page: { limit: 2, offset: 0, has_more: true } }, { query_id: 'q-9', limit: 2 });
-  assert.deepEqual(m.chart.bars, [{ label: 'start', value: 100 }, { label: 'finish', value: 37 }]);
+  const m = buildViewModel('get_query_result', { status: 'ready', columns: [{ name: 'country' }, { name: 'users' }], rows: [{ country: 'US', users: 100 }, { country: 'DE', users: 37 }], page: { limit: 2, offset: 0, has_more: true } }, { query_id: 'q-9', limit: 2 });
+  assert.equal(m.kind, 'chart', 'a breakdown sorted by size is a chart, not a funnel');
+  assert.deepEqual(m.chart.bars, [{ label: 'US', value: 100 }, { label: 'DE', value: 37 }]);
   assert.deepEqual(m.nextPage, { name: 'get_query_result', arguments: { query_id: 'q-9', limit: 2, offset: 2 } });
   assert.equal(m.prevPage, null); // the first page has nothing before it
-  const second = buildViewModel('get_query_result', { status: 'ready', columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'x', users: 5 }], page: { limit: 2, offset: 2, has_more: false } }, { query_id: 'q-9', limit: 2, offset: 2 });
+  const second = buildViewModel('get_query_result', { status: 'ready', columns: [{ name: 'country' }, { name: 'users' }], rows: [{ country: 'FR', users: 5 }], page: { limit: 2, offset: 2, has_more: false } }, { query_id: 'q-9', limit: 2, offset: 2 });
   assert.equal(second.nextPage, null);
   assert.deepEqual(second.prevPage, { name: 'get_query_result', arguments: { query_id: 'q-9', limit: 2, offset: 0 } });
 });
@@ -125,21 +126,41 @@ test('view model: a mean with no relative interval plots the absolute one', asyn
   assert.deepEqual(v.effect, { unit: 'absolute', point: r.results[0].absolute_lift, lo: r.results[0].confidence_interval[0], hi: r.results[0].confidence_interval[1] });
 });
 
-test('view model: a sample-size plan carries the plan\'s own numbers', async () => {
-  const r = await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
-  const m = buildViewModel('experiment', r);
-  assert.equal(m.kind, 'plan');
-  const fig = Object.fromEntries(m.figures.map((f) => [f.label, f.value]));
-  assert.equal(fig['users per group'], r.n_per_group);
-  assert.equal(fig['users in total'], r.total_n);
-  assert.equal(fig.baseline, 0.1);
+test('view model: a funnel from a row per step carries each step\'s share of the first and of the previous', () => {
+  const rows = [{ step: '1_start', users: 10000 }, { step: '2_move', users: 7400 }, { step: '3_match', users: 5100 }, { step: '4_finish', users: 3900 }];
+  const m = buildViewModel('get_query_result', { status: 'ready', table: 'pipe_tutorial', columns: [{ name: 'step' }, { name: 'users' }], rows });
+  assert.equal(m.kind, 'funnel');
+  assert.equal(m.measure, 'users');
+  assert.deepEqual(m.steps.map((x) => [x.label, x.value]), rows.map((r) => [r.step, r.users]));
+  assert.deepEqual(m.steps.map((x) => x.of_first), [1, 0.74, 0.51, 0.39]);
+  assert.deepEqual(m.steps.map((x) => x.of_previous), [null, 0.74, 5100 / 7400, 3900 / 5100]);
+  assert.equal(m.overall, 0.39);
+  assert.equal(m.biggest_drop, 2, '7400 → 5100 keeps the smallest share');
 });
 
-test('view model: a value distribution, a running build and an error are shown as what they are', () => {
-  const d = buildViewModel('semantic_index', { property: 'country', source: 'users', samples: [{ value: 'DE', freq: 7 }, { value: null, freq: 2 }], value_stats: { total_count: 9, distinct_count: 2 } });
-  assert.equal(d.kind, 'distribution');
-  assert.deepEqual(d.bars.map((b) => b.value), [7, 2]);
-  assert.equal(d.total, 9);
-  assert.equal(buildViewModel('get_query_result', { status: 'running', query_id: 'q' }).kind, 'running');
-  assert.equal(buildViewModel('get_query_result', { ok: false, status: 'error', error: { stage: 'fetch', message: 'boom' } }).kind, 'error');
+test('view model: a funnel from one row of step counts keeps the metrics\' names and skips the ratios', () => {
+  const m = buildViewModel('query_semantic_model', { columns: [{ name: 'tut_funnel_step1' }, { name: 'tut_funnel_step2' }, { name: 'tut_funnel_step3' }, { name: 'tut_funnel_conv_1_2' }], rows: [{ tut_funnel_step1: 1000, tut_funnel_step2: 700, tut_funnel_step3: 420, tut_funnel_conv_1_2: 0.7 }] });
+  assert.equal(m.kind, 'funnel');
+  assert.deepEqual(m.steps.map((x) => [x.label, x.value]), [['tut_funnel_step1', 1000], ['tut_funnel_step2', 700], ['tut_funnel_step3', 420]]);
+  assert.equal(m.overall, 0.42);
+});
+
+test('view model: counts that merely decrease, or steps that grow, are not a funnel', () => {
+  // two unrelated metrics in one row: no step-like names
+  assert.equal(buildViewModel('query_semantic_model', { columns: [{ name: 'dau' }, { name: 'new_users' }], rows: [{ dau: 1000, new_users: 300 }] }).kind, 'none');
+  // step-named rows whose counts grow: a bar chart, not a funnel
+  assert.equal(buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: 5 }, { step: 'b', users: 9 }] }).kind, 'chart');
+});
+
+test('view model: only a chart, an A/B test and a funnel are drawn — every other result is none', async () => {
+  const plan = await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
+  const split = await s.engine.experiment({ action: 'check_split', groups: [{ label: 'control', n: 5000 }, { label: 'b', n: 5100 }] });
+  for (const [tool, result] of [
+    ['experiment', plan],
+    ['experiment', split],
+    ['get_query_result', { status: 'running', query_id: 'q' }],
+    ['get_query_result', { ok: false, status: 'error', error: { stage: 'fetch', message: 'boom' } }],
+    ['query_semantic_model', { ok: true, sql: 'select 1' }],
+    ['query_semantic_model', { columns: [{ name: 'a' }, { name: 'b' }, { name: 'c' }], rows: [{ a: 'x', b: 'y', c: 'z' }] }],
+  ]) assert.equal(buildViewModel(tool, result).kind, 'none', JSON.stringify(result).slice(0, 80));
 });

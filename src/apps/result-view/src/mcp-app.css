@@ -82,26 +82,6 @@
   }
 }
 
-.status-text {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  text-align: left;
-
-  /* a line with a caption under it: the line reads as the heading */
-  &:has(.status-sub) {
-    color: var(--foreground);
-    font-weight: var(--font-weight-medium);
-  }
-}
-
-.status-sub {
-  color: var(--muted-foreground);
-  font-weight: var(--font-weight-normal);
-  font-size: var(--font-text-xs-size);
-  line-height: var(--font-text-xs-line-height);
-}
-
 /* ── Page header ─────────────────────────────────────────────────────────────────────────── */
 .page-header {
   display: flex;

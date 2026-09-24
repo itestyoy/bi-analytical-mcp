@@ -171,7 +171,7 @@ the plain tools stay exactly as they were for every client that does not:
   that query — it polls `get_query_result` for that query_id every 3 s (for up to 30 min) and draws
   the rows in place of the "Running in the warehouse…" line when they are ready. A host that does
   not proxy a view's tool calls (no `serverTools` capability), or a refused call, leaves a static
-  "Moved to the background" line instead, and the result comes with the model's own
+  "The result comes in a separate card" line instead, and the result comes with the model's own
   `get_query_result` card.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
   not call it) except `get_query_result`, `["model", "app"]`; the view resource declares an empty

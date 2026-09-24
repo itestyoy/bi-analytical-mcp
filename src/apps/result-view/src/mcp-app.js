@@ -298,17 +298,15 @@ async function followQuery(queryId) {
 function showStatus(model) {
   const lines = {
     // the card is following its query: this line is replaced by the result when it is ready
-    following: ['loader-circle', 'Running in the warehouse…', null, 'icon spin'],
+    following: ['loader-circle', 'Running in the warehouse…', 'icon spin'],
     // a detached query the card cannot follow (the host proxies no tools/call, or following ended):
     // a HAND-OFF, not a live state, so no spinner — the rows arrive through the model's own
     // get_query_result call, which draws its own card
-    running: ['clock', 'Moved to the background', 'The result comes in its own card'],
+    running: ['clock', 'The result comes in a separate card'],
     error: ['circle-alert', 'Error'],
   };
-  const [name, text, sub, cls] = lines[model.reason] || ['info', 'Nothing to chart'];
-  const label = el('span', 'status-text', text);
-  if (sub) label.append(el('span', 'status-sub', sub));
-  statusEl.replaceChildren(icon(name, cls), label);
+  const [name, text, cls] = lines[model.reason] || ['info', 'Nothing to chart'];
+  statusEl.replaceChildren(icon(name, cls), el('span', null, text));
   statusEl.classList.toggle('status-line-error', model.reason === 'error');
 }
 

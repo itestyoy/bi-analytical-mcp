@@ -409,7 +409,7 @@ export function buildSchemas(catalog) {
     ...extra,
   });
   const display = {
-    description: 'How the result is SHOWN to the person as a card, in hosts that render MCP Apps (Claude on the web, desktop and mobile). Pick the `kind` whose description matches the question; the card then draws exactly that. It changes no numbers. Omitted, the card infers a chart or a funnel from the shape where it can.',
+    description: 'Draw the result as a CARD for the person, in hosts that render MCP Apps (Claude on the web, desktop and mobile) — and how. Omitted: no card. Pick the `kind` whose description matches the question; the card draws exactly that. It changes no numbers.',
     discriminator: { propertyName: 'kind' },
     oneOf: [
       form('line', 'line — a trend', 'A TREND over an ordered axis (usually time): one line, or several to compare series.', {
@@ -1124,6 +1124,7 @@ function experimentSchema() {
   const srm = srmCheckSchema();
   const ss = sampleSizeSchema();
   const properties = {
+    card: { type: 'boolean', description: 'Draw the result as a CARD for the person (the test, the split check or the plan), in hosts that render MCP Apps. Omitted: no card — ask for it only when the person should see this result.' },
     action: { enum: ['plan', 'check_split', 'analyze'], description: 'plan → required sample size / MDE (power planning, BEFORE running); check_split → Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run BEFORE trusting any lift); analyze → the A/B significance test on per-group aggregates.' },
     // union of all three actions' fields (analyze/ab_test wins on shared keys like metric).
     ...ss.properties,

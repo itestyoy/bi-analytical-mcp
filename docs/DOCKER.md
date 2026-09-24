@@ -208,8 +208,11 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   re-drawn later that follows such a query says so instead of "Error"),
   SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
   nothing would leave an empty box) and the text answer carries the rest.
-  ONE QUERY, ONE CARD: a tool with a card carries `structuredContent` only when the view model has
-  something to draw — a query that outlasts its call (`{ status: 'running', query_id }`), a failure
+  A CARD ONLY WHEN THE CALL ASKS FOR IT: `structuredContent` (what a host draws a card from) is
+  carried only when the call asked for a card — `display` on `query_semantic_model` /
+  `get_query_result` (or remembered by the query it reads), `card: true` on `experiment` — and every
+  other answer, of every tool, is text alone. ONE QUERY, ONE CARD: even when asked, only when the
+  view model has something to draw — a query that outlasts its call (`{ status: 'running', query_id }`), a failure
   or rows with no shape carry the text alone, so the host has nothing to render. The model waits for
   such a query with `time({ query_id })` (no card; it wakes as soon as the query is done) and reads it
   ONCE with `get_query_result`: that read is the query's card.

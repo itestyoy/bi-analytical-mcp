@@ -126,9 +126,11 @@
   stored table, filtered to the path taken and grouped by the dimension chosen, each read built by
   the view model's one definition of a view (no other tools/call, resource, model message, link or
   network) — a test holds its sources to that. Everything else interactive stays on the data already in the page.
-- ONE QUERY, ONE CARD. A tool with a card carries `structuredContent` only when there is a card to
-  draw — the view model decides (`buildViewModel(...).kind !== 'none'`): a query still running, a
-  failure, rows with no shape carry the text alone. A query that outlasts its call is waited for
+- A CARD ONLY WHEN THE CALL ASKS FOR IT; ONE QUERY, ONE CARD. `structuredContent` is carried only
+  when the call asked for a card — `display` on query_semantic_model / get_query_result (given now,
+  or remembered by the query it reads), `card: true` on experiment — AND there is one to draw: the
+  view model decides (`buildViewModel(...).kind !== 'none'`); a query still running, a failure,
+  rows with no shape carry the text alone, and so does every tool without a card. A query that outlasts its call is waited for
   with `time({ query_id })` (no card; it wakes as soon as the query is done) and read ONCE with
   get_query_result — that read is its card. The card never waits for a query by itself.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its

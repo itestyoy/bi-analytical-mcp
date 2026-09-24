@@ -105,16 +105,21 @@ test('a result that is gone reaches the card as result_gone over MCP, and the ca
   }
 });
 
-test('one query, one card: an answer with nothing to draw carries no structured output — the same view model decides', () => {
-  // a viewed tool: rows → structured; still running, failed, nothing to draw → text only
-  assert.ok(toCallToolResult({ ok: true, columns: [{ name: 'c' }, { name: 'v' }], rows: [{ c: 'US', v: 3 }, { c: 'DE', v: 1 }] }, 'get_query_result').structuredContent);
-  for (const nothing of [{ ok: true, status: 'running', query_id: 'abc123abc123' }, { ok: false, error: { message: 'x' } }, { ok: true, columns: [{ name: 'a' }], rows: [] }]) {
+test('structured output only when the call asked for a card AND there is one to draw — the same view model decides', () => {
+  const rows = { ok: true, columns: [{ name: 'c' }, { name: 'v' }], rows: [{ c: 'US', v: 3 }, { c: 'DE', v: 1 }] };
+  const display = { kind: 'bar', x: 'c', y: ['v'] };
+  // asked (the result carries the declaration, given now or remembered by the query) and drawable
+  assert.ok(toCallToolResult({ ...rows, display }, 'get_query_result').structuredContent);
+  // rows, but nobody asked for a card: text alone
+  assert.equal(toCallToolResult(rows, 'get_query_result').structuredContent, undefined);
+  // asked, but nothing to draw: still running, failed, empty
+  for (const nothing of [{ ok: true, status: 'running', query_id: 'abc123abc123', display }, { ok: false, error: { message: 'x' }, display }, { ok: true, columns: [{ name: 'c' }, { name: 'v' }], rows: [], display }]) {
     const r = toCallToolResult(nothing, 'query_semantic_model');
     assert.equal(r.structuredContent, undefined, JSON.stringify(nothing));
     assert.deepEqual(JSON.parse(r.content[0].text), nothing, 'the model still reads the whole answer');
   }
-  // a tool without a card keeps its structured output
-  assert.ok(toCallToolResult({ ok: true, waited_seconds: 1 }, 'time').structuredContent);
+  // a tool without a card: text alone
+  assert.equal(toCallToolResult({ ok: true, waited_seconds: 1 }, 'time').structuredContent, undefined);
 });
 
 test('the view resource is one mcp-app HTML document, listed and readable for a client that declares MCP Apps', async () => {
@@ -125,13 +130,15 @@ test('the view resource is one mcp-app HTML document, listed and readable for a 
   assert.ok(content.text.startsWith('<!DOCTYPE html>') && /<\/html>\s*$/.test(content.text), 'a complete document');
 });
 
-test('the result carries structuredContent equal to the text the model reads (both eras)', async () => {
+test('structured output only when the call asks for its card: card: true carries it, equal to the text; without it, text alone', async () => {
   const args = { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 };
-  for (const era of ['legacy', 'modern']) {
-    const r = await (await s.client({ era })).callTool({ name: 'experiment', arguments: args });
-    assert.deepEqual(r.structuredContent, JSON.parse(r.content[0].text), era);
-    assert.equal(r.structuredContent.n_per_group, 3841, era);
-  }
+  const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
+  const asked = await c.callTool({ name: 'experiment', arguments: { ...args, card: true } });
+  assert.deepEqual(asked.structuredContent, JSON.parse(asked.content[0].text));
+  assert.equal(asked.structuredContent.n_per_group, 3841);
+  const plain = await c.callTool({ name: 'experiment', arguments: args });
+  assert.equal(plain.structuredContent, undefined, 'no card asked for: no structured output');
+  assert.equal(JSON.parse(plain.content[0].text).n_per_group, 3841, 'the same answer, as text');
 });
 
 test('the checked-in view is the build of its sources (npm run build:app)', async () => {

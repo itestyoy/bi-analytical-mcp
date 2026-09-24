@@ -99,13 +99,14 @@ test('a task follows a build the engine handed back as a query_id, and returns t
     async query_semantic_model() { return { ok: true, status: 'running', query_id: 'q-1', table: 't' }; },
     async get_query_result({ query_id }) {
       polls += 1;
-      return polls < 3 ? { ok: true, status: 'running', query_id } : { ok: true, status: 'ready', query_id, columns: [{ name: 'day' }, { name: 'dau' }], rows, row_count: 2 };
+      // the query remembers the card declaration it was issued with, and its result carries it
+      return polls < 3 ? { ok: true, status: 'running', query_id } : { ok: true, status: 'ready', query_id, columns: [{ name: 'day' }, { name: 'dau' }], rows, row_count: 2, display: { kind: 'line', x: 'day', y: ['dau'] } };
     },
   };
   const { result, raw } = await runToCompletion(engine, 'query_semantic_model', {}, { pollMs: 10 });
   assert.equal(raw.status, 'ready');
   assert.deepEqual(payload(result).rows, rows);
-  assert.deepEqual(result.structuredContent.rows, rows);
+  assert.deepEqual(result.structuredContent.rows, rows, 'the card asked for is drawn from the followed rows');
   assert.equal(polls, 3);
 });
 

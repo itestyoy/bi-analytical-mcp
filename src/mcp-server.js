@@ -27,13 +27,16 @@ import { releasableSignal } from './request-context.js';
 import { UI_EXTENSION, RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
 import { clientCapabilities, declaresExtension } from './client-extensions.js';
 import { SKILLS_EXTENSION } from './skills.js';
+import { LIST_TTL_MS } from './surface-change.js';
 
 export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
 
 // Nothing this server lists changes while it runs. What it lists and says depends on which
 // extensions the client declared (src/client-extensions.js), so those answers are its own to cache.
 const STATIC = { ttlMs: 3600000, cacheScope: 'public' };
-const PER_CLIENT = { ttlMs: 3600000, cacheScope: 'private' };
+// A client may cache the lists and server/discover for LIST_TTL_MS — short, so a deploy that changes
+// them reaches it within a minute even when no subscription stream is open (src/surface-change.js).
+const PER_CLIENT = { ttlMs: LIST_TTL_MS, cacheScope: 'private' };
 
 const SkillsListParams = z.object({ cursor: z.string().optional() }).passthrough();
 const SkillsGetParams = z.object({ uri: z.string() }).passthrough();
@@ -43,8 +46,9 @@ const AnyResult = z.object({}).passthrough();
 /** The capabilities this server declares (also what server/discover and initialize report). */
 export function serverCapabilities(services) {
   return {
-    tools: {},
-    resources: {},
+    // a change of either list is announced on an open subscriptions/listen stream (src/surface-change.js)
+    tools: { listChanged: true },
+    resources: { listChanged: true },
     extensions: {
       [TASKS_EXTENSION]: {},
       [UI_EXTENSION]: { mimeTypes: [RESOURCE_MIME_TYPE] },
@@ -73,13 +77,16 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
   const { engine, tasks } = services;
   const renders = offer.apps;
   const variant = renders ? 'apps' : 'plain';
-  const server = new Server(SERVER_INFO, {
+  const server = new Server(services.serverInfo || SERVER_INFO, {
     capabilities: serverCapabilities(services),
     instructions: services.instructionsFor(offer),
     cacheHints: { 'server/discover': PER_CLIENT, 'tools/list': PER_CLIENT, 'resources/list': PER_CLIENT, 'resources/templates/list': PER_CLIENT, 'resources/read': PER_CLIENT },
   });
 
-  server.setRequestHandler('tools/list', async () => ({ tools: services.toolDefs[variant] }));
+  server.setRequestHandler('tools/list', async () => {
+    logLine('rpc', `tools/list → ${services.toolDefs[variant].length} tools (${era || '?'}, apps=${renders})`);
+    return { tools: services.toolDefs[variant] };
+  });
 
   server.setRequestHandler('tools/call', async (request, ctx) => {
     const { name, arguments: args } = request.params;
@@ -125,10 +132,16 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     return { resultType: 'task', ...tasks.detailed(t), statusMessage: 'The call is running; poll tasks/get.' };
   }
 
-  server.setRequestHandler('resources/list', async () => ({ resources: services.resources(offer) }));
+  server.setRequestHandler('resources/list', async () => {
+    const resources = services.resources(offer);
+    logLine('rpc', `resources/list → ${resources.length} (${era || '?'}, apps=${renders})`);
+    return { resources };
+  });
   server.setRequestHandler('resources/templates/list', async () => ({ resourceTemplates: services.templates(offer) }));
   server.setRequestHandler('resources/read', async (request) => {
     const contents = services.read(request.params.uri, offer);
+    // what a host fetches to (re-)draw a card is one line away from its answer
+    logLine('rpc', `resources/read ${String(request.params.uri).slice(0, 120)} → ${contents ? 'ok' : 'NOT FOUND'} (${era || '?'}, apps=${renders})`);
     // the SDK puts this on the wire as each revision spells it (-32002 in 2025, -32602 in 2026-07-28)
     if (!contents) throw new ResourceNotFoundError(request.params.uri);
     return { contents };

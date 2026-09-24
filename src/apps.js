@@ -24,9 +24,9 @@
 // drill-down's next view — a pivot row opened, a chart mark clicked (its task's stored table,
 // filtered to the path taken). Held in three places, so no single one is load-bearing:
 //   * every tool declares `_meta.ui.visibility` — ["model"] (callable by the model, NOT by a view;
-//     the spec's default is ["model", "app"]), except drill_result, which is ["app"]: the view's
-//     read of its own drawn task, which the model never sees; a host refuses a view's tools/call to
-//     any other;
+//     the spec's default is ["model", "app"]), except drill_result, which is ["model", "app"]: the
+//     view's read of its own drawn task, served by the server only for a drawn task; a host refuses a
+//     view's tools/call to any other;
 //   * the view resource declares an empty `csp` — no connect/resource/frame origins, i.e. no fetch,
 //     XHR, WebSocket, remote script or nested frame — and the page carries the same policy itself;
 //   * the view's code has exactly one server call, drill_result, reached with its own drill-down
@@ -62,11 +62,16 @@ export const VIEWED_TOOLS = new Set(['display_model_result', 'experiment']);
 
 /** Who may call a tool: the model only — never a view (see the header). */
 export const TOOL_VISIBILITY = Object.freeze(['model']);
-/** The one tool a view calls, and ONLY a view: the card reading the next view of its own drawn task. */
+/**
+ * The one tool a view calls: the card reading the next view of its own drawn task. Its visibility is
+ * ["model", "app"] — the spec's default — and not ["app"] alone: a host refused the card's call to an
+ * app-only tool ("Could not load this level"), while this pair is what hosts serve. What keeps it the
+ * card's own read is the server: it answers only for a task that was DRAWN.
+ */
 export const APP_CALLABLE_TOOLS = Object.freeze(['drill_result']);
 /** Tools that exist only with the view: a call that draws is accepted only from a client that renders MCP Apps (drill_result: only for a drawn task). */
 export const APPS_ONLY_TOOLS = new Set(['display_model_result', 'drill_result']);
-const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? ['app'] : [...TOOL_VISIBILITY]);
+const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? [...TOOL_VISIBILITY, 'app'] : [...TOOL_VISIBILITY]);
 
 /**
  * The `_meta` every tool carries: its visibility, and — for a viewed tool — the view, in both

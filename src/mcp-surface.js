@@ -12,6 +12,7 @@ import { buildViewModel } from './apps/result-view-model.js';
 // client that renders cards, like a call to display_model_result itself.
 const CARD_FIELD = { experiment: 'card' };
 import { buildSkills } from './skills.js';
+import { surfaceFingerprint, surfaceChange, SurfaceChangeBus, CHANGE_WINDOW_MS } from './surface-change.js';
 import { TaskRegistry } from './tasks.js';
 
 const TOOL_DESCRIPTIONS = {
@@ -360,15 +361,30 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
   const skillPointer = skills?.skills.length
     ? `\n\nSKILLS\nThis procedure is also served as Agent Skills (skills/list, or read by URI): ${skills.skills.map((s) => s.uri).join(', ')}.`
     : '';
+  // built once: the SDK builds a server per request, and the definitions never change in a process
+  const defs = buildToolDefs(engine);
+  // WHAT A CLIENT CACHES ABOUT THIS SERVER, fingerprinted — and compared with what the previous
+  // process served, so a change is announced (src/surface-change.js)
+  const fingerprint = surfaceFingerprint({
+    tools: defs,
+    resources: apps.resources(),
+    skills: skills?.skills.map((s) => s.resources.map((r) => [r.uri, r.digest ?? r.size])) ?? null,
+    instructions: [SERVER_DESCRIPTION, RESULT_CARDS, skillPointer],
+  });
+  const surface = surfaceChange(engine.store, fingerprint);
+  logLine('surface', `${fingerprint}${surface.changed ? ` — changed since the last start (${surface.previous || 'none recorded'}): open subscriptions are told for the next ${Math.round(CHANGE_WINDOW_MS / 60000)} min` : ' — unchanged'}`);
   return {
     engine,
     apps,
     skills,
     tasks,
-    // built once: the SDK builds a server per request, and the definitions never change — in two
-    // variants, for a client that renders MCP Apps and for one that does not (src/apps.js)
     // one list for every client (see buildToolDefs); kept under both variants the server asks for
-    toolDefs: (() => { const defs = buildToolDefs(engine); return { apps: defs, plain: defs }; })(),
+    toolDefs: { apps: defs, plain: defs },
+    // the surface's fingerprint rides in serverInfo.version, so a changed surface is a changed version
+    surface,
+    serverInfo: { ...SERVER_INFO, version: `${SERVER_INFO.version}+${fingerprint}` },
+    // the bus subscriptions/listen streams subscribe to: a changed start announces itself on it
+    bus: new SurfaceChangeBus(surface, { onerror: (e) => logLine('surface', `✗ listener: ${e?.message || e}`) }),
     // how often a call with a progressToken hears it is alive; how long a call may run inline
     // before it becomes a task (for a client that declared the Tasks extension)
     progressEveryMs,

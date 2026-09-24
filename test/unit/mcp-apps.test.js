@@ -78,7 +78,7 @@ test('the view reads only its own result: one tool is app-callable (and only by 
     const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
     // a host refuses a view's tools/call to a tool that is not visible to "app": only the card's read of its own task is,
     // and the model never sees that one
-    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, t.name === 'drill_result' ? ['app'] : ['model'], t.name);
+    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, t.name === 'drill_result' ? ['model', 'app'] : ['model'], t.name);
     const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
     assert.deepEqual(content._meta?.ui?.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, 'no origin of any kind');
   }

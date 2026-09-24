@@ -119,8 +119,8 @@
   official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Table — the
   pivot's only, Alert, Accordion, Chart) over the HOST's style variables, whose fallbacks are the shadcn neutral
   theme; its build is checked in and held to its sources by a test. THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT:
-  every tool is `visibility: ["model"]` except `drill_result` (`["app"]` — the card's, never the
-  model's), the view resource declares an empty `csp` and the page its own CSP, and the view's ONE
+  every tool is `visibility: ["model"]` except `drill_result` (`["model", "app"]` — hosts refused a
+  card's call to an app-only tool; the server answers it only for a DRAWN task), the view resource declares an empty `csp` and the page its own CSP, and the view's ONE
   server call is drill_result for the task it was drawn from — a drill-down's next view — a pivot
   row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): its task's stored
   table, filtered to the path taken and grouped by the dimension chosen, each read built by the view
@@ -169,6 +169,15 @@
     (-32021 otherwise).
   A 2025 client declares capabilities once, in `initialize`, and is served statelessly, so its later
   requests carry nothing to go by — it gets none of them. The lists that differ are cached `private`.
+
+- A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
+  cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
+  (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`
+  (LIST_TTL_MS, one minute); (2) `tools.listChanged` / `resources.listChanged` are declared, and a
+  start whose surface fingerprint differs from the one persisted by the previous process (the store's
+  `meta`) announces `notifications/tools/list_changed` + `…/resources/list_changed` to every
+  `subscriptions/listen` stream that subscribes within CHANGE_WINDOW_MS; (3) the fingerprint rides in
+  `serverInfo.version` (`0.1.0+<fingerprint>`). Do NOT lengthen the list TTLs back to hours.
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

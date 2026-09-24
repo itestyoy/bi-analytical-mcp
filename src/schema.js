@@ -957,6 +957,10 @@ function abTestSchema() {
   const familyP = { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, description: 'p-values of OTHER metrics in the same experiment readout — included in the multiplicity-correction family (Holm/BH) alongside the variants.' };
   const sequential = { type: 'boolean', description: 'Also compute an ALWAYS-VALID p per variant (mixture SPRT): p_value_sequential stays honest under repeated peeking at a RUNNING experiment, unlike the fixed-horizon p_value. proportion/mean only.' };
   const expectedEffect = { type: 'number', exclusiveMinimum: 0, description: 'Optional expected ABSOLUTE effect size — sets the sequential test\'s mixture prior scale (more power near this effect). Default: the observed sampling noise scale.' };
+  // Whether a rise is good is a property of the METRIC, which the test cannot know: conversion up is
+  // an improvement, crash rate or churn up is a regression. It changes no statistic — only how a
+  // significant result is read (outcome: better | worse).
+  const good = { enum: ['up', 'down'], default: 'up', description: 'Which direction of the metric is GOOD: up (conversion, revenue, retention) or down (crash rate, churn, load time, cost). Decides whether a significant change is an improvement or a regression; no statistic changes.' };
 
   // One metric branch of the union.
   const branch = (metric, branchDesc, fields, armDesc, extraProps = {}) => {
@@ -966,7 +970,7 @@ function abTestSchema() {
       description: branchDesc,
       properties: {
         metric: { enum: [metric] },
-        confidence, alternative, correction,
+        confidence, alternative, correction, good,
         family_p_values: familyP,
         ...extraProps,
         control: a,
@@ -986,7 +990,7 @@ function abTestSchema() {
     required: ['metric', 'control', 'variants'],
     properties: {
       metric: { enum: ['proportion', 'mean', 'ratio', 'cuped'], description: 'Which test to run and which group fields are required: proportion→conversions; mean→mean,stddev; ratio→sumNum,sumDen,sumNum2,sumDen2,sumNumDen; cuped→sumY,sumY2,sumX,sumX2,sumXY.' },
-      confidence, alternative, correction,
+      confidence, alternative, correction, good,
       family_p_values: familyP,
       sequential,
       expected_effect: expectedEffect,

@@ -157,7 +157,10 @@ the plain tools stay exactly as they were for every client that does not:
   `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`):
   a CHART (a time series or a breakdown, its rows folded underneath as a filterable, sortable table),
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
-  TEST (a stat card per variant: lift, interval, verdict, the groups), the SAMPLE-RATIO CHECK (the
+  TEST (a stat card per variant: lift, interval, verdict, the groups — a significant change coloured
+  by what it means for the metric: green an improvement, red a regression; `good: down` on the
+  analyze call marks a metric where lower is better, such as crash rate or churn, and the card says
+  "lower is better"), the SAMPLE-RATIO CHECK (the
   observed split against the intended one) and the SAMPLE-SIZE PLAN. What a result with rows IS is
   declared by the caller: `display` on `query_semantic_model` / `get_query_result`, a union of closed
   forms tagged by `kind` — each form's schema says which question it fits and what it needs (required

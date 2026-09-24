@@ -2921,13 +2921,23 @@ export class Engine {
       const adj = adjustPValues([...results.map((r) => r.p_value), ...familyExtra], correction);
       results = results.map((r, i) => ({ ...r, p_value_adjusted: adj[i], significant_adjusted: adj[i] < 1 - confidence }));
     }
+    // How a significant change READS depends on the metric: a rise is an improvement only where up is
+    // good (conversion), a regression where down is (crash rate) — the caller says which
+    const good = input.good || 'up';
+    results = results.map((r) => {
+      const sig = !!(r.significant_adjusted ?? r.significant);
+      const lift = r.absolute_lift ?? 0;
+      return { ...r, outcome: !sig || lift === 0 ? 'no_difference' : (lift > 0) === (good === 'up') ? 'better' : 'worse' };
+    });
+    const worse = results.filter((r) => r.outcome === 'worse').map((r) => r.variant);
     const anySig = results.some((r) => (r.significant_adjusted ?? r.significant));
     const recommendations = [
       `Trust significant_adjusted (multiplicity-corrected${familyExtra.length ? `, family includes ${familyExtra.length} other metric(s)` : ''}) over raw significant.`,
       ...(input.sequential ? ['p_value_sequential is valid under repeated peeking; the fixed-horizon p_value is only valid at the planned sample size.'] : ['Peeking at a RUNNING experiment with fixed-horizon p-values inflates false positives — pass sequential:true for an always-valid p.']),
+      ...(worse.length ? [`${worse.join(', ')} ${worse.length === 1 ? 'is' : 'are'} significantly WORSE than control on this metric (${good === 'up' ? 'lower' : 'higher'} where ${good} is good) — a regression, not a win.`] : []),
       ...(anySig ? [] : ['No significant lift: check power with experiment({ action: "plan", ... }) before calling it a true null — and verify the split with experiment({ action: "check_split", ... }) if you have not.']),
     ];
-    return { ok: true, metric, confidence, alternative, correction, control: labelOf(control, -1), ...extra, results, recommendations };
+    return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, results, recommendations };
   }
 
   /**

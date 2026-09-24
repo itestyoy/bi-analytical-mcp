@@ -72,8 +72,10 @@ export function buildViewModel(toolName, result, toolInput) {
         p_value_sequential: num(r.p_value_sequential),
         significant,
         // a significant result has a direction; whether that direction is GOOD depends on the
-        // metric (conversion up is good, crash rate up is not), which the test does not know
+        // metric (conversion up is good, crash rate up is not) — the `outcome` below
         verdict: !significant ? 'no_difference' : (lift ?? 0) >= 0 ? 'increase' : 'decrease',
+        // whether that direction is GOOD is the caller's to say (good: up | down, echoed by the test)
+        outcome: r.outcome || (!significant || !lift ? 'no_difference' : (lift > 0) === ((result.good || 'up') === 'up') ? 'better' : 'worse'),
         variance_reduction: num(r.variance_reduction),
       };
     });
@@ -84,7 +86,8 @@ export function buildViewModel(toolName, result, toolInput) {
       const p = 10 ** Math.floor(Math.log10(x));
       return [1, 2, 2.5, 5, 10].map((m) => m * p).find((m) => m >= x);
     };
-    const metricLabel = { proportion: 'conversion rate', mean: 'mean', ratio: 'ratio', cuped: 'mean (CUPED-adjusted)' }[result.metric] || result.metric || 'metric';
+    // a proportion where lower is better (crash rate, churn) is not a conversion — it is a rate
+    const metricLabel = { proportion: result.good === 'down' ? 'rate' : 'conversion rate', mean: 'mean', ratio: 'ratio', cuped: 'mean (CUPED-adjusted)' }[result.metric] || result.metric || 'metric';
     return {
       kind: 'experiment',
       title: `A/B test · ${metricLabel}`,
@@ -96,6 +99,7 @@ export function buildViewModel(toolName, result, toolInput) {
       correction: result.correction && result.correction !== 'none' ? result.correction : null,
       variants,
       significant_count: variants.filter((v) => v.significant).length,
+      good: result.good || 'up',
       scale: nice(extent * 1.1),
       notes: result.recommendations || [],
     };

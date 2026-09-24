@@ -268,6 +268,12 @@
   background-color: color-mix(in oklab, var(--color-series-1) 12%, transparent);
 }
 
+.badge-success {
+  color: color-mix(in oklab, var(--success) 85%, var(--foreground));
+  border-color: color-mix(in oklab, var(--success) 30%, transparent);
+  background-color: color-mix(in oklab, var(--success) 12%, transparent);
+}
+
 .badge-destructive {
   color: color-mix(in oklab, var(--destructive) 85%, var(--foreground));
   border-color: color-mix(in oklab, var(--destructive) 25%, transparent);
@@ -866,8 +872,13 @@
 .ci-plot {
   --ci-color: var(--muted-foreground);
 
-  &.ci-significant {
-    --ci-color: var(--color-series-1);
+  /* a significant change is coloured by what it means for this metric, not by its sign */
+  &.ci-better {
+    --ci-color: var(--success);
+  }
+
+  &.ci-worse {
+    --ci-color: var(--destructive);
   }
 }
 

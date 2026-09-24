@@ -124,6 +124,27 @@ test('view model: the A/B card carries the test\'s own numbers', async () => {
   assert.equal(v.p_value, r.results[0].p_value);
 });
 
+test('A/B outcome: the same significant rise is an improvement where up is good and a regression where down is', async () => {
+  // crash sessions: 400 of 10 000 in control, 520 of 10 000 in the variant — a clear rise
+  const args = { action: 'analyze', metric: 'proportion', control: { n: 10000, conversions: 400 }, variants: [{ label: 'new_sdk', n: 10000, conversions: 520 }] };
+  const up = await s.engine.experiment(args);
+  const down = await s.engine.experiment({ ...args, good: 'down' });
+  // no statistic changes with the reading
+  assert.equal(down.results[0].p_value, up.results[0].p_value);
+  assert.equal(down.results[0].absolute_lift, 0.052 - 0.04);
+  assert.equal(up.results[0].significant_adjusted, true);
+  assert.deepEqual([up.good, up.results[0].outcome], ['up', 'better']);
+  assert.deepEqual([down.good, down.results[0].outcome], ['down', 'worse']);
+  assert.ok(down.recommendations.some((x) => x.startsWith('new_sdk is significantly WORSE')));
+  // the card carries it: the direction stays "increase", its reading flips
+  const m = buildViewModel('experiment', down, { ...args, good: 'down' });
+  assert.equal(m.good, 'down');
+  assert.deepEqual([m.variants[0].verdict, m.variants[0].outcome], ['increase', 'worse']);
+  // a result with no significance reads as no difference either way
+  const flat = await s.engine.experiment({ ...args, good: 'down', variants: [{ label: 'same', n: 10000, conversions: 402 }] });
+  assert.equal(flat.results[0].outcome, 'no_difference');
+});
+
 test('view model: each A/B variant carries its verdict, its interval in the headline\'s unit, its group sizes, on one shared scale', async () => {
   const args = { action: 'analyze', metric: 'proportion', control: { n: 5000, conversions: 500 }, variants: [{ label: 'b', n: 5020, conversions: 580 }, { label: 'c', n: 4980, conversions: 470 }] };
   const r = await s.engine.experiment(args);

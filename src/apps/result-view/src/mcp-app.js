@@ -790,11 +790,14 @@ filterInput.addEventListener('input', () => {
 // figures in a divided grid at the foot. All variants share one interval scale, so the stacked
 // cards compare at a glance.
 
+// The badge names the direction; its colour says whether that direction is good for this metric
+// (outcome, from the caller's `good`): an improvement green, a regression red, no difference plain.
 const VERDICTS = {
-  increase: { icon: 'trending-up', text: 'Significant increase', variant: 'accent' },
-  decrease: { icon: 'trending-down', text: 'Significant decrease', variant: 'accent' },
-  no_difference: { icon: 'minus', text: 'Not significant', variant: 'outline' },
+  increase: { icon: 'trending-up', text: 'Significant increase' },
+  decrease: { icon: 'trending-down', text: 'Significant decrease' },
+  no_difference: { icon: 'minus', text: 'Not significant' },
 };
+const OUTCOME_VARIANT = { better: 'success', worse: 'destructive', no_difference: 'outline' };
 
 function stat(label, value, caption) {
   const node = el('div', 'stat');
@@ -807,7 +810,7 @@ function stat(label, value, caption) {
 function intervalPlot(v, scale, fmt, confidenceLabel) {
   const e = v.effect;
   const pos = (x) => `${(50 + (Math.max(-scale, Math.min(scale, x)) / scale) * 50).toFixed(2)}%`;
-  const plot = el('div', `ci-plot${v.significant ? ' ci-significant' : ''}`);
+  const plot = el('div', `ci-plot${v.outcome === 'better' ? ' ci-better' : v.outcome === 'worse' ? ' ci-worse' : ''}`);
   plot.setAttribute('role', 'img');
   plot.setAttribute('aria-label', `${confidenceLabel} interval ${fmt(e.lo)} to ${fmt(e.hi)}, estimate ${fmt(e.point)}; zero means no effect`);
   const track = el('div', 'ci-track');
@@ -833,7 +836,9 @@ function renderExperiment(model) {
     confidenceLabel ? badge(`${confidenceLabel} confidence`, 'outline') : null,
     model.alternative && model.alternative !== 'two_sided' ? badge(`one-sided · ${model.alternative}`, 'outline') : null,
     model.correction ? badge(`${correctionName(model.correction)} correction`, 'outline') : null,
-    k > 1 ? badge(`${model.significant_count} of ${k} significant`, model.significant_count ? 'accent' : 'secondary') : null,
+    // an inverted metric says so up front: a green decrease must not read as a mistake
+    model.good === 'down' ? badge('lower is better', 'outline', 'trending-down') : null,
+    k > 1 ? badge(`${model.significant_count} of ${k} significant`, 'secondary') : null,
   );
 
   const isRate = model.metric === 'proportion';
@@ -871,7 +876,7 @@ function renderExperiment(model) {
       title: headline,
       titleClass: 'card-title card-title-stat',
       subline,
-      action: badge(verdict.text, verdict.variant, verdict.icon),
+      action: badge(verdict.text, OUTCOME_VARIANT[v.outcome] || 'outline', verdict.icon),
     }, e ? content : null, stats);
     node.classList.add('ab-card');
     cardsSection.append(node);
@@ -977,7 +982,7 @@ function renderSrm(model) {
     title: model.srm_detected ? 'Mismatch' : 'Healthy',
     titleClass: 'card-title card-title-stat',
     subline: model.srm_detected ? 'The split is off: randomization or logging is broken, so no lift from this test can be trusted.' : 'The split matches the intended one: the test result can be read.',
-    action: model.srm_detected ? badge('Do not trust the lift', 'destructive', 'circle-x') : badge('Split is sound', 'accent', 'circle-check'),
+    action: model.srm_detected ? badge('Do not trust the lift', 'destructive', 'circle-x') : badge('Split is sound', 'success', 'circle-check'),
   }, content, stats);
   cardsSection.append(node);
   cardsSection.hidden = false;

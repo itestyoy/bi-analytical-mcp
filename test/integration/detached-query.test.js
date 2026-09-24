@@ -247,3 +247,22 @@ test('a drillable bar is drawn folded over its drill level, and a bar drills int
   // a drill level the chart already draws is refused
   await assert.rejects(engine.get_query_result({ query_id: first.query_id, display: { ...display, drill: { levels: [{ column: 'users_country' }] } } }), (e) => e.field === 'display');
 });
+
+// ONE QUERY, ONE CARD: the model waits with time({ query_id }) — no card — and reads the result once.
+test('time({ query_id }) wakes as soon as the query is done, then one read returns the warehouse\'s rows', opts, async (t) => {
+  if (skip(t)) return;
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
+  assert.equal(first.status, 'running');
+  let waited;
+  for (let i = 0; i < 20; i++) {
+    waited = await engine.time({ seconds: 30, query_id: first.query_id });
+    if (waited.query.status !== 'running') break;
+  }
+  assert.equal(waited.query.status, 'ready');
+  assert.ok(waited.waited_seconds < 30, `woke early (${waited.waited_seconds}s)`);
+  const read = await engine.get_query_result({ query_id: first.query_id });
+  assert.equal(Number(read.rows[0].mon_revenue), 85);
+  // a query this server does not know: gone, at once
+  const gone = await engine.time({ seconds: 30, query_id: 'ffffffffffff' });
+  assert.deepEqual([gone.query.status, gone.waited_seconds < 1], ['gone', true]);
+});

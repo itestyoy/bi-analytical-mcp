@@ -121,12 +121,18 @@
   theme; its build is checked in and held to its sources by a test. THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT:
   every tool is `visibility: ["model"]` except `get_query_result` (`["model", "app"]`), the view
   resource declares an empty `csp` and the page its own CSP, and the view's ONE server call is
-  get_query_result for the result it was drawn from — the query_id of its own detached result,
-  polled until the rows are there so they appear in the same card, and a drill-down's next view
+  get_query_result for the result it was drawn from — a drill-down's next view
   — a pivot row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): its
   stored table, filtered to the path taken and grouped by the dimension chosen, each read built by
   the view model's one definition of a view (no other tools/call, resource, model message, link or
   network) — a test holds its sources to that. Everything else interactive stays on the data already in the page.
+- A CARD ONLY WHEN THE CALL ASKS FOR IT; ONE QUERY, ONE CARD. `structuredContent` is carried only
+  when the call asked for a card — `display` on query_semantic_model / get_query_result (given now,
+  or remembered by the query it reads), `card: true` on experiment — AND there is one to draw: the
+  view model decides (`buildViewModel(...).kind !== 'none'`); a query still running, a failure,
+  rows with no shape carry the text alone, and so does every tool without a card. A query that outlasts its call is waited for
+  with `time({ query_id })` (no card; it wakes as soon as the query is done) and read ONCE with
+  get_query_result — that read is its card. The card never waits for a query by itself.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): `_meta.ui`, the view resource,

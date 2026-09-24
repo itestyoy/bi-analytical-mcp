@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { startServer, APPS_CAPS } from '../helpers/mcp-http.js';
 import { buildViewModel, drillView, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
-import { runTool } from '../../src/mcp-surface.js';
+import { runTool, toCallToolResult } from '../../src/mcp-surface.js';
 
 let s;
 before(async () => { s = await startServer(); });
@@ -87,12 +87,11 @@ test('the view reads only its own result: one tool is app-callable, no network, 
   // exactly one tools/call site: get_query_result…
   assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
   assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'get_query_result', arguments: args }");
-  // …reached for the card's OWN result only: its query_id while it waits, its stored table's next
-  // view when a drill-down steps down (a pivot row, a chart mark — each read built by the view model)
+  // …reached for the card's OWN result only: its stored table's next view when a drill-down steps
+  // down (a pivot row, a chart mark — each read built by the view model)
   assert.deepEqual(reads.filter((r) => r !== 'args').sort(), [
     '{ ...d.source, transform: view.transform, limit: DRILL_ROWS }',
     '{ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }',
-    '{ query_id: queryId }',
   ]);
 });
 
@@ -106,9 +105,21 @@ test('a result that is gone reaches the card as result_gone over MCP, and the ca
   }
 });
 
-test('view model: a result that moved to the background carries the query_id the card follows', () => {
-  const m = buildViewModel('query_semantic_model', { ok: true, status: 'running', query_id: 'abc123abc123' });
-  assert.deepEqual(m, { kind: 'none', reason: 'running', query_id: 'abc123abc123' });
+test('structured output only when the call asked for a card AND there is one to draw — the same view model decides', () => {
+  const rows = { ok: true, columns: [{ name: 'c' }, { name: 'v' }], rows: [{ c: 'US', v: 3 }, { c: 'DE', v: 1 }] };
+  const display = { kind: 'bar', x: 'c', y: ['v'] };
+  // asked (the result carries the declaration, given now or remembered by the query) and drawable
+  assert.ok(toCallToolResult({ ...rows, display }, 'get_query_result').structuredContent);
+  // rows, but nobody asked for a card: text alone
+  assert.equal(toCallToolResult(rows, 'get_query_result').structuredContent, undefined);
+  // asked, but nothing to draw: still running, failed, empty
+  for (const nothing of [{ ok: true, status: 'running', query_id: 'abc123abc123', display }, { ok: false, error: { message: 'x' }, display }, { ok: true, columns: [{ name: 'c' }, { name: 'v' }], rows: [], display }]) {
+    const r = toCallToolResult(nothing, 'query_semantic_model');
+    assert.equal(r.structuredContent, undefined, JSON.stringify(nothing));
+    assert.deepEqual(JSON.parse(r.content[0].text), nothing, 'the model still reads the whole answer');
+  }
+  // a tool without a card: text alone
+  assert.equal(toCallToolResult({ ok: true, waited_seconds: 1 }, 'time').structuredContent, undefined);
 });
 
 test('the view resource is one mcp-app HTML document, listed and readable for a client that declares MCP Apps', async () => {
@@ -119,13 +130,15 @@ test('the view resource is one mcp-app HTML document, listed and readable for a 
   assert.ok(content.text.startsWith('<!DOCTYPE html>') && /<\/html>\s*$/.test(content.text), 'a complete document');
 });
 
-test('the result carries structuredContent equal to the text the model reads (both eras)', async () => {
+test('structured output only when the call asks for its card: card: true carries it, equal to the text; without it, text alone', async () => {
   const args = { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 };
-  for (const era of ['legacy', 'modern']) {
-    const r = await (await s.client({ era })).callTool({ name: 'experiment', arguments: args });
-    assert.deepEqual(r.structuredContent, JSON.parse(r.content[0].text), era);
-    assert.equal(r.structuredContent.n_per_group, 3841, era);
-  }
+  const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
+  const asked = await c.callTool({ name: 'experiment', arguments: { ...args, card: true } });
+  assert.deepEqual(asked.structuredContent, JSON.parse(asked.content[0].text));
+  assert.equal(asked.structuredContent.n_per_group, 3841);
+  const plain = await c.callTool({ name: 'experiment', arguments: args });
+  assert.equal(plain.structuredContent, undefined, 'no card asked for: no structured output');
+  assert.equal(JSON.parse(plain.content[0].text).n_per_group, 3841, 'the same answer, as text');
 });
 
 test('the checked-in view is the build of its sources (npm run build:app)', async () => {

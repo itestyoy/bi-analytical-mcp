@@ -409,7 +409,7 @@ export function buildSchemas(catalog) {
     ...extra,
   });
   const display = {
-    description: 'How the result is SHOWN to the person as a card, in hosts that render MCP Apps (Claude on the web, desktop and mobile). Pick the `kind` whose description matches the question; the card then draws exactly that. It changes no numbers. Omitted, the card infers a chart or a funnel from the shape where it can.',
+    description: 'Draw the result as a CARD for the person, in hosts that render MCP Apps (Claude on the web, desktop and mobile) — and how. Omitted: no card. Pick the `kind` whose description matches the question; the card draws exactly that. It changes no numbers.',
     discriminator: { propertyName: 'kind' },
     oneOf: [
       form('line', 'line — a trend', 'A TREND over an ordered axis (usually time): one line, or several to compare series.', {
@@ -618,6 +618,7 @@ export function buildSchemas(catalog) {
       description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.`,
       properties: {
         seconds: { type: 'number', minimum: 0, maximum: 86400, description: `Seconds to wait; the actual wait is capped at ${MAX_WAIT_SECONDS} (larger values are clamped, with clamped:true and cap_seconds in the result).` },
+        query_id: { type: 'string', pattern: '^[a-f0-9]{12}$', description: 'Wait FOR this query: return as soon as it is no longer running (or after `seconds`), with its status. Then read it ONCE with get_query_result.' },
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
       },
     },
@@ -1123,6 +1124,7 @@ function experimentSchema() {
   const srm = srmCheckSchema();
   const ss = sampleSizeSchema();
   const properties = {
+    card: { type: 'boolean', description: 'Draw the result as a CARD for the person (the test, the split check or the plan), in hosts that render MCP Apps. Omitted: no card — ask for it only when the person should see this result.' },
     action: { enum: ['plan', 'check_split', 'analyze'], description: 'plan → required sample size / MDE (power planning, BEFORE running); check_split → Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run BEFORE trusting any lift); analyze → the A/B significance test on per-group aggregates.' },
     // union of all three actions' fields (analyze/ab_test wins on shared keys like metric).
     ...ss.properties,

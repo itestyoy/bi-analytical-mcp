@@ -5,14 +5,17 @@
 
 import { MAX_WAIT_SECONDS } from './schema.js';
 import { withSignal } from './request-context.js';
-import { appsSurface, viewMeta } from './apps.js';
+import { appsSurface, viewMeta, VIEWED_TOOLS } from './apps.js';
+import { buildViewModel } from './apps/result-view-model.js';
 
-// The tools that take a card declaration (`display`) — offered only to a client that renders cards.
-const DISPLAY_TOOLS = new Set(['query_semantic_model', 'get_query_result']);
-/** A tool's input schema without the card declaration, for a client that renders no cards. */
-function withoutDisplay(schema) {
-  if (!schema?.properties?.display) return schema;
-  const { display: _drop, ...properties } = schema.properties;
+// How a call ASKS for its card — offered only to a client that renders cards: a card declaration
+// (`display`) on the query tools, `card: true` on experiment.
+const CARD_ASK = { query_semantic_model: 'display', get_query_result: 'display', experiment: 'card' };
+/** A tool's input schema without the way to ask for a card, for a client that renders no cards. */
+function withoutDisplay(schema, name) {
+  const field = CARD_ASK[name];
+  if (!field || !schema?.properties?.[field]) return schema;
+  const { [field]: _drop, ...properties } = schema.properties;
   const out = { ...schema, properties };
   // the one rule about it at the root (a drill-down needs materialize) goes with it
   if (out.if?.properties?.display) { delete out.if; delete out.then; }
@@ -33,7 +36,7 @@ const TOOL_DESCRIPTIONS = {
   context: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, cascade for dependent metrics).',
   memory: 'DURABLE analyst memory — remember what you FOUND OUT so it comes back through semantic_index. After you resolve something non-obvious (a vague request tracked down to a real field, a gotcha, a useful source), record:"action" it: `note` the finding, `question` the ORIGINAL business question it answers (in the stakeholder\'s words — embedded with the note so a future similar question retrieves this insight by meaning), `targets` the catalog entities it is about, each as { source, name } (a property, attribute or event of that source — e.g. { source: "events", name: "ad_type_of_event_data" }, { source: "users", name: "country" }) or { source } for a model, `aliases` the words the user actually used ("ad format") — give them in BOTH the original language and English so search works cross-language, `links` any sources. The note then surfaces inline on the linked semantic_index views ({ model }/{ source, event }/{ source, property }) and in semantic_index({ search }) — so the next fuzzy phrasing resolves straight to the right field instead of re-investigating. RECORD ONE ATOMIC FINDING PER NOTE: when studying a topic or a document, split it into several small single-fact notes (each with its own targets/aliases) rather than dumping a whole topic into one big note — atomic notes link precisely and retrieve far better; an over-long note matches poorly and may fail to index. action: list (all, or one { target }) | search (by word — typo-tolerant fuzzy, and SEMANTIC/meaning-based when embeddings are enabled) | forget (by id).',
   experiment: 'The A/B EXPERIMENT lifecycle in one tool (action-driven): plan → check_split → analyze. action:"plan" = power/sample-size (required users, or the MDE at a given n) BEFORE running. action:"check_split" = Sample-Ratio-Mismatch χ² guardrail; p < 0.001 means randomization/logging is broken and the result is INVALID — run it BEFORE trusting any lift. action:"analyze" = the significance test on PRE-AGGREGATED per-group stats (metric: proportion → two-proportion z-test; mean → Welch t-test; ratio → delta-method; cuped → variance reduction), returning lift (+ relative-lift CI), p-value, CI, significance, and a multiplicity-adjusted p-value per variant; sequential:true adds an always-valid p for live peeking. Compute the per-group aggregates first with a pipeline. Field names are exact: use `baseline` (NOT baseline_rate) and `confidence` (NOT alpha); there is no `allocation` field (use check_split.expected_ratio). For proportion, each group needs `conversions` (0..n; conversions > n is rejected). Examples — plan: {action:"plan",metric:"proportion",baseline:0.1,mde:0.02}; check_split: {action:"check_split",groups:[{label:"control",n:5000},{label:"variant_b",n:5020}]}; analyze: {action:"analyze",metric:"proportion",control:{n:5000,conversions:500},variants:[{label:"variant_b",n:5020,conversions:580}],correction:"holm"}.',
-  time: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return — a pure timer that touches no data. Use it to PACE polling: after query_semantic_model({ materialize:true }) (or a long build) returns a query_id, call time to wait, then poll get_query_result; repeat until ready.`,
+  time: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return — a timer that touches no data. With \`query_id\` it WAITS FOR THAT QUERY: it returns as soon as the query is no longer running, with its status. When a call returns a query_id, wait with time({ query_id }) — again while it says running — then read the result ONCE with get_query_result; do not poll get_query_result itself.`,
 };
 
 // Human-readable display names for the tools (MCP `title` / annotations.title). The `name` stays
@@ -54,7 +57,7 @@ const TOOL_TITLES = {
 // Server-level documentation surfaced to the AI client (serverInfo.description):
 // what this MCP is for and how to use it end-to-end.
 // Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
-const RESULT_CARDS = `RESULT CARDS: in a host that renders MCP Apps, the results of query_semantic_model, get_query_result and experiment are drawn for the person as cards — a chart, KPI tiles, a funnel, a sankey, the A/B test, the split check, the sample-size plan. A query that outlasts its call answers with a query_id; its card follows the query and draws the result in place when it is ready (where the host lets a card read its result), but YOU still need the rows: call get_query_result({ query_id }) until it is ready before you report the numbers. build_native_model draws none: after materialize, call get_query_result({ context_id, table }) on the pipeline's table (its response names it under show_to_user) to show a funnel or a chart, and do not draw your own chart of the same rows. DECLARE the card with \`display\` (on query_semantic_model or get_query_result) whenever the result is a funnel or a chart: pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order, instead of guessing from column names. It names result columns and changes no numbers; a column that is not in the result is refused with the list. Without it, a funnel is only inferred from step-like names (step1_…, a column named step) with counts that do not grow.`;
+const RESULT_CARDS = `RESULT CARDS: in a host that renders MCP Apps, a result of query_semantic_model, get_query_result or experiment can be drawn for the person as a card — a chart, KPI tiles, a funnel, a sankey, a pivot, the A/B test, the split check, the sample-size plan. ONE QUERY, ONE CARD: a query that outlasts its call answers with a query_id and draws nothing; wait for it with time({ query_id }) — it draws no card and returns as soon as the query is done — then read it ONCE with get_query_result({ query_id }): that read is its card. Never poll get_query_result, and never read the same result twice. build_native_model draws none: after materialize, call get_query_result({ context_id, table, display }) on the pipeline's table (its response names it under show_to_user) to show a funnel or a chart, and do not draw your own chart of the same rows. A CARD IS DRAWN ONLY WHEN YOU ASK FOR IT: \`display\` on query_semantic_model or get_query_result (a chart, a funnel, KPI tiles, a pivot…), \`card: true\` on experiment. Without it the answer is text only — so ask for the result the person should SEE, once, and not for the intermediate reads you make to work something out. In \`display\` pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list.`;
 
 const SERVER_DESCRIPTION = `Declarative semantic layer for product analytics.
 
@@ -75,7 +78,7 @@ WORKFLOW
    - For ordered multi-step funnels/paths (and any custom transform) use build_native_model: compose a PIPELINE one stage at a time (start → add_step* → materialize; each add_step shows the columns available next), building a model whose ROWS are the result — read/slice them with get_query_result (a pipeline context is not queried via query_semantic_model). It accepts a time_range and an internal pre-filter (event subset / user segment).
    - Beyond SQL (a statistical test, clustering, scoring, a forecast), where the overview's python_models says available: add a 'python' stage to a build_native_model pipeline — but ONLY for the part SQL cannot express, with the table it reads prepared by the SQL stages before it. Do not write one from memory: semantic_index({ guide: "python" }) is this warehouse's frame rules and the reasoning behind them, the stage description indexes the worked recipes by the move each covers, and semantic_index({ recipe: "<id>" }) returns one in full. Read the result with get_query_result as usual.
 3. query_semantic_model — run metrics with group_by / where / order_by / time_range. Options: dry_run (preview, no run), explain (query plan, no run), materialize (persist the result and read it back; long queries return a query_id to poll), limit/offset.
-4. get_query_result — poll a backgrounded query by query_id, or re-read/re-slice a stored result (where/group_by/aggregations/having) WITHOUT recomputing.
+4. get_query_result — read a backgrounded query by query_id ONCE it is done (wait for it with time({ query_id })), or re-read/re-slice a stored result (where/group_by/aggregations/having) WITHOUT recomputing.
 
 KEY CONCEPTS
 - context_id: an isolated workspace; parallel tasks never collide. Manage via context({ action: list | describe | drop | delete_model | delete_semantic_model }).
@@ -150,7 +153,7 @@ export function buildToolDefs(engine, { renders = true } = {}) {
     .map(([name, schema]) => {
       const title = TOOL_TITLES[name] || titleFromName(name);
       const meta = viewMeta(name, renders);
-      const inputSchema = renders ? schema : withoutDisplay(schema);
+      const inputSchema = renders ? schema : withoutDisplay(schema, name);
       // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
       // read the older annotations location. `name` remains the stable programmatic identifier.
       return {
@@ -176,10 +179,16 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
 /** A tool's return value as an MCP CallToolResult: the JSON as text (what the model reads) and the
  *  same value as `structuredContent` (what a program — the Apps view — reads; the spec asks for
  *  both, and a host that uses the structured copy does not add it to the model's context). */
-export function toCallToolResult(result) {
+export function toCallToolResult(result, name, args) {
+  // STRUCTURED OUTPUT ONLY WHEN THE CALL ASKED FOR A CARD — `display` on the query tools (given now,
+  // or remembered by the query it reads: the result carries it), `card: true` on experiment — AND
+  // there is a card to draw: the same view model the card runs decides (a query still running, a
+  // failure, rows with no shape: nothing). Anything else is the text alone — one card per ask.
+  const asked = name === 'experiment' ? args?.card === true : VIEWED_TOOLS.has(name) && isPlainObject(result) && isPlainObject(result.display);
+  const structured = asked && isPlainObject(result) && buildViewModel(name, result, args).kind !== 'none';
   return {
     content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-    ...(isPlainObject(result) ? { structuredContent: result } : {}),
+    ...(structured ? { structuredContent: result } : {}),
     // a result the engine RETURNED as a failure ({ ok: false, error }) — a build that failed, a
     // query the warehouse refused — is a tool execution error like a thrown one (spec: isError)
     ...(isPlainObject(result) && result.ok === false ? { isError: true } : {}),
@@ -203,10 +212,11 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
     logLine(name, '✗ unknown tool');
     return { result: errorResult(`unknown tool: ${name}`, 'validate'), raw: null, unknown: true };
   }
-  // a card declaration from a client that renders no cards: not offered to it, so not accepted
-  if (!renders && DISPLAY_TOOLS.has(name) && args?.display !== undefined) {
-    logLine(name, '✗ display from a client without the Apps extension');
-    return { result: errorResult('display is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so no card is drawn — drop the display field', 'validate', 'display'), raw: null };
+  // a request for a card from a client that renders no cards: not offered to it, so not accepted
+  const ask = CARD_ASK[name];
+  if (!renders && ask && args?.[ask] !== undefined) {
+    logLine(name, `✗ ${ask} from a client without the Apps extension`);
+    return { result: errorResult(`${ask} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so no card is drawn — drop the ${ask} field`, 'validate', ask), raw: null };
   }
   let beat;
   if (onProgress) {
@@ -221,7 +231,7 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
     // the hint to show a result as a card means nothing to a client that draws none
     if (!renders && isPlainObject(raw) && 'show_to_user' in raw) { const { show_to_user: _hint, ...rest } = raw; raw = rest; }
     logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(raw)}`);
-    return { result: toCallToolResult(raw), raw };
+    return { result: toCallToolResult(raw, name, args), raw };
   } catch (err) {
     const cancelled = !!signal?.aborted;
     logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} in ${Date.now() - started}ms: ${err?.message || String(err)}${err?.field ? ` (field: ${err.field})` : ''}`);
@@ -266,7 +276,7 @@ export async function runToCompletion(engine, name, args, { signal, pollMs = 200
     logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} while following ${first.raw.query_id}: ${err?.message || String(err)}`);
     return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : (err?.stage || 'query'), err?.field, cancelled ? undefined : err?.code), raw: null };
   }
-  return { result: toCallToolResult(job), raw: job };
+  return { result: toCallToolResult(job, name, args), raw: job };
 }
 
 export { TOOL_DESCRIPTIONS, TOOL_TITLES, SERVER_DESCRIPTION, SERVER_SUMMARY, HIDDEN_TOOLS };

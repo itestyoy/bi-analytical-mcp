@@ -9,9 +9,8 @@
  *
  * IT DRAWS, AND READS ONLY ITS OWN RESULT. The input is the tool result the host delivers
  * (ontoolresult). The one thing it asks for is more of that same result, through get_query_result
- * (readResult): the rows of a query that outlasted its call (followQuery polls its query_id), and
- * a drill-down's next view (its stored table, filtered to the pivot row opened or the chart mark
- * clicked, grouped by the dimension chosen). Nothing
+ * (readResult): a drill-down's next view — its stored table, filtered to the pivot row opened or
+ * the chart mark clicked, grouped by the dimension chosen. Nothing
  * else: no other tool, no resource, no message to the model, no link — and no network at all (the
  * page's CSP, and the resource's declared `csp`). Everything else interactive here — the
  * tooltip, the legend, fullscreen — works on the data already in the page or on the host's own
@@ -154,7 +153,6 @@ const state = {
   toolName: null,
   toolInput: null,
   chart: null,
-  follow: 0, // bumps on every new result, so a stale poll loop stops
   current: null, // the view model on screen
   drill: [], // the drill-down path: { model, crumb } from the result as it came to the view on screen
   displayMode: 'inline',
@@ -325,9 +323,7 @@ function show(model) {
   mainEl.hidden = !draw;
   statusEl.hidden = !!draw;
   if (!draw) {
-    const following = model.reason === 'running' && model.query_id && canFollow();
-    showStatus(following ? { ...model, reason: 'following' } : model);
-    if (following) followQuery(model.query_id);
+    showStatus(model);
     return;
   }
   titleEl.textContent = model.title;
@@ -512,59 +508,24 @@ function renderPivot(model) {
   cardsSection.hidden = false;
 }
 
-// ── following a detached query to its rows ───────────────────────────────────────────────────
+// ── reading more of this card's own result (a drill-down's next view) ─────────────────────────
 
-const FOLLOW_EVERY_MS = 3000;
-const FOLLOW_FOR_MS = 30 * 60 * 1000; // a detached result is kept for an hour; half of it is plenty
-
-/** Whether the host proxies a view's tools/call at all — without it the card stays a hand-off. */
+/** Whether the host proxies a view's tools/call at all — without it nothing can be drilled into. */
 const canFollow = () => !!app.getHostCapabilities()?.serverTools;
 
 /**
  * THE view's one way to the server: get_query_result, for the result this card was drawn from —
- * its query_id while it waits for the rows, or its stored table's next view when a drill-down
- * steps down (a pivot row, a chart mark). Read-only, and only this card's own result.
+ * its stored table's next view when a drill-down steps down (a pivot row, a chart mark).
+ * Read-only, and only this card's own result.
  */
 const readResult = (args) => app.callServerTool({ name: 'get_query_result', arguments: args });
-
-/**
- * Poll get_query_result for THIS card's query_id until it is no longer running, then draw what came
- * back in place of the status line. The only server call the view makes. A newer result, teardown,
- * a refused call or the time limit ends the loop; the card then says the result comes separately.
- */
-async function followQuery(queryId) {
-  const token = ++state.follow;
-  const until = Date.now() + FOLLOW_FOR_MS;
-  const handOff = () => { if (token === state.follow) showStatus({ reason: 'running' }); };
-  while (token === state.follow) {
-    await new Promise((resolve) => setTimeout(resolve, FOLLOW_EVERY_MS));
-    if (token !== state.follow) return;
-    if (Date.now() > until) { handOff(); return; }
-    let next;
-    try {
-      next = await readResult({ query_id: queryId });
-    } catch (e) {
-      log.error('following the query failed', e);
-      handOff();
-      return;
-    }
-    if (token !== state.follow) return;
-    if (payloadOf(next)?.status === 'running') continue;
-    state.follow++; // this loop is done; the result below may not start another one for the same id
-    render(next);
-    return;
-  }
-}
 
 /** The one line a result without a card gets — what happened, and that the reply carries the rest. */
 function showStatus(model) {
   const lines = {
-    // the card is following its query: this line is replaced by the result when it is ready
-    following: ['loader-circle', 'Running in the warehouse…', 'icon spin'],
-    // a detached query the card cannot follow (the host proxies no tools/call, or following ended):
-    // a HAND-OFF, not a live state, so no spinner — the rows arrive through the model's own
-    // get_query_result call, which draws its own card
-    running: ['clock', 'The result comes in a separate card'],
+    // a query that moved to the background: a hand-off, not a live state — its one card is the read
+    // of its result (get_query_result) once it is done
+    running: ['clock', 'Continues in the background'],
     // the result this card showed or waited for was deleted or expired since — not an error
     gone: ['clock', 'This result is no longer available'],
     error: ['circle-alert', 'Error'],
@@ -1370,7 +1331,6 @@ const app = new App({ name: 'Query Result', version: '1.0.0' }, { availableDispl
 
 // 2. Register handlers BEFORE connecting
 app.onteardown = async () => {
-  state.follow++; // stop following a query
   state.chart?.destroy();
   return {};
 };
@@ -1380,13 +1340,11 @@ app.ontoolinput = (params) => {
 };
 
 app.ontoolresult = (result) => {
-  state.follow++; // a new result replaces whatever the card was following
   render(result);
 };
 
 app.ontoolcancelled = () => {
   // a cancelled call has no result to draw
-  state.follow++;
   loadingEl.hidden = true;
   statusEl.replaceChildren(icon('circle-x'), el('span', null, 'The call was cancelled.'));
   statusEl.hidden = false;

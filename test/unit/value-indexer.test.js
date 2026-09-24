@@ -8,7 +8,7 @@ import { settle } from '../helpers/settle.js';
 // Allowed observability/lifecycle test: a STUB runner returns canned rows by SQL SHAPE (no
 // warehouse, no generated-SQL assertions). The indexer issues COMBINED scans per batch — one
 // cardinality (d{j}/t{j} per property + rows_total), one coverage (per event[×app], nn{j} per
-// property), and per-property top-values (Postgres has no approx_top_k). A row Proxy answers
+// property), and per-property top-values (DuckDB's approx_top_k carries no counts). A row Proxy answers
 // the per-property aliases (d0/t0/nn0/…) uniformly so the stub need not know the batch size.
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 
@@ -62,7 +62,7 @@ test('BackgroundIndexer logs sync start → steps → results, records the run +
 // watermark, and the delta counts are ADDED to what is stored (freq/coverage/total accumulate).
 test('merge mode accumulates counts across syncs (delta), scanned as ONE combined batch query', async () => {
   const catalog = loadCatalog(CATALOG, {});
-  assert.ok(['postgres', 'postgresql'].includes(catalog.dialect), 'fixture is a dialect with a since-clause');
+  assert.ok(catalog.dialect === 'duckdb', 'fixture is a dialect with a since-clause');
   const index = new ValueIndex();
   const prop = catalog.scalarEventProps('events')[0];
   const nEvent = catalog.scalarEventProps('events').length;
@@ -184,7 +184,7 @@ test('a field gone from the schema is pruned from the index on the next sync', a
 // cheap delta — not a full re-run of everything.
 test('a newly added field is indexed individually; existing fields stay delta-scanned', async () => {
   const catalog = loadCatalog(CATALOG, {});
-  assert.ok(['postgres', 'postgresql'].includes(catalog.dialect), 'fixture dialect has a since-clause');
+  assert.ok(catalog.dialect === 'duckdb', 'fixture dialect has a since-clause');
   const index = new ValueIndex();
   let deltaScans = 0; // combined cardinality scans bounded to "device_time > watermark"
   const runner = { show: async (_d, sql) => {
@@ -424,7 +424,7 @@ test('complex-coverage merges a delta into stored coverage (incremental, not ful
 // here: a query against the crash table that names the OTHER fact's time column is rejected.
 
 // A stub warehouse: canned shapes as above, but any SQL over the crash table that references the
-// events fact's time column fails the way Postgres would. The combined batch over the crash table
+// events fact's time column fails the way the warehouse would. The combined batch over the crash table
 // is made to fail so the per-property fallback (the path that used to borrow the anchor's column)
 // is what runs; rows carry a `wm` so a watermark gets stored and the SECOND sync goes delta.
 function twoFactStub() {

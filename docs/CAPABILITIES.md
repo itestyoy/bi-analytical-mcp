@@ -17,7 +17,7 @@ and the integration tests.
   - `dim_users` — one row per user: categorical attributes (country, platform, media_source, acquisition_type, campaign_id, install_date, …).
   - Funnels are built **only** from events (a step = event + an `event_data` property value). Segmentation joins user attributes to events by the `user` entity at query time (MetricFlow generates the join).
 
-**Evidence legend:** **PROVEN** = exact-value data test against dbt+MetricFlow+PGlite ·
+**Evidence legend:** **PROVEN** = exact-value data test against dbt+MetricFlow+DuckDB ·
 **RUN-PROVEN** = recipe parses and its example query returns rows · **BY DESIGN** = code path exists, no test.
 
 ---
@@ -73,7 +73,7 @@ and the integration tests.
 - **Native-sequence time/value metrics (`avg_seconds_between`, `agg_at_step`) — BY DESIGN, untested.** Generated for both dialects and exposed as measures, but no test exercises them.
 - **`percentile` measures — input-validated only.** Compiles, but no value is asserted on data.
 - **N-step funnel in pure MetricFlow is composed, not native.** Chain 2-step conversions, or use the row-pattern native model (the true multi-step engine).
-- **`strict` (contiguous-adjacency) funnels — only on the production warehouse target, rejected on the Postgres test path** (honest guardrail rather than wrong numbers). Therefore unverified by tests.
+- **`strict` (contiguous-adjacency) funnels — only on the production warehouse target, rejected on the DuckDB test path** (honest guardrail rather than wrong numbers). Therefore unverified by tests.
 
 ---
 
@@ -100,7 +100,7 @@ Consolidated from the code-quality and production-readiness audits. Severity is 
 
 ### Still open — production-readiness
 - **[CRITICAL] The production query runner is untested.** Production wires the `mf`/`dbt` **CLI runner** (`src/server.js` `makeEngine` → `DbtRunner`), but every integration test injects the **Python sidecar** (`MfEngineBackend`). The two have divergent error/result contracts (the CLI extracts SQL by scanning stdout; the sidecar returns structured SQL, which the materialize flow writes verbatim into a dbt model). → Run the suite against `DbtRunner` too, or default production to the tested sidecar.
-- **[CRITICAL — verify] BigQuery `MATCH_RECOGNIZE` path has zero test coverage.** The native funnel's BigQuery SQL is only exercised via the Postgres equivalent in tests. One audit flagged that **GoogleSQL may not support `MATCH_RECOGNIZE`** — validate on a live BigQuery instance before relying on native funnels in production; if unsupported, add a window-function / ordered self-join fallback (the same logical shape the Postgres path already produces).
+- **[CRITICAL — verify] BigQuery `MATCH_RECOGNIZE` path has zero test coverage.** The native funnel's BigQuery SQL is only exercised via the DuckDB CTE equivalent in tests. One audit flagged that **GoogleSQL may not support `MATCH_RECOGNIZE`** — validate on a live BigQuery instance before relying on native funnels in production; if unsupported, add a window-function / ordered self-join fallback (the same logical shape the Postgres path already produces).
 - **[unverified on BigQuery/Snowflake]** `jsonExtract` (`JSON_VALUE`/`CAST … AS INT64`; Snowflake `col:key::type`) and the time-spine SQL (`generate_date_array` / `seq4()`) are code-complete but only the Postgres branches are executed by tests.
 - **[MEDIUM] No warehouse `qr_*` result-table sweeper.** Context overlay GC now bounds the workspace, but materialized result tables in the warehouse are still only reclaimed when their context is dropped. → Add a sweeper for completed/aged jobs.
 
@@ -118,7 +118,7 @@ Consolidated from the code-quality and production-readiness audits. Severity is 
 
 ## 5. Readiness verdict
 
-> **Pilot-ready on Postgres; prototype against the stated BigQuery production target.**
+> **Pilot-ready on DuckDB; prototype against the stated BigQuery production target.**
 
 The semantic-layer/MetricFlow integration, context isolation, materialization/job machinery, and injection safety are well-built and **proven on data** for the full set of two-source mobile-game analytics. The dominant gap is the distance between *what is tested* (Postgres via the sidecar runner) and *what ships* (BigQuery via the CLI runner): both the production runner and the BigQuery funnel SQL are currently unexercised.
 

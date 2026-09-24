@@ -1,6 +1,6 @@
 // A BATCH OF QUERIES — one call starts up to five queries on a context, they run side by side, and
 // one read returns them all. Run with the production runner (the `mf` CLI and `dbt`, each member its
-// own process), proven on DATA against PGlite: SEED_DATA's total IAP revenue 85, by country US 35 /
+// own process), proven on DATA against DuckDB: SEED_DATA's total IAP revenue 85, by country US 35 /
 // GB 25 / BR 25; 184 event rows, 11 of them priced (8 completed purchases = 85, 3 failed = 35).
 
 import { test, before, after } from 'node:test';
@@ -12,9 +12,9 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { DbtRunner } from '../../src/dbt-runner.js';
+import { createDbt } from '../../src/dbt/index.js';
 import { Engine } from '../../src/engine.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
@@ -25,7 +25,7 @@ const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
 const opts = { timeout: 300000 };
 const num = (v) => Number(v);
 
-let pg; let engine;
+let wh; let engine;
 const TASK = {
   name: 'mon', use_base_models: ['users'],
   semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
@@ -36,17 +36,16 @@ const revenueBy = (rows) => Object.fromEntries(rows.map((r) => [String(r.users_c
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'batch-')), timeSpineDialect: 'postgres' });
-  const runner = new DbtRunner({ dbtBin: DBT_BIN, mfBin: MF_BIN, profilesDir: BASE });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'batch-')), timeSpineDialect: 'duckdb' });
+  const runner = createDbt({ dbtBin: DBT_BIN, mfBin: MF_BIN, profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner }));
 }, opts);
 
-after(async () => { if (pg) await pg.stop(); });
+after(async () => { if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 /** Read a batch back until none of it is running. */

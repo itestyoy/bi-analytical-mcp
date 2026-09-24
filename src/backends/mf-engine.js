@@ -1,14 +1,17 @@
 // Programmatic query backend: keeps a warm Python MetricFlow sidecar
-// (python/mf_sidecar.py) and talks to it over stdio — same parse()/query()
-// contract as DbtRunner, so it's a drop-in alternative that avoids `mf` CLI
-// cold-starts and returns structured results.
+// (python/mf_sidecar.py) and talks to it over stdio — the same contract as the dbt client
+// (src/dbt/index.js), so it's a drop-in alternative that avoids `mf` CLI cold-starts and returns
+// structured results.
 //
-// `parse` still uses `dbt parse` (writes the semantic manifest the engine reads);
-// `query` goes through the persistent sidecar.
+// Everything but `query` is the dbt client's (parse writes the semantic manifest the sidecar reads);
+// `query` goes through the persistent sidecar — taking the warehouse's turn like any dbt process
+// when the warehouse admits one process at a time (DuckDB), and the sidecar lets go of the database
+// after each request.
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { DbtRunner } from '../dbt-runner.js';
+import { createDbt } from '../dbt/index.js';
+import { warehouseTurns } from '../dbt/process.js';
 import { currentSignal } from '../request-context.js';
 // the sidecar script is a non-JS runtime asset — see src/runtime-assets.js for why it lives there
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
@@ -18,7 +21,7 @@ export class MfEngineBackend {
     this.pythonBin = pythonBin;
     this.profilesDir = profilesDir;
     this.timeout = timeout;
-    this._dbt = new DbtRunner({ dbtBin, profilesDir, timeout });
+    this._dbt = createDbt({ version: 1, dbtBin, profilesDir, timeout });
     this._proc = null;
     this._pending = new Map();
     this._seq = 0;
@@ -67,8 +70,27 @@ export class MfEngineBackend {
     return this._dbt.run(projectDir, select);
   }
 
-  async show(projectDir, sql, limit) {
-    return this._dbt.show(projectDir, sql, limit);
+  async seed(projectDir) {
+    return this._dbt.seed(projectDir);
+  }
+
+  async show(projectDir, sql, limit, timeout) {
+    return this._dbt.show(projectDir, sql, limit, timeout);
+  }
+
+  async validate(projectDir) {
+    return this._dbt.validate(projectDir);
+  }
+
+  warehouse(projectDir) {
+    return this._dbt.warehouse(projectDir);
+  }
+
+  /** One sidecar request, in the warehouse's turn when it takes one process at a time. */
+  _request(projectDir, req) {
+    const { turn } = this._dbt.warehouse(projectDir);
+    if (!turn) return this._send(req);
+    return warehouseTurns.run(turn, () => this._send(req), currentSignal()).catch((e) => ({ ok: false, error: e?.message || 'cancelled' }));
   }
 
   async relationColumns(projectDir, modelName) {
@@ -90,10 +112,10 @@ export class MfEngineBackend {
       end: opts.endTime,
     };
     if (opts.explain) {
-      const r = await this._send({ op: 'explain', ...base, plan: !!opts.plan });
+      const r = await this._request(projectDir, { op: 'explain', ...base, plan: !!opts.plan });
       return { ok: !!r.ok, command: 'mf_sidecar.explain', sql: r.sql, plan: r.plan, stderr: r.error };
     }
-    const r = await this._send({ op: 'query', ...base });
+    const r = await this._request(projectDir, { op: 'query', ...base });
     if (!r.ok) return { ok: false, command: 'mf_sidecar.query', stderr: r.error, columns: [], rows: [] };
     const columns = (r.columns || []).map((name) => ({ name }));
     const rows = (r.rows || []).map((row) => Object.fromEntries(r.columns.map((c, i) => [c, row[i]])));

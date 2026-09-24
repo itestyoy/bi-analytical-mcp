@@ -79,13 +79,13 @@ test('the migrated file builds the SAME catalog, and keeps the file a human wrot
   const dir = mkdtempSync(join(tmpdir(), 'migrate-'));
   const file = join(dir, 'schema.yml');
   writeFileSync(file, LEGACY);
-  const before = loadCatalog(file, { dialect: 'postgres' });
+  const before = loadCatalog(file, { dialect: 'duckdb' });
 
   const out = run(['--write', file]);
   assert.match(out, /5 meta block\(s\)|meta block\(s\)/);
 
   const migrated = readFileSync(file, 'utf8');
-  const after = loadCatalog(file, { dialect: 'postgres' });
+  const after = loadCatalog(file, { dialect: 'duckdb' });
   assert.deepEqual(JSON.parse(JSON.stringify(after.raw)), JSON.parse(JSON.stringify(before.raw)), 'the catalog is unchanged');
 
   // the shape dbt 1.10+ (and Fusion) wants, on the model and on the column alike

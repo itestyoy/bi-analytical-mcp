@@ -37,7 +37,7 @@ models:
 test('loadCatalogFromProject: discovers MCP models from the dbt project schema YAMLs', () => {
   const dir = project({ 'events.yml': eventsYml, 'users.yml': usersYml });
   try {
-    const c = loadCatalogFromProject(dir, { dialect: 'postgres' });
+    const c = loadCatalogFromProject(dir, { dialect: 'duckdb' });
     assert.deepEqual(c.facts, ['events']);
     assert.equal(c.getModel('events').dbt_model, 'fct_events');
     assert.equal(c.getModel('users').dbt_model, 'dim_users');
@@ -52,7 +52,7 @@ test('loadCatalog(dir) delegates to project discovery; schema split across files
   mkdirSync(join(dir, 'models', 'dims'), { recursive: true });
   writeFileSync(join(dir, 'models', 'dims', 'users.yml'), usersYml);
   try {
-    const c = loadCatalog(dir, { dialect: 'postgres' });
+    const c = loadCatalog(dir, { dialect: 'duckdb' });
     assert.equal(c.getModel('users').dbt_model, 'dim_users'); // found in a nested dir
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -61,7 +61,7 @@ test('config error: more than one model declares the same role', () => {
   const dupe = eventsYml.replace('fct_events', 'fct_events_2');
   const dir = project({ 'events.yml': eventsYml, 'events2.yml': dupe });
   try {
-    assert.throws(() => loadCatalogFromProject(dir, { dialect: 'postgres' }), /more than one model declares role 'events'/);
+    assert.throws(() => loadCatalogFromProject(dir, { dialect: 'duckdb' }), /more than one model declares role 'events'/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -69,7 +69,7 @@ test('error when no MCP-tagged models are present', () => {
   const plain = 'version: 2\nmodels:\n  - name: some_model\n    columns: [{ name: x, data_type: string }]\n';
   const dir = project({ 'm.yml': plain });
   try {
-    assert.throws(() => loadCatalogFromProject(dir, { dialect: 'postgres' }), /no MCP-tagged models/);
+    assert.throws(() => loadCatalogFromProject(dir, { dialect: 'duckdb' }), /no MCP-tagged models/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -105,8 +105,8 @@ test('meta under config: (dbt 1.10+) builds exactly the same catalog as the pre-
   const legacy = project({ 'events.yml': eventsYml, 'users.yml': usersYml });
   const moved = project({ 'events.yml': movedEventsYml, 'users.yml': movedUsersYml });
   try {
-    const a = loadCatalogFromProject(legacy, { dialect: 'postgres' });
-    const b = loadCatalogFromProject(moved, { dialect: 'postgres' });
+    const a = loadCatalogFromProject(legacy, { dialect: 'duckdb' });
+    const b = loadCatalogFromProject(moved, { dialect: 'duckdb' });
     // the whole registry, not a spot check: roles, entities, the time axis, the payload properties
     assert.deepEqual(JSON.parse(JSON.stringify(b.raw)), JSON.parse(JSON.stringify(a.raw)));
     // …and the surface a caller sees is the same too
@@ -131,7 +131,7 @@ models:
 `;
   const dir = project({ 'events.yml': mixed, 'users.yml': movedUsersYml });
   try {
-    const c = loadCatalogFromProject(dir, { dialect: 'postgres' });
+    const c = loadCatalogFromProject(dir, { dialect: 'duckdb' });
     assert.deepEqual(c.modelKeys().sort(), ['events', 'users'], 'the role from config: is the one that counts');
     assert.deepEqual(c.eventNames('events'), ['login', 'purchase'], 'and so is its event list');
     // keys only the old block carries are still read — a half-migrated file is not a broken one

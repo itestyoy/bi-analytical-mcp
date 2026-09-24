@@ -20,7 +20,7 @@ project-specific is supplied at runtime via compose volumes + env.
 | Your dbt project (profiles.yml + the events fact & users dim models) | volume `DBT_PROJECT_DIR` → `/dbt_project` | `./dbt_project` |
 | The **catalog** | discovered from your dbt project's model YAMLs (`meta.mcp.role`) — no separate file | — |
 | Recipes (optional) and/or a standalone catalog | volume `CONFIG_DIR` → `/config` | `./config` |
-| Warehouse | the bundled `warehouse` Postgres service, or point profiles.yml at your own | local Postgres |
+| Warehouse | a DuckDB file on the `warehouse` volume (`DUCKDB_PATH`), or BigQuery via `docker-compose.bigquery.yml` | local DuckDB |
 | Per-context workspace (generated models, results, jobs) | named volume `mcp_workspace` → `/workspace` | persisted |
 
 ### Catalog = your dbt model YAMLs
@@ -64,7 +64,7 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 
 ## Configuration (env vars)
 - `PORT` — published port (default 3000). The container always binds `0.0.0.0`.
-- `WAREHOUSE_DIALECT` — `postgres` | `bigquery`.
+- `WAREHOUSE_DIALECT` — `duckdb` | `bigquery`.
 - `DBT_PROJECT_DIR` — host path to your dbt project (mounted at `/dbt_project`; used as both `DBT_BASE_PROJECT` and `DBT_PROFILES_DIR`; the catalog is discovered from its model YAMLs).
 - `CONFIG_DIR` — host path mounted read-only at `/config` for optional `recipes.json` (and a standalone `catalog.yml` if you set `CATALOG_PATH`).
 - `CATALOG_PATH` — optional; set to a standalone catalog file instead of project discovery.
@@ -93,27 +93,22 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
   3600) — how long a finished task stays readable.
 - `MCP_PROGRESS_INTERVAL_MS` (default 5000) — how often a call that carries a `progressToken` hears
   it is still working (clients may reset their request timeout on it).
-- `DBT_PG_HOST/PORT/USER/PASSWORD/DBNAME/SCHEMA` — warehouse connection, consumed by your `profiles.yml` via `env_var(...)`.
+- `DUCKDB_PATH` — the DuckDB database file, consumed by your `profiles.yml` via `env_var(...)`. One process at a time can hold a DuckDB file, so the server queues its dbt/MetricFlow processes on it (src/dbt/process.js).
 
-Your `profiles.yml` should read the connection from env, e.g.:
+Your `profiles.yml` should read the database path from env, e.g.:
 ```yaml
 analytics:
-  target: prod
+  target: dev
   outputs:
-    prod:
-      type: postgres
-      host: "{{ env_var('DBT_PG_HOST') }}"
-      port: "{{ env_var('DBT_PG_PORT') | int }}"
-      user: "{{ env_var('DBT_PG_USER') }}"
-      password: "{{ env_var('DBT_PG_PASSWORD') }}"
-      dbname: "{{ env_var('DBT_PG_DBNAME') }}"
-      schema: "{{ env_var('DBT_PG_SCHEMA') }}"
-      threads: 4
+    dev:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH') }}"
+      threads: 1
 ```
 
 ## Notes
-- The image bundles the `dbt` + `mf` (MetricFlow) CLIs (see `requirements.txt`); swap `dbt-postgres` for your adapter (e.g. `dbt-bigquery`) and rebuild.
-- For an external/managed warehouse, delete the `warehouse` service and set the `DBT_PG_*` (or your profile's) vars to point at it.
+- The image bundles the `dbt` + `mf` (MetricFlow) CLIs, dbt 1.x (see `requirements.txt`: dbt-duckdb; `requirements-bigquery.txt`: dbt-bigquery). The server talks to dbt through `src/dbt/` (one client per dbt major version; 1.x today — v2 is refused with the reason, see `docs/DBT_V2_MIGRATION.md`); `DBT_VERSION` pins the version instead of asking the CLI.
+- For BigQuery, use `docker-compose.bigquery.yml` (and `.env.bigquery.example`).
 - A dbt project (or an explicit `CATALOG_PATH`) is required — the image bakes no catalog. With a project mounted, build/query work via the bundled `dbt`/`mf` runner.
 - **Restarting the container loses nothing a client holds.** The server keeps no sessions (the SDK
   serves each request from a fresh server instance), so a client connected before a deploy keeps

@@ -1,4 +1,4 @@
-// END-TO-END on the REAL stack (dbt + MetricFlow + PGlite) for the SLOWLY-CHANGING (SCD-2)
+// END-TO-END on the REAL stack (dbt + MetricFlow + DuckDB) for the SLOWLY-CHANGING (SCD-2)
 // dimension cycle — the governed point-in-time join, the native-pipeline join.between, and the
 // "incomplete join" nudge. The fixture is built so POINT-IN-TIME and a naive key-only join give
 // DIFFERENT numbers, so the tests actually prove correctness (not just "it ran").
@@ -20,7 +20,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse } from './warehouse-harness.js';
 import { settle, readTable } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
@@ -35,21 +35,20 @@ const num = (v) => Number(v);
 const byKey = (rows, k, v) => rows.map((r) => [String(r[k]), num(r[v])]);
 const mapOf = (rows, k, v) => Object.fromEntries(byKey(rows, k, v));
 
-let pg; let engine; let backend;
+let wh; let engine; let backend;
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'scd-')), timeSpineDialect: 'postgres' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'scd-')), timeSpineDialect: 'duckdb' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
 }, opts);
 
-after(async () => { backend?.close(); if (pg) await pg.stop(); });
+after(async () => { backend?.close(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 // 1) GOVERNED SCD point-in-time join: revenue by (versioned) country attributes each purchase to

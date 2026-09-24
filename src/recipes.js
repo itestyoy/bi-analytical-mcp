@@ -9,7 +9,7 @@
 //
 // NOT EVERY RECIPE FITS EVERY DEPLOYMENT. An entry may declare what it needs —
 //   requires: 'python_models'   → only where dbt can run python models here
-//   dialect:  'bigquery' | ['bigquery', 'postgres']  → only on that warehouse
+//   dialect:  'bigquery' | ['bigquery', 'duckdb']  → only on that warehouse
 //   runtime:  'bigframes' | ['snowpark', ...]        → only on that python runtime
 // — and everything that LISTS recipes (the overview, the guide, the tool schema's enum) offers
 // only the ones this deployment can actually run. Fetching one by id still works and says so.

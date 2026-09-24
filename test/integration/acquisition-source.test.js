@@ -3,7 +3,7 @@
 // aggregations, names, units and the percentile parameter all come from meta.mcp — so the
 // same declarations work for any column of any source.
 // Every assertion is on the NUMBERS returned by dbt + MetricFlow / the pipeline against
-// PGlite, per test/integration/fixtures/SEED_DATA.md (§11).
+// DuckDB, per test/integration/fixtures/SEED_DATA.md (§11).
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
 import { test, before, after } from 'node:test';
@@ -17,7 +17,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
@@ -28,7 +28,7 @@ const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 
 const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
 const opts = { timeout: 300000 };
 
-let pg; let engine; let backend; let ctx;
+let wh; let engine; let backend; let ctx;
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[col])) ? num(r[col]) : 0), 0);
@@ -38,14 +38,13 @@ const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-acq-')), timeSpineDialect: 'postgres' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-acq-')), timeSpineDialect: 'duckdb' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
@@ -82,7 +81,7 @@ before(async () => {
   ctx = out.context_id;
 }, opts);
 
-after(async () => { backend?.close(); if (pg) await pg.stop(); });
+after(async () => { backend?.close(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 const q = (input) => engine.query_semantic_model({ context_id: ctx, ...input });
 

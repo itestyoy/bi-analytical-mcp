@@ -1,7 +1,7 @@
 // Funnels are PIPELINES: register_native_model builds a pipe-syntax pipeline whose
 // match_recognize stage produces one row per user, and downstream stages (join,
 // aggregate) slice it. The model's rows ARE the result. Data-only assertions on
-// the returned rows (Postgres equivalent here; BigQuery MATCH_RECOGNIZE in prod).
+// the returned rows (the CTE equivalent on DuckDB here; BigQuery MATCH_RECOGNIZE in prod).
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,7 +14,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
@@ -25,7 +25,7 @@ const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 
 const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
 const opts = { timeout: 300000 };
 
-let pg; let engine; let backend; let ctxId; let seq = 0;
+let wh; let engine; let backend; let ctxId; let seq = 0;
 const num = (v) => Number(v);
 const tru = (v) => v === true || v === 't' || v === 'true' || v === 1 || v === '1';
 const reached = (rows, step) => rows.filter((r) => tru(r[`reached_${step}`])).length;
@@ -50,17 +50,16 @@ const matchActivation = (extra = {}) => ({ stage: 'match_recognize', partition_b
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mr-')), timeSpineDialect: 'postgres' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mr-')), timeSpineDialect: 'duckdb' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
 }, opts);
 
-after(async () => { backend?.close(); if (pg) await pg.stop(); });
+after(async () => { backend?.close(); if (wh) await wh.stop(); });
 // dim_users is SLOWLY-CHANGING, so a join to it is point-in-time. After match_recognize the
 // per-event time is gone — `first_seen_at` (the funnel's first event) survives and is the right
 // instant to attribute a funnel to: the user as they were when the funnel started.

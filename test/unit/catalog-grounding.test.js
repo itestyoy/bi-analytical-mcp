@@ -231,7 +231,7 @@ test('grounding: a relation-not-found that dbt reported on STDOUT still marks th
   const full = physicalSets(catalog);
   const runner = { relationColumns: async (_dir, model) => {
     const key = catalog.modelKeys().find((k) => catalog.getModel(k).dbt_model === model);
-    // exactly what DbtRunner.relationColumns returns for `dbt exited with code 2`
+    // exactly what the dbt client's relationColumns returns for `dbt exited with code 2`
     if (key === 'experiments') {
       return { ok: false, stdout: 'Runtime Error in operation mcp_relation_columns\n  relation "fct_experiment_assignments" does not exist', stderr: '', error: 'dbt exited with code 2', killed: false, signal: null };
     }

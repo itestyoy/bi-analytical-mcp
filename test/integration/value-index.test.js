@@ -17,7 +17,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
@@ -31,18 +31,17 @@ const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
 // awaits it synchronously to assert on populated values, so give the hook ample headroom.
 const opts = { timeout: 600000 };
 
-let pg; let engine; let backend; let index; let indexer;
+let wh; let engine; let backend; let index; let indexer;
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 const valOf = (arr, v) => arr.find((x) => x.value === v);
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'vi-')), timeSpineDialect: 'postgres' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'vi-')), timeSpineDialect: 'duckdb' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   // A temp-file value index so the index is real SQLite (not just the engine's default).
@@ -55,7 +54,7 @@ before(async () => {
   await indexer.refresh();
 }, opts);
 
-after(async () => { backend?.close(); index?.close(); if (pg) await pg.stop(); });
+after(async () => { backend?.close(); index?.close(); if (wh) await wh.stop(); });
 
 // Verify the EXACT property names against the fixture catalog via semantic_index.
 test('exact property names: ad_finished + level_completed carry the *_of_event_data props', opts, async (t) => {

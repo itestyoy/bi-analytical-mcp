@@ -22,8 +22,8 @@ function timeSpineSql(dialect, start, end) {
   if (dialect === 'bigquery') {
     return `{{ config(materialized='table') }}\n${header}select d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d\n`;
   }
-  // postgres (default)
-  return `{{ config(materialized='table') }}\n${header}select d::date as date_day\nfrom generate_series('${start}'::date, '${end}'::date, interval '1 day') as d\n`;
+  // duckdb (default): range() is a table of timestamps, one per day
+  return `{{ config(materialized='table') }}\n${header}select cast(range as date) as date_day\nfrom range(date '${start}', date '${end}' + interval 1 day, interval 1 day)\n`;
 }
 
 const TIME_SPINE_YML = `models:
@@ -84,7 +84,7 @@ export function mergeCompiled(state, compiled) {
 }
 
 export class ContextManager {
-  constructor({ baseProjectDir, workspaceRoot, registryPath, timeSpineDialect = 'postgres', timeSpineStart = '2020-01-01', timeSpineEnd = '2035-12-31' } = {}) {
+  constructor({ baseProjectDir, workspaceRoot, registryPath, timeSpineDialect = 'duckdb', timeSpineStart = '2020-01-01', timeSpineEnd = '2035-12-31' } = {}) {
     this.baseProjectDir = baseProjectDir;
     this.workspaceRoot = workspaceRoot || join(process.cwd(), '.mcp', 'ctx');
     this.registryPath = registryPath || join(this.workspaceRoot, 'registry.json');

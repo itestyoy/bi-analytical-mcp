@@ -125,7 +125,7 @@ npm start            # streamable-HTTP MCP on :3000/mcp
 
 ```bash
 npm test                 # unit tests (pure JS, no dbt needed)
-npm run test:integration # end-to-end: dbt Core + MetricFlow against PGlite (auto-skips if dbt/mf absent)
+npm run test:integration # end-to-end: dbt Core + MetricFlow against DuckDB (auto-skips if dbt/mf absent)
 ```
 
 A `python` stage may sit anywhere in the pipeline (first: it reads the source itself) and repeat: the
@@ -133,22 +133,18 @@ pipeline renders as a chain `pipe_<name>_s1 → _s2 → … → pipe_<name>` of 
 each reading the previous via `ref`; a python stage declares `output.columns` so SQL stages after it
 know its columns. The `python` stage exists in the tool schemas only where dbt can run Python models — decided
 from the active dbt profile (BigQuery with `submission_method` / a Dataproc or BigFrames region,
-Snowflake, Databricks, DuckDB); on Postgres it is absent and `semantic_index()` says why under
+Snowflake, Databricks, DuckDB); on any other adapter it is absent and `semantic_index()` says why under
 `python_models`. `MCP_PYTHON_MODELS=on|off` overrides the decision.
 
-The `python` pipeline stage is proven on **dbt-duckdb** — the one adapter that runs dbt Python
-models locally (dbt-postgres cannot). It lives in its own venv so it never touches the
-MetricFlow one:
+The integration suite runs on **DuckDB**: each test file gets a database file of its own
+(`DUCKDB_PATH`, read by the fixture profiles), builds the base project, then runs
+`build_semantic_model` → `dbt parse` → `mf query` (and the pipelines, the python stage — dbt-duckdb
+runs dbt Python models locally) and checks the returned rows. One process at a time can hold a DuckDB
+file, so the dbt client queues its processes on it (`src/dbt/process.js`).
+
+Prerequisites for integration tests — one venv with dbt 1.x, the DuckDB adapter, MetricFlow and
+pandas (`requirements.txt`), as `.dbtvenv` (or via `DBT_BIN`/`MF_BIN`/`PYTHON_BIN`):
 
 ```bash
-python3 -m venv .duckvenv && .duckvenv/bin/pip install "dbt-duckdb>=1.9" pandas pyarrow
-node --test test/integration/python-stage.test.js   # auto-skips when .duckvenv is absent
+python3 -m venv .dbtvenv && .dbtvenv/bin/pip install -r requirements.txt
 ```
-
-The integration suite boots an in-process **PGlite** database exposed over a TCP
-socket (`@electric-sql/pglite-socket`), so the Python `dbt-postgres` adapter
-connects without a real Postgres server. It builds the base project, then runs
-`build_semantic_model` → `dbt parse` → `mf query` and checks the returned rows.
-
-Prerequisites for integration tests: `dbt-core`, `dbt-postgres`,
-`dbt-metricflow[dbt-postgres]` available as `dbt`/`mf` (or via `DBT_BIN`/`MF_BIN`).

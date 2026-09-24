@@ -4,7 +4,7 @@
 // The work it started is a dbt process on the warehouse, several layers below the handler, and
 // threading a signal through every engine method would put a parameter on each of them that none
 // of them uses. So the signal rides the ASYNC CONTEXT instead: the server runs the call inside
-// `withSignal(signal, …)`, and the one place that spawns processes (src/dbt-runner.js) reads it.
+// `withSignal(signal, …)`, and the one place that spawns processes (src/dbt/process.js) reads it.
 //
 // Two rules keep that honest:
 //   * work SHARED between callers (the enrichment reads of Engine._bestEffort: one in-flight read
@@ -34,7 +34,7 @@ export function detached(fn) {
 /**
  * Run `fn` as one of several tasks working on ONE context at the same time (a batch of queries):
  * every dbt process it starts writes its artifacts to a target directory of its own, so two of
- * them never write the same target/ files at once (src/dbt-runner.js reads this).
+ * them never write the same target/ files at once (src/dbt/v1.js reads this).
  */
 export function isolatedTarget(fn) {
   return storage.run({ ...(storage.getStore() || {}), isolated: true }, fn);

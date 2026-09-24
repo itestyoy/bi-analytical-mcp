@@ -12,7 +12,7 @@ RUN apt-get update \
 WORKDIR /app
 
 # dbt + MetricFlow into an isolated venv; expose `dbt`/`mf` on PATH.
-# Pick the warehouse adapter at build time: requirements.txt (Postgres, default)
+# Pick the warehouse adapter at build time: requirements.txt (DuckDB, default)
 # or requirements-bigquery.txt (BigQuery) — see docker-compose.bigquery.yml.
 ARG DBT_REQUIREMENTS=requirements.txt
 ENV VENV=/opt/dbtvenv

@@ -2,7 +2,7 @@
 
 How to express common games-analytics questions as a **pipeline** (a `source` + an
 ordered list of stages). Modeled on BigQuery pipe syntax; each recipe shows the
-declarative stages and the pipe-syntax it lowers to on BigQuery (Postgres lowers
+declarative stages and the pipe-syntax it lowers to on BigQuery (DuckDB lowers
 the same op list to a chained CTE). Reference:
 [BigQuery pipe syntax by example](https://medium.com/google-cloud/bigquery-pipe-syntax-by-example-blasetta-0f3df50ba331).
 
@@ -75,8 +75,8 @@ Then `where dsi=1` + `aggregate count_distinct(appsflyer_id)` ⇒ **D1 active us
      frame:{mode:"range", preceding:10, following:0}} ]
 ```
 Lowers to a value-based RANGE frame on an integer day key (so "10 PRECEDING" = 10
-days), matching the BigQuery idiom — order by `UNIX_DATE(CAST(... AS DATE))` (Postgres:
-`(...::date - DATE '1970-01-01')`), then `RANGE BETWEEN 10 PRECEDING AND CURRENT ROW`:
+days), matching the BigQuery idiom — order by `UNIX_DATE(CAST(... AS DATE))` (DuckDB:
+`date_diff('day', DATE '1970-01-01', CAST(... AS DATE))`), then `RANGE BETWEEN 10 PRECEDING AND CURRENT ROW`:
 ```
 SUM(amount) OVER (PARTITION BY customer_id ORDER BY day RANGE BETWEEN 10 PRECEDING AND CURRENT ROW)
 ```
@@ -95,7 +95,7 @@ to read a sketch's cardinality.
   {stage:"aggregate", group_by:["pid"], measures:[{name:"sk", fn:"hll_init", column:"appsflyer_id"}]},
   {stage:"aggregate", group_by:[],      measures:[{name:"buyers", fn:"hll_merge", column:"sk"}]} ]
 ```
-BigQuery → `HLL_COUNT.INIT/MERGE/MERGE_PARTIAL/EXTRACT`; Postgres → an exact,
+BigQuery → `HLL_COUNT.INIT/MERGE/MERGE_PARTIAL/EXTRACT`; DuckDB → an exact,
 mergeable distinct-set fallback. For a rolling N-day unique: `hll_init` per day,
 then merge the trailing-N days' sketches.
 
@@ -122,7 +122,7 @@ then merge the trailing-N days' sketches.
          {name:"purchase",event_name:["iap_purchase_completed"]}],
   metrics:[{name:"conv",type:"conversion",from:"launch",to:"purchase"}] } }
 ```
-Lowers to a per-user CTE chain (Postgres) / `|> MATCH_RECOGNIZE` (BigQuery); the
+Lowers to a per-user CTE chain (DuckDB) / `|> MATCH_RECOGNIZE` (BigQuery); the
 resulting model is then sliced by user attributes through MetricFlow.
 
 ---

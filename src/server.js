@@ -17,7 +17,7 @@ import { loadRecipes } from './recipes.js';
 import { assetPath } from './runtime-assets.js';
 import { frameProfile } from './python-model.js';
 import { ContextManager } from './context-manager.js';
-import { DbtRunner } from './dbt-runner.js';
+import { createDbt } from './dbt/index.js';
 import { Engine } from './engine.js';
 import { BackgroundIndexer } from './value-index.js';
 import { createEmbedder } from './embeddings.js';
@@ -94,7 +94,8 @@ export async function makeEngine(opts = {}) {
   const runner = opts.runner !== undefined
     ? opts.runner
     : baseProjectDir
-      ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
+      // the dbt client for the installed CLI's version (DBT_VERSION pins it; an unsupported one is refused at start)
+      ? createDbt({ version: process.env.DBT_VERSION || 'auto', dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
       : null;
   const queryTimeoutMs = graceMsFromEnv(process.env.QUERY_TIMEOUT_SECONDS, 20, 'QUERY_TIMEOUT_SECONDS');
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
@@ -297,7 +298,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const windowDays = Number(process.env.MCP_INDEX_WINDOW_DAYS) || 0;
   // Approximate (HLL) distinct counts during indexing — cheaper on a large fact, and the
   // project's preferred distinct-count method. DEFAULT ON; dialect-gated (bigquery/snowflake/
-  // duckdb/redshift use APPROX_COUNT_DISTINCT, postgres & unknown fall back to EXACT). Disable
+  // duckdb/redshift use APPROX_COUNT_DISTINCT, unknown fall back to EXACT). Disable
   // with MCP_INDEX_APPROX_DISTINCT=false/0/no/off to force exact everywhere.
   const approxDistinct = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_APPROX_DISTINCT ?? 'true').trim());
   // Properties indexed per combined scan (cardinality + coverage in one query each); a failed

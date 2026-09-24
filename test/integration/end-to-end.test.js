@@ -35,7 +35,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse } from './warehouse-harness.js';
 import { settle, readTable } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
@@ -56,7 +56,7 @@ const valOf = (arr, v) => arr.find((x) => x.value === v);
 const close = (a, b, tol = 1e-3) => assert.ok(Math.abs(a - b) <= tol, `${a} ≈ ${b}`);
 
 // Shared state threaded through the ORDERED tests below (one coherent workflow).
-let pg; let engine; let backend; let index; let indexer; let recipes;
+let wh; let engine; let backend; let index; let indexer; let recipes;
 const S = {}; // S.semCtx, S.draftId, S.pipeCtx, S.pipeTable, S.abCtx
 
 // The canonical 4-step activation funnel (copied verbatim from match-recognize.test.js).
@@ -72,13 +72,12 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'e2e-')), timeSpineDialect: 'postgres' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'e2e-')), timeSpineDialect: 'duckdb' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
   // A temp-file value index so semantic_index reports a REAL persisted SQLite index.
@@ -90,7 +89,7 @@ before(async () => {
   await indexer.refresh();
 }, opts);
 
-after(async () => { backend?.close(); index?.close(); if (pg) await pg.stop(); });
+after(async () => { backend?.close(); index?.close(); if (wh) await wh.stop(); });
 
 // ───────────────────────── 1. DISCOVERY ─────────────────────────
 test('1a. semantic_index overview lists models + event names (no column dump)', opts, async (t) => {

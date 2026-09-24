@@ -9,7 +9,7 @@ import { Engine } from '../../src/engine.js';
 import { MAX_WAIT_SECONDS } from '../../src/schema.js';
 import { settle } from '../helpers/settle.js';
 
-const catalog = loadCatalog(new URL('../../config/catalog.yml', import.meta.url).pathname, { dialect: 'postgres' });
+const catalog = loadCatalog(new URL('../../config/catalog.yml', import.meta.url).pathname, { dialect: 'duckdb' });
 const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'time-')) }) }));
 
 test('time: returns immediately for 0s', async () => {

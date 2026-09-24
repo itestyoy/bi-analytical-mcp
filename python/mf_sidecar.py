@@ -45,10 +45,39 @@ def _build_engine(project_dir, profiles_dir):
     return cfg
 
 
+def _release(cfg):
+    """Let go of the warehouse after a request. A DuckDB database is a file only ONE process may hold
+    open: kept open here, every dbt process on it would fail with a lock error. So the adapter's
+    connections are closed, and dbt-duckdb's process-wide environment (which holds the file) too."""
+    try:
+        cfg.dbt_artifacts.adapter.cleanup_connections()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        from dbt.adapters.duckdb.connections import DuckDBConnectionManager
+    except Exception:  # noqa: BLE001 — not a DuckDB install
+        return
+    with DuckDBConnectionManager._LOCK:
+        env = DuckDBConnectionManager._ENV
+        DuckDBConnectionManager._ENV = None
+        if env is not None:
+            try:
+                env.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _handle(req):
+    cfg = _build_engine(req["project_dir"], req.get("profiles_dir"))
+    try:
+        return _answer(cfg, req)
+    finally:
+        _release(cfg)
+
+
+def _answer(cfg, req):
     from metricflow.engine.metricflow_engine import MetricFlowQueryRequest
 
-    cfg = _build_engine(req["project_dir"], req.get("profiles_dir"))
     mf_request = MetricFlowQueryRequest.create(
         metric_names=req.get("metrics") or None,
         group_by_names=req.get("group_by") or None,

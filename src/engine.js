@@ -9,7 +9,7 @@ import { compileDeclaration } from './compile.js';
 import { renderContext } from './yaml-render.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
-import { formatDbtError } from './dbt-runner.js';
+import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
@@ -2158,7 +2158,7 @@ export class Engine {
     const dropped = this._applyCheckpointPlan(ctx, draft, plan);
     const modelName = this._nextPipelineModel(ctx, draft.name);
     // Render ONLY the active warehouse dialect, so every response is consistent with where
-    // the pipeline actually runs (bigquery → `|>`, postgres → CTEs). Grounded to physical.
+    // the pipeline actually runs (bigquery → `|>`, duckdb → CTEs). Grounded to physical.
     const rendered = renderPipeline(this.catalog, dialect, draft.source, plan.stages, { physicalCols: physSet, modelName, from: plan.from });
     const models = this._chainModels(rendered.chain, { name: draft.name, pipeline: { source: draft.source } });
     const hasPython = models.some((m) => m.kind === 'python');
@@ -2319,7 +2319,7 @@ export class Engine {
     // a member of a batch waits for what was queued before the BATCH, and runs beside the other members
     const before = batch ? batch.before : ctx ? this._ctxQueue.get(ctx.id) : null;
     // The task's own cancellation (a query tool's { task_id, cancel: true }): every dbt process its
-    // work starts is stopped by it, and one started after it is refused at once (src/dbt-runner.js).
+    // work starts is stopped by it, and one started after it is refused at once (src/dbt/process.js).
     const control = new AbortController();
     this._taskControls ||= new Map();
     this._taskControls.set(id, control);
@@ -3433,7 +3433,7 @@ export class Engine {
     if (sample) {
       // A REPRESENTATIVE random subset rather than the first rows by physical
       // order. BigQuery uses TABLESAMPLE SYSTEM (block sampling on the table
-      // reference); Postgres uses ORDER BY random() (reliable on small result
+      // reference); DuckDB uses ORDER BY random() (reliable on small result
       // tables, where block sampling can return nothing). Paging doesn't apply.
       let sql;
       if (this.catalog.dialect === 'bigquery') {

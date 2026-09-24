@@ -76,13 +76,13 @@ Stage = {
 | `unpivot` | `\|> UNPIVOT` | fold listed columns into (name, value) rows | **expands** |
 | `match_recognize` | `\|> MATCH_RECOGNIZE` | row-pattern sequence → one row per match (per user/session) | **collapses** to one row per partition match |
 | `project` | `\|> SELECT` | keep/rename a column set | unchanged |
-| `sample` | `\|> TABLESAMPLE` | keep ~N% of rows for a fast approximate estimate (BigQuery TABLESAMPLE SYSTEM; Postgres row-level random()) | unchanged |
+| `sample` | `\|> TABLESAMPLE` | keep ~N% of rows for a fast approximate estimate (BigQuery TABLESAMPLE SYSTEM; DuckDB row-level random()) | unchanged |
 | `order_by` | `\|> ORDER BY` | sort | unchanged |
 | `limit` | `\|> LIMIT` | cap rows | unchanged |
 
-**Implemented** (`src/pipeline.js` + `src/dialects/{base,postgres,bigquery}.js`):
+**Implemented** (`src/pipeline.js` + `src/dialects/{base,duckdb,bigquery}.js`):
 `where`, `derive`, `unnest`, `join`, `aggregate`, `pivot`, `unpivot`, `order_by`,
-`limit`, `project` — lowered to a Postgres CTE chain (data-tested via `dbt show`:
+`limit`, `project` — lowered to a DuckDB CTE chain (data-tested via `dbt show`:
 aggregate / pivot / unpivot) and to BigQuery pipe syntax. Remaining:
 `match_recognize` as a registry stage (today a dedicated renderer consuming the
 prepared relation).
@@ -133,15 +133,15 @@ an aggregate) before generating SQL.
 The pipeline is lowered to SQL by walking the stages. The **same stage `emit()`**
 targets either dialect:
 
-Exactly **two dialects** are supported — `postgres` and `bigquery` — each a class
-in its own file (`src/dialects/postgres.js`, `src/dialects/bigquery.js`)
+Exactly **two dialects** are supported — `duckdb` and `bigquery` — each a class
+in its own file (`src/dialects/duckdb.js`, `src/dialects/bigquery.js`)
 implementing the abstract `Dialect` (`src/dialects/base.js`). `src/dialect.js` is
 a thin functional facade that delegates to them (so existing callers are
 unchanged). The same op IR lowers two ways:
 
 - **BigQuery → native pipe syntax.** Each stage emits its `|>` operator; the
   result is the pipeline verbatim (`FROM … |> WHERE … |> AGGREGATE … |> PIVOT …`).
-- **Postgres → nested CTE lowering.** Each stage becomes a CTE `p0, p1, …`, each
+- **DuckDB → nested CTE lowering.** Each stage becomes a CTE `p0, p1, …`, each
   `SELECT … FROM p{i-1}`. `unnest` → `CROSS JOIN LATERAL jsonb_array_elements*`;
   `aggregate` → `GROUP BY`; `pivot` → conditional aggregation
   (`sum(CASE WHEN on = v THEN val END)`); `unpivot` → `CROSS JOIN LATERAL (VALUES …)`.
@@ -149,7 +149,7 @@ unchanged). The same op IR lowers two ways:
 
 A dialect that supports a stage natively uses it; one that does not uses the
 lowering (or the stage is rejected for that dialect with a clear error, as
-`strict` MATCH_RECOGNIZE already is on Postgres).
+`strict` MATCH_RECOGNIZE already is on DuckDB).
 
 ## 6. Where dbt + MetricFlow fit
 
@@ -216,7 +216,7 @@ refusal that names the consumers, unless forced.
 Already in place: the stage registry pattern (`src/prepare.js`), chained-CTE
 lowering, dialect array/struct helpers (`src/dialect.js`), catalog complex-type
 declarations + scalar guards, SQL config headers (`src/sql-header.js`), and
-MATCH_RECOGNIZE as a generator with a Postgres equivalent.
+MATCH_RECOGNIZE as a generator with a CTE equivalent (DuckDB).
 
 Steps to reach the target:
 1. **Generalize `prepare` → `pipeline`**: lift the `src/prepare.js` registry to
@@ -251,7 +251,7 @@ Declarative pipeline:
 ```
 Lowers to BigQuery pipe syntax directly, or to a CTE chain
 `p0 (where) → p1 (where) → p2 (extend n_words) → p3 (match_recognize per-user) →
-p4 (aggregate)` on Postgres — with a `/* <this config as YAML> */` header.
+p4 (aggregate)` on DuckDB — with a `/* <this config as YAML> */` header.
 
 ---
 

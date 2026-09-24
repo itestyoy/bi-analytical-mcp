@@ -674,7 +674,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | поле | значение | когда рецепт скрыт |
 |---|---|---|
 | `requires` | `python_models` | здесь dbt не запускает python-модели |
-| `dialect` | `bigquery` / `postgres` / список | склад другого типа |
+| `dialect` | `bigquery` / `duckdb` / список | склад другого типа |
 | `runtime` | `bigframes` / `snowpark` / список | python-модели уходят на другой рантайм |
 
 Запрос такого рецепта по id всё равно отвечает — и объясняет в `unavailable_here`, почему он
@@ -896,7 +896,7 @@ via: 'user', between: … }` → 20 хлебных крошек по стран�
 | `create_payload` | `build_semantic_model` парсится (dbt parse), **первый** `example_queries` исполняется и возвращает строки |
 | `register_payload` | pipeline собирается и выполняется, результат ≥ 2 строк; если есть `ab_test` — строки скармливаются `experiment({ action: 'analyze' })` и `p_value` ∈ [0, 1]; если `srm_check` — то же для `check_split` |
 | `tool_calls` | каждый вызов возвращает `ok: true` |
-| `requires: python_models` | на складе фикстуры (PGlite) python-модели не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: `register_native_model({ …, dry_run: true })` — стадии рендерятся, цепочка моделей раскладывается, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после; плюс наличие `read_first`, `hack`, `notes` |
+| `requires: python_models` | на складе фикстуры (DuckDB) python-модели на BigFrames не бегают, поэтому проверяется КОМПИЛЯЦИЯ под развёртывание, которое их бегает: `register_native_model({ …, dry_run: true })` — стадии рендерятся, цепочка моделей раскладывается, тела функций проходят статический гейт, объявленные `output.columns` доходят до SQL-стадий после; плюс наличие `read_first`, `hack`, `notes` |
 
 Следствия для автора: имена событий, свойств и атрибутов в payload должны существовать **в
 фикстуре** (`test/integration/fixtures/catalog.yml`), а не только в проде — иначе рецепт не

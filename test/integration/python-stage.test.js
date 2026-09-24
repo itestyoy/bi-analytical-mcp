@@ -5,7 +5,7 @@
 // independently from the seed. The same files go to BigQuery/Snowflake unchanged; only the
 // profile decides where the Python runtime is.
 //
-// Needs the separate venv with dbt-duckdb + pandas (.duckvenv); skipped when absent.
+// Needs the test venv (.dbtvenv: dbt-duckdb + pandas); skipped when absent.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,18 +16,18 @@ import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
-import { DbtRunner } from '../../src/dbt-runner.js';
+import { createDbt } from '../../src/dbt/index.js';
 import { Engine } from '../../src/engine.js';
 import { settle, readTable } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const ROOT = process.cwd();
 const PROJECT = join(ROOT, 'test', 'integration', 'fixtures', 'duckdb_project');
-const DBT_BIN = process.env.DUCK_DBT_BIN || join(ROOT, '.duckvenv', 'bin', 'dbt');
-const PY_BIN = process.env.DUCK_PYTHON_BIN || join(ROOT, '.duckvenv', 'bin', 'python');
+const DBT_BIN = process.env.DBT_BIN || join(ROOT, '.dbtvenv', 'bin', 'dbt');
+const PY_BIN = process.env.PYTHON_BIN || join(ROOT, '.dbtvenv', 'bin', 'python');
 const HAS = existsSync(DBT_BIN) && existsSync(PY_BIN);
 const opts = { timeout: 600000 };
-const skip = (t) => { if (!HAS) { t.skip('dbt-duckdb venv not installed (.duckvenv)'); return true; } return false; };
+const skip = (t) => { if (!HAS) { t.skip('dbt venv not installed (.dbtvenv)'); return true; } return false; };
 
 let engine; let work;
 before(async () => {
@@ -36,8 +36,8 @@ before(async () => {
   process.env.DUCKDB_PATH = join(work, 'wh.duckdb');
   const env = { ...process.env, DBT_PROFILES_DIR: PROJECT, DBT_PROJECT_DIR: PROJECT };
   await execFileP(DBT_BIN, ['seed'], { cwd: PROJECT, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  const runner = new DbtRunner({ dbtBin: DBT_BIN, profilesDir: PROJECT, timeout: 600000 });
-  const ctxs = new ContextManager({ baseProjectDir: PROJECT, workspaceRoot: join(work, 'ctx'), timeSpineDialect: 'postgres' });
+  const runner = createDbt({ dbtBin: DBT_BIN, profilesDir: PROJECT, timeout: 600000 });
+  const ctxs = new ContextManager({ baseProjectDir: PROJECT, workspaceRoot: join(work, 'ctx'), timeSpineDialect: 'duckdb' });
   const catalog = loadCatalog(join(ROOT, 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: PROJECT, projectDir: PROJECT });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner, pythonBin: PY_BIN, dbPath: join(work, 'index.sqlite') }));
 }, opts);

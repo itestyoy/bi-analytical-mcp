@@ -187,9 +187,22 @@
   `subscriptions/listen` stream that subscribes within CHANGE_WINDOW_MS; (3) the fingerprint rides in
   `serverInfo.version` (`0.1.0+<fingerprint>`). Do NOT lengthen the list TTLs back to hours.
 
+## Warehouses and dbt
+- TWO WAREHOUSES, TWO DIALECTS: `bigquery` (production) and `duckdb` (local work, the tests, the
+  default compose setup) — `src/dialects/{bigquery,duckdb}.js`. There is no Postgres. A DuckDB
+  database is a FILE one process at a time may hold, so every dbt / MetricFlow process on it takes
+  the warehouse's turn (`src/dbt/process.js`, keyed by the database file read from the profile), the
+  MetricFlow sidecar lets go of it after each request, and a batch's members run one after another
+  there (side by side on BigQuery).
+- dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`): one contract (parse
+  / run / seed / show / relationColumns / query / validate / warehouse) over the installed dbt's
+  version, each version its own implementation. dbt 1.x is implemented (`src/dbt/v1.js`); v2 is
+  refused at start with the reason (`docs/DBT_V2_MIGRATION.md`). Do NOT spawn dbt or `mf` anywhere
+  else, and do NOT branch on the dbt version outside `src/dbt/`.
+
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model
-  against the warehouse (PGlite + dbt + MetricFlow).
+  against the warehouse (DuckDB + dbt + MetricFlow).
 - NEVER assert on generated text: no string/regex matching of generated SQL,
   YAML, Jinja (`Dimension(...)`/`--where`), `mf`/`dbt` command strings, or runner
   args. Correctness is proven by the NUMBERS returned, not by the query text.

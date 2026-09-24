@@ -279,6 +279,22 @@ function predicateDefs(catalog) {
 // Declared here because both the schema text and the engine's clamp must say the same number.
 export const MAX_WAIT_SECONDS = 30;
 
+// How many queries one call to a query tool may start (`queries`) or read back (`task_ids`).
+export const MAX_BATCH = 5;
+
+/** A copy of a schema without its descriptions: the same checks, told once where it is described. */
+function terse(schema) {
+  if (Array.isArray(schema)) return schema.map(terse);
+  if (!schema || typeof schema !== 'object') return schema;
+  const out = {};
+  for (const [k, v] of Object.entries(schema)) {
+    if (k === 'description') continue;
+    // under `properties` the keys are field names, not schema keywords
+    out[k] = k === 'properties' ? Object.fromEntries(Object.entries(v).map(([f, sub]) => [f, terse(sub)])) : terse(v);
+  }
+  return out;
+}
+
 export function buildSchemas(catalog) {
   const modelKeys = catalog.modelKeys();
   const create = {
@@ -503,22 +519,28 @@ export function buildSchemas(catalog) {
       order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
     },
   };
+  const pipelineQueryFields = {
+    transform: projection,
+    limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Rows to return (default 1000); with task_id, pages a stored result.' },
+    offset: { type: 'integer', minimum: 0, description: 'Rows to skip (paging); with task_id, pages a stored result.' },
+  };
   // The read half of a query tool: { task_id } waits for a task of its side and returns it.
   const taskRead = {
     task_id: { type: 'string', pattern: TASK_ID, description: 'READ a task of this side back (instead of starting a query): wait for it and return its result.' },
     wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `With task_id: how long to wait for the task at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment the task is done. 0 = just look.` },
   };
-  const readMode = (queryFields) => ({ if: { required: ['task_id'] }, then: forbid(queryFields), else: { required: ['context_id'] } });
+  taskRead.task_ids = { type: 'array', minItems: 1, maxItems: MAX_BATCH, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: `READ up to ${MAX_BATCH} tasks of this side at once (the task_ids a batch returned): waits until all are done and returns each one's result, in this order.` };
+  // The four modes of a query tool: start one query (context_id + its fields), start a batch
+  // (context_id + queries), read one task (task_id), read several (task_ids). Each takes only its own fields.
+  const queryModes = (fields) => [
+    { if: { required: ['task_id'] }, then: forbid(['context_id', ...fields, 'queries', 'task_ids']) },
+    { if: { required: ['task_ids'] }, then: forbid(['context_id', ...fields, 'queries', 'task_id', 'offset', 'limit']) },
+    { if: { required: ['queries'] }, then: { required: ['context_id'], ...forbid([...fields, 'offset', 'limit', 'wait_seconds']) } },
+    { if: { not: { anyOf: [{ required: ['task_id'] }, { required: ['task_ids'] }] } }, then: { required: ['context_id'] } },
+  ];
+  const batchOf = (item, what) => ({ type: 'array', minItems: 1, maxItems: MAX_BATCH, description: `START up to ${MAX_BATCH} ${what} on this context in one call, run side by side: each item takes the fields of a single query (described above; context_id stays at the top). All are checked first — one mistake refuses the whole batch. Returns task_ids, in this order: read them together with { task_ids }.`, items: item });
 
-  const query = {
-    type: 'object',
-    additionalProperties: false,
-    description: 'Start a metric query against a context — or, with task_id, read a semantic task back.',
-    $defs: pdefs,
-    allOf: [readMode(['context_id', 'task', 'metrics', 'group_by', 'where', 'order_by', 'time_range', 'materialize', 'dry_run', 'explain'])],
-    properties: {
-      ...taskRead,
-      context_id: { type: 'string', pattern: CTX, description: D.context_id },
+  const semanticQueryFields = {
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
       metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Metric names to fetch (as exposed by the context, e.g. task_<metric>).' },
       group_by: {
@@ -539,6 +561,18 @@ export function buildSchemas(catalog) {
       materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with query_semantic_model({ task_id, offset, limit }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_pipeline_model({ action: "start", from_task })).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the compiled query WITHOUT executing it.' },
       explain: { type: 'boolean', description: 'If true, return the query plan (how the metrics compile) and the compiled query WITHOUT executing. A superset of dry_run; useful for inspecting/optimizing.' },
+  };
+  const query = {
+    type: 'object',
+    additionalProperties: false,
+    description: `Start a metric query against a context (or up to ${MAX_BATCH} at once with queries) — or, with task_id / task_ids, read semantic tasks back.`,
+    $defs: pdefs,
+    allOf: queryModes(Object.keys(semanticQueryFields).filter((f) => f !== 'limit' && f !== 'offset')),
+    properties: {
+      ...taskRead,
+      context_id: { type: 'string', pattern: CTX, description: D.context_id },
+      ...semanticQueryFields,
+      queries: batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: terse(semanticQueryFields) }, 'metric queries'),
     },
   };
 
@@ -596,14 +630,13 @@ export function buildSchemas(catalog) {
     query_semantic_model: query,
     query_pipeline_model: {
       type: 'object', additionalProperties: false,
-      description: 'Query a built pipeline model — or, with task_id, read a pipeline task back.',
-      allOf: [readMode(['context_id', 'transform'])],
+      description: `Query a built pipeline model (or up to ${MAX_BATCH} queries at once with queries) — or, with task_id / task_ids, read pipeline tasks back.`,
+      allOf: queryModes(['transform']),
       properties: {
         ...taskRead,
         context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the draft_id build_pipeline_model returned, after materialize).' },
-        transform: projection,
-        limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Rows to return (default 1000); with task_id, pages a stored result.' },
-        offset: { type: 'integer', minimum: 0, description: 'Rows to skip (paging); with task_id, pages a stored result.' },
+        ...pipelineQueryFields,
+        queries: batchOf({ type: 'object', additionalProperties: false, properties: terse(pipelineQueryFields) }, 'queries over the built model'),
       },
     },
     display_model_result: {

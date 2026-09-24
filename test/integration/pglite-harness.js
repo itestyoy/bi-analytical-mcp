@@ -20,7 +20,9 @@ export async function startPglite() {
   // Boot an empty PGlite; the test data is loaded by `dbt seed` (CSV seeds).
   const db = await PGlite.create();
   const port = await freePort();
-  const server = new PGLiteSocketServer({ db, port, host: '127.0.0.1' });
+  // several connections at once: the queries of a batch run side by side, each its own dbt/mf
+  // process (PGlite itself still executes one query at a time — the socket server queues them)
+  const server = new PGLiteSocketServer({ db, port, host: '127.0.0.1', maxConnections: 16 });
   await server.start();
   return {
     port,

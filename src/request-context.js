@@ -32,6 +32,20 @@ export function detached(fn) {
 }
 
 /**
+ * Run `fn` as one of several tasks working on ONE context at the same time (a batch of queries):
+ * every dbt process it starts writes its artifacts to a target directory of its own, so two of
+ * them never write the same target/ files at once (src/dbt-runner.js reads this).
+ */
+export function isolatedTarget(fn) {
+  return storage.run({ ...(storage.getStore() || {}), isolated: true }, fn);
+}
+
+/** Whether the code runs as one of several concurrent tasks on a context (isolatedTarget). */
+export function inIsolatedTarget() {
+  return !!storage.getStore()?.isolated;
+}
+
+/**
  * A signal that follows `source` only until `release()` is called. The server hands this to a
  * call instead of the transport's own signal: a cancellation that arrives while the call is in
  * flight stops its work; one that arrives after the call has returned (a build already handed

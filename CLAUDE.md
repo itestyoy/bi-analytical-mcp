@@ -133,10 +133,16 @@
   pipeline materialize, the hidden register_native_model/update_semantic_model) or a query
   (`query_semantic_model({ context_id, metrics… })`, `query_pipeline_model({ context_id,
   transform })`) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
-  never waits (`Engine._startTask`; tasks on one context run in order). The query tool of the SAME
+  never waits (`Engine._startTask`; tasks on one context run in order). A query tool also takes a
+  BATCH — `{ context_id, queries: [...] }`, up to MAX_BATCH (5) — which checks EVERY query before
+  any starts (one mistake refuses the batch), starts one task per query and returns ONLY
+  `{ task_ids, context_id }` (`Engine._startBatch`); the members run side by side (each dbt process
+  with a target directory of its own), after what was queued before them and before what is
+  queued after. The query tool of the SAME
   side reads a task back (the started answer names it in `read_with`): `{ task_id }` waits
   (≤ MAX_WAIT_SECONDS per call) and returns the result, paging a stored table or the rows held in
-  memory; it refuses a task of the other side — before any wait — and it never draws. The side is
+  memory; `{ task_ids }` waits for several and returns each one's result as `{ task_id }` would; it
+  refuses a task of the other side — before any wait — and it never draws. The side is
   the tool that started the task, persisted with it (the jobs table's `tool`), never guessed.
   `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
   query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each

@@ -4,10 +4,10 @@
 // and incompatible with local per-context isolation).
 
 import { execFile } from 'node:child_process';
-import { existsSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { currentSignal } from './request-context.js';
+import { currentSignal, inIsolatedTarget } from './request-context.js';
 
 function run(bin, args, { cwd, env, timeout = 600000 } = {}) {
   // The cancellation of the tool call this process works for (src/request-context.js): a call the
@@ -51,6 +51,25 @@ export class DbtRunner {
     return env;
   }
 
+  /**
+   * A dbt command other than parse. Run as one of several concurrent tasks on a context (a batch of
+   * queries, src/request-context.js isolatedTarget), it writes its artifacts (manifest, run results,
+   * the partial-parse cache) to a target directory of its own — seeded with the context's
+   * partial-parse cache so it still parses incrementally — and that directory is removed after.
+   * The context's own target/ (whose semantic manifest MetricFlow reads) is left untouched.
+   */
+  async _dbt(projectDir, args, timeout = this.timeout) {
+    if (!inIsolatedTarget()) return run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout });
+    const target = mkdtempSync(join(tmpdir(), 'dbt-target-'));
+    try {
+      const cache = join(projectDir, 'target', 'partial_parse.msgpack');
+      if (existsSync(cache)) { try { copyFileSync(cache, join(target, 'partial_parse.msgpack')); } catch { /* a full parse then */ } }
+      return await run(this.dbtBin, args, { cwd: projectDir, env: { ...this._env(projectDir), DBT_TARGET_PATH: target }, timeout });
+    } finally {
+      rmSync(target, { recursive: true, force: true });
+    }
+  }
+
   async parse(projectDir) {
     const r = await run(this.dbtBin, ['parse'], { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, 'target', 'semantic_manifest.json')) };
@@ -60,14 +79,14 @@ export class DbtRunner {
   async run(projectDir, select) {
     const args = ['run'];
     if (select) args.push('--select', select);
-    const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
+    const r = await this._dbt(projectDir, args);
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, ...(r.error ? { error: r.error } : {}), ...(r.cancelled ? { cancelled: true } : {}) };
   }
 
   /** Real physical columns of a model's relation, via adapter.get_columns_in_relation. */
   async relationColumns(projectDir, modelName) {
     const args = ['run-operation', 'mcp_relation_columns', '--args', JSON.stringify({ model_name: modelName })];
-    const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
+    const r = await this._dbt(projectDir, args);
     // Preserve the process-level facts (killed/signal/error = timeout, spawn failure): the caller
     // has to tell "dbt could not run" from "dbt ran and this relation is not there".
     if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, killed: r.killed, signal: r.signal };
@@ -83,7 +102,7 @@ export class DbtRunner {
    */
   async show(projectDir, sql, limit = 1000, timeout = this.timeout) {
     const args = ['show', '--inline', sql, '--output', 'json', '--limit', String(limit)];
-    const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout });
+    const r = await this._dbt(projectDir, args, timeout);
     // Preserve r.error (the process-level message from execFile: timeout, ENOENT, spawn
     // failure) so callers can log the REAL reason from ANY level — not just dbt's own stderr.
     if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, ...(r.cancelled ? { cancelled: true } : {}), rows: [], columns: [] };

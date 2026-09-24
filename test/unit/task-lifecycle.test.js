@@ -244,3 +244,118 @@ test('a drawn pivot keeps opening after a restart, and whatever envelope the hos
   assert.equal((await runTool(e2, 'display_model_result', { task_id: build.task_id }, { renders: false })).result.isError, true);
   e2.close();
 });
+
+// A BATCH — queries: [...] starts up to five queries on one context in one call; { task_ids } reads
+// them back together.
+
+/** A runner whose metric queries are held until the test releases them — to see what runs at once. */
+function heldQueries() {
+  const r = {
+    log: [], held: [],
+    async parse() { return { ok: true }; },
+    query(_dir, opts) {
+      r.log.push(`start:${opts.metrics.join(',')}`);
+      return new Promise((resolve) => { r.held.push(() => { r.log.push(`end:${opts.metrics.join(',')}`); resolve({ ok: true, columns: [{ name: opts.metrics[0] }], rows: [{ [opts.metrics[0]]: 1 }] }); }); });
+    },
+    async run() { return { ok: true, stdout: '', stderr: '' }; },
+    async show() { return { ok: true, columns: [], rows: [] }; },
+    async relationColumns() { return { ok: false }; },
+  };
+  return r;
+}
+const TWO = { ...TASK, metrics: [{ name: 'cnt', type: 'simple', measure: { name: 'cnt' } }, { name: 'cnt2', type: 'simple', measure: { name: 'cnt' } }] };
+
+test('a batch answers with its task_ids only; its members run side by side, and a query issued after it waits for all of them', async () => {
+  const runner = heldQueries();
+  const e = engine(runner);
+  const created = await e.build_semantic_model(TWO);
+  const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['task_cnt2'] }] });
+  assert.deepEqual(Object.keys(batch).sort(), ['context_id', 'next', 'read_with', 'task_ids']);
+  assert.equal(batch.read_with, 'query_semantic_model');
+  assert.equal(new Set(batch.task_ids).size, 2, 'one task per query');
+  const later = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  await until(() => runner.held.length === 2);
+  for (let i = 0; i < 10; i += 1) await tick();
+  // both members started before either finished; the later query has not started
+  assert.deepEqual(runner.log.slice().sort(), ['start:task_cnt', 'start:task_cnt2']);
+  const peek = await e.query_semantic_model({ task_ids: batch.task_ids, wait_seconds: 0 });
+  assert.deepEqual([peek.status, peek.results.map((r) => r.status)], ['running', ['running', 'running']]);
+  runner.held.shift()();
+  await until(() => batch.task_ids.some((id) => e.jobs.get(id).status === 'ready'));
+  const half = await e.query_semantic_model({ task_ids: batch.task_ids, wait_seconds: 0 });
+  assert.equal(half.status, 'running');
+  assert.equal(half.results.filter((r) => r.status === 'done').length, 1);
+  assert.match(half.next, new RegExp(half.results.find((r) => r.status === 'running').task_id), 'next names only what still runs');
+  assert.equal(runner.log.filter((l) => l.startsWith('start:')).length, 2, 'the later query still waits for the whole batch');
+  runner.held.shift()();
+  await until(() => runner.held.length === 1);
+  runner.held.shift()();
+  const done = await e.query_semantic_model({ task_ids: batch.task_ids });
+  assert.equal(done.status, 'done');
+  assert.deepEqual(done.results.map((r) => r.task_id), batch.task_ids, 'in the order the batch returned');
+  assert.equal((await taskResult(e, later.task_id)).status, 'done');
+});
+
+test('one mistake refuses the whole batch, naming the query — and nothing in it is started', async () => {
+  const e = engine(orderedRunner());
+  const created = await e.build_semantic_model(TASK);
+  const before = e.list_query_jobs().tasks.length;
+  await assert.rejects(
+    () => e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['no_such_metric'] }] }),
+    (err) => err.field.startsWith('queries[1]') && /queries\[1\]: unknown metric/.test(err.message),
+  );
+  assert.equal(e.list_query_jobs().tasks.length, before, 'no task was started for the batch');
+});
+
+test('a batch takes at most five queries, and each mode takes only its own fields', async () => {
+  const e = engine(orderedRunner());
+  const created = await e.build_semantic_model(TASK);
+  const ctx = created.context_id;
+  const q = { metrics: ['task_cnt'] };
+  await assert.rejects(() => e.query_semantic_model({ context_id: ctx, queries: [q, q, q, q, q, q] }));
+  await assert.rejects(() => e.query_semantic_model({ context_id: ctx, queries: [q], metrics: ['task_cnt'] }), 'a query field beside queries');
+  await assert.rejects(() => e.query_semantic_model({ queries: [q] }), 'a batch names its context');
+  await assert.rejects(() => e.query_semantic_model({ task_ids: [created.task_id], offset: 1 }), 'task_ids does not page');
+  await assert.rejects(() => e.query_semantic_model({ task_ids: [created.task_id, created.task_id] }), 'the same task twice');
+  await assert.rejects(() => e.query_pipeline_model({ context_id: ctx, queries: [{ metrics: ['task_cnt'] }] }), 'a pipeline query has no metrics');
+  // a task of the other side is refused before any wait
+  await assert.rejects(() => e.query_pipeline_model({ task_ids: [created.task_id] }), /query_semantic_model/);
+});
+
+test('a protocol task follows a batch read until every member is done', async () => {
+  const { runToCompletion } = await import('../../src/mcp-surface.js');
+  const runner = heldQueries();
+  const e = engine(runner);
+  const created = await e.build_semantic_model(TWO);
+  const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['task_cnt2'] }] });
+  await until(() => runner.held.length === 2);
+  const followed = runToCompletion(e, 'query_semantic_model', { task_ids: batch.task_ids });
+  runner.held.shift()();
+  await tick();
+  runner.held.shift()();
+  const { raw } = await followed;
+  assert.equal(raw.status, 'done');
+  assert.deepEqual(raw.results.map((r) => r.status), ['done', 'done']);
+});
+
+test('run as a batch member, a dbt command writes to a target directory of its own, seeded with the parse cache, and removed after', async () => {
+  const { chmodSync, writeFileSync, mkdirSync, existsSync, readdirSync } = await import('node:fs');
+  const { DbtRunner } = await import('../../src/dbt-runner.js');
+  const { isolatedTarget } = await import('../../src/request-context.js');
+  const dir = mkdtempSync(join(tmpdir(), 'iso-'));
+  const project = join(dir, 'project');
+  mkdirSync(join(project, 'target'), { recursive: true });
+  writeFileSync(join(project, 'target', 'partial_parse.msgpack'), 'cache');
+  // a stand-in dbt: reports the target it was given and whether the parse cache is there
+  const bin = join(dir, 'dbt');
+  writeFileSync(bin, '#!/bin/sh\nT="${DBT_TARGET_PATH:-target}"\nC=no; [ -f "$T/partial_parse.msgpack" ] && C=yes\necho "{\\"show\\": [{\\"target\\": \\"$T\\", \\"cache\\": \\"$C\\"}]}"\n');
+  chmodSync(bin, 0o755);
+  const runner = new DbtRunner({ dbtBin: bin });
+  const plain = await runner.show(project, 'select 1');
+  assert.equal(plain.rows[0].target, 'target', 'alone, a command uses the context\'s own target/');
+  const iso = await isolatedTarget(() => runner.show(project, 'select 1'));
+  assert.notEqual(iso.rows[0].target, 'target');
+  assert.equal(iso.rows[0].cache, 'yes', 'seeded with the context\'s partial-parse cache');
+  assert.equal(existsSync(iso.rows[0].target), false, 'and removed after');
+  assert.deepEqual(readdirSync(join(project, 'target')), ['partial_parse.msgpack'], 'the context\'s own target/ is untouched');
+});

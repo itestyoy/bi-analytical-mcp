@@ -2,15 +2,16 @@
  * @file Query Result view — the cards inside the host's conversation: a CHART (a line or multi-line,
  * a stacked area, grouped/stacked/horizontal bars, a donut of shares or a sankey of flows, its rows
  * folded underneath as a data table with filter and sorting), KPI TILES (a headline number, its
- * change, a sparkline), a FUNNEL (steps, conversion, the biggest drop) and the A/B
+ * change, a sparkline), a PIVOT (a drill-down table, each level read when its row opens), a FUNNEL
+ * (steps, conversion, the biggest drop) and the A/B
  * family (the test, the split check, the sample-size plan). Any other result gets one status line.
  *
- * IT DRAWS, AND FOLLOWS ITS OWN QUERY. The input is the tool result the host delivers
- * (ontoolresult). The one thing it asks for is the rest of that result: a query that outlasted its
- * call answers { status: 'running', query_id }, and the card polls get_query_result for that
- * query_id (followQuery) until the rows are there, then draws them in place. Nothing else: no other
- * tool, no resource, no message to the model, no link — and no network at all (the page's CSP, and
- * the resource's declared `csp`). Everything interactive here —
+ * IT DRAWS, AND READS ONLY ITS OWN RESULT. The input is the tool result the host delivers
+ * (ontoolresult). The one thing it asks for is more of that same result, through get_query_result
+ * (readResult): the rows of a query that outlasted its call (followQuery polls its query_id), and
+ * the next level of a drill-down when a row opens (its stored table, filtered to that row). Nothing
+ * else: no other tool, no resource, no message to the model, no link — and no network at all (the
+ * page's CSP, and the resource's declared `csp`). Everything else interactive here —
  * sorting, filtering, the legend, fullscreen — works on the data already in the page or on the
  * host's own frame.
  *
@@ -42,7 +43,7 @@ import {
   Tooltip,
 } from 'chart.js';
 import { Flow, SankeyController } from 'chartjs-chart-sankey';
-import { buildViewModel } from '../../result-view-model.js';
+import { buildViewModel, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../result-view-model.js';
 import { icon } from './icons.js';
 import './global.css';
 import './mcp-app.css';
@@ -307,7 +308,7 @@ function resetSections() {
 
 // ── render ───────────────────────────────────────────────────────────────────────────────────
 
-const CARDS = { chart: (m) => renderChartResult(m), kpi: (m) => renderKpi(m), funnel: (m) => renderFunnel(m), experiment: (m) => renderExperiment(m), srm: (m) => renderSrm(m), plan: (m) => renderPlan(m) };
+const CARDS = { chart: (m) => renderChartResult(m), kpi: (m) => renderKpi(m), pivot: (m) => renderPivot(m), funnel: (m) => renderFunnel(m), experiment: (m) => renderExperiment(m), srm: (m) => renderSrm(m), plan: (m) => renderPlan(m) };
 
 function render(result) {
   loadingEl.hidden = true; // the result is here: the spinner's job is done, whatever is drawn next
@@ -389,6 +390,110 @@ function renderKpi(model) {
   cardsSection.hidden = false;
 }
 
+// ── pivot: a drill-down table, each level read from the stored result when its row opens ───────
+
+function renderPivot(model) {
+  const drillable = model.levels.length > 1 && canFollow();
+  setDescription(badge(`${model.levels.length} ${model.levels.length === 1 ? 'level' : 'levels'}`, 'secondary'));
+  const table = el('table', 'table pivot-table');
+  const head = document.createElement('tr');
+  // the levels, top down, name the one column their rows share
+  const first = el('th', 'pivot-levels', model.levels.join(' › '));
+  first.scope = 'col';
+  head.append(first, ...model.values.map((v) => { const th = el('th', 'num', v.label); th.scope = 'col'; return th; }));
+  table.append(document.createElement('thead'), document.createElement('tbody'));
+  table.tHead.append(head);
+  const body = table.tBodies[0];
+
+  // a row's children, once read; a closed row keeps them, so reopening it reads nothing
+  const opened = new Map();
+
+  const note = (text, depth, cls = '') => {
+    const tr = el('tr', `pivot-note ${cls}`);
+    const td = el('td', null);
+    td.colSpan = model.values.length + 1;
+    td.style.setProperty('--depth', String(depth));
+    td.append(el('span', null, text));
+    tr.append(td);
+    return tr;
+  };
+
+  const collapse = (tr) => {
+    const state = opened.get(tr);
+    if (!state?.open) return;
+    for (const child of state.rows) { collapse(child); child.remove(); }
+    state.open = false;
+    tr.querySelector('.pivot-toggle')?.setAttribute('aria-expanded', 'false');
+  };
+
+  const rowEl = (row, path, depth) => {
+    const tr = el('tr', 'pivot-row');
+    const cell = el('td', 'pivot-label');
+    cell.style.setProperty('--depth', String(depth));
+    const canOpen = drillable && depth < model.levels.length - 1;
+    if (canOpen) {
+      const btn = el('button', 'btn btn-ghost btn-icon pivot-toggle');
+      btn.type = 'button';
+      btn.setAttribute('aria-expanded', 'false');
+      btn.setAttribute('aria-label', `Open ${row.label} by ${model.levels[depth + 1]}`);
+      btn.append(icon('chevron-right'));
+      btn.addEventListener('click', () => toggle(tr, row, path, depth));
+      cell.append(btn);
+    } else {
+      cell.append(el('span', 'pivot-leaf'));
+    }
+    cell.append(el('span', row.key === null ? 'null' : null, row.label));
+    tr.append(cell, ...model.values.map((v, i) => el('td', 'num', formatKpi(row.values[i], v))));
+    return tr;
+  };
+
+  const insertAfter = (anchor, nodes) => { anchor.after(...nodes); };
+
+  async function toggle(tr, row, path, depth) {
+    const state = opened.get(tr);
+    if (state?.open) { collapse(tr); return; }
+    const btn = tr.querySelector('.pivot-toggle');
+    btn.setAttribute('aria-expanded', 'true');
+    if (state?.rows) { insertAfter(tr, state.rows); state.open = true; return; }
+    if (state?.loading) return;
+    opened.set(tr, { loading: true });
+    const loading = note(`Loading ${model.levels[depth + 1]}…`, depth + 1, 'pivot-loading');
+    loading.querySelector('td').prepend(icon('loader-circle', 'icon spin'));
+    tr.after(loading);
+    const at = [...path, row.key];
+    let rows;
+    try {
+      const got = payloadOf(await readResult({ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }));
+      if (got?.ok === false) {
+        rows = [note(got.error?.code === 'result_gone' ? 'This result is no longer available' : 'Could not load this level', depth + 1, 'pivot-error')];
+      } else {
+        const children = pivotRows(got, model.display, depth + 1);
+        rows = children.length ? children.map((c) => rowEl(c, at, depth + 1)) : [note('No rows', depth + 1)];
+        if (got?.page?.has_more) rows.push(note(`Top ${children.length} shown`, depth + 1));
+      }
+    } catch (e) {
+      log.error('opening a pivot row failed', e);
+      rows = [note('Could not load this level', depth + 1, 'pivot-error')];
+    }
+    loading.remove();
+    const still = btn.getAttribute('aria-expanded') === 'true';
+    opened.set(tr, { rows, open: still });
+    if (still) insertAfter(tr, rows);
+  }
+
+  body.append(...model.rows.map((r) => rowEl(r, [], 0)));
+  if (!model.rows.length) body.append(note('No rows', 0));
+  if (model.has_more) body.append(note(`Top ${model.rows.length} shown`, 0));
+
+  const container = el('div', 'table-container pivot-container');
+  container.append(table);
+  const content = el('div', 'card-content');
+  content.append(container);
+  cardsSection.className = 'ab-list';
+  cardsSection.append(card({ title: model.values.map((v) => v.label).join(' · ') }, content));
+  cardsSection.hidden = false;
+}
+
 // ── following a detached query to its rows ───────────────────────────────────────────────────
 
 const FOLLOW_EVERY_MS = 3000;
@@ -396,6 +501,13 @@ const FOLLOW_FOR_MS = 30 * 60 * 1000; // a detached result is kept for an hour; 
 
 /** Whether the host proxies a view's tools/call at all — without it the card stays a hand-off. */
 const canFollow = () => !!app.getHostCapabilities()?.serverTools;
+
+/**
+ * THE view's one way to the server: get_query_result, for the result this card was drawn from —
+ * its query_id while it waits for the rows, or its stored table's next level when a row of a
+ * drill-down opens. Read-only, and only this card's own result.
+ */
+const readResult = (args) => app.callServerTool({ name: 'get_query_result', arguments: args });
 
 /**
  * Poll get_query_result for THIS card's query_id until it is no longer running, then draw what came
@@ -412,7 +524,7 @@ async function followQuery(queryId) {
     if (Date.now() > until) { handOff(); return; }
     let next;
     try {
-      next = await app.callServerTool({ name: 'get_query_result', arguments: { query_id: queryId } });
+      next = await readResult({ query_id: queryId });
     } catch (e) {
       log.error('following the query failed', e);
       handOff();

@@ -14,7 +14,7 @@ import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer } from '../helpers/mcp-http.js';
-import { buildViewModel } from '../../src/apps/result-view-model.js';
+import { buildViewModel, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
 
 let s;
@@ -34,7 +34,7 @@ test('the viewed tools carry the view in both spellings, for every client in bot
   }
 });
 
-test('the view draws and follows only its own query: one tool is app-callable, no network, one server call in its code', async () => {
+test('the view reads only its own result: one tool is app-callable, no network, one server call in its code', async () => {
   for (const era of ['legacy', 'modern']) {
     const c = await s.client({ era });
     // a host refuses a view's tools/call to a tool that is not visible to "app": only the read of a result is
@@ -47,15 +47,23 @@ test('the view draws and follows only its own query: one tool is app-callable, n
   const dir = new URL('../../src/apps/result-view/src/', import.meta.url).pathname;
   const sources = [...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f)), new URL('../../src/apps/result-view-model.js', import.meta.url).pathname];
   const toolCalls = [];
+  const reads = [];
   for (const file of sources) {
     const text = readFileSync(file, 'utf8');
     const hit = text.match(REACHES_OUT);
     assert.equal(hit, null, `${file} calls ${hit?.[1]}`);
     for (const m of text.matchAll(/callServerTool\s*\(([^)]*)\)/g)) toolCalls.push(m[1]);
+    for (const m of text.matchAll(/\breadResult\s*\(((?:[^()]|\([^()]*\))*)\)/g)) reads.push(m[1].replace(/\s+/g, ' ').trim());
   }
-  // exactly one tools/call: get_query_result, with nothing but the query_id of the card's own result
+  // exactly one tools/call site: get_query_result…
   assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
-  assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'get_query_result', arguments: { query_id: queryId } }");
+  assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'get_query_result', arguments: args }");
+  // …reached for the card's OWN result only: its query_id while it waits, its stored table's next
+  // level when a drill-down row opens
+  assert.deepEqual(reads.filter((r) => r !== 'args').sort(), [
+    '{ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }',
+    '{ query_id: queryId }',
+  ]);
 });
 
 test('a result that is gone reaches the card as result_gone over MCP, and the card says "no longer available"', async () => {
@@ -298,6 +306,16 @@ test('display guard: a sankey that loops back, or KPI tiles over many rows with 
   assert.equal(s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links.slice(0, 2)).length, 0, 'a chain is fine');
   assert.equal(s.engine._displayProblems({ kind: 'kpi', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 1);
   assert.equal(s.engine._displayProblems({ kind: 'kpi', x: 'a', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 0);
+});
+
+test('pivot: one level is the rows under a path, grouped by the next level; its rows keep the key as it came', () => {
+  const display = { kind: 'pivot', levels: ['country', 'platform', 'channel'], values: [{ column: 'revenue' }, { column: 'users', agg: 'max' }] };
+  const t = pivotTransform(display, ['US', null]);
+  assert.deepEqual(t.where, [{ column: 'country', op: 'eq', value: 'US' }, { column: 'platform', op: 'is_null' }]);
+  assert.deepEqual(t.group_by, ['channel']);
+  assert.deepEqual(t.aggregations, [{ fn: 'sum', column: 'revenue', as: 'revenue' }, { fn: 'max', column: 'users', as: 'users' }]);
+  const rows = pivotRows({ columns: [{ name: 'platform' }, { name: 'revenue' }, { name: 'users' }], rows: [{ platform: 'ios', revenue: '12.5', users: 3 }, { platform: null, revenue: 4, users: null }] }, display, 1);
+  assert.deepEqual(rows, [{ key: 'ios', label: 'ios', values: [12.5, 3] }, { key: null, label: '∅', values: [4, null] }]);
 });
 
 test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {

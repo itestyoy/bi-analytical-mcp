@@ -243,6 +243,7 @@ test('the card declaration (display) is structural: each kind is a closed branch
     { kind: 'funnel', steps: { label_column: 'step', value_column: 'users' } },
     { kind: 'kpi', values: [{ column: 'revenue', format: 'currency', currency: 'EUR', good: 'up' }] },
     { kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'n' },
+    { kind: 'pivot', levels: ['users_country', 'users_platform'], values: [{ column: 'revenue' }, { column: 'users', agg: 'max', format: 'number' }] },
   ]) assert.equal(check(ok).ok, true, `${JSON.stringify(ok)}: ${check(ok).errors?.join(' | ')}`);
   for (const [bad, why] of [
     [{ kind: 'donut', label_column: 'a', value_column: 'b' }, 'an unknown kind'],
@@ -254,5 +255,11 @@ test('the card declaration (display) is structural: each kind is a closed branch
     [{ kind: 'kpi', values: [{ column: 'r', good: 'sideways' }] }, 'good is up or down'],
     [{ kind: 'kpi', values: [1, 2, 3, 4, 5].map((i) => ({ column: `c${i}` })) }, 'more than four tiles'],
     [{ kind: 'pie', label_column: 'a', value_column: 'b', stacked: true }, 'a field of another kind'],
+    [{ kind: 'pivot', levels: ['a', 'a'], values: [{ column: 'v' }] }, 'a level twice'],
+    [{ kind: 'pivot', levels: ['a'], values: [{ column: 'v', agg: 'count_distinct' }] }, 'an agg a level cannot fold'],
   ]) assert.equal(check(bad).ok, false, why);
+  // a drill-down reads a stored result: a metric query declaring one must materialize
+  const q = (extra) => validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'pivot', levels: ['a'], values: [{ column: 'm' }] }, ...extra });
+  assert.equal(q({}).ok, false, 'pivot without materialize');
+  assert.equal(q({ materialize: true }).ok, true, `pivot with materialize: ${q({ materialize: true }).errors?.join(' | ')}`);
 });

@@ -118,12 +118,14 @@
   guide, a tool's result); they never carry text or numbers of their own. The Apps view follows the
   official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Input, Table,
   Alert, Accordion, Chart) over the HOST's style variables, whose fallbacks are the shadcn neutral
-  theme; its build is checked in and held to its sources by a test. THE VIEW DRAWS, AND FOLLOWS ONLY ITS OWN QUERY:
+  theme; its build is checked in and held to its sources by a test. THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT:
   every tool is `visibility: ["model"]` except `get_query_result` (`["model", "app"]`), the view
   resource declares an empty `csp` and the page its own CSP, and the view's ONE server call is
-  get_query_result with the query_id of its own detached result, polled until the rows are there so
-  they appear in the same card (no other tools/call, resource, model message, link or network) — a
-  test holds its sources to that. Interactivity stays on the data already in the page.
+  get_query_result for the result it was drawn from — the query_id of its own detached result,
+  polled until the rows are there so they appear in the same card, and the next level of a
+  drill-down (`display.kind: pivot`) when a row opens: its stored table, filtered to that row and
+  grouped by the level below (no other tools/call, resource, model message, link or network) — a
+  test holds its sources to that. Everything else interactive stays on the data already in the page.
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

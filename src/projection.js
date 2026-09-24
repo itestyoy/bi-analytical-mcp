@@ -44,7 +44,7 @@ function havingPredicate(h) {
 
 /**
  * @param relation  SQL relation expression (e.g. `{{ ref('qr_x') }}`).
- * @param t         { where[], group_by[], aggregations[{fn,column,as}], having[], order_by[{key,direction}], limit }
+ * @param t         { where[], group_by[], aggregations[{fn,column,as}], having[], order_by[{key,direction,nulls}], limit }
  */
 export function buildProjection(relation, t = {}) {
   const groupCols = (t.group_by || []).map(ident);
@@ -54,7 +54,7 @@ export function buildProjection(relation, t = {}) {
   if (t.where?.length) sql += ` where ${t.where.map(predicate).join(' and ')}`;
   if (groupCols.length) sql += ` group by ${groupCols.join(', ')}`;
   if (t.having?.length) sql += ` having ${t.having.map(havingPredicate).join(' and ')}`;
-  if (t.order_by?.length) sql += ` order by ${t.order_by.map((o) => `${ident(o.key)} ${o.direction === 'desc' ? 'desc' : 'asc'}`).join(', ')}`;
+  if (t.order_by?.length) sql += ` order by ${t.order_by.map((o) => `${ident(o.key)} ${o.direction === 'desc' ? 'desc' : 'asc'}${o.nulls === 'first' ? ' nulls first' : o.nulls === 'last' ? ' nulls last' : ''}`).join(', ')}`;
   if (typeof t.limit === 'number') sql += ` limit ${Math.trunc(t.limit)}`;
   return sql;
 }

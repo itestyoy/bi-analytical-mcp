@@ -27,6 +27,7 @@ import { buildProjection } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 import { detached, currentSignal } from './request-context.js';
+import { pivotTransform, PIVOT_LEVEL_ROWS } from './apps/result-view-model.js'; // what one drill-down level is: the same read for the engine and the card
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, pythonBuildGraceMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
@@ -3359,6 +3360,8 @@ export class Engine {
     }
     const job = this.jobs.get(id);
     if (job.status === 'error') return { ok: false, status: 'error', query_id: id, table, error: { stage: 'materialize', message: job.error } };
+    // a drill-down shows its TOP level first; the card reads the levels below from this table
+    if (input.display?.kind === 'pivot') return this._withPivot(await this._fetchResult(id, input.limit ?? PIVOT_LEVEL_ROWS, pivotTransform(input.display, [])), input.display, { query_id: id });
     return this._withDisplay(await this._fetchResult(id, input.limit ?? 1000, undefined, input.offset ?? 0), input.display);
   }
 
@@ -3409,6 +3412,21 @@ export class Engine {
    */
   async get_query_result(input) {
     this._validate('get_query_result', input);
+    // a drill-down (display kind pivot) reads its TOP level, not every detail row: the card opens the
+    // levels below one row at a time (a read with an explicit transform, which is served as it is)
+    const pivot = !input.transform && [input.display, input.query_id ? this.jobs.get(input.query_id)?.display : null].find((d) => d?.kind === 'pivot');
+    if (pivot) {
+      if (input.display) {
+        // its columns are the stored table's, not the top level's — checked against one row of it
+        const probe = await this._getQueryResult({ ...input, display: undefined, limit: 1, offset: undefined });
+        const cols = this._resultColumns(probe);
+        const problems = cols ? this._displayProblems(pivot, cols) : [];
+        if (problems.length) throw new ToolError(`display: ${problems.join('; ')}. This result's columns: ${cols.join(', ')}`, { stage: 'validate', field: 'display' });
+        if (!cols) return probe;
+      }
+      const out = await this._getQueryResult({ ...input, transform: pivotTransform(pivot, []), limit: input.limit ?? PIVOT_LEVEL_ROWS, offset: undefined });
+      return this._withPivot(out, pivot, input.query_id ? { query_id: input.query_id } : { context_id: input.context_id, table: input.table });
+    }
     const out = await this._getQueryResult(input);
     if (input.display) {
       const cols = this._resultColumns(out);
@@ -3442,6 +3460,7 @@ export class Engine {
       : display.kind === 'pie' ? [display.label_column, display.value_column]
         : display.kind === 'kpi' ? [display.x, ...(display.values || []).flatMap((v) => [v.column, v.previous_column])]
           : display.kind === 'sankey' ? [display.source_column, display.target_column, display.value_column]
+            : display.kind === 'pivot' ? [...(display.levels || []), ...(display.values || []).map((v) => v.column)]
             : [display.x, ...ys, ...(display.series_column ? [display.series_column] : [])];
     const problems = [...new Set(named.filter((c) => c && !have.has(c)))].map((c) => `'${c}' is not a column of this result`);
     if (display.kind === 'funnel' && stepColumns && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
@@ -3460,6 +3479,12 @@ export class Engine {
       if (rows.some((r) => Number(r?.[display.value_column]) < 0)) problems.push(`a pie's slices are shares of one total, and '${display.value_column}' has negative values — use a bar`);
     }
     return problems;
+  }
+
+  /** A drill-down's top level, with where its levels are read (the card reads them from there). */
+  _withPivot(out, display, source) {
+    if (!out || out.ok === false || !Array.isArray(out.rows)) return out;
+    return { ...out, display, pivot_source: source };
   }
 
   /** Whether directed links [from, to] loop back anywhere (depth-first, three colours). */

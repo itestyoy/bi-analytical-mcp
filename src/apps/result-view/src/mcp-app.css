@@ -14,7 +14,9 @@
  * cannot reach, plus whatever safe area the host reports (--safe-*, set from its context).
  */
 .main {
-  --pad: calc(var(--space) * 5);
+  /* a few pixels more than the frame's rounding needs: a phone host scales the frame by a fraction
+     and softens the outermost pixels of an edge, which a border sitting right there would lose */
+  --pad: calc(var(--space) * 6);
   width: 100%;
   padding: calc(var(--pad) + var(--safe-top, 0px)) calc(var(--pad) + var(--safe-right, 0px)) calc(var(--pad) + var(--safe-bottom, 0px)) calc(var(--pad) + var(--safe-left, 0px));
   display: flex;
@@ -1021,7 +1023,7 @@
 /* ── A narrow chat bubble or a phone: shadcn's p-4 instead of p-6 inside cards ─────────────── */
 @media (max-width: 480px) {
   .main {
-    --pad: calc(var(--space) * 4);
+    --pad: calc(var(--space) * 5);
     gap: calc(var(--space) * 3);
   }
 

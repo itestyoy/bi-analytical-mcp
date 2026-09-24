@@ -164,8 +164,12 @@ the plain tools stay exactly as they were for every client that does not:
   y columns or a `series_column` make it multi-line), a stacked AREA (a total split into parts over
   time), BARS (a comparison; several y or a `series_column` group them, `stacked` stacks them,
   `horizontal` lays them flat — the default past 8 categories), a PIE drawn as a donut (shares of one
-  total; past 6 slices the smallest fold into "Other"; negative values or a single row are refused)
-  or a FUNNEL (step columns of one row, or a label and a value column over a row per step); the server checks the columns exist (a
+  total; past 6 slices the smallest fold into "Other"; negative values or a single row are refused),
+  KPI tiles (1–4 headline numbers from one row, each with its change against a `previous_column` —
+  coloured only when `good: up|down` says which way is good — or, with an `x` axis, the last row, its
+  change from the row before and a sparkline of the trend), a SANKEY (one row per link source →
+  target with an amount; links that loop back are refused) or a FUNNEL (step columns of one row, or
+  a label and a value column over a row per step); the server checks the columns exist (a
   detached query remembers it) and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
   result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply),

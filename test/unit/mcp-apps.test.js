@@ -233,6 +233,42 @@ test('view model: a DECLARED pie is slices in size order with their shares; past
   assert.ok(Math.abs(m.chart.slices.reduce((a, x) => a + x.share, 0) - 1) < 1e-12, 'the slices make up the whole');
 });
 
+test('view model: KPI tiles read one row, with the change against a previous column', () => {
+  const row = { revenue: 184230.5, revenue_prev: 171020, crash_rate: 0.0041, crash_rate_prev: 0.0052 };
+  const m = buildViewModel('get_query_result', { columns: Object.keys(row).map((name) => ({ name })), rows: [row], display: { kind: 'kpi', values: [{ column: 'revenue', label: 'Revenue', format: 'currency', previous_column: 'revenue_prev', good: 'up' }, { column: 'crash_rate', format: 'percent', previous_column: 'crash_rate_prev', good: 'down' }] } });
+  assert.equal(m.kind, 'kpi');
+  assert.deepEqual(m.tiles.map((t) => [t.label, t.value, t.previous, t.good]), [['Revenue', 184230.5, 171020, 'up'], ['crash_rate', 0.0041, 0.0052, 'down']]);
+  assert.equal(m.tiles[0].change, (184230.5 - 171020) / 171020);
+  assert.equal(m.tiles[1].change, (0.0041 - 0.0052) / 0.0052);
+  assert.equal(m.tiles[0].trend, null);
+});
+
+test('view model: KPI tiles over a time axis show the LAST row, its change from the row before and the trend', () => {
+  const rows = [{ d: '2026-09-03', dau: 130 }, { d: '2026-09-01', dau: 100 }, { d: '2026-09-02', dau: 120 }];
+  const m = buildViewModel('query_semantic_model', { columns: [{ name: 'd' }, { name: 'dau' }], rows, display: { kind: 'kpi', x: 'd', values: [{ column: 'dau' }] } });
+  assert.equal(m.as_of, '2026-09-03');
+  assert.equal(m.compared_to, '2026-09-02');
+  assert.deepEqual([m.tiles[0].value, m.tiles[0].previous], [130, 120]);
+  assert.deepEqual(m.tiles[0].trend, [100, 120, 130], 'in time order, whatever order the rows came in');
+});
+
+test('view model: a sankey sums a link seen twice, drops empty flows and sizes each node by what passes through', () => {
+  const rows = [['organic', 'ios', 40], ['organic', 'ios', 2], ['organic', 'android', 60], ['ios', 'payer', 5], ['android', 'payer', 4], ['android', 'x', null]].map(([a, b, v]) => ({ a, b, v }));
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'a' }, { name: 'b' }, { name: 'v' }], rows, display: { kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' } });
+  assert.equal(m.chart.type, 'sankey');
+  assert.deepEqual(m.chart.links, [{ from: 'organic', to: 'ios', flow: 42 }, { from: 'organic', to: 'android', flow: 60 }, { from: 'ios', to: 'payer', flow: 5 }, { from: 'android', to: 'payer', flow: 4 }]);
+  assert.deepEqual(m.chart.nodes.map((n) => [n.name, n.size]), [['organic', 102], ['android', 60], ['ios', 42], ['payer', 9]]);
+});
+
+test('display guard: a sankey that loops back, or KPI tiles over many rows with no axis, are refused', () => {
+  const links = [{ a: 'menu', b: 'level' }, { a: 'level', b: 'shop' }, { a: 'shop', b: 'menu' }].map((r) => ({ ...r, v: 1 }));
+  const loop = s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links);
+  assert.equal(loop.length, 1);
+  assert.equal(s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links.slice(0, 2)).length, 0, 'a chain is fine');
+  assert.equal(s.engine._displayProblems({ kind: 'kpi', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 1);
+  assert.equal(s.engine._displayProblems({ kind: 'kpi', x: 'a', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 0);
+});
+
 test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {
   // step counts with a NULL first step cannot be a funnel; the step-per-row shape is still a bar chart
   const m = buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: null }, { step: 'b', users: 4 }], display: { kind: 'funnel', label_column: 'step', value_column: 'users' } });

@@ -2532,7 +2532,7 @@ export class Engine {
       // The rows above come back WITHOUT the result card — build_native_model carries no view (its
       // other actions return schema, and a card on each would bury the conversation). Reading the
       // table with get_query_result is what draws a funnel or a chart for the person.
-      show_to_user: { tool: 'get_query_result', arguments: { context_id: ctx.id, table: modelName }, why: 'in a host that renders MCP Apps (Claude on the web, desktop and mobile) this call draws the result as a card — a funnel for ordered steps, a chart for a series or a breakdown. Add `display` to say which, over this table\'s columns: a funnel ({ kind: \'funnel\', steps: [{ column, label }] } or { kind: \'funnel\', label_column, value_column }), a line or a stacked area ({ kind: \'line\' | \'area\', x, y: [..], series_column? }), bars ({ kind: \'bar\', x, y, series_column?, stacked?, horizontal? }) or a pie of shares ({ kind: \'pie\', label_column, value_column }). Make it before summarising, instead of drawing your own chart; the rows are the same ones returned here.' },
+      show_to_user: { tool: 'get_query_result', arguments: { context_id: ctx.id, table: modelName }, why: 'in a host that renders MCP Apps (Claude on the web, desktop and mobile) this call draws the result as a card — a funnel for ordered steps, a chart for a series or a breakdown. Add `display` to say which, over this table\'s columns: a funnel ({ kind: \'funnel\', steps: [{ column, label }] } or { kind: \'funnel\', label_column, value_column }), a line or a stacked area ({ kind: \'line\' | \'area\', x, y: [..], series_column? }), bars ({ kind: \'bar\', x, y, series_column?, stacked?, horizontal? }), a pie of shares ({ kind: \'pie\', label_column, value_column }), headline tiles ({ kind: \'kpi\', values: [{ column, previous_column?, format? }] }) or flows ({ kind: \'sankey\', source_column, target_column, value_column }). Make it before summarising, instead of drawing your own chart; the rows are the same ones returned here.' },
       assumptions: [
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
@@ -3429,16 +3429,42 @@ export class Engine {
     const named = display.kind === 'funnel'
       ? (display.steps ? display.steps.map((st) => st.column) : [display.label_column, display.value_column])
       : display.kind === 'pie' ? [display.label_column, display.value_column]
-        : [display.x, ...ys, ...(display.series_column ? [display.series_column] : [])];
+        : display.kind === 'kpi' ? [display.x, ...(display.values || []).flatMap((v) => [v.column, v.previous_column])]
+          : display.kind === 'sankey' ? [display.source_column, display.target_column, display.value_column]
+            : [display.x, ...ys, ...(display.series_column ? [display.series_column] : [])];
     const problems = [...new Set(named.filter((c) => c && !have.has(c)))].map((c) => `'${c}' is not a column of this result`);
     if (display.kind === 'funnel' && display.steps && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
     if (display.kind === 'funnel' && display.steps && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, or declare { kind: 'funnel', label_column, value_column } for a row per step`);
     if (display.series_column && ys.length > 1) problems.push(`series_column splits ONE y column into a ${display.kind === 'bar' ? 'bar' : display.kind === 'area' ? 'band' : 'line'} per value — declare a single y with it`);
+    if (display.kind === 'kpi' && !display.x && Array.isArray(rows) && rows.length !== 1) problems.push(`KPI tiles read ONE row, and this result has ${rows.length} — aggregate to one row, or give x (the time column) to show the last row with its trend`);
+    if (display.kind === 'sankey' && Array.isArray(rows) && have.has(display.source_column) && have.has(display.target_column)) {
+      const links = rows.map((r) => [String(r?.[display.source_column]), String(r?.[display.target_column])]);
+      if (links.some(([a, b]) => a === b)) problems.push('a sankey link may not flow into itself (source = target)');
+      else if (this._hasCycle(links)) problems.push('the links loop back (a cycle) — a sankey flows one way; name each stage apart (e.g. prefix the step) so no node is both before and after another');
+      const nodes = new Set(links.flat());
+      if (nodes.size > 40) problems.push(`${nodes.size} nodes are too many to read — group the small ones into "Other" in the query first (40 at most)`);
+    }
     if (display.kind === 'pie' && Array.isArray(rows) && have.has(display.value_column)) {
       if (rows.length < 2) problems.push(`a pie needs a slice per row, and this result has ${rows.length} — a single number is better said as a number`);
       if (rows.some((r) => Number(r?.[display.value_column]) < 0)) problems.push(`a pie's slices are shares of one total, and '${display.value_column}' has negative values — use a bar`);
     }
     return problems;
+  }
+
+  /** Whether directed links [from, to] loop back anywhere (depth-first, three colours). */
+  _hasCycle(links) {
+    const next = new Map();
+    for (const [a, b] of links) { if (!next.has(a)) next.set(a, []); next.get(a).push(b); }
+    const state = new Map(); // 1 = on the current path, 2 = done
+    const visit = (n) => {
+      if (state.get(n) === 1) return true;
+      if (state.get(n) === 2) return false;
+      state.set(n, 1);
+      for (const m of next.get(n) || []) if (visit(m)) return true;
+      state.set(n, 2);
+      return false;
+    };
+    return [...next.keys()].some((n) => visit(n));
   }
 
   /** A result with its card declaration attached — when it has rows the declaration fits. */

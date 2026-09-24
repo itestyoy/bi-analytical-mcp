@@ -1,7 +1,8 @@
 /**
  * @file Query Result view — the cards inside the host's conversation: a CHART (a line or multi-line,
- * a stacked area, grouped/stacked/horizontal bars or a donut of shares, its rows folded underneath as
- * a data table with filter and sorting), a FUNNEL (steps, conversion, the biggest drop) and the A/B
+ * a stacked area, grouped/stacked/horizontal bars, a donut of shares or a sankey of flows, its rows
+ * folded underneath as a data table with filter and sorting), KPI TILES (a headline number, its
+ * change, a sparkline), a FUNNEL (steps, conversion, the biggest drop) and the A/B
  * family (the test, the split check, the sample-size plan). Any other result gets one status line.
  *
  * IT DRAWS, AND FOLLOWS ITS OWN QUERY. The input is the tool result the host delivers
@@ -40,13 +41,14 @@ import {
   PointElement,
   Tooltip,
 } from 'chart.js';
+import { Flow, SankeyController } from 'chartjs-chart-sankey';
 import { buildViewModel } from '../../result-view-model.js';
 import { icon } from './icons.js';
 import './global.css';
 import './mcp-app.css';
 
 // Only the pieces this view draws — Chart.js is tree-shakable, and the whole view ships in one file
-Chart.register(ArcElement, BarController, BarElement, CategoryScale, DoughnutController, Filler, LinearScale, LineController, LineElement, PointElement, Tooltip);
+Chart.register(ArcElement, BarController, BarElement, CategoryScale, DoughnutController, Filler, Flow, LinearScale, LineController, LineElement, PointElement, SankeyController, Tooltip);
 
 const log = {
   info: console.log.bind(console, '[APP]'),
@@ -240,7 +242,7 @@ function resetSections() {
 
 // ── render ───────────────────────────────────────────────────────────────────────────────────
 
-const CARDS = { chart: (m) => renderChartResult(m), funnel: (m) => renderFunnel(m), experiment: (m) => renderExperiment(m), srm: (m) => renderSrm(m), plan: (m) => renderPlan(m) };
+const CARDS = { chart: (m) => renderChartResult(m), kpi: (m) => renderKpi(m), funnel: (m) => renderFunnel(m), experiment: (m) => renderExperiment(m), srm: (m) => renderSrm(m), plan: (m) => renderPlan(m) };
 
 function render(result) {
   loadingEl.hidden = true; // the result is here: the spinner's job is done, whatever is drawn next
@@ -259,6 +261,67 @@ function render(result) {
   titleEl.textContent = model.title;
   setDescription();
   draw(model);
+}
+
+// ── KPI tiles (shadcn stat cards: the value large, its change, the trend as a sparkline) ─────────
+
+function formatKpi(value, tile) {
+  if (value === null || value === undefined) return '—';
+  if (tile.format === 'percent') return `${(value * 100).toFixed(Math.abs(value) < 0.1 ? 2 : 1)}%`;
+  if (tile.format === 'currency') {
+    try {
+      return new Intl.NumberFormat(undefined, { style: 'currency', currency: tile.currency, maximumFractionDigits: Math.abs(value) >= 1000 ? 0 : 2 }).format(value);
+    } catch { return formatNumber(value); }
+  }
+  return formatNumber(value);
+}
+
+/** The trend under a tile: one line, no axes — its shape is the point, the numbers are in the title. */
+function sparkline(values) {
+  const NS = 'http://www.w3.org/2000/svg';
+  const known = values.map((v, i) => [i, v]).filter(([, v]) => v !== null);
+  const lo = Math.min(...known.map(([, v]) => v));
+  const hi = Math.max(...known.map(([, v]) => v));
+  const W = 100;
+  const H = 32;
+  const x = (i) => (values.length > 1 ? (i / (values.length - 1)) * W : 0);
+  const y = (v) => (hi > lo ? H - 2 - ((v - lo) / (hi - lo)) * (H - 4) : H / 2);
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('class', 'kpi-sparkline');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('preserveAspectRatio', 'none');
+  svg.setAttribute('aria-hidden', 'true');
+  const line = document.createElementNS(NS, 'polyline');
+  line.setAttribute('points', known.map(([i, v]) => `${x(i).toFixed(2)},${y(v).toFixed(2)}`).join(' '));
+  svg.append(line);
+  return svg;
+}
+
+function renderKpi(model) {
+  const asOf = model.as_of ? timeFormatter([model.as_of])(model.as_of) : null;
+  setDescription(
+    badge(`${model.tiles.length} ${model.tiles.length === 1 ? 'metric' : 'metrics'}`, 'secondary'),
+    asOf ? badge(`as of ${asOf}`, 'outline') : null,
+  );
+  const vs = model.compared_to === 'previous' ? 'vs previous' : model.compared_to ? `vs ${timeFormatter([model.compared_to])(model.compared_to)}` : null;
+  cardsSection.className = 'kpi-grid';
+  for (const tile of model.tiles) {
+    let change = null;
+    if (tile.change !== null) {
+      // coloured only when the caller said which way is good; otherwise the change is just stated
+      const up = tile.change > 0;
+      const verdict = !tile.good || tile.change === 0 ? 'neutral' : (up === (tile.good === 'up')) ? 'good' : 'bad';
+      change = el('p', `kpi-change kpi-change-${verdict}`);
+      change.append(icon(tile.change === 0 ? 'minus' : up ? 'trending-up' : 'trending-down'), el('span', null, formatSignedPercent(tile.change)));
+      if (vs) change.append(el('span', 'kpi-vs', vs));
+    } else if (tile.previous !== null) {
+      change = el('p', 'kpi-change kpi-change-neutral', `${formatKpi(tile.previous, tile)} before`);
+    }
+    const body = el('div', 'card-content kpi-body');
+    body.append(...[change, tile.trend ? sparkline(tile.trend) : null].filter(Boolean));
+    cardsSection.append(card({ description: tile.label, title: formatKpi(tile.value, tile), titleClass: 'card-title card-title-stat' }, body.childElementCount ? body : null));
+  }
+  cardsSection.hidden = false;
 }
 
 // ── following a detached query to its rows ───────────────────────────────────────────────────
@@ -328,7 +391,10 @@ function renderChartResult(model) {
 // ── chart (shadcn charts: horizontal grid only, no axis or tick lines, HTML tooltip and legend) ─
 
 function renderChart(chart, title) {
-  chartTitleEl.textContent = chart.type === 'line' ? `${title} over ${chart.x}` : chart.type === 'pie' ? `${title} · share by ${chart.x}` : `${title} by ${chart.x}`;
+  chartTitleEl.textContent = chart.type === 'line' ? `${title} over ${chart.x}`
+    : chart.type === 'pie' ? `${title} · share by ${chart.x}`
+      : chart.type === 'sankey' ? `${title} from ${chart.x} to ${chart.to}`
+        : `${title} by ${chart.x}`;
   chartSection.hidden = false;
   const muted = cssVar('--muted-foreground');
   const grid = cssVar('--border');
@@ -425,6 +491,41 @@ function renderChart(chart, title) {
     return;
   }
 
+  if (chart.type === 'sankey') {
+    // the largest nodes keep a series color, the rest share the muted one — never a generated 7th hue
+    const colorOf = new Map(chart.nodes.map((n, i) => [n.name, i < 6 ? seriesColor(i) : muted]));
+    state.chart = new Chart(chartCanvas, {
+      type: 'sankey',
+      data: {
+        datasets: [{
+          label: chart.y || 'flow',
+          data: chart.links,
+          colorFrom: (c) => colorOf.get(c.dataset.data[c.dataIndex]?.from) || muted,
+          colorTo: (c) => colorOf.get(c.dataset.data[c.dataIndex]?.to) || muted,
+          colorMode: 'from', // a flow wears the color of where it comes from
+          alpha: 0.35,
+          color: cssVar('--foreground'), // node labels wear text ink, never a series color
+          font: { size: 12 },
+          nodeWidth: 8,
+          borderWidth: 0,
+          size: 'max',
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        layout: { padding: { top: 4, bottom: 4, left: 4, right: 4 } },
+        interaction: { mode: 'nearest', intersect: true },
+        plugins: { legend: { display: false }, tooltip: { enabled: false, external: drawTooltip } },
+      },
+    });
+    const total = chart.links.reduce((a, l) => a + l.flow, 0);
+    chartDescriptionEl.textContent = `${chart.nodes.length} nodes · ${chart.links.length} flows · ${formatNumber(total)} in all links`;
+    chartCanvas.setAttribute('aria-label', `${title}: ${chart.links.slice(0, 20).map((l) => `${l.from} to ${l.to} ${formatNumber(l.flow)}`).join(', ')}`);
+    return;
+  }
+
   // bars: one series (a bar per category), several side by side (grouped) or stacked into one
   const series = chart.series || [{ name: chart.y || 'value', values: chart.bars.map((b) => b.value) }];
   const allLabels = chart.labels || chart.bars.map((b) => b.label);
@@ -472,6 +573,19 @@ function drawTooltip({ chart, tooltip }) {
   }
   const items = el('div', 'chart-tooltip-items');
   const slice = chart.config.type === 'doughnut';
+  if (chart.config.type === 'sankey') {
+    // a flow: where it starts, where it goes, how much of the source it carries
+    const { from, to, flow } = tooltip.dataPoints[0].raw;
+    const out = chart.data.datasets[0].data.filter((l) => l.from === from).reduce((a, l) => a + l.flow, 0);
+    const row = el('div', 'chart-tooltip-item');
+    const value = el('div', 'chart-tooltip-value');
+    value.append(el('span', 'chart-tooltip-name', `→ ${to}`), el('span', 'chart-tooltip-number', `${formatNumber(flow)} · ${formatShare(out ? flow / out : null)}`));
+    row.append(value);
+    items.append(row);
+    chartTooltip.replaceChildren(el('div', 'chart-tooltip-label', from), items);
+    placeTooltip(chart, tooltip);
+    return;
+  }
   for (const p of tooltip.dataPoints) {
     const row = el('div', 'chart-tooltip-item');
     const swatch = el('span', 'chart-indicator');
@@ -486,6 +600,10 @@ function drawTooltip({ chart, tooltip }) {
   }
   const heading = slice ? chart.data.labels[tooltip.dataPoints[0].dataIndex] : tooltip.title?.[0];
   chartTooltip.replaceChildren(el('div', 'chart-tooltip-label', heading ?? ''), items);
+  placeTooltip(chart, tooltip);
+}
+
+function placeTooltip(chart, tooltip) {
   chartTooltip.hidden = false;
   // beside the cursor, flipped to the other side near the right edge, always inside the chart
   const { width, height } = chart.canvas.getBoundingClientRect();

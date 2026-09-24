@@ -155,3 +155,17 @@ test('a declared pie carries each country\'s share of the warehouse total; a pie
   await follow(one.query_id);
   await assert.rejects(engine.get_query_result({ query_id: one.query_id, display: { kind: 'pie', label_column: 'mon_revenue', value_column: 'mon_revenue' } }), (e) => e.field === 'display');
 });
+
+test('a KPI tile over the warehouse total shows its number; over many rows it needs an axis', opts, async (t) => {
+  if (skip(t)) return;
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], display: { kind: 'kpi', title: 'Revenue', values: [{ column: 'mon_revenue', label: 'IAP revenue', format: 'currency' }] } });
+  const done = await follow(first.query_id);
+  const m = buildViewModel('get_query_result', done);
+  assert.equal(m.kind, 'kpi');
+  assert.deepEqual(m.tiles.map((x) => [x.label, x.value]), [['IAP revenue', 85]]);
+  // a row per country and no axis: the rows come back, the tiles are not drawn, and the reply says why
+  const many = await follow((await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], display: { kind: 'kpi', values: [{ column: 'mon_revenue' }] } })).query_id);
+  assert.equal(many.display, undefined);
+  assert.ok((many.warnings || []).some((w) => w.startsWith('display was not applied')), JSON.stringify(many.warnings));
+  assert.equal(many.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85);
+});

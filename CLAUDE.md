@@ -127,13 +127,18 @@
   stored table, filtered to the path taken and grouped by the dimension chosen, each read built by
   the view model's one definition of a view (no other tools/call, resource, model message, link or
   network) — a test holds its sources to that. Everything else interactive stays on the data already in the page.
-- MCP APPS ARE OFFERED ONLY TO A CLIENT THAT DECLARES THEM, IN THE REQUEST BEING SERVED: its
-  capabilities carry `extensions["io.modelcontextprotocol/ui"]` with the view's MIME type. Only then
-  does it get `_meta.ui`, the view resource, the `display` declaration, the RESULT CARDS instructions
-  and the `show_to_user` hint; any other client gets none of them, and a `display` it sends is
-  refused. A 2025 client declares capabilities once, in `initialize`, and is served statelessly, so
-  its later requests carry nothing to go by — it gets the plain surface (src/apps.js). The lists
-  that differ are cached `private`.
+- AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
+  envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
+  * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): `_meta.ui`, the view resource,
+    the `display` declaration, the RESULT CARDS instructions, the `show_to_user` hint — a `display`
+    from any other client is refused;
+  * Skills (`io.modelcontextprotocol/skills`): skills/list and skills/get (-32021 otherwise), the
+    skill files in resources/list, templates and resources/read, the SKILLS pointer in the
+    instructions;
+  * Tasks (`io.modelcontextprotocol/tasks`): a long call becoming a task, tasks/get|cancel|update
+    (-32021 otherwise).
+  A 2025 client declares capabilities once, in `initialize`, and is served statelessly, so its later
+  requests carry nothing to go by — it gets none of them. The lists that differ are cached `private`.
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

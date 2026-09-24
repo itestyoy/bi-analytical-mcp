@@ -5,8 +5,8 @@
 // SDK owns the protocol: which revision a request speaks (the initialize handshake of 2025, or the
 // per-request `_meta` envelope of 2026-07-28), headers, `server/discover`, `resultType`, caching
 // hints on the wire, error codes. This file only says WHAT the server offers — the same for every
-// client, except MCP Apps (cards, `display`, the hints about them), offered only to a client that
-// declares the extension in the request being served (src/apps.js).
+// client, except its extensions (Apps, Skills, Tasks), each offered only to a client that declares
+// it in the request being served (src/client-extensions.js).
 //
 // The tools are registered on the low-level `Server`, the SDK's documented path for a JSON Schema
 // you already have (docs: "Low-level Server"): our input schemas are built from the catalog, and
@@ -21,16 +21,17 @@
 //     front of the SDK (src/mcp-tasks.js) until the SDK serves the extension itself.
 
 import { z } from 'zod';
-import { Server, ProtocolError, ResourceNotFoundError, CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
+import { Server, ProtocolError, ResourceNotFoundError } from '@modelcontextprotocol/server';
 import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine } from './mcp-surface.js';
 import { releasableSignal } from './request-context.js';
-import { UI_EXTENSION, RESOURCE_MIME_TYPE, clientRendersApps } from './apps.js';
+import { UI_EXTENSION, RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
+import { clientCapabilities, declaresExtension } from './client-extensions.js';
 import { SKILLS_EXTENSION } from './skills.js';
 
 export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
 
-// Nothing this server lists changes while it runs. What it lists and says depends on whether the
-// client renders MCP Apps (src/apps.js), so those answers are the asking client's own to cache.
+// Nothing this server lists changes while it runs. What it lists and says depends on which
+// extensions the client declared (src/client-extensions.js), so those answers are its own to cache.
 const STATIC = { ttlMs: 3600000, cacheScope: 'public' };
 const PER_CLIENT = { ttlMs: 3600000, cacheScope: 'private' };
 
@@ -52,15 +53,30 @@ export function serverCapabilities(services) {
   };
 }
 
-export function createMcpServer(services, { era, renders = era === 'modern' && clientRendersApps() } = {}) {
+/**
+ * Which extensions a server built for this request offers: each only if the client declared it IN
+ * this request (a 2026-07-28 envelope) — a 2025 client carries no capabilities past initialize
+ * (src/client-extensions.js). Apps also needs the view's MIME type among the declared ones.
+ */
+export function offeredExtensions(services, { era } = {}) {
+  const caps = era === 'modern' ? clientCapabilities() : null;
+  return {
+    apps: rendersApps(caps),
+    skills: !!services.skills && declaresExtension(caps, SKILLS_EXTENSION),
+    tasks: declaresExtension(caps, TASKS_EXTENSION),
+  };
+}
+
+const missingExtension = (id) => new ProtocolError(-32021, 'Missing required client capability', { requiredCapabilities: { extensions: { [id]: {} } } });
+
+export function createMcpServer(services, { era, offer = offeredExtensions(services, { era }) } = {}) {
   const { engine, tasks } = services;
-  // MCP Apps — cards, `display`, the hints about them — only for a client that declared it in THIS
-  // request (a 2026-07-28 envelope); a 2025 client carries no capabilities past initialize (src/apps.js)
+  const renders = offer.apps;
   const variant = renders ? 'apps' : 'plain';
   const server = new Server(SERVER_INFO, {
     capabilities: serverCapabilities(services),
-    instructions: services.instructions[variant],
-    cacheHints: { 'server/discover': PER_CLIENT, 'tools/list': PER_CLIENT, 'resources/list': PER_CLIENT, 'resources/templates/list': STATIC, 'resources/read': PER_CLIENT },
+    instructions: services.instructionsFor(offer),
+    cacheHints: { 'server/discover': PER_CLIENT, 'tools/list': PER_CLIENT, 'resources/list': PER_CLIENT, 'resources/templates/list': PER_CLIENT, 'resources/read': PER_CLIENT },
   });
 
   server.setRequestHandler('tools/list', async () => ({ tools: services.toolDefs[variant] }));
@@ -76,8 +92,7 @@ export function createMcpServer(services, { era, renders = era === 'modern' && c
     // the response is sent, which aborts this signal).
     const cancel = releasableSignal(ctx.mcpReq.signal);
     try {
-      const caps = ctx.mcpReq.envelope?.[CLIENT_CAPABILITIES_META_KEY];
-      if (era === 'modern' && caps?.extensions?.[TASKS_EXTENSION]) return await callAsTask(name, args, cancel);
+      if (offer.tasks) return await callAsTask(name, args, cancel);
       const token = ctx.mcpReq._meta?.progressToken;
       const { result } = await runTool(engine, name, args, {
         signal: cancel.signal,
@@ -110,18 +125,23 @@ export function createMcpServer(services, { era, renders = era === 'modern' && c
     return { resultType: 'task', ...tasks.detailed(t), statusMessage: 'The call is running; poll tasks/get.' };
   }
 
-  server.setRequestHandler('resources/list', async () => ({ resources: services.resources(renders) }));
-  server.setRequestHandler('resources/templates/list', async () => ({ resourceTemplates: services.templates() }));
+  server.setRequestHandler('resources/list', async () => ({ resources: services.resources(offer) }));
+  server.setRequestHandler('resources/templates/list', async () => ({ resourceTemplates: services.templates(offer) }));
   server.setRequestHandler('resources/read', async (request) => {
-    const contents = services.read(request.params.uri, renders);
+    const contents = services.read(request.params.uri, offer);
     // the SDK puts this on the wire as each revision spells it (-32002 in 2025, -32602 in 2026-07-28)
     if (!contents) throw new ResourceNotFoundError(request.params.uri);
     return { contents };
   });
 
   if (services.skills) {
-    server.setRequestHandler('skills/list', { params: SkillsListParams, result: AnyResult }, async () => ({ skills: services.skills.list(), ...STATIC }));
+    // served to a client that declared the Skills extension in this request, refused to any other
+    server.setRequestHandler('skills/list', { params: SkillsListParams, result: AnyResult }, async () => {
+      if (!offer.skills) throw missingExtension(SKILLS_EXTENSION);
+      return { skills: services.skills.list(), ...STATIC };
+    });
     server.setRequestHandler('skills/get', { params: SkillsGetParams, result: AnyResult }, async ({ uri }) => {
+      if (!offer.skills) throw missingExtension(SKILLS_EXTENSION);
       const s = services.skills.get(uri);
       if (!s) throw new ProtocolError(-32602, `Not a skill this server serves: ${uri}`);
       return { skill: s };
@@ -131,8 +151,8 @@ export function createMcpServer(services, { era, renders = era === 'modern' && c
   // tasks/update carries input for a task waiting on the client; this server never asks for any,
   // so a response is acknowledged and ignored (the extension tells servers to ignore responses to
   // keys that are not outstanding). tasks/get and tasks/cancel: src/mcp-tasks.js.
-  server.setRequestHandler('tasks/update', { params: TaskUpdateParams, result: AnyResult }, async ({ taskId }, ctx) => {
-    requireTasks(ctx);
+  server.setRequestHandler('tasks/update', { params: TaskUpdateParams, result: AnyResult }, async ({ taskId }) => {
+    if (!offer.tasks) throw missingExtension(TASKS_EXTENSION);
     if (!tasks.get(taskId)) throw new ProtocolError(-32602, 'Failed to retrieve task: Task not found');
     return {};
   });
@@ -140,9 +160,3 @@ export function createMcpServer(services, { era, renders = era === 'modern' && c
   return server;
 }
 
-function requireTasks(ctx) {
-  const caps = ctx.mcpReq.envelope?.[CLIENT_CAPABILITIES_META_KEY];
-  if (!caps?.extensions?.[TASKS_EXTENSION]) {
-    throw new ProtocolError(-32021, 'Missing required client capability', { requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } } });
-  }
-}

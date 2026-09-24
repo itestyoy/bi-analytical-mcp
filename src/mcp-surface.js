@@ -332,15 +332,19 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     // before it becomes a task (for a client that declared the Tasks extension)
     progressEveryMs,
     taskAfterMs,
-    instructions: { apps: `${SERVER_DESCRIPTION}\n${RESULT_CARDS}${skillPointer}`, plain: SERVER_DESCRIPTION + skillPointer },
-    resources(renders = true) {
+    /** The instructions for what this client is offered: the card and skills paragraphs only for
+     *  a client that declared those extensions (src/client-extensions.js). */
+    instructionsFor(offer = {}) {
+      return [SERVER_DESCRIPTION, offer.apps ? `\n${RESULT_CARDS}` : '', offer.skills ? skillPointer : ''].join('');
+    },
+    resources(offer = {}) {
       return [
-        ...(renders ? apps.resources() : []),
-        ...(skills ? skills.skills.map((s) => ({ uri: s.uri, name: s.frontmatter.name, title: `Skill: ${s.frontmatter.name}`, description: s.frontmatter.description, mimeType: 'text/markdown', size: s.resources.find((r) => r.uri === s.uri)?.size })) : []),
+        ...(offer.apps ? apps.resources() : []),
+        ...(skills && offer.skills ? skills.skills.map((s) => ({ uri: s.uri, name: s.frontmatter.name, title: `Skill: ${s.frontmatter.name}`, description: s.frontmatter.description, mimeType: 'text/markdown', size: s.resources.find((r) => r.uri === s.uri)?.size })) : []),
       ];
     },
-    templates() {
-      return skills
+    templates(offer = {}) {
+      return skills && offer.skills
         ? skills.skills.filter((s) => s.resources.some((r) => /\/recipes\//.test(r.uri))).map((s) => ({
           uriTemplate: s.uri.replace(/SKILL\.md$/, 'recipes/{recipe}.md'),
           name: `${s.frontmatter.name}-recipe`,
@@ -351,11 +355,11 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
         : [];
     },
     /** The contents of a resource, or null when this server has no such URI. */
-    read(uri, renders = true) {
+    read(uri, offer = {}) {
       if (typeof uri !== 'string') return null;
-      const ui = renders ? apps.read(uri) : null;
+      const ui = offer.apps ? apps.read(uri) : null;
       if (ui) return ui;
-      const f = skills?.read(uri);
+      const f = offer.skills ? skills?.read(uri) : null;
       return f ? [{ uri: f.uri, mimeType: f.mimeType, text: f.text }] : null;
     },
     onShutdown(fn) { shutdownHooks.add(fn); },

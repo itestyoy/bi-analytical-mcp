@@ -143,6 +143,12 @@ request's own stream, cancellation when the stream closes.
 Three extensions are declared and served; each switches on the moment a client declares it, and
 the plain tools stay exactly as they were for every client that does not:
 
+Each extension below is offered ONLY to a client that declares it in the request being served —
+its capabilities in the 2026-07-28 envelope. A 2025 client declares capabilities once, in
+`initialize`, and this server keeps no sessions, so its later requests carry nothing to go by: it is
+offered none of them (src/client-extensions.js). The listings that differ by client are cached
+`private`.
+
 - **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
   finished in `MCP_TASK_AFTER_MS` comes back as a task (`resultType: "task"`) the HOST polls; a build
   the engine hands back as a `query_id` is followed to its end, so the task's result is the rows.
@@ -152,7 +158,10 @@ the plain tools stay exactly as they were for every client that does not:
 - **Skills** (`io.modelcontextprotocol/skills`) — the analyst procedure, every recipe and (where
   python models run) the python-stage guide, served as Agent Skills (`skills/list`, `skills/get`,
   files via `resources/read` with sha256 digests). Generated at startup from the same objects
-  `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy.
+  `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy. A client
+  that does not declare it gets `skills/list` / `skills/get` refused (-32021), no skill files in the
+  resource listings or reads, and no SKILLS pointer in the instructions — the same content stays
+  reachable through `semantic_index`.
 - **Apps** (`io.modelcontextprotocol/ui`) — offered ONLY to a client that declares the extension
   (with the view's MIME type) in the request being served, i.e. a 2026-07-28 client, whose every
   request carries its capabilities. Every other client — including a 2025 client that declared it in

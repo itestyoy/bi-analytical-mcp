@@ -15,6 +15,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -56,7 +57,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mr-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend });
+  engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
@@ -113,16 +114,16 @@ test('match_recognize between_steps: explicit "any" equals the default; "gap" is
   assert.ok(G <= A && G >= 0, `gap (${G}) is a subset of any (${A}) — never over-matches`);
 });
 
-// A2/A4: the pipeline response documents its output columns + how to re-read it.
-test('pipeline response: output_columns (carried partition key) + read_with hint', opts, async (t) => {
+// A2/A4: the pipeline response documents its output columns and the task it can be re-read from.
+test('pipeline response: output_columns (carried partition key) + the task that holds it', opts, async (t) => {
   if (skip(t)) return;
   const out = await pipe([matchActivation()]);
   assert.ok(Array.isArray(out.output_columns), 'output_columns present');
   const names = out.output_columns.map((c) => c.name);
   assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to the output');
   assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel columns present');
-  assert.equal(out.read_with?.tool, 'get_query_result');
-  assert.equal(out.read_with?.table, out.model);
+  assert.equal(out.table, out.model, 'the task left the model as its table');
+  assert.match(out.task_id, /^[a-f0-9]{12}$/);
 });
 
 // A5: dry_run returns a cheap source-volume estimate; a narrower window scans fewer rows.
@@ -136,26 +137,26 @@ test('dry_run estimated_source_rows: real count, monotonic in the time window', 
   assert.ok(wide.output_columns.some((c) => c.name === 'event_name'), 'dry_run also reports output_columns');
 });
 
-// Feature C: incremental build_native_model. Each add_step returns the columns
+// Feature C: incremental build_pipeline_model. Each add_step returns the columns
 // available for the next stage; a committed draft yields the SAME rows as the
 // all-at-once register_native_model (fidelity), proven on the activation funnel.
-test('build_native_model incremental: per-step columns + commit equals all-at-once (12/8/5/3)', opts, async (t) => {
+test('build_pipeline_model incremental: per-step columns + commit equals all-at-once (12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'inc_funnel', source: 'events', include_columns: true });
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'inc_funnel', source: 'events', include_columns: true });
   assert.ok(s.draft_id, 'start returns a draft_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   // add the funnel as one match_recognize stage; its output columns must be reported.
-  const a1 = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: matchActivation(), include_columns: true });
+  const a1 = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: matchActivation(), include_columns: true });
   assert.equal(a1.step_index, 1);
   const names = a1.available_columns.map((c) => c.name);
   assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to next stage');
   assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel output columns available next');
   // preview renders SQL without materializing.
-  const pv = await engine.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  const pv = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL');
   assert.equal(pv.steps.length, 1);
   // commit materializes; rows MATCH the all-at-once funnel exactly.
-  const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(reached(c.rows, 'launch'), 12);
   assert.equal(reached(c.rows, 'tut1'), 8);
@@ -164,15 +165,15 @@ test('build_native_model incremental: per-step columns + commit equals all-at-on
 });
 
 // Lifecycle/validation guard: a rejected stage must NOT mutate the draft.
-test('build_native_model add_step rejects an invalid stage without mutating the draft', opts, async (t) => {
+test('build_pipeline_model add_step rejects an invalid stage without mutating the draft', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'inc_guard', source: 'events' });
-  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'inc_guard', source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
   await assert.rejects(
-    () => engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'project', columns: ['no_such_column'] } }),
+    () => engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'project', columns: ['no_such_column'] } }),
     'a stage referencing a missing column is rejected',
   );
-  const pv = await engine.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  const pv = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
   assert.equal(pv.steps.length, 1, 'the rejected step was not persisted');
 });
 

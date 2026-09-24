@@ -18,6 +18,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -31,7 +32,7 @@ let pg; let engine; let backend;
 const ctxOf = {};
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const create = async (decl) => {
-  const out = await engine.create_semantic_model(decl);
+  const out = await engine.build_semantic_model(decl);
   assert.equal(out.parse.ok, true, `parse failed for ${decl.name}: ${JSON.stringify(out.parse.error || out.parse)}`);
   ctxOf[decl.name] = out.context_id;
   return out;
@@ -49,7 +50,7 @@ before(async () => {
   const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'msf-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, recipes });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, recipes }));
 
   // Scenario A: build from the published recipe (tutorial step funnel)
   await create(recipes.get('funnel_from_event_property_steps').create_payload);

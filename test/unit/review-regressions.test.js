@@ -14,13 +14,14 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { openStore } from '../../src/store.js';
 import { renderContext, renderBaseModel } from '../../src/yaml-render.js';
+import { settle, isStartedTask, taskResult } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-const engine = (over = {}) => new Engine({
+const engine = (over = {}) => settle(new Engine({
   catalog: loadCatalog(CATALOG, {}),
   contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
   ...over,
-});
+}));
 
 // ── delete_native_model left a pipeline's other files behind ────────────────────────────────
 // A pipeline is a CHAIN of generated files: `<model>.sql`, and for a python stage `<model>.py` +
@@ -60,7 +61,7 @@ test('an unknown column name is refused by the property view, not read off undef
 // `term:` prefix leaked into the searchable text.
 test('a rewritten legacy memory target is stored in the same shape as a recorded one', async () => {
   const store = openStore({});
-  const mk = () => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }), store });
+  const mk = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }), store }));
   const e0 = mk();
   store.memory.add({ id: 'legacy', note: 'ad format lives in ad_type', targets: ['property:ad_type_of_event_data'], aliases: [], links: [], created_at: Date.now() });
   const e = mk(); // a fresh Engine over the same store runs the rewrite
@@ -118,37 +119,38 @@ models:
 // and still pays the warehouse Python runtime's cold start — minutes of a blocked call with no
 // query_id to poll. Checked through the engine's own decision, with a runner stub standing in for
 // the warehouse (no SQL text is asserted).
-test('a single python-model pipeline is built detached, like a chain', async (t) => {
+test('a pipeline build never holds its call: even a lone python model returns a task_id at once', async (t) => {
   process.env.MCP_PYTHON_MODELS = 'on'; // the fixture has no dbt profile, so the stage is hidden otherwise
   const VENV_PY = join(process.cwd(), '.dbtvenv', 'bin', 'python');
   const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
   if (spawnSync(PY, ['--version']).status !== 0) { t.skip('no python interpreter for the static gate'); return; }
 
-  // The build is the slow part, so it is stubbed: what is under test is WHICH path the engine
-  // takes, and a `run` that never returns within the timeout is exactly the situation the
-  // detached path exists for.
-  let ran = 0; let detached = false;
+  // The build is the slow part, so it is stubbed: what is under test is that the call that STARTS
+  // it does not wait for it — the build finishes on its own, and its task says so.
+  let finished = 0;
   const runner = {
-    async run() { ran += 1; await new Promise((r) => setTimeout(r, 400)); return { ok: true, stdout: '', stderr: '' }; },
+    async run() { await new Promise((r) => setTimeout(r, 400)); finished += 1; return { ok: true, stdout: '', stderr: '' }; },
     async show() { return { ok: true, rows: [], columns: [] }; },
     async parse() { return { ok: true }; },
   };
-  const e = new Engine({
+  const e = settle(new Engine({
     catalog: loadCatalog(CATALOG, {}),
     contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
-    runner, pythonBin: PY, queryTimeoutMs: 50, // anything slower than this hands back a query_id
-  });
+    runner, pythonBin: PY,
+  }));
   const py = {
     stage: 'python',
     functions: [{ name: 'tag', params: ['df'], body: ['df["tag"] = 1', 'return df'] }],
     steps: [{ call: 'tag', args: {} }],
     output: { columns: ['tag'] },
   };
-  const out = await e.register_native_model({ name: 'only_py', pipeline: { source: 'events', stages: [py] } });
-  assert.ok(out.ok !== false, JSON.stringify(out.error || {}));
-  detached = out.status === 'running' && !!out.query_id;
-  assert.ok(detached, `a lone python model hands back a query_id instead of blocking: ${JSON.stringify(out).slice(0, 300)}`);
-  assert.equal(ran, 1, 'and the build did start');
+  const started = await e.raw.register_native_model({ name: 'only_py', pipeline: { source: 'events', stages: [py] } });
+  assert.ok(isStartedTask(started), `the call answers with its task only: ${JSON.stringify(started).slice(0, 300)}`);
+  assert.equal(finished, 0, 'and returns before the build is done');
+  const out = await taskResult(e, started.task_id);
+  assert.equal(out.status, 'done', JSON.stringify(out.error || {}));
+  assert.equal(finished, 1, 'the build ran to its end in the task');
+  assert.equal(out.build.executed, true);
 });
 
 // ── a funnel step filtering a JSON-BLOB payload property threw ReferenceError ───────────────
@@ -186,7 +188,7 @@ models:
   const dir = mkdtempSync(join(tmpdir(), 'blob-'));
   const file = join(dir, 'catalog.yml');
   writeFileSync(file, yaml);
-  const e = new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) });
+  const e = settle(new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) }));
   const funnel = {
     stage: 'match_recognize',
     partition_by: [{ entity: 'user' }],
@@ -207,11 +209,11 @@ models:
 // so the payload is fitted to it when the recipe is handed over.
 test('a recipe payload is fitted to this catalog: an SCD join gets its validity window', async () => {
   const { loadRecipes } = await import('../../src/recipes.js');
-  const e = new Engine({
+  const e = settle(new Engine({
     catalog: loadCatalog(CATALOG, {}),
     recipes: loadRecipes(fileURLToPath(new URL('../../config/recipes.json', import.meta.url))),
     contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'rev-')) }),
-  });
+  }));
   const out = await e.semantic_index({ recipe: 'pipeline_age_offset_axis' });
   const joinStage = out.register_payload.pipeline.stages.find((s) => s.stage === 'join' && s.with === 'users');
   const u = e.catalog.getModel('users');
@@ -246,7 +248,7 @@ test('register_native_model warns about an incomplete SCD join, like the step bu
 // still reported success.
 test('remove_dimensions takes the attribute it was offered, and refuses an unknown one', async () => {
   const e = engine();
-  const first = await e.create_semantic_model({
+  const first = await e.build_semantic_model({
     name: 'ret',
     semantic_models: [
       { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
@@ -277,7 +279,7 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
 // which is not loaded in this context".
 test('groupable and the example only name models this context loaded', async () => {
   const e = engine();
-  const out = await e.create_semantic_model({
+  const out = await e.build_semantic_model({
     name: 'evonly',
     semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
@@ -476,7 +478,7 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
   const e = engine();
   // measures on one events source; the OTHER events source is loaded, but nothing declares a
   // relationship to it (two facts do not point at each other).
-  const out = await e.create_semantic_model({
+  const out = await e.build_semantic_model({
     name: 'evonly',
     use_base_models: ['crashlytics', 'users'],
     semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
@@ -529,15 +531,15 @@ models:
 // instead of a stage-time refusal at add_step.
 test('unnest is refused when the payload column it explodes is gone', async () => {
   const e = engine();
-  const s = await e.build_native_model({ action: 'start', name: 'items', source: 'events' });
+  const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } });
+  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } });
   assert.equal(ok.step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
-  const agg = await e.build_native_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_native_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }] } });
+  const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }] } });
   await assert.rejects(
-    () => e.build_native_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } }),
+    () => e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } }),
     /unknown column 'event_data' at this stage/,
   );
 });

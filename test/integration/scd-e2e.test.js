@@ -21,6 +21,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { settle, readTable } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'scd_project');
@@ -45,7 +46,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'scd-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog: loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend, queryTimeoutMs: 120000 });
+  engine = settle(new Engine({ catalog: loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
@@ -55,7 +56,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 //    the user version valid AT the event time. Proves no fan-out (total 100, not 130).
 test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 20 / DE 30, total 100)', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.create_semantic_model({
+  const created = await engine.build_semantic_model({
     name: 'scd_rev', use_base_models: ['users'],
     semantic_models: [
       { from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] },
@@ -67,12 +68,12 @@ test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 2
   const ctx = created.context_id;
 
   const total = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], materialize: true });
-  assert.equal(total.status, 'ready', JSON.stringify(total));
-  const totalR = await engine.get_query_result({ context_id: ctx, table: total.table, transform: { aggregations: [{ fn: 'sum', column: 'scd_rev_revenue', as: 't' }] } });
+  assert.equal(total.status, 'done', JSON.stringify(total));
+  const totalR = await readTable(engine, ctx, total.table, { transform: { aggregations: [{ fn: 'sum', column: 'scd_rev_revenue', as: 't' }] } });
   assert.equal(num(totalR.rows[0].t), 100, 'point-in-time total revenue = 100 (a fan-out join would give 130)');
 
   const seg = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
-  const rows = await engine.get_query_result({ context_id: ctx, table: seg.table });
+  const rows = await readTable(engine, ctx, seg.table);
   const by = mapOf(rows.rows, 'users_country', 'scd_rev_revenue');
   assert.equal(by.US, 50, `US = u1's pre-move $10 + u3 $40 = 50 (got ${JSON.stringify(by)})`);
   assert.equal(by.GB, 20, "GB = u1's post-move $20");
@@ -84,14 +85,14 @@ test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 2
 //    via a metric_time series (would error "no time spine" if the spine were missing/unbuilt).
 test('governed SCD join: metric_time series works (time spine auto-built), Jan month = 100', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.create_semantic_model({
+  const created = await engine.build_semantic_model({
     name: 'scd_ts', use_base_models: ['users'],
     semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
   });
   assert.equal(created.parse.ok, true, JSON.stringify(created.parse));
   const m = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_ts_revenue'], group_by: [{ time: 'metric_time', grain: 'month' }], materialize: true });
-  const r = await engine.get_query_result({ context_id: created.context_id, table: m.table });
+  const r = await readTable(engine, created.context_id, m.table);
   assert.equal(r.rows.reduce((s, x) => s + num(x.scd_ts_revenue), 0), 100, 'all revenue lands in the month buckets, summing to 100');
 });
 
@@ -99,7 +100,7 @@ test('governed SCD join: metric_time series works (time spine auto-built), Jan m
 //    The renderer must drop it (with a warning) and keep the manifest valid & queryable.
 test('governed SCD join: a measure on the SCD users model is dropped with a warning; the task still parses & queries', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.create_semantic_model({
+  const created = await engine.build_semantic_model({
     name: 'scd_drop', use_base_models: ['users'],
     semantic_models: [
       { from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] },
@@ -116,15 +117,15 @@ test('governed SCD join: a measure on the SCD users model is dropped with a warn
   assert.ok(created.metrics.includes('scd_drop_revenue'), 'the events metric survives');
   // and the surviving metric still queries to the point-in-time total
   const m = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['scd_drop_revenue'], materialize: true });
-  const r = await engine.get_query_result({ context_id: created.context_id, table: m.table, transform: { aggregations: [{ fn: 'sum', column: 'scd_drop_revenue', as: 't' }] } });
+  const r = await readTable(engine, created.context_id, m.table, { transform: { aggregations: [{ fn: 'sum', column: 'scd_drop_revenue', as: 't' }] } });
   assert.equal(num(r.rows[0].t), 100);
 });
 
 // 4) NATIVE PIPELINE point-in-time join via join.between: same point-in-time numbers as governed.
 test('native pipeline join.between: point-in-time revenue by country = US 50 / GB 20 / DE 30', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'scd_pipe', source: 'events' });
-  const r = await engine.build_native_model({
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_pipe', source: 'events' });
+  const r = await engine.build_pipeline_model({
     action: 'add_steps', draft_id: s.draft_id, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
       { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
@@ -133,9 +134,9 @@ test('native pipeline join.between: point-in-time revenue by country = US 50 / G
     ],
   });
   assert.equal(r.action, 'add_steps');
-  const mat = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const rows = await engine.get_query_result({ context_id: mat.context_id, table: mat.model });
+  const rows = await readTable(engine, mat.context_id, mat.model);
   const by = mapOf(rows.rows, 'country', 'revenue');
   assert.equal(by.US, 50, `US = 50 point-in-time (got ${JSON.stringify(by)})`);
   assert.equal(by.GB, 20);
@@ -147,8 +148,8 @@ test('native pipeline join.between: point-in-time revenue by country = US 50 / G
 //    to 130 and there are 6 joined rows. This is exactly what the join-completeness nudge warns about.
 test('native pipeline key-only join (no between) fans out: total inflates to 130 / 6 rows', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'scd_fanout', source: 'events' });
-  await engine.build_native_model({
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_fanout', source: 'events' });
+  await engine.build_pipeline_model({
     action: 'add_steps', draft_id: s.draft_id, stages: [
       { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },
       { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' },
@@ -156,9 +157,9 @@ test('native pipeline key-only join (no between) fans out: total inflates to 130
       { stage: 'aggregate', measures: [{ name: 'revenue', fn: 'sum', column: 'price' }, { name: 'n', fn: 'count' }] },
     ],
   });
-  const mat = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const rows = await engine.get_query_result({ context_id: mat.context_id, table: mat.model });
+  const rows = await readTable(engine, mat.context_id, mat.model);
   assert.equal(num(rows.rows[0].revenue), 130, 'fan-out double-counts u1 across both versions → 130 (vs the correct 100)');
   assert.equal(num(rows.rows[0].n), 6, 'u1 (2 purchases) × 2 versions + u2 + u3 = 6 joined rows');
 });
@@ -167,8 +168,8 @@ test('native pipeline key-only join (no between) fans out: total inflates to 130
 //    REAL schema columns to fix it (the caller's key + the event-time + validity columns).
 test('native pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with real column names', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'scd_warn', source: 'events' });
-  const r = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: 'internal_player_id', attrs: ['country'] } });
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'scd_warn', source: 'events' });
+  const r = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: 'internal_player_id', attrs: ['country'] } });
   const w = (r.recommendations || []).find((x) => /INCOMPLETE JOIN/.test(x));
   assert.ok(w, `expected an INCOMPLETE JOIN nudge, got ${JSON.stringify(r.recommendations)}`);
   assert.match(w, /internal_player_id/);        // the caller's join key, echoed
@@ -176,7 +177,7 @@ test('native pipeline: SCD key-only join surfaces the INCOMPLETE JOIN nudge with
   assert.match(w, /install_time_valid_from/);   // validity-window columns from the catalog
   assert.match(w, /install_time_valid_until/);
   // and the correct form (WITH between) produces NO such nudge
-  const s2 = await engine.build_native_model({ action: 'start', name: 'scd_ok', source: 'events' });
-  const r2 = await engine.build_native_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'users', on: 'internal_player_id', attrs: ['country'], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } } });
+  const s2 = await engine.build_pipeline_model({ action: 'start', name: 'scd_ok', source: 'events' });
+  const r2 = await engine.build_pipeline_model({ action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'users', on: 'internal_player_id', attrs: ['country'], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } } });
   assert.ok(!(r2.recommendations || []).some((x) => /INCOMPLETE JOIN/.test(x)), 'no nudge once between is present');
 });

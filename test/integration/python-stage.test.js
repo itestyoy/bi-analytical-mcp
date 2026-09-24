@@ -18,6 +18,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { DbtRunner } from '../../src/dbt-runner.js';
 import { Engine } from '../../src/engine.js';
+import { settle, readTable } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const ROOT = process.cwd();
@@ -38,7 +39,7 @@ before(async () => {
   const runner = new DbtRunner({ dbtBin: DBT_BIN, profilesDir: PROJECT, timeout: 600000 });
   const ctxs = new ContextManager({ baseProjectDir: PROJECT, workspaceRoot: join(work, 'ctx'), timeSpineDialect: 'postgres' });
   const catalog = loadCatalog(join(ROOT, 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: PROJECT, projectDir: PROJECT });
-  engine = new Engine({ catalog, contextManager: ctxs, runner, pythonBin: PY_BIN, queryTimeoutMs: 600000, dbPath: join(work, 'index.sqlite') });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner, pythonBin: PY_BIN, dbPath: join(work, 'index.sqlite') }));
 }, opts);
 after(() => { try { engine?.close(); } catch { /* noop */ } if (work) rmSync(work, { recursive: true, force: true }); });
 
@@ -83,24 +84,24 @@ test('python stage: dbt builds the prep table, runs the Python model, and its RO
   assert.ok(p4.revenue_z == null || Number.isNaN(p4.revenue_z), 'no revenue → no z-score');
   assert.deepEqual(rows.map((x) => x.tier), ['low', 'low', 'high', 'low'], 'the second function ran on the first one\'s output');
 
-  // The result IS a table in the warehouse: re-read it through get_query_result, and re-slice it.
-  const again = await engine.get_query_result({ context_id: r.context_id, table: r.model });
+  // The result IS a table in the warehouse: re-read it, and re-slice it.
+  const again = await readTable(engine, r.context_id, r.model);
   assert.equal(again.rows.length, 4);
-  const byTier = await engine.get_query_result({ context_id: r.context_id, table: r.model, transform: { group_by: ['tier'], aggregations: [{ fn: 'count', as: 'players' }], order_by: [{ key: 'tier' }] } });
+  const byTier = await readTable(engine, r.context_id, r.model, { transform: { group_by: ['tier'], aggregations: [{ fn: 'count', as: 'players' }], order_by: [{ key: 'tier' }] } });
   assert.deepEqual(byTier.rows.map((x) => [x.tier, num(x.players)]), [['high', 1], ['low', 3]]);
   // and so is the prep table, under its own name
-  const prep = await engine.get_query_result({ context_id: r.context_id, table: r.models[0].model });
+  const prep = await readTable(engine, r.context_id, r.models[0].model);
   assert.equal(prep.rows.length, 4);
   assert.ok(!Object.keys(prep.rows[0]).includes('tier'), 'the prep table is the SQL part only');
 });
 
 test('python stage: the incremental builder materializes the same split and returns the rows', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'seg2', source: 'events' });
-  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'seg2', source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
   const keep = { name: 'keep', params: ['df', 'columns'], body: ['return df[columns]'] };
-  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { ...PY, functions: [...PY.functions, keep], steps: [PY.steps[0], PY.steps[1], { call: 'keep', args: { columns: ['player_id_of_internal', 'revenue_z'] } }], output: { columns: ['player_id_of_internal', 'revenue_z'] } } });
-  const m = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { ...PY, functions: [...PY.functions, keep], steps: [PY.steps[0], PY.steps[1], { call: 'keep', args: { columns: ['player_id_of_internal', 'revenue_z'] } }], output: { columns: ['player_id_of_internal', 'revenue_z'] } } });
+  const m = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(m.build?.executed, true, JSON.stringify(m.error || m));
   assert.equal(m.row_count, 4);
   assert.deepEqual(Object.keys(m.rows[0]).sort(), ['player_id_of_internal', 'revenue_z']);
@@ -117,7 +118,7 @@ test('python stage: a runtime error in the Python model is reported from dbt, no
   assert.equal(r.ok, false);
   assert.equal(r.error.stage, 'run');
   assert.match(r.error.message, /no_such_column/);
-  await assert.rejects(() => engine.get_query_result({ context_id: r.context_id, table: r.model }).then((x) => { if (x.ok === false) throw new Error(x.error?.message || 'not ok'); }));
+  await assert.rejects(() => readTable(engine, r.context_id, r.model).then((x) => { if (x.ok === false) throw new Error(x.error?.message || 'not ok'); }));
 });
 
 // The steps work on what dbt.ref() returns on this warehouse — a DuckDBPyRelation here (BigFrames /
@@ -162,8 +163,8 @@ test('python stage anywhere: python → SQL → python → SQL is a chain of fou
   assert.deepEqual(rows.map((x) => [x.player_id_of_internal, x.n, x.revenue, x.tier]), [['p3', 2, 65, 'high']], 'only p3 has a positive z-score; n counts purchases only (the first python model filtered the source)');
   assert.ok(Math.abs(rows[0].revenue_z - Z.p3) < 1e-6);
   // every hop is a real table
-  for (const m of r.models) assert.equal((await engine.get_query_result({ context_id: r.context_id, table: m.model })).ok !== false, true, m.model);
-  const s1 = await engine.get_query_result({ context_id: r.context_id, table: r.models[0].model });
+  for (const m of r.models) assert.equal((await readTable(engine, r.context_id, m.model)).ok !== false, true, m.model);
+  const s1 = await readTable(engine, r.context_id, r.models[0].model);
   assert.equal(s1.rows.length, 5, 'the first python model kept the 5 purchase rows of the source');
 });
 

@@ -45,6 +45,7 @@ import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
 import { openStore } from '../../src/store.js';
 import { startPglite } from './pglite-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -78,20 +79,20 @@ function variant(mutate, extra = {}) {
   const at = join(mkdtempSync(join(tmpdir(), 'aud-')), 'catalog.yml');
   writeFileSync(at, yaml.dump(doc));
   const cat = loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
-  return { catalog: cat, engine: new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra }) };
+  return { catalog: cat, engine: settle(new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra })) };
 }
-const evtsTask = (eng, name, more = {}) => eng.create_semantic_model({
+const evtsTask = (eng, name, more = {}) => eng.build_semantic_model({
   name, semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
   metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }], ...more,
 });
 /** Run a pipeline of stages and return its rows. */
 async function pipeRows(source, stages, eng = engine) {
-  const s = await eng.build_native_model({ action: 'start', name: `au_${seq++}`, source });
+  const s = await eng.build_pipeline_model({ action: 'start', name: `au_${seq++}`, source });
   for (const stage of stages) {
-    const r = await eng.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage });
+    const r = await eng.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage });
     assert.ok(!r.error, `add_step failed: ${JSON.stringify(r.error || r)}`);
   }
-  const c = await eng.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await eng.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }
@@ -106,7 +107,7 @@ before(async () => {
   ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'aud-ws-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   catalog = loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE });
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath: join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite') });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath: join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite') }));
   // The value index is REAL: a full pass over the warehouse, awaited, so the guard and the
   // coverage views below answer from measured data.
   const indexer = new BackgroundIndexer({ catalog, runner: backend, index: engine.valueIndex, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
@@ -114,13 +115,13 @@ before(async () => {
 
   evCtx = (await evtsTask(engine, 'aev')).context_id;
   evUsersCtx = (await evtsTask(engine, 'aeu', { use_base_models: ['users'] })).context_id;
-  const acq = await engine.create_semantic_model({
+  const acq = await engine.build_semantic_model({
     name: 'aacq', use_base_models: ['users'],
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
   });
   acqUsersCtx = acq.context_id;
-  const both = await engine.create_semantic_model({
+  const both = await engine.build_semantic_model({
     name: 'aboth',
     semantic_models: [
       { from: 'events', event_scope: { event_name: ['first_launch'] }, measures: [{ name: 'launches', agg: 'count', field: '*' }] },
@@ -140,7 +141,7 @@ before(async () => {
     const clicks = M.fct_player_acquisition.columns.find((c) => c.name === 'clicks');
     setMcp(clicks, { measure: true, dimension: {} });
   }));
-  const bt = await bothEngine.create_semantic_model({
+  const bt = await bothEngine.build_semantic_model({
     name: 'aclk',
     semantic_models: [{ from: 'acquisition', dimensions: [{ source: 'model_column', column: 'clicks' }], measures: [{ name: 'cost', agg: 'sum', field: 'cost' }, { name: 'click_total', agg: 'sum', field: 'clicks' }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }, { name: 'click_total', type: 'simple', measure: { name: 'click_total' } }],
@@ -346,7 +347,7 @@ test('24. a declared amount the table lacks is pruned; the real one still sums t
   const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
   assert.ok(pruned.acquisition.includes('amount:bonus_spend'), JSON.stringify(pruned));
   assert.ok(!cat.aggregatableFields('acquisition').some((a) => a.name === 'bonus_spend'));
-  const c = await eng.create_semantic_model({ name: 'agr1', semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }], metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }] });
+  const c = await eng.build_semantic_model({ name: 'agr1', semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }], metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }] });
   const r = await q(c.context_id, { metrics: ['agr1_cost'] }, eng);
   assert.ok(Math.abs(num(r.rows[0].agr1_cost) - 17.5) < 1e-6);
 });
@@ -357,7 +358,7 @@ test('25. a measure over the pruned amount is refused at validation, not in the 
     M.fct_player_acquisition.columns.push({ name: 'bonus_spend', data_type: 'numeric', meta: { mcp: { measure: { unit: 'usd' } } } });
   });
   await groundCatalogToPhysical(cat, backend, BASE);
-  await assert.rejects(() => eng.create_semantic_model({ name: 'agr2', semantic_models: [{ from: 'acquisition', measures: [{ name: 'b', agg: 'sum', field: 'bonus_spend' }] }], metrics: [{ name: 'b', type: 'simple', measure: { name: 'b' } }] }),
+  await assert.rejects(() => eng.build_semantic_model({ name: 'agr2', semantic_models: [{ from: 'acquisition', measures: [{ name: 'b', agg: 'sum', field: 'bonus_spend' }] }], metrics: [{ name: 'b', type: 'simple', measure: { name: 'b' } }] }),
     /bonus_spend|invalid input/);
 });
 
@@ -369,7 +370,7 @@ test('26. a governed measure whose column is missing is pruned; the surviving on
   const { pruned } = await groundCatalogToPhysical(cat, backend, BASE);
   assert.ok(pruned.acquisition.includes('measure:ghost_total'), JSON.stringify(pruned));
   assert.equal(cat.getModel('acquisition').measures.ghost_total, undefined);
-  const c = await eng.create_semantic_model({ name: 'agr3', metrics: [{ name: 'total_spend', type: 'simple', measure: { name: 'total_spend' } }] });
+  const c = await eng.build_semantic_model({ name: 'agr3', metrics: [{ name: 'total_spend', type: 'simple', measure: { name: 'total_spend' } }] });
   assert.equal(c.parse.ok, true, JSON.stringify(c.parse));
   const r = await q(c.context_id, { metrics: ['agr3_total_spend'] }, eng);
   assert.ok(Math.abs(num(r.rows[0].agr3_total_spend) - 17.5) < 1e-6);
@@ -460,7 +461,7 @@ test('32. reset() over a fresh store leaves an empty index that the scan then fi
 test("33. an events source whose role is not called 'events' loads and counts 184", opts, async (t) => {
   if (skip(t)) return;
   assert.deepEqual([...renamedEngine.catalog.facts].sort(), ['analytics', 'crashlytics']);
-  const c = await renamedEngine.create_semantic_model({ name: 'aren', semantic_models: [{ from: 'analytics', measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] });
+  const c = await renamedEngine.build_semantic_model({ name: 'aren', semantic_models: [{ from: 'analytics', measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] });
   assert.equal(c.parse.ok, true, JSON.stringify(c.parse));
   const r = await q(c.context_id, { metrics: ['aren_n'] }, renamedEngine);
   assert.equal(num(r.rows[0].aren_n), 184);
@@ -514,7 +515,7 @@ test('39. device_model is found on users AND on crashlytics; the crash copy coun
 
 test('40. governed: ad_type as a task dimension → rewarded 10 / interstitial 8 / banner 6', opts, async (t) => {
   if (skip(t)) return;
-  const c = await engine.create_semantic_model({ name: 'aadt', semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'ad_type_of_event_data' }], measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] });
+  const c = await engine.build_semantic_model({ name: 'aadt', semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'ad_type_of_event_data' }], measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] });
   assert.equal(c.parse.ok, true, JSON.stringify(c.parse));
   const r = await q(c.context_id, { metrics: ['aadt_n'], group_by: [{ model: 'events', attribute: 'ad_type_of_event_data' }] });
   const by = mapCol(r.rows, groupCol(r, 'aadt_n'), 'aadt_n');
@@ -540,7 +541,7 @@ test('42. the value index read the same property the same way: 10 / 8 / 6 with 2
 
 test('43. a numeric property: governed sum and pipeline sum both give 85 over 8 purchases', opts, async (t) => {
   if (skip(t)) return;
-  const c = await engine.create_semantic_model({ name: 'arev', semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'rev', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'rev', type: 'simple', measure: { name: 'rev' } }, { name: 'n', type: 'simple', measure: { name: 'n' } }] });
+  const c = await engine.build_semantic_model({ name: 'arev', semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'rev', agg: 'sum', field: 'price_in_usd_of_event_data' }, { name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'rev', type: 'simple', measure: { name: 'rev' } }, { name: 'n', type: 'simple', measure: { name: 'n' } }] });
   const r = await q(c.context_id, { metrics: ['arev_rev', 'arev_n'] });
   assert.equal(num(r.rows[0].arev_rev), 85); assert.equal(num(r.rows[0].arev_n), 8);
   const rows = await pipeRows('events', [

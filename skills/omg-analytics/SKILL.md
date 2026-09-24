@@ -55,7 +55,7 @@ OMG cautions on top of the generic procedure:
 - **Complete periods**: "last week" = last full calendar week; anchor freshness on the latest
   event time, not "today".
 - **Governed first**: if the ask matches a named OMG metric (*Game Completion Rate*,
-  *Resource Income/Outcome*, *Cumulative Sessions*, …), reproduce it via `create_semantic_model`
+  *Resource Income/Outcome*, *Cumulative Sessions*, …), reproduce it via `build_semantic_model`
   — same definition as the BI dashboards. Confirm the definition in Confluence (below).
 - **Reinstalls / ATT / test users** distort cohorts, revenue and coverage — exclude/flag per
   the gotchas in `reference/playbooks.md`.

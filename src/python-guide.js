@@ -328,8 +328,8 @@ export function pythonAuthoringGuide(profile, recipes = []) {
       },
     } : {}),
     read_next: index.length
-      ? `STUDY THE RECIPES BEFORE YOU WRITE: fetch EVERY move your question involves (semantic_index({ recipe: '${index[0].id}' }), … — \`recipes.moves\` above says which id covers which), adapt them, and only then declare the stage with build_native_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.`
-      : 'Declare the stage with build_native_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.',
+      ? `STUDY THE RECIPES BEFORE YOU WRITE: fetch EVERY move your question involves (semantic_index({ recipe: '${index[0].id}' }), … — \`recipes.moves\` above says which id covers which), adapt them, and only then declare the stage with build_pipeline_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.`
+      : 'Declare the stage with build_pipeline_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.',
   };
 }
 

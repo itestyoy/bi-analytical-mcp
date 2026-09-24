@@ -18,6 +18,7 @@ import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
 import { startPglite } from './pglite-harness.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -47,7 +48,7 @@ before(async () => {
   // A temp-file value index so the index is real SQLite (not just the engine's default).
   const dbPath = join(mkdtempSync(join(tmpdir(), 'vi-db-')), 'value-index.sqlite');
   const recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath, recipes });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath, recipes }));
   index = engine.valueIndex;
   indexer = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   // Await directly — do NOT rely on timers; we want the index populated before asserting.
@@ -280,8 +281,8 @@ test('semantic_index reports the value-index sync state + jobs', opts, async (t)
   assert.ok(vi.last_successful_run.properties_indexed > 0);
   assert.ok(typeof vi.seconds_since_last_sync === 'number' && vi.seconds_since_last_sync >= 0);
   // jobs section present (no background query jobs ran in this suite).
-  assert.equal(typeof out.query_jobs.total, 'number');
-  assert.ok(Array.isArray(out.query_jobs.running));
+  assert.equal(typeof out.tasks.total, 'number');
+  assert.ok(Array.isArray(out.tasks.running));
   assert.ok(out.recommendations.length > 0);
 
   // per-property timing drill-down: by RUN (slowest first) and by PROPERTY (history).

@@ -21,6 +21,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -42,18 +43,18 @@ before(async () => {
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-jinja-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 async function countWhere(name, value, description) {
-  const s = await engine.build_native_model({ action: 'start', name, source: 'events', ...(description ? { description } : {}) });
+  const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events', ...(description ? { description } : {}) });
   assert.ok(s.draft_id, JSON.stringify(s));
-  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value }] } });
-  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] } });
-  const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value }] } });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] } });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return Number(c.rows[0].n);
 }
@@ -77,7 +78,7 @@ test('Jinja in the declaration (the model header) neither runs nor breaks the bu
 // players reached tutorial step_1.
 test('governed path: a Jinja filter value is literal, a Jinja label neither runs nor breaks dbt parse', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.create_semantic_model({
+  const out = await engine.build_semantic_model({
     name: 'jtut',
     semantic_models: [{
       from: 'events',

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog, groundCatalogToPhysical } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // Catalog grounding: a field the dbt schema DECLARES but the physical table LACKS must
 // not appear ANYWHERE — not in pipeline columns, not in event properties, not in the tool
@@ -33,7 +34,7 @@ function physicalSets(catalog) {
 function groundedEngine() {
   const catalog = loadCatalog(CATALOG, {});
   catalog.groundToPhysical(physicalSets(catalog));
-  return new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) });
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) }));
 }
 
 test('groundToPhysical prunes a phantom event property from the catalog accessors', () => {
@@ -51,8 +52,8 @@ test('groundToPhysical prunes a phantom event property from the catalog accessor
 
 test('grounded catalog: phantom field is absent from the tool SCHEMAS (enums)', () => {
   const e = groundedEngine();
-  // create_semantic_model dimension/measure enums are projected from scalarEventProps.
-  const schemaStr = JSON.stringify(e.schemas.create_semantic_model);
+  // build_semantic_model dimension/measure enums are projected from scalarEventProps.
+  const schemaStr = JSON.stringify(e.schemas.build_semantic_model);
   assert.ok(!schemaStr.includes('complete_time_of_event_data'), 'pruned property not selectable in any enum');
   assert.ok(schemaStr.includes('ad_type_of_event_data'), 'a real property is still selectable');
 });
@@ -300,7 +301,7 @@ test('grounding: ordinary columns still drop one by one — the model stays avai
 test('grounding: tools explain an unavailable model instead of "unknown model"', async () => {
   const catalog = loadCatalog(CATALOG, {});
   catalog.groundToPhysical(physWithout(catalog, 'crashlytics', ['event_name']));
-  const engine = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) });
+  const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) }));
   // { model } view: the status with the missing columns, not an error and not a half model
   const view = await engine.semantic_index({ model: 'crashlytics' });
   assert.equal(view.unavailable, true);
@@ -314,9 +315,9 @@ test('grounding: tools explain an unavailable model instead of "unknown model"',
   const schemas = buildSchemas(catalog);
   const enums = (node, out = []) => { if (Array.isArray(node)) node.forEach((n) => enums(n, out)); else if (node && typeof node === 'object') { if (Array.isArray(node.enum)) out.push(node.enum); for (const v of Object.values(node)) enums(v, out); } return out; };
   const offers = (schema, key) => enums(schema).some((e) => e.includes(key));
-  assert.ok(!offers(schemas.create_semantic_model, 'crashlytics'), 'create_semantic_model must not offer the unavailable source');
-  assert.ok(!offers(schemas.build_native_model, 'crashlytics'), 'build_native_model must not offer the unavailable source');
-  assert.ok(offers(schemas.create_semantic_model, 'events'));
+  assert.ok(!offers(schemas.build_semantic_model, 'crashlytics'), 'build_semantic_model must not offer the unavailable source');
+  assert.ok(!offers(schemas.build_pipeline_model, 'crashlytics'), 'build_pipeline_model must not offer the unavailable source');
+  assert.ok(offers(schemas.build_semantic_model, 'events'));
   const modelView = schemas.semantic_index.anyOf.find((b) => b.title === '{ model }');
   assert.ok(modelView.properties.model.enum.includes('crashlytics'), 'the { model } view still accepts it, to explain');
 });

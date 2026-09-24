@@ -58,6 +58,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { startPglite } from './pglite-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -97,10 +98,10 @@ before(async () => {
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-join-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
   // Governed contexts: MetricFlow reaches the SCD install record by itself, point-in-time.
-  const acq = await engine.create_semantic_model({
+  const acq = await engine.build_semantic_model({
     name: 'jacq',
     use_base_models: ['users'],
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
@@ -109,7 +110,7 @@ before(async () => {
   assert.equal(acq.parse.ok, true, JSON.stringify(acq.parse));
   acqCtx = acq.context_id;
 
-  const ev = await engine.create_semantic_model({
+  const ev = await engine.build_semantic_model({
     name: 'jev',
     use_base_models: ['users'],
     semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
@@ -150,8 +151,8 @@ before(async () => {
 
   ({ pruned: phantomPruned } = await groundCatalogToPhysical(phantom, backend, BASE));
 
-  phantomEngine = new Engine({ catalog: phantom, contextManager: ctxs, runner: backend });
-  const pc = await phantomEngine.create_semantic_model({
+  phantomEngine = settle(new Engine({ catalog: phantom, contextManager: ctxs, runner: backend }));
+  const pc = await phantomEngine.build_semantic_model({
     name: 'jph',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
     metrics: [{ name: 'cost', type: 'simple', measure: { name: 'cost' } }],
@@ -169,8 +170,8 @@ before(async () => {
   const ownerPath = join(mkdtempSync(join(tmpdir(), 'owner-')), 'catalog.yml');
   writeFileSync(ownerPath, yaml.dump(od));
   ownerCatalog = loadCatalog(ownerPath, { profilesDir: BASE, projectDir: BASE });
-  ownerEngine = new Engine({ catalog: ownerCatalog, contextManager: ctxs, runner: backend });
-  const oc = await ownerEngine.create_semantic_model({
+  ownerEngine = settle(new Engine({ catalog: ownerCatalog, contextManager: ctxs, runner: backend }));
+  const oc = await ownerEngine.build_semantic_model({
     name: 'jown',
     use_base_models: ['crashlytics'],
     semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
@@ -202,7 +203,7 @@ before(async () => {
   // relationship (ad_funnel__user__*), and a path can only be served when the model that owns
   // its last leg is in the context.
   const evtsOn = async (engine, name) => {
-    const r = await engine.create_semantic_model({
+    const r = await engine.build_semantic_model({
       name, use_base_models: ['crashlytics', 'users'],
       semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
       metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
@@ -212,11 +213,11 @@ before(async () => {
   };
 
   oneCatalog = owned(['rewarded_tracking_id'], ['tracking_id']);
-  oneEngine = new Engine({ catalog: oneCatalog, contextManager: ctxs, runner: backend });
+  oneEngine = settle(new Engine({ catalog: oneCatalog, contextManager: ctxs, runner: backend }));
   oneCtx = (await evtsOn(oneEngine, 'jone')).context_id;
 
   trueCatalog = owned(['funnel_tracking_id'], ['tracking_id'], 'funnel_tracking_id');
-  trueEngine = new Engine({ catalog: trueCatalog, contextManager: ctxs, runner: backend });
+  trueEngine = settle(new Engine({ catalog: trueCatalog, contextManager: ctxs, runner: backend }));
   trueCtx = (await evtsOn(trueEngine, 'jtrue')).context_id;
 }, opts);
 
@@ -225,12 +226,12 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 /** Run a pipeline of stages and return its materialized rows. */
 async function pipeRows(source, ...stages) {
-  const s = await engine.build_native_model({ action: 'start', name: `jn_${seq++}`, source });
+  const s = await engine.build_pipeline_model({ action: 'start', name: `jn_${seq++}`, source });
   for (const stage of stages) {
-    const r = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage });
+    const r = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage });
     assert.ok(!r.error, `add_step ${stage.stage}: ${JSON.stringify(r.error)}`);
   }
-  const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }
@@ -249,8 +250,8 @@ async function joinStats(source, joinStage, idColumn) {
 
 /** The add_step response for a join — used to read its warnings. */
 async function joinStep(source, joinStage) {
-  const s = await engine.build_native_model({ action: 'start', name: `jw_${seq++}`, source });
-  return engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: joinStage });
+  const s = await engine.build_pipeline_model({ action: 'start', name: `jw_${seq++}`, source });
+  return engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: joinStage });
 }
 
 const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...input });
@@ -514,7 +515,7 @@ test('22. a half-built window also drops the slowly-changing flag', opts, async 
   // …and the degradation is not just a flag on an object: the manifest PARSES (dbt rejects a
   // `natural` entity that has no window) and the join now behaves as a plain dimension —
   // u1's 36 events reach BOTH of its install rows, so the grouped total is 220, not 184.
-  const sm = await phantomEngine.create_semantic_model({
+  const sm = await phantomEngine.build_semantic_model({
     name: 'jphev',
     use_base_models: ['users'],
     semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
@@ -532,11 +533,11 @@ test('23. a phantom relationship is pruned and rejected at the call', opts, asyn
   assert.ok(!phantom.joinEntityNames().includes('ad_funnel_ghost'), 'not offered any more');
   assert.equal(phantom.entityKey('crashlytics', 'ad_funnel_ghost'), undefined);
   assert.match(String(phantomPruned.crashlytics || ''), /entity:ad_funnel_ghost/);
-  const s = await phantomEngine.build_native_model({ action: 'start', name: `ph_${seq++}`, source: 'crashlytics' });
+  const s = await phantomEngine.build_pipeline_model({ action: 'start', name: `ph_${seq++}`, source: 'crashlytics' });
   // Refused before any SQL exists: the pruned name is not even in the tool's `via` enum, so the
   // rejection lists the relationships that DID survive and never mentions the ghost.
   await assert.rejects(
-    () => phantomEngine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'events', via: 'ad_funnel_ghost' } }),
+    () => phantomEngine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'events', via: 'ad_funnel_ghost' } }),
     (e) => /must be one of|declares no such relationship/.test(e.message) && !/ad_funnel_ghost/.test(e.message),
     'a key the warehouse cannot back is refused here, not as a SQL error',
   );
@@ -550,15 +551,15 @@ test('24. the real variants are untouched by the pruning: 14 / 12 / 8', opts, as
     assert.deepEqual(phantom.entityKey('crashlytics', `ad_funnel_${v}`), [{ column: `${v}_tracking_id` }, { column: 'player_id_of_internal' }]);
   }
   const n = async (variant) => {
-    const st = await phantomEngine.build_native_model({ action: 'start', name: `ph_${seq++}`, source: 'crashlytics' });
+    const st = await phantomEngine.build_pipeline_model({ action: 'start', name: `ph_${seq++}`, source: 'crashlytics' });
     for (const stage of [
       { stage: 'join', with: 'events', via: `ad_funnel_${variant}`, kind: 'inner', attrs: ['event_id'] },
       { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] },
     ]) {
-      const r = await phantomEngine.build_native_model({ action: 'add_step', draft_id: st.draft_id, stage });
+      const r = await phantomEngine.build_pipeline_model({ action: 'add_step', draft_id: st.draft_id, stage });
       assert.ok(!r.error, JSON.stringify(r.error));
     }
-    const c = await phantomEngine.build_native_model({ action: 'materialize', draft_id: st.draft_id });
+    const c = await phantomEngine.build_pipeline_model({ action: 'materialize', draft_id: st.draft_id });
     assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
     return num(c.rows[0].n);
   };
@@ -580,15 +581,15 @@ test('25. pruning an owning key clears the join target', opts, async (t) => {
   // one assignment per player, so every one of the 184 events pairs exactly once.
   assert.deepEqual(phantom.entityKey('experiments', 'user'), [{ column: 'player_id_of_internal' }]);
   assert.equal(phantom.joinTargetFor('user'), 'users');
-  const st = await phantomEngine.build_native_model({ action: 'start', name: `ph_${seq++}`, source: 'events' });
+  const st = await phantomEngine.build_pipeline_model({ action: 'start', name: `ph_${seq++}`, source: 'events' });
   for (const stage of [
     { stage: 'join', with: 'experiments', via: 'user', kind: 'inner', attrs: ['variant_group'] },
     { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'distinct_base', fn: 'count_distinct', column: 'event_id' }] },
   ]) {
-    const r = await phantomEngine.build_native_model({ action: 'add_step', draft_id: st.draft_id, stage });
+    const r = await phantomEngine.build_pipeline_model({ action: 'add_step', draft_id: st.draft_id, stage });
     assert.ok(!r.error, JSON.stringify(r.error));
   }
-  const c = await phantomEngine.build_native_model({ action: 'materialize', draft_id: st.draft_id });
+  const c = await phantomEngine.build_pipeline_model({ action: 'materialize', draft_id: st.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(num(c.rows[0].n), 184);
   assert.equal(num(c.rows[0].distinct_base), 184, 'and it did not fan out');
@@ -656,12 +657,12 @@ function ordered(sql, cols) {
 
 /** The SQL the tool generates for these stages — read from `preview`, nothing built. */
 async function generatedSql(source, ...stages) {
-  const s = await engine.build_native_model({ action: 'start', name: `gen_${seq++}`, source });
+  const s = await engine.build_pipeline_model({ action: 'start', name: `gen_${seq++}`, source });
   for (const stage of stages) {
-    const r = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage });
+    const r = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage });
     assert.ok(!r.error, `add_step ${stage.stage}: ${JSON.stringify(r.error)}`);
   }
-  const p = await engine.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  const p = await engine.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
   assert.ok(p.model_sql, 'preview returns the generated model SQL');
   return p.model_sql;
 }
@@ -824,25 +825,25 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
     const tools = (await client.listTools()).tools.map((x) => x.name);
-    assert.ok(tools.includes('build_native_model'), 'the pipeline tool is advertised');
+    assert.ok(tools.includes('build_pipeline_model'), 'the pipeline tool is advertised');
     const call = async (name, args) => {
       const res = await client.callTool({ name, arguments: args });
       assert.ok(!res.isError, `${name}: ${res.content?.[0]?.text}`);
       return JSON.parse(res.content[0].text);
     };
 
-    const s = await call('build_native_model', { action: 'start', name: `mcp_${seq++}`, source: 'acquisition' });
-    await call('build_native_model', {
+    const s = await call('build_pipeline_model', { action: 'start', name: `mcp_${seq++}`, source: 'acquisition' });
+    await call('build_pipeline_model', {
       action: 'add_step',
       draft_id: s.draft_id,
       stage: { stage: 'join', with: 'users', via: 'user', between: AT('spend_date'), kind: 'inner', attrs: ['country'] },
     });
-    await call('build_native_model', {
+    await call('build_pipeline_model', {
       action: 'add_step',
       draft_id: s.draft_id,
       stage: { stage: 'aggregate', group_by: ['country'], measures: [{ name: 'total', fn: 'sum', column: 'cost' }] },
     });
-    const built = await call('build_native_model', { action: 'materialize', draft_id: s.draft_id });
+    const built = await call('build_pipeline_model', { action: 'materialize', draft_id: s.draft_id });
     assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
     const by = mapCol(built.rows, 'country', 'total');
     assert.ok(near(by.US, 6.75), `US=${by.US}`);
@@ -851,9 +852,9 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
     assert.ok(near(by.BR, 1.75), `BR=${by.BR}`);
 
     // A relationship the two models do not share comes back as an MCP tool ERROR, not an answer.
-    const s2 = await call('build_native_model', { action: 'start', name: `mcp_${seq++}`, source: 'events' });
+    const s2 = await call('build_pipeline_model', { action: 'start', name: `mcp_${seq++}`, source: 'events' });
     const bad = await client.callTool({
-      name: 'build_native_model',
+      name: 'build_pipeline_model',
       arguments: { action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' } },
     });
     assert.equal(bad.isError, true);
@@ -987,7 +988,7 @@ test('39. aggregating the chain: 25.00 across 3 channels, u1 dominating', opts, 
 //     plus a ratio that spans them. MetricFlow applies each source's point-in-time join itself.
 test('40. governed: spend and events from two sources, sliced by the same install attribute', opts, async (t) => {
   if (skip(t)) return;
-  const task = await engine.create_semantic_model({
+  const task = await engine.build_semantic_model({
     name: 'jmix',
     use_base_models: ['users'],
     semantic_models: [
@@ -1031,7 +1032,7 @@ test('40. governed: spend and events from two sources, sliced by the same instal
 //     same task WITH the model answers.
 test('41. a join path without its owning model is refused, and works once loaded', opts, async (t) => {
   if (skip(t)) return;
-  const bare = await engine.create_semantic_model({
+  const bare = await engine.build_semantic_model({
     name: 'jbare',
     semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
     metrics: [{ name: 'evts', type: 'simple', measure: { name: 'evts' } }],
@@ -1056,8 +1057,8 @@ test('41. a join path without its owning model is refused, and works once loaded
 //     refusal says which model was asked and what the two sides actually share.
 test('42. a chained relationship the pipeline source does not declare is refused', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: `ch_${seq++}`, source: 'acquisition' });
-  const ok = await engine.build_native_model({
+  const s = await engine.build_pipeline_model({ action: 'start', name: `ch_${seq++}`, source: 'acquisition' });
+  const ok = await engine.build_pipeline_model({
     action: 'add_step', draft_id: s.draft_id,
     stage: { stage: 'join', with: 'events', via: 'user', kind: 'inner', attrs: ['tracking_id'] },
   });
@@ -1065,14 +1066,14 @@ test('42. a chained relationship the pipeline source does not declare is refused
   // `tracking_id` is now IN the pipeline — but the ad-funnel relationship belongs to the events
   // source, not to acquisition, so it cannot be the next hop.
   await assert.rejects(
-    () => engine.build_native_model({
+    () => engine.build_pipeline_model({
       action: 'add_step', draft_id: s.draft_id,
       stage: { stage: 'join', with: 'crashlytics', via: 'ad_funnel_rewarded' },
     }),
     /'acquisition' declares no such relationship.*share: user/s,
   );
   // the hop the source DOES declare works from the same draft.
-  const good = await engine.build_native_model({
+  const good = await engine.build_pipeline_model({
     action: 'add_step', draft_id: s.draft_id,
     stage: { stage: 'join', with: 'crashlytics', via: 'user', kind: 'inner', attrs: ['crash_id'] },
   });
@@ -1084,7 +1085,7 @@ test('42. a chained relationship the pipeline source does not declare is refused
 //     is how sources are compared when a row-to-row join would be wrong.
 test('43. three sources side by side on metric_time keep their own totals: 17.50 / 184 / 13', opts, async (t) => {
   if (skip(t)) return;
-  const task = await engine.create_semantic_model({
+  const task = await engine.build_semantic_model({
     name: 'jtri',
     semantic_models: [
       { from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] },
@@ -1469,16 +1470,16 @@ const perDayCatalog = (grain) => {
 
 /** Join events → acquisition through `player_day` on the given catalog and count what matched. */
 async function perDayMatches(catalog) {
-  const eng = new Engine({ catalog, contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'perday-ctx-')), timeSpineDialect: 'postgres' }), runner: backend });
-  const s = await eng.build_native_model({ action: 'start', name: `pd_${seq++}`, source: 'events' });
-  const j = await eng.build_native_model({
+  const eng = settle(new Engine({ catalog, contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'perday-ctx-')), timeSpineDialect: 'postgres' }), runner: backend }));
+  const s = await eng.build_pipeline_model({ action: 'start', name: `pd_${seq++}`, source: 'events' });
+  const j = await eng.build_pipeline_model({
     action: 'add_step',
     draft_id: s.draft_id,
     stage: { stage: 'join', with: 'acquisition', via: 'player_day', kind: 'inner', attrs: ['cost'] },
   });
   assert.ok(!j.error, `add_step join: ${JSON.stringify(j.error)}`);
-  await eng.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'spend', fn: 'sum', column: 'cost' }] } });
-  const c = await eng.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  await eng.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }, { name: 'spend', fn: 'sum', column: 'cost' }] } });
+  const c = await eng.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return { n: num(c.rows[0].n), spend: num(c.rows[0].spend) };
 }

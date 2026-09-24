@@ -5,13 +5,13 @@
 //                    value search, asserting the rewarded → ad_type → ad_finished
 //                    provenance fact from the value index.
 //   2. INDEX STATE — semantic_index reports the value-index sync after refresh().
-//   3. NATIVE PIPE — build_native_model (start/add_step/preview/commit) builds the
-//                    activation funnel; rows read back via get_query_result; the
+//   3. NATIVE PIPE — build_pipeline_model (start/add_step/preview/commit) builds the
+//                    activation funnel; rows read back via query_pipeline_model; the
 //                    committed counts equal the all-at-once register path (12/8/5/3).
-//   4. SEMANTIC    — create_semantic_model (IAP revenue) → query_semantic_model by
+//   4. SEMANTIC    — build_semantic_model (IAP revenue) → query_semantic_model by
 //                    country → update_semantic_model adds a payers metric → re-query;
 //                    context({describe|list}) + semantic_index({status}) lifecycle.
-//   5. A/B         — build_native_model fed the conversion recipe's stages one-at-a-
+//   5. A/B         — build_pipeline_model fed the conversion recipe's stages one-at-a-
 //                    time → materialize → per-variant aggregates → ab_test + srm_check +
 //                    sample_size, asserting the exact numbers ab-test.test.js asserts.
 //   6. RECIPES     — semantic_index overview list + semantic_index({ recipe: id }).
@@ -36,6 +36,7 @@ import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
 import { startPglite } from './pglite-harness.js';
+import { settle, readTable } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -82,7 +83,7 @@ before(async () => {
   recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
   // A temp-file value index so semantic_index reports a REAL persisted SQLite index.
   const dbPath = join(mkdtempSync(join(tmpdir(), 'e2e-db-')), 'value-index.sqlite');
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, recipes, dbPath, queryTimeoutMs: 60000 });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, recipes, dbPath }));
   index = engine.valueIndex;
   indexer = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   // Await directly so the value index is populated before the discovery assertions.
@@ -166,7 +167,7 @@ test('2. semantic_index({ status }) reports a clean value-index sync with EXACT 
   assert.equal(vi.indexed_properties, vi.last_successful_run.properties_indexed);
   assert.equal(vi.total_values, vi.last_successful_run.values_written);
   assert.ok(vi.total_values > 0, 'values stored');
-  assert.equal(typeof out.query_jobs.total, 'number');
+  assert.equal(typeof out.tasks.total, 'number');
 });
 
 // 2b. Read the index DIRECTLY (bypassing semantic_index): the exact seeded values landed.
@@ -194,24 +195,24 @@ test('2b. the value index holds the exact seeded values (direct read)', opts, as
 });
 
 // ───────────────────────── 3. NATIVE PIPELINE (incremental) ─────────────────────────
-test('3a. build_native_model: start → add_step (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
+test('3a. build_pipeline_model: start → add_step (funnel) → preview → commit = 12/8/5/3', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'e2e_funnel', source: 'events', include_columns: true });
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'e2e_funnel', source: 'events', include_columns: true });
   assert.ok(s.draft_id, 'start returns a draft_id');
   assert.ok(s.available_columns.some((c) => c.name === 'player_id_of_internal'), 'source columns at start');
   S.draftId = s.draft_id;
 
   // default add_step returns a DIFF; the funnel columns show up as added.
-  const a1 = await engine.build_native_model({ action: 'add_step', draft_id: S.draftId, stage: matchActivation() });
+  const a1 = await engine.build_pipeline_model({ action: 'add_step', draft_id: S.draftId, stage: matchActivation() });
   assert.equal(a1.step_index, 1);
   const cols = a1.columns_added.map((c) => c.name);
   assert.ok(cols.includes('reached_launch') && cols.includes('completed'), 'funnel output columns reported as added');
 
-  const pv = await engine.build_native_model({ action: 'preview', draft_id: S.draftId });
+  const pv = await engine.build_pipeline_model({ action: 'preview', draft_id: S.draftId });
   assert.ok(typeof pv.model_sql === 'string' && pv.model_sql.length > 0, 'preview renders SQL (existence only)');
   assert.equal(pv.steps.length, 1);
 
-  const c = await engine.build_native_model({ action: 'materialize', draft_id: S.draftId });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: S.draftId });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(reached(c.rows, 'launch'), 12);
   assert.equal(reached(c.rows, 'tut1'), 8);
@@ -219,24 +220,24 @@ test('3a. build_native_model: start → add_step (funnel) → preview → commit
   assert.equal(reached(c.rows, 'tut3'), 3);
   S.pipeCtx = c.context_id;
   S.pipeTable = c.model;
-  assert.equal(c.read_with?.tool, 'get_query_result');
-  assert.equal(c.read_with?.table, c.model);
+  S.pipeTask = c.task_id;
+  assert.equal(c.tool, 'build_pipeline_model', 'the rows are the build task\'s result');
   // Provenance: a pipeline result is tagged tier=pipeline with the source + real data freshness.
   assert.equal(c.provenance?.tier, 'pipeline');
   assert.equal(c.provenance?.source, 'events');
   assert.ok(typeof c.provenance?.data_freshness === 'string' && c.provenance.data_freshness.length > 0, 'data freshness = latest event time');
 });
 
-test('3b. get_query_result re-reads the committed pipeline rows (same 12/8/5/3)', opts, async (t) => {
+test('3b. the build task\'s stored table is re-read (paged) with query_pipeline_model (same 12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const r = await engine.get_query_result({ context_id: S.pipeCtx, table: S.pipeTable });
+  const r = await engine.query_pipeline_model({ task_id: S.pipeTask, limit: 1000 });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(reached(r.rows, 'launch'), 12);
   assert.equal(reached(r.rows, 'tut1'), 8);
   assert.equal(reached(r.rows, 'tut2'), 5);
   assert.equal(reached(r.rows, 'tut3'), 3);
   // transform the stored table in place: count users whose furthest step is tut3 = 3
-  const t3 = await engine.get_query_result({ context_id: S.pipeCtx, table: S.pipeTable, transform: { where: [{ column: 'furthest_step_name', op: 'eq', value: 'tut3' }], aggregations: [{ fn: 'count', column: '*', as: 'n' }] } });
+  const t3 = await readTable(engine, S.pipeCtx, S.pipeTable, { transform: { where: [{ column: 'furthest_step_name', op: 'eq', value: 'tut3' }], aggregations: [{ fn: 'count', column: '*', as: 'n' }] } });
   assert.equal(t3.ok, true, JSON.stringify(t3.error));
   assert.equal(num(t3.rows[0].n), 3);
 });
@@ -253,9 +254,9 @@ test('3c. commit equals the all-at-once register_native_model path (fidelity 12/
 });
 
 // ───────────────────────── 4. SEMANTIC MODEL ─────────────────────────
-test('4a. create_semantic_model (IAP revenue) → query by country = US35/GB25/BR25, total 85', opts, async (t) => {
+test('4a. build_semantic_model (IAP revenue) → query by country = US35/GB25/BR25, total 85', opts, async (t) => {
   if (skip(t)) return;
-  const created = await engine.create_semantic_model({
+  const created = await engine.build_semantic_model({
     name: 'e2e_mon', use_base_models: ['users'],
     semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
     metrics: [{ name: 'revenue', type: 'simple', measure: { name: 'revenue' } }],
@@ -308,7 +309,7 @@ test('4c. context({describe|list}) + semantic_index({status}) reflect the regist
   assert.ok(dc.measures.includes('e2e_mon_revenue') && dc.measures.includes('e2e_mon_payers'), 'both measures in context');
 
   const status = await engine.semantic_index({ status: true });
-  assert.ok(Array.isArray(status.query_jobs.recent), 'query jobs listed in the status view'); // non-materialized queries ⇒ none spawned
+  assert.ok(Array.isArray(status.tasks.recent), 'query jobs listed in the status view'); // non-materialized queries ⇒ none spawned
 
   const ctxs = await engine.context({ action: 'list' });
   assert.ok(ctxs.contexts.some((c) => c.context_id === S.semCtx), 'semantic context listed');
@@ -316,19 +317,19 @@ test('4c. context({describe|list}) + semantic_index({status}) reflect the regist
 });
 
 // ───────────────────────── 5. A/B over the experiments role ─────────────────────────
-test('5a. build_native_model fed the conversion recipe stages → per-variant aggregates (control 6/6, variant 1/6)', opts, async (t) => {
+test('5a. build_pipeline_model fed the conversion recipe stages → per-variant aggregates (control 6/6, variant 1/6)', opts, async (t) => {
   if (skip(t)) return;
   // Exercise the AI-facing incremental builder by feeding the recipe's pipeline
   // stages one at a time, then commit. (register_native_model with the same payload
   // is the documented fallback; here we prove the add_step path also works.)
   const r = recipes.list.find((x) => x.id === 'ab_test_conversion');
   const stages = r.register_payload.pipeline.stages;
-  const start = await engine.build_native_model({ action: 'start', name: 'e2e_ab_conv', source: r.register_payload.pipeline.source });
+  const start = await engine.build_pipeline_model({ action: 'start', name: 'e2e_ab_conv', source: r.register_payload.pipeline.source });
   for (const stage of stages) {
-    const a = await engine.build_native_model({ action: 'add_step', draft_id: start.draft_id, stage });
+    const a = await engine.build_pipeline_model({ action: 'add_step', draft_id: start.draft_id, stage });
     assert.ok(Number.isInteger(a.step_index), 'each add_step advances the draft');
   }
-  const commit = await engine.build_native_model({ action: 'materialize', draft_id: start.draft_id });
+  const commit = await engine.build_pipeline_model({ action: 'materialize', draft_id: start.draft_id });
   assert.equal(commit.build?.ok, true, JSON.stringify(commit.error || commit.build));
   S.abCtx = commit.context_id;
 

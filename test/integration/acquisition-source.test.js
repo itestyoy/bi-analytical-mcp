@@ -18,6 +18,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -46,12 +47,12 @@ before(async () => {
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-acq-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
   // The schema only MARKS which fields are amounts (cost / impressions / clicks, and the
   // cost_per_click expression). It fixes no aggregation, so the task picks one per question —
   // the same `cost` field is summed here, maxed there, and read at a percentile below.
-  const out = await engine.create_semantic_model({
+  const out = await engine.build_semantic_model({
     name: 'uacq',
     use_base_models: ['users'],
     semantic_models: [{
@@ -180,12 +181,12 @@ test('the declared time axis drives metric_time on a non-events source', opts, a
 test('composite join key prevents fan-out: player+day = 12 rows, player alone = 13', opts, async (t) => {
   if (skip(t)) return;
   const rowsAfterJoin = async (name, on) => {
-    const s = await engine.build_native_model({ action: 'start', name, source: 'events' });
-    await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
-    await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'spend_date', op: 'date_trunc', column: 'device_time', granularity: 'day' } });
-    await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'acquisition', on, attrs: ['media_source'] } });
-    await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] } });
-    const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+    const s = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
+    await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'first_launch' }] } });
+    await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'spend_date', op: 'date_trunc', column: 'device_time', granularity: 'day' } });
+    await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'acquisition', on, attrs: ['media_source'] } });
+    await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] } });
+    const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
     assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
     return num(c.rows[0].n);
   };
@@ -219,9 +220,9 @@ test('the schema opt-outs hold: a measure/opted-out column is not groupable but 
 
   // …and a pipeline can still READ the opted-out column: the seed carries one loader batch per
   // row, so grouping by it yields one row per (player, day) — 13.
-  const s = await engine.build_native_model({ action: 'start', name: 'acq_batches', source: 'acquisition' });
-  await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', fn: 'count' }] } });
-  const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'acq_batches', source: 'acquisition' });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['ingest_batch_id'], measures: [{ name: 'n', fn: 'count' }] } });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 13, 'one row per (player, day) — the column is readable even though it is not an attribute');
   assert.equal(sumCol(c.rows, 'n'), 13);
@@ -235,7 +236,7 @@ test('a governed measure declared in the schema: total_spend = 17.50, applovin 8
   if (skip(t)) return;
   // The task declares NO measure of its own: it names the schema's, and adds only the attribute
   // it wants to slice by.
-  const out = await engine.create_semantic_model({
+  const out = await engine.build_semantic_model({
     name: 'gov',
     use_base_models: ['users'],
     semantic_models: [{ from: 'acquisition', dimensions: [{ source: 'model_column', column: 'media_source' }] }],

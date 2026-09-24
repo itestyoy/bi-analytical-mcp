@@ -14,7 +14,7 @@
      properties, its `meta.mcp.primary_entity` and its own space in the value
      index (keyed by `(source, property)`), and they are never mixed. No source is
      privileged: the SOURCE is always a separate argument — `semantic_index({
-     source, event })`, `build_native_model({ source })`, `semantic_models[].from`
+     source, event })`, `build_pipeline_model({ source })`, `semantic_models[].from`
      — never glued into a name. Within a source, names are used as-is. A source is
      named ALWAYS, in every catalog, including one that declares a single source:
      one address for one thing, so no name ever has a second, owner-less spelling
@@ -119,25 +119,43 @@
   official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Table — the
   pivot's only, Alert, Accordion, Chart) over the HOST's style variables, whose fallbacks are the shadcn neutral
   theme; its build is checked in and held to its sources by a test. THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT:
-  every tool is `visibility: ["model"]` except `get_query_result` (`["model", "app"]`), the view
-  resource declares an empty `csp` and the page its own CSP, and the view's ONE server call is
-  get_query_result for the result it was drawn from — a drill-down's next view
-  — a pivot row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): its
-  stored table, filtered to the path taken and grouped by the dimension chosen, each read built by
-  the view model's one definition of a view (no other tools/call, resource, model message, link or
-  network) — a test holds its sources to that. Everything else interactive stays on the data already in the page.
-- A CARD ONLY WHEN THE CALL ASKS FOR IT; ONE QUERY, ONE CARD. `structuredContent` is carried only
-  when the call asked for a card — `display` on query_semantic_model / get_query_result (given now,
-  or remembered by the query it reads), `card: true` on experiment — AND there is one to draw: the
-  view model decides (`buildViewModel(...).kind !== 'none'`); a query still running, a failure,
-  rows with no shape carry the text alone, and so does every tool without a card. A query that outlasts its call is waited for
-  with `time({ query_id })` (no card; it wakes as soon as the query is done) and read ONCE with
-  get_query_result — that read is its card. The card never waits for a query by itself.
+  every tool is `visibility: ["model"]` except `drill_result` (`["app"]` — the card's, never the
+  model's), the view resource declares an empty `csp` and the page its own CSP, and the view's ONE
+  server call is drill_result for the task it was drawn from — a drill-down's next view — a pivot
+  row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): its task's stored
+  table, filtered to the path taken and grouped by the dimension chosen, each read built by the view
+  model's one definition of a view (no other tools/call, resource, model message, link or network)
+  — a test holds its sources to that; the server serves it only for a task that was drawn.
+  Everything else interactive stays on the data already in the page.
+- BUILD, QUERY, SHOW — TWO SIDES, ONE NAMING (HARD RULE). Each side has a builder and a query
+  tool: `build_semantic_model` / `query_semantic_model` and `build_pipeline_model` /
+  `query_pipeline_model`. A call that STARTS warehouse work — a build (incl. action:update, a
+  pipeline materialize, the hidden register_native_model/update_semantic_model) or a query
+  (`query_semantic_model({ context_id, metrics… })`, `query_pipeline_model({ context_id,
+  transform })`) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
+  never waits (`Engine._startTask`; tasks on one context run in order). The query tool of the SAME
+  side reads a task back (the started answer names it in `read_with`): `{ task_id }` waits
+  (≤ MAX_WAIT_SECONDS per call) and returns the result, paging a stored table or the rows held in
+  memory; it refuses a task of the other side — before any wait — and it never draws. The side is
+  the tool that started the task, persisted with it (the jobs table's `tool`), never guessed.
+  `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
+  query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
+  task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
+  `structuredContent` is carried only by a display_model_result that drew (`drawn: true`) or an
+  experiment called with `card: true`, and only when `buildViewModel(...).kind !== 'none'`; every
+  other answer is the text alone. THE EXPERIMENT IS A SEPARATE PROCESS, NOT MIXED WITH display: it is
+  statistics over numbers the caller brings — no task, no task_id — returned at once, and it draws its
+  own card (the test, the split check, the plan) only when asked with `card: true` (a field offered to
+  an Apps client alone, refused from any other). A stored result is
+  built on by a pipeline started from its task (`build_pipeline_model({ action: 'start', from_task
+  })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
+  starting call, a reader shared by both sides, a read by table name, or route an experiment
+  through tasks or display_model_result.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): `_meta.ui`, the view resource,
-    the `display` declaration, the RESULT CARDS instructions, the `show_to_user` hint — a `display`
-    from any other client is refused;
+    display_model_result and drill_result (not even listed otherwise, and refused if called),
+    experiment's `card` field (refused otherwise), the RESULT CARDS instructions, the `show_to_user` hint;
   * Skills (`io.modelcontextprotocol/skills`): skills/list and skills/get (-32021 otherwise), the
     skill files in resources/list, templates and resources/read, the SKILLS pointer in the
     instructions;

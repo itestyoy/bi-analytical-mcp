@@ -195,7 +195,7 @@ await e.semantic_index({ source: 'events', property: 'ad_type_of_event_data' });
 // 6) filter-value guard
 const e2 = new Engine({ catalog: loadCatalog(CAT, {}), contextManager: ctx() });
 e2.valueIndex.upsertProperty('result_of_event_data', { distinctCount: 2, totalCount: 15, values: [{ value: 'Organic', freq: 10 }, { value: 'Paid', freq: 5 }] });
-const d = await e2.build_native_model({ action: 'start', name: 'guard_demo', source: 'events' });
-await e2.build_native_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'eq', value: 'organic' }] } }); // → REJECTED, did you mean 'Organic'?
-await e2.build_native_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'eq', value: 'Organic' }] } }); // → OK
+const d = await e2.build_pipeline_model({ action: 'start', name: 'guard_demo', source: 'events' });
+await e2.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'eq', value: 'organic' }] } }); // → REJECTED, did you mean 'Organic'?
+await e2.build_pipeline_model({ action: 'add_step', draft_id: d.draft_id, stage: { stage: 'where', conditions: [{ column: 'result_of_event_data', op: 'eq', value: 'Organic' }] } }); // → OK
 ```

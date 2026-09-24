@@ -13,17 +13,25 @@
 //     to its sources.
 // A host without the extension ignores `_meta.ui`: the tool is the plain tool it always was.
 //
+// TWO TOOLS DRAW, EACH ITS OWN KIND OF RESULT. display_model_result draws a FINISHED model task's
+// result — a semantic query or a pipeline — read the way the query tools read a task, each task at
+// most once: one question gets one card by construction, and starting, reading and showing a result
+// stay three separate calls. experiment is a process of its own — statistics over numbers the
+// caller brings, no task — and draws its own card when the call asks for it (card: true).
+//
 // THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT — nothing else. It gets the result the host hands
-// it; the ONE thing it may ask for is more of that same result, through get_query_result: a
-// drill-down's next view — a pivot row opened, a chart mark clicked (its stored table, filtered to
-// the path taken). Held in three places, so no single one is load-bearing:
+// it; the ONE thing it may ask for is more of that same result, through drill_result: a
+// drill-down's next view — a pivot row opened, a chart mark clicked (its task's stored table,
+// filtered to the path taken). Held in three places, so no single one is load-bearing:
 //   * every tool declares `_meta.ui.visibility` — ["model"] (callable by the model, NOT by a view;
-//     the spec's default is ["model", "app"]), except get_query_result, a read-only lookup of a
-//     finished result, which is ["model", "app"]; a host refuses a view's tools/call to any other;
+//     the spec's default is ["model", "app"]), except drill_result, which is ["app"]: the view's
+//     read of its own drawn task, which the model never sees; a host refuses a view's tools/call to
+//     any other;
 //   * the view resource declares an empty `csp` — no connect/resource/frame origins, i.e. no fetch,
 //     XHR, WebSocket, remote script or nested frame — and the page carries the same policy itself;
-//   * the view's code has exactly one server call, get_query_result, reached with its own query_id or
-//     its own drill-down source and nothing else (a unit test holds its sources to that).
+//   * the view's code has exactly one server call, drill_result, reached with its own drill-down
+//     source and nothing else (a unit test holds its sources to that); the server serves it only
+//     for a task that was drawn.
 
 import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage, RUNTIME_ASSETS } from './runtime-assets.js';
@@ -43,16 +51,18 @@ export { RESOURCE_MIME_TYPE, EXTENSION_ID as UI_EXTENSION };
 export const RESULT_VIEW_URI = 'ui://betti/result-view.html';
 export const RESULT_VIEW_FILE = RUNTIME_ASSETS.resultView.path;
 
-// The tools whose results are data a person looks at. NOT semantic_index: it is the most frequent
-// call and mostly returns catalog structure — a view on every exploration step would bury the
-// conversation.
-export const VIEWED_TOOLS = new Set(['query_semantic_model', 'get_query_result', 'experiment']);
+// The tools whose result is drawn: display_model_result (a model's rows) and experiment (the test, the
+// split check, the plan). Nothing else carries the view — not a query, not a build, not a query
+// tool's read of a task — so no read, no poll and no intermediate step ever draws.
+export const VIEWED_TOOLS = new Set(['display_model_result', 'experiment']);
 
 /** Who may call a tool: the model only — never a view (see the header). */
 export const TOOL_VISIBILITY = Object.freeze(['model']);
-/** The one tool a view may also call: the card following its own detached query to its rows. */
-export const APP_CALLABLE_TOOLS = Object.freeze(['get_query_result']);
-const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? [...TOOL_VISIBILITY, 'app'] : [...TOOL_VISIBILITY]);
+/** The one tool a view calls, and ONLY a view: the card reading the next view of its own drawn task. */
+export const APP_CALLABLE_TOOLS = Object.freeze(['drill_result']);
+/** Tools that exist only with the view: offered to a client that renders MCP Apps, and to no other. */
+export const APPS_ONLY_TOOLS = new Set(['display_model_result', 'drill_result']);
+const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? ['app'] : [...TOOL_VISIBILITY]);
 
 /**
  * The `_meta` every tool carries: its visibility, and — for a viewed tool — the view, in both

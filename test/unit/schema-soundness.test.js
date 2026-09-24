@@ -18,13 +18,14 @@ import { buildSchemas } from '../../src/schema.js';
 import { assertSchemaSound } from '../../src/schema-kit.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 const engineFor = (yaml) => {
   const dir = mkdtempSync(join(tmpdir(), 'snd-'));
   const file = join(dir, 'catalog.yml');
   writeFileSync(file, yaml);
   const catalog = loadCatalog(file, {});
-  return { catalog, engine: new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: dir }) }) };
+  return { catalog, engine: settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: dir }) })) };
 };
 
 const EVENTS = (extra = '') => `  - name: fct_events
@@ -76,14 +77,14 @@ ${USER_KEY}      - { name: ts, data_type: timestamp, meta: { mcp: { is_time: tru
 
 test('every tool schema compiles for a catalog whose sources declare no relationship', () => {
   const { engine } = engineFor(NO_RELATIONSHIPS); // constructing the Engine IS the compile
-  assert.ok(engine.schemas.build_native_model, 'the pipeline tool is still offered');
+  assert.ok(engine.schemas.build_pipeline_model, 'the pipeline tool is still offered');
 });
 
 test('every tool schema compiles for a model with no groupable dimension', () => {
   const { catalog, engine } = engineFor(NO_DIMENSIONS);
   assert.deepEqual(catalog.modelDimensionColumns('users'), []);
   // the branch exists, minus the field there is nothing to fill in
-  const branch = engine.schemas.create_semantic_model.properties.semantic_models.items.oneOf
+  const branch = engine.schemas.build_semantic_model.properties.semantic_models.items.oneOf
     .find((b) => b.properties?.from?.enum?.[0] === 'users');
   assert.ok(branch, 'the users model can still carry a semantic model');
   assert.equal(branch.properties.dimensions, undefined, 'no dimension to add → no field to fill in');
@@ -94,12 +95,12 @@ test('every tool schema compiles for an events source with no declared event voc
   const { catalog, engine } = engineFor(NO_EVENT_NAMES); // constructing the Engine IS the compile
   assert.deepEqual(catalog.eventNames('events'), [], 'nothing is declared yet');
   // Every event_name field stays a field — an OPEN string, since there is no vocabulary to offer.
-  const measure = engine.schemas.create_semantic_model.properties.semantic_models.items.oneOf
+  const measure = engine.schemas.build_semantic_model.properties.semantic_models.items.oneOf
     .find((b) => b.properties?.from?.enum?.[0] === 'events').properties.measures.items.properties.event_name;
   assert.equal(measure.items.type, 'string');
   assert.equal(measure.items.enum, undefined, 'no vocabulary → no closed list, not an empty one');
   // and the funnel stage, which builds its own step vocabulary, is offered too
-  assert.ok(engine.schemas.build_native_model.properties.stage, 'the pipeline tool is still offered');
+  assert.ok(engine.schemas.build_pipeline_model.properties.stage, 'the pipeline tool is still offered');
 });
 
 // The backstop: whatever the catalog, no built schema may carry an empty enum/oneOf/anyOf/allOf.

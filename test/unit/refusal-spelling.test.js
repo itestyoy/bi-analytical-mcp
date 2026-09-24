@@ -27,13 +27,13 @@ const text = (res) => (res.errors || []).join(' | ');
 const stage = (st) => ({ action: 'add_step', draft_id: 'ctxabc123456', stage: st });
 
 test("a pipeline stage refuses `average` and says it is spelled `avg` here", () => {
-  const res = check('build_native_model', stage({ stage: 'aggregate', measures: [{ name: 'x', fn: 'average', column: 'price' }] }));
+  const res = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'x', fn: 'average', column: 'price' }] }));
   assert.equal(res.ok, false);
   assert.match(text(res), /'average' is spelled 'avg'/);
   // the allowed list is still there — the hint adds to it, it does not replace it
   assert.match(text(res), /must be one of: sum, avg/);
   // …and the correct spelling is accepted
-  assert.equal(check('build_native_model', stage({ stage: 'aggregate', measures: [{ name: 'x', fn: 'avg', column: 'price' }] })).ok, true);
+  assert.equal(check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'x', fn: 'avg', column: 'price' }] })).ok, true);
 });
 
 test("a governed measure refuses `avg` and says it is spelled `average` here", () => {
@@ -42,19 +42,19 @@ test("a governed measure refuses `avg` and says it is spelled `average` here", (
     semantic_models: [{ from: 'events', measures: [{ name: 'm', agg, field: 'price_in_usd_of_event_data' }] }],
     metrics: [{ name: 'm', type: 'simple', measure: { name: 'm' } }],
   });
-  const res = check('create_semantic_model', payload('avg'));
+  const res = check('build_semantic_model', payload('avg'));
   assert.equal(res.ok, false);
   assert.match(text(res), /'avg' is spelled 'average'/);
-  assert.equal(check('create_semantic_model', payload('average')).ok, true);
+  assert.equal(check('build_semantic_model', payload('average')).ok, true);
 });
 
 test('the quantile parameter names itself per path: `q` in a stage, `percentile` in a measure', () => {
-  const res = check('build_native_model', stage({ stage: 'aggregate', measures: [{ name: 'p90', fn: 'percentile', percentile: 0.9, column: 'price' }] }));
+  const res = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'p90', fn: 'percentile', percentile: 0.9, column: 'price' }] }));
   assert.equal(res.ok, false);
   assert.match(text(res), /here that field is called 'q'/);
-  assert.equal(check('build_native_model', stage({ stage: 'aggregate', measures: [{ name: 'p90', fn: 'percentile', q: 0.9, column: 'price' }] })).ok, true);
+  assert.equal(check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'p90', fn: 'percentile', q: 0.9, column: 'price' }] })).ok, true);
 
-  const gov = check('create_semantic_model', {
+  const gov = check('build_semantic_model', {
     name: 'spell_pct',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'p90', agg: 'percentile', field: 'cost', q: 0.9 }] }],
     metrics: [{ name: 'p90', type: 'simple', measure: { name: 'p90' } }],
@@ -64,7 +64,7 @@ test('the quantile parameter names itself per path: `q` in a stage, `percentile`
 });
 
 test('a name with no counterpart in this path gets the plain list, with no invented advice', () => {
-  const res = check('build_native_model', stage({ stage: 'aggregate', measures: [{ name: 'x', fn: 'geomean', column: 'price' }] }));
+  const res = check('build_pipeline_model', stage({ stage: 'aggregate', measures: [{ name: 'x', fn: 'geomean', column: 'price' }] }));
   assert.equal(res.ok, false);
   assert.match(text(res), /must be one of/);
   assert.ok(!/is spelled/.test(text(res)), 'nothing is suggested for a function this server does not have');

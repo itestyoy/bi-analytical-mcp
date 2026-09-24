@@ -16,6 +16,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { settle, readTable } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -37,7 +38,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'cpt-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend, queryTimeoutMs: 120000 });
+  engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
@@ -58,17 +59,17 @@ const byPlayer = (rows) => Object.fromEntries(rows.map((r) => [String(r.player_i
 
 /** Build a draft from `steps`, materializing after each index listed in `pointsAt` (1-based). */
 async function build(name, steps, pointsAt = []) {
-  const { draft_id } = await engine.build_native_model({ action: 'start', name, source: 'events' });
+  const { draft_id } = await engine.build_pipeline_model({ action: 'start', name, source: 'events' });
   let last = null;
   for (let i = 0; i < steps.length; i += 1) {
-    await engine.build_native_model({ action: 'add_step', draft_id, stage: steps[i] });
+    await engine.build_pipeline_model({ action: 'add_step', draft_id, stage: steps[i] });
     if (pointsAt.includes(i + 1)) {
-      last = await engine.build_native_model({ action: 'materialize', draft_id });
+      last = await engine.build_pipeline_model({ action: 'materialize', draft_id });
       assert.notEqual(last.ok, false, JSON.stringify(last.error));
     }
   }
   if (!pointsAt.includes(steps.length)) {
-    last = await engine.build_native_model({ action: 'materialize', draft_id });
+    last = await engine.build_pipeline_model({ action: 'materialize', draft_id });
     assert.notEqual(last.ok, false, JSON.stringify(last.error));
   }
   return { draft_id, result: last };
@@ -90,9 +91,9 @@ test('editing a step AFTER the prefix keeps it: the numbers still match a full r
   const { draft_id, result: before } = await build('cp_edit', STEPS, [3, 4]);
   assert.equal(before.from_checkpoint.at, 3);
   const edited = { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 3 }] };
-  const ed = await engine.build_native_model({ action: 'edit_step', draft_id, index: 4, stage: edited });
+  const ed = await engine.build_pipeline_model({ action: 'edit_step', draft_id, index: 4, stage: edited });
   assert.equal(ed.from_checkpoint.at, 3, 'the prefix survived an edit below it');
-  const after = await engine.build_native_model({ action: 'materialize', draft_id });
+  const after = await engine.build_pipeline_model({ action: 'materialize', draft_id });
   assert.notEqual(after.ok, false, JSON.stringify(after.error));
   assert.equal(after.steps_recomputed, 1);
   const fresh = await build('cp_edit_ref', [...STEPS.slice(0, 3), edited]);
@@ -109,9 +110,9 @@ test('the prefix is READ, not recomputed: changing the data in its table changes
   // from the source would wipe this out; reading the table carries it through.
   const victim = players.sort()[0];
   await pg.db.query(`UPDATE public.${built.model} SET levels = 99, total_score = 4242 WHERE player_id_of_internal = '${victim}'`);
-  const cont = await engine.build_native_model({ action: 'add_step', draft_id, stage: { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] } });
+  const cont = await engine.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'where', conditions: [{ column: 'levels', op: 'gte', value: 2 }] } });
   assert.equal(cont.from_checkpoint.at, 3);
-  const out = await engine.build_native_model({ action: 'materialize', draft_id });
+  const out = await engine.build_pipeline_model({ action: 'materialize', draft_id });
   assert.notEqual(out.ok, false, JSON.stringify(out.error));
   const rows = byPlayer(out.rows);
   assert.deepEqual(rows[victim], [99, 4242], 'the continuation read the materialized prefix');
@@ -119,7 +120,7 @@ test('the prefix is READ, not recomputed: changing the data in its table changes
   for (const p of players.filter((x) => x !== victim && before[x][0] >= 2)) assert.deepEqual(rows[p], before[p]);
   // …and the prefix itself was NOT re-materialized: its table still holds exactly what it held
   // before the continuation ran (a recompute would have restored the real totals).
-  const prefix = await engine.get_query_result({ context_id: draft_id, table: built.model });
+  const prefix = await readTable(engine, draft_id, built.model);
   assert.equal(prefix.ok, true, JSON.stringify(prefix.error));
   assert.deepEqual(byPlayer(prefix.rows)[victim], [99, 4242], 'the prefix table was left alone');
   assert.notEqual(out.model, built.model, 'the continuation built its own model');
@@ -157,11 +158,11 @@ test('a funnel and a payload read run on top of a materialized event slice, with
 test('a fork inherits the prefix: same numbers as an independent recompute, and the table is only read', opts, async (t) => {
   if (skip(t)) return;
   const { draft_id, result: built } = await build('cp_parent', STEPS.slice(0, 3), [3]);
-  const fork = await engine.build_native_model({ action: 'fork', draft_id, after: 3, name: 'cp_fork' });
+  const fork = await engine.build_pipeline_model({ action: 'fork', draft_id, after: 3, name: 'cp_fork' });
   assert.deepEqual(fork.inherited_checkpoints, [{ at: 3, model: built.model, owner: draft_id }]);
   const tail = { stage: 'where', conditions: [{ column: 'total_score', op: 'gte', value: 1 }] };
-  await engine.build_native_model({ action: 'add_step', draft_id: fork.draft_id, stage: tail });
-  const forked = await engine.build_native_model({ action: 'materialize', draft_id: fork.draft_id });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: fork.draft_id, stage: tail });
+  const forked = await engine.build_pipeline_model({ action: 'materialize', draft_id: fork.draft_id });
   assert.notEqual(forked.ok, false, JSON.stringify(forked.error));
   assert.equal(forked.from_checkpoint.model, built.model, "the fork read the parent's table");
   const independent = await build('cp_fork_ref', [...STEPS.slice(0, 3), tail]);
@@ -172,10 +173,10 @@ test('a fork inherits the prefix: same numbers as an independent recompute, and 
   // inherited table carries it into the fork's own result.
   const victim = Object.keys(byPlayer(built.rows)).sort()[0];
   await pg.db.query(`UPDATE public.${built.model} SET total_score = 7777 WHERE player_id_of_internal = '${victim}'`);
-  const fork2 = await engine.build_native_model({ action: 'fork', draft_id, after: 3, name: 'cp_fork2' });
+  const fork2 = await engine.build_pipeline_model({ action: 'fork', draft_id, after: 3, name: 'cp_fork2' });
   assert.deepEqual(fork2.inherited_checkpoints, [{ at: 3, model: built.model, owner: draft_id }]);
-  await engine.build_native_model({ action: 'add_step', draft_id: fork2.draft_id, stage: tail });
-  const tampered = await engine.build_native_model({ action: 'materialize', draft_id: fork2.draft_id });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: fork2.draft_id, stage: tail });
+  const tampered = await engine.build_pipeline_model({ action: 'materialize', draft_id: fork2.draft_id });
   assert.notEqual(tampered.ok, false, JSON.stringify(tampered.error));
   assert.equal(byPlayer(tampered.rows)[victim][1], 7777, 'the inherited table was read, never rebuilt');
 });

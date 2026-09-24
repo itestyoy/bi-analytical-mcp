@@ -68,24 +68,17 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 - `DBT_PROJECT_DIR` — host path to your dbt project (mounted at `/dbt_project`; used as both `DBT_BASE_PROJECT` and `DBT_PROFILES_DIR`; the catalog is discovered from its model YAMLs).
 - `CONFIG_DIR` — host path mounted read-only at `/config` for optional `recipes.json` (and a standalone `catalog.yml` if you set `CATALOG_PATH`).
 - `CATALOG_PATH` — optional; set to a standalone catalog file instead of project discovery.
-- `QUERY_TIMEOUT_SECONDS` — how long an **SQL** build may hold the tool call before it hands back a
-  `query_id` to poll (default **20 s**). It cancels nothing: past it the build runs on in the
-  background: the caller waits with `time({ query_id })` and reads it once with `get_query_result`. **Values above 30 s are capped at 30**, with a
-  line on stderr saying so — a longer wait inside one tool call outlives the calling client's own
-  timeout, which this server cannot raise, and the caller then sees "the server is not responding"
-  while the build it started keeps running unseen. The same window bounds the WAREHOUSE READS that
-  merely enrich an answer — the physical column set a source is grounded to, the freshness of its
+- `QUERY_TIMEOUT_SECONDS` — how long a WAREHOUSE READ that merely enriches an answer may hold the
+  call (default **20 s**) — the physical column set a source is grounded to, the freshness of its
   time column, a row estimate: past it the call answers without that extra (exactly as it does when
   there is no runner at all) while the read finishes in the background and is cached for the next
   call. Otherwise the first such call after a restart, with a cold dbt process, would sit on dbt's
   own 10-minute timeout (`DBT_TIMEOUT_SECONDS`) and the client would report a generic tool failure.
+  **Values above 30 s are capped at 30**, with a line on stderr saying so — a longer wait inside one
+  tool call outlives the calling client's own timeout, which this server cannot raise. (A query or a
+  build never holds a call at all: it is a task — the call returns its `task_id` at once and
+  the query tool of its side, given `{ task_id }`, waits for it, at most 30 s per call.)
 - `CONTEXT_TTL_MS` — context GC tuning.
-- `PYTHON_BUILD_GRACE_SECONDS` — the same window for a build that includes a **Python** model, which
-  is a different figure. Unset, the RUNTIME decides: a remote one (BigFrames in a Colab Enterprise
-  notebook, Spark on Dataproc, Snowpark) hands the `query_id` back after 5 s, because it cold-starts
-  for minutes; a local one (DuckDB) keeps `QUERY_TIMEOUT_SECONDS`, because it finishes in seconds and
-  returning the rows beats returning a job id. Set this to override both; the same 30 s ceiling
-  applies.
 - `MCP_ALLOWED_ORIGINS` — comma-separated browser origin HOSTNAMES allowed to call the endpoint
   (port-agnostic, e.g. `console.example.com`). The spec requires a server to validate `Origin`
   (DNS-rebinding protection): a request **without** an Origin (every native client, every hosted
@@ -150,8 +143,10 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
 `private`.
 
 - **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
-  finished in `MCP_TASK_AFTER_MS` comes back as a task (`resultType: "task"`) the HOST polls; a build
-  the engine hands back as a `query_id` is followed to its end, so the task's result is the rows.
+  finished in `MCP_TASK_AFTER_MS` comes back as a task (`resultType: "task"`) the HOST polls; a call
+  that waits on an engine task (a query tool with `{ task_id }`, `display_model_result`) is followed to its end, so the
+  protocol task's result is the rows, not "still running". A call that starts work still answers
+  with its `task_id` at once.
   `tasks/cancel` stops the call's dbt process. (The TypeScript SDK does not implement this extension
   yet and routes `tasks/get` / `tasks/cancel` as methods of the older revision, so those two are
   answered in front of it — `src/mcp-tasks.js`, with the SDK's own request classifier — until it does.)
@@ -166,10 +161,13 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   (with the view's MIME type) in the request being served, i.e. a 2026-07-28 client, whose every
   request carries its capabilities. Every other client — including a 2025 client that declared it in
   `initialize`, whose later requests carry nothing (this server keeps no sessions) — gets no
-  `_meta.ui`, no view resource, no `display` field (a `display` it sends is refused), no card
-  instructions and no `show_to_user` hint. For a client that declares it, `query_semantic_model`,
-  `get_query_result` and `experiment` render in the host's conversation as an interactive view
-  (`ui://betti/result-view.html`):
+  `_meta.ui`, no view resource, neither `display_model_result` nor `drill_result` (not listed; a call is
+  refused), no `card` on `experiment` (refused if sent), no card instructions and no `show_to_user`
+  hint. For a client that declares it, two tools draw, each its own kind of result, in the host's
+  conversation as an interactive view (`ui://betti/result-view.html`):
+  `display_model_result({ task_id, display })` a finished MODEL result — a semantic query or a
+  pipeline — and `experiment` (a separate process: statistics over the numbers the caller brings, no
+  task) its own card when called with `card: true`:
   a CHART (a time series or a breakdown — the chart alone; the only table is the pivot below),
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
   TEST (a stat card per variant: lift, interval, verdict, the groups — a significant change coloured
@@ -177,7 +175,7 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   analyze call marks a metric where lower is better, such as crash rate or churn, and the card says
   "lower is better"), the SAMPLE-RATIO CHECK (the
   observed split against the intended one) and the SAMPLE-SIZE PLAN. What a result with rows IS is
-  declared by the caller: `display` on `query_semantic_model` / `get_query_result`, a union of closed
+  declared by the caller: `display` on `display_model_result`, a union of closed
   forms tagged by `kind` — each form's schema says which question it fits and what it needs (required
   fields, bounds, enums, if/then), so nothing about a form lives in prose: `line` (a trend; several
   `y`, or one `y` with a `series_column`, is a multi-line), `area` (a total split into parts over time,
@@ -188,40 +186,38 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   row with the change against a `previous_column`, coloured only when `good: up|down` says which way
   is good — or, with an `x` axis, the last row, its change and a sparkline), `sankey` (a row per
   link source → target with an amount; links that loop back are refused) and `pivot` (a drill-down
-  table over a MATERIALIZED result, `levels: [{ column, label }]`: the card gets the top level —
+  table over a STORED result (a query run with `materialize: true`, or a pipeline build), `levels: [{ column, label }]`: the card gets the top level —
   the header names only that one, and an opened row names the level under it ("US · by Platform") —
   and each row it opens reads the next level from the stored table, filtered to that row — 200 rows
   a level; each level re-aggregates
   with the value's agg, so sums and counts add up while distinct counts, averages and ratios do not).
   `line`, `area`, `bar` and `pie` may declare `drill: { levels: [{ column, label }], agg }` over a
-  materialized result grouped by those columns too: the chart is drawn folded over them, a click on
+  stored result grouped by those columns too: the chart is drawn folded over them, a click on
   a bar, slice or point opens a menu of the dimensions left ("by Platform"; a point also "by Platform
   over time"), and the chart redraws in the same card filtered to what was clicked — a breadcrumb
   ("All › US › ios") over it and a back button beside fullscreen step back without a read. Each
   takes a title;
-  the server checks the columns exist (a
-  detached query remembers it) and the card draws exactly that, in the declared order. Without it
+  the server checks the columns exist and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
-  result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply), a result that is gone — its table
-  or context deleted, a result held in memory expired or lost to a restart, a query_id the server
-  does not know (`error.code: result_gone`, shown as "This result is no longer available": a card
-  re-drawn later that follows such a query says so instead of "Error"),
-  SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
-  nothing would leave an empty box) and the text answer carries the rest.
-  A CARD ONLY WHEN THE CALL ASKS FOR IT: `structuredContent` (what a host draws a card from) is
-  carried only when the call asked for a card — `display` on `query_semantic_model` /
-  `get_query_result` (or remembered by the query it reads), `card: true` on `experiment` — and every
-  other answer, of every tool, is text alone. ONE QUERY, ONE CARD: even when asked, only when the
-  view model has something to draw — a query that outlasts its call (`{ status: 'running', query_id }`), a failure
-  or rows with no shape carry the text alone, so the host has nothing to render. The model waits for
-  such a query with `time({ query_id })` (no card; it wakes as soon as the query is done) and reads it
-  ONCE with `get_query_result`: that read is the query's card.
+  result arrives. A result that is gone — its table or context deleted, a result held in memory
+  expired or lost to a restart, a task_id the server does not know — is `error.code: result_gone`
+  (a card of it reads "This result is no longer available", not "Error").
+  BUILD, QUERY, SHOW: two sides with one naming — `build_semantic_model` / `query_semantic_model`
+  and `build_pipeline_model` / `query_pipeline_model`. A call that starts warehouse work (a build, a
+  query) returns only `{ task_id }` and never waits; the query tool of the same side, given
+  `{ task_id }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
+  `display_model_result` is the only tool that draws a model result, for either side: it reads the
+  task the same way and draws each task ONCE (a second call is refused). So one question gets one
+  card by construction: `structuredContent` (what a host draws a card from) is carried only by a
+  `display_model_result` that drew, or an `experiment` called with `card: true`; every other answer,
+  of every tool, is text alone. A task still running
+  is refused by display_model_result (wait with its query tool), and so is a column the result lacks.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
-  not call it) except `get_query_result`, `["model", "app"]`; the view resource declares an empty
-  `csp` (no connect, resource or frame origin) and the page carries the same Content-Security-Policy
-  itself; and the view's code makes that one call — get_query_result for its own result: the next
-  view of its own stored table when a pivot row opens or a chart mark is drilled into — and calls no
-  other tool, resource, model message or link.
+  not call it) except `drill_result`, `["app"]` (the model never sees it); the view resource declares
+  an empty `csp` (no connect, resource or frame origin) and the page carries the same
+  Content-Security-Policy itself; and the view's code makes that one call — drill_result for its own
+  task: the next view of its stored table when a pivot row opens or a chart mark is drilled into
+  (served only for a task that was drawn) — and calls no other tool, resource, model message or link.
   (`semantic_index` has no view on purpose: it is the most frequent call and a view on every
   exploration step would bury the conversation.) The view is built like the official MCP Apps
   examples — the ext-apps `App` class, host theme and style variables, shadcn/ui components,

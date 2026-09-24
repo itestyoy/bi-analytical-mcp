@@ -545,7 +545,7 @@ export function dbtSchemaToCatalog(doc) {
     // source such as acquisition). There is NO default or "anchor" source: a source may
     // be omitted only when the catalog has exactly one.
     if (mcp.anchor !== undefined) {
-      throw new Error(`model '${model.name}': meta.mcp.anchor is no longer a schema key — there is no default source. Every events source is addressed by name (semantic_index({ source }), build_native_model({ source }), semantic_models[].from); a source may be omitted only when the catalog has exactly one.`);
+      throw new Error(`model '${model.name}': meta.mcp.anchor is no longer a schema key — there is no default source. Every events source is addressed by name (semantic_index({ source }), build_pipeline_model({ source }), semantic_models[].from); a source may be omitted only when the catalog has exactly one.`);
     }
     const isFact = (model.columns || []).some((c) => { const cm = c.meta?.mcp || {}; return cm.is_event_name || cm.is_event_data; });
     if (isFact) (out.facts ||= []).push(key);

@@ -25,11 +25,9 @@ services:
       DBT_PROFILES_DIR: "/dbt_project"
       RECIPES_PATH: "/config/recipes.json"
       MCP_WORKSPACE: "/workspace"
-      # How long an SQL build holds the tool call before handing back a query_id to poll (max 30).
+      # How long a best-effort warehouse read (column set, freshness) may hold a call (max 30).
+      # Queries and builds never hold one: they are tasks, read back with query_semantic_model / query_pipeline_model ({ task_id }).
       QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-20}"
-      # A python model on BigFrames cold-starts for minutes, so the build is handed back as a job
-      # after 5s by default (the runtime's own figure). Set this only to override it.
-      PYTHON_BUILD_GRACE_SECONDS: "${PYTHON_BUILD_GRACE_SECONDS:-}"
       CONTEXT_TTL_MS: "${CONTEXT_TTL_MS:-0}"
       # PERSISTENCE — keep the value index / job history / memory across restarts. The DBs live
       # on the named `mcp_workspace` volume (below), so they survive `docker compose restart/up`.

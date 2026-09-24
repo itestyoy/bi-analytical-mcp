@@ -16,6 +16,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { stageUnion, stageBranch, stageNames } from '../helpers/stage-schema.js';
 import { pyLiteral, importAllowlist, frameProfile, compilePythonStage, runAstGate, pythonRunHints } from '../../src/python-model.js';
+import { settle } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 // The fixture catalog is loaded without a dbt profile here → no Python runtime → the stage would be
@@ -28,7 +29,7 @@ const HAS_PY = spawnSync(PY, ['--version']).status === 0;
 
 const engine = () => {
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
-  return new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY });
+  return settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY }));
 };
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }, { name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
 const ZSCORE = { name: 'zscore', params: ['df', 'column', 'as_'], body: ['df[as_] = (df[column] - df[column].mean()) / df[column].std(ddof=0)', 'return df'] };
@@ -74,8 +75,8 @@ test('python stage: one declaration lands as prep TABLE + Python model under the
   assert.equal(n.model, r.model);
   assert.deepEqual(n.chain.map((m) => m.model), [`${r.model}_s1`, r.model]);
   assert.equal(r.build.executed, false, 'no runner → written, not run');
-  // the result is addressed like any pipeline model
-  assert.equal(r.read_with.table, r.model);
+  // the context remembers the task that built it: its rows are read from there
+  assert.equal(n.task_id, r.task_id);
 });
 
 test('python stage: a rebuild WITHOUT the stage removes the Python files (dbt allows one model per name)', async (t) => {
@@ -173,7 +174,7 @@ test('python stage: the static gate refuses imports in bodies, dbt/session acces
 test('python stage: a package the runtime lacks goes to dbt\'s packages config; operator extras are literal', async (t) => {
   if (skipNoPy(t)) return;
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
-  const e = new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'bigframes' } });
+  const e = settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'bigframes' } }));
   const st = { ...PY_STAGE, imports: [{ package: 'sklearn', submodule: 'cluster', names: ['KMeans'] }, { package: 'scipy', submodule: 'stats' }, { package: 'numpy', as: 'np' }] };
   const r = await e.register_native_model(decl({ dry_run: true, pipeline: { source: 'events', stages: [AGG, st] } }));
   assert.equal(r.dry_run, true);
@@ -192,7 +193,7 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' }; // as a BigQuery profile resolves
   const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) });
-  const e = new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } });
+  const e = settle(new Engine({ catalog, contextManager: ctxs, pythonBin: PY, pythonModelConfig: { submission_method: 'serverless' } }));
   const pkgEnum = () => stageUnion(e.schemas.register_native_model, 'stages')
     .find((x) => x.properties?.stage?.enum?.[0] === 'python').properties.imports.items.properties.package.enum;
   assert.ok(pkgEnum().includes('pyspark'), `the schema offers the pinned runtime's packages: ${pkgEnum().join(', ')}`);
@@ -204,18 +205,18 @@ test('python stage: the pinned submission decides BOTH the offered packages and 
 test('incremental builder: add_step python → columns, nothing may follow, preview carries the model, materialize writes the split', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  const s = await e.build_native_model({ action: 'start', name: 'seg', source: 'events' });
-  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
-  const p = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: PY_STAGE });
+  const s = await e.build_pipeline_model({ action: 'start', name: 'seg', source: 'events' });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
+  const p = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: PY_STAGE });
   assert.deepEqual(p.columns_added.map((c) => c.name), ['revenue_z']);
-  const pv = await e.build_native_model({ action: 'preview', draft_id: s.draft_id });
+  const pv = await e.build_pipeline_model({ action: 'preview', draft_id: s.draft_id });
   assert.deepEqual(pv.models.map((m) => [m.model, m.kind]), [[`pipe_seg_${s.draft_id}_s1`, 'sql'], [`pipe_seg_${s.draft_id}`, 'python']]);
   assert.equal(pv.models[1].input, `pipe_seg_${s.draft_id}_s1`, 'the python model reads the SQL model before it');
   assert.deepEqual(pv.available_columns.map((c) => c.name), ['player_id_of_internal', 'revenue', 'revenue_z']);
   // SQL after the python stage is allowed — it becomes the next model in the chain
-  const after = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'limit', n: 5 } });
+  const after = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'limit', n: 5 } });
   assert.equal(after.step_index, 3);
-  const m = await e.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const m = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(m.model, `pipe_seg_${s.draft_id}`);
   assert.deepEqual(pipeFiles(e, s.draft_id), [`${m.model}.sql`, `${m.model}_s1.sql`, `${m.model}_s2.py`, `${m.model}_s2.yml`]);
 });
@@ -247,11 +248,11 @@ test('python stage: body structure — nesting is indentation, headers open bloc
 test('python stage: the body schema is a recursive $ref to $defs.py_block hoisted to each tool root', async (t) => {
   if (skipNoPy(t)) return;
   const e = engine();
-  for (const tool of ['build_native_model', 'register_native_model']) {
+  for (const tool of ['build_pipeline_model', 'register_native_model']) {
     const root = e.schemas[tool];
     assert.ok(root.$defs?.py_block, `${tool} carries $defs.py_block at its root`);
     assert.deepEqual(root.$defs.py_block.items.anyOf[1], { $ref: '#/$defs/py_block' }, 'the block refers to itself');
-    const stages = stageUnion(root, tool === 'build_native_model' ? 'stage' : 'stages');
+    const stages = stageUnion(root, tool === 'build_pipeline_model' ? 'stage' : 'stages');
     const py = stages.find((st) => st.properties.stage.enum?.[0] === 'python');
     assert.equal(py.properties.functions.items.properties.body.$ref, '#/$defs/py_block');
   }
@@ -294,10 +295,10 @@ test('python stage: offered only where the dbt profile can run Python models; re
   try {
     const cPg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
     assert.equal(cPg.pythonRuntime.available, false);
-    const ePg = new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    const stagesPg = stageNames(ePg.schemas.build_native_model);
+    const ePg = settle(new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
+    const stagesPg = stageNames(ePg.schemas.build_pipeline_model);
     assert.ok(!stagesPg.includes('python'), `no python stage on postgres: ${stagesPg.join(', ')}`);
-    assert.ok(!ePg.schemas.build_native_model.$defs?.py_block, 'and no py_block definition either');
+    assert.ok(!ePg.schemas.build_pipeline_model.$defs?.py_block, 'and no py_block definition either');
     // …and a declaration naming it is refused with the reason, not with a warehouse error later
     await assert.rejects(() => ePg.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] } }), /python stage is not available: .*postgres.*runs no dbt Python models|must be equal to one of the allowed values|stage/);
     // the overview says so
@@ -306,9 +307,9 @@ test('python stage: offered only where the dbt profile can run Python models; re
     assert.match(ov.python_models.reason, /postgres/);
     // with the duckdb profile it is there, and the overview names the runtime
     const cDuck = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
-    const eDuck = new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    assert.ok(stageNames(eDuck.schemas.build_native_model).includes('python'));
-    assert.ok(eDuck.schemas.build_native_model.$defs.py_block);
+    const eDuck = settle(new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
+    assert.ok(stageNames(eDuck.schemas.build_pipeline_model).includes('python'));
+    assert.ok(eDuck.schemas.build_pipeline_model.$defs.py_block);
     assert.deepEqual((await eDuck.semantic_index({})).python_models.runtime, 'duckdb');
   } finally { process.env.MCP_PYTHON_MODELS = saved; }
 });
@@ -344,8 +345,8 @@ test('python stage: the schema names THIS warehouse\'s frame — and there is no
   const saved = process.env.MCP_PYTHON_MODELS; delete process.env.MCP_PYTHON_MODELS;
   try {
     const c = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
-    const e = new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    const py = stageBranch(e.schemas.build_native_model, 'python');
+    const e = settle(new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
+    const py = stageBranch(e.schemas.build_pipeline_model, 'python');
     assert.equal(py.properties.frame, undefined, 'no frame option');
     assert.match(py.description, /DuckDBPyRelation/);
     assert.match(py.description, /converting to pandas is a deliberate, single-node choice/);
@@ -383,8 +384,8 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   const saved = process.env.MCP_PYTHON_MODELS; delete process.env.MCP_PYTHON_MODELS;
   try {
     const c = loadCatalog(CATALOG, { profilesDir: dir, dialect: 'bigquery' });
-    const e = new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY });
-    const py = stageBranch(e.schemas.build_native_model, 'python');
+    const e = settle(new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
+    const py = stageBranch(e.schemas.build_pipeline_model, 'python');
     assert.match(py.description, /MODELLING: bigframes\.ml/);
     assert.match(py.description, /RULES FOR BIGFRAMES/);
     assert.match(py.properties.functions.items.properties.body.description, /Modelling: bigframes\.ml/);
@@ -405,14 +406,14 @@ test('an adapter with no SQL dialect of its own is reported, not silently render
     const catalog = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     assert.equal(catalog.dialect, 'postgres', 'SQL is written in a dialect this server knows');
     assert.deepEqual(catalog.dialectFallback, { profile_type: 'duckdb', rendering_as: 'postgres', explicit: false });
-    const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }), pythonBin: PY });
+    const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }), pythonBin: PY }));
     const overview = await e.semantic_index({});
     assert.match(overview.dialect_note || '', /duckdb.*rendered as postgres SQL/);
     // and a profile the server DOES write SQL for says nothing
     const PG = fileURLToPath(new URL('../integration/fixtures/dbt_project', import.meta.url));
     const pg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
     assert.equal(pg.dialectFallback, null);
-    assert.equal((await new Engine({ catalog: pg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }) }).semantic_index({})).dialect_note, undefined);
+    assert.equal((await settle(new Engine({ catalog: pg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }) })).semantic_index({})).dialect_note, undefined);
   } finally { if (saved === undefined) delete process.env.WAREHOUSE_DIALECT; else process.env.WAREHOUSE_DIALECT = saved; }
 });
 
@@ -504,7 +505,7 @@ test('the python authoring guide is served for this deployment\'s runtime, with 
   if (skipNoPy(t)) return;
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide-')) }), pythonBin: PY });
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide-')) }), pythonBin: PY }));
 
   const g = await e.semantic_index({ guide: 'python' });
   assert.equal(g.runtime, 'bigframes');
@@ -525,7 +526,7 @@ test('the python authoring guide is served for this deployment\'s runtime, with 
   // a deployment that runs no python models says so instead of showing another runtime's guide
   const plain = loadCatalog(CATALOG, {});
   plain.pythonRuntime = { available: false, reason: 'no runtime' };
-  const e2 = new Engine({ catalog: plain, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide2-')) }) });
+  const e2 = settle(new Engine({ catalog: plain, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyguide2-')) }) }));
   const none = await e2.semantic_index({ guide: 'python' });
   assert.match(none.note, /runs no python models/);
   assert.equal(none.examples, undefined);
@@ -537,8 +538,8 @@ test('the stage description itself carries the runtime rules and the right form 
   if (skipNoPy(t)) return;
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pydesc-')) }), pythonBin: PY });
-  const py = stageBranch(e.schemas.build_native_model, 'python');
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pydesc-')) }), pythonBin: PY }));
+  const py = stageBranch(e.schemas.build_pipeline_model, 'python');
 
   // every rule of the guide is represented in the description…
   const guide = await e.semantic_index({ guide: 'python' });
@@ -576,9 +577,9 @@ test('the stage description and the guide send the caller to this deployment\'s 
 
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec-')) }), recipes, pythonBin: PY });
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec-')) }), recipes, pythonBin: PY }));
 
-  const py = stageBranch(e.schemas.build_native_model, 'python');
+  const py = stageBranch(e.schemas.build_pipeline_model, 'python');
   const entries = recipes.entriesRequiring('python_models');
   // The description INSISTS on reading them and says how many there are and how to fetch one — but
   // it no longer LISTS them: every caller is handed this string on every request, and the ids with
@@ -628,8 +629,8 @@ test('the stage description and the guide send the caller to this deployment\'s 
   // a deployment with no python recipes says nothing about them
   const bare = loadCatalog(CATALOG, {});
   bare.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e2 = new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec2-')) }), pythonBin: PY });
-  const py2 = stageBranch(e2.schemas.build_native_model, 'python');
+  const e2 = settle(new Engine({ catalog: bare, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pyrec2-')) }), pythonBin: PY }));
+  const py2 = stageBranch(e2.schemas.build_pipeline_model, 'python');
   assert.ok(!py2.description.includes('STUDY THE RECIPES FIRST'));
   for (const { id } of entries) assert.ok(!py2.description.includes(id), 'no recipe of another deployment is advertised');
   // …and with nothing to point at, the description carries the forms itself instead of dropping them
@@ -684,15 +685,15 @@ test('a python stage of six functions / ~150 lines is accepted by every entry po
 
   // 1. incrementally: the aggregate, then the big stage
   const e = engine();
-  const s = await e.build_native_model({ action: 'start', name: 'bigpy', source: 'events' });
-  await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
-  const added = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: big });
+  const s = await e.build_pipeline_model({ action: 'start', name: 'bigpy', source: 'events' });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: AGG });
+  const added = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: big });
   assert.equal(added.step?.stage, 'python', JSON.stringify(added.error || added).slice(0, 300));
 
   // 2. both stages at once
   const e2 = engine();
-  const s2 = await e2.build_native_model({ action: 'start', name: 'bigpy2', source: 'events' });
-  const many = await e2.build_native_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [AGG, big] });
+  const s2 = await e2.build_pipeline_model({ action: 'start', name: 'bigpy2', source: 'events' });
+  const many = await e2.build_pipeline_model({ action: 'add_steps', draft_id: s2.draft_id, stages: [AGG, big] });
   assert.equal(many.added, 2, JSON.stringify(many.error || many).slice(0, 300));
 
   // 3. all-at-once registration: renders the whole chain (python model + its SQL prep)
@@ -712,8 +713,8 @@ test('a python stage with no preparation before it is told so; one after an SQL 
 
   // 1. python FIRST, on the raw source → the nudge, and it names what belongs in SQL
   const e = engine();
-  const raw = await e.build_native_model({ action: 'start', name: 'raw_py', source: 'events' });
-  const added = await e.build_native_model({ action: 'add_step', draft_id: raw.draft_id, stage: PY_STAGE });
+  const raw = await e.build_pipeline_model({ action: 'start', name: 'raw_py', source: 'events' });
+  const added = await e.build_pipeline_model({ action: 'add_step', draft_id: raw.draft_id, stage: PY_STAGE });
   const [said] = nudge(added);
   assert.ok(said, `expected the preparation nudge, got: ${JSON.stringify(added.recommendations || [])}`);
   assert.match(said, /'events'/, 'it names the source being read raw');
@@ -722,16 +723,16 @@ test('a python stage with no preparation before it is told so; one after an SQL 
   assert.match(said, /nothing to change/, 'and it stays a recommendation, not a verdict');
 
   // 2. the same stage after an aggregate → nothing to say
-  const prepared = await e.build_native_model({ action: 'start', name: 'prep_py', source: 'events' });
-  await e.build_native_model({ action: 'add_step', draft_id: prepared.draft_id, stage: AGG });
-  const after = await e.build_native_model({ action: 'add_step', draft_id: prepared.draft_id, stage: PY_STAGE });
+  const prepared = await e.build_pipeline_model({ action: 'start', name: 'prep_py', source: 'events' });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: prepared.draft_id, stage: AGG });
+  const after = await e.build_pipeline_model({ action: 'add_step', draft_id: prepared.draft_id, stage: PY_STAGE });
   assert.deepEqual(nudge(after), [], 'an aggregate before the stage IS the preparation');
 
   // 3. a where alone counts too — narrowing is preparation
-  const scoped = await e.build_native_model({ action: 'start', name: 'scoped_py', source: 'events' });
-  await e.build_native_model({ action: 'add_step', draft_id: scoped.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] } });
-  await e.build_native_model({ action: 'add_step', draft_id: scoped.draft_id, stage: AGG });
-  const scopedPy = await e.build_native_model({ action: 'add_step', draft_id: scoped.draft_id, stage: PY_STAGE });
+  const scoped = await e.build_pipeline_model({ action: 'start', name: 'scoped_py', source: 'events' });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: scoped.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] } });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: scoped.draft_id, stage: AGG });
+  const scopedPy = await e.build_pipeline_model({ action: 'add_step', draft_id: scoped.draft_id, stage: PY_STAGE });
   assert.deepEqual(nudge(scopedPy), []);
 
   // 4. the all-at-once path says the same thing (a recipe payload, a hand-written one)
@@ -751,8 +752,8 @@ test('the SQL-vs-python division of labour is in the stage description and the g
   if (skipNoPy(t)) return;
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'sqlfirst-')) }), pythonBin: PY });
-  const py = stageBranch(e.schemas.build_native_model, 'python');
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'sqlfirst-')) }), pythonBin: PY }));
+  const py = stageBranch(e.schemas.build_pipeline_model, 'python');
   assert.match(py.description, /WHAT BELONGS HERE/);
   assert.match(py.description, /the preparation of the table this analysis reads/);
   assert.match(py.description, /never the raw source/);

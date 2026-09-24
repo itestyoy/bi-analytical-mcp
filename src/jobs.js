@@ -1,6 +1,6 @@
-// Tracks background (materialized) query jobs. Results live in the warehouse (a
-// materialized table), not in memory — so they survive crashes and are
-// re-fetchable. This store tracks status + which context/table to read from,
+// Tracks TASKS (src/engine.js _startTask): the work a tool started and its side's query tool reads back ({ task_id }). A
+// task that stores a table (a materialized query, a pipeline build) keeps its result in the
+// warehouse — re-readable after a restart. This store tracks status + which context/table to read from,
 // persisted in the shared store (one SQLite db, see store.js) so the job registry
 // survives restarts. Falls back to in-memory when no persistent store is available.
 
@@ -58,7 +58,7 @@ export class JobManager {
   }
 
   list() {
-    return [...this.jobs.values()].map((j) => ({ query_id: j.id, status: j.status, table: j.table, context_id: j.contextId, age_ms: Date.now() - j.startedAt }));
+    return [...this.jobs.values()].map((j) => ({ task_id: j.id, ...(j.tool ? { tool: j.tool } : {}), status: j.status, table: j.table, context_id: j.contextId, age_ms: Date.now() - j.startedAt }));
   }
 
   close() {

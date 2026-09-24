@@ -90,6 +90,10 @@ export function pivotRows(result, display, depth) {
 }
 
 export function buildViewModel(toolName, result, toolInput) {
+  // display_model_result draws the rows another tool produced: the card is that tool's
+  if (toolName === 'display_model_result' && result && typeof result === 'object' && result.drawn_from && typeof result.drawn_from === 'object') {
+    return buildViewModel(result.drawn_from.tool || 'result', result, null);
+  }
   const MAX_SERIES = 6; // lines share one axis; past six the legend stops being readable
   const MAX_BARS = 30; // past thirty categories bars stop being readable, flat or not
 
@@ -106,7 +110,7 @@ export function buildViewModel(toolName, result, toolInput) {
 
   // a build that is still running, or one that failed, says so — there is nothing to plot
   const none = (reason, extra = {}) => ({ kind: 'none', reason, ...extra });
-  if (result.status === 'running' && result.query_id) return none('running');
+  if (result.status === 'running') return none('running');
   // a result that existed and is no longer there (deleted, expired) is not a failure: it says so
   // plainly — error.code is RESULT_GONE in src/validate.js
   if (result.ok === false && result.error?.code === 'result_gone') return none('gone');
@@ -240,7 +244,7 @@ export function buildViewModel(toolName, result, toolInput) {
     const timeIdx = columns.findIndex((c) => c.type === 'time');
     const numIdx = columns.map((c, i) => (c.type === 'number' ? i : -1)).filter((i) => i >= 0);
     const catIdx = columns.map((c, i) => (c.type === 'category' ? i : -1)).filter((i) => i >= 0);
-    // the result TABLE's name is generated (qr_<id>, pipe_<name>_<context>) — an address, not a
+    // the result TABLE's name is generated (qr_<task_id>, pipe_<name>_<context>) — an address, not a
     // title: the card names what it shows, and the chart names its metric
     const title = toolName === 'query_semantic_model' ? 'Metric query' : 'Query result';
 

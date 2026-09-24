@@ -26,12 +26,13 @@ import { buildSchemas } from '../../src/schema.js';
 import { pipelineStageSchema } from '../../src/pipeline.js';
 import { makeValidators, validateInput } from '../../src/validate.js';
 import { getDialect } from '../../src/dialects/index.js';
+import { settle } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const engine = (dialect) => {
   const catalog = loadCatalog(CATALOG, dialect ? { dialect } : {});
   if (dialect) catalog.dialect = dialect;
-  return new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'win-')) }) });
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'win-')) }) }));
 };
 
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', fn: 'sum', column: 'price' }] };
@@ -39,10 +40,10 @@ const DERIVE = { stage: 'derive', name: 'price', op: 'extract', source: 'price_i
 
 test('a window with no partition_by is named as a global window, with the aggregate way out', async () => {
   const e = engine();
-  const { draft_id } = await e.build_native_model({ action: 'start', name: 'win', source: 'events' });
-  await e.build_native_model({ action: 'add_step', draft_id, stage: DERIVE });
-  await e.build_native_model({ action: 'add_step', draft_id, stage: AGG });
-  const out = await e.build_native_model({
+  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'win', source: 'events' });
+  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: DERIVE });
+  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: AGG });
+  const out = await e.build_pipeline_model({
     action: 'add_step', draft_id,
     stage: { stage: 'compute', name: 'revenue_avg', op: 'window', fn: 'avg', column: 'revenue' },
   });
@@ -55,9 +56,9 @@ test('a window with no partition_by is named as a global window, with the aggreg
 
 test('the same window PER GROUP says nothing — a partition is what a window is for', async () => {
   const e = engine();
-  const { draft_id } = await e.build_native_model({ action: 'start', name: 'win2', source: 'events' });
-  await e.build_native_model({ action: 'add_step', draft_id, stage: DERIVE });
-  const out = await e.build_native_model({
+  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'win2', source: 'events' });
+  await e.build_pipeline_model({ action: 'add_step', draft_id, stage: DERIVE });
+  const out = await e.build_pipeline_model({
     action: 'add_step', draft_id,
     stage: { stage: 'compute', name: 'running', op: 'window', fn: 'sum', column: 'price', partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }] },
   });
@@ -84,7 +85,7 @@ test('raw SQL carrying OVER () is caught too, and a partitioned one is not', () 
 // Pass 2 of the ladder: the numbers come back as literals, so `least` has to take one.
 test('least/greatest take a literal as well as columns, and say so when given neither', () => {
   const validators = makeValidators(buildSchemas(loadCatalog(CATALOG, {})));
-  const step = (stage) => validateInput(validators.build_native_model, { action: 'add_step', draft_id: 'ctxabc123456', stage });
+  const step = (stage) => validateInput(validators.build_pipeline_model, { action: 'add_step', draft_id: 'ctxabc123456', stage });
 
   assert.equal(step({ stage: 'compute', name: 'capped', op: 'least', parts: [{ column: 'revenue' }, { value: 100 }] }).ok, true);
   assert.equal(step({ stage: 'compute', name: 'capped', op: 'least', columns: ['revenue', 'budget'] }).ok, true);

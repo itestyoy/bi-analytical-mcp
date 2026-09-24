@@ -7,12 +7,13 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // Allowed non-data test: semantic_index's OPERATIONAL views ({status}/{run}) report
 // registry state (sync-run log + job list) read from SQLite/in-memory stores — no
 // warehouse, no generated SQL asserted. Plus the strict view contract (input validation).
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-const engine = () => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'di-')) }) });
+const engine = () => settle(new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'di-')) }) }));
 
 test('semantic_index({ status }): idle state before any sync', async () => {
   const e = engine();
@@ -22,8 +23,8 @@ test('semantic_index({ status }): idle state before any sync', async () => {
   assert.equal(out.value_index.indexed_properties, 0);
   assert.equal(out.value_index.last_run, null);
   assert.equal(out.value_index.seconds_since_last_sync, null);
-  assert.equal(out.query_jobs.total, 0);
-  assert.deepEqual(out.query_jobs.running, []);
+  assert.equal(out.tasks.total, 0);
+  assert.deepEqual(out.tasks.running, []);
   assert.ok(out.recommendations.some((r) => /not run yet/i.test(r)), 'guides the AI that the index is empty');
 });
 
@@ -123,7 +124,7 @@ function engineFor(yaml) {
   const dir = mkdtempSync(join(tmpdir(), 'srcarg-'));
   const file = join(dir, 'catalog.yml');
   writeFileSync(file, yaml);
-  return new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) });
+  return settle(new Engine({ catalog: loadCatalog(file, {}), contextManager: new ContextManager({ workspaceRoot: dir }) }));
 }
 
 test('semantic_index: an event or a column is never asked for without its source', async () => {

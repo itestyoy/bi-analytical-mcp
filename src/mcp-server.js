@@ -22,7 +22,7 @@
 
 import { z } from 'zod';
 import { Server, ProtocolError, ResourceNotFoundError } from '@modelcontextprotocol/server';
-import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine } from './mcp-surface.js';
+import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine, unknownToolMessage } from './mcp-surface.js';
 import { releasableSignal } from './request-context.js';
 import { UI_EXTENSION, RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
 import { clientCapabilities, declaresExtension } from './client-extensions.js';
@@ -85,11 +85,11 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     const { name, arguments: args } = request.params;
     // an unknown tool is a protocol error (-32602) in every revision; a private engine method is
     // an unknown tool — a name never dispatches to anything but a tool
-    if (!isCallableTool(engine, name)) throw new ProtocolError(-32602, `Unknown tool: ${name}`);
+    if (!isCallableTool(engine, name)) throw new ProtocolError(-32602, unknownToolMessage(name).replace(/^unknown tool/, 'Unknown tool'));
 
-    // The call's cancellation reaches its dbt processes only while the call is in flight: a build
-    // handed back as a query_id is meant to outlive the call (the per-request transport closes when
-    // the response is sent, which aborts this signal).
+    // The call's cancellation reaches its dbt processes only while the call is in flight: a task it
+    // started is meant to outlive the call (the per-request transport closes when the response is
+    // sent, which aborts this signal).
     const cancel = releasableSignal(ctx.mcpReq.signal);
     try {
       if (offer.tasks) return await callAsTask(name, args, cancel);
@@ -110,13 +110,13 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
    * The Tasks extension: a call that has not finished within services.taskAfterMs becomes a task
    * the client polls; one that has, answers inline. The work keeps its own cancellation from the
    * moment it becomes a task — the request that started it is over, tasks/cancel is the way to
-   * stop it now. A detached build is followed to its rows (runToCompletion).
+   * stop it now. A call that waits on an engine task is followed to its end (runToCompletion).
    */
   async function callAsTask(name, args, requestCancel) {
     const ctl = new AbortController();
     const forward = () => ctl.abort(requestCancel.signal.reason);
     requestCancel.signal.addEventListener('abort', forward, { once: true });
-    const work = runToCompletion(engine, name, args, { signal: ctl.signal, pollMs: tasks.pollIntervalMs, renders });
+    const work = runToCompletion(engine, name, args, { signal: ctl.signal, renders });
     const finished = await Promise.race([work.then((r) => r.result), new Promise((r) => { setTimeout(() => r(null), services.taskAfterMs).unref?.(); })]);
     requestCancel.signal.removeEventListener('abort', forward);
     if (finished) return finished;

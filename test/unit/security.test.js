@@ -10,14 +10,16 @@ const catalog = loadCatalog(join(process.cwd(), 'config', 'catalog.yml'));
 const validators = makeValidators(buildSchemas(catalog));
 const v = (tool, input) => validateInput(validators[tool], input);
 
-test('get_query_result rejects SQL-injection in `table` (must be qr_<hex>)', () => {
-  assert.equal(v('get_query_result', { context_id: 'abcdef12', table: "qr_x') }} ; drop table dim_users -- " }).ok, false);
-  assert.equal(v('get_query_result', { context_id: 'abcdef12', table: 'fct_analytics_events' }).ok, false);
-  assert.ok(v('get_query_result', { context_id: 'abcdef12', table: 'qr_aabbccddeeff' }).ok);
+test('a task is addressed by its id alone — no table name or path reaches a read', () => {
+  for (const tool of ['query_semantic_model', 'query_pipeline_model', 'display_model_result']) {
+    assert.equal(v(tool, { task_id: "x') }} ; drop table dim_users -- " }).ok, false, `${tool}: a task id is hex`);
+    assert.equal(v(tool, { task_id: 'aabbccddeeff', table: 'fct_analytics_events' }).ok, false, `${tool}: no table to name`);
+    assert.ok(v(tool, { task_id: 'aabbccddeeff' }).ok);
+  }
+  assert.equal(v('drill_result', { task_id: 'aabbccddeeff', transform: {}, table: 'qr_aabbccddeeff' }).ok, false);
 });
-
 test('context_id is pattern-constrained (no path traversal) on all context tools', () => {
-  for (const tool of ['get_query_result', 'query_semantic_model', 'drop_context', 'describe_context']) {
+  for (const tool of ['query_semantic_model', 'drop_context', 'describe_context']) {
     const base = tool === 'query_semantic_model' ? { metrics: ['m'] } : {};
     assert.equal(v(tool, { ...base, context_id: '../../../etc/passwd' }).ok, false, `${tool} should reject traversal`);
     assert.equal(v(tool, { ...base, context_id: 'a/b' }).ok, false, `${tool} should reject slashes`);

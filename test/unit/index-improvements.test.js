@@ -7,11 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 function engine(extra = {}) {
   const catalog = loadCatalog(CATALOG, {});
-  return new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'idx-')) }), ...extra });
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'idx-')) }), ...extra }));
 }
 
 // п.2 RECALL: the index keeps only top-N values, so a property with more distinct values
@@ -62,11 +63,11 @@ test('memoryDbPath persists findings across engine instances', async () => {
   const ws = () => new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'idx-')) });
   const cat = () => loadCatalog(CATALOG, {});
 
-  const e1 = new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb });
+  const e1 = settle(new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb }));
   const rec = await e1.memory({ action: 'record', note: 'durable finding about ads', targets: [{ source: 'events', name: 'ad_type_of_event_data' }] });
   e1.close();
 
-  const e2 = new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb });
+  const e2 = settle(new Engine({ catalog: cat(), contextManager: ws(), memoryDbPath: memDb }));
   const list = await e2.memory({ action: 'list' });
   assert.ok(list.notes.some((n) => n.id === rec.id && n.note === 'durable finding about ads'), 'finding persisted in the dedicated memory store');
   e2.close();

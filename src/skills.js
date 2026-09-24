@@ -124,7 +124,7 @@ export function buildSkills(engine) {
   ].join('\n');
   addSkill('betti/analytics', {
     name: 'analytics',
-    description: 'How to answer a product-analytics question with this server\'s tools: discover the catalog with semantic_index, prefer a governed metric (create_semantic_model + query_semantic_model) over a one-off pipeline (build_native_model), bound and review the query, report with provenance. Includes the IF/DO routing and every recipe by family. Use for any question that needs this data.',
+    description: 'How to answer a product-analytics question with this server\'s tools: discover the catalog with semantic_index, prefer a governed metric (build_semantic_model + query_semantic_model) over a one-off pipeline (build_pipeline_model), bound and review the query, report with provenance. Includes the IF/DO routing and every recipe by family. Use for any question that needs this data.',
   }, body, visible.map(recipeFile));
 
   // ── the python-stage authoring guide (only where python models run) ──
@@ -140,7 +140,7 @@ export function buildSkills(engine) {
     ].join('\n');
     addSkill('betti/python-stage', {
       name: 'python-stage',
-      description: 'Authoring guide for a python stage in a build_native_model pipeline on this warehouse\'s python runtime: what belongs in python (only what SQL cannot say, on a table prepared by SQL stages), the frame\'s rules and the forms that raise, the in-engine ML library, and worked recipes per move. Use before writing any python stage.',
+      description: 'Authoring guide for a python stage in a build_pipeline_model pipeline on this warehouse\'s python runtime: what belongs in python (only what SQL cannot say, on a table prepared by SQL stages), the frame\'s rules and the forms that raise, the in-engine ML library, and worked recipes per move. Use before writing any python stage.',
     }, pyBody, pyRecipes.map(recipeFile));
   }
 

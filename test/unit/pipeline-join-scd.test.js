@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // Allowed non-data test: this asserts a NUDGE/recommendation (a UX affordance surfaced in the
 // pipeline response), not query correctness and not generated SQL text. A key-only join to an
@@ -48,15 +49,15 @@ function engine() {
   const path = join(dir, 'catalog.yml');
   writeFileSync(path, SCD_CATALOG);
   const catalog = loadCatalog(path, {});
-  return new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'scdjoin-ws-')) }) });
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'scdjoin-ws-')) }) }));
 }
 
 const hasIncompleteJoin = (recs) => (recs || []).some((r) => /INCOMPLETE JOIN/.test(r) && /SCD-2/.test(r));
 
 test('key-only join to an SCD-2 dimension → response warns the join is incomplete (fan-out)', async () => {
   const e = engine();
-  const s = await e.build_native_model({ action: 'start', name: 'jtest', source: 'events' });
-  const r = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: 'player_id', attrs: ['country'] } });
+  const s = await e.build_pipeline_model({ action: 'start', name: 'jtest', source: 'events' });
+  const r = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'join', with: 'users', on: 'player_id', attrs: ['country'] } });
   assert.ok(hasIncompleteJoin(r.recommendations), `expected an incomplete-join warning, got: ${JSON.stringify(r.recommendations)}`);
   // the warning names the exact fix (event time + the validity columns)
   const w = r.recommendations.find((x) => /INCOMPLETE JOIN/.test(x));
@@ -68,8 +69,8 @@ test('key-only join to an SCD-2 dimension → response warns the join is incompl
 
 test('SCD-2 join WITH a point-in-time between window → no incomplete-join warning', async () => {
   const e = engine();
-  const s = await e.build_native_model({ action: 'start', name: 'jtest', source: 'events' });
-  const r = await e.build_native_model({
+  const s = await e.build_pipeline_model({ action: 'start', name: 'jtest', source: 'events' });
+  const r = await e.build_pipeline_model({
     action: 'add_step', draft_id: s.draft_id,
     stage: { stage: 'join', with: 'users', on: 'player_id', attrs: ['country'], between: { value: 'device_time', from: 'install_time_valid_from', to: 'install_time_valid_until' } },
   });

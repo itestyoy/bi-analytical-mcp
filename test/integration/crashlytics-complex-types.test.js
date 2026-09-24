@@ -27,6 +27,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -55,7 +56,7 @@ before(async () => {
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'cxtype-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
@@ -63,20 +64,20 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 /** Build and materialize a pipeline over the crash source; return its rows. */
 async function pipeRows(...stages) {
-  const s = await engine.build_native_model({ action: 'start', name: `cx_${seq++}`, source: 'crashlytics' });
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cx_${seq++}`, source: 'crashlytics' });
   for (const stage of stages) {
-    const r = await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage });
+    const r = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage });
     assert.ok(!r.error, `add_step ${stage.stage}: ${JSON.stringify(r.error)}`);
   }
-  const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   return c.rows;
 }
 
 /** The add_step response (for rejection assertions). */
 async function step(stage) {
-  const s = await engine.build_native_model({ action: 'start', name: `cxw_${seq++}`, source: 'crashlytics' });
-  return engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage });
+  const s = await engine.build_pipeline_model({ action: 'start', name: `cxw_${seq++}`, source: 'crashlytics' });
+  return engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage });
 }
 
 // ═══════════ A. an array of scalars ═══════════

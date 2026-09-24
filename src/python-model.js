@@ -84,14 +84,6 @@ export function frameProfile(rt, config = {}) {
       // runtime inside it.
       runHints: bigframesRunHints(),
       packages: ['bigframes'],
-      // HOW LONG A BUILD MAY HOLD THE CALL before it is handed back as a job to poll. This is a
-      // property of the RUNTIME, like the frame type and the ML library: dbt starts a Colab
-      // Enterprise notebook, which is minutes of cold start before a single row is computed, and
-      // the client on the other end of our tool call has a timeout we neither know nor can raise.
-      // So: hand back the query_id in seconds. A runtime that declares nothing here keeps the
-      // ordinary query window, because for a LOCAL runtime (duckdb) the build is seconds and
-      // detaching it would make every call asynchronous for no reason.
-      buildGraceMs: 5000,
     };
   }
   if (runtime === 'bigquery' || runtime === 'databricks') {
@@ -103,7 +95,6 @@ export function frameProfile(rt, config = {}) {
       guide: 'RULES FOR PYSPARK: modelling = pyspark.ml (distributed), not sklearn (needs toPandas(), single-node on the driver); stay in pyspark.sql column expressions (F.col / F.when / groupBy.agg / Window); avoid Python UDFs and row iteration (they serialize every row through Python), and collect() / toPandas() on a large frame; df.pandas_api() keeps pandas syntax distributed.',
       packagesNote: 'On PySpark prefer pyspark (pyspark.ml) over sklearn / scipy / statsmodels: those need toPandas(), single-node.',
       packages: ['pyspark'],
-      buildGraceMs: 5000, // a Dataproc / job-cluster start is minutes, like BigFrames above
     };
   }
   if (runtime === 'snowflake') {
@@ -115,7 +106,6 @@ export function frameProfile(rt, config = {}) {
       guide: 'RULES FOR SNOWPARK: modelling = snowflake.ml.modeling (runs in the warehouse), not sklearn (needs to_pandas(), single-node); stay in Snowpark column expressions (F.col / F.when / group_by.agg / Window); avoid Python UDFs on rows and to_pandas() on a large frame.',
       packagesNote: 'On Snowpark prefer snowflake (snowflake.ml.modeling) over sklearn / scipy / statsmodels: those need to_pandas(), single-node.',
       packages: ['snowflake'],
-      buildGraceMs: 5000, // a Snowpark warehouse start is remote too — poll rather than hold the call
     };
   }
   if (runtime === 'duckdb') {
@@ -424,7 +414,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   // included), interpolated below. Restating any of it here is how the two start to disagree.
   return {
     type: 'object', additionalProperties: false, required: ['stage', 'functions', 'steps'],
-    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against THAT API; converting to pandas is a deliberate, single-node choice made inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}${profile.mlReference ? ` — every class and its parameters: semantic_index({ recipe: "${profile.mlReference}" })` : (profile.mlClasses ? `: ${profile.mlClasses}` : '')}.` : ''} ${profile.guide} You declare imports (allowlisted), your own functions over the frame and the ordered steps; the server writes dbt.ref / dbt.config / return. The LAST step's return value is this model's table — declare output.columns for the SQL stages after it. Bodies pass a static allowlist first (own names + declared imports + public attributes). SIZE: 30 functions, 400 body lines each, 500 chars per line, 50 steps, 20 imports — a real analysis fits, so a refusal is never about size. Read the result with get_query_result as usual.`,
+    description: `PYTHON stage — a dbt PYTHON model of its own, allowed ANYWHERE in the pipeline and any number of times. The SQL stages before it land as a table it reads (as the first stage it reads the source directly); SQL stages after it read ITS table as the next model — dbt builds the chain in order, on the warehouse's Python runtime, never on the MCP host. The first step receives dbt.ref() of its input exactly as THIS warehouse returns it: ${profile.native}. Write the functions against THAT API; converting to pandas is a deliberate, single-node choice made inside a function, never done for you.${profile.ml ? ` MODELLING: ${profile.ml}${profile.mlReference ? ` — every class and its parameters: semantic_index({ recipe: "${profile.mlReference}" })` : (profile.mlClasses ? `: ${profile.mlClasses}` : '')}.` : ''} ${profile.guide} You declare imports (allowlisted), your own functions over the frame and the ordered steps; the server writes dbt.ref / dbt.config / return. The LAST step's return value is this model's table — declare output.columns for the SQL stages after it. Bodies pass a static allowlist first (own names + declared imports + public attributes). SIZE: 30 functions, 400 body lines each, 500 chars per line, 50 steps, 20 imports — a real analysis fits, so a refusal is never about size. Read the result with query_pipeline_model as usual.`,
     properties: {
       stage: { enum: ['python'] },
       description: { type: 'string', maxLength: 2000, description: 'What the stage computes (goes to the dbt YAML sidecar).' },
@@ -463,7 +453,7 @@ function pythonStageSchema(allow = importAllowlist(), profile = frameProfile(nul
   };
 }
 
-// Registered like every other stage, so it is valid in build_native_model (add_step) and
+// Registered like every other stage, so it is valid in build_pipeline_model (add_step) and
 // register_native_model alike; the engine splits the pipeline at it. `terminal` = nothing may
 // follow. `build` validates the structure (imports / names / arguments) against a placeholder
 // ref; the body gate and the real names are the engine's part.

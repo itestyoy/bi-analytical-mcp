@@ -1,5 +1,5 @@
 // The unified pipe-style transformation pipeline (src/pipeline.js), executed on
-// DATA: each pipeline is lowered to Postgres SQL and run via `dbt show` against
+// DATA: each pipeline is lowered to DuckDB SQL and run via `dbt show` against
 // the seed, asserting exact numbers. Covers aggregate (group_by), pivot, and
 // unpivot. (BigQuery lowers the same op IR to native pipe syntax; not run here.)
 
@@ -10,33 +10,30 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
-import { DbtRunner } from '../../src/dbt-runner.js';
+import { createDbt } from '../../src/dbt/index.js';
 import { renderPipeline } from '../../src/pipeline.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse, fixtureProject } from './warehouse-harness.js';
+import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
-const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
-const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'dbt');
-const MF_BIN = process.env.MF_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'mf');
-const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
+const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 const num = (v) => Number(v);
 
-let pg; let runner; let catalog;
-const run = (stages) => runner.show(BASE, renderPipeline(catalog, 'postgres', 'events', stages).sql, 1000);
+let wh; let runner; let catalog;
+const run = (stages) => runner.show(BASE, renderPipeline(catalog, 'duckdb', 'events', stages).sql, 1000);
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  runner = new DbtRunner({ dbtBin: DBT_BIN, mfBin: MF_BIN, profilesDir: BASE });
+  runner = createDbt({ dbtBin: DBT_BIN, mfBin: MF_BIN, profilesDir: BASE });
   catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
 }, opts);
 
-after(async () => { if (pg) await pg.stop(); });
+after(async () => { if (wh) await wh.stop(); });
 // dim_users is SLOWLY-CHANGING (one row per player per validity window), so every join to it
 // is point-in-time: the declared player key AND the event time inside the window. Without the
 // window a player with several versions matches all of them and counts inflate.
@@ -306,8 +303,8 @@ test('pipeline window RANGE frame: rolling 1-day sum for u1 = {5, 15} (unix_date
   assert.deepEqual(rolls, [5, 15]);
 });
 
-// approx_count_distinct (HLL++): BigQuery APPROX_COUNT_DISTINCT; Postgres exact fallback
-test('pipeline approx_count_distinct: distinct payers = 7 (exact fallback on PGlite)', opts, async (t) => {
+// approx_count_distinct (HLL++): BigQuery APPROX_COUNT_DISTINCT; DuckDB exact
+test('pipeline approx_count_distinct: distinct payers = 7 (exact on DuckDB)', opts, async (t) => {
   if (skip(t)) return;
   const r = await run([
     { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'iap_purchase_completed' }] },

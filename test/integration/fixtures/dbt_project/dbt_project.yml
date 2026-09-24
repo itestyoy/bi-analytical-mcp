@@ -14,7 +14,7 @@ seeds:
     seed_events:
       +column_types:
         device_time: timestamp
-        event_data: jsonb
+        event_data: json
     seed_users:
       +column_types:
         install_date: date

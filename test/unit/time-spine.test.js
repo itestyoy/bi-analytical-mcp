@@ -14,7 +14,7 @@ function overlay(baseSetup) {
   mkdirSync(join(base, 'models'), { recursive: true });
   writeFileSync(join(base, 'dbt_project.yml'), 'name: b\nprofile: b\nversion: "1"\nconfig-version: 2\nmodel-paths: ["models"]\n');
   baseSetup(join(base, 'models'));
-  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'postgres' });
+  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'duckdb' });
   const ctx = cm.create();
   const gen = cm.generatedDir(ctx.id);
   return { files: existsSync(gen) ? readdirSync(gen) : [], generatedSpine: cm.generatedTimeSpine(ctx.id) };
@@ -36,7 +36,7 @@ test('self-heal: a context missing its spine (stale/reused) re-generates it idem
   const base = mkdtempSync(join(tmpdir(), 'ts-base-'));
   mkdirSync(join(base, 'models'), { recursive: true });
   writeFileSync(join(base, 'dbt_project.yml'), 'name: b\nprofile: b\nversion: "1"\nconfig-version: 2\nmodel-paths: ["models"]\n');
-  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'postgres' });
+  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'duckdb' });
   const ctx = cm.create();
   const gen = cm.generatedDir(ctx.id);
   // Simulate a context persisted from BEFORE spine generation existed: strip the spine files.
@@ -57,7 +57,7 @@ test('custom model-paths: generated dir lands under the FIRST base model-path (d
   mkdirSync(join(base, 'marts'), { recursive: true });
   // base uses a CUSTOM model-paths that does NOT include the default "models"
   writeFileSync(join(base, 'dbt_project.yml'), 'name: b\nprofile: b\nversion: "1"\nconfig-version: 2\nmodel-paths: ["marts"]\n');
-  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'postgres' });
+  const cm = new ContextManager({ baseProjectDir: base, workspaceRoot: mkdtempSync(join(tmpdir(), 'ts-ws-')), timeSpineDialect: 'duckdb' });
   assert.deepEqual(cm.modelPaths, ['marts'], 'reads custom model-paths from the base');
   const ctx = cm.create();
   const gen = cm.generatedDir(ctx.id);

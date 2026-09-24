@@ -2,7 +2,7 @@
 //
 // Nothing here calls the engine directly. Every step goes through a real MCP client over a
 // transport: tools/list, tools/call with JSON arguments, the answer read back out of the MCP
-// content block — and the numbers asserted are what the WAREHOUSE returned (PGlite + dbt +
+// content block — and the numbers asserted are what the WAREHOUSE returned (DuckDB + dbt +
 // MetricFlow, seeded and built in `before`). A scenario is a sequence of tool calls, the way a
 // real task is: discover, declare, query; or start a draft, add stages, materialize, re-slice.
 //
@@ -28,18 +28,15 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { makeMcpServer } from '../../src/server.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { isStartedTask } from '../helpers/settle.js';
+import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
-const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
-const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'dbt');
-const MF_BIN = process.env.MF_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'mf');
-const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'python');
-const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
+const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 
-let pg; let backend; let server; let client; let seq = 0;
+let wh; let backend; let server; let client; let seq = 0;
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -51,14 +48,13 @@ const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_ti
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed', '--full-refresh'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpe2e-')), timeSpineDialect: 'postgres' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpe2e-')), timeSpineDialect: 'duckdb' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   const engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
 
@@ -73,7 +69,7 @@ after(async () => {
   if (client) await client.close();
   if (server) await server.close();
   backend?.close();
-  if (pg) await pg.stop();
+  if (wh) await wh.stop();
 });
 
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };

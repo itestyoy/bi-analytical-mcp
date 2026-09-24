@@ -10,6 +10,7 @@ import { randomBytes } from 'node:crypto';
 import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import yaml from 'js-yaml';
+import { mergeModelEntry } from './semantic-latest.js';
 import { sqlConfigHeader } from './sql-header.js';
 
 // A daily time spine is REQUIRED by MetricFlow for metric_time, grains,
@@ -22,8 +23,8 @@ function timeSpineSql(dialect, start, end) {
   if (dialect === 'bigquery') {
     return `{{ config(materialized='table') }}\n${header}select d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d\n`;
   }
-  // postgres (default)
-  return `{{ config(materialized='table') }}\n${header}select d::date as date_day\nfrom generate_series('${start}'::date, '${end}'::date, interval '1 day') as d\n`;
+  // duckdb (default): range() is a table of timestamps, one per day
+  return `{{ config(materialized='table') }}\n${header}select cast(range as date) as date_day\nfrom range(date '${start}', date '${end}' + interval 1 day, interval 1 day)\n`;
 }
 
 const TIME_SPINE_YML = `models:
@@ -84,7 +85,7 @@ export function mergeCompiled(state, compiled) {
 }
 
 export class ContextManager {
-  constructor({ baseProjectDir, workspaceRoot, registryPath, timeSpineDialect = 'postgres', timeSpineStart = '2020-01-01', timeSpineEnd = '2035-12-31' } = {}) {
+  constructor({ baseProjectDir, workspaceRoot, registryPath, timeSpineDialect = 'duckdb', timeSpineStart = '2020-01-01', timeSpineEnd = '2035-12-31' } = {}) {
     this.baseProjectDir = baseProjectDir;
     this.workspaceRoot = workspaceRoot || join(process.cwd(), '.mcp', 'ctx');
     this.registryPath = registryPath || join(this.workspaceRoot, 'registry.json');
@@ -279,6 +280,55 @@ export class ContextManager {
     mkdirSync(this.generatedDir(id), { recursive: true });
     writeFileSync(file, yamlText);
     return file;
+  }
+
+  /**
+   * Write a context's semantic layer as rendered (src/yaml-render.js). The legacy spec is a file of
+   * its own. In the LATEST spec a semantic model is part of its dbt model's property entry, and dbt
+   * refuses two entries for one model — so a model the project's YAML already describes is taken
+   * OUT of the overlay's copy of that file and written merged (its config, docs and columns kept,
+   * the semantic keys added) into context.yml. Every render starts from the base project's files,
+   * so a model the context no longer uses gets its own entry back untouched.
+   */
+  writeSemanticYaml(id, render) {
+    if (!render.latest) return this.writeYaml(id, render.yaml);
+    const ours = new Map(render.latest.models.map((m) => [m.name, m]));
+    const merged = new Map();
+    if (this.baseProjectDir) {
+      for (const rel of this._baseYamlFiles()) {
+        const basePath = join(this.baseProjectDir, rel);
+        const overlayPath = join(this.dir(id), rel);
+        let doc;
+        try { doc = yaml.load(readFileSync(basePath, 'utf8')); } catch { continue; }
+        const entries = Array.isArray(doc?.models) ? doc.models : [];
+        const taken = entries.filter((m) => m && ours.has(m.name));
+        if (!taken.length) { cpSync(basePath, overlayPath); continue; } // the project's own file, as it is
+        for (const m of taken) merged.set(m.name, m);
+        const rest = { ...doc, models: entries.filter((m) => !(m && ours.has(m.name))) };
+        if (!rest.models.length) delete rest.models;
+        // (a file left holding only `version:` is written empty: nothing in it describes anything)
+        writeFileSync(overlayPath, Object.keys(rest).some((k) => k !== 'version') ? yaml.dump(rest, { lineWidth: 120, noRefs: true }) : '');
+      }
+    }
+    const models = render.latest.models.map((m) => mergeModelEntry(merged.get(m.name), m));
+    const doc = render.latest.metrics.length ? { models, metrics: render.latest.metrics } : { models };
+    return this.writeYaml(id, yaml.dump(doc, { lineWidth: 120, noRefs: true, quotingType: '"' }));
+  }
+
+  /** The base project's property files (YAML under its model-paths, outside generated/), relative to it. */
+  _baseYamlFiles() {
+    const out = [];
+    const walk = (dir, rel) => {
+      if (!existsSync(dir)) return;
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        const r = join(rel, name);
+        if (statSync(p).isDirectory()) { if (name !== 'generated') walk(p, r); continue; }
+        if (/\.ya?ml$/.test(name)) out.push(r);
+      }
+    };
+    for (const mp of this.modelPaths) walk(join(this.baseProjectDir, mp), mp);
+    return out;
   }
 
   /** Write a generated dbt model (.sql) into the context overlay. */

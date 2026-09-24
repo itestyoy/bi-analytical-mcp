@@ -1,7 +1,7 @@
 // Functional facade over the dialect classes (src/dialects/*), kept so existing
 // callers (compile/predicate/match-recognize/projection) need no change. The
 // single source of dialect logic lives in the classes; this just delegates.
-// Exactly two dialects are supported: postgres and bigquery.
+// Exactly two dialects are supported: duckdb and bigquery.
 
 import { getDialect } from './dialects/index.js';
 import { isNumericType as _isNumericType } from './dialects/base.js';
@@ -18,7 +18,7 @@ export function jsonExtract(dialect, column, key, type = 'string') {
 
 /** A SQL string literal, safely single-quoted (dialect-independent). */
 export function sqlLiteral(value) {
-  return getDialect('postgres').sqlLiteral(value); // escaping is identical across our dialects
+  return getDialect('duckdb').sqlLiteral(value); // escaping is identical across our dialects
 }
 
 export function jsonArrayLength(dialect, column, key) {
@@ -65,10 +65,10 @@ export function recentSince(dialect, col, days) {
   const n = Math.floor(Number(days));
   if (!col || !Number.isFinite(n) || n <= 0) return null;
   const d = String(dialect || '').toLowerCase();
-  if (d === 'postgres' || d === 'postgresql' || d === 'redshift') return `${col} >= CURRENT_TIMESTAMP - INTERVAL '${n} days'`;
+  if (d === 'redshift') return `${col} >= CURRENT_TIMESTAMP - INTERVAL '${n} days'`;
   if (d === 'bigquery') return `${col} >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL ${n} DAY)`;
   if (d === 'snowflake') return `${col} >= DATEADD(day, -${n}, CURRENT_TIMESTAMP())`;
-  if (d === 'duckdb') return `${col} >= now() - INTERVAL '${n} days'`;
+  if (d === 'duckdb') return `${col} >= CAST(now() AS TIMESTAMP) - INTERVAL '${n} days'`;
   return null; // unknown dialect → no window (best-effort, never break the scan)
 }
 
@@ -81,7 +81,7 @@ export function sinceTimestampMs(dialect, col, ms) {
   const n = Math.floor(Number(ms));
   if (!col || !Number.isFinite(n)) return null;
   const d = String(dialect || '').toLowerCase();
-  if (d === 'postgres' || d === 'postgresql' || d === 'redshift') return `${col} > to_timestamp(${n} / 1000.0)`;
+  if (d === 'redshift') return `${col} > to_timestamp(${n} / 1000.0)`;
   if (d === 'bigquery') return `${col} > TIMESTAMP_MILLIS(${n})`;
   if (d === 'snowflake') return `${col} > TO_TIMESTAMP_LTZ(${n}, 3)`;
   if (d === 'duckdb') return `${col} > epoch_ms(${n})`;
@@ -97,7 +97,7 @@ export function approxCountDistinct(dialect, expr) {
   const d = String(dialect || '').toLowerCase();
   if (d === 'bigquery' || d === 'snowflake' || d === 'duckdb') return `APPROX_COUNT_DISTINCT(${expr})`;
   if (d === 'redshift') return `APPROXIMATE COUNT(DISTINCT ${expr})`;
-  return null; // postgres & unknown → no native approx; use exact COUNT(DISTINCT)
+  return null; // unknown → no native approx; use exact COUNT(DISTINCT)
 }
 
 /**

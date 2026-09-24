@@ -105,7 +105,7 @@ test('least/greatest take a literal as well as columns, and say so when given ne
 // P99" has to know which one it holds. The dialect declares it; the stage says it.
 test('the stage says whether this warehouse computes median/percentile exactly or approximately', () => {
   assert.deepEqual(getDialect('bigquery').approximateStats, ['median', 'percentile']);
-  assert.deepEqual(getDialect('postgres').approximateStats, []);
+  assert.deepEqual(getDialect('duckdb').approximateStats, []);
 
   const describe = (dialect) => {
     const catalog = loadCatalog(CATALOG, { dialect });
@@ -115,9 +115,9 @@ test('the stage says whether this warehouse computes median/percentile exactly o
     return branches.find((b) => b.properties?.stage?.enum?.[0] === 'aggregate').description;
   };
   assert.match(describe('bigquery'), /median\/percentile are APPROXIMATE/);
-  assert.match(describe('postgres'), /every measure here is exact/);
+  assert.match(describe('duckdb'), /every measure here is exact/);
   // …and both warn off the global window, since that part is not per warehouse
-  for (const d of ['bigquery', 'postgres']) {
+  for (const d of ['bigquery', 'duckdb']) {
     assert.match(describe(d), /NO group_by/);
     assert.match(describe(d), /Resources exceeded/);
   }

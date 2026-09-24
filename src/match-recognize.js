@@ -1,6 +1,6 @@
 // Sequenced-funnel / path engine: we generate the query OURSELVES from the
 // declared ordered steps + metrics (MetricFlow can't express row-pattern
-// sequences). Target = BigQuery MATCH_RECOGNIZE (per docs); a Postgres
+// sequences). Target = BigQuery MATCH_RECOGNIZE (per docs); a DuckDB
 // equivalent is also emitted purely so funnel NUMBERS can be asserted on data.
 //
 // Output is a SINGLE ROW of the declared metrics (same shape for both dialects).
@@ -198,7 +198,7 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
   //  - 'any' : any rows, including repeats of step events — i.e. "the next later
   //            occurrence of step i+1", repeats don't break the match.
   //  - 'gap' : only non-step events; a repeat of any step event breaks/advances.
-  //  Unset = each dialect's historical default (Postgres ~ 'any', BigQuery ~ 'gap');
+  //  Unset = each dialect's historical default (DuckDB ~ 'any', BigQuery ~ 'gap');
   //  set it explicitly for identical semantics across engines.
   const betweenSteps = spec.between_steps || null;
   const steps = spec.steps.map((s, i) => ({ idx: i + 1, name: s.name || `s${i + 1}` }));
@@ -275,15 +275,18 @@ function gapModeFor(r) {
 // model: the funnel is just part of the pipeline whose rows are the result.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Postgres lowering: a single SELECT (nested WITH ev/r1..rn/joined) over fromRel. */
-export function matchStepPostgres(r, fromRel, catalog) {
+/**
+ * The lowering for an engine without MATCH_RECOGNIZE (DuckDB): a single SELECT (nested WITH
+ * ev/r1..rn/joined) over fromRel, in the dialect `dialectName`.
+ */
+export function matchStepCte(r, fromRel, catalog, dialectName) {
   if (r.mode === 'strict') {
-    throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the Postgres equivalent");
+    throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the CTE equivalent other warehouses run");
   }
-  const preds = r.stepPreds('postgres');
+  const preds = r.stepPreds(dialectName);
   const capByIdx = new Map();
   for (const c of r.propCaptures) { if (!capByIdx.has(c.idx)) capByIdx.set(c.idx, []); capByIdx.get(c.idx).push(c); }
-  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : catalog.propertyExpr(r.fact, c.property, 'postgres', { type: c.type })}) AS ${c.id}`);
+  const evExtra = r.propCaptures.map((c) => `    (${c.isColumn ? c.property : catalog.propertyExpr(r.fact, c.property, dialectName, { type: c.type })}) AS ${c.id}`);
   const evCols = [...preds.map((p, i) => `    (${p}) AS is${i + 1}`), ...evExtra].join(',\n');
   const carried1 = (idx) => (capByIdx.get(idx) || []).map((c) => `, ${c.id}`).join('');
   const carried = (idx) => (capByIdx.get(idx) || []).map((c) => `, e.${c.id} AS ${c.id}`).join('');
@@ -330,12 +333,12 @@ export function matchStepPostgres(r, fromRel, catalog) {
 }
 
 /** BigQuery lowering: a single SELECT … FROM fromRel MATCH_RECOGNIZE(…).
- *  rows handling, to stay numerically consistent with the Postgres lowering:
+ *  rows handling, to stay numerically consistent with the CTE lowering:
  *  - one_per_match: emit `AFTER MATCH SKIP TO NEXT ROW` so a new match can begin on
  *    the very next row — every occurrence of the start step yields a match (overlapping
- *    matches), matching the "every S1 starts a match" Postgres CTE. (Without it,
+ *    matches), matching the "every S1 starts a match" CTE lowering. (Without it,
  *    BigQuery's default AFTER MATCH SKIP PAST LAST ROW gives NON-overlapping matches,
- *    which would diverge from Postgres.)
+ *    which would diverge from the CTE lowering.)
  *  - one_per_partition: keep BigQuery's default skip and take the first match per
  *    partition via the outer QUALIFY (ROW_NUMBER ORDER BY t1 = 1) — the earliest-S1
  *    match, equivalent regardless of skip mode. */
@@ -498,7 +501,7 @@ registerStage('match_recognize', {
         render: (prev, dn) => {
           const pre = buildPrefilter(catalog, spec, dn, r.fact);
           const fromRel = pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev;
-          return dn === 'bigquery' ? matchStepBigQuery(r, fromRel, catalog) : matchStepPostgres(r, fromRel, catalog);
+          return dn === 'bigquery' ? matchStepBigQuery(r, fromRel, catalog) : matchStepCte(r, fromRel, catalog, dn);
         },
       },
       cols: matchOutputColumns(r),

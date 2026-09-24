@@ -1,7 +1,7 @@
 // A SECOND events source (role: crashlytics) is an equal, independent source: its own event
 // vocabulary, its own event-scoped payload, governed metrics, a funnel over it, a join to
 // dim_users, and metrics from BOTH sources answered in one query. Every assertion is on the
-// NUMBERS returned by dbt + MetricFlow / the pipeline against PGlite — the exact totals
+// NUMBERS returned by dbt + MetricFlow / the pipeline against DuckDB — the exact totals
 // recorded in test/integration/fixtures/SEED_DATA.md (§10).
 // Auto-skips when dbt/mf are not installed (HAS_DBT gate).
 
@@ -16,18 +16,15 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
+import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
-const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
-const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'dbt');
-const MF_BIN = process.env.MF_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'mf');
-const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'python');
-const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
+const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 
-let pg;
+let wh;
 let engine;
 let backend;
 let crashCtx; // metrics built on the crashlytics fact
@@ -41,14 +38,13 @@ const groupCol = (res, metric) => res.columns.map((c) => c.name).find((n) => n !
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-crash-')), timeSpineDialect: 'postgres' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-crash-')), timeSpineDialect: 'duckdb' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
@@ -93,7 +89,7 @@ before(async () => {
   bothCtx = both.context_id;
 }, opts);
 
-after(async () => { backend?.close(); if (pg) await pg.stop(); });
+after(async () => { backend?.close(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...input });
 

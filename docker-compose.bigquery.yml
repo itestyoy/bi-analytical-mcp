@@ -9,16 +9,15 @@
 
 services:
   mcp:
-    build:
-      context: .
-      args:
-        DBT_REQUIREMENTS: requirements-bigquery.txt   # build with the BigQuery adapter
+    build: .    # the same image as the DuckDB setup: every environment carries both adapters
     ports:
       - "${PORT:-3000}:3000"
     environment:
       HOST: "0.0.0.0"
       PORT: "3000"
       WAREHOUSE_DIALECT: "bigquery"
+      # dbt 1.x (the image's `dbt-v1` environment) until the python stage is proven on dbt v2 on BigQuery
+      DBT_ENV: "${DBT_ENV:-dbt-v1}"
       # Catalog discovered from the mounted dbt project's model YAMLs (meta.mcp.role);
       # no separate catalog file. (Set CATALOG_PATH=/config/catalog.yml to override.)
       DBT_BASE_PROJECT: "/dbt_project"

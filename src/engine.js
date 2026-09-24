@@ -7,9 +7,10 @@ import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validat
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration } from './compile.js';
 import { renderContext } from './yaml-render.js';
+import { gatePythonRuntime } from './catalog.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
-import { formatDbtError } from './dbt-runner.js';
+import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
 import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
@@ -26,7 +27,7 @@ import { openStore } from './store.js';
 import { buildProjection, projectionProblems } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
-import { detached, currentSignal } from './request-context.js';
+import { detached, currentSignal, isolatedTarget, withSignal } from './request-context.js';
 import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
 
 export class Engine {
@@ -71,6 +72,8 @@ export class Engine {
     // per move is worth more than any amount of description text, and the caller has to know the
     // index exists before writing the first function.
     if (recipes) catalog.pythonRecipes = recipes.entriesRequiring('python_models');
+    // what the installed dbt can run, before the schemas exist (dbt v2 runs no Python models on DuckDB)
+    gatePythonRuntime(catalog, runner);
     this.schemas = buildSchemas(catalog);
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
@@ -105,8 +108,9 @@ export class Engine {
     this.ctxs = contextManager || new ContextManager({});
     this.runner = runner; // optional; required for non-dry_run parse/query
     // The interpreter that runs the static gate over a python stage's functions (a local syntax /
-    // safety check; the model itself runs where dbt sends it). The MetricFlow sidecar's Python.
-    this.pythonBin = pythonBin || process.env.PYTHON_BIN || runner?.pythonBin || 'python3';
+    // safety check; the model itself runs where dbt sends it). The MetricFlow environment's Python —
+    // never one found on PATH: an engine given neither refuses the gate (runAstGate says why).
+    this.pythonBin = pythonBin || runner?.pythonBin || runner?.environment?.pythonBin || null;
   }
 
   // Internal helpers (no longer standalone tools — reached via semantic_index({ recipe })
@@ -2158,7 +2162,7 @@ export class Engine {
     const dropped = this._applyCheckpointPlan(ctx, draft, plan);
     const modelName = this._nextPipelineModel(ctx, draft.name);
     // Render ONLY the active warehouse dialect, so every response is consistent with where
-    // the pipeline actually runs (bigquery → `|>`, postgres → CTEs). Grounded to physical.
+    // the pipeline actually runs (bigquery → `|>`, duckdb → CTEs). Grounded to physical.
     const rendered = renderPipeline(this.catalog, dialect, draft.source, plan.stages, { physicalCols: physSet, modelName, from: plan.from });
     const models = this._chainModels(rendered.chain, { name: draft.name, pipeline: { source: draft.source } });
     const hasPython = models.some((m) => m.kind === 'python');
@@ -2311,13 +2315,20 @@ export class Engine {
    * starts once the declaration is parsed, and two builds never write the same files at once.
    * Returns the task id.
    */
-  _startTask(ctx, tool, work, { input = null } = {}) {
+  _startTask(ctx, tool, work, { input = null, batch = null } = {}) {
     const id = this.jobs.create({ ...(ctx ? { contextId: ctx.id } : {}), tool });
     if (ctx) this.ctxs.acquire(ctx.id);
     this._ctxQueue ||= new Map();
     this._taskRuns ||= new Map();
-    const before = ctx ? this._ctxQueue.get(ctx.id) : null;
+    // a member of a batch waits for what was queued before the BATCH, and runs beside the other members
+    const before = batch ? batch.before : ctx ? this._ctxQueue.get(ctx.id) : null;
+    // The task's own cancellation (a query tool's { task_id, cancel: true }): every dbt process its
+    // work starts is stopped by it, and one started after it is refused at once (src/dbt/process.js).
+    const control = new AbortController();
+    this._taskControls ||= new Map();
+    this._taskControls.set(id, control);
     const keep = (out) => {
+      if (this.jobs.get(id)?.status === 'cancelled') return; // what the work did after the cancel is not its result
       this._keepTaskResult(id, { tool, input, out });
       if (isPlainObject(out) && out.ok === false) this.jobs.fail(id, out.error?.message || `the ${tool} task failed`);
       else this.jobs.ready(id);
@@ -2325,19 +2336,62 @@ export class Engine {
     const settled = detached(async () => {
       await null; // the caller records what it needs about the task before any of the work runs
       if (before) await before;
-      return work(id);
+      // A query cancelled while it waited never starts. A cancelled BUILD still runs its work —
+      // with its signal already aborted, so no dbt process starts and the work goes down its own
+      // failure path (clearing its in-flight marker and its checkpoint).
+      if (control.signal.aborted && TASK_SIDE[tool] && tool.startsWith('query_')) return { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: 'cancelled before it started' } };
+      // Members of a batch run at the same time on one context: each dbt process gets its own target/.
+      return withSignal(control.signal, () => (batch ? isolatedTarget(() => work(id)) : work(id)));
     }).then(keep, (e) => keep({
       ok: false,
       error: { stage: e?.stage || 'task', message: e?.message || String(e), ...(e?.field ? { field: e.field } : {}), ...(e?.code ? { code: e.code } : {}) },
     })).catch((e) => this.jobs.fail(id, e?.message || String(e))).finally(() => {
       this._taskRuns.delete(id);
+      this._taskControls.delete(id);
       if (!ctx) return;
       this.ctxs.release(ctx.id);
       if (this._ctxQueue.get(ctx.id) === settled) this._ctxQueue.delete(ctx.id);
     });
-    if (ctx) this._ctxQueue.set(ctx.id, settled);
+    if (ctx && !batch) this._ctxQueue.set(ctx.id, settled);
     this._taskRuns.set(id, settled);
     return id;
+  }
+
+  /**
+   * A BATCH of queries on one context (`queries`, up to MAX_BATCH): each is checked by `prepare`
+   * BEFORE any starts — one mistake refuses the whole batch, naming the query — and each becomes a
+   * task of its own (so each is read, paged and drawn like any other). The members wait for what
+   * was queued on the context before the batch, run side by side, and whatever is queued after the
+   * batch waits for all of them. Returns { task_ids, context_id, read_with, next }.
+   */
+  _startBatch(ctx, tool, queries, prepare) {
+    const works = queries.map((q, i) => {
+      try { return prepare(q); } catch (e) {
+        if (e instanceof ToolError) {
+          throw new ToolError(`queries[${i}]: ${e.message} — nothing in this batch was started`, { stage: e.stage || 'validate', field: `queries[${i}]${e.field ? `.${e.field}` : ''}`, code: e.code });
+        }
+        throw e;
+      }
+    });
+    this._ctxQueue ||= new Map();
+    const batch = { before: this._ctxQueue.get(ctx.id) || null };
+    const ids = works.map((work) => this._startTask(ctx, tool, work, { batch }));
+    const all = Promise.allSettled(ids.map((id) => this._taskRuns.get(id))).finally(() => {
+      if (this._ctxQueue.get(ctx.id) === all) this._ctxQueue.delete(ctx.id);
+    });
+    this._ctxQueue.set(ctx.id, all);
+    const reader = SIDE_READER[TASK_SIDE[tool]];
+    return {
+      task_ids: ids,
+      context_id: ctx.id,
+      read_with: reader,
+      next: `${reader}({ task_ids: [${ids.map((id) => `'${id}'`).join(', ')}] }) — it waits for them together (up to ${MAX_WAIT_SECONDS}s per call) and returns each one's result, in this order`,
+    };
+  }
+
+  /** The semantic YAML the installed dbt reads (its client decides; no runner: the legacy spec). */
+  _semanticSpec() {
+    return this.runner?.semanticSpec || 'legacy';
   }
 
   /** What a tool that started a task answers: the task's id and where to read it — nothing else. */
@@ -2726,7 +2780,7 @@ export class Engine {
         mergeCompiled(draft, { additions: clone(cur.additions), metrics: clone(cur.metrics), usedModels: [...cur.usedModels], task: null });
       }
       mergeCompiled(draft, compiled);
-      const render = renderContext(this.catalog, draft);
+      const render = renderContext(this.catalog, draft, { spec: this._semanticSpec() });
       const out = { context_id: input.context_id || null, task: compiled.task, dry_run: true, yaml: render.yaml, semantic_models: render.semanticModels, metrics: render.metricNames, warnings: render.warnings || [] };
       return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), input.context_id ? { context_id: input.context_id } : {});
     }
@@ -2736,8 +2790,8 @@ export class Engine {
     // context waits for it (tasks on one context run in order).
     const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
     mergeCompiled(ctx.state, compiled);
-    const render = renderContext(this.catalog, ctx.state);
-    const file = this.ctxs.writeYaml(ctx.id, render.yaml);
+    const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
+    const file = this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const taskId = this._startTask(ctx, 'build_semantic_model', () => this._declared(ctx, input, compiled, render, file));
     return this._taskStarted(taskId, { context_id: ctx.id });
@@ -2828,12 +2882,12 @@ export class Engine {
     }
 
     mergeCompiled(state, compiled);
-    const render = renderContext(this.catalog, state);
+    const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });
     if (input.dry_run) {
       const out = { context_id: ctx.id, semantic_model: modelKey, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
       return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), { context_id: ctx.id });
     }
-    const file = this.ctxs.writeYaml(ctx.id, render.yaml);
+    const file = this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const taskId = this._startTask(ctx, 'build_semantic_model', async () => {
       const parse = await this._parse(ctx.id);
@@ -2859,8 +2913,8 @@ export class Engine {
     }
     ctx.state.metrics = ctx.state.metrics.filter((m) => !dependents.includes(m));
     delete ctx.state.additions[modelKey];
-    const render = renderContext(this.catalog, ctx.state);
-    this.ctxs.writeYaml(ctx.id, render.yaml);
+    const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
+    this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const parse = await this._parse(ctx.id);
     return { context_id: ctx.id, semantic_model: modelKey, removed: true, metrics: render.metricNames, parse };
@@ -3147,8 +3201,11 @@ export class Engine {
 
   async query_semantic_model(input) {
     this._validate('query_semantic_model', input);
-    // the read half: { task_id } waits for a semantic task (a model being parsed, a query) and returns it
+    // the read half: { task_id } waits for a semantic task (a model being parsed, a query) and returns it;
+    // { task_ids } waits for several at once
+    if (input.cancel) return this._cancelTasks(input, 'semantic');
     if (input.task_id) return this._pollTask(input, 'semantic');
+    if (input.task_ids) return this._pollTasks(input, 'semantic');
     const ctx = this._ctx(input.context_id);
 
     // A pipeline-registered model has no MetricFlow semantic model — its rows ARE
@@ -3157,6 +3214,17 @@ export class Engine {
       const built = ctx.state.native?.task_id;
       throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ task_id: '${built}' }), filter or regroup them with query_pipeline_model({ context_id: '${ctx.id}', transform }), or build on them with build_pipeline_model({ action: 'start', name, from_task: '${built}' })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
     }
+    // A BATCH (queries: up to MAX_BATCH): every query is validated before any starts, and they run
+    // side by side — one task each, read together with { task_ids }.
+    if (input.queries) return this._startBatch(ctx, 'query_semantic_model', input.queries, (q) => this._semanticQueryWork(ctx, { ...q, context_id: ctx.id }));
+    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', this._semanticQueryWork(ctx, input)), { context_id: ctx.id });
+  }
+
+  /**
+   * One metric query, checked: every mistake is refused HERE (metrics, group_by, where values,
+   * order_by, the time window), and what is returned is the work its task runs.
+   */
+  _semanticQueryWork(ctx, input) {
 
     const known = new Set(ctx.state.metrics.map((m) => m.name));
     if (!input.metrics?.length) throw new ToolError(`metrics is required for a metric query. This context defines: ${[...known].join(', ') || '(none — create metrics first)'}`, { stage: 'validate', field: 'metrics' });
@@ -3330,14 +3398,13 @@ export class Engine {
     // The query is a TASK: validated above, run below, its response read with query_semantic_model({ task_id }).
     // A metric query over a big window can outlast the client in front of this call — so no call
     // holds it.
-    const taskId = this._startTask(ctx, 'query_semantic_model', async (id) => {
+    return async (id) => {
       // Build the time-spine table before a REAL query (not needed for dry_run/explain, which only
       // generate SQL). MetricFlow requires the spine materialized for metric_time / SCD joins.
       if (!explain) await this._ensureTimeSpineBuilt(ctx.id);
       if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id);
       return respond(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain }));
-    });
-    return this._taskStarted(taskId, { context_id: ctx.id });
+    };
   }
 
   /**
@@ -3375,7 +3442,7 @@ export class Engine {
     if (sample) {
       // A REPRESENTATIVE random subset rather than the first rows by physical
       // order. BigQuery uses TABLESAMPLE SYSTEM (block sampling on the table
-      // reference); Postgres uses ORDER BY random() (reliable on small result
+      // reference); DuckDB uses ORDER BY random() (reliable on small result
       // tables, where block sampling can return nothing). Paging doesn't apply.
       let sql;
       if (this.catalog.dialect === 'bigquery') {
@@ -3429,6 +3496,54 @@ export class Engine {
     return this._awaitRead(input.task_id, input);
   }
 
+  /**
+   * CANCEL — { task_id, cancel: true } / { task_ids, cancel: true } on the query tool of the task's
+   * side: a running task ends at once as `cancelled` (its dbt process is stopped; one still queued
+   * behind another task never starts one), and whatever was queued after it goes on. A task that
+   * already finished is left as it is, and the answer says so.
+   */
+  _cancelTasks(input, side) {
+    const ids = input.task_ids || [input.task_id];
+    for (const id of ids) this._taskForSide(id, side);
+    const results = ids.map((id) => {
+      const job = this.jobs.get(id);
+      if (job.status !== 'running') {
+        return { task_id: id, cancelled: false, status: job.status === 'ready' ? 'done' : job.status, note: `already ${job.status === 'ready' ? 'finished' : job.status} — nothing to cancel` };
+      }
+      const reason = `cancelled by ${SIDE_READER[side]}({ task_id, cancel: true })`;
+      this._taskControls?.get(id)?.abort(new Error(reason));
+      this.jobs.cancel(id, reason);
+      this._keepTaskResult(id, { tool: job.tool, input: null, out: { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: reason } } });
+      return { task_id: id, cancelled: true, status: 'cancelled' };
+    });
+    return input.task_ids ? { ok: true, results } : { ok: true, ...results[0] };
+  }
+
+  /**
+   * THE READ HALF, FOR SEVERAL TASKS — { task_ids }: every id is checked first (known, of this
+   * side), then it waits until ALL of them are done (at most `wait_seconds`, capped at
+   * MAX_WAIT_SECONDS) and returns each one's result in the order asked — the same answer
+   * { task_id } gives for it. Those still running come back as running, and `next` names just them.
+   */
+  async _pollTasks(input, side) {
+    const ids = input.task_ids;
+    for (const id of ids) this._taskForSide(id, side);
+    const seconds = Math.min(Math.max(input.wait_seconds ?? MAX_WAIT_SECONDS, 0), MAX_WAIT_SECONDS);
+    const waited = await this._awaitTasks(ids, seconds);
+    const results = [];
+    for (const id of ids) results.push(await this._taskResult(id, { waited }));
+    const running = results.filter((r) => r.status === 'running').map((r) => r.task_id);
+    const failed = results.filter((r) => r.status === 'error').length;
+    return {
+      ok: true,
+      status: running.length ? 'running' : 'done',
+      waited_seconds: waited,
+      ...(failed ? { failed } : {}),
+      results,
+      ...(running.length ? { next: `${running.length} still running — call ${SIDE_READER[side]}({ task_ids: [${running.map((id) => `'${id}'`).join(', ')}] }) for them; the others are final above` } : {}),
+    };
+  }
+
   /** The task behind an id — or the one refusal of an id this server does not know. */
   _knownTask(id) {
     const job = this.jobs.get(id);
@@ -3451,8 +3566,9 @@ export class Engine {
    */
   _precheckWait(tool, args) {
     this._validate(tool, args);
-    if (tool === 'query_semantic_model') this._taskForSide(args.task_id, 'semantic');
-    else if (tool === 'query_pipeline_model') this._taskForSide(args.task_id, 'pipeline');
+    const ids = args.task_ids || [args.task_id];
+    if (tool === 'query_semantic_model') for (const id of ids) this._taskForSide(id, 'semantic');
+    else if (tool === 'query_pipeline_model') for (const id of ids) this._taskForSide(id, 'pipeline');
     else if (tool === 'display_model_result') {
       this._knownTask(args.task_id);
       if (this._displayed?.get(args.task_id) === 'drawn' || this.jobs.get(args.task_id)?.drawn) throw new ToolError(`task ${args.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'task_id' });
@@ -3476,8 +3592,16 @@ export class Engine {
    */
   async query_pipeline_model(input) {
     this._validate('query_pipeline_model', input);
+    if (input.cancel) return this._cancelTasks(input, 'pipeline');
     if (input.task_id) return this._pollTask(input, 'pipeline');
+    if (input.task_ids) return this._pollTasks(input, 'pipeline');
     const ctx = this._ctx(input.context_id);
+    if (input.queries) return this._startBatch(ctx, 'query_pipeline_model', input.queries, (q) => this._pipelineQueryWork(ctx, q));
+    return this._taskStarted(this._startTask(ctx, 'query_pipeline_model', this._pipelineQueryWork(ctx, input)), { context_id: ctx.id });
+  }
+
+  /** One query over a context's built pipeline model, checked against its columns; returns the work its task runs. */
+  _pipelineQueryWork(ctx, input) {
     // A build in flight is the model this query is about: tasks on a context run in order, so the
     // query runs once that build is done — against ITS columns and ITS table, not the previous one.
     const building = ctx.state.draft?.building?.task_id ? ctx.state.draft.building : null;
@@ -3495,24 +3619,29 @@ export class Engine {
       if (problems.length) throw new ToolError(`transform: ${problems.join('; ')}. The model's columns: ${columns.join(', ')}`, { stage: 'validate', field: 'transform' });
     }
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
-    const taskId = this._startTask(ctx, 'query_pipeline_model', async () => {
+    return async () => {
       const table = ctx.state.model; // resolved when the query runs: after any build queued before it
       if (!table || !this.ctxs.hasPipelineModel(ctx.id, table)) return { ok: false, error: { stage: 'fetch', code: RESULT_GONE, message: `the pipeline model ${table || ''} is not there (its build failed, or it was deleted) — build it again` } };
       const out = await this._readTable(this.ctxs.dir(ctx.id), table, input.limit ?? 1000, input.transform, {}, input.offset ?? 0);
       return out.ok === false ? out : { ...out, model: table, provenance: { tier: 'pipeline', model: table } };
-    });
-    return this._taskStarted(taskId, { context_id: ctx.id });
+    };
   }
 
   /** Wait for a task to settle, `seconds` at most — or until the call is cancelled. Returns the seconds waited. */
   async _awaitTask(id, seconds) {
-    const run = this._taskRuns?.get(id);
-    if (!run || seconds <= 0) return 0;
+    return this._awaitTasks([id], seconds);
+  }
+
+  /** Wait until every one of these tasks has settled, `seconds` at most — or until the call is cancelled. Returns the seconds waited. */
+  async _awaitTasks(ids, seconds) {
+    // a cancelled task is final the moment it is cancelled, whatever its work still does before it stops
+    const runs = ids.filter((id) => this.jobs.get(id)?.status === 'running').map((id) => this._taskRuns?.get(id)).filter(Boolean);
+    if (!runs.length || seconds <= 0) return 0;
     const started = Date.now();
     const signal = currentSignal();
     let timer; let onAbort;
     await Promise.race([
-      run,
+      Promise.all(runs),
       new Promise((resolve) => { timer = setTimeout(resolve, seconds * 1000); }),
       new Promise((resolve) => { onAbort = resolve; signal?.addEventListener?.('abort', onAbort, { once: true }); }),
     ]);
@@ -3528,6 +3657,7 @@ export class Engine {
       if (!this.jobs.isLive(id)) return { ok: false, ...head, status: 'error', error: { stage: 'task', message: 'this task was started by a server process that is gone (it restarted), so nothing is running it — start the work again' } };
       return { ok: true, ...head, status: 'running', waited_seconds: waited, next: `still running — call ${this._readWith(id)} again; it waits up to ${MAX_WAIT_SECONDS}s` };
     }
+    if (job.status === 'cancelled') return { ok: false, ...head, status: 'cancelled', error: { stage: 'cancelled', code: 'cancelled', message: job.error || 'cancelled' } };
     const paging = offset != null || limit != null;
     const kept = this._taskResults?.get(id);
     const stored = job.status === 'ready' && !!job.table;
@@ -3747,6 +3877,15 @@ export class Engine {
     if (!this.runner?.run) return;
     const ctx = this.ctxs.get(ctxId);
     if (ctx.state._timeSpineBuilt) return;
+    // the queries of a batch run side by side: they share ONE build of the spine, never race to write it
+    this._spineBuilds ||= new Map();
+    if (!this._spineBuilds.has(ctxId)) {
+      this._spineBuilds.set(ctxId, this._buildTimeSpine(ctxId, ctx).finally(() => this._spineBuilds.delete(ctxId)));
+    }
+    return this._spineBuilds.get(ctxId);
+  }
+
+  async _buildTimeSpine(ctxId, ctx) {
     // Self-heal: make sure the spine files exist even for a reused/persisted context that never
     // went through create()'s ensureTimeSpine — then build the table we generated.
     try { this.ctxs.ensureTimeSpine?.(ctxId); } catch { /* best effort */ }

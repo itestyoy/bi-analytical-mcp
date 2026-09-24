@@ -15,7 +15,7 @@ export function sqlConfigHeader(kind, config) {
   }
   // The config is arbitrary caller text (a filter literal, a python function body). A `*/` inside it
   // would CLOSE this banner early and leave the rest of the YAML to be parsed as SQL; a `/*` would
-  // OPEN a nested comment on the engines that nest them (Postgres does, BigQuery does not) and the
+  // OPEN a nested comment on the engines that nest them (some do, BigQuery does not) and the
   // banner would then swallow the model. SQL has no escape inside a block comment, so both markers
   // are broken up with a backslash — the banner is documentation, and it still reads as declared.
   // dbt renders the whole .sql file as Jinja, comments included: a `{{ … }}` in the config would

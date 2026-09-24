@@ -56,19 +56,16 @@ import { Engine } from '../../src/engine.js';
 import { makeMcpServer } from '../../src/server.js';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
+import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
-const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
-const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'dbt');
-const MF_BIN = process.env.MF_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'mf');
-const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'python');
-const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
+const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 
-let pg; let engine; let backend; let acqCtx; let evCtx; let seq = 0;
+let wh; let engine; let backend; let acqCtx; let evCtx; let seq = 0;
 // A second catalog over the SAME warehouse, declaring things the tables do not actually have —
 // see section E. `phantom` is that catalog AFTER real introspection has grounded it.
 let phantom; let phantomEngine; let phantomPruned; let phantomCostCtx;
@@ -89,14 +86,13 @@ const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_ti
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed', '--full-refresh'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
-  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-join-')), timeSpineDialect: 'postgres' });
+  const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-join-')), timeSpineDialect: 'duckdb' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
@@ -221,7 +217,7 @@ before(async () => {
   trueCtx = (await evtsOn(trueEngine, 'jtrue')).context_id;
 }, opts);
 
-after(async () => { backend?.close(); if (pg) await pg.stop(); });
+after(async () => { backend?.close(); if (wh) await wh.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
 /** Run a pipeline of stages and return its materialized rows. */
@@ -643,9 +639,9 @@ test('join guards: an undeclared relationship, a self-join and via+on are all re
 
 const REF = /\{\{\s*ref\(\s*'([^']+)'\s*\)\s*\}\}/g;
 
-/** Execute SQL on the very warehouse the tools ran against (same PGlite instance). */
+/** Execute SQL on the very warehouse the tools ran against (same DuckDB database). */
 async function runSql(sql) {
-  const { rows } = await pg.db.query(sql.replace(REF, (_, m) => `public.${m}`).trim().replace(/;\s*$/, ''));
+  const { rows } = await wh.query(sql.replace(REF, (_, m) => `main.${m}`).trim().replace(/;\s*$/, ''));
   return rows;
 }
 
@@ -1353,8 +1349,8 @@ test('51. `unique` is a claim nobody checks: a false one inflates 184 to 190', o
   assert.equal(grouped.ok, true, JSON.stringify(grouped.error));
   assert.equal(sumCol(grouped.rows, 'jown_evts'), 190, 'the join added 6 rows: 2 events x 4 reports of one funnel');
   // the same key is genuinely NOT unique on the owning side — which is why.
-  const dup = await pg.db.query(`SELECT count(*) AS n FROM (
-    SELECT rewarded_tracking_id, player_id_of_internal FROM public.fct_crashlytics_events
+  const dup = await wh.query(`SELECT count(*) AS n FROM (
+    SELECT rewarded_tracking_id, player_id_of_internal FROM main.fct_crashlytics_events
     WHERE rewarded_tracking_id IS NOT NULL GROUP BY 1, 2 HAVING count(*) > 1) d`);
   assert.equal(num(dup.rows[0].n), 1, 'one duplicated (funnel, player) pair — u1 with fnl_01, four times');
 });
@@ -1419,8 +1415,8 @@ test('53. every attribute the catalog advertises for an owned relationship answe
 //     24 events find their one crash report, 160 find none.
 test('54. a truthful `unique` never duplicates: 184 stays 184', opts, async (t) => {
   if (skip(t)) return;
-  const dup = await pg.db.query(`SELECT count(*) AS n FROM (
-    SELECT funnel_tracking_id FROM public.fct_crashlytics_events
+  const dup = await wh.query(`SELECT count(*) AS n FROM (
+    SELECT funnel_tracking_id FROM main.fct_crashlytics_events
     WHERE funnel_tracking_id IS NOT NULL GROUP BY 1 HAVING count(*) > 1) d`);
   assert.equal(num(dup.rows[0].n), 0, 'the claim is true on this warehouse: no repeated key');
 
@@ -1470,7 +1466,7 @@ const perDayCatalog = (grain) => {
 
 /** Join events → acquisition through `player_day` on the given catalog and count what matched. */
 async function perDayMatches(catalog) {
-  const eng = settle(new Engine({ catalog, contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'perday-ctx-')), timeSpineDialect: 'postgres' }), runner: backend }));
+  const eng = settle(new Engine({ catalog, contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'perday-ctx-')), timeSpineDialect: 'duckdb' }), runner: backend }));
   const s = await eng.build_pipeline_model({ action: 'start', name: `pd_${seq++}`, source: 'events' });
   const j = await eng.build_pipeline_model({
     action: 'add_step',

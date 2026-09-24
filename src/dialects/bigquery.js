@@ -84,7 +84,7 @@ export class BigQueryDialect extends Dialect {
   jsonColumnArrayLength(column) {
     // JSON_QUERY_ARRAY reads a JSON-typed column and a STRING holding JSON alike, and yields NULL
     // when the value is not an array — so a row whose value is a scalar counts as absent instead of
-    // failing the query. (Postgres needs an explicit guard for the same thing; see its dialect.)
+    // failing the query. (DuckDB needs an explicit guard for the same thing; see its dialect.)
     return `ARRAY_LENGTH(JSON_QUERY_ARRAY(${column}, '$'))`;
   }
 
@@ -97,7 +97,7 @@ export class BigQueryDialect extends Dialect {
   arrayContains(column, value) { return `${this.sqlLiteral(value)} IN UNNEST(${column})`; }
 
   // JSON_VALUE parses a STRING holding JSON exactly as it reads a JSON-typed column, so the
-  // struct-in-a-string form is the same expression here (on Postgres it is not: that one casts).
+  // struct-in-a-string form is the same expression here (on DuckDB it is the same idea: a guarded JSON read).
   jsonColumnStructField(column, field, type = 'string') { return this.jsonColumnField(column, field, type); }
 
   // ── time / scalar / statistical ────────────────────────────────────────────

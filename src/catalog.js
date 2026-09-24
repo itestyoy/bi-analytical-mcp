@@ -150,7 +150,7 @@ function pipelineColumnType(cm, col) {
  * physical table lacks") can never surface anywhere downstream. Best-effort: a model
  * whose relation can't be introspected is left as declared. Returns { pruned }.
  */
-// How the adapters word "this relation is not there": Postgres/Redshift/DuckDB `relation … does not
+// How the adapters word "this relation is not there": DuckDB/Redshift `relation … does not
 // exist`, BigQuery `Not found: Table …`, Snowflake `… does not exist or not authorized`, Databricks
 // `TABLE_OR_VIEW_NOT_FOUND`, dbt's own `… depends on a node named '…' which was not found`.
 const RELATION_ABSENT = /does not exist|doesn't exist|not found|no such table|unknown table|could not find|table_or_view_not_found/i;
@@ -337,15 +337,15 @@ function collectSchemaModels(dir, acc) {
  *   1. explicit `dialect` argument
  *   2. WAREHOUSE_DIALECT env var
  *   3. the active dbt profile's output `type` (what dbt actually connects with)
- *   4. `fallback` (legacy catalogs) / 'postgres'
+ *   4. `fallback` (legacy catalogs) / 'duckdb'
  */
 export function resolveDialect({ dialect, profilesDir, projectDir, fallback, report } = {}) {
   const fromProfile = dialectFromProfile(profilesDir, projectDir);
-  const d = dialect || process.env.WAREHOUSE_DIALECT || fromProfile || fallback || 'postgres';
+  const d = dialect || process.env.WAREHOUSE_DIALECT || fromProfile || fallback || 'duckdb';
   if (!SUPPORTED_DIALECTS.has(d)) {
     throw new Error(`unsupported warehouse dialect '${d}' (supported: ${[...SUPPORTED_DIALECTS].join(', ')}). Set WAREHOUSE_DIALECT or fix the dbt profile output type.`);
   }
-  // dbt connects with an adapter this server writes no SQL for (duckdb, snowflake…), and nothing
+  // dbt connects with an adapter this server writes no SQL for (snowflake, redshift…), and nothing
   // said otherwise: the SQL is then written in `d`'s dialect against that engine. It may well work
   // — but it is a fact about this deployment, not a detail, so it is reported rather than assumed.
   const profileType = String(profileOutput(profilesDir, projectDir)?.type || '').toLowerCase();
@@ -414,13 +414,26 @@ function dialectFromProfile(profilesDir, projectDir) {
 }
 
 /**
+ * The adapter may run Python models while the installed dbt does not (dbt v2 on DuckDB): the dbt
+ * client (src/dbt/) says so, and the python stage is then not offered. Applied to the catalog
+ * before anything reads its python runtime (the recipes, the tool schemas).
+ */
+export function gatePythonRuntime(catalog, runner) {
+  const rt = catalog.pythonRuntime;
+  if (rt?.available && typeof runner?.pythonModelsOn === 'function' && !runner.pythonModelsOn(rt.runtime)) {
+    catalog.pythonRuntime = { ...rt, available: false, reason: `dbt ${runner.major}.x runs no dbt Python models on ${rt.runtime}` };
+  }
+  return catalog.pythonRuntime;
+}
+
+/**
  * Can dbt run PYTHON models on this profile? Decided the way dbt itself would decide — from the
  * adapter and its settings in the active profile output — so the `python` pipeline stage is
  * offered only where it can actually run:
  *   - duckdb / snowflake / databricks: the adapter runs Python models as such;
  *   - bigquery: only with a submission set up — `submission_method`, or a Dataproc/BigFrames region
  *     (`dataproc_region` / `compute_region`) or cluster (`dataproc_cluster_name`);
- *   - postgres and everything else: no Python models at all.
+ *   - everything else: no Python models at all.
  * MCP_PYTHON_MODELS=on|off overrides (on: the operator sets the submission per model via
  * MCP_PYTHON_MODEL_CONFIG; off: hide the stage regardless). Returns { available, runtime?, reason? }.
  */

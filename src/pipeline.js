@@ -5,7 +5,7 @@
 // registry entry { schema, build } — adding a stage changes nothing else. The
 // stage `build` is dialect-agnostic: it emits a logical op (IR) and updates the
 // tracked column set. The Dialect (src/dialects/*) lowers the op list to SQL —
-// Postgres to a chained CTE, BigQuery to native `|>` pipe operators.
+// DuckDB to a chained CTE, BigQuery to native `|>` pipe operators.
 //
 // Safety: stage params are catalog-enum / typed; column references are validated
 // against the live column set threaded through the pipeline; identifiers pass the
@@ -46,7 +46,7 @@
 //   unpivot    |> UNPIVOT    fold listed columns into (name, value) rows. Solves: tidy/long
 //                            format for charting; cohort/retention grids → rows.
 //   sample     |> TABLESAMPLE  keep ~N% of rows for a FAST approximate first estimate
-//                            on large data (BigQuery TABLESAMPLE SYSTEM; Postgres random()).
+//                            on large data (BigQuery TABLESAMPLE SYSTEM; DuckDB random()).
 //   order_by   |> ORDER BY   sort. limit |> LIMIT cap. project |> SELECT keep a column set.
 //   match_recognize |> MATCH_RECOGNIZE  (registered by match-recognize.js) row-pattern
 //                            funnel; TERMINAL stage → one row per user/session match.
@@ -837,8 +837,8 @@ export function columnMap(columns) {
  * it another SQL model reading it through ref, and so on — any number of python stages, anywhere
  * (a python stage FIRST reads the source directly). dbt orders the chain from the refs; the last
  * model carries the pipeline's name (`modelName`), the ones before it `<modelName>_s1`, `_s2`, ….
- * SQL uses the dialect-native form (Postgres chained CTE, BigQuery `|>` pipe syntax) for the first
- * model unless a stage requires CTE form (match_recognize on Postgres); later SQL models read a
+ * SQL uses the dialect-native form (DuckDB chained CTE, BigQuery `|>` pipe syntax) for the first
+ * model unless a stage requires CTE form (match_recognize on DuckDB); later SQL models read a
  * ref, so they are plain CTE chains.
  *
  * `from` starts the chain from an ALREADY-BUILT relation instead of the catalog source: the model
@@ -868,7 +868,7 @@ export function renderPipeline(catalog, dialectName, source, stages = [], { phys
     if (seg.kind === 'sql') {
       const { ops, cols: next } = buildOps(catalog, d, cols, seg.stages, source);
       // Every SQL segment renders in the dialect's native form — BigQuery pipe syntax, a chain of
-      // CTEs on Postgres — whether it reads the source or the model a python stage produced.
+      // CTEs on DuckDB — whether it reads the source or the model a python stage produced.
       seg.sql = d.renderPipeline(baseRelation, ops);
       cols = next;
     } else {

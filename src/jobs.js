@@ -59,6 +59,12 @@ export class JobManager {
     if (j) { j.status = 'error'; j.error = error; this._persist(j); }
   }
 
+  /** The caller cancelled the task: it ends here, whatever its work still does before it stops. */
+  cancel(id, reason) {
+    const j = this.jobs.get(id);
+    if (j) { j.status = 'cancelled'; j.error = reason; this._persist(j); }
+  }
+
   get(id) {
     return this.jobs.get(id);
   }

@@ -1,5 +1,5 @@
 // AUDIT REGRESSIONS — every finding of the two code audits, plus the structured attribute
-// reference, proven on the REAL warehouse (PGlite + dbt + MetricFlow + the value indexer).
+// reference, proven on the REAL warehouse (DuckDB + dbt + MetricFlow + the value indexer).
 //
 // Every assertion is a NUMBER or a set of values read back from the warehouse or from the index
 // the indexer built by scanning it — never the text of generated SQL/YAML. Where a finding is
@@ -43,20 +43,17 @@ import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
 import { openStore } from '../../src/store.js';
-import { startPglite } from './pglite-harness.js';
+import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
+import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
-const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
+const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml');
-const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'dbt');
-const MF_BIN = process.env.MF_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'mf');
-const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'python');
-const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
 const opts = { timeout: 600000 };
 
-let pg; let backend; let ctxs; let engine; let catalog;
+let wh; let backend; let ctxs; let engine; let catalog;
 let evCtx; let evUsersCtx; let acqUsersCtx; let evCrashCtx;
 let ownerEngine; let ownerCtx;           // the crash source OWNS ad_funnel (type: unique)
 let bothEngine; let bothCtx;             // acquisition.clicks is measure AND dimension
@@ -99,12 +96,11 @@ async function pipeRows(source, stages, eng = engine) {
 
 before(async () => {
   if (!HAS_DBT) return;
-  pg = await startPglite();
-  process.env.DBT_PG_PORT = String(pg.port);
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DBT_PG_PORT: String(pg.port) };
+  wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
   await execFileP(DBT_BIN, ['seed'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'aud-ws-')), timeSpineDialect: 'postgres' });
+  ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'aud-ws-')), timeSpineDialect: 'duckdb' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   catalog = loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath: join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite') }));
@@ -152,7 +148,7 @@ before(async () => {
   ({ engine: renamedEngine } = variant((M) => { mcp(M.fct_analytics_events).role = 'analytics'; }));
 }, opts);
 
-after(async () => { backend?.close(); engine?.valueIndex?.close?.(); if (pg) await pg.stop(); });
+after(async () => { backend?.close(); engine?.valueIndex?.close?.(); if (wh) await wh.stop(); });
 
 // ═══════════ A. THE ATTRIBUTE, ADDRESSED BY WHERE IT LIVES ═══════════
 

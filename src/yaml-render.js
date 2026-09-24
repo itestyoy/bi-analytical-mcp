@@ -6,6 +6,7 @@ import yaml from 'js-yaml';
 import { primaryEntityName } from './catalog.js';
 import { getDialect } from './dialects/index.js';
 import { inertProse } from './jinja-inert.js';
+import { toLatestSpec } from './semantic-latest.js';
 
 const EVENT_TIME_DIM = 'event_time';
 
@@ -165,7 +166,13 @@ function manifestOnly(decl) {
   return Object.fromEntries(Object.entries(decl).filter(([k]) => !k.startsWith('_')));
 }
 
-export function renderContext(catalog, state) {
+/**
+ * `spec` is the semantic YAML the installed dbt reads (its client's `semanticSpec`): 'legacy'
+ * (dbt 1.x) or 'latest' (dbt v2) — the same semantic layer, rendered once and then converted
+ * (src/semantic-latest.js). A 'latest' render also returns `latest` ({ models, metrics }), which the
+ * context writer merges into the project's own model entries.
+ */
+export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   const modelsToRender = new Set(state.usedModels || []);
   // always include any model that received additions
   for (const k of Object.keys(state.additions || {})) modelsToRender.add(k);
@@ -207,13 +214,17 @@ export function renderContext(catalog, state) {
 
   // js-yaml quotes ref('...') fine as a plain scalar; force flow-off for readability
   // dbt renders descriptions and labels as Jinja: the caller's prose goes in inert (jinja-inert.js)
-  const body = yaml.dump(inertProse(doc), { lineWidth: 120, noRefs: true, quotingType: '"' });
+  const latest = spec === 'latest' ? toLatestSpec(inertProse(doc)) : null;
+  const body = latest
+    ? yaml.dump(latest.metrics.length ? { models: latest.models, metrics: latest.metrics } : { models: latest.models }, { lineWidth: 120, noRefs: true, quotingType: '"' })
+    : yaml.dump(inertProse(doc), { lineWidth: 120, noRefs: true, quotingType: '"' });
   const warnings = [];
   if (droppedMeasures.size) {
     warnings.push(`SCD dimension model is join-only: MetricFlow forbids measures on a validity_params model, so measure(s) [${[...droppedMeasures].join(', ')}] were not emitted${droppedMetrics.length ? ` (and metric(s) [${droppedMetrics.join(', ')}] that depended on them were dropped)` : ''}. Source of such a measure is the catalog's meta.mcp.measures on this model OR a prior task on a reused context_id (it stays in ctx.state.additions) — not auto-generated. Define user counts on the events fact (count_distinct of the user key) instead.`);
   }
   return {
-    yaml: unquoteRefs(body),
+    yaml: latest ? body : unquoteRefs(body),
+    ...(latest ? { latest } : {}),
     semanticModels: semanticModels.map((s) => s.name),
     metricNames: metrics.map((m) => m.name),
     warnings,

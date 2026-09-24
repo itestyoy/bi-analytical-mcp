@@ -23,7 +23,7 @@ import { isStartedTask, taskResult } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 process.env.MCP_PYTHON_MODELS = 'on'; // the fixture loads without a dbt profile; a python stage is the minutes-long build
-const VENV_PY = join(process.cwd(), '.dbtvenv', 'bin', 'python');
+const VENV_PY = join(process.cwd(), '.venvs', 'dbt-v1', 'bin', 'python');
 const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
 const HAS_PY = spawnSync(PY, ['--version']).status === 0;
 const skipNoPy = (t) => { if (!HAS_PY) { t.skip('no python interpreter for the static gate'); return true; } return false; };

@@ -100,7 +100,7 @@ function stubEngine({ after = 3, rows = [], fail = null, throws = null } = {}) {
     state,
     schemas: { query_pipeline_model: {}, display_model_result: {}, query_semantic_model: {} },
     jobs: { get: (id) => (id === 't1' ? { id, status: done() ? (fail ? 'error' : 'ready') : 'running' } : undefined), isLive: () => true },
-    async _awaitTask() {
+    async _awaitTasks() {
       if (throws) throw throws;
       state.waits += 1;
     },

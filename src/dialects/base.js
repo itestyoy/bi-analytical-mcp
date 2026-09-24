@@ -1,9 +1,9 @@
-// Abstract warehouse dialect. Concrete dialects (postgres.js, bigquery.js)
+// Abstract warehouse dialect. Concrete dialects (duckdb.js, bigquery.js)
 // implement the abstract methods; shared, dialect-independent logic lives here.
 //
 // Two responsibilities:
 //   1. SQL value/identifier/JSON primitives (jsonExtract, array/struct helpers).
-//   2. Lowering a logical pipeline (an ordered op IR) to SQL — Postgres lowers to
+//   2. Lowering a logical pipeline (an ordered op IR) to SQL — DuckDB lowers to
 //      a chained-CTE; BigQuery lowers to native pipe syntax. The op IR is shared;
 //      only the assembly differs, so a stage is written once and runs on both.
 import { inertLiteral } from '../jinja-inert.js';

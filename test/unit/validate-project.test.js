@@ -37,7 +37,7 @@ function project({ macro = true, factSql = true, usersSeed = true } = {}) {
 test('validateDbtProject: passes when macro + model + seed nodes are present', () => {
   const dir = project();
   try {
-    const c = loadCatalogFromProject(dir, { dialect: 'postgres' });
+    const c = loadCatalogFromProject(dir, { dialect: 'duckdb' });
     assert.doesNotThrow(() => validateDbtProject(dir, c));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -45,7 +45,7 @@ test('validateDbtProject: passes when macro + model + seed nodes are present', (
 test('validateDbtProject: errors when the required macro is missing', () => {
   const dir = project({ macro: false });
   try {
-    const c = loadCatalogFromProject(dir, { dialect: 'postgres' });
+    const c = loadCatalogFromProject(dir, { dialect: 'duckdb' });
     assert.throws(() => validateDbtProject(dir, c), /required macro 'mcp_relation_columns' is not defined/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -53,7 +53,7 @@ test('validateDbtProject: errors when the required macro is missing', () => {
 test('validateDbtProject: errors when a role references a missing model/seed node', () => {
   const dir = project({ usersSeed: false }); // dim_users node absent
   try {
-    const c = loadCatalogFromProject(dir, { dialect: 'postgres' });
+    const c = loadCatalogFromProject(dir, { dialect: 'duckdb' });
     assert.throws(() => validateDbtProject(dir, c), /role 'users' references dbt node 'dim_users'/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
@@ -61,7 +61,7 @@ test('validateDbtProject: errors when a role references a missing model/seed nod
 test('validateDbtProject: collects multiple problems in one error', () => {
   const dir = project({ macro: false, factSql: false });
   try {
-    const c = loadCatalogFromProject(dir, { dialect: 'postgres' });
+    const c = loadCatalogFromProject(dir, { dialect: 'duckdb' });
     assert.throws(() => validateDbtProject(dir, c), (e) => /mcp_relation_columns/.test(e.message) && /fct_events/.test(e.message));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

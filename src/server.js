@@ -12,12 +12,12 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpExpressApp } from '@modelcontextprotocol/express';
 import express from 'express';
 import { mkdirSync } from 'node:fs';
-import { loadCatalog, validateDbtProject, groundCatalogToPhysical } from './catalog.js';
+import { loadCatalog, validateDbtProject, groundCatalogToPhysical, gatePythonRuntime } from './catalog.js';
 import { loadRecipes } from './recipes.js';
 import { assetPath } from './runtime-assets.js';
 import { frameProfile } from './python-model.js';
 import { ContextManager } from './context-manager.js';
-import { DbtRunner } from './dbt-runner.js';
+import { createDbt, DEFAULT_ENV } from './dbt/index.js';
 import { Engine } from './engine.js';
 import { BackgroundIndexer } from './value-index.js';
 import { createEmbedder } from './embeddings.js';
@@ -73,6 +73,16 @@ export async function makeEngine(opts = {}) {
   // Fail fast if the dbt project doesn't implement the required macro(s) / model
   // nodes the server depends on (unless explicitly skipped, e.g. catalog-only dev).
   if (baseProjectDir && process.env.SKIP_PROJECT_VALIDATION !== '1') validateDbtProject(baseProjectDir, catalog);
+  const runner = opts.runner !== undefined
+    ? opts.runner
+    : baseProjectDir
+      // dbt runs ONLY in one of this tool's environments (a venv under DBT_ENVS_DIR built from its
+      // lock — DBT_ENV, else `dbt-v2`; MetricFlow's is `metricflow`); anything else is refused. The
+      // client reads its version from the binary (DBT_VERSION pins it).
+      ? createDbt({ version: process.env.DBT_VERSION || 'auto', environment: process.env.DBT_ENV || DEFAULT_ENV, profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
+      : null;
+  // what the installed dbt can run decides what is offered (dbt v2 runs no Python models on DuckDB)
+  gatePythonRuntime(catalog, runner);
   // Recipes come in TWO LAYERS, merged: the system file that ships with the server (technical and
   // universal) and the deployment's own file(s) — RECIPES_PATH, comma-separated for several — with
   // the deployment winning an id collision. Before this, RECIPES_PATH REPLACED the system set, so a
@@ -91,11 +101,6 @@ export async function makeEngine(opts = {}) {
     workspaceRoot: opts.workspaceRoot || process.env.MCP_WORKSPACE,
     timeSpineDialect: catalog.dialect,
   });
-  const runner = opts.runner !== undefined
-    ? opts.runner
-    : baseProjectDir
-      ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
-      : null;
   const queryTimeoutMs = graceMsFromEnv(process.env.QUERY_TIMEOUT_SECONDS, 20, 'QUERY_TIMEOUT_SECONDS');
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
   // <workspaceRoot>/mcp.sqlite; pin it elsewhere (e.g. a persistent volume) via MCP_DB.
@@ -297,7 +302,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const windowDays = Number(process.env.MCP_INDEX_WINDOW_DAYS) || 0;
   // Approximate (HLL) distinct counts during indexing — cheaper on a large fact, and the
   // project's preferred distinct-count method. DEFAULT ON; dialect-gated (bigquery/snowflake/
-  // duckdb/redshift use APPROX_COUNT_DISTINCT, postgres & unknown fall back to EXACT). Disable
+  // duckdb/redshift use APPROX_COUNT_DISTINCT, unknown fall back to EXACT). Disable
   // with MCP_INDEX_APPROX_DISTINCT=false/0/no/off to force exact everywhere.
   const approxDistinct = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_APPROX_DISTINCT ?? 'true').trim());
   // Properties indexed per combined scan (cardinality + coverage in one query each); a failed

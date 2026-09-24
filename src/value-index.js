@@ -268,7 +268,7 @@ export class BackgroundIndexer {
     // Use the dialect's APPROX distinct-count (HLL) for cardinality — cheaper on a large
     // fact (the project's preferred distinct method), at the price of an approximate
     // distinct_count. DEFAULT ON; only applied where the dialect has a native function
-    // (postgres & unknown fall back to exact silently), and disableable by the caller.
+    // (unknown fall back to exact silently), and disableable by the caller.
     this.approxDistinct = approxDistinct !== false;
     // Default to a stderr logger so sync progress/results are ALWAYS visible in the
     // server logs; callers (incl. tests) can pass their own or a no-op to silence it.
@@ -541,7 +541,7 @@ export class BackgroundIndexer {
    *   • ONE combined cardinality scan (distinct + non-null for every property),
    *   • ONE combined coverage scan (per event×app, every property's non-null) when anchored,
    *   • top-values via ONE combined APPROX_TOP_COUNT scan where supported (BigQuery/Snowflake),
-   *     else a per-property GROUP BY (the best Postgres/DuckDB/Redshift have).
+   *     else a per-property GROUP BY (the best DuckDB/Redshift have).
    * `where` overrides the scan predicate (null → the windowDays window; '' → whole table; a
    * string → e.g. a delta "time > watermark"). `withWm` also selects MAX(time) so the caller
    * gets the batch's new watermark. Returns { results: Map<property, stats>, maxTime }. Throws

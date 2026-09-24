@@ -67,15 +67,15 @@ test('a recipe is offered only where this deployment can run it', () => {
   const bq = loadRecipes(SYSTEM, mine, { dialect: 'bigquery', python: true, runtime: 'bigframes' });
   for (const id of ['needs_python', 'bq_only', 'bigframes_only', 'anywhere']) assert.ok(bq.ids().includes(id), id);
 
-  const pg = loadRecipes(SYSTEM, mine, { dialect: 'postgres', python: false, runtime: 'unknown' });
-  assert.ok(pg.ids().includes('anywhere'));
-  for (const id of ['needs_python', 'bq_only', 'bigframes_only']) assert.ok(!pg.ids().includes(id), `${id} must not be offered here`);
+  const local = loadRecipes(SYSTEM, mine, { dialect: 'duckdb', python: false, runtime: 'unknown' });
+  assert.ok(local.ids().includes('anywhere'));
+  for (const id of ['needs_python', 'bq_only', 'bigframes_only']) assert.ok(!local.ids().includes(id), `${id} must not be offered here`);
   // the shipped python recipes are withheld on that deployment too
-  assert.deepEqual(pg.idsRequiring('python_models'), []);
+  assert.deepEqual(local.idsRequiring('python_models'), []);
   assert.ok(loadRecipes(SYSTEM, [], { dialect: 'bigquery', python: true, runtime: 'bigframes' }).idsRequiring('python_models').length >= 3);
 
   // …and fetching one by id still answers, saying why it does not fit here
-  assert.match(pg.get('needs_python').unavailable_here, /no dbt python models/);
-  assert.match(pg.get('bq_only').unavailable_here, /this warehouse is postgres/);
-  assert.equal(pg.get('anywhere').unavailable_here, undefined);
+  assert.match(local.get('needs_python').unavailable_here, /no dbt python models/);
+  assert.match(local.get('bq_only').unavailable_here, /this warehouse is duckdb/);
+  assert.equal(local.get('anywhere').unavailable_here, undefined);
 });

@@ -1,7 +1,7 @@
 // A CANCELLED CALL STOPS THE PROCESS IT STARTED — and only a call that is still in flight does.
 //
 // The signal rides the async context (src/request-context.js) down to the one place that spawns
-// processes (src/dbt-runner.js). Three properties, each one a way this could go wrong:
+// processes (src/dbt/process.js). Three properties, each one a way this could go wrong:
 //   * a cancelled call kills its dbt process instead of letting it scan the warehouse to the end;
 //   * work SHARED between callers (Engine._bestEffort) is detached — one caller leaving does not
 //     kill the read another caller is waiting on;
@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { DbtRunner } from '../../src/dbt-runner.js';
+import { createDbt } from '../../src/dbt/index.js';
 import { withSignal, detached, currentSignal, releasableSignal } from '../../src/request-context.js';
 
 function sleepyDbt(seconds = 10) {
@@ -28,7 +28,7 @@ function sleepyDbt(seconds = 10) {
 
 test('a cancelled call kills its dbt process', async () => {
   const { bin, dir } = sleepyDbt();
-  const runner = new DbtRunner({ dbtBin: bin, timeout: 60000 });
+  const runner = createDbt({ version: 1, dbtBin: bin, timeout: 60000 });
   const ctl = new AbortController();
   const t0 = Date.now();
   const p = withSignal(ctl.signal, () => runner.run(dir));
@@ -45,7 +45,7 @@ test('a cancelled call kills its dbt process', async () => {
 
 test('a call without a signal runs to its end', async () => {
   const { bin, dir } = sleepyDbt(0.2);
-  const r = await new DbtRunner({ dbtBin: bin }).run(dir);
+  const r = await createDbt({ version: 1, dbtBin: bin }).run(dir);
   assert.equal(r.ok, true);
 });
 

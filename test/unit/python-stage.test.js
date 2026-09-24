@@ -23,7 +23,7 @@ const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', imp
 // hidden. Force it on for these tests, exactly as an operator does when the submission is set per
 // model; the availability rules themselves are tested at the end of this file.
 process.env.MCP_PYTHON_MODELS = 'on';
-const VENV_PY = join(process.cwd(), '.dbtvenv', 'bin', 'python');
+const VENV_PY = join(process.cwd(), '.venvs', 'dbt-v1', 'bin', 'python');
 const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
 const HAS_PY = spawnSync(PY, ['--version']).status === 0;
 
@@ -265,12 +265,14 @@ test('python stage: the body schema is a recursive $ref to $defs.py_block hoiste
 // ── Availability: the stage exists only where dbt can run Python models — decided from the profile ──
 test('python stage: offered only where the dbt profile can run Python models; refused elsewhere with the reason', async () => {
   const { resolvePythonRuntime } = await import('../../src/catalog.js');
-  const PG = fileURLToPath(new URL('../integration/fixtures/dbt_project', import.meta.url));      // postgres profile
+  // a profile whose adapter runs no dbt Python models (redshift), and the duckdb one, which does
+  const PG = mkdtempSync(join(tmpdir(), 'rsprof-'));
+  writeFileSync(join(PG, 'profiles.yml'), 'p:\n  target: dev\n  outputs:\n    dev:\n      type: redshift\n      host: x\n');
   const DUCK = fileURLToPath(new URL('../integration/fixtures/duckdb_project', import.meta.url)); // duckdb profile
   const noEnv = { };
   // the decision itself
   assert.equal(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: noEnv }).available, false);
-  assert.match(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: noEnv }).reason, /postgres.*runs no dbt Python models/);
+  assert.match(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: noEnv }).reason, /redshift.*runs no dbt Python models/);
   assert.deepEqual(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: noEnv }), { available: true, runtime: 'duckdb', config: {}, packages: '' });
   assert.equal(resolvePythonRuntime({ profilesDir: PG, projectDir: PG, env: { MCP_PYTHON_MODELS: 'on' } }).available, true, 'the operator may force it on');
   assert.equal(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: { MCP_PYTHON_MODELS: 'off' } }).available, false, '…or off');
@@ -290,21 +292,21 @@ test('python stage: offered only where the dbt profile can run Python models; re
   assert.deepEqual(pinned.config, { submission_method: 'serverless' });
   assert.equal(pinned.packages, 'shap=shap');
   assert.deepEqual(resolvePythonRuntime({ profilesDir: DUCK, projectDir: DUCK, env: { MCP_PYTHON_MODEL_CONFIG: 'not json' } }).config, {}, 'an unparseable pin is no pin');
-  // and what the tools show: with the postgres profile the stage is ABSENT from the schemas…
+  // and what the tools show: with the redshift profile the stage is ABSENT from the schemas…
   const saved = process.env.MCP_PYTHON_MODELS; delete process.env.MCP_PYTHON_MODELS;
   try {
     const cPg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
     assert.equal(cPg.pythonRuntime.available, false);
     const ePg = settle(new Engine({ catalog: cPg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
     const stagesPg = stageNames(ePg.schemas.build_pipeline_model);
-    assert.ok(!stagesPg.includes('python'), `no python stage on postgres: ${stagesPg.join(', ')}`);
+    assert.ok(!stagesPg.includes('python'), `no python stage on redshift: ${stagesPg.join(', ')}`);
     assert.ok(!ePg.schemas.build_pipeline_model.$defs?.py_block, 'and no py_block definition either');
     // …and a declaration naming it is refused with the reason, not with a warehouse error later
-    await assert.rejects(() => ePg.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] } }), /python stage is not available: .*postgres.*runs no dbt Python models|must be equal to one of the allowed values|stage/);
+    await assert.rejects(() => ePg.register_native_model({ name: 'seg', pipeline: { source: 'events', stages: [AGG, PY_STAGE] } }), /python stage is not available: .*redshift.*runs no dbt Python models|must be equal to one of the allowed values|stage/);
     // the overview says so
     const ov = await ePg.semantic_index({});
     assert.equal(ov.python_models.available, false);
-    assert.match(ov.python_models.reason, /postgres/);
+    assert.match(ov.python_models.reason, /redshift/);
     // with the duckdb profile it is there, and the overview names the runtime
     const cDuck = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     const eDuck = settle(new Engine({ catalog: cDuck, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
@@ -396,22 +398,23 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
 });
 
 // dbt's adapter and this server's SQL writer read the SAME profile and can disagree: dbt connects
-// with duckdb (and runs Python models there) while no SQL dialect is written for it, so pipelines
+// with snowflake (and runs Python models there) while no SQL dialect is written for it, so pipelines
 // are rendered in another dialect's syntax against it. That is a fact about the deployment — it is
 // reported, not assumed away.
 test('an adapter with no SQL dialect of its own is reported, not silently rendered as another', async () => {
-  const DUCK = fileURLToPath(new URL('../integration/fixtures/duckdb_project', import.meta.url));
+  const SNOW = mkdtempSync(join(tmpdir(), 'sfprof-'));
+  writeFileSync(join(SNOW, 'profiles.yml'), 'p:\n  target: dev\n  outputs:\n    dev:\n      type: snowflake\n      account: x\n');
   const saved = process.env.WAREHOUSE_DIALECT; delete process.env.WAREHOUSE_DIALECT;
   try {
-    const catalog = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
-    assert.equal(catalog.dialect, 'postgres', 'SQL is written in a dialect this server knows');
-    assert.deepEqual(catalog.dialectFallback, { profile_type: 'duckdb', rendering_as: 'postgres', explicit: false });
+    const catalog = loadCatalog(CATALOG, { profilesDir: SNOW, projectDir: SNOW });
+    assert.equal(catalog.dialect, 'duckdb', 'SQL is written in a dialect this server knows');
+    assert.deepEqual(catalog.dialectFallback, { profile_type: 'snowflake', rendering_as: 'duckdb', explicit: false });
     const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }), pythonBin: PY }));
     const overview = await e.semantic_index({});
-    assert.match(overview.dialect_note || '', /duckdb.*rendered as postgres SQL/);
+    assert.match(overview.dialect_note || '', /snowflake.*rendered as duckdb SQL/);
     // and a profile the server DOES write SQL for says nothing
-    const PG = fileURLToPath(new URL('../integration/fixtures/dbt_project', import.meta.url));
-    const pg = loadCatalog(CATALOG, { profilesDir: PG, projectDir: PG });
+    const DUCK = fileURLToPath(new URL('../integration/fixtures/duckdb_project', import.meta.url));
+    const pg = loadCatalog(CATALOG, { profilesDir: DUCK, projectDir: DUCK });
     assert.equal(pg.dialectFallback, null);
     assert.equal((await settle(new Engine({ catalog: pg, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dialect-')) }) })).semantic_index({})).dialect_note, undefined);
   } finally { if (saved === undefined) delete process.env.WAREHOUSE_DIALECT; else process.env.WAREHOUSE_DIALECT = saved; }

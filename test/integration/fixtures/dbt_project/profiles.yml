@@ -2,14 +2,7 @@ test_project:
   target: dev
   outputs:
     dev:
-      type: postgres
-      host: 127.0.0.1
-      port: "{{ env_var('DBT_PG_PORT') | as_number }}"
-      user: postgres
-      password: postgres
-      dbname: postgres
-      schema: public
+      type: duckdb
+      # a database file per test run (the harness sets DUCKDB_PATH); one process at a time holds it
+      path: "{{ env_var('DUCKDB_PATH') }}"
       threads: 1
-      sslmode: disable
-      connect_timeout: 30
-      retries: 1

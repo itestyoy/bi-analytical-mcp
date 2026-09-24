@@ -4,23 +4,34 @@
 # to IN-MEMORY (nothing survives a restart; semantic_index reports persisted:false).
 FROM node:22-slim
 
-# Python + build basics for dbt/metricflow.
+# Python for the dbt/MetricFlow environments (Debian bookworm's 3.11; dbt v2 needs >= 3.11).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 python3-pip python3-venv git \
+  && apt-get install -y --no-install-recommends python3 python3-venv git \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# dbt + MetricFlow into an isolated venv; expose `dbt`/`mf` on PATH.
-# Pick the warehouse adapter at build time: requirements.txt (Postgres, default)
-# or requirements-bigquery.txt (BigQuery) — see docker-compose.bigquery.yml.
-ARG DBT_REQUIREMENTS=requirements.txt
-ENV VENV=/opt/dbtvenv
-COPY requirements*.txt ./
-RUN python3 -m venv "$VENV" \
-  && "$VENV/bin/pip" install --no-cache-dir --upgrade pip \
-  && "$VENV/bin/pip" install --no-cache-dir -r "$DBT_REQUIREMENTS"
-ENV PATH="$VENV/bin:$PATH"
+# dbt runs in named ENVIRONMENTS — one virtualenv each under DBT_ENVS_DIR (src/dbt/environments.js);
+# the server uses DBT_ENV (else `dbt-v2`) and reads its dbt version from the binary. WHAT goes into
+# each is decided by this tool, not the build: src/dbt/environment-specs.js names the exact version
+# of every package, and scripts/dbt-env.mjs installs exactly those. There is no requirements file to
+# hand in, and no warehouse to choose: each carries the adapters of both DuckDB and BigQuery, and dbt
+# picks one from the project's profile. All three are always built: DBT_ENV picks among them.
+#   dbt-v2     — dbt v2 (its adapters are built in; it fetches the ADBC driver on first use)
+#   dbt-v1     — dbt 1.x + the DuckDB and BigQuery adapters, pandas/pyarrow (dbt Python models)
+#   metricflow — MetricFlow's `mf` + the Python dbt-core and both adapters it queries with; every
+#                dbt environment queries metrics through it
+ENV DBT_ENVS_DIR=/opt/dbt-envs
+# (only what the build step imports — node builtins alone, so it runs before `npm ci`)
+COPY scripts/dbt-env.mjs ./scripts/
+COPY src/dbt/environments.js src/dbt/environment-specs.js src/dbt/version.js ./src/dbt/
+RUN set -e; \
+    node scripts/dbt-env.mjs create metricflow; \
+    node scripts/dbt-env.mjs create dbt-v1; \
+    node scripts/dbt-env.mjs create dbt-v2; \
+    # for a shell in the container: `mf` on PATH — only mf; the MetricFlow venv's own `dbt` (dbt-core
+    # 1.x) is not the dbt the server runs, so its bin/ is NOT put on PATH
+    ln -s "$DBT_ENVS_DIR/metricflow/bin/mf" /usr/local/bin/mf
 
 # Node deps (production only — devDeps are the test harness).
 COPY package.json package-lock.json* ./
@@ -44,8 +55,7 @@ COPY config ./config
 ENV HOST=0.0.0.0 \
     PORT=3000 \
     MCP_WORKSPACE=/workspace \
-    DBT_BIN=dbt \
-    MF_BIN=mf
+    DBT_ENV=dbt-v2
 
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \

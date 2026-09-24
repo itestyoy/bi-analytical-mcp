@@ -49,7 +49,7 @@ test('lease prevents drop while in-flight', () => {
 
 test('time spine is always present in a context overlay (predefined model)', () => {
   const root = tmpRoot();
-  const cm = new ContextManager({ workspaceRoot: root, timeSpineDialect: 'postgres' });
+  const cm = new ContextManager({ workspaceRoot: root, timeSpineDialect: 'duckdb' });
   const ctx = cm.create();
   assert.ok(cm.hasTimeSpine(ctx.id), 'overlay must always have a time spine');
   const files = cm.generatedFiles(ctx.id);

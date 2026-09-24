@@ -12,7 +12,7 @@ import { settle } from '../helpers/settle.js';
 // Allowed non-data tests: these assert the CATALOG METADATA CONTRACT — units,
 // event semantics, partition hints and error fields are structured catalog facts
 // surfaced to the AI (not generated SQL/YAML), so the discovery layer is honest.
-const catalog = loadCatalog(new URL('../../config/catalog.yml', import.meta.url).pathname, { dialect: 'postgres' });
+const catalog = loadCatalog(new URL('../../config/catalog.yml', import.meta.url).pathname, { dialect: 'duckdb' });
 const engine = () => settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'dm-')) }) }));
 
 test('overview surfaces event_semantics + partition_column for the events fact', async () => {

@@ -133,10 +133,18 @@
   pipeline materialize, the hidden register_native_model/update_semantic_model) or a query
   (`query_semantic_model({ context_id, metrics… })`, `query_pipeline_model({ context_id,
   transform })`) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
-  never waits (`Engine._startTask`; tasks on one context run in order). The query tool of the SAME
+  never waits (`Engine._startTask`; tasks on one context run in order). A query tool also takes a
+  BATCH — `{ context_id, queries: [...] }`, up to MAX_BATCH (5) — which checks EVERY query before
+  any starts (one mistake refuses the batch), starts one task per query and returns ONLY
+  `{ task_ids, context_id }` (`Engine._startBatch`); the members run side by side (each dbt process
+  with a target directory of its own), after what was queued before them and before what is
+  queued after. The query tool of the SAME
   side reads a task back (the started answer names it in `read_with`): `{ task_id }` waits
   (≤ MAX_WAIT_SECONDS per call) and returns the result, paging a stored table or the rows held in
-  memory; it refuses a task of the other side — before any wait — and it never draws. The side is
+  memory; `{ task_ids }` waits for several and returns each one's result as `{ task_id }` would;
+  `{ task_id | task_ids, cancel: true }` stops them at once (the task's own AbortController kills its
+  dbt process; its work still runs down its failure path, so a build clears its in-flight marker); it
+  refuses a task of the other side — before any wait — and it never draws. The side is
   the tool that started the task, persisted with it (the jobs table's `tool`), never guessed.
   `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
   query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
@@ -179,9 +187,49 @@
   `subscriptions/listen` stream that subscribes within CHANGE_WINDOW_MS; (3) the fingerprint rides in
   `serverInfo.version` (`0.1.0+<fingerprint>`). Do NOT lengthen the list TTLs back to hours.
 
+## Warehouses and dbt
+- TWO WAREHOUSES, TWO DIALECTS: `bigquery` (production) and `duckdb` (local work, the tests, the
+  default compose setup) — `src/dialects/{bigquery,duckdb}.js`. There is no Postgres. A DuckDB
+  database is a FILE one process at a time may hold, so every dbt / MetricFlow process on it takes
+  the warehouse's turn (`src/dbt/process.js`, keyed by the database file read from the profile), the
+  MetricFlow sidecar lets go of it after each request, and a batch's members run one after another
+  there (side by side on BigQuery).
+- dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
+  the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
+  / semanticSpec / pythonModelsOn) over the installed dbt, each major version its own implementation
+  — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
+  and do NOT branch on the dbt version outside `src/dbt/`.
+- ONE SEMANTIC LAYER, TWO YAML SPECS: the context is rendered once (`src/yaml-render.js`, legacy
+  shape) and, for a dbt whose `semanticSpec` is 'latest' (v2), converted by `src/semantic-latest.js`
+  — the semantic model joins its dbt model's entry (merged with the project's own entry by
+  `ContextManager.writeSemanticYaml`), keeping OUR semantic-model names so paths and metric names
+  do not change. What v2 writes differently into the manifest is corrected in its client (a
+  percentile is always approximate there: `config.meta.mcp_percentile` puts the request back).
+  Metric queries go through MetricFlow's `mf` on either version.
+- dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
+  DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v2`
+  (used unless DBT_ENV names another), `dbt-v1`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own
+  (`metricflow`, or MF_ENV) that every dbt environment queries through — `mf` and the sidecar's
+  Python — since dbt-metricflow brings the Python dbt-core, which cannot share a venv with a dbt v2
+  binary. `npm run dbt:env -- create|list` manages them.
+- WHAT IS IN AN ENVIRONMENT IS THIS TOOL'S DECISION (HARD RULE): `src/dbt/environment-specs.js` names
+  each one's packages at EXACT versions and `create` installs exactly those; the image builds them at
+  `docker build`. Every environment carries the adapters of BOTH warehouses (dbt picks one from the
+  profile), so the image is one for DuckDB and BigQuery — there is no warehouse build argument.
+  ONLY OURS RUN: `resolveEnvironment` refuses a name the specs do not define, one asked for as what
+  its spec's `role` is not (DBT_ENV must be a `dbt` environment, MF_ENV a `metricflow` one), and a
+  directory whose mcp-env.json does not record the spec's pip and packages as they are now. NOTHING IS
+  TAKEN FROM PATH: no DBT_BIN / MF_BIN / PYTHON_BIN, and `createDbt`, `MfEngineBackend` and the AST
+  gate refuse without a named binary (tests name theirs from the same environments; a refused
+  environment fails the test run instead of skipping it).
+  Do NOT add a requirements file, a `pip install <pkg>` in the Dockerfile, or an option to hand the
+  tool packages, versions or a dbt of one's own: a version change is a spec change, reviewed as code.
+- Tests run on the `dbt-v2` environment; the python stage's file runs on `dbt-v1` (dbt 1.x),
+  since v2 runs no Python models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
+
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model
-  against the warehouse (PGlite + dbt + MetricFlow).
+  against the warehouse (DuckDB + dbt + MetricFlow).
 - NEVER assert on generated text: no string/regex matching of generated SQL,
   YAML, Jinja (`Dimension(...)`/`--where`), `mf`/`dbt` command strings, or runner
   args. Correctness is proven by the NUMBERS returned, not by the query text.

@@ -1,7 +1,7 @@
 /**
  * @file Query Result view — the cards inside the host's conversation: a CHART (a line or multi-line,
- * a stacked area, grouped/stacked/horizontal bars, a donut of shares or a sankey of flows, its rows
- * folded underneath as a data table with filter and sorting), KPI TILES (a headline number, its
+ * a stacked area, grouped/stacked/horizontal bars, a donut of shares or a sankey of flows — the chart
+ * alone, the only table is the pivot), KPI TILES (a headline number, its
  * change, a sparkline), a PIVOT (a drill-down table, each level read when its row opens), a FUNNEL
  * (steps, conversion, the biggest drop) and the A/B
  * family (the test, the split check, the sample-size plan). Any other result gets one status line.
@@ -19,7 +19,7 @@
  * unit tests run in node on real tool results; this file only draws it. Structure follows the
  * official MCP Apps templates: handlers are registered on the App before connect(), the host's
  * theme, style variables and fonts are applied on connect and on every context change. The pieces
- * it draws are shadcn/ui components (Card, Badge, Button, Input, Table, Alert, Accordion, Chart),
+ * it draws are shadcn/ui components (Card, Badge, Button, Table, Alert, Accordion, Chart),
  * styled in mcp-app.css.
  */
 import {
@@ -133,10 +133,6 @@ const chartCanvas = document.getElementById('chart');
 const chartTooltip = document.getElementById('chart-tooltip');
 const chartLegend = document.getElementById('chart-legend');
 const cardsSection = document.getElementById('cards-section');
-const dataLabel = document.getElementById('data-label');
-const filterInput = document.getElementById('filter');
-const tableCount = document.getElementById('table-count');
-const tableEl = document.getElementById('table');
 const notesEl = document.getElementById('notes');
 const notesList = document.getElementById('notes-list');
 const fullscreenBtn = document.getElementById('fullscreen-btn');
@@ -144,9 +140,7 @@ const loadingEl = document.getElementById('loading');
 const statusEl = document.getElementById('status');
 
 // static icons
-document.getElementById('filter-icon').append(icon('search'));
 document.getElementById('notes-chevron').append(icon('chevron-down'));
-document.getElementById('data-chevron').append(icon('chevron-down'));
 document.getElementById('loading-icon').append(icon('loader-circle', 'icon spin'));
 
 // App state
@@ -156,9 +150,7 @@ const state = {
   lastResult: null,
   model: null,
   chart: null,
-  sort: null, // { index, dir: 1 | -1 }
   follow: 0, // bumps on every new result, so a stale poll loop stops
-  filter: '',
   displayMode: 'inline',
 };
 
@@ -576,7 +568,6 @@ function renderChartResult(model) {
     model.approximate ? badge('approximate', 'outline') : null,
   );
   renderChart(model.chart, model.chart.y || 'Series');
-  renderTable(model);
 }
 
 // ── chart (shadcn charts: horizontal grid only, no axis or tick lines, HTML tooltip and legend) ─
@@ -646,7 +637,7 @@ function renderChart(chart, title) {
     chartDescriptionEl.textContent = `${labels.length} points · ${chart.series.length} series`;
     chartCanvas.setAttribute('aria-label', `${title}: ${chart.series.length} series over ${labels.length} points`);
     if (chart.series.length > 1) drawLegend();
-    if (chart.folded) showAlert({ title: `${chart.folded} smaller series are in the table only`, description: 'The chart keeps the largest series readable; every row is in the table below.' });
+    if (chart.folded) showAlert({ title: `${chart.folded} smaller series are not drawn`, description: 'The chart keeps the largest six readable.' });
     return;
   }
 
@@ -757,7 +748,7 @@ function renderChart(chart, title) {
   chartDescriptionEl.textContent = series.length > 1 ? `${count.replace(/bars?$/, labels.length === 1 ? 'category' : 'categories')} · ${series.length} series${stacked ? ', stacked' : ''}` : count;
   chartCanvas.setAttribute('aria-label', `${title}: ${labels.length} categories${series.length > 1 ? `, ${series.length} series` : ''}`);
   if (series.length > 1) drawLegend();
-  if (chart.folded) showAlert({ title: `${chart.folded} smaller series are in the table only`, description: 'The chart keeps the largest series readable; every row is in the table below.' });
+  if (chart.folded) showAlert({ title: `${chart.folded} smaller series are not drawn`, description: 'The chart keeps the largest six readable.' });
 }
 
 /** shadcn ChartTooltipContent, drawn as HTML next to the canvas. */
@@ -876,76 +867,6 @@ chartCanvas.addEventListener('pointercancel', hideSoon);
 chartCanvas.addEventListener('pointerdown', () => clearTimeout(tooltipTimer));
 chartCanvas.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') hideSoon(); });
 window.addEventListener('scroll', clearTooltip, { passive: true });
-
-// ── data table (shadcn data-table: filter input, sortable headers, count + pager footer) ──────
-
-function renderTable(model) {
-  dataLabel.textContent = `Data · ${integerFormat.format(model.rows.length)} row${model.rows.length === 1 ? '' : 's'}`;
-  filterInput.value = state.filter;
-  drawRows(model);
-}
-
-function drawRows(model) {
-  const q = state.filter.trim().toLowerCase();
-  const rows = q ? model.rows.filter((r) => r.some((v) => v !== null && String(v).toLowerCase().includes(q))) : model.rows.slice();
-  if (state.sort && state.sort.index < model.columns.length) {
-    const { index, dir } = state.sort;
-    const numeric = model.columns[index].type === 'number';
-    rows.sort((a, b) => {
-      const x = a[index];
-      const y = b[index];
-      if (x === null) return 1;
-      if (y === null) return -1;
-      return dir * (numeric ? Number(x) - Number(y) : String(x).localeCompare(String(y)));
-    });
-  }
-
-  const head = document.createElement('tr');
-  model.columns.forEach((c, index) => {
-    const th = el('th', c.type === 'number' ? 'num' : '');
-    th.scope = 'col';
-    const sorted = state.sort?.index === index;
-    if (sorted) th.setAttribute('aria-sort', state.sort.dir > 0 ? 'ascending' : 'descending');
-    const btn = el('button', 'btn btn-ghost btn-sm sort-btn');
-    btn.type = 'button';
-    btn.append(el('span', null, c.name), icon(sorted ? (state.sort.dir > 0 ? 'arrow-up' : 'arrow-down') : 'arrow-up-down'));
-    btn.addEventListener('click', () => {
-      state.sort = { index, dir: state.sort?.index === index ? -state.sort.dir : 1 };
-      drawRows(model);
-    });
-    th.append(btn);
-    head.append(th);
-  });
-  tableEl.tHead.replaceChildren(head);
-
-  const timeLabels = model.columns.map((c, i) => (c.type === 'time' ? timeFormatter(model.rows.map((r) => r[i]).filter((v) => v !== null)) : null));
-  if (!rows.length) {
-    const tr = document.createElement('tr');
-    const td = el('td', 'empty-cell', model.rows.length ? 'No rows match the filter.' : 'No rows.');
-    td.colSpan = Math.max(1, model.columns.length);
-    tr.append(td);
-    tableEl.tBodies[0].replaceChildren(tr);
-  } else {
-    tableEl.tBodies[0].replaceChildren(...rows.map((r) => {
-      const tr = document.createElement('tr');
-      r.forEach((v, i) => {
-        const numeric = model.columns[i].type === 'number';
-        const text = v === null ? 'null' : numeric ? formatNumber(v) : timeLabels[i] ? timeLabels[i](v) : String(v);
-        tr.append(el('td', [numeric ? 'num' : '', v === null ? 'null' : ''].filter(Boolean).join(' '), text));
-      });
-      return tr;
-    }));
-  }
-
-  const offset = model.page?.offset ?? 0;
-  const range = model.rows.length ? `Rows ${integerFormat.format(offset + 1)}–${integerFormat.format(offset + model.rows.length)}` : 'No rows';
-  tableCount.textContent = q ? `${integerFormat.format(rows.length)} of ${integerFormat.format(model.rows.length)} rows match` : range;
-}
-
-filterInput.addEventListener('input', () => {
-  state.filter = filterInput.value;
-  if (state.model?.columns) drawRows(state.model);
-});
 
 // ── A/B result ────────────────────────────────────────────────────────────────────────────────
 //
@@ -1187,8 +1108,8 @@ function showNotes(notes) {
 
 /**
  * The container's size decides the layout, never a width baked in here. A FIXED height (fullscreen,
- * or a host that pins it) switches to the fill layout — the table takes the remaining space and
- * scrolls inside; a flexible height lets the content size the iframe (the App reports it).
+ * or a host that pins it) switches to the fill layout — the view takes the frame and its cards scroll
+ * inside it; a flexible height lets the content size the iframe (the App reports it).
  */
 function applyContainer(ctx) {
   const dims = ctx.containerDimensions;

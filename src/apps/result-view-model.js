@@ -1,7 +1,7 @@
 // THE MODEL OF WHAT THE RESULT VIEW SHOWS — a pure function from a tool result to a view.
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
-// WHAT to render: a CHART (a time series or a breakdown, with its rows folded underneath), KPI tiles, a FUNNEL,
+// WHAT to render: a CHART (a time series or a breakdown), KPI tiles, a FUNNEL,
 // and the A/B TEST family — the test itself, the sample-ratio check and the sample-size plan, the
 // three steps of one experiment. Anything else — a failure, a build still running (with the query_id
 // the card follows to its rows), an explained
@@ -180,7 +180,7 @@ export function buildViewModel(toolName, result, toolInput) {
   if (toolName === 'experiment') return none('experiment');
   if (typeof result.sql === 'string' && !Array.isArray(result.rows)) return none('sql');
 
-  // ── rows: a funnel, or a chart (with the rows folded under it) — or nothing ──
+  // ── rows: a funnel, or a chart — or nothing ──
   if (Array.isArray(result.rows)) {
     const names = Array.isArray(result.columns) && result.columns.length
       ? result.columns.map((c) => (isObj(c) ? c.name : String(c)))

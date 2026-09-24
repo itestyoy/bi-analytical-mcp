@@ -68,7 +68,7 @@ test('governed SCD join: revenue by users.country is point-in-time (US 50 / GB 2
   const ctx = created.context_id;
 
   const total = await engine.query_semantic_model({ context_id: ctx, metrics: ['scd_rev_revenue'], materialize: true });
-  assert.equal(total.status, 'ready', JSON.stringify(total));
+  assert.equal(total.status, 'done', JSON.stringify(total));
   const totalR = await readTable(engine, ctx, total.table, { transform: { aggregations: [{ fn: 'sum', column: 'scd_rev_revenue', as: 't' }] } });
   assert.equal(num(totalR.rows[0].t), 100, 'point-in-time total revenue = 100 (a fan-out join would give 130)');
 

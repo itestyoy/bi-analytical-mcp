@@ -298,7 +298,7 @@ async function followQuery(queryId) {
 function showStatus(model) {
   const lines = {
     // the card is following its query: this line is replaced by the result when it is ready
-    following: ['loader-circle', 'Running in the warehouse…', 'The result appears here when it is ready', 'icon spin'],
+    following: ['loader-circle', 'Running in the warehouse…', null, 'icon spin'],
     // a detached query the card cannot follow (the host proxies no tools/call, or following ended):
     // a HAND-OFF, not a live state, so no spinner — the rows arrive through the model's own
     // get_query_result call, which draws its own card

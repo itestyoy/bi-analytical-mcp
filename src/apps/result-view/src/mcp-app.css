@@ -795,8 +795,9 @@
 }
 
 /* ── Collapsible notes (shadcn Accordion item) ─────────────────────────────────────────────── */
+/* the notes are the last thing on the page: no rule under them, the host's frame ends it */
 .collapsible {
-  border-bottom: var(--border-width-regular) solid var(--border);
+  margin-bottom: calc(var(--space) * -2);
 }
 
 .collapsible-trigger {

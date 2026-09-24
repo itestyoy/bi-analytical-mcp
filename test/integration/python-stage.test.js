@@ -32,7 +32,7 @@ const DBT_BIN = ENV?.dbtBin || '';
 const PY_BIN = ENV?.pythonBin || '';
 const HAS = !!(DBT_BIN && PY_BIN && existsSync(DBT_BIN) && existsSync(PY_BIN));
 const opts = { timeout: 600000 };
-const skip = (t) => { if (!HAS) { t.skip('dbt environment dbt-v1 not installed (npm run dbt:env -- create dbt-v1 -r requirements.txt)'); return true; } return false; };
+const skip = (t) => { if (!HAS) { t.skip('dbt environment dbt-v1 not installed (npm run dbt:env -- create dbt-v1)'); return true; } return false; };
 
 let engine; let work;
 before(async () => {

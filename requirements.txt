@@ -1,8 +1,0 @@
-# The `dbt-v1` environment for DuckDB: dbt 1.x (the Python dbt-core) and the DuckDB adapter, with
-# pandas + pyarrow so dbt-duckdb runs dbt PYTHON models locally (the python stage — dbt v2 runs no
-# Python models on DuckDB). MetricFlow is an environment of its own (requirements-metricflow.txt);
-# dbt v2 is requirements-dbt2.txt. The BigQuery build uses requirements-bigquery.txt.
-dbt-core==1.11.11
-dbt-duckdb>=1.10,<1.12
-pandas
-pyarrow

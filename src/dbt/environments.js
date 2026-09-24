@@ -12,7 +12,8 @@
 // brings the Python dbt-core, whose own `dbt` command would replace it. (An environment that carries
 // its own `mf` — a single all-in-one venv — uses it when there is no MetricFlow environment.)
 //
-// Create them with `npm run dbt:env -- create <name> -r <requirements file>` (scripts/dbt-env.mjs).
+// Create them with `npm run dbt:env -- create <name> [--adapter duckdb|bigquery]` (scripts/dbt-env.mjs),
+// from what src/dbt/environment-specs.js defines and config/dbt-environments/ locks.
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
@@ -53,12 +54,12 @@ export function resolveEnvironment(name, { dir = envsDir(), env = process.env } 
   const e = all.find((x) => x.name === wanted);
   if (!e || !e.dbtBin) {
     const have = all.filter((x) => x.dbtBin).map((x) => x.name);
-    throw new Error(`dbt environment '${wanted}' not found in ${dir}${have.length ? ` (there: ${have.join(', ')})` : ' (none there)'} — create it with: npm run dbt:env -- create ${wanted} -r <requirements file>`);
+    throw new Error(`dbt environment '${wanted}' not found in ${dir}${have.length ? ` (there: ${have.join(', ')})` : ' (none there)'} — create it with: npm run dbt:env -- create ${wanted}`);
   }
   const mfName = env.MF_ENV || DEFAULT_MF_ENV;
   const mf = all.find((x) => x.name === mfName && x.mfBin);
   if (mf) return { ...e, mfBin: mf.mfBin, pythonBin: mf.pythonBin, metricflowFrom: mf.name };
-  if (env.MF_ENV) throw new Error(`MetricFlow environment '${env.MF_ENV}' not found in ${dir} (or it has no mf) — create it with: npm run dbt:env -- create ${env.MF_ENV} -r requirements-metricflow.txt`);
+  if (env.MF_ENV) throw new Error(`MetricFlow environment '${env.MF_ENV}' not found in ${dir} (or it has no mf) — create it with: npm run dbt:env -- create ${env.MF_ENV}`);
   if (e.mfBin) return { ...e, metricflowFrom: e.name };
   return { ...e, mfBin: null, metricflowFrom: null };
 }

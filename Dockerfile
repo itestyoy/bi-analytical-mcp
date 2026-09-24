@@ -4,33 +4,35 @@
 # to IN-MEMORY (nothing survives a restart; semantic_index reports persisted:false).
 FROM node:22-slim
 
-# Python + build basics for dbt/metricflow.
+# Python for the dbt/MetricFlow environments (Debian bookworm's 3.11 — the Python the locks are for).
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 python3-pip python3-venv git \
+  && apt-get install -y --no-install-recommends python3 python3-venv git \
   && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # dbt runs in named ENVIRONMENTS — one virtualenv each under DBT_ENVS_DIR (src/dbt/environments.js);
-# the server uses DBT_ENV (else `dbt-v2`) and reads its dbt version from the binary.
-#   dbt-v2     — dbt v2 (requirements-dbt2.txt). INSTALL_DBT_V2=0 skips it (set DBT_ENV=dbt-v1).
-#   dbt-v1     — dbt 1.x + the warehouse adapter: DBT_REQUIREMENTS, requirements.txt (DuckDB, with
-#                pandas for Python models) or requirements-bigquery.txt (BigQuery).
-#   metricflow — MetricFlow's `mf` + the Python dbt-core and adapter it queries with: MF_REQUIREMENTS,
-#                requirements-metricflow.txt or requirements-metricflow-bigquery.txt. Every dbt
-#                environment queries metrics through it (MF_ENV names another).
-ARG DBT_REQUIREMENTS=requirements.txt
-ARG MF_REQUIREMENTS=requirements-metricflow.txt
+# the server uses DBT_ENV (else `dbt-v2`) and reads its dbt version from the binary. WHAT goes into
+# each is decided by this tool, not the build: src/dbt/environment-specs.js names the exact packages,
+# config/dbt-environments/*.lock.txt locks every file of every dependency by SHA-256, and
+# scripts/dbt-env.mjs installs exactly that (--require-hashes, wheels only, a locked pip) and checks
+# the result. There is no requirements file to hand in — only which warehouse to build for:
+#   WAREHOUSE_ADAPTER — duckdb (default) or bigquery: the adapter of dbt-v1 and metricflow;
+#   INSTALL_DBT_V2=0  — skip dbt-v2 (then set DBT_ENV=dbt-v1).
+#   dbt-v2     — dbt v2 (its adapters are built in; it fetches the ADBC driver on first use)
+#   dbt-v1     — dbt 1.x + the adapter (on DuckDB with pandas/pyarrow, for dbt Python models)
+#   metricflow — MetricFlow's `mf` + the Python dbt-core and adapter it queries with; every dbt
+#                environment queries metrics through it
+ARG WAREHOUSE_ADAPTER=duckdb
 ARG INSTALL_DBT_V2=1
 ENV DBT_ENVS_DIR=/opt/dbt-envs
-COPY requirements*.txt ./
+COPY scripts/dbt-env.mjs ./scripts/
+COPY src/dbt/environments.js src/dbt/environment-specs.js ./src/dbt/
+COPY config/dbt-environments ./config/dbt-environments
 RUN set -e; \
-    mkenv() { python3 -m venv "$DBT_ENVS_DIR/$1" \
-      && "$DBT_ENVS_DIR/$1/bin/pip" install --no-cache-dir --upgrade pip \
-      && "$DBT_ENVS_DIR/$1/bin/pip" install --no-cache-dir -r "$2"; }; \
-    mkenv metricflow "$MF_REQUIREMENTS"; \
-    mkenv dbt-v1 "$DBT_REQUIREMENTS"; \
-    if [ "$INSTALL_DBT_V2" = "1" ]; then mkenv dbt-v2 requirements-dbt2.txt; fi
+    node scripts/dbt-env.mjs create metricflow --adapter "$WAREHOUSE_ADAPTER"; \
+    node scripts/dbt-env.mjs create dbt-v1 --adapter "$WAREHOUSE_ADAPTER"; \
+    if [ "$INSTALL_DBT_V2" = "1" ]; then node scripts/dbt-env.mjs create dbt-v2; fi
 # (for a shell in the container: mf on PATH)
 ENV PATH="$DBT_ENVS_DIR/metricflow/bin:$PATH"
 

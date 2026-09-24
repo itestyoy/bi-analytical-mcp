@@ -12,8 +12,7 @@ services:
     build:
       context: .
       args:
-        DBT_REQUIREMENTS: requirements-bigquery.txt              # dbt-v1: dbt 1.x + the BigQuery adapter
-        MF_REQUIREMENTS: requirements-metricflow-bigquery.txt    # metricflow: mf + the BigQuery adapter
+        WAREHOUSE_ADAPTER: bigquery    # dbt-v1 and metricflow built with the BigQuery adapter (their locks)
     ports:
       - "${PORT:-3000}:3000"
     environment:

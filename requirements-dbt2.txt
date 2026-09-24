@@ -1,5 +1,0 @@
-# dbt v2 — the Rust `dbt` binary, in a venv of its own: the `dbt` package and dbt-core both install
-# a `dbt` command, so they cannot share one. MetricFlow (`mf`) and the Python adapter it queries
-# with stay in the main venv (requirements.txt / requirements-bigquery.txt); `mf` reads the
-# semantic_manifest.json that v2 writes. Point DBT_BIN at this venv's dbt to use it.
-dbt>=2.0,<3

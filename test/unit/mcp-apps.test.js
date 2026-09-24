@@ -190,7 +190,7 @@ test('view model: a sample-size plan says which side it solved and carries the p
   assert.equal(d.n_per_group, 5000);
 });
 
-test('view model: a result with no card is none, with its reason — and a failure carries its first line', () => {
+test('view model: a result with no card is none, with its reason', () => {
   for (const [tool, result, reason] of [
     ['get_query_result', { status: 'running', query_id: 'q' }, 'running'],
     ['get_query_result', { ok: false, status: 'error', error: { stage: 'fetch', message: 'boom\nsecond line' } }, 'error'],
@@ -201,5 +201,4 @@ test('view model: a result with no card is none, with its reason — and a failu
     assert.equal(m.kind, 'none', JSON.stringify(result).slice(0, 80));
     assert.equal(m.reason, reason);
   }
-  assert.equal(buildViewModel('get_query_result', { ok: false, error: { stage: 'fetch', message: 'boom\nsecond line' } }).message, 'boom');
 });

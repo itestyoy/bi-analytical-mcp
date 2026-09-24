@@ -28,10 +28,8 @@ export function buildViewModel(toolName, result, toolInput) {
   // a build that is still running, or one that failed, says so — there is nothing to plot
   const none = (reason, extra = {}) => ({ kind: 'none', reason, ...extra });
   if (result.status === 'running' && result.query_id) return none('running');
-  if (result.ok === false || (result.error && !result.rows)) {
-    const e = isObj(result.error) ? result.error : {};
-    return none('error', { message: String(e.message || result.error || 'the call failed').split('\n')[0].slice(0, 300), stage: e.stage || null });
-  }
+  // a failure is only NAMED in the view — the reason is for the reply, not the card
+  if (result.ok === false || (result.error && !result.rows)) return none('error');
 
   // ── A/B: significance per variant (experiment analyze) ──
   if (toolName === 'experiment' && Array.isArray(result.results)) {

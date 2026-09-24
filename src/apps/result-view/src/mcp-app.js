@@ -251,7 +251,7 @@ function render(result) {
 function showStatus(model) {
   const lines = {
     running: ['loader-circle', 'Still running in the warehouse — the result comes back in a later step.', 'icon spin'],
-    error: ['circle-alert', model.message ? `The call failed: ${model.message}` : 'The call failed — the reason is in the reply.'],
+    error: ['circle-alert', 'Error'],
   };
   const [name, text, cls] = lines[model.reason] || ['info', 'Nothing to chart in this result — it is in the reply.'];
   statusEl.replaceChildren(icon(name, cls || 'icon'), el('span', null, text));

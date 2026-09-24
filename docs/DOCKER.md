@@ -157,8 +157,8 @@ the plain tools stay exactly as they were for every client that does not:
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
   TEST (a stat card per variant: lift, interval, verdict, the groups), the SAMPLE-RATIO CHECK (the
   observed split against the intended one) and the SAMPLE-SIZE PLAN. A spinner shows until the
-  result arrives. Any other result — a failure, a build still running, SQL, rows with no chart
-  shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
+  result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply),
+  a build still running, SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
   nothing would leave an empty box) and the text answer carries the rest.
   The view ONLY DRAWS: it reads the result the host hands it and nothing else. Every tool declares
   `_meta.ui.visibility: ["model"]` (a view may not call it), the view resource declares an empty

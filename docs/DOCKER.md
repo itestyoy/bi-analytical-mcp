@@ -157,13 +157,16 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   that does not declare it gets `skills/list` / `skills/get` refused (-32021), no skill files in the
   resource listings or reads, and no SKILLS pointer in the instructions — the same content stays
   reachable through `semantic_index`.
-- **Apps** (`io.modelcontextprotocol/ui`) — offered ONLY to a client that declares the extension
+- **Apps** (`io.modelcontextprotocol/ui`) — drawing is offered ONLY to a client that declares the extension
   (with the view's MIME type) in the request being served, i.e. a 2026-07-28 client, whose every
   request carries its capabilities. Every other client — including a 2025 client that declared it in
-  `initialize`, whose later requests carry nothing (this server keeps no sessions) — gets no
-  `_meta.ui`, no view resource, neither `display_model_result` nor `drill_result` (not listed; a call is
-  refused), no `card` on `experiment` (refused if sent), no card instructions and no `show_to_user`
-  hint. For a client that declares it, two tools draw, each its own kind of result, in the host's
+  `initialize`, whose later requests carry nothing (this server keeps no sessions) — gets no card
+  instructions and no `show_to_user` hint, and a call that would draw (`display_model_result`, `card`
+  on `experiment`) is refused. The tool list (with `_meta.ui`) and the view page are the same for
+  every client, as the official ext-apps `registerAppTool` serves them: a host re-draws a card
+  already in a conversation — reopened, or on another device — by finding its tool and page on
+  requests that need not carry the declaration, and hiding them made every stored card "Connector
+  not found". For a client that declares it, two tools draw, each its own kind of result, in the host's
   conversation as an interactive view (`ui://betti/result-view.html`):
   `display_model_result({ task_id, display })` a finished MODEL result — a semantic query or a
   pipeline — and `experiment` (a separate process: statistics over the numbers the caller brings, no

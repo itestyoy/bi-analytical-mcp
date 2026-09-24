@@ -39,28 +39,27 @@ test('the two drawing tools carry the view, in both spellings — for a client t
   assert.ok(c.getInstructions().includes('RESULT CARDS'), 'and the instructions tell how cards work');
 });
 
-test('a client that does not declare MCP Apps in its request gets none of it: no view, no display_model_result, no card hints — and a call to it is refused', async () => {
+test('a client that does not declare MCP Apps sees the same tools and page, but nothing speaks to its model about cards and nothing draws', async () => {
   // a 2025 client declares its capabilities once, in initialize: its later requests carry none, so
   // even a declaration there does not turn the feature on; a 2026 client that declares nothing neither
+  const apps = (await (await s.client({ era: 'modern', capabilities: APPS_CAPS })).listTools()).tools;
   for (const [era, capabilities] of [['legacy', APPS_CAPS], ['legacy', {}], ['modern', {}]]) {
     const label = `${era} ${capabilities.extensions ? 'declaring at initialize' : 'declaring nothing'}`;
     const c = await s.client({ era, capabilities });
-    const tools = (await c.listTools()).tools;
-    for (const t of tools) assert.equal(t._meta?.ui, undefined, `${label}: ${t.name} carries no _meta.ui`);
-    for (const name of APPS_ONLY) assert.equal(tools.find((t) => t.name === name), undefined, `${label}: ${name} is not offered`);
-    assert.equal(tools.find((t) => t.name === 'experiment').inputSchema.properties.card, undefined, `${label}: experiment offers no card`);
-    const card = await c.callTool({ name: 'experiment', arguments: { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true } });
-    assert.equal(card.isError, true, `${label}: card is refused`);
-    assert.equal(JSON.parse(card.content[0].text).error.field, 'card', label);
-    assert.ok(!(await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI), `${label}: the view is not listed`);
-    // …but a card already in a conversation is re-drawn when the chat is reopened, on a fetch that
-    // need not carry the declaration: the page itself is readable by its URI
+    // the list is the one list: a host re-drawing a stored card finds its tool and page on requests
+    // that need not carry the declaration (hiding them made every stored card "Connector not found")
+    assert.deepEqual((await c.listTools()).tools, apps, `${label}: the same tools, _meta.ui included`);
+    assert.ok((await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI), `${label}: the view is listed`);
     const [page] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
-    assert.equal(page.mimeType, 'text/html;profile=mcp-app', `${label}: the page of a stored card is served`);
+    assert.equal(page.mimeType, 'text/html;profile=mcp-app', `${label}: and read`);
+    // …but nothing tells its model about cards, and nothing draws
     assert.ok(!c.getInstructions().includes('RESULT CARDS'), `${label}: no card instructions`);
     const r = await c.callTool({ name: 'display_model_result', arguments: { task_id: 'ffffffffffff' } });
     assert.equal(r.isError, true, label);
     assert.match(JSON.parse(r.content[0].text).error.message, /MCP Apps/, label);
+    const card = await c.callTool({ name: 'experiment', arguments: { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true } });
+    assert.equal(card.isError, true, `${label}: card is refused`);
+    assert.equal(JSON.parse(card.content[0].text).error.field, 'card', label);
   }
 });
 

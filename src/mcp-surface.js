@@ -8,16 +8,9 @@ import { withSignal } from './request-context.js';
 import { appsSurface, viewMeta, VIEWED_TOOLS, APPS_ONLY_TOOLS, APP_CALLABLE_TOOLS } from './apps.js';
 import { buildViewModel } from './apps/result-view-model.js';
 
-// experiment draws its own card when the call asks for it (`card: true`) — a field offered only to a
-// client that renders cards, like display_model_result itself.
+// experiment draws its own card when the call asks for it (`card: true`) — accepted only from a
+// client that renders cards, like a call to display_model_result itself.
 const CARD_FIELD = { experiment: 'card' };
-/** A tool's input schema without the way to ask for a card, for a client that renders no cards. */
-function withoutCard(schema, name) {
-  const field = CARD_FIELD[name];
-  if (!field || !schema?.properties?.[field]) return schema;
-  const { [field]: _drop, ...properties } = schema.properties;
-  return { ...schema, properties };
-}
 import { buildSkills } from './skills.js';
 import { TaskRegistry } from './tasks.js';
 
@@ -146,19 +139,23 @@ function titleFromName(name) {
 }
 
 /**
- * The advertised tools, in two variants (src/apps.js). For a client that renders MCP Apps every
- * tool carries `_meta.ui` — its visibility (the model's; drill_result the view's only), and on
- * display_model_result and experiment the view — as the official ext-apps `registerAppTool` does. A
- * client that does not render them gets no `_meta.ui`, neither display_model_result nor drill_result,
- * and no `card` on experiment: nothing draws.
+ * The advertised tools — ONE list, the same for every client, as the official ext-apps
+ * `registerAppTool` does: every tool carries `_meta.ui` (its visibility — the model's; drill_result
+ * the view's only — and on display_model_result and experiment the view), and a host without the
+ * extension ignores it. It is not a per-client list because a host re-draws a card already in a
+ * conversation (reopened, or on another device) by finding the tool that drew it, on a listing
+ * that need not carry the Apps declaration: a list without display_model_result there made every
+ * stored card "Connector not found". What a client WITHOUT the extension does not get is what
+ * speaks to its model — the card instructions and the show_to_user hint — and a call that would
+ * draw is refused (runTool).
  */
-export function buildToolDefs(engine, { renders = true } = {}) {
+export function buildToolDefs(engine) {
   return Object.entries(engine.schemas)
-    .filter(([name]) => !HIDDEN_TOOLS.has(name) && (renders || !APPS_ONLY_TOOLS.has(name)))
+    .filter(([name]) => !HIDDEN_TOOLS.has(name))
     .map(([name, schema]) => {
       const title = TOOL_TITLES[name] || titleFromName(name);
-      const meta = viewMeta(name, renders);
-      const inputSchema = renders ? schema : withoutCard(schema, name);
+      const meta = viewMeta(name);
+      const inputSchema = schema;
       // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
       // read the older annotations location. `name` remains the stable programmatic identifier.
       return {
@@ -370,7 +367,8 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     tasks,
     // built once: the SDK builds a server per request, and the definitions never change — in two
     // variants, for a client that renders MCP Apps and for one that does not (src/apps.js)
-    toolDefs: { apps: buildToolDefs(engine, { renders: true }), plain: buildToolDefs(engine, { renders: false }) },
+    // one list for every client (see buildToolDefs); kept under both variants the server asks for
+    toolDefs: (() => { const defs = buildToolDefs(engine); return { apps: defs, plain: defs }; })(),
     // how often a call with a progressToken hears it is alive; how long a call may run inline
     // before it becomes a task (for a client that declared the Tasks extension)
     progressEveryMs,
@@ -382,7 +380,7 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     },
     resources(offer = {}) {
       return [
-        ...(offer.apps ? apps.resources() : []),
+        ...apps.resources(), // the view page: listed and read for every client, like the tools that draw into it
         ...(skills && offer.skills ? skills.skills.map((s) => ({ uri: s.uri, name: s.frontmatter.name, title: `Skill: ${s.frontmatter.name}`, description: s.frontmatter.description, mimeType: 'text/markdown', size: s.resources.find((r) => r.uri === s.uri)?.size })) : []),
       ];
     },

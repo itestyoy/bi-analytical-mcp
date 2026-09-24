@@ -153,14 +153,15 @@
   through tasks or display_model_result.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
-  * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): `_meta.ui`, the view resource
-    in resources/list (a resources/read of its URI is served to ANY request: a host re-draws a card
-    already in a conversation — reopened, or on another device — on a fetch that need not carry the
-    declaration, and refusing it broke every stored card),
-    display_model_result and drill_result (not even listed otherwise; display_model_result is refused
-    if called — drill_result is served for a DRAWN task whatever envelope the host puts on the
-    card's proxied read, the drawn mark being persisted with the task so a card outlives a restart),
-    experiment's `card` field (refused otherwise), the RESULT CARDS instructions, the `show_to_user` hint;
+  * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): what speaks to the MODEL — the
+    RESULT CARDS instructions, the `show_to_user` hint — and what DRAWS — a call to
+    display_model_result, `card` on experiment (refused otherwise). The tool list (with `_meta.ui`,
+    display_model_result and drill_result) and the view page (listed and read) are the SAME for every
+    client, as the official ext-apps registerAppTool serves them: a host re-draws a card already in a
+    conversation — reopened, or on another device — by finding its tool and page on requests that
+    need not carry the declaration, and hiding them broke every stored card ("Connector not
+    found"). drill_result is served for a DRAWN task whatever envelope the host puts on the card's
+    proxied read, the drawn mark persisted with the task so a card outlives a restart;
   * Skills (`io.modelcontextprotocol/skills`): skills/list and skills/get (-32021 otherwise), the
     skill files in resources/list, templates and resources/read, the SKILLS pointer in the
     instructions;

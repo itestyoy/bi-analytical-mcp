@@ -67,10 +67,11 @@ export function buildProjection(relation, t = {}) {
  * task is started, so a mistake is refused with the list instead of failing in the warehouse later.
  * Empty = it can run.
  */
-export function projectionProblems(t = {}, columns = []) {
-  const have = new Set(columns);
+export function projectionProblems(t = {}, columns = null) {
+  // columns null = not known: only the projection's own shape is checked
+  const have = new Set(columns || []);
   const problems = [];
-  const need = (c, where) => { if (c && c !== '*' && !have.has(c)) problems.push(`${where}: '${c}' is not a column of this model`); };
+  const need = (c, where) => { if (columns && c && c !== '*' && !have.has(c)) problems.push(`${where}: '${c}' is not a column of this model`); };
   for (const w of t.where || []) need(w.column, 'where');
   for (const g of t.group_by || []) need(g, 'group_by');
   for (const a of t.aggregations || []) need(a.column, `aggregations.${a.fn}`);
@@ -80,7 +81,7 @@ export function projectionProblems(t = {}, columns = []) {
   const out = aggregated
     ? new Set([...(t.group_by || []), ...(t.aggregations || []).map((a) => a.as || (a.column && a.column !== '*' ? `${a.fn}_${a.column}` : a.fn))])
     : have;
-  for (const o of t.order_by || []) if (!out.has(o.key)) problems.push(`order_by: '${o.key}' is not a column of what this query returns (${[...out].join(', ')})`);
+  for (const o of t.order_by || []) if ((columns || aggregated) && !out.has(o.key)) problems.push(`order_by: '${o.key}' is not a column of what this query returns (${[...out].join(', ')})`);
   try { buildProjection('x', t); } catch (e) { problems.push(e.message); }
   return problems;
 }

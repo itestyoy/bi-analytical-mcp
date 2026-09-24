@@ -479,7 +479,8 @@ function renderPivot(model) {
     try {
       const got = payloadOf(await readResult({ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }));
       if (got?.ok === false) {
-        rows = [note(got.error?.code === 'result_gone' ? 'This result is no longer available' : 'Could not load this level', depth + 1, 'pivot-error')];
+        // the reason is said, so a failed level is diagnosable from the card itself
+        rows = [note(got.error?.code === 'result_gone' ? 'This result is no longer available' : `Could not load this level${got.error?.message ? ` — ${String(got.error.message).split('\n')[0].slice(0, 160)}` : ''}`, depth + 1, 'pivot-error')];
       } else {
         const children = pivotRows(got, model.display, depth + 1);
         rows = children.length ? children.map((c) => rowEl(c, at, depth + 1)) : [note('No rows', depth + 1)];
@@ -487,7 +488,7 @@ function renderPivot(model) {
       }
     } catch (e) {
       log.error('opening a pivot row failed', e);
-      rows = [note('Could not load this level', depth + 1, 'pivot-error')];
+      rows = [note(`Could not load this level${e?.message ? ` — ${String(e.message).split('\n')[0].slice(0, 160)}` : ''}`, depth + 1, 'pivot-error')];
     }
     loading.remove();
     const still = btn.getAttribute('aria-expanded') === 'true';
@@ -838,13 +839,14 @@ async function drillInto(chart, filters, step) {
     got = payloadOf(await readResult({ ...d.source, transform: view.transform, limit: DRILL_ROWS }));
   } catch (e) {
     log.error('drilling down failed', e);
-    got = { ok: false };
+    got = { ok: false, error: { message: e?.message } };
   }
   chartLoading.hidden = true;
   if (got?.ok === false) {
+    const reason = got.error?.message ? String(got.error.message).split('\n')[0].slice(0, 200) : undefined;
     showAlert(got.error?.code === 'result_gone'
       ? { title: 'This result is no longer available', iconName: 'clock' }
-      : { title: 'Could not load this view', variant: 'destructive', iconName: 'circle-alert' });
+      : { title: 'Could not load this view', description: reason, variant: 'destructive', iconName: 'circle-alert' });
     return;
   }
   const next = buildViewModel(state.toolName, { ...got, display: view.display, drill_source: d.source, drill_path: path }, null);

@@ -53,6 +53,10 @@ test('a client that does not declare MCP Apps in its request gets none of it: no
     assert.equal(card.isError, true, `${label}: card is refused`);
     assert.equal(JSON.parse(card.content[0].text).error.field, 'card', label);
     assert.ok(!(await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI), `${label}: the view is not listed`);
+    // …but a card already in a conversation is re-drawn when the chat is reopened, on a fetch that
+    // need not carry the declaration: the page itself is readable by its URI
+    const [page] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
+    assert.equal(page.mimeType, 'text/html;profile=mcp-app', `${label}: the page of a stored card is served`);
     assert.ok(!c.getInstructions().includes('RESULT CARDS'), `${label}: no card instructions`);
     const r = await c.callTool({ name: 'display_model_result', arguments: { task_id: 'ffffffffffff' } });
     assert.equal(r.isError, true, label);

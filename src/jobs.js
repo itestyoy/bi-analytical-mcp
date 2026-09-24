@@ -48,6 +48,12 @@ export class JobManager {
     if (j) { j.status = 'ready'; j.readyAt = Date.now(); this._persist(j); }
   }
 
+  /** The task's one card was drawn (display_model_result) — kept with the task, so it outlives a restart. */
+  markDrawn(id) {
+    const j = this.jobs.get(id);
+    if (j) { j.drawn = true; this._persist(j); }
+  }
+
   fail(id, error) {
     const j = this.jobs.get(id);
     if (j) { j.status = 'error'; j.error = error; this._persist(j); }

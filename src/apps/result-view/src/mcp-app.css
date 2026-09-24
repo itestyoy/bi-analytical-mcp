@@ -1,6 +1,6 @@
 /*
- * Components, after shadcn/ui (new-york v4 registry): Card, Badge, Button, Input, Table (the
- * data-table pattern), Alert, Accordion/Collapsible, Chart tooltip and legend. Each block names the
+ * Components, after shadcn/ui (new-york v4 registry): Card, Badge, Button, Table (the pivot's
+ * rows), Alert, Accordion/Collapsible, Chart tooltip and legend. Each block names the
  * shadcn component it follows; values are that component's Tailwind classes spelled as CSS, over
  * the semantic tokens in global.css (which read the host's variables).
  *
@@ -522,76 +522,7 @@
   }
 }
 
-/* ── Input (shadcn Input, with a leading search icon) ───────────────────────────────────── */
-.input-group {
-  position: relative;
-  display: flex;
-  align-items: center;
-  width: 100%;
-  max-width: 24rem;
-}
-
-.input-icon {
-  position: absolute;
-  left: calc(var(--space) * 3);
-  display: flex;
-  color: var(--muted-foreground);
-  pointer-events: none;
-}
-
-.input {
-  width: 100%;
-  min-width: 0;
-  height: 2.25rem;
-  padding: calc(var(--space) * 1) calc(var(--space) * 3);
-  border: var(--border-width-regular) solid var(--input);
-  border-radius: var(--border-radius-md);
-  font-family: inherit;
-  font-size: var(--font-text-sm-size);
-  color: var(--foreground);
-  background-color: transparent;
-  box-shadow: var(--shadow-xs);
-  outline: none;
-  transition: color 0.15s, box-shadow 0.15s;
-
-  .input-icon + & {
-    padding-left: calc(var(--space) * 9);
-  }
-
-  &::placeholder {
-    color: var(--muted-foreground);
-  }
-
-  &:focus-visible {
-    border-color: var(--ring);
-    box-shadow: 0 0 0 3px var(--ring-soft);
-  }
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .input {
-    background-color: color-mix(in oklab, var(--input) 30%, transparent);
-  }
-}
-
-:root[data-theme="dark"] .input {
-  background-color: color-mix(in oklab, var(--input) 30%, transparent);
-}
-
-/* ── Data table (shadcn Table + the data-table toolbar / sortable header / pagination) ──────── */
-.data-table {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: calc(var(--space) * 3);
-}
-
-.data-table-toolbar {
-  display: flex;
-  align-items: center;
-  gap: calc(var(--space) * 2);
-}
-
+/* ── Table (shadcn Table): the pivot's rows ──────────────────────────────────────────────── */
 /* wide rows scroll sideways inside their own box; the page never scrolls horizontally */
 .table-container {
   position: relative;
@@ -650,76 +581,6 @@
   .null {
     color: var(--muted-foreground);
     font-style: italic;
-  }
-}
-
-/* sortable header: a ghost button with the arrow icon (shadcn DataTableColumnHeader) */
-.sort-btn {
-  height: 2rem;
-  margin: 0 calc(var(--space) * -2);
-  padding: 0 calc(var(--space) * 2);
-  gap: calc(var(--space) * 1.5);
-  font-weight: var(--font-weight-medium);
-
-  .icon {
-    color: var(--muted-foreground);
-  }
-
-  [aria-sort] & .icon {
-    color: var(--foreground);
-  }
-
-  .num & {
-    flex-direction: row-reverse;
-  }
-}
-
-.data-table-count {
-  font-size: var(--font-text-sm-size);
-  line-height: var(--font-text-sm-line-height);
-  color: var(--muted-foreground);
-  font-variant-numeric: tabular-nums;
-}
-
-.empty-cell {
-  height: 6rem;
-  text-align: center;
-  color: var(--muted-foreground);
-}
-
-/* ── The chart card's rows, folded at its foot (an Accordion item as the card footer) ────────── */
-.card-data {
-  margin-bottom: calc(var(--space) * -6);
-  border-top: var(--border-width-regular) solid var(--border);
-
-  > .data-table {
-    padding: 0 calc(var(--space) * 6) calc(var(--space) * 6);
-  }
-}
-
-.card-data-trigger {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: calc(var(--space) * 4);
-  padding: calc(var(--space) * 3) calc(var(--space) * 6);
-  font-size: var(--font-text-sm-size);
-  line-height: var(--font-text-sm-line-height);
-  font-weight: var(--font-weight-medium);
-  list-style: none;
-  cursor: pointer;
-  outline: none;
-
-  &::-webkit-details-marker {
-    display: none;
-  }
-
-  &:hover span:first-child {
-    text-decoration: underline;
-  }
-
-  &:focus-visible {
-    box-shadow: inset 0 0 0 3px var(--ring-soft);
   }
 }
 
@@ -1047,18 +908,6 @@
   .card-content,
   .card-footer {
     padding: 0 calc(var(--space) * 4);
-  }
-
-  .card-data {
-    margin-bottom: calc(var(--space) * -4);
-
-    > .data-table {
-      padding: 0 calc(var(--space) * 4) calc(var(--space) * 4);
-    }
-  }
-
-  .card-data-trigger {
-    padding: calc(var(--space) * 3) calc(var(--space) * 4);
   }
 
   .stat-grid {

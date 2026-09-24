@@ -155,7 +155,7 @@ the plain tools stay exactly as they were for every client that does not:
   `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy.
 - **Apps** (`io.modelcontextprotocol/ui`) — `query_semantic_model`, `get_query_result` and
   `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`):
-  a CHART (a time series or a breakdown, its rows folded underneath as a filterable, sortable table),
+  a CHART (a time series or a breakdown — the chart alone; the only table is the pivot below),
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
   TEST (a stat card per variant: lift, interval, verdict, the groups — a significant change coloured
   by what it means for the metric: green an improvement, red a regression; `good: down` on the

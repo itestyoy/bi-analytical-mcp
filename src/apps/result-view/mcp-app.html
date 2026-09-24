@@ -11,6 +11,17 @@
   <title>Query Result</title>
 </head>
 <body>
+  <!-- Shown from the moment the host opens the view until the tool's result arrives: the call can
+       take a while on a big window, and an empty frame reads as broken. -->
+  <div id="loading" class="loading" role="status" aria-live="polite">
+    <span id="loading-icon" class="loading-icon"></span>
+    <span class="loading-text">Computing…</span>
+  </div>
+
+  <!-- One quiet line for a result that has no card (a failure, a build still running, SQL): the host
+       keeps a minimum frame for the view, and an empty one reads as broken. -->
+  <div id="status" class="status-line" role="status" hidden></div>
+
   <main class="main" hidden>
     <header class="page-header">
       <div class="page-header-text">

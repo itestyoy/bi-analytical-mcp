@@ -1,10 +1,12 @@
 // THE MODEL OF WHAT THE RESULT VIEW SHOWS — a pure function from a tool result to a view.
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
-// WHAT to render, and there are exactly three cards: a CHART (a time series or a breakdown, with its
-// rows folded underneath), an A/B TEST, a FUNNEL. Anything else — a failure, a build still running,
-// an explained query's SQL, a plan, a split check, rows with no chart shape — is `none`: the view
-// draws nothing and the tool's text result speaks for itself. The view imports it and the unit
+// WHAT to render: a CHART (a time series or a breakdown, with its rows folded underneath), a FUNNEL,
+// and the A/B TEST family — the test itself, the sample-ratio check and the sample-size plan, the
+// three steps of one experiment. Anything else — a failure, a build still running, an explained
+// query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
+// status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
+// the tool's text result speaks for itself. The view imports it and the unit
 // tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
 // Everything below is data in, data out: no DOM, no module scope.
@@ -24,8 +26,9 @@ export function buildViewModel(toolName, result, toolInput) {
   if (!isObj(result)) return { kind: 'none', reason: 'not_an_object' };
 
   // a build that is still running, or one that failed, says so — there is nothing to plot
-  const none = (reason) => ({ kind: 'none', reason });
+  const none = (reason, extra = {}) => ({ kind: 'none', reason, ...extra });
   if (result.status === 'running' && result.query_id) return none('running');
+  // a failure is only NAMED in the view — the reason is for the reply, not the card
   if (result.ok === false || (result.error && !result.rows)) return none('error');
 
   // ── A/B: significance per variant (experiment analyze) ──
@@ -93,7 +96,44 @@ export function buildViewModel(toolName, result, toolInput) {
       notes: result.recommendations || [],
     };
   }
-  // a split check, a sample-size plan, an explained query: text results, no card
+  // ── A/B: the sample-ratio check — is the observed split the one that was intended? ──
+  if (toolName === 'experiment' && Array.isArray(result.groups) && 'srm_detected' in result) {
+    const groups = result.groups.map((g) => ({ label: String(g.label ?? ''), observed: num(g.observed), expected: num(g.expected) }));
+    const total = groups.reduce((a, g) => a + (g.observed ?? 0), 0);
+    const expectedTotal = groups.reduce((a, g) => a + (g.expected ?? 0), 0);
+    return {
+      kind: 'srm',
+      title: 'Sample ratio check',
+      p_value: num(result.p_value),
+      srm_detected: !!result.srm_detected,
+      total,
+      groups: groups.map((g) => ({
+        ...g,
+        observed_share: total > 0 && g.observed !== null ? g.observed / total : null,
+        expected_share: expectedTotal > 0 && g.expected !== null ? g.expected / expectedTotal : null,
+      })),
+    };
+  }
+  // ── A/B: the sample-size plan — how many users, or the smallest effect a given n can see ──
+  if (toolName === 'experiment' && 'n_per_group' in result) {
+    const metricLabel = { proportion: 'conversion rate', mean: 'mean' }[result.metric] || result.metric || 'metric';
+    return {
+      kind: 'plan',
+      title: `Sample-size plan · ${metricLabel}`,
+      metric: result.metric || null,
+      // which side was solved: a total comes back only when n was the unknown
+      solved: 'total_n' in result ? 'n' : 'mde',
+      n_per_group: num(result.n_per_group),
+      total_n: num(result.total_n),
+      baseline: num(result.baseline),
+      stddev: num(result.stddev),
+      mde: num(result.mde),
+      relative_mde: num(result.relative_mde),
+      power: num(result.power),
+      confidence: num(result.confidence),
+      alternative: result.alternative || null,
+    };
+  }
   if (toolName === 'experiment') return none('experiment');
   if (typeof result.sql === 'string' && !Array.isArray(result.rows)) return none('sql');
 
@@ -114,7 +154,9 @@ export function buildViewModel(toolName, result, toolInput) {
     const timeIdx = columns.findIndex((c) => c.type === 'time');
     const numIdx = columns.map((c, i) => (c.type === 'number' ? i : -1)).filter((i) => i >= 0);
     const catIdx = columns.map((c, i) => (c.type === 'category' ? i : -1)).filter((i) => i >= 0);
-    const title = result.table || (toolName === 'query_semantic_model' ? 'Metric query' : 'Result');
+    // the result TABLE's name is generated (qr_<id>, pipe_<name>_<context>) — an address, not a
+    // title: the card names what it shows, and the chart names its metric
+    const title = toolName === 'query_semantic_model' ? 'Metric query' : 'Query result';
 
     // ── a FUNNEL: ordered steps whose counts never grow. Recognised only on an explicit signal —
     // step-like names, or ordinal step labels — so a breakdown sorted by size never becomes one.
@@ -133,7 +175,7 @@ export function buildViewModel(toolName, result, toolInput) {
       // the step that loses the largest share of the users who reached the one before it
       let worst = null;
       for (let i = 1; i < steps.length; i++) if (steps[i].of_previous !== null && (worst === null || steps[i].of_previous < steps[worst].of_previous)) worst = i;
-      return { kind: 'funnel', title, measure, steps, overall: values[values.length - 1] / first, biggest_drop: worst };
+      return { kind: 'funnel', title: 'Funnel', measure, steps, overall: values[values.length - 1] / first, biggest_drop: worst };
     };
     if (rows.length === 1 && timeIdx < 0 && catIdx.length === 0) {
       const counts = numIdx.filter((i) => Number.isInteger(num(rows[0][i])));
@@ -145,7 +187,7 @@ export function buildViewModel(toolName, result, toolInput) {
     if (timeIdx < 0 && catIdx.length === 1 && numIdx.length >= 1 && rows.length >= 2 && rows.length <= 20) {
       const labels = rows.map((r) => (r[catIdx[0]] === null ? '∅' : String(r[catIdx[0]])));
       const values = rows.map((r) => num(r[numIdx[0]]));
-      const stepLike = STEP_NAME.test(names[catIdx[0]]) || /funnel/i.test(title) || labels.every((l) => /^\s*\d+\s*[._:)\-\s]/.test(l));
+      const stepLike = STEP_NAME.test(names[catIdx[0]]) || /funnel/i.test(String(result.table || '')) || labels.every((l) => /^\s*\d+\s*[._:)\-\s]/.test(l));
       if (stepLike && nonIncreasing(values)) return funnelOf(labels, values, names[numIdx[0]]);
     }
 

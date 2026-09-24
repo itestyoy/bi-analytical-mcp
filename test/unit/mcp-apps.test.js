@@ -165,15 +165,40 @@ test('view model: counts that merely decrease, or steps that grow, are not a fun
   assert.equal(buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: 5 }, { step: 'b', users: 9 }] }).kind, 'chart');
 });
 
-test('view model: only a chart, an A/B test and a funnel are drawn — every other result is none', async () => {
-  const plan = await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
-  const split = await s.engine.experiment({ action: 'check_split', groups: [{ label: 'control', n: 5000 }, { label: 'b', n: 5100 }] });
-  for (const [tool, result] of [
-    ['experiment', plan],
-    ['experiment', split],
-    ['get_query_result', { status: 'running', query_id: 'q' }],
-    ['get_query_result', { ok: false, status: 'error', error: { stage: 'fetch', message: 'boom' } }],
-    ['query_semantic_model', { ok: true, sql: 'select 1' }],
-    ['query_semantic_model', { columns: [{ name: 'a' }, { name: 'b' }, { name: 'c' }], rows: [{ a: 'x', b: 'y', c: 'z' }] }],
-  ]) assert.equal(buildViewModel(tool, result).kind, 'none', JSON.stringify(result).slice(0, 80));
+test('view model: the sample-ratio check carries each group\'s observed and intended share, from the engine\'s own test', async () => {
+  const r = await s.engine.experiment({ action: 'check_split', groups: [{ label: 'base', n: 41164 }, { label: 'a', n: 41585 }] });
+  const m = buildViewModel('experiment', r);
+  assert.equal(m.kind, 'srm');
+  assert.equal(m.srm_detected, r.srm_detected);
+  assert.equal(m.p_value, r.p_value);
+  assert.equal(m.total, 41164 + 41585);
+  assert.deepEqual(m.groups.map((g) => [g.label, g.observed]), [['base', 41164], ['a', 41585]]);
+  assert.deepEqual(m.groups.map((g) => g.observed_share), [41164 / 82749, 41585 / 82749]);
+  assert.deepEqual(m.groups.map((g) => g.expected_share), [0.5, 0.5]);
+});
+
+test('view model: a sample-size plan says which side it solved and carries the plan\'s own numbers', async () => {
+  const forN = await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
+  const n = buildViewModel('experiment', forN);
+  assert.equal(n.kind, 'plan');
+  assert.equal(n.solved, 'n');
+  assert.deepEqual([n.n_per_group, n.total_n, n.baseline, n.mde], [forN.n_per_group, forN.total_n, 0.1, 0.02]);
+  const forMde = await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, n: 5000 });
+  const d = buildViewModel('experiment', forMde);
+  assert.equal(d.solved, 'mde');
+  assert.equal(d.mde, forMde.mde);
+  assert.equal(d.n_per_group, 5000);
+});
+
+test('view model: a result with no card is none, with its reason', () => {
+  for (const [tool, result, reason] of [
+    ['get_query_result', { status: 'running', query_id: 'q' }, 'running'],
+    ['get_query_result', { ok: false, status: 'error', error: { stage: 'fetch', message: 'boom\nsecond line' } }, 'error'],
+    ['query_semantic_model', { ok: true, sql: 'select 1' }, 'sql'],
+    ['query_semantic_model', { columns: [{ name: 'a' }, { name: 'b' }, { name: 'c' }], rows: [{ a: 'x', b: 'y', c: 'z' }] }, 'no_chart_shape'],
+  ]) {
+    const m = buildViewModel(tool, result);
+    assert.equal(m.kind, 'none', JSON.stringify(result).slice(0, 80));
+    assert.equal(m.reason, reason);
+  }
 });

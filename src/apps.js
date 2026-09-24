@@ -54,7 +54,7 @@ const RESOURCE = {
   uri: RESULT_VIEW_URI,
   name: 'result-view',
   title: 'Query Result',
-  description: 'Interactive card for a result: a chart (time series or breakdown, rows folded underneath), an A/B test (lift, interval, verdict per variant), or a funnel (steps, conversion, biggest drop). Other results draw nothing.',
+  description: 'Interactive card for a result: a chart (time series or breakdown, rows folded underneath), a funnel (steps, conversion, biggest drop), or the A/B family — the test (lift, interval, verdict per variant), the sample-ratio check and the sample-size plan. Other results get one status line.',
   mimeType: RESOURCE_MIME_TYPE,
   _meta: { ui: { prefersBorder: true, csp: VIEW_CSP } },
 };

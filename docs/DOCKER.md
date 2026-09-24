@@ -90,7 +90,9 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
   (port-agnostic, e.g. `console.example.com`). The spec requires a server to validate `Origin`
   (DNS-rebinding protection): a request **without** an Origin (every native client, every hosted
   connector calling from its backend) always passes, a loopback origin (`localhost`, `127.0.0.1`,
-  the MCP Inspector) passes, and any other origin gets **403** unless it is listed here.
+  the MCP Inspector) passes, and any other origin gets **403** unless it is listed here. Every
+  refused request is logged with its origin (`http ✗ refused 403 POST /mcp rpc=… origin=…`), so a
+  host that reports it "cannot reach" the server shows up with the exact origin to list.
 - `MCP_ALLOWED_HOSTS` — optional comma-separated hostnames the `Host` header must match (a second
   fence against DNS rebinding). Unset = no Host check, which is what you want behind a proxy.
 - `MCP_TASK_AFTER_MS` (default 3000) — for a client that declared the Tasks extension, a call that

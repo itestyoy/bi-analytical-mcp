@@ -34,6 +34,20 @@ test('Origin: none and loopback pass, a foreign page gets 403, a listed one pass
   } finally { await s.stop(); }
 });
 
+test('a refusal leaves one log line naming the origin, so "cannot reach the server" has a visible reason', async () => {
+  const s = await startServer({ app: { host: '0.0.0.0' } });
+  const lines = [];
+  const real = console.error;
+  console.error = (...a) => { lines.push(a.join(' ')); };
+  try {
+    await s.post(LIST, { origin: 'https://desktop-host.example' });
+    await new Promise((r) => setTimeout(r, 20)); // the line is written when the response finishes
+  } finally { console.error = real; await s.stop(); }
+  const line = lines.find((l) => l.includes('refused'));
+  assert.ok(line, `no refusal line among: ${lines.join(' | ')}`);
+  for (const part of ['403', 'origin=https://desktop-host.example', 'MCP_ALLOWED_ORIGINS']) assert.ok(line.includes(part), `${part} missing in: ${line}`);
+});
+
 test('the optional Host allowlist refuses a Host the operator did not name', async () => {
   const s = await startServer({ app: { allowedHosts: ['mcp.internal'] } });
   try {

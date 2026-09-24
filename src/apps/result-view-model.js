@@ -32,6 +32,9 @@ export function buildViewModel(toolName, result, toolInput) {
   const none = (reason, extra = {}) => ({ kind: 'none', reason, ...extra });
   // (the query_id is what the card follows to the rows)
   if (result.status === 'running' && result.query_id) return none('running', { query_id: String(result.query_id) });
+  // a result that existed and is no longer there (deleted, expired) is not a failure: it says so
+  // plainly — error.code is RESULT_GONE in src/validate.js
+  if (result.ok === false && result.error?.code === 'result_gone') return none('gone');
   // a failure is only NAMED in the view — the reason is for the reply, not the card
   if (result.ok === false || (result.error && !result.rows)) return none('error');
 

@@ -176,7 +176,10 @@ the plain tools stay exactly as they were for every client that does not:
   the server checks the columns exist (a
   detached query remembers it) and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
-  result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply),
+  result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply), a result that is gone — its table
+  or context deleted, a result held in memory expired or lost to a restart, a query_id the server
+  does not know (`error.code: result_gone`, shown as "This result is no longer available": a card
+  re-drawn later that follows such a query says so instead of "Error"),
   SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
   nothing would leave an empty box) and the text answer carries the rest.
   A query that outlasts its call answers `{ status: 'running', query_id }`; its card then FOLLOWS

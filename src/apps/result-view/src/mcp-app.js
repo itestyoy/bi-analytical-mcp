@@ -436,6 +436,8 @@ function showStatus(model) {
     // a HAND-OFF, not a live state, so no spinner — the rows arrive through the model's own
     // get_query_result call, which draws its own card
     running: ['clock', 'The result comes in a separate card'],
+    // the result this card showed or waited for was deleted or expired since — not an error
+    gone: ['clock', 'This result is no longer available'],
     error: ['circle-alert', 'Error'],
   };
   const [name, text, cls] = lines[model.reason] || ['info', 'Nothing to chart'];

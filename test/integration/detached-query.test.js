@@ -169,3 +169,28 @@ test('a KPI tile over the warehouse total shows its number; over many rows it ne
   assert.ok((many.warnings || []).some((w) => w.startsWith('display was not applied')), JSON.stringify(many.warnings));
   assert.equal(many.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85);
 });
+
+// A result that EXISTED and is no longer there says so structurally (error.code result_gone), and the
+// card reads it as "no longer available" — not as the failure a broken query is.
+test('a result that is gone — forgotten, expired or deleted — is result_gone, and the card says so instead of "Error"', opts, async (t) => {
+  if (skip(t)) return;
+  // held in memory, then forgotten (what a restart or the hour does)
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
+  const done = await follow(first.query_id);
+  assert.equal(Number(done.rows[0].mon_revenue), 85);
+  engine._inlineResults.delete(first.query_id);
+  const forgotten = await engine.get_query_result({ query_id: first.query_id });
+  assert.deepEqual([forgotten.ok, forgotten.error.code], [false, 'result_gone']);
+  assert.deepEqual(buildViewModel('get_query_result', forgotten), { kind: 'none', reason: 'gone' });
+  // a query_id this server never issued
+  await assert.rejects(engine.get_query_result({ query_id: 'ffffffffffff' }), (e) => e.code === 'result_gone');
+  // a materialized result whose table definition was deleted
+  const mat = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], materialize: true });
+  const built = await follow(mat.query_id);
+  assert.equal(Number(built.rows[0].mon_revenue), 85);
+  engine.ctxs.removeGeneratedFile(ctxId, `${built.table}.sql`);
+  const deleted = await engine.get_query_result({ query_id: mat.query_id });
+  assert.deepEqual([deleted.ok, deleted.error.code], [false, 'result_gone']);
+  // …while a query that FAILED stays an error
+  assert.equal(buildViewModel('get_query_result', { ok: false, status: 'error', error: { stage: 'query', message: 'x' } }).reason, 'error');
+});

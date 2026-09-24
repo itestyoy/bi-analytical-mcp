@@ -203,7 +203,7 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   } catch (err) {
     const cancelled = !!signal?.aborted;
     logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} in ${Date.now() - started}ms: ${err?.message || String(err)}${err?.field ? ` (field: ${err.field})` : ''}`);
-    return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : err?.stage, err?.field), raw: null };
+    return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : err?.stage, err?.field, cancelled ? undefined : err?.code), raw: null };
   } finally {
     if (beat) clearInterval(beat);
   }
@@ -242,7 +242,7 @@ export async function runToCompletion(engine, name, args, { signal, pollMs = 200
   } catch (err) {
     const cancelled = !!signal?.aborted;
     logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} while following ${first.raw.query_id}: ${err?.message || String(err)}`);
-    return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : (err?.stage || 'query'), err?.field), raw: null };
+    return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : (err?.stage || 'query'), err?.field, cancelled ? undefined : err?.code), raw: null };
   }
   return { result: toCallToolResult(job), raw: job };
 }
@@ -276,8 +276,8 @@ function summarizeResult(result) {
   return bits.length ? ` [${bits.join(' ')}]` : '';
 }
 
-export function errorResult(message, stage, field) {
-  const payload = { ok: false, error: { stage: stage || 'error', message, ...(field ? { field } : {}) } };
+export function errorResult(message, stage, field, code) {
+  const payload = { ok: false, error: { stage: stage || 'error', message, ...(field ? { field } : {}), ...(code ? { code } : {}) } };
   return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
 }
 

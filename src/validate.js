@@ -200,11 +200,17 @@ export function validateInput(validator, input) {
   return { ok: false, errors };
 }
 
+/** error.code of a result that existed and is no longer there (deleted, expired, forgotten) —
+ *  distinct from a query that FAILED, so a reader can say "no longer available" instead of "error". */
+export const RESULT_GONE = 'result_gone';
+
 export class ToolError extends Error {
-  constructor(message, { stage = 'validate', field } = {}) {
+  constructor(message, { stage = 'validate', field, code } = {}) {
     super(message);
     this.name = 'ToolError';
     this.stage = stage;
     this.field = field;
+    // a machine-readable kind for a failure a reader acts on differently (e.g. result_gone)
+    if (code) this.code = code;
   }
 }

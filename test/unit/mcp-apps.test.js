@@ -58,6 +58,16 @@ test('the view draws and follows only its own query: one tool is app-callable, n
   assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'get_query_result', arguments: { query_id: queryId } }");
 });
 
+test('a result that is gone reaches the card as result_gone over MCP, and the card says "no longer available"', async () => {
+  for (const era of ['legacy', 'modern']) {
+    const r = await (await s.client({ era })).callTool({ name: 'get_query_result', arguments: { query_id: 'ffffffffffff' } });
+    assert.equal(r.isError, true, era);
+    const payload = JSON.parse(r.content[0].text);
+    assert.equal(payload.error.code, 'result_gone', era);
+    assert.deepEqual(buildViewModel('get_query_result', payload), { kind: 'none', reason: 'gone' }, era);
+  }
+});
+
 test('view model: a result that moved to the background carries the query_id the card follows', () => {
   const m = buildViewModel('query_semantic_model', { ok: true, status: 'running', query_id: 'abc123abc123' });
   assert.deepEqual(m, { kind: 'none', reason: 'running', query_id: 'abc123abc123' });

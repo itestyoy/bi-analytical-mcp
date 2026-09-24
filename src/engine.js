@@ -3,7 +3,7 @@
 
 import { buildSchemas, MAX_WAIT_SECONDS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
-import { makeValidators, validateInput, ToolError } from './validate.js';
+import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration } from './compile.js';
 import { renderContext } from './yaml-render.js';
@@ -3488,7 +3488,8 @@ export class Engine {
   }
 
   async _getQueryResult(input) {
-    if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
+    // the engine is needed to READ a table; looking a job up, or a result held in memory, is not
+    const needEngine = () => { if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' }); };
     // The top-level `limit` and `transform.limit` BOTH cap rows; applied together they emit
     // two LIMITs (… LIMIT a … LIMIT b → SQL syntax error). Accept exactly one source of truth,
     // and when it lives in transform, strip it so buildProjection doesn't also emit a LIMIT —
@@ -3507,21 +3508,29 @@ export class Engine {
     if (input.table) {
       this._ctx(input.context_id); // validate the context exists (throws otherwise)
       if (!/^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$/.test(input.table)) throw new ToolError(`invalid result table name: ${input.table}`, { stage: 'validate', field: 'table' });
+      needEngine();
       return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, transform, {}, offset, sample, samplePercent);
     }
     const job = this.jobs.get(input.query_id);
-    if (!job) throw new ToolError(`unknown query_id: ${input.query_id} (pass {context_id, table} to fetch a known table directly)`, { stage: 'validate', field: 'query_id' });
+    // RESULT_GONE marks a result that existed and is no longer there (as opposed to a query that
+    // failed): a card that follows its query says "no longer available", not "error"
+    if (!job) throw new ToolError(`unknown query_id: ${input.query_id} (pass {context_id, table} to fetch a known table directly)`, { stage: 'validate', field: 'query_id', code: RESULT_GONE });
     if (job.inline) {
       // a metric query that outlasted its call: its finished response is held here, not in a table
       if (job.status === 'running' && this.jobs.isLive(job.id)) return { ok: true, status: 'running', query_id: job.id };
       if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, error: { stage: 'query', message: job.error } };
       const kept = job.status === 'ready' ? this._inlineResults?.get(job.id) : null;
-      if (!kept) return { ok: false, status: 'error', query_id: job.id, error: { stage: 'query', message: 'this query\'s result was held in memory and is gone (the server restarted, or it is over an hour old) — run the query again; materialize:true keeps a result as a table that survives restarts.' } };
+      if (!kept) return { ok: false, status: 'error', query_id: job.id, error: { stage: 'query', code: RESULT_GONE, message: 'this query\'s result was held in memory and is gone (the server restarted, or it is over an hour old) — run the query again; materialize:true keeps a result as a table that survives restarts.' } };
       if (input.transform || input.sample || input.offset || input.limit != null) throw new ToolError('this result is one page held in memory, not a table: re-slicing, sampling and paging need a materialized result — run the query again with materialize:true (or with the offset/limit you want).', { stage: 'validate', field: input.transform ? 'transform' : input.sample ? 'sample' : 'offset' });
       return { ...kept.out, status: 'ready', query_id: job.id };
     }
     if (job.status === 'running') return { ok: true, status: 'running', query_id: job.id, table: job.table };
     if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, table: job.table, error: { stage: 'materialize', message: job.error } };
+    // a built result whose context or table definition was deleted since: gone, not failed
+    if (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table)) {
+      return { ok: false, status: 'error', query_id: job.id, table: job.table, error: { stage: 'fetch', code: RESULT_GONE, message: `the result table ${job.table} was deleted (its context or model is gone) — run the query again to rebuild it` } };
+    }
+    needEngine();
     return this._fetchResult(job.id, limit, transform, offset, sample, samplePercent);
   }
 

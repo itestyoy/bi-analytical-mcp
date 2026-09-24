@@ -15,21 +15,19 @@ WORKDIR /app
 # the server uses DBT_ENV (else `dbt-v2`) and reads its dbt version from the binary. WHAT goes into
 # each is decided by this tool, not the build: src/dbt/environment-specs.js names the exact version
 # of every package, and scripts/dbt-env.mjs installs exactly those. There is no requirements file to
-# hand in — only which warehouse to build for:
-#   WAREHOUSE_ADAPTER — duckdb (default) or bigquery: the adapter of dbt-v1 and metricflow;
-#   INSTALL_DBT_V2=0  — skip dbt-v2 (then set DBT_ENV=dbt-v1).
+# hand in, and no warehouse to choose: each carries the adapters of both DuckDB and BigQuery, and dbt
+# picks one from the project's profile. INSTALL_DBT_V2=0 skips dbt-v2 (then set DBT_ENV=dbt-v1).
 #   dbt-v2     — dbt v2 (its adapters are built in; it fetches the ADBC driver on first use)
-#   dbt-v1     — dbt 1.x + the adapter (on DuckDB with pandas/pyarrow, for dbt Python models)
-#   metricflow — MetricFlow's `mf` + the Python dbt-core and adapter it queries with; every dbt
-#                environment queries metrics through it
-ARG WAREHOUSE_ADAPTER=duckdb
+#   dbt-v1     — dbt 1.x + the DuckDB and BigQuery adapters, pandas/pyarrow (dbt Python models)
+#   metricflow — MetricFlow's `mf` + the Python dbt-core and both adapters it queries with; every
+#                dbt environment queries metrics through it
 ARG INSTALL_DBT_V2=1
 ENV DBT_ENVS_DIR=/opt/dbt-envs
 COPY scripts/dbt-env.mjs ./scripts/
 COPY src/dbt/environments.js src/dbt/environment-specs.js ./src/dbt/
 RUN set -e; \
-    node scripts/dbt-env.mjs create metricflow --adapter "$WAREHOUSE_ADAPTER"; \
-    node scripts/dbt-env.mjs create dbt-v1 --adapter "$WAREHOUSE_ADAPTER"; \
+    node scripts/dbt-env.mjs create metricflow; \
+    node scripts/dbt-env.mjs create dbt-v1; \
     if [ "$INSTALL_DBT_V2" = "1" ]; then node scripts/dbt-env.mjs create dbt-v2; fi
 # (for a shell in the container: mf on PATH)
 ENV PATH="$DBT_ENVS_DIR/metricflow/bin:$PATH"

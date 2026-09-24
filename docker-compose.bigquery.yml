@@ -9,10 +9,7 @@
 
 services:
   mcp:
-    build:
-      context: .
-      args:
-        WAREHOUSE_ADAPTER: bigquery    # dbt-v1 and metricflow built with the BigQuery adapter (their locks)
+    build: .    # the same image as the DuckDB setup: every environment carries both adapters
     ports:
       - "${PORT:-3000}:3000"
     environment:

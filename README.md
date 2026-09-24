@@ -144,8 +144,8 @@ file, so the dbt client queues its processes on it (`src/dbt/process.js`).
 
 Prerequisites for integration tests — three ENVIRONMENTS (virtualenvs under `.venvs/`, see
 `src/dbt/environments.js`): `dbt-v2` with dbt v2, which the suite runs on; `dbt-v1` with dbt 1.x, the
-DuckDB adapter and pandas, which the python stage's file runs on (v2 runs no Python models on DuckDB);
-and `metricflow` — MetricFlow's `mf` with the DuckDB adapter, which every dbt environment queries
+DuckDB and BigQuery adapters and pandas, which the python stage's file runs on (v2 runs no Python
+models on DuckDB); and `metricflow` — MetricFlow's `mf` with both adapters, which every dbt environment queries
 metrics through (dbt's docs: without the dbt platform, "install MetricFlow separately"). `DBT_ENV` /
 `MF_ENV` pick others among ours. Nothing else runs: a name the specs do not define, a venv not built by
 `create` or built with other versions than the spec names is refused, and there is no binary to name
@@ -156,7 +156,7 @@ What goes into an environment is decided by this repository, not by whoever buil
 exactly those (the image does it at `docker build`). There is no requirements file to pass in:
 
 ```bash
-npm run dbt:env -- create metricflow            # --adapter duckdb (default) | bigquery
+npm run dbt:env -- create metricflow
 npm run dbt:env -- create dbt-v2
 npm run dbt:env -- create dbt-v1
 npm run dbt:env -- list

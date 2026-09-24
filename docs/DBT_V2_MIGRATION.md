@@ -13,7 +13,7 @@
   (`mf` + dbt-core + адаптер), как советует документация dbt для работы без dbt platform. Файл python-стадии идёт на 1.x: v2 не запускает Python-модели на DuckDB, и там стадия не
   предлагается (`gatePythonRuntime`).
 - Docker: окружения `/opt/dbt-envs/dbt-v2`, `dbt-v1` (1.x + адаптер) и `metricflow` собираются на
-  `docker build` из точных версий в `src/dbt/environment-specs.js` (build arg `WAREHOUSE_ADAPTER`). `docker-compose.yml`
+  `docker build` из точных версий в `src/dbt/environment-specs.js` (с адаптерами DuckDB и BigQuery сразу). `docker-compose.yml`
   использует `dbt-v2`, BigQuery-сетап — `dbt-v1`, пока
   python-стадия не проверена на v2 в BigQuery.
 - `dbt` 2.0.6 на PyPI — sdist-заглушка: при установке его build backend качает платформенный wheel с

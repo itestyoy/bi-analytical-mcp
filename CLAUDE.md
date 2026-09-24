@@ -213,8 +213,9 @@
   Python — since dbt-metricflow brings the Python dbt-core, which cannot share a venv with a dbt v2
   binary. `npm run dbt:env -- create|list` manages them.
 - WHAT IS IN AN ENVIRONMENT IS THIS TOOL'S DECISION (HARD RULE): `src/dbt/environment-specs.js` names
-  each one's packages at EXACT versions (per adapter where it matters) and `create` installs exactly
-  those; the image builds them at `docker build`. ONLY OURS RUN: `resolveEnvironment` refuses a name
+  each one's packages at EXACT versions and `create` installs exactly those; the image builds them at
+  `docker build`. Every environment carries the adapters of BOTH warehouses (dbt picks one from the
+  profile), so the image is one for DuckDB and BigQuery — there is no warehouse build argument. ONLY OURS RUN: `resolveEnvironment` refuses a name
   the specs do not define and a directory whose mcp-env.json does not record the spec's packages as
   they are now, and the server has no DBT_BIN / MF_BIN / PYTHON_BIN or PATH fallback (the library's
   `createDbt({ dbtBin })` stays for tests, which take their bins from the same environments).

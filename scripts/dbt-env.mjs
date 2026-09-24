@@ -3,8 +3,8 @@
 // tool defines, ONLY with the exact versions it names (src/dbt/environment-specs.js). The image runs
 // `create` at `docker build`; locally it builds .venvs for the tests.
 //
-//   node scripts/dbt-env.mjs create <name> [--adapter duckdb|bigquery]   build it from its spec
-//   node scripts/dbt-env.mjs list                                         what is there
+//   node scripts/dbt-env.mjs create <name>   build it from its spec
+//   node scripts/dbt-env.mjs list            what is there
 //
 // `create` makes <DBT_ENVS_DIR>/<name> a fresh virtualenv, installs the spec's pip, then exactly the
 // spec's packages, checks that each is installed at its version, and records what it was built with
@@ -14,12 +14,11 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { envsDir, listEnvironments, notOurs, resolveEnvironment } from '../src/dbt/environments.js';
-import { ADAPTERS, ENVIRONMENT_SPECS, INSTALLER, environmentPackages, environmentSpec } from '../src/dbt/environment-specs.js';
+import { ENVIRONMENT_SPECS, INSTALLER, environmentPackages } from '../src/dbt/environment-specs.js';
 
 const [cmd, ...rest] = process.argv.slice(2);
 const dir = envsDir();
-const flag = (name) => { const i = rest.indexOf(name); return i >= 0 ? rest[i + 1] : undefined; };
-const positional = rest.filter((a, i) => !a.startsWith('--') && !rest[i - 1]?.startsWith('--'));
+const positional = rest.filter((a) => !a.startsWith('--'));
 
 function versionOf(bin) {
   try {
@@ -30,9 +29,8 @@ function versionOf(bin) {
 
 if (cmd === 'create') {
   const name = positional[0];
-  if (!name) { console.error(`usage: dbt-env create <name> [--adapter ${ADAPTERS.join('|')}]   (names: ${Object.keys(ENVIRONMENT_SPECS).join(', ')})`); process.exit(2); }
-  const adapter = environmentSpec(name).packages ? null : (flag('--adapter') || 'duckdb');
-  const packages = environmentPackages(name, adapter); // refuses an adapter the spec does not build
+  if (!name) { console.error(`usage: dbt-env create <name>   (names: ${Object.keys(ENVIRONMENT_SPECS).join(', ')})`); process.exit(2); }
+  const packages = environmentPackages(name); // refuses a name the specs do not define
   const target = join(dir, name);
   const python = join(target, 'bin', 'python');
   const step = (bin, args) => { const r = spawnSync(bin, args, { stdio: 'inherit' }); if (r.status !== 0) process.exit(r.status ?? 1); };
@@ -47,10 +45,10 @@ if (cmd === 'create') {
     .split('\n').map((l) => l.split('==')).filter((p) => p.length === 2).map(([n, v]) => [n.toLowerCase().replace(/_/g, '-'), v]));
   const wrong = packages.filter((p) => { const [n, v] = p.split('=='); return installed.get(n.toLowerCase().replace(/_/g, '-')) !== v; });
   if (wrong.length) { console.error(`${name}: not installed as named: ${wrong.join(', ')}`); process.exit(1); }
-  writeFileSync(join(target, 'mcp-env.json'), `${JSON.stringify({ name, adapter, packages }, null, 2)}\n`);
+  writeFileSync(join(target, 'mcp-env.json'), `${JSON.stringify({ name, packages }, null, 2)}\n`);
   const made = listEnvironments({ dir }).find((x) => x.name === name);
   const what = made?.mfBin ? `MetricFlow at ${made.mfBin}` : `dbt ${versionOf(made.dbtBin)} at ${made.dbtBin}`;
-  console.log(`${name}${adapter ? ` (${adapter})` : ''}: ${what} — ${packages.join(' ')}`);
+  console.log(`${name}: ${what} — ${packages.join(' ')}`);
 } else if (cmd === 'list' || !cmd) {
   const all = listEnvironments({ dir });
   if (!all.length) console.log(`no dbt environments in ${dir} — build one: node scripts/dbt-env.mjs create dbt-v2`);

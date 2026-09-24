@@ -12,7 +12,7 @@
 // brings the Python dbt-core, whose own `dbt` command would replace it.
 //
 // ONLY OUR ENVIRONMENTS RUN. A name must be one src/dbt/environment-specs.js defines, and the
-// directory must have been built by `npm run dbt:env -- create <name> [--adapter duckdb|bigquery]`
+// directory must have been built by `npm run dbt:env -- create <name>`
 // (scripts/dbt-env.mjs — in the image, at `docker build`) from that spec as it is now: its
 // mcp-env.json names the exact packages it was built with. A venv put there by hand, or built from
 // other versions, is refused — as is any dbt named from outside (the server has no DBT_BIN / MF_BIN /
@@ -31,9 +31,9 @@ export function notOurs(name, envDir) {
   let meta;
   try { meta = JSON.parse(readFileSync(join(envDir, 'mcp-env.json'), 'utf8')); } catch { return `'${name}' in ${dirname(envDir)} was not built by this tool (no mcp-env.json) — build it with: npm run dbt:env -- create ${name}`; }
   let wanted;
-  try { wanted = environmentPackages(name, meta.adapter); } catch (e) { return e.message; }
+  try { wanted = environmentPackages(name); } catch (e) { return e.message; }
   if (meta.name !== name || JSON.stringify(meta.packages) !== JSON.stringify(wanted)) {
-    return `'${name}' in ${dirname(envDir)} was built with ${(meta.packages || []).join(' ') || 'other packages'}, the spec says ${wanted.join(' ')} — rebuild it with: npm run dbt:env -- create ${name}${meta.adapter ? ` --adapter ${meta.adapter}` : ''}`;
+    return `'${name}' in ${dirname(envDir)} was built with ${(meta.packages || []).join(' ') || 'other packages'}, the spec says ${wanted.join(' ')} — rebuild it with: npm run dbt:env -- create ${name}`;
   }
   return null;
 }

@@ -73,13 +73,13 @@ test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an 
   const dir = mkdtempSync(join(tmpdir(), 'envs-'));
   // a venv with these executables, each answering --version for its dbt, marked as built by
   // `dbt-env create` from its spec as it is now
-  const venv = (name, bins, version, adapter = name === 'dbt-v2' ? null : 'duckdb') => {
+  const venv = (name, bins, version) => {
     mkdirSync(join(dir, name, 'bin'), { recursive: true });
     for (const b of bins) {
       writeFileSync(join(dir, name, 'bin', b), `#!/bin/sh\necho "dbt ${version}"\n`);
       chmodSync(join(dir, name, 'bin', b), 0o755);
     }
-    writeFileSync(join(dir, name, 'mcp-env.json'), JSON.stringify({ name, adapter, packages: environmentPackages(name, adapter) }));
+    writeFileSync(join(dir, name, 'mcp-env.json'), JSON.stringify({ name, packages: environmentPackages(name) }));
   };
   venv('dbt-v2', ['dbt'], '2.0.6');                            // dbt v2: the binary only
   venv('dbt-v1', ['dbt', 'python'], '1.11.11');                 // dbt 1.x, no MetricFlow
@@ -99,7 +99,7 @@ test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an 
   writeFileSync(join(dir, 'my-dbt', 'bin', 'dbt'), '#!/bin/sh\necho "dbt 1.11.11"\n');
   chmodSync(join(dir, 'my-dbt', 'bin', 'dbt'), 0o755);
   assert.throws(() => resolveEnvironment('my-dbt', { dir, env: {} }), /refused: 'my-dbt' is not an environment this tool defines/);
-  writeFileSync(join(dir, 'dbt-v1', 'mcp-env.json'), JSON.stringify({ name: 'dbt-v1', adapter: 'duckdb', packages: ['dbt-core==1.10.0', 'dbt-duckdb==1.10.0'] }));
+  writeFileSync(join(dir, 'dbt-v1', 'mcp-env.json'), JSON.stringify({ name: 'dbt-v1', packages: ['dbt-core==1.10.0', 'dbt-duckdb==1.10.0'] }));
   assert.throws(() => resolveEnvironment('dbt-v1', { dir, env: {} }), /refused: .*built with dbt-core==1\.10\.0 dbt-duckdb==1\.10\.0, the spec says dbt-core==1\.11\.11/);
   const { rmSync } = await import('node:fs');
   rmSync(join(dir, 'dbt-v1', 'mcp-env.json'));

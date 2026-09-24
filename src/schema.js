@@ -529,10 +529,12 @@ export function buildSchemas(catalog) {
     task_id: { type: 'string', pattern: TASK_ID, description: 'READ a task of this side back (instead of starting a query): wait for it and return its result.' },
     wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `With task_id: how long to wait for the task at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment the task is done. 0 = just look.` },
   };
+  taskRead.cancel = { type: 'boolean', const: true, description: 'With task_id / task_ids: CANCEL those tasks instead of reading them — a running task ends at once as cancelled (its warehouse process is stopped; one still queued never starts); a finished one is left as it is.' };
   taskRead.task_ids = { type: 'array', minItems: 1, maxItems: MAX_BATCH, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: `READ up to ${MAX_BATCH} tasks of this side at once (the task_ids a batch returned): waits until all are done and returns each one's result, in this order.` };
   // The four modes of a query tool: start one query (context_id + its fields), start a batch
   // (context_id + queries), read one task (task_id), read several (task_ids). Each takes only its own fields.
   const queryModes = (fields) => [
+    { if: { required: ['cancel'] }, then: { anyOf: [{ required: ['task_id'] }, { required: ['task_ids'] }], ...forbid(['wait_seconds', 'offset', 'limit']) } },
     { if: { required: ['task_id'] }, then: forbid(['context_id', ...fields, 'queries', 'task_ids']) },
     { if: { required: ['task_ids'] }, then: forbid(['context_id', ...fields, 'queries', 'task_id', 'offset', 'limit']) },
     { if: { required: ['queries'] }, then: { required: ['context_id'], ...forbid([...fields, 'offset', 'limit', 'wait_seconds']) } },

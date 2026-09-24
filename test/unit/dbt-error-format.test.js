@@ -40,3 +40,13 @@ test('no marker → still drops leading boilerplate but keeps content', () => {
 test('empty input yields a stable fallback', () => {
   assert.equal(formatDbtError('', ''), 'unknown dbt error');
 });
+
+test('the rows of `dbt show --output json` are read from dbt 1.x ({ "show": [...] }) and dbt v2 (a bare array) alike', async () => {
+  const { parseShowJson } = await import('../../src/dbt-runner.js');
+  // dbt 1.x: log lines, then the object spread over several lines
+  assert.deepEqual(parseShowJson('\x1b[0m12:00:00  Running with dbt=1.11.11\n{\n  "show": [\n    {"n": 5},\n    {"n": 6}\n  ]\n}\n'), [{ n: 5 }, { n: 6 }]);
+  // dbt v2: a banner, the array on one line, then a status line
+  assert.deepEqual(parseShowJson('       dbt 2.0.6\n   Loading profiles.yml\n[{"event_name":"level_started","n":28}]\n Succeeded model main.inline (ephemeral) [1 of 1 in 0.04s]\n'), [{ event_name: 'level_started', n: 28 }]);
+  assert.deepEqual(parseShowJson('       dbt 2.0.6\n[]\n'), []);
+  assert.deepEqual(parseShowJson('no rows here'), []);
+});

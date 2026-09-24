@@ -203,17 +203,25 @@ function extractPlan(stdout) {
   return planText ? { dataflow_plan: planText.slice(0, 20000) } : undefined;
 }
 
-/** Parse `dbt show --output json` stdout: logs then { "show": [ {col:val}, ... ] }. */
+/**
+ * Parse `dbt show --output json` stdout: log lines, then the rows. dbt 1.x prints them as
+ * { "show": [ {col:val}, ... ] }; dbt v2 prints the bare array [ {col:val}, ... ]. Both are read.
+ */
 export function parseShowJson(stdout) {
   const cleaned = (stdout || '').replace(/\x1b\[[0-9;]*m/g, '');
+  const tryParse = (from, to) => { try { return JSON.parse(cleaned.slice(from, to + 1)); } catch { return undefined; } };
+  const obj = cleaned.indexOf('{"show"') >= 0 ? tryParse(cleaned.indexOf('{"show"'), cleaned.lastIndexOf('}')) : undefined;
+  if (Array.isArray(obj?.show)) return obj.show;
+  // a JSON array of rows on a line of its own (v2), or the 1.x object spread over several lines
+  for (const line of cleaned.split('\n')) {
+    const t = line.trim();
+    if (t.startsWith('[') && t.endsWith(']')) { const rows = tryParse(cleaned.indexOf(t), cleaned.indexOf(t) + t.length - 1); if (Array.isArray(rows)) return rows; }
+  }
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start < 0 || end < 0) return [];
-  try {
-    return JSON.parse(cleaned.slice(start, end + 1)).show || [];
-  } catch {
-    return [];
-  }
+  const parsed = tryParse(start, end);
+  return Array.isArray(parsed?.show) ? parsed.show : [];
 }
 
 /** Minimal CSV parser (handles quoted fields with commas/quotes/newlines). */

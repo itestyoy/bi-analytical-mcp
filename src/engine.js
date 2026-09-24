@@ -26,7 +26,7 @@ import { openStore } from './store.js';
 import { buildProjection, projectionProblems } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
-import { detached, currentSignal, isolatedTarget } from './request-context.js';
+import { detached, currentSignal, isolatedTarget, withSignal } from './request-context.js';
 import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
 
 export class Engine {
@@ -2318,7 +2318,13 @@ export class Engine {
     this._taskRuns ||= new Map();
     // a member of a batch waits for what was queued before the BATCH, and runs beside the other members
     const before = batch ? batch.before : ctx ? this._ctxQueue.get(ctx.id) : null;
+    // The task's own cancellation (a query tool's { task_id, cancel: true }): every dbt process its
+    // work starts is stopped by it, and one started after it is refused at once (src/dbt-runner.js).
+    const control = new AbortController();
+    this._taskControls ||= new Map();
+    this._taskControls.set(id, control);
     const keep = (out) => {
+      if (this.jobs.get(id)?.status === 'cancelled') return; // what the work did after the cancel is not its result
       this._keepTaskResult(id, { tool, input, out });
       if (isPlainObject(out) && out.ok === false) this.jobs.fail(id, out.error?.message || `the ${tool} task failed`);
       else this.jobs.ready(id);
@@ -2326,13 +2332,18 @@ export class Engine {
     const settled = detached(async () => {
       await null; // the caller records what it needs about the task before any of the work runs
       if (before) await before;
-      // members of a batch run at the same time on one context: each dbt process gets its own target/
-      return batch ? isolatedTarget(() => work(id)) : work(id);
+      // A query cancelled while it waited never starts. A cancelled BUILD still runs its work —
+      // with its signal already aborted, so no dbt process starts and the work goes down its own
+      // failure path (clearing its in-flight marker and its checkpoint).
+      if (control.signal.aborted && TASK_SIDE[tool] && tool.startsWith('query_')) return { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: 'cancelled before it started' } };
+      // Members of a batch run at the same time on one context: each dbt process gets its own target/.
+      return withSignal(control.signal, () => (batch ? isolatedTarget(() => work(id)) : work(id)));
     }).then(keep, (e) => keep({
       ok: false,
       error: { stage: e?.stage || 'task', message: e?.message || String(e), ...(e?.field ? { field: e.field } : {}), ...(e?.code ? { code: e.code } : {}) },
     })).catch((e) => this.jobs.fail(id, e?.message || String(e))).finally(() => {
       this._taskRuns.delete(id);
+      this._taskControls.delete(id);
       if (!ctx) return;
       this.ctxs.release(ctx.id);
       if (this._ctxQueue.get(ctx.id) === settled) this._ctxQueue.delete(ctx.id);
@@ -3183,6 +3194,7 @@ export class Engine {
     this._validate('query_semantic_model', input);
     // the read half: { task_id } waits for a semantic task (a model being parsed, a query) and returns it;
     // { task_ids } waits for several at once
+    if (input.cancel) return this._cancelTasks(input, 'semantic');
     if (input.task_id) return this._pollTask(input, 'semantic');
     if (input.task_ids) return this._pollTasks(input, 'semantic');
     const ctx = this._ctx(input.context_id);
@@ -3476,6 +3488,29 @@ export class Engine {
   }
 
   /**
+   * CANCEL — { task_id, cancel: true } / { task_ids, cancel: true } on the query tool of the task's
+   * side: a running task ends at once as `cancelled` (its dbt process is stopped; one still queued
+   * behind another task never starts one), and whatever was queued after it goes on. A task that
+   * already finished is left as it is, and the answer says so.
+   */
+  _cancelTasks(input, side) {
+    const ids = input.task_ids || [input.task_id];
+    for (const id of ids) this._taskForSide(id, side);
+    const results = ids.map((id) => {
+      const job = this.jobs.get(id);
+      if (job.status !== 'running') {
+        return { task_id: id, cancelled: false, status: job.status === 'ready' ? 'done' : job.status, note: `already ${job.status === 'ready' ? 'finished' : job.status} — nothing to cancel` };
+      }
+      const reason = `cancelled by ${SIDE_READER[side]}({ task_id, cancel: true })`;
+      this._taskControls?.get(id)?.abort(new Error(reason));
+      this.jobs.cancel(id, reason);
+      this._keepTaskResult(id, { tool: job.tool, input: null, out: { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: reason } } });
+      return { task_id: id, cancelled: true, status: 'cancelled' };
+    });
+    return input.task_ids ? { ok: true, results } : { ok: true, ...results[0] };
+  }
+
+  /**
    * THE READ HALF, FOR SEVERAL TASKS — { task_ids }: every id is checked first (known, of this
    * side), then it waits until ALL of them are done (at most `wait_seconds`, capped at
    * MAX_WAIT_SECONDS) and returns each one's result in the order asked — the same answer
@@ -3548,6 +3583,7 @@ export class Engine {
    */
   async query_pipeline_model(input) {
     this._validate('query_pipeline_model', input);
+    if (input.cancel) return this._cancelTasks(input, 'pipeline');
     if (input.task_id) return this._pollTask(input, 'pipeline');
     if (input.task_ids) return this._pollTasks(input, 'pipeline');
     const ctx = this._ctx(input.context_id);
@@ -3589,7 +3625,8 @@ export class Engine {
 
   /** Wait until every one of these tasks has settled, `seconds` at most — or until the call is cancelled. Returns the seconds waited. */
   async _awaitTasks(ids, seconds) {
-    const runs = ids.map((id) => this._taskRuns?.get(id)).filter(Boolean);
+    // a cancelled task is final the moment it is cancelled, whatever its work still does before it stops
+    const runs = ids.filter((id) => this.jobs.get(id)?.status === 'running').map((id) => this._taskRuns?.get(id)).filter(Boolean);
     if (!runs.length || seconds <= 0) return 0;
     const started = Date.now();
     const signal = currentSignal();
@@ -3611,6 +3648,7 @@ export class Engine {
       if (!this.jobs.isLive(id)) return { ok: false, ...head, status: 'error', error: { stage: 'task', message: 'this task was started by a server process that is gone (it restarted), so nothing is running it — start the work again' } };
       return { ok: true, ...head, status: 'running', waited_seconds: waited, next: `still running — call ${this._readWith(id)} again; it waits up to ${MAX_WAIT_SECONDS}s` };
     }
+    if (job.status === 'cancelled') return { ok: false, ...head, status: 'cancelled', error: { stage: 'cancelled', code: 'cancelled', message: job.error || 'cancelled' } };
     const paging = offset != null || limit != null;
     const kept = this._taskResults?.get(id);
     const stored = job.status === 'ready' && !!job.table;

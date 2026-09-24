@@ -132,3 +132,16 @@ test('a query issued after a batch runs once the whole batch is done, and reads 
   assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25]);
   assert.deepEqual(revenueBy(peek.results[1].rows), g, 'the batch member grouped the same way reads the same numbers');
 });
+
+test('a cancelled query ends as cancelled and the context goes on: the next query reads the warehouse\'s numbers', opts, async (t) => {
+  if (skip(t)) return;
+  const created = await engine.build_semantic_model(TASK);
+  const doomed = await engine.raw.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['mon_revenue'], group_by: byCountry }, { metrics: ['mon_revenue'] }] });
+  const out = await engine.raw.query_semantic_model({ task_ids: doomed.task_ids, cancel: true });
+  assert.deepEqual(out.results.map((r) => r.status), ['cancelled', 'cancelled']);
+  const read = await engine.raw.query_semantic_model({ task_ids: doomed.task_ids, wait_seconds: 0 });
+  assert.deepEqual(read.results.map((r) => r.status), ['cancelled', 'cancelled']);
+  const next = await engine.query_semantic_model({ context_id: created.context_id, metrics: ['mon_revenue'], group_by: byCountry });
+  const g = revenueBy(next.rows);
+  assert.deepEqual([g.US, g.GB, g.BR], [35, 25, 25]);
+});

@@ -9,6 +9,7 @@
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { DbtRunner } from '../dbt-runner.js';
+import { currentSignal } from '../request-context.js';
 // the sidecar script is a non-JS runtime asset — see src/runtime-assets.js for why it lives there
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 
@@ -75,6 +76,8 @@ export class MfEngineBackend {
   }
 
   async query(projectDir, opts) {
+    // a cancelled task starts nothing (the sidecar cannot be interrupted once a request is in it)
+    if (currentSignal()?.aborted) return { ok: false, cancelled: true, command: 'mf query (sidecar)', columns: [], rows: [], stdout: '', stderr: 'not started — the task was cancelled' };
     const base = {
       project_dir: projectDir,
       profiles_dir: this.profilesDir,

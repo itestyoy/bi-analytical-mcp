@@ -359,3 +359,65 @@ test('run as a batch member, a dbt command writes to a target directory of its o
   assert.equal(existsSync(iso.rows[0].target), false, 'and removed after');
   assert.deepEqual(readdirSync(join(project, 'target')), ['partial_parse.msgpack'], 'the context\'s own target/ is untouched');
 });
+
+// CANCEL — { task_id | task_ids, cancel: true } on the query tool of the task's side.
+
+test('a running query is cancelled at once: its process is stopped, a read says cancelled, and the queue goes on', async () => {
+  const runner = heldQueries();
+  const signals = [];
+  const { currentSignal } = await import('../../src/request-context.js');
+  const q0 = runner.query;
+  runner.query = (dir, opts) => { signals.push(currentSignal()); return q0(dir, opts); };
+  const e = engine(runner);
+  const created = await e.build_semantic_model(TWO);
+  const first = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  const second = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt2'] });
+  await until(() => runner.held.length === 1);
+  const out = await e.query_semantic_model({ task_id: first.task_id, cancel: true });
+  assert.deepEqual([out.cancelled, out.status], [true, 'cancelled']);
+  assert.equal(signals[0].aborted, true, 'the process the task started is told to stop');
+  const read = await e.query_semantic_model({ task_id: first.task_id, wait_seconds: 5 });
+  assert.deepEqual([read.status, read.error.code], ['cancelled', 'cancelled']);
+  // the held process ends (as a killed one would); the next task runs, and the cancelled one stays cancelled
+  runner.held.shift()();
+  await until(() => runner.held.length === 1);
+  runner.held.shift()();
+  assert.equal((await taskResult(e, second.task_id)).status, 'done');
+  assert.equal((await e.query_semantic_model({ task_id: first.task_id })).status, 'cancelled');
+  // a finished task is left as it is
+  const again = await e.query_semantic_model({ task_id: second.task_id, cancel: true });
+  assert.deepEqual([again.cancelled, again.status], [false, 'done']);
+});
+
+test('a queued task that is cancelled never starts a process; a batch is cancelled by its task_ids', async () => {
+  const runner = heldQueries();
+  const e = engine(runner);
+  const created = await e.build_semantic_model(TWO);
+  const first = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['task_cnt2'] }] });
+  await until(() => runner.held.length === 1);
+  const out = await e.query_semantic_model({ task_ids: batch.task_ids, cancel: true });
+  assert.deepEqual(out.results.map((r) => r.status), ['cancelled', 'cancelled']);
+  runner.held.shift()();
+  assert.equal((await taskResult(e, first.task_id)).status, 'done');
+  for (let i = 0; i < 20; i += 1) await tick();
+  assert.equal(runner.log.filter((l) => l.startsWith('start:')).length, 1, 'the cancelled batch never reached the warehouse');
+  // cancel is refused beside fields it does not take, and for a task of the other side
+  await assert.rejects(() => e.query_semantic_model({ task_id: first.task_id, cancel: true, wait_seconds: 1 }));
+  await assert.rejects(() => e.query_semantic_model({ context_id: created.context_id, cancel: true }));
+  await assert.rejects(() => e.query_pipeline_model({ task_id: first.task_id, cancel: true }), /query_semantic_model/);
+});
+
+test('a cancel under a protocol task is answered at once, not after the task', async () => {
+  const { runToCompletion } = await import('../../src/mcp-surface.js');
+  const runner = heldQueries();
+  const e = engine(runner);
+  const created = await e.build_semantic_model(TWO);
+  const q = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  await until(() => runner.held.length === 1);
+  const t0 = Date.now();
+  const { raw } = await runToCompletion(e, 'query_semantic_model', { task_id: q.task_id, cancel: true });
+  assert.equal(raw.status, 'cancelled');
+  assert.ok(Date.now() - t0 < 2000);
+  runner.held.shift()();
+});

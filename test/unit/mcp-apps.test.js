@@ -14,7 +14,7 @@ import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer } from '../helpers/mcp-http.js';
-import { buildViewModel, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
+import { buildViewModel, drillView, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
 
 let s;
@@ -59,8 +59,9 @@ test('the view reads only its own result: one tool is app-callable, no network, 
   assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
   assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'get_query_result', arguments: args }");
   // …reached for the card's OWN result only: its query_id while it waits, its stored table's next
-  // level when a drill-down row opens
+  // view when a drill-down steps down (a pivot row, a chart mark — each read built by the view model)
   assert.deepEqual(reads.filter((r) => r !== 'args').sort(), [
+    '{ ...d.source, transform: view.transform, limit: DRILL_ROWS }',
     '{ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }',
     '{ query_id: queryId }',
   ]);
@@ -243,7 +244,7 @@ test('view model: a DECLARED bar split by a column groups (or stacks) a bar per 
   assert.equal(m.chart.type, 'bar');
   assert.deepEqual(m.chart.labels, ['US', 'BR'], 'categories in the order they first appear');
   // the largest series first (android 490 > ios 465); a category × series seen twice is summed
-  assert.deepEqual(m.chart.series, [{ name: 'android', values: [310, 180] }, { name: 'ios', values: [420, 45] }]);
+  assert.deepEqual(m.chart.series.map(({ name, values }) => ({ name, values })), [{ name: 'android', values: [310, 180] }, { name: 'ios', values: [420, 45] }]);
   assert.equal(m.chart.stacked, true);
   assert.equal(m.chart.horizontal, true);
   // several y columns: a bar each per category, grouped
@@ -342,6 +343,42 @@ test('view model: what a chart leaves out is said in numbers — categories past
   // an inferred breakdown draws its first amount and names the others
   const brk = buildViewModel('get_query_result', { columns: [{ name: 'platform' }, { name: 'users' }, { name: 'revenue' }, { name: 'arpu' }], rows: [{ platform: 'ios', users: 10, revenue: 50, arpu: 5 }, { platform: 'web', users: 4, revenue: 8, arpu: 2 }] });
   assert.deepEqual([brk.chart.y, brk.chart.omitted], ['users', ['revenue', 'arpu']]);
+});
+
+test('drill: a view is the stored rows under the path, grouped by what it draws; a pie stays a pie, a line can split over time', () => {
+  const levels = [{ column: 'platform', label: 'Platform' }, { column: 'channel' }];
+  const bar = { kind: 'bar', x: 'country', y: ['revenue', 'users'], drill: { levels, agg: 'max' } };
+  // the chart as declared: folded over the drill levels
+  assert.deepEqual(drillView(bar).transform.group_by, ['country']);
+  assert.deepEqual(drillView(bar).transform.aggregations, [{ fn: 'max', column: 'revenue', as: 'revenue' }, { fn: 'max', column: 'users', as: 'users' }]);
+  // a bar of US opened by Platform: filtered to US, one bar per platform, Channel left to step into
+  const step = drillView(bar, [{ column: 'country', value: 'US' }], { level: { column: 'platform' }, mode: 'breakdown' });
+  assert.deepEqual(step.transform.where, [{ column: 'country', op: 'eq', value: 'US' }]);
+  assert.deepEqual(step.transform.group_by, ['platform']);
+  assert.deepEqual([step.display.kind, step.display.x, step.display.y], ['bar', 'platform', ['revenue', 'users']]);
+  assert.deepEqual(step.display.drill.levels, [{ column: 'channel' }]);
+  // a slice opens into slices
+  const pie = drillView({ kind: 'pie', label_column: 'country', value_column: 'revenue', drill: { levels } }, [{ column: 'country', value: null }], { level: { column: 'channel' }, mode: 'breakdown' });
+  assert.deepEqual([pie.display.kind, pie.display.label_column, pie.transform.where[0].op], ['pie', 'channel', 'is_null']);
+  // a line: that moment broken down into bars, or the line split over time
+  const line = { kind: 'line', x: 'day', y: ['dau'], series_column: 'country', drill: { levels } };
+  assert.deepEqual(drillView(line).transform.group_by, ['day', 'country']);
+  const trend = drillView(line, [{ column: 'country', value: 'US' }], { level: { column: 'platform' }, mode: 'trend' });
+  assert.deepEqual([trend.display.kind, trend.display.x, trend.display.series_column], ['line', 'day', 'platform']);
+  assert.deepEqual(trend.transform.group_by, ['day', 'platform']);
+  const moment = drillView(line, [{ column: 'country', value: 'US' }, { column: 'day', value: '2026-09-01' }], { level: { column: 'platform' }, mode: 'breakdown' });
+  assert.equal(moment.display.kind, 'bar');
+});
+
+test('view model: a drillable chart carries each mark\'s own value to filter by, and where to read the next view', () => {
+  const display = { kind: 'bar', x: 'country', y: ['v'], series_column: 'p', drill: { levels: [{ column: 'channel' }] } };
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'country' }, { name: 'p' }, { name: 'v' }], rows: [{ country: null, p: 'ios', v: 3 }, { country: 'US', p: 7, v: 5 }], display, drill_source: { query_id: 'q1' } });
+  assert.deepEqual(m.chart.labels, ['∅', 'US']);
+  assert.deepEqual(m.chart.drill.keys, [null, 'US'], 'the empty category filters by null, not by its label');
+  assert.deepEqual(m.chart.series.map((x) => x.key).sort(), [7, 'ios'], 'a numeric split value stays a number');
+  assert.deepEqual(m.chart.drill.source, { query_id: 'q1' });
+  // without a source to read from there is nothing to drill
+  assert.equal(buildViewModel('get_query_result', { columns: [{ name: 'country' }, { name: 'v' }], rows: [{ country: 'US', v: 1 }], display: { kind: 'bar', x: 'country', y: ['v'], drill: { levels: [{ column: 'p' }] } } }).chart.drill, undefined);
 });
 
 test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {

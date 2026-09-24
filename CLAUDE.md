@@ -122,10 +122,11 @@
   every tool is `visibility: ["model"]` except `get_query_result` (`["model", "app"]`), the view
   resource declares an empty `csp` and the page its own CSP, and the view's ONE server call is
   get_query_result for the result it was drawn from — the query_id of its own detached result,
-  polled until the rows are there so they appear in the same card, and the next level of a
-  drill-down (`display.kind: pivot`) when a row opens: its stored table, filtered to that row and
-  grouped by the level below (no other tools/call, resource, model message, link or network) — a
-  test holds its sources to that. Everything else interactive stays on the data already in the page.
+  polled until the rows are there so they appear in the same card, and a drill-down's next view
+  — a pivot row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): its
+  stored table, filtered to the path taken and grouped by the dimension chosen, each read built by
+  the view model's one definition of a view (no other tools/call, resource, model message, link or
+  network) — a test holds its sources to that. Everything else interactive stays on the data already in the page.
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

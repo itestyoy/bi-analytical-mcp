@@ -178,7 +178,12 @@ the plain tools stay exactly as they were for every client that does not:
   and each row it opens reads the next level from the stored table, filtered to that row — 200 rows
   a level; each level re-aggregates
   with the value's agg, so sums and counts add up while distinct counts, averages and ratios do not).
-  Each takes a title;
+  `line`, `area`, `bar` and `pie` may declare `drill: { levels: [{ column, label }], agg }` over a
+  materialized result grouped by those columns too: the chart is drawn folded over them, a click on
+  a bar, slice or point opens a menu of the dimensions left ("by Platform"; a point also "by Platform
+  over time"), and the chart redraws in the same card filtered to what was clicked — a breadcrumb
+  ("All › US › ios") over it and a back button beside fullscreen step back without a read. Each
+  takes a title;
   the server checks the columns exist (a
   detached query remembers it) and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
@@ -198,8 +203,8 @@ the plain tools stay exactly as they were for every client that does not:
   not call it) except `get_query_result`, `["model", "app"]`; the view resource declares an empty
   `csp` (no connect, resource or frame origin) and the page carries the same Content-Security-Policy
   itself; and the view's code makes that one call — get_query_result for its own result: its
-  query_id while it waits, the next level of its own stored table when a pivot row opens — and calls
-  no other tool, resource, model message or link.
+  query_id while it waits, the next view of its own stored table when a pivot row opens or a chart
+  mark is drilled into — and calls no other tool, resource, model message or link.
   (`semantic_index` has no view on purpose: it is the most frequent call and a view on every
   exploration step would bury the conversation.) The view is built like the official MCP Apps
   examples — the ext-apps `App` class, host theme and style variables, shadcn/ui components,

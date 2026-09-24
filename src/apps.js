@@ -16,8 +16,8 @@
 // THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT — nothing else. It gets the result the host hands
 // it; the ONE thing it may ask for is more of that same result, through get_query_result: the rows
 // of a query that outlasted its call (it polls THAT query_id, so the result appears in the card that
-// announced it), and the next level of a drill-down when a row opens (its stored table, filtered to
-// that row). Held in three places, so no single one is load-bearing:
+// announced it), and a drill-down's next view — a pivot row opened, a chart mark clicked (its stored
+// table, filtered to the path taken). Held in three places, so no single one is load-bearing:
 //   * every tool declares `_meta.ui.visibility` — ["model"] (callable by the model, NOT by a view;
 //     the spec's default is ["model", "app"]), except get_query_result, a read-only lookup of a
 //     finished result, which is ["model", "app"]; a host refuses a view's tools/call to any other;
@@ -62,7 +62,7 @@ const RESOURCE = {
   uri: RESULT_VIEW_URI,
   name: 'result-view',
   title: 'Query Result',
-  description: 'Interactive card for a result: a chart as the caller declares it (line, multi-line, stacked area, grouped/stacked/horizontal bars, a pie of shares, a sankey of flows), KPI tiles, a drill-down pivot table (the only table), a funnel (steps, conversion, biggest drop), or the A/B family — the test (lift, interval, verdict per variant), the sample-ratio check and the sample-size plan. Other results get one status line.',
+  description: 'Interactive card for a result: a chart as the caller declares it (line, multi-line, stacked area, grouped/stacked/horizontal bars, a pie of shares, a sankey of flows — drillable where declared: a click opens a mark into a dimension), KPI tiles, a drill-down pivot table (the only table), a funnel (steps, conversion, biggest drop), or the A/B family — the test (lift, interval, verdict per variant), the sample-ratio check and the sample-size plan. Other results get one status line.',
   mimeType: RESOURCE_MIME_TYPE,
   _meta: { ui: { prefersBorder: true, csp: VIEW_CSP } },
 };

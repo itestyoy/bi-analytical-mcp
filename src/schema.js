@@ -393,6 +393,15 @@ export function buildSchemas(catalog) {
   // a split names ONE value column: the schema says so, not a sentence
   const oneYWhenSplit = { if: { required: ['series_column'] }, then: { properties: { y: { maxItems: 1 } } } };
   const axis = { ...resultColumn, description: 'The axis column: time is put in time order, any other column keeps the row order.' };
+  // a chart the person can drill into: the dimensions a clicked point, bar or slice opens into
+  const drill = {
+    type: 'object', additionalProperties: false, required: ['levels'],
+    description: 'Let the person DRILL DOWN: a click on a bar, slice or point offers these dimensions, and the chart is redrawn filtered to what was clicked and broken down by the one chosen — then again, one level deeper, with the ones left. Reads a MATERIALIZED result whose rows carry these columns too (group the query by them as well); the chart is drawn from it folded over them. Each view RE-AGGREGATES with `agg`: sums and counts add up, but a distinct count, an average or a ratio does NOT (a user in two platforms counts twice) — be careful with non-additive metrics.',
+    properties: {
+      levels: { type: 'array', minItems: 1, maxItems: 5, description: 'The dimensions offered, in the order the menu lists them.', items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 40, description: 'How the dimension reads in the menu (default: the column name).' } } } },
+      agg: { enum: ['sum', 'count', 'min', 'max', 'avg'], default: 'sum', description: 'How the rows under a view fold into its values.' },
+    },
+  };
   const form = (kind, title, description, properties, required, extra = {}) => ({
     title, description, type: 'object', additionalProperties: false,
     required: ['kind', ...required],
@@ -404,10 +413,10 @@ export function buildSchemas(catalog) {
     discriminator: { propertyName: 'kind' },
     oneOf: [
       form('line', 'line — a trend', 'A TREND over an ordered axis (usually time): one line, or several to compare series.', {
-        x: axis, y: valueColumns('line'), series_column: seriesColumn('line'),
+        x: axis, y: valueColumns('line'), series_column: seriesColumn('line'), drill,
       }, ['x', 'y'], oneYWhenSplit),
       form('area', 'area — a total split into parts over time', 'A COMPOSITION OVER TIME: series that add up to one total, STACKED (DAU by platform). Series that do not add up → line.', {
-        x: axis, y: valueColumns('band'), series_column: seriesColumn('band'),
+        x: axis, y: valueColumns('band'), series_column: seriesColumn('band'), drill,
       }, ['x', 'y'], oneYWhenSplit),
       form('bar', 'bar — a comparison across categories', 'A COMPARISON across categories, in row order: a bar per category, several per category (grouped), or stacked into one (part-to-whole per category).', {
         x: { ...resultColumn, description: 'The category column.' },
@@ -415,10 +424,12 @@ export function buildSchemas(catalog) {
         series_column: seriesColumn('bar within each category'),
         stacked: { type: 'boolean', default: false, description: 'Stack the bars of a category into one instead of grouping them side by side.' },
         horizontal: { type: 'boolean', description: 'Lay the bars flat. Omitted: flat past 8 categories.' },
+        drill,
       }, ['x', 'y'], oneYWhenSplit),
       form('pie', 'pie — shares of one total', 'A PART-TO-WHOLE at a glance, drawn as a donut: a slice per row. For a few clearly different shares — close values read better as bars. Past 6 slices the smallest fold into "Other".', {
         label_column: { ...resultColumn, description: 'The column naming each slice.' },
         value_column: { ...resultColumn, description: 'The column with each slice\'s amount (non-negative).' },
+        drill,
       }, ['label_column', 'value_column']),
       form('funnel', 'funnel — ordered steps', 'ORDERED STEPS and how many reach each, with the conversion between them.', {
         steps: {
@@ -481,8 +492,8 @@ export function buildSchemas(catalog) {
     required: ['context_id'],
     description: 'Run a metric query against a context.',
     $defs: pdefs,
-    // a drill-down reads the STORED result level by level, so it needs one
-    if: { required: ['display'], properties: { display: { required: ['kind'], properties: { kind: { const: 'pivot' } } } } },
+    // a drill-down — a pivot, or a chart with drill — reads the STORED result view by view, so it needs one
+    if: { required: ['display'], properties: { display: { anyOf: [{ required: ['kind'], properties: { kind: { const: 'pivot' } } }, { required: ['drill'] }] } } },
     then: { required: ['materialize'], properties: { materialize: { const: true } } },
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },

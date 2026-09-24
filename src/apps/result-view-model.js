@@ -33,6 +33,50 @@ export function pivotTransform(display, path) {
   };
 }
 
+/**
+ * A CHART WITH A DRILL-DOWN (display.drill) reads a stored result at a coarser grain than it holds:
+ * the table carries the drill levels too, so every view is that table filtered to the path taken so
+ * far and grouped by what the view draws, each value folded with drill.agg (sum by default).
+ * `drillView` is one such view — the chart as declared (path []), or a step into a drill level — as
+ * the READ (transform) and the DECLARATION the rows are then drawn with. The engine reads the first
+ * view with it and the card each step; one definition of what a view is.
+ */
+export const DRILL_ROWS = 1000;
+
+const drillYs = (display) => (display.kind === 'pie' ? [display.value_column] : [].concat(display.y));
+const drillX = (display) => (display.kind === 'pie' ? display.label_column : display.x);
+
+export function drillView(display, path = [], step = null) {
+  const agg = display.drill?.agg || 'sum';
+  const ys = drillYs(display);
+  const where = path.map((f) => (f.value === null ? { column: f.column, op: 'is_null' } : { column: f.column, op: 'eq', value: f.value }));
+  const aggregations = ys.map((y) => ({ fn: agg, column: y, as: y }));
+  const used = new Set(path.map((f) => f.column));
+  // the levels left to step into from here
+  const rest = (display.drill?.levels || []).filter((l) => !used.has(l.column) && (!step || l.column !== step.level.column));
+  const drill = display.drill ? { ...display.drill, levels: rest } : undefined;
+  const byValue = [{ key: ys[0], direction: 'desc', nulls: 'last' }];
+  if (!step) {
+    // the chart as declared: its own dimensions
+    const group = [drillX(display), ...(display.series_column ? [display.series_column] : [])];
+    const timeLike = display.kind === 'line' || display.kind === 'area';
+    return { transform: { where, group_by: group, aggregations, order_by: timeLike ? [{ key: display.x, direction: 'asc' }] : byValue }, display };
+  }
+  const level = step.level.column;
+  if (step.mode === 'trend' && (display.kind === 'line' || display.kind === 'area')) {
+    // the same axis, one line (or band) per value of the level
+    return {
+      transform: { where, group_by: [display.x, level], aggregations: aggregations.slice(0, 1), order_by: [{ key: display.x, direction: 'asc' }] },
+      display: { kind: display.kind, x: display.x, y: [ys[0]], series_column: level, drill },
+    };
+  }
+  // a breakdown by the level: a pie stays a pie (shares of what was chosen), anything else is bars
+  return {
+    transform: { where, group_by: [level], aggregations, order_by: byValue },
+    display: display.kind === 'pie' ? { kind: 'pie', label_column: level, value_column: ys[0], drill } : { kind: 'bar', x: level, y: ys, drill },
+  };
+}
+
 /** The rows of one drill-down level read with pivotTransform: the key as it came (to filter by), and the values. */
 export function pivotRows(result, display, depth) {
   const level = display.levels[depth].column;
@@ -239,6 +283,15 @@ export function buildViewModel(toolName, result, toolInput) {
     // ── a DECLARED card: the caller said what this result is (the server checked the columns
     // exist), so it is drawn as declared — in the declared order, with no shape guessing ──
     const d = isObj(result.display) ? result.display : null;
+    // a chart that can be drilled into: its levels left, the table it reads, the path taken so far
+    const drill = d && isObj(d.drill) && Array.isArray(d.drill.levels) && isObj(result.drill_source)
+      ? {
+        levels: d.drill.levels.filter(isObj).map((l) => ({ column: l.column, label: typeof l.label === 'string' && l.label ? l.label : l.column })),
+        source: result.drill_source,
+        path: Array.isArray(result.drill_path) ? result.drill_path : [],
+        display: d,
+      }
+      : null;
     // a sankey flows one way: links that loop back cannot be laid out
     const acyclic = (links) => {
       const next = new Map();
@@ -285,15 +338,18 @@ export function buildViewModel(toolName, result, toolInput) {
             const y = num(r[yi]);
             if (y !== null) bySeries.get(k).push([String(r[xi]), y]);
           }
-          const all = [...bySeries.entries()].map(([name, points]) => ({ name, points, total: points.reduce((s, p) => s + p[1], 0) })).sort((a, b) => b.total - a.total);
-          series = all.slice(0, MAX_SERIES).map(({ name, points }) => ({ name, points }));
+          const keyOf = new Map(inOrder.map((r) => [label(r[si]), r[si] ?? null]));
+          const all = [...bySeries.entries()].map(([name, points]) => ({ name, key: keyOf.get(name), points, total: points.reduce((s, p) => s + p[1], 0) })).sort((a, b) => b.total - a.total);
+          series = all.slice(0, MAX_SERIES).map(({ name, key, points }) => ({ name, key, points }));
           fold = cut(all.length, true);
         } else {
           series = d.y.slice(0, MAX_SERIES).map((y) => ({ name: y, points: inOrder.map((r) => [String(r[xi]), num(r[at(y)])]).filter((p) => p[1] !== null) }));
           fold = cut(d.y.length, false);
         }
+        // a drill filters by the point's own x, as the rows carry it (a number stays a number)
+        const xKeys = drill ? Object.fromEntries(inOrder.map((r) => [String(r[xi]), r[xi]])) : undefined;
         // an area stacks its series: they are the parts of one total over time
-        return chartCard({ type: 'line', x: d.x, y: d.y.length === 1 ? d.y[0] : null, series, ...fold, ordered, ...(d.kind === 'area' ? { area: true, stacked: series.length > 1 } : {}), title: declaredTitle }, declaredTitle || title);
+        return chartCard({ type: 'line', x: d.x, y: d.y.length === 1 ? d.y[0] : null, series, ...fold, ordered, ...(d.kind === 'area' ? { area: true, stacked: series.length > 1 } : {}), title: declaredTitle, ...(drill ? { drill: { ...drill, series_column: d.series_column || null, x_keys: xKeys } } : {}) }, declaredTitle || title);
       }
       const ys = d.y === undefined ? [] : [].concat(d.y);
       if (d.kind === 'bar' && at(d.x) >= 0 && ys.length && ys.every((y) => at(y) >= 0)) {
@@ -301,12 +357,16 @@ export function buildViewModel(toolName, result, toolInput) {
         let labels;
         let series;
         let fold;
+        let keyOf; // a drawn category's own value, for a drill to filter by
         if (d.series_column && at(d.series_column) >= 0) {
           // categories in the order they first appear; a bar per series value inside each — every
           // row counts toward a series' total, whether or not its category is drawn
           const si = at(d.series_column);
           const yi = at(ys[0]);
           labels = [...new Set(rows.map((r) => label(r[xi])))];
+          const byLabel = new Map(rows.map((r) => [label(r[xi]), r[xi] ?? null]));
+          keyOf = (l) => byLabel.get(l);
+          const keyOfSeries = new Map(rows.map((r) => [label(r[si]), r[si] ?? null]));
           const bySeries = new Map();
           for (const r of rows) {
             const k = label(r[si]);
@@ -314,16 +374,19 @@ export function buildViewModel(toolName, result, toolInput) {
             const cell = bySeries.get(k);
             cell.set(label(r[xi]), (cell.get(label(r[xi])) ?? 0) + (num(r[yi]) ?? 0));
           }
-          const all = [...bySeries.entries()].map(([name, byX]) => ({ name, values: labels.map((l) => byX.get(l) ?? 0) })).map((x) => ({ ...x, total: x.values.reduce((a, v) => a + v, 0) })).sort((a, b) => b.total - a.total);
-          series = all.slice(0, MAX_SERIES).map(({ name, values }) => ({ name, values }));
+          const all = [...bySeries.entries()].map(([name, byX]) => ({ name, key: keyOfSeries.get(name), values: labels.map((l) => byX.get(l) ?? 0) })).map((x) => ({ ...x, total: x.values.reduce((a, v) => a + v, 0) })).sort((a, b) => b.total - a.total);
+          series = all.slice(0, MAX_SERIES).map(({ name, key, values }) => ({ name, key, values }));
           fold = cut(all.length, true);
         } else {
           labels = rows.map((r) => label(r[xi]));
+          keyOf = (_, i) => rows[i][xi] ?? null;
           series = ys.slice(0, MAX_SERIES).map((y) => ({ name: y, values: rows.map((r) => num(r[at(y)]) ?? 0) }));
           fold = cut(ys.length, false);
         }
         // the categories drawn: the first MAX_BARS in row order — and how many there were
         const shown = labels.slice(0, MAX_BARS);
+        // the categories' own values, to filter a drill by
+        const keys = drill ? shown.map(keyOf) : undefined;
         series = series.map((x) => ({ ...x, values: x.values.slice(0, shown.length) }));
         const single = series.length === 1 && !d.series_column;
         return chartCard({
@@ -338,10 +401,11 @@ export function buildViewModel(toolName, result, toolInput) {
           horizontal: typeof d.horizontal === 'boolean' ? d.horizontal : null,
           ...fold,
           title: declaredTitle,
+          ...(drill ? { drill: { ...drill, series_column: d.series_column || null, keys } } : {}),
         }, declaredTitle || title);
       }
       // a drill-down: the top level the server read, and where the card reads the levels below
-      if (d.kind === 'pivot' && Array.isArray(d.levels) && d.levels.length && d.levels.every(isObj) && Array.isArray(d.values) && d.values.length && isObj(result.pivot_source)) {
+      if (d.kind === 'pivot' && Array.isArray(d.levels) && d.levels.length && d.levels.every(isObj) && Array.isArray(d.values) && d.values.length && isObj(result.drill_source)) {
         return {
           kind: 'pivot',
           title: declaredTitle || 'Pivot',
@@ -350,7 +414,7 @@ export function buildViewModel(toolName, result, toolInput) {
           values: d.values.map((v) => ({ column: v.column, label: typeof v.label === 'string' && v.label ? v.label : v.column, agg: v.agg || 'sum', format: v.format || 'number', currency: v.currency || 'USD' })),
           rows: pivotRows(result, d, 0),
           has_more: !!result.page?.has_more,
-          source: result.pivot_source,
+          source: result.drill_source,
         };
       }
       if (d.kind === 'kpi' && Array.isArray(d.values) && d.values.length && d.values.every((v) => isObj(v) && at(v.column) >= 0) && (at(d.x) >= 0 || rows.length === 1)) {
@@ -410,13 +474,13 @@ export function buildViewModel(toolName, result, toolInput) {
         const li = at(d.label_column);
         const vi = at(d.value_column);
         const MAX_SLICES = 6; // a donut reads a share at a glance only while the slices are few
-        const all = rows.map((r) => ({ label: label(r[li]), value: num(r[vi]) })).filter((x) => x.value !== null && x.value > 0).sort((a, b) => b.value - a.value);
+        const all = rows.map((r) => ({ label: label(r[li]), key: r[li] ?? null, value: num(r[vi]) })).filter((x) => x.value !== null && x.value > 0).sort((a, b) => b.value - a.value);
         const total = all.reduce((a, x) => a + x.value, 0);
         if (all.length >= 2 && total > 0) {
           const shown = all.length > MAX_SLICES ? all.slice(0, MAX_SLICES - 1) : all;
           const rest = all.slice(shown.length);
           const slices = [...shown, ...(rest.length ? [{ label: 'Other', value: rest.reduce((a, x) => a + x.value, 0), other: rest.length }] : [])].map((x) => ({ ...x, share: x.value / total }));
-          return chartCard({ type: 'pie', x: d.label_column, y: d.value_column, slices, total, folded: rest.length, title: declaredTitle }, declaredTitle || title);
+          return chartCard({ type: 'pie', x: d.label_column, y: d.value_column, slices, total, folded: rest.length, title: declaredTitle, ...(drill ? { drill } : {}) }, declaredTitle || title);
         }
       }
       // a declaration the rows cannot fill falls through to the inferred card

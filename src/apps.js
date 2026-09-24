@@ -37,9 +37,13 @@ import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage, RUNTIME_ASSETS } from './runtime-assets.js';
 import { RESOURCE_MIME_TYPE, RESOURCE_URI_META_KEY, EXTENSION_ID, getUiCapability } from '@modelcontextprotocol/ext-apps/server';
 
-// OFFERED ONLY TO A CLIENT THAT SAYS IT RENDERS THEM (src/client-extensions.js): `_meta.ui` on the
-// tools, the view resource, the `display` declaration, the instructions and hints about cards —
-// only for a client that declares this extension WITH this view's MIME type in the request served.
+// WHAT DEPENDS ON THE CLIENT DECLARING THIS EXTENSION (with this view's MIME type, in the request
+// served — src/client-extensions.js): what speaks to its MODEL — the card instructions and the
+// show_to_user hint — and what would DRAW — a call to display_model_result, `card` on experiment.
+// The tool list, `_meta.ui` and the view page are the same for every client, as the official
+// ext-apps registerAppTool serves them: a host re-drawing a card already in a conversation
+// (reopened, or on another device) finds its tool and page on requests that need not carry the
+// declaration, and hiding them broke every stored card ("Connector not found").
 
 /** Whether a set of client capabilities declares that it renders this view. */
 export function rendersApps(clientCapabilities) {
@@ -60,7 +64,7 @@ export const VIEWED_TOOLS = new Set(['display_model_result', 'experiment']);
 export const TOOL_VISIBILITY = Object.freeze(['model']);
 /** The one tool a view calls, and ONLY a view: the card reading the next view of its own drawn task. */
 export const APP_CALLABLE_TOOLS = Object.freeze(['drill_result']);
-/** Tools that exist only with the view: offered to a client that renders MCP Apps, and to no other. */
+/** Tools that exist only with the view: a call that draws is accepted only from a client that renders MCP Apps (drill_result: only for a drawn task). */
 export const APPS_ONLY_TOOLS = new Set(['display_model_result', 'drill_result']);
 const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? ['app'] : [...TOOL_VISIBILITY]);
 
@@ -68,8 +72,7 @@ const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? ['app'] : [.
  * The `_meta` every tool carries: its visibility, and — for a viewed tool — the view, in both
  * spellings registerAppTool writes.
  */
-export function viewMeta(tool, renders = true) {
-  if (!renders) return undefined; // a client without the extension gets no `_meta.ui` at all
+export function viewMeta(tool) {
   return VIEWED_TOOLS.has(tool)
     ? { ui: { resourceUri: RESULT_VIEW_URI, visibility: visibilityOf(tool) }, [RESOURCE_URI_META_KEY]: RESULT_VIEW_URI }
     : { ui: { visibility: visibilityOf(tool) } };

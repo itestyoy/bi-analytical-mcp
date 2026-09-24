@@ -200,7 +200,7 @@ test('view model: a DECLARED line over a non-time axis keeps the row order; seri
 test('view model: a DECLARED bar split by a column groups (or stacks) a bar per value inside each category', () => {
   const rows = [{ c: 'US', p: 'ios', v: 420 }, { c: 'US', p: 'android', v: 310 }, { c: 'BR', p: 'android', v: 180 }, { c: 'BR', p: 'ios', v: 40 }, { c: 'BR', p: 'ios', v: 5 }];
   const cols = [{ name: 'c' }, { name: 'p' }, { name: 'v' }];
-  const m = buildViewModel('get_query_result', { columns: cols, rows, display: { kind: 'bar', x: 'c', y: 'v', series_column: 'p', stacked: true, horizontal: true } });
+  const m = buildViewModel('get_query_result', { columns: cols, rows, display: { kind: 'bar', x: 'c', y: ['v'], series_column: 'p', stacked: true, horizontal: true } });
   assert.equal(m.chart.type, 'bar');
   assert.deepEqual(m.chart.labels, ['US', 'BR'], 'categories in the order they first appear');
   // the largest series first (android 490 > ios 465); a category × series seen twice is summed
@@ -271,7 +271,7 @@ test('display guard: a sankey that loops back, or KPI tiles over many rows with 
 
 test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {
   // step counts with a NULL first step cannot be a funnel; the step-per-row shape is still a bar chart
-  const m = buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: null }, { step: 'b', users: 4 }], display: { kind: 'funnel', label_column: 'step', value_column: 'users' } });
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: null }, { step: 'b', users: 4 }], display: { kind: 'funnel', steps: { label_column: 'step', value_column: 'users' } } });
   assert.equal(m.kind, 'chart');
   assert.equal(m.chart.type, 'bar');
 });

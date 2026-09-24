@@ -507,7 +507,11 @@ function renderChart(chart, title) {
           color: cssVar('--foreground'), // node labels wear text ink, never a series color
           font: { size: 12 },
           nodeWidth: 8,
-          borderWidth: 0,
+          // a 2px surface gap between a node and the flows that meet it, like the gap between stacked
+          // bars and between slices: the node's border in the card color (the plugin starts a flow
+          // half a border away from the node)
+          borderWidth: 3,
+          borderColor: cssVar('--card'),
           size: 'max',
         }],
       },

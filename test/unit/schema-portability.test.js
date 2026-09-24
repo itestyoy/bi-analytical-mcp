@@ -230,3 +230,29 @@ test('the tool surface stays within its size budget on the production catalog', 
   const total = Object.values(tools).reduce((n, s) => n + JSON.stringify(s).length, 0);
   assert.ok(total < 220000, `the tool schemas are ${total} characters — they were ~150k after the fold; something is being dumped into every request again`);
 });
+
+test('the card declaration (display) is structural: each kind is a closed branch, and what it needs is enforced by the schema', () => {
+  const validators = makeValidators(schemas);
+  const check = (display) => validateInput(validators.get_query_result, { query_id: 'abc123abc123', display });
+  for (const ok of [
+    { kind: 'line', x: 'metric_time_day', y: ['dau', 'wau'] },
+    { kind: 'area', x: 'metric_time_day', y: ['dau'], series_column: 'users_platform' },
+    { kind: 'bar', x: 'users_country', y: ['revenue'], series_column: 'users_platform', stacked: true },
+    { kind: 'pie', label_column: 'users_country', value_column: 'revenue' },
+    { kind: 'funnel', steps: [{ column: 'step1' }, { column: 'step2', label: 'Level 1' }] },
+    { kind: 'funnel', steps: { label_column: 'step', value_column: 'users' } },
+    { kind: 'kpi', values: [{ column: 'revenue', format: 'currency', currency: 'EUR', good: 'up' }] },
+    { kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'n' },
+  ]) assert.equal(check(ok).ok, true, `${JSON.stringify(ok)}: ${check(ok).errors?.join(' | ')}`);
+  for (const [bad, why] of [
+    [{ kind: 'donut', label_column: 'a', value_column: 'b' }, 'an unknown kind'],
+    [{ kind: 'line', x: 'd', y: ['a', 'b'], series_column: 'c' }, 'a split with two value columns'],
+    [{ kind: 'bar', x: 'c', y: 'revenue' }, 'y is always a list'],
+    [{ kind: 'funnel', label_column: 'step', value_column: 'users' }, 'the row form lives under steps'],
+    [{ kind: 'funnel', steps: [{ column: 'only_one' }] }, 'a funnel of one step'],
+    [{ kind: 'kpi', values: [{ column: 'r', currency: 'EUR' }] }, 'a currency code without format currency'],
+    [{ kind: 'kpi', values: [{ column: 'r', good: 'sideways' }] }, 'good is up or down'],
+    [{ kind: 'kpi', values: [1, 2, 3, 4, 5].map((i) => ({ column: `c${i}` })) }, 'more than four tiles'],
+    [{ kind: 'pie', label_column: 'a', value_column: 'b', stacked: true }, 'a field of another kind'],
+  ]) assert.equal(check(bad).ok, false, why);
+});

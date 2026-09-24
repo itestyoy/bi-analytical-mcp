@@ -217,11 +217,13 @@ export function buildViewModel(toolName, result, toolInput) {
     if (d && rows.length) {
       const declaredTitle = typeof d.title === 'string' && d.title.trim() ? d.title.trim() : null;
       if (d.kind === 'funnel') {
+        // steps as COLUMNS of one row, or as ROWS ({ label_column, value_column })
         const steps = Array.isArray(d.steps) ? d.steps.filter((st) => isObj(st) && at(st.column) >= 0) : null;
-        const labels = steps ? steps.map((st) => (typeof st.label === 'string' && st.label ? st.label : st.column)) : rows.map((r) => label(r[at(d.label_column)]));
-        const values = steps ? steps.map((st) => num(rows[0][at(st.column)])) : rows.map((r) => num(r[at(d.value_column)]));
-        const drawable = (steps || (at(d.label_column) >= 0 && at(d.value_column) >= 0)) && labels.length >= 2 && values[0] > 0 && values.every((v) => v !== null && v >= 0);
-        if (drawable) return { ...funnelOf(labels, values, steps ? null : d.value_column), ...(declaredTitle ? { title: declaredTitle } : {}) };
+        const byRow = isObj(d.steps) && at(d.steps.label_column) >= 0 && at(d.steps.value_column) >= 0 ? d.steps : null;
+        const labels = steps ? steps.map((st) => (typeof st.label === 'string' && st.label ? st.label : st.column)) : byRow ? rows.map((r) => label(r[at(byRow.label_column)])) : [];
+        const values = steps ? steps.map((st) => num(rows[0][at(st.column)])) : byRow ? rows.map((r) => num(r[at(byRow.value_column)])) : [];
+        const drawable = labels.length >= 2 && values[0] > 0 && values.every((v) => v !== null && v >= 0);
+        if (drawable) return { ...funnelOf(labels, values, byRow ? byRow.value_column : null), ...(declaredTitle ? { title: declaredTitle } : {}) };
       }
       if ((d.kind === 'line' || d.kind === 'area') && at(d.x) >= 0 && Array.isArray(d.y) && d.y.length && d.y.every((y) => at(y) >= 0)) {
         const xi = at(d.x);

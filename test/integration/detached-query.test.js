@@ -96,7 +96,7 @@ test('a detached query that FAILS reports the failure through get_query_result',
 // and the card's numbers are the warehouse's.
 test('a declared bar chart survives the detach and draws the warehouse\'s numbers in row order', opts, async (t) => {
   if (skip(t)) return;
-  const display = { kind: 'bar', title: 'Revenue by country', x: 'users_country', y: 'mon_revenue' };
+  const display = { kind: 'bar', title: 'Revenue by country', x: 'users_country', y: ['mon_revenue'] };
   const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], order_by: [{ key: 'mon_revenue', direction: 'asc' }], display });
   assert.equal(first.status, 'running');
   const done = await follow(first.query_id);
@@ -116,7 +116,7 @@ test('a funnel declared on a read of that result follows the declared steps, not
   const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], where: paying, order_by: [{ key: 'mon_revenue', direction: 'desc' }] });
   const done = await follow(first.query_id);
   assert.equal(done.display, undefined, 'no declaration, none attached');
-  const read = await engine.get_query_result({ query_id: first.query_id, display: { kind: 'funnel', label_column: 'users_country', value_column: 'mon_revenue' } });
+  const read = await engine.get_query_result({ query_id: first.query_id, display: { kind: 'funnel', steps: { label_column: 'users_country', value_column: 'mon_revenue' } } });
   const m = buildViewModel('get_query_result', read);
   assert.equal(m.kind, 'funnel');
   assert.deepEqual(m.steps.map((x) => x.label), read.rows.map((r) => String(r.users_country)));

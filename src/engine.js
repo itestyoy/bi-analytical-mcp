@@ -2532,7 +2532,7 @@ export class Engine {
       // The rows above come back WITHOUT the result card — build_native_model carries no view (its
       // other actions return schema, and a card on each would bury the conversation). Reading the
       // table with get_query_result is what draws a funnel or a chart for the person.
-      show_to_user: { tool: 'get_query_result', arguments: { context_id: ctx.id, table: modelName }, why: 'in a host that renders MCP Apps (Claude on the web, desktop and mobile) this call draws the result as a card — a funnel for ordered steps, a chart for a series or a breakdown. Add `display` to say which, over this table\'s columns: a funnel ({ kind: \'funnel\', steps: [{ column, label }] } or { kind: \'funnel\', label_column, value_column }), a line or a stacked area ({ kind: \'line\' | \'area\', x, y: [..], series_column? }), bars ({ kind: \'bar\', x, y, series_column?, stacked?, horizontal? }), a pie of shares ({ kind: \'pie\', label_column, value_column }), headline tiles ({ kind: \'kpi\', values: [{ column, previous_column?, format? }] }) or flows ({ kind: \'sankey\', source_column, target_column, value_column }). Make it before summarising, instead of drawing your own chart; the rows are the same ones returned here.' },
+      show_to_user: { tool: 'get_query_result', arguments: { context_id: ctx.id, table: modelName }, why: 'in a host that renders MCP Apps (Claude on the web, desktop and mobile) this call draws the result as a card — a funnel for ordered steps, a chart for a series or a breakdown. Add `display` (the kind that fits the question, over this table\'s columns — the schema lists each kind and its fields). Make it before summarising, instead of drawing your own chart; the rows are the same ones returned here.' },
       assumptions: [
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
@@ -3426,15 +3426,16 @@ export class Engine {
   _displayProblems(display, columns, rows = null) {
     const have = new Set(columns);
     const ys = display.y === undefined ? [] : [].concat(display.y);
+    const stepColumns = Array.isArray(display.steps); // steps as columns of one row, or { label_column, value_column } over a row per step
     const named = display.kind === 'funnel'
-      ? (display.steps ? display.steps.map((st) => st.column) : [display.label_column, display.value_column])
+      ? (stepColumns ? display.steps.map((st) => st.column) : [display.steps?.label_column, display.steps?.value_column])
       : display.kind === 'pie' ? [display.label_column, display.value_column]
         : display.kind === 'kpi' ? [display.x, ...(display.values || []).flatMap((v) => [v.column, v.previous_column])]
           : display.kind === 'sankey' ? [display.source_column, display.target_column, display.value_column]
             : [display.x, ...ys, ...(display.series_column ? [display.series_column] : [])];
     const problems = [...new Set(named.filter((c) => c && !have.has(c)))].map((c) => `'${c}' is not a column of this result`);
-    if (display.kind === 'funnel' && display.steps && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
-    if (display.kind === 'funnel' && display.steps && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, or declare { kind: 'funnel', label_column, value_column } for a row per step`);
+    if (display.kind === 'funnel' && stepColumns && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
+    if (display.kind === 'funnel' && stepColumns && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, or declare steps: { label_column, value_column } for a row per step`);
     if (display.series_column && ys.length > 1) problems.push(`series_column splits ONE y column into a ${display.kind === 'bar' ? 'bar' : display.kind === 'area' ? 'band' : 'line'} per value — declare a single y with it`);
     if (display.kind === 'kpi' && !display.x && Array.isArray(rows) && rows.length !== 1) problems.push(`KPI tiles read ONE row, and this result has ${rows.length} — aggregate to one row, or give x (the time column) to show the last row with its trend`);
     if (display.kind === 'sankey' && Array.isArray(rows) && have.has(display.source_column) && have.has(display.target_column)) {

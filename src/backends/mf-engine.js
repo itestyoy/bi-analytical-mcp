@@ -8,6 +8,7 @@
 // when the warehouse admits one process at a time (DuckDB), and the sidecar lets go of the database
 // after each request.
 
+import { queryTag } from '../dbt/query-tag.js';
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { createDbt, resolveEnvironment } from '../dbt/index.js';
@@ -120,6 +121,7 @@ export class MfEngineBackend {
     const base = {
       project_dir: projectDir,
       profiles_dir: this.profilesDir,
+      tag: queryTag(), // the call's query tag, in front of every query the sidecar's adapter sends
       metrics: opts.metrics,
       group_by: opts.groupBy,
       where: opts.where,

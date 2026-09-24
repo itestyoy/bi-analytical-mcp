@@ -7,7 +7,7 @@
 // a restart.
 
 import { join, dirname } from 'node:path';
-import { createMcpHandler, CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
+import { createMcpHandler, CLIENT_CAPABILITIES_META_KEY, CLIENT_INFO_META_KEY } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpExpressApp } from '@modelcontextprotocol/express';
 import express from 'express';
@@ -24,7 +24,7 @@ import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
 import { createMcpServer } from './mcp-server.js';
 import { answerTaskRequest } from './mcp-tasks.js';
-import { withClientCapabilities, envelopeCapabilities } from './client-extensions.js';
+import { withClientCapabilities, envelopeCapabilities, envelopeClientInfo } from './client-extensions.js';
 
 export { buildToolDefs };
 
@@ -249,7 +249,11 @@ export function createApp(engine, opts = {}) {
     if (answerTaskRequest(services.tasks, req, res)) return;
     // what THIS request's client declares (its envelope's capabilities) decides which extensions
     // the server built for it offers (src/client-extensions.js)
-    void withClientCapabilities(envelopeCapabilities(req.body, CLIENT_CAPABILITIES_META_KEY), () => node(req, res, req.body));
+    // the server built for it offers (src/client-extensions.js) — and which client it is, as the
+    // technical facts its warehouse queries are tagged with (src/dbt/query-tag.js)
+    const info = envelopeClientInfo(req.body, CLIENT_INFO_META_KEY);
+    const client = { name: info?.name, version: info?.version, userAgent: req.headers['user-agent'] };
+    void withClientCapabilities(envelopeCapabilities(req.body, CLIENT_CAPABILITIES_META_KEY), () => node(req, res, req.body), client);
   });
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
 

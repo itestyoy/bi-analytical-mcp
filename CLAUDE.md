@@ -224,6 +224,16 @@
   environment fails the test run instead of skipping it).
   Do NOT add a requirements file, a `pip install <pkg>` in the Dockerfile, or an option to hand the
   tool packages, versions or a dbt of one's own: a version change is a spec change, reviewed as code.
+- EVERY WAREHOUSE QUERY A CALL CAUSES CARRIES ITS QUERY TAG (src/dbt/query-tag.js): a leading
+  `/* {"app","client","ua","tool","task","context"} */` — the client as the request described it (the
+  2026-07-28 envelope's clientInfo, the User-Agent), the tool, and for a task its id and context.
+  TECHNICAL information for the warehouse's query history, not an identity (nothing is verified). It
+  rides the call's async context (`withTag`, src/request-context.js) into the tasks it starts and
+  reaches the SQL on every path: the dbt 1.x and `mf` CLIs run through python/query_tag.py (it tags
+  every query their dbt adapter sends — `mf` never sets dbt's `query-comment`), the MetricFlow sidecar
+  sets the same hook, and dbt v2 — a binary no hook reaches — gets it in the SQL its client hands over
+  (`show --inline`; its own `dbt run` statements carry none). Do NOT put it in the project's
+  `dbt_project.yml`, and do NOT tag by editing model files.
 - Tests run on the `dbt-v2` environment; the python stage's file runs on `dbt-v1` (dbt 1.x),
   since v2 runs no Python models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 

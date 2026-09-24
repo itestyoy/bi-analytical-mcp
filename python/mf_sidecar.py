@@ -10,7 +10,7 @@ hosted dbtsl SDK (dbt platform). Here we use the same building blocks the `mf`
 CLI uses: CLIConfiguration -> MetricFlowEngine -> query()/explain().
 
 Protocol (newline-delimited JSON):
-  request : {"id","op":"query"|"explain","project_dir","profiles_dir",
+  request : {"id","op":"query"|"explain","project_dir","profiles_dir","tag"?,
              "metrics":[...],"group_by":[...],"where":[...],"order":[...],
              "limit":int,"start":"YYYY-MM-DD","end":"YYYY-MM-DD","plan":bool}
   response: {"id","ok":true,"columns":[...],"rows":[[...]]}        # query
@@ -67,7 +67,29 @@ def _release(cfg):
                 pass
 
 
+# The call's QUERY TAG (src/dbt/query-tag.js), in front of every query this request's adapter sends
+# — the same hook python/query_tag.py sets for the dbt / mf CLI.
+_TAG = {"text": None}
+
+
+def _tag_queries():
+    from dbt.adapters.base.connections import BaseConnectionManager
+
+    add = BaseConnectionManager._add_query_comment
+    if getattr(add, "_mcp_tagged", False):
+        return
+
+    def _add_query_comment(self, sql):
+        sql = add(self, sql)
+        return f"/* {_TAG['text']} */\n{sql}" if _TAG["text"] else sql
+
+    _add_query_comment._mcp_tagged = True
+    BaseConnectionManager._add_query_comment = _add_query_comment
+
+
 def _handle(req):
+    _tag_queries()
+    _TAG["text"] = (req.get("tag") or "").replace("*/", "* /") or None
     cfg = _build_engine(req["project_dir"], req.get("profiles_dir"))
     try:
         return _answer(cfg, req)

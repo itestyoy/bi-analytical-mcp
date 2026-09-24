@@ -4,7 +4,8 @@
 // envelope and header rules — so nothing here knows which revision a request came in.
 
 import { MAX_WAIT_SECONDS, MAX_BATCH } from './schema.js';
-import { withSignal } from './request-context.js';
+import { withSignal, withTag } from './request-context.js';
+import { requestClient } from './client-extensions.js';
 import { appsSurface, viewMeta, VIEWED_TOOLS, APPS_ONLY_TOOLS, APP_CALLABLE_TOOLS } from './apps.js';
 import { buildViewModel } from './apps/result-view-model.js';
 
@@ -230,6 +231,20 @@ const PROGRESS_EVERY_MS = Number(process.env.MCP_PROGRESS_INTERVAL_MS) || 5000;
  * tool. `signal` stops the processes the call started; `onProgress(params)` receives heartbeats.
  * Returns { result: CallToolResult, raw } — `raw` is the engine's value (null on error).
  */
+/**
+ * The query tag of a call to `tool` (src/dbt/query-tag.js): the tool, and the client the request
+ * came from as it described itself — its clientInfo (name/version) and User-Agent. Technical
+ * information for the warehouse's query history, not an identity.
+ */
+function callTag(tool) {
+  const c = requestClient();
+  return {
+    client: c?.name ? `${c.name}${c.version ? `/${c.version}` : ''}` : undefined,
+    ua: c?.userAgent || undefined,
+    tool,
+  };
+}
+
 export async function runTool(engine, calledAs, args, { signal, onProgress, progressEveryMs = PROGRESS_EVERY_MS, renders = true } = {}) {
   const started = Date.now();
   logLine(calledAs, `▶ call ${summarizeArgs(args)}`);
@@ -260,7 +275,8 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
     }, progressEveryMs);
   }
   try {
-    let raw = await withSignal(signal, () => (ASYNC_TOOLS.has(name) ? engine[name](args || {}) : Promise.resolve().then(() => engine[name](args || {}))));
+    // every warehouse query the call causes is tagged with where it came from (src/dbt/query-tag.js)
+    let raw = await withSignal(signal, () => withTag(callTag(name), () => (ASYNC_TOOLS.has(name) ? engine[name](args || {}) : Promise.resolve().then(() => engine[name](args || {})))));
     // the hint to show a result as a card means nothing to a client that draws none
     if (!renders && isPlainObject(raw) && 'show_to_user' in raw) { const { show_to_user: _hint, ...rest } = raw; raw = rest; }
     logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(raw)}`);

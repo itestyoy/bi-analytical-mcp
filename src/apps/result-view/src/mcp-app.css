@@ -197,16 +197,6 @@
   }
 }
 
-.btn-sm {
-  height: 2rem;
-  gap: calc(var(--space) * 1.5);
-  padding: 0 calc(var(--space) * 3);
-
-  &:has(> svg) {
-    padding: 0 calc(var(--space) * 2.5);
-  }
-}
-
 .btn-icon {
   width: 2.25rem;
   height: 2.25rem;

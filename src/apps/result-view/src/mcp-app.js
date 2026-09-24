@@ -11,9 +11,9 @@
  * (readResult): the rows of a query that outlasted its call (followQuery polls its query_id), and
  * the next level of a drill-down when a row opens (its stored table, filtered to that row). Nothing
  * else: no other tool, no resource, no message to the model, no link — and no network at all (the
- * page's CSP, and the resource's declared `csp`). Everything else interactive here —
- * sorting, filtering, the legend, fullscreen — works on the data already in the page or on the
- * host's own frame.
+ * page's CSP, and the resource's declared `csp`). Everything else interactive here — the
+ * tooltip, the legend, fullscreen — works on the data already in the page or on the host's own
+ * frame.
  *
  * WHAT to show is decided by buildViewModel (src/apps/result-view-model.js), a pure function the
  * unit tests run in node on real tool results; this file only draws it. Structure follows the
@@ -148,7 +148,6 @@ const state = {
   toolName: null,
   toolInput: null,
   lastResult: null,
-  model: null,
   chart: null,
   follow: 0, // bumps on every new result, so a stale poll loop stops
   displayMode: 'inline',
@@ -305,7 +304,6 @@ const CARDS = { chart: (m) => renderChartResult(m), kpi: (m) => renderKpi(m), pi
 function render(result) {
   loadingEl.hidden = true; // the result is here: the spinner's job is done, whatever is drawn next
   const model = buildViewModel(state.toolName, payloadOf(result), state.toolInput);
-  state.model = model;
   resetSections();
   const draw = CARDS[model.kind];
   mainEl.hidden = !draw;
@@ -562,12 +560,28 @@ function showStatus(model) {
 }
 
 function renderChartResult(model) {
+  // a page of a larger result says which rows it is, so a chart of one page never reads as the whole
+  const page = model.page;
+  const partial = page && (page.offset > 0 || page.has_more);
+  const rowsText = partial
+    ? `rows ${formatNumber(page.offset + 1)}–${formatNumber(page.offset + model.row_count)}${page.has_more ? ' · more exist' : ''}`
+    : `${formatNumber(model.row_count)} row${model.row_count === 1 ? '' : 's'}`;
   setDescription(
-    badge(`${formatNumber(model.row_count)} row${model.row_count === 1 ? '' : 's'}`, 'secondary'),
+    badge(rowsText, 'secondary'),
     model.sampled ? badge('random sample', 'outline') : null,
     model.approximate ? badge('approximate', 'outline') : null,
   );
   renderChart(model.chart, model.chart.y || 'Series');
+}
+
+/** What the chart left out, in the model's own numbers: series not drawn, and by what rule. */
+function showFolded(chart) {
+  if (!chart.folded) return;
+  const bySize = chart.folded_by === 'size';
+  showAlert({
+    title: `${chart.folded} ${bySize ? 'smaller ' : ''}series ${chart.folded === 1 ? 'is' : 'are'} not drawn`,
+    description: bySize ? `The chart keeps the largest ${chart.kept}.` : `The chart keeps the first ${chart.kept}, in column order.`,
+  });
 }
 
 // ── chart (shadcn charts: horizontal grid only, no axis or tick lines, HTML tooltip and legend) ─
@@ -637,7 +651,7 @@ function renderChart(chart, title) {
     chartDescriptionEl.textContent = `${labels.length} points · ${chart.series.length} series`;
     chartCanvas.setAttribute('aria-label', `${title}: ${chart.series.length} series over ${labels.length} points`);
     if (chart.series.length > 1) drawLegend();
-    if (chart.folded) showAlert({ title: `${chart.folded} smaller series are not drawn`, description: 'The chart keeps the largest six readable.' });
+    showFolded(chart);
     return;
   }
 
@@ -714,9 +728,10 @@ function renderChart(chart, title) {
 
   // bars: one series (a bar per category), several side by side (grouped) or stacked into one
   const series = chart.series || [{ name: chart.y || 'value', values: chart.bars.map((b) => b.value) }];
-  const allLabels = chart.labels || chart.bars.map((b) => b.label);
-  const labels = allLabels.slice(0, 30);
-  const horizontal = typeof chart.horizontal === 'boolean' ? chart.horizontal : allLabels.length > 8;
+  // the model already chose the categories drawn; categories_total says how many there were
+  const labels = chart.labels || chart.bars.map((b) => b.label);
+  const total = chart.categories_total ?? labels.length;
+  const horizontal = typeof chart.horizontal === 'boolean' ? chart.horizontal : labels.length > 8;
   const stacked = !!chart.stacked;
   state.chart = new Chart(chartCanvas, {
     type: 'bar',
@@ -744,11 +759,13 @@ function renderChart(chart, title) {
         : { x: { ...common.scales.x, stacked }, y: { ...common.scales.y, stacked } },
     },
   });
-  const count = allLabels.length > labels.length ? `top ${labels.length} of ${allLabels.length}` : `${labels.length} ${labels.length === 1 ? 'bar' : 'bars'}`;
+  const count = total > labels.length ? `${labels.length} of ${formatNumber(total)} categories shown` : `${labels.length} ${labels.length === 1 ? 'bar' : 'bars'}`;
   chartDescriptionEl.textContent = series.length > 1 ? `${count.replace(/bars?$/, labels.length === 1 ? 'category' : 'categories')} · ${series.length} series${stacked ? ', stacked' : ''}` : count;
   chartCanvas.setAttribute('aria-label', `${title}: ${labels.length} categories${series.length > 1 ? `, ${series.length} series` : ''}`);
   if (series.length > 1) drawLegend();
-  if (chart.folded) showAlert({ title: `${chart.folded} smaller series are not drawn`, description: 'The chart keeps the largest six readable.' });
+  showFolded(chart);
+  // other amounts of an inferred breakdown share no axis with the drawn one: named, not drawn
+  if (chart.omitted?.length) showAlert({ title: `${chart.omitted.length} more ${chart.omitted.length === 1 ? 'column is' : 'columns are'} not drawn`, description: chart.omitted.join(', ') });
 }
 
 /** shadcn ChartTooltipContent, drawn as HTML next to the canvas. */

@@ -48,6 +48,7 @@ export function pivotRows(result, display, depth) {
 
 export function buildViewModel(toolName, result, toolInput) {
   const MAX_SERIES = 6; // lines share one axis; past six the legend stops being readable
+  const MAX_BARS = 30; // past thirty categories bars stop being readable, flat or not
 
   const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
   const num = (v) => {
@@ -221,11 +222,13 @@ export function buildViewModel(toolName, result, toolInput) {
       return { kind: 'funnel', title: 'Funnel', measure, steps, overall: values[values.length - 1] / first, biggest_drop: worst };
     };
     const page = isObj(result.page) ? { limit: num(result.page.limit), offset: num(result.page.offset) ?? 0, has_more: !!result.page.has_more } : null;
+    // what a chart leaves out is said by numbers the card only prints: how many series it kept and
+    // how many it did not draw (by size, or by column order), how many categories there were
+    const cut = (total, bySize) => ({ kept: Math.min(total, MAX_SERIES), folded: Math.max(0, total - MAX_SERIES), folded_by: bySize ? 'size' : 'order' });
     const chartCard = (chart, cardTitle = title) => ({
       kind: 'chart',
       title: cardTitle,
       columns,
-      rows,
       row_count: rows.length,
       sampled: !!result.sampled,
       approximate: !!result.approximate || !!result.provenance?.approximate,
@@ -271,7 +274,7 @@ export function buildViewModel(toolName, result, toolInput) {
         const kept = rows.filter((r) => r[xi] !== null);
         const inOrder = ordered ? kept : kept.slice().sort((a, b) => (String(a[xi]) < String(b[xi]) ? -1 : String(a[xi]) > String(b[xi]) ? 1 : 0));
         let series;
-        let folded = 0;
+        let fold;
         if (d.series_column && at(d.series_column) >= 0) {
           const si = at(d.series_column);
           const yi = at(d.y[0]);
@@ -284,27 +287,28 @@ export function buildViewModel(toolName, result, toolInput) {
           }
           const all = [...bySeries.entries()].map(([name, points]) => ({ name, points, total: points.reduce((s, p) => s + p[1], 0) })).sort((a, b) => b.total - a.total);
           series = all.slice(0, MAX_SERIES).map(({ name, points }) => ({ name, points }));
-          folded = Math.max(0, all.length - MAX_SERIES);
+          fold = cut(all.length, true);
         } else {
           series = d.y.slice(0, MAX_SERIES).map((y) => ({ name: y, points: inOrder.map((r) => [String(r[xi]), num(r[at(y)])]).filter((p) => p[1] !== null) }));
+          fold = cut(d.y.length, false);
         }
         // an area stacks its series: they are the parts of one total over time
-        return chartCard({ type: 'line', x: d.x, y: d.y.length === 1 ? d.y[0] : null, series, folded, ordered, ...(d.kind === 'area' ? { area: true, stacked: series.length > 1 } : {}), title: declaredTitle }, declaredTitle || title);
+        return chartCard({ type: 'line', x: d.x, y: d.y.length === 1 ? d.y[0] : null, series, ...fold, ordered, ...(d.kind === 'area' ? { area: true, stacked: series.length > 1 } : {}), title: declaredTitle }, declaredTitle || title);
       }
       const ys = d.y === undefined ? [] : [].concat(d.y);
       if (d.kind === 'bar' && at(d.x) >= 0 && ys.length && ys.every((y) => at(y) >= 0)) {
         const xi = at(d.x);
-        const kept = rows.slice(0, 50);
         let labels;
         let series;
-        let folded = 0;
+        let fold;
         if (d.series_column && at(d.series_column) >= 0) {
-          // categories in the order they first appear; a bar per series value inside each
+          // categories in the order they first appear; a bar per series value inside each — every
+          // row counts toward a series' total, whether or not its category is drawn
           const si = at(d.series_column);
           const yi = at(ys[0]);
-          labels = [...new Set(kept.map((r) => label(r[xi])))];
+          labels = [...new Set(rows.map((r) => label(r[xi])))];
           const bySeries = new Map();
-          for (const r of kept) {
+          for (const r of rows) {
             const k = label(r[si]);
             if (!bySeries.has(k)) bySeries.set(k, new Map());
             const cell = bySeries.get(k);
@@ -312,22 +316,27 @@ export function buildViewModel(toolName, result, toolInput) {
           }
           const all = [...bySeries.entries()].map(([name, byX]) => ({ name, values: labels.map((l) => byX.get(l) ?? 0) })).map((x) => ({ ...x, total: x.values.reduce((a, v) => a + v, 0) })).sort((a, b) => b.total - a.total);
           series = all.slice(0, MAX_SERIES).map(({ name, values }) => ({ name, values }));
-          folded = Math.max(0, all.length - MAX_SERIES);
+          fold = cut(all.length, true);
         } else {
-          labels = kept.map((r) => label(r[xi]));
-          series = ys.slice(0, MAX_SERIES).map((y) => ({ name: y, values: kept.map((r) => num(r[at(y)]) ?? 0) }));
+          labels = rows.map((r) => label(r[xi]));
+          series = ys.slice(0, MAX_SERIES).map((y) => ({ name: y, values: rows.map((r) => num(r[at(y)]) ?? 0) }));
+          fold = cut(ys.length, false);
         }
+        // the categories drawn: the first MAX_BARS in row order — and how many there were
+        const shown = labels.slice(0, MAX_BARS);
+        series = series.map((x) => ({ ...x, values: x.values.slice(0, shown.length) }));
         const single = series.length === 1 && !d.series_column;
         return chartCard({
           type: 'bar',
           x: d.x,
           y: ys.length === 1 ? ys[0] : null,
-          labels,
+          labels: shown,
+          categories_total: labels.length,
           series,
-          ...(single ? { bars: labels.map((l, i) => ({ label: l, value: series[0].values[i] })) } : {}),
+          ...(single ? { bars: shown.map((l, i) => ({ label: l, value: series[0].values[i] })) } : {}),
           stacked: !!d.stacked && series.length > 1,
           horizontal: typeof d.horizontal === 'boolean' ? d.horizontal : null,
-          folded,
+          ...fold,
           title: declaredTitle,
         }, declaredTitle || title);
       }
@@ -439,19 +448,23 @@ export function buildViewModel(toolName, result, toolInput) {
           const y = num(r[numIdx[0]]);
           if (y !== null && r[timeIdx] !== null) byCat.get(k).push([String(r[timeIdx]), y]);
         }
-        // largest series first; the rest fold into the table rather than into a ninth colour
+        // largest series first; the rest are not drawn (the card says how many) rather than
+        // becoming a seventh colour
         const series = [...byCat.entries()]
           .map(([name, points]) => ({ name, points: points.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)), total: points.reduce((s, p) => s + p[1], 0) }))
           .sort((a, b) => b.total - a.total);
-        chart = { type: 'line', x: names[timeIdx], y: names[numIdx[0]], series: series.slice(0, MAX_SERIES).map(({ name, points }) => ({ name, points })), folded: Math.max(0, series.length - MAX_SERIES) };
+        chart = { type: 'line', x: names[timeIdx], y: names[numIdx[0]], series: series.slice(0, MAX_SERIES).map(({ name, points }) => ({ name, points })), ...cut(series.length, true) };
       } else if (catIdx.length === 0) {
         const ordered = rows.filter((r) => r[timeIdx] !== null).slice().sort((a, b) => (String(a[timeIdx]) < String(b[timeIdx]) ? -1 : String(a[timeIdx]) > String(b[timeIdx]) ? 1 : 0));
         const series = numIdx.slice(0, MAX_SERIES).map((i) => ({ name: names[i], points: ordered.map((r) => [String(r[timeIdx]), num(r[i])]).filter((p) => p[1] !== null) }));
-        chart = { type: 'line', x: names[timeIdx], y: numIdx.length === 1 ? names[numIdx[0]] : null, series, folded: Math.max(0, numIdx.length - MAX_SERIES) };
+        // one line per numeric column, in column order
+        chart = { type: 'line', x: names[timeIdx], y: numIdx.length === 1 ? names[numIdx[0]] : null, series, ...cut(numIdx.length, false) };
       }
     } else if (timeIdx < 0 && catIdx.length === 1 && numIdx.length >= 1 && rows.length >= 1 && rows.length <= 50) {
-      // one category and an amount: a bar per category (a segment breakdown)
-      chart = { type: 'bar', x: names[catIdx[0]], y: names[numIdx[0]], bars: rows.map((r) => ({ label: r[catIdx[0]] === null ? '∅' : String(r[catIdx[0]]), value: num(r[numIdx[0]]) ?? 0 })) };
+      // one category and an amount: a bar per category (a segment breakdown). Bars of different
+      // measures would share one axis, so only the first amount is drawn — the others are named
+      const bars = rows.map((r) => ({ label: r[catIdx[0]] === null ? '∅' : String(r[catIdx[0]]), value: num(r[numIdx[0]]) ?? 0 }));
+      chart = { type: 'bar', x: names[catIdx[0]], y: names[numIdx[0]], bars: bars.slice(0, MAX_BARS), categories_total: bars.length, omitted: numIdx.slice(1).map((i) => names[i]) };
     }
 
     if (!chart) return none('no_chart_shape');

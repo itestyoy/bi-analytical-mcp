@@ -121,7 +121,7 @@ test('view model: a time series by segment is one line per segment, with the row
   const byName = Object.fromEntries(m.chart.series.map((x) => [x.name, x.points]));
   assert.deepEqual(byName.US, [['2024-01-01', 9], ['2024-01-02', 11]]);
   assert.deepEqual(byName.DE, [['2024-01-01', 3], ['2024-01-02', 5]], 'sorted by time');
-  assert.equal(m.rows.length, 4);
+  assert.equal(m.row_count, 4);
 });
 
 test('view model: a category and an amount is a bar per category', () => {
@@ -317,6 +317,31 @@ test('pivot: one level is the rows under a path, grouped by the next level; its 
   assert.deepEqual(t.aggregations, [{ fn: 'sum', column: 'revenue', as: 'revenue' }, { fn: 'max', column: 'users', as: 'users' }]);
   const rows = pivotRows({ columns: [{ name: 'platform' }, { name: 'revenue' }, { name: 'users' }], rows: [{ platform: 'ios', revenue: '12.5', users: 3 }, { platform: null, revenue: 4, users: null }] }, display, 1);
   assert.deepEqual(rows, [{ key: 'ios', label: 'ios', values: [12.5, 3] }, { key: null, label: '∅', values: [4, null] }]);
+});
+
+test('view model: what a chart leaves out is said in numbers — categories past the cap, series by size or by column order, amounts not drawn', () => {
+  // a declared bar over 120 categories: 30 drawn, 120 counted
+  const many = Array.from({ length: 120 }, (_, i) => ({ c: `c${i}`, v: i }));
+  const bar = buildViewModel('get_query_result', { columns: [{ name: 'c' }, { name: 'v' }], rows: many, display: { kind: 'bar', x: 'c', y: ['v'] } });
+  assert.deepEqual([bar.chart.labels.length, bar.chart.categories_total], [30, 120]);
+  assert.deepEqual(bar.chart.bars.at(-1), { label: 'c29', value: 29 });
+  // split by a column: a series' total counts every row, also those past the drawn categories
+  const split = Array.from({ length: 70 }, (_, i) => ({ c: `c${i}`, p: i < 60 ? 'ios' : 'web', v: i < 60 ? 1 : 100 }));
+  const byP = buildViewModel('get_query_result', { columns: [{ name: 'c' }, { name: 'p' }, { name: 'v' }], rows: split, display: { kind: 'bar', x: 'c', y: ['v'], series_column: 'p' } });
+  assert.equal(byP.chart.series[0].name, 'web', 'web (10 rows × 100) outweighs ios (60 × 1), though its rows come last');
+  assert.equal(byP.chart.categories_total, 70);
+  // eight value columns over time: the first six in column order, and the card is told so
+  const wide = ['2026-09-01', '2026-09-02'].map((d, k) => Object.fromEntries([['day', d], ...Array.from({ length: 8 }, (_, i) => [`m${i}`, (i + 1) * 10 + k])]));
+  const line = buildViewModel('query_semantic_model', { columns: Object.keys(wide[0]).map((name) => ({ name })), rows: wide });
+  assert.deepEqual([line.chart.series.length, line.chart.kept, line.chart.folded, line.chart.folded_by], [6, 6, 2, 'order']);
+  assert.deepEqual(line.chart.series.map((x) => x.name), ['m0', 'm1', 'm2', 'm3', 'm4', 'm5']);
+  // nine segments over time: the largest six, by size
+  const seg = Array.from({ length: 9 }, (_, i) => [{ day: '2026-09-01', country: `k${i}`, dau: i }, { day: '2026-09-02', country: `k${i}`, dau: i }]).flat();
+  const bySeg = buildViewModel('query_semantic_model', { columns: [{ name: 'day' }, { name: 'country' }, { name: 'dau' }], rows: seg });
+  assert.deepEqual([bySeg.chart.folded, bySeg.chart.folded_by, bySeg.chart.series[0].name], [3, 'size', 'k8']);
+  // an inferred breakdown draws its first amount and names the others
+  const brk = buildViewModel('get_query_result', { columns: [{ name: 'platform' }, { name: 'users' }, { name: 'revenue' }, { name: 'arpu' }], rows: [{ platform: 'ios', users: 10, revenue: 50, arpu: 5 }, { platform: 'web', users: 4, revenue: 8, arpu: 2 }] });
+  assert.deepEqual([brk.chart.y, brk.chart.omitted], ['users', ['revenue', 'arpu']]);
 });
 
 test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {

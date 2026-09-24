@@ -5,7 +5,7 @@
 
 import { MAX_WAIT_SECONDS } from './schema.js';
 import { withSignal } from './request-context.js';
-import { appsSurface, viewMeta, VIEWED_TOOLS, APPS_ONLY_TOOLS } from './apps.js';
+import { appsSurface, viewMeta, VIEWED_TOOLS, APPS_ONLY_TOOLS, APP_CALLABLE_TOOLS } from './apps.js';
 import { buildViewModel } from './apps/result-view-model.js';
 
 // experiment draws its own card when the call asks for it (`card: true`) — a field offered only to a
@@ -240,8 +240,11 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
     return { result: errorResult(unknownToolMessage(calledAs), 'validate'), raw: null, unknown: true };
   }
   const name = canonicalTool(calledAs);
-  // a card for a client that renders none: the tool is not offered to it, so not accepted
-  if (!renders && APPS_ONLY_TOOLS.has(name)) {
+  // a card for a client that renders none: the tool is not offered to it, so not accepted. The
+  // card's own read (drill_result) is the exception: the HOST makes that call on behalf of a card
+  // this server drew, and the proof it may read is the drawn task — not the envelope the host puts
+  // on a proxied request, which the host decides and this server cannot vouch for.
+  if (!renders && APPS_ONLY_TOOLS.has(name) && !APP_CALLABLE_TOOLS.includes(name)) {
     logLine(name, '✗ from a client without the Apps extension');
     return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_id })`, 'validate'), raw: null };
   }

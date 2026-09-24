@@ -217,3 +217,30 @@ test('the tool that started a task is persisted with it, so its side survives a 
   assert.equal(b.get(id)?.tool, 'query_pipeline_model');
   b.close();
 });
+
+test('a drawn pivot keeps opening after a restart, and whatever envelope the host puts on its read', async () => {
+  const { runTool } = await import('../../src/mcp-surface.js');
+  const root = mkdtempSync(join(tmpdir(), 'drawn-'));
+  const make = (runner) => new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: new ContextManager({ workspaceRoot: root, registryPath: join(root, 'registry.json') }), runner, dbPath: join(root, 'mcp.sqlite') });
+  const rows = { ok: true, columns: [{ name: 'event_name' }, { name: 'n' }], rows: [{ event_name: 'level_completed', n: 3 }] };
+  const runner = { ...heldBuilds(), async run() { return { ok: true, stdout: '', stderr: '' }; }, async show() { return rows; } };
+  const e1 = make(runner);
+  const { draft_id } = await e1.build_pipeline_model({ action: 'start', name: 'lvl', source: 'events' });
+  await e1.build_pipeline_model({ action: 'add_step', draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
+  const build = await e1.build_pipeline_model({ action: 'materialize', draft_id });
+  await taskResult(e1, build.task_id);
+  const display = { kind: 'pivot', levels: [{ column: 'event_name' }], values: [{ column: 'n' }] };
+  assert.equal((await e1.display_model_result({ task_id: build.task_id, display })).drawn, true);
+  e1.close();
+  // the server restarts; the card is still open in the conversation
+  const e2 = make(runner);
+  const level = await e2.drill_result({ task_id: build.task_id, transform: { group_by: ['event_name'], aggregations: [{ fn: 'sum', column: 'n', as: 'n' }] } });
+  assert.notEqual(level.ok, false, JSON.stringify(level.error));
+  await assert.rejects(() => e2.display_model_result({ task_id: build.task_id, display }), /shown already/, 'and it is still drawn once');
+  // a host proxying the card's read without the Apps envelope is still served (the proof is the drawn task)
+  const proxied = await runTool(e2, 'drill_result', { task_id: build.task_id, transform: { group_by: ['event_name'] } }, { renders: false });
+  assert.equal(proxied.result.isError, undefined, proxied.result.content[0].text);
+  // …while display_model_result itself is still refused to such a client
+  assert.equal((await runTool(e2, 'display_model_result', { task_id: build.task_id }, { renders: false })).result.isError, true);
+  e2.close();
+});

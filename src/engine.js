@@ -3455,7 +3455,7 @@ export class Engine {
     else if (tool === 'query_pipeline_model') this._taskForSide(args.task_id, 'pipeline');
     else if (tool === 'display_model_result') {
       this._knownTask(args.task_id);
-      if (this._displayed?.get(args.task_id) === 'drawn') throw new ToolError(`task ${args.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'task_id' });
+      if (this._displayed?.get(args.task_id) === 'drawn' || this.jobs.get(args.task_id)?.drawn) throw new ToolError(`task ${args.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'task_id' });
     }
   }
 
@@ -3481,15 +3481,17 @@ export class Engine {
     // A build in flight is the model this query is about: tasks on a context run in order, so the
     // query runs once that build is done — against ITS columns and ITS table, not the previous one.
     const building = ctx.state.draft?.building?.task_id ? ctx.state.draft.building : null;
-    const columns = building
-      ? ((ctx.state.draft.checkpoints || []).find((cp) => cp.task_id === building.task_id)?.columns || []).map((c) => c.name)
-      : (ctx.state.engine === 'pipeline' && ctx.state.model ? ctx.state.native?.columns || [] : null);
+    // (an edit during the build may have retired its checkpoint: then the model standing is what is known)
+    const buildingCp = building ? (ctx.state.draft.checkpoints || []).find((cp) => cp.task_id === building.task_id) : null;
+    const standing = ctx.state.engine === 'pipeline' && ctx.state.model ? ctx.state.native?.columns || [] : null;
+    const columns = buildingCp ? buildingCp.columns.map((c) => c.name) : building ? (standing || []) : standing;
     if (!columns) {
       throw new ToolError(`context ${ctx.id} holds no built pipeline model — build one with build_pipeline_model (… materialize)${(ctx.state.metrics || []).length ? '; the metrics it declares are queried with query_semantic_model' : ''}`, { stage: 'validate', field: 'context_id' });
     }
     // the transform is checked HERE, against the model's columns: a mistake is refused in the call
     if (input.transform) {
-      const problems = projectionProblems(input.transform, columns);
+      // (columns are unknown only while a first build whose plan was edited away runs: shape alone then)
+      const problems = projectionProblems(input.transform, columns.length ? columns : null);
       if (problems.length) throw new ToolError(`transform: ${problems.join('; ')}. The model's columns: ${columns.join(', ')}`, { stage: 'validate', field: 'transform' });
     }
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
@@ -3582,6 +3584,7 @@ export class Engine {
     this._validate('display_model_result', input);
     const id = input.task_id;
     this._displayed ||= new Map();
+    if (this.jobs.get(id)?.drawn) this._displayed.set(id, 'drawn'); // drawn before a restart
     if (this._displayed.has(id)) {
       throw new ToolError(this._displayed.get(id) === 'drawn'
         ? `task ${id} is shown already — its card is in the conversation above. One result, one card: say in words what else to notice, or run a new query for different data.`
@@ -3621,7 +3624,7 @@ export class Engine {
       drawn = true;
       return { ...out, drawn: true };
     } finally {
-      if (drawn) this._displayed.set(id, 'drawn');
+      if (drawn) { this._displayed.set(id, 'drawn'); this.jobs.markDrawn(id); }
       else this._displayed.delete(id);
     }
   }
@@ -3636,7 +3639,7 @@ export class Engine {
     this._validate('drill_result', input);
     const job = this.jobs.get(input.task_id);
     if (!job) throw new ToolError(`unknown task_id: ${input.task_id}`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
-    if (this._displayed?.get(job.id) !== 'drawn') throw new ToolError(`task ${job.id} was not drawn as a card — only a card reads its own result`, { stage: 'validate', field: 'task_id' });
+    if (!job.drawn && this._displayed?.get(job.id) !== 'drawn') throw new ToolError(`task ${job.id} was not drawn as a card — only a card reads its own result`, { stage: 'validate', field: 'task_id' });
     if (job.status !== 'ready' || !job.table) throw new ToolError(`task ${job.id} holds no stored table to drill into`, { stage: 'validate', field: 'task_id' });
     if (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table)) {
       return { ok: false, task_id: job.id, status: 'error', error: { stage: 'fetch', code: RESULT_GONE, message: `the result table ${job.table} was deleted (its context or model is gone)` } };

@@ -102,6 +102,22 @@ const formatPercent = (value) => (value === null || value === undefined ? '—' 
 const sign = (v) => (v > 0 ? '+' : v < 0 ? '−' : '');
 const formatPoints = (v) => `${sign(v)}${Math.abs(v * 100).toFixed(2)} pp`;
 const formatSignedPercent = (v, digits = 1) => `${sign(v)}${Math.abs(v * 100).toFixed(digits)}%`;
+/**
+ * A time value as a reader wants it: a timestamp at midnight UTC — what a day/week/month bucket is —
+ * is shown as its date ("Sep 16"), with the year when the values span more than one; a real time of
+ * day keeps it. The raw value stays the sort key; only the label changes.
+ */
+function timeFormatter(values) {
+  const dates = values.map((v) => new Date(String(v))).filter((d) => !Number.isNaN(d.getTime()));
+  if (!dates.length) return (v) => String(v);
+  const midnight = dates.every((d) => d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0);
+  const years = new Set(dates.map((d) => d.getUTCFullYear()));
+  const fmt = new Intl.DateTimeFormat(undefined, midnight
+    ? { month: 'short', day: 'numeric', ...(years.size > 1 ? { year: 'numeric' } : {}), timeZone: 'UTC' }
+    : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
+  return (v) => { const d = new Date(String(v)); return Number.isNaN(d.getTime()) ? String(v) : fmt.format(d); };
+}
+
 const formatShare = (v) => (v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`);
 const formatSignedNumber = (v) => `${sign(v)}${formatNumber(Math.abs(v))}`;
 const formatP = (p) => (p < 0.001 ? '<0.001' : p.toFixed(3));
@@ -248,10 +264,11 @@ function renderChart(chart, title) {
 
   if (chart.type === 'line') {
     const labels = [...new Set(chart.series.flatMap((s) => s.points.map((p) => p[0])))].sort();
+    const timeLabel = timeFormatter(labels);
     state.chart = new Chart(chartCanvas, {
       type: 'line',
       data: {
-        labels,
+        labels: labels.map(timeLabel),
         datasets: chart.series.map((s, i) => {
           const byX = new Map(s.points);
           return {
@@ -269,7 +286,8 @@ function renderChart(chart, title) {
           };
         }),
       },
-      options: common,
+      // a line reads a CHANGE, so its axis fits the data; only bars (a length) must start at zero
+      options: { ...common, scales: { ...common.scales, y: { ...common.scales.y, beginAtZero: false, grace: '5%' } } },
     });
     chartDescriptionEl.textContent = `${labels.length} points · ${chart.series.length} series`;
     chartCanvas.setAttribute('aria-label', `${title}: ${chart.series.length} series over ${labels.length} points`);
@@ -397,6 +415,7 @@ function drawRows(model) {
   });
   tableEl.tHead.replaceChildren(head);
 
+  const timeLabels = model.columns.map((c, i) => (c.type === 'time' ? timeFormatter(model.rows.map((r) => r[i]).filter((v) => v !== null)) : null));
   if (!rows.length) {
     const tr = document.createElement('tr');
     const td = el('td', 'empty-cell', model.rows.length ? 'No rows match the filter.' : 'No rows.');
@@ -408,7 +427,8 @@ function drawRows(model) {
       const tr = document.createElement('tr');
       r.forEach((v, i) => {
         const numeric = model.columns[i].type === 'number';
-        tr.append(el('td', [numeric ? 'num' : '', v === null ? 'null' : ''].filter(Boolean).join(' '), v === null ? 'null' : numeric ? formatNumber(v) : String(v)));
+        const text = v === null ? 'null' : numeric ? formatNumber(v) : timeLabels[i] ? timeLabels[i](v) : String(v);
+        tr.append(el('td', [numeric ? 'num' : '', v === null ? 'null' : ''].filter(Boolean).join(' '), text));
       });
       return tr;
     }));
@@ -588,7 +608,9 @@ function showNotes(notes) {
  */
 function applyContainer(ctx) {
   const dims = ctx.containerDimensions;
-  const fixedHeight = dims && 'height' in dims && typeof dims.height === 'number';
+  // a BOOLEAN: classList.toggle(token, undefined) does not switch the class off — it flips it, so a
+  // host that sends no containerDimensions would put the view into the fixed-height layout
+  const fixedHeight = !!(dims && 'height' in dims && typeof dims.height === 'number');
   mainEl.classList.toggle('fill', state.displayMode === 'fullscreen' || fixedHeight);
   document.documentElement.style.maxHeight = dims && 'maxHeight' in dims && dims.maxHeight ? `${dims.maxHeight}px` : '';
 }

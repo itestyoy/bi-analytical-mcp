@@ -114,7 +114,9 @@ export function buildViewModel(toolName, result, toolInput) {
     const timeIdx = columns.findIndex((c) => c.type === 'time');
     const numIdx = columns.map((c, i) => (c.type === 'number' ? i : -1)).filter((i) => i >= 0);
     const catIdx = columns.map((c, i) => (c.type === 'category' ? i : -1)).filter((i) => i >= 0);
-    const title = result.table || (toolName === 'query_semantic_model' ? 'Metric query' : 'Result');
+    // the result TABLE's name is generated (qr_<id>, pipe_<name>_<context>) — an address, not a
+    // title: the card names what it shows, and the chart names its metric
+    const title = toolName === 'query_semantic_model' ? 'Metric query' : 'Query result';
 
     // ── a FUNNEL: ordered steps whose counts never grow. Recognised only on an explicit signal —
     // step-like names, or ordinal step labels — so a breakdown sorted by size never becomes one.
@@ -133,7 +135,7 @@ export function buildViewModel(toolName, result, toolInput) {
       // the step that loses the largest share of the users who reached the one before it
       let worst = null;
       for (let i = 1; i < steps.length; i++) if (steps[i].of_previous !== null && (worst === null || steps[i].of_previous < steps[worst].of_previous)) worst = i;
-      return { kind: 'funnel', title, measure, steps, overall: values[values.length - 1] / first, biggest_drop: worst };
+      return { kind: 'funnel', title: 'Funnel', measure, steps, overall: values[values.length - 1] / first, biggest_drop: worst };
     };
     if (rows.length === 1 && timeIdx < 0 && catIdx.length === 0) {
       const counts = numIdx.filter((i) => Number.isInteger(num(rows[0][i])));
@@ -145,7 +147,7 @@ export function buildViewModel(toolName, result, toolInput) {
     if (timeIdx < 0 && catIdx.length === 1 && numIdx.length >= 1 && rows.length >= 2 && rows.length <= 20) {
       const labels = rows.map((r) => (r[catIdx[0]] === null ? '∅' : String(r[catIdx[0]])));
       const values = rows.map((r) => num(r[numIdx[0]]));
-      const stepLike = STEP_NAME.test(names[catIdx[0]]) || /funnel/i.test(title) || labels.every((l) => /^\s*\d+\s*[._:)\-\s]/.test(l));
+      const stepLike = STEP_NAME.test(names[catIdx[0]]) || /funnel/i.test(String(result.table || '')) || labels.every((l) => /^\s*\d+\s*[._:)\-\s]/.test(l));
       if (stepLike && nonIncreasing(values)) return funnelOf(labels, values, names[numIdx[0]]);
     }
 

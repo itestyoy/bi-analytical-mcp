@@ -3168,73 +3168,122 @@ export class Engine {
     const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: limit + offset + 1 };
     const explain = !!(input.dry_run || input.explain);
     if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename);
-    const raw = await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
-    this.ctxs.touch(ctx.id);
-    const res = raw.ok && !explain ? { ...raw, ...friendlyResult(raw.columns, raw.rows) } : raw;
+    // The response is built from the runner's answer in ONE place, whether the query finished
+    // inside the call or after it was handed back as a job.
+    const respond = async (raw) => {
+      this.ctxs.touch(ctx.id);
+      const res = raw.ok && !explain ? { ...raw, ...friendlyResult(raw.columns, raw.rows) } : raw;
 
-    if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
-    if (explain) {
-      const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: orderableKeys };
-      if (input.dry_run) out.dry_run = true;
-      if (input.explain) { out.explain = true; out.plan = res.plan; }
-      if (filterWarnings.length) out.warnings = filterWarnings;
-      return out;
-    }
+      if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
+      if (explain) {
+        const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: orderableKeys };
+        if (input.dry_run) out.dry_run = true;
+        if (input.explain) { out.explain = true; out.plan = res.plan; }
+        if (filterWarnings.length) out.warnings = filterWarnings;
+        return out;
+      }
 
-    const pageRows = res.rows.slice(offset, offset + limit);
-    const page = { limit, offset, has_more: res.rows.length > offset + limit };
-    // A context can span several facts (e.g. crashes vs sessions compared over metric_time):
-    // report the freshness of each one it reads, and headline the STALEST — that is the date
-    // the combined result is actually complete through.
-    // Freshness is a property of the sources whose MEASURES the query reads: every events source
-    // in the context, plus a non-events source (a spend table) only when the task aggregates it.
-    // A dimension joined for its attributes (installs) has a time axis too, but its latest install
-    // says nothing about how complete a spend or events result is.
-    const contributes = (k) => this.catalog.isFact(k) || ((ctx.state.additions?.[k]?.measures || []).length > 0) || Object.keys(this.catalog.getModel(k).measures || {}).length > 0;
-    const factsRead = (ctx.state.usedModels || []).filter((k) => this.catalog.getModel(k).time?.column && contributes(k));
-    const freshByFact = {};
-    await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this._dataFreshness(f); }));
-    const knownFresh = Object.values(freshByFact).filter(Boolean);
-    const fresh = knownFresh.length ? knownFresh.reduce((a, b) => (a < b ? a : b)) : null;
-    // Situational recommendations: surface a risk ONLY when it is actually present.
-    const recs = [];
-    // #1 STALENESS/incompleteness: the window reaches past the latest data → empty/partial tail.
-    if (fresh) {
-      const freshDay = String(fresh).slice(0, 10);
-      const endDay = input.time_range?.end ? String(input.time_range.end).slice(0, 10) : null;
-      if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (latest event time)${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
-    }
-    // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
-    if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ source, property }).');
-    // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
-    const distinctMeasures = new Set();
-    for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
-    const usesDistinct = distinctMeasures.size && input.metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...distinctMeasures].some((dm) => metricUsesMeasure(metric, dm)); });
-    if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
-      recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_native_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
-    }
-    if (page.has_more) recs.push(`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`);
-    recs.push('Re-slice or persist: pass materialize:true to keep the result as a table readable via get_query_result; group differently or compare segments by re-querying with another group_by.');
-    return {
-      ok: true,
-      command: res.command,
-      columns: res.columns,
-      rows: pageRows,
-      row_count: pageRows.length,
-      page,
-      // Provenance so the result is self-trustable: which tier produced it, the source,
-      // and how fresh the underlying data is (latest event time).
-      ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
-      provenance: {
-        tier: 'governed_metric',
-        metrics: input.metrics,
-        source: factsRead.length === 1 ? factsRead[0] : factsRead,
-        data_freshness: fresh,
-        ...(factsRead.length > 1 ? { data_freshness_by_source: freshByFact } : {}),
-      },
-      warnings: [...windowWarnings, ...filterWarnings],
-      recommendations: recs,
+      const pageRows = res.rows.slice(offset, offset + limit);
+      const page = { limit, offset, has_more: res.rows.length > offset + limit };
+      // A context can span several facts (e.g. crashes vs sessions compared over metric_time):
+      // report the freshness of each one it reads, and headline the STALEST — that is the date
+      // the combined result is actually complete through.
+      // Freshness is a property of the sources whose MEASURES the query reads: every events source
+      // in the context, plus a non-events source (a spend table) only when the task aggregates it.
+      // A dimension joined for its attributes (installs) has a time axis too, but its latest install
+      // says nothing about how complete a spend or events result is.
+      const contributes = (k) => this.catalog.isFact(k) || ((ctx.state.additions?.[k]?.measures || []).length > 0) || Object.keys(this.catalog.getModel(k).measures || {}).length > 0;
+      const factsRead = (ctx.state.usedModels || []).filter((k) => this.catalog.getModel(k).time?.column && contributes(k));
+      const freshByFact = {};
+      await Promise.all(factsRead.map(async (f) => { freshByFact[f] = await this._dataFreshness(f); }));
+      const knownFresh = Object.values(freshByFact).filter(Boolean);
+      const fresh = knownFresh.length ? knownFresh.reduce((a, b) => (a < b ? a : b)) : null;
+      // Situational recommendations: surface a risk ONLY when it is actually present.
+      const recs = [];
+      // #1 STALENESS/incompleteness: the window reaches past the latest data → empty/partial tail.
+      if (fresh) {
+        const freshDay = String(fresh).slice(0, 10);
+        const endDay = input.time_range?.end ? String(input.time_range.end).slice(0, 10) : null;
+        if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (latest event time)${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
+      }
+      // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
+      if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ source, property }).');
+      // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
+      const distinctMeasures = new Set();
+      for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
+      const usesDistinct = distinctMeasures.size && input.metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...distinctMeasures].some((dm) => metricUsesMeasure(metric, dm)); });
+      if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
+        recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_native_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
+      }
+      if (page.has_more) recs.push(`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`);
+      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table readable via get_query_result; group differently or compare segments by re-querying with another group_by.');
+      return {
+        ok: true,
+        command: res.command,
+        columns: res.columns,
+        rows: pageRows,
+        row_count: pageRows.length,
+        page,
+        // Provenance so the result is self-trustable: which tier produced it, the source,
+        // and how fresh the underlying data is (latest event time).
+        ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
+        provenance: {
+          tier: 'governed_metric',
+          metrics: input.metrics,
+          source: factsRead.length === 1 ? factsRead[0] : factsRead,
+          data_freshness: fresh,
+          ...(factsRead.length > 1 ? { data_freshness_by_source: freshByFact } : {}),
+        },
+        warnings: [...windowWarnings, ...filterWarnings],
+        recommendations: recs,
+      };
     };
+
+    const running = this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
+    if (explain) return respond(await running);
+    // A metric query over a big window can outlast the client in front of this call, which gives
+    // up on its own schedule (60s is common) and reports the tool as timed out while the warehouse
+    // keeps working. So a query is held for the same grace a build gets; past it, the call returns
+    // a query_id and the query runs on — its finished response is served by get_query_result.
+    return this._withinGrace(running, respond, { ctx, label: 'query' });
+  }
+
+  /**
+   * Wait for `running` (a promise of the runner's answer) for at most queryTimeoutMs. Finished in
+   * time → `respond(answer)`. Still running → a job: `{ status: 'running', query_id }` now, and the
+   * finished response kept for get_query_result (in memory — it is one page of rows, not a table;
+   * materialize:true is the form that survives a restart). The context is leased until the query
+   * settles, so it cannot be dropped under it.
+   */
+  async _withinGrace(running, respond, { ctx, label }) {
+    this.ctxs.acquire(ctx.id);
+    const settled = running.finally(() => this.ctxs.release(ctx.id));
+    const PENDING = Symbol('pending');
+    let timer;
+    const grace = new Promise((resolve) => { timer = setTimeout(() => resolve(PENDING), this.queryTimeoutMs); });
+    let first;
+    try { first = await Promise.race([settled, grace]); } finally { clearTimeout(timer); }
+    if (first !== PENDING) return respond(first);
+    const id = this.jobs.create({ contextId: ctx.id, inline: true });
+    settled.then(respond).then(
+      (out) => {
+        if (out?.ok === false) { this.jobs.fail(id, out.error?.message || 'the query failed'); return; }
+        this._keepInlineResult(id, out);
+        this.jobs.ready(id);
+      },
+      (e) => this.jobs.fail(id, e?.message || String(e)),
+    ).catch(() => {});
+    return { ok: true, status: 'running', query_id: id, message: `the ${label} is still running in the warehouse (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — it returns the rows once it is done` };
+  }
+
+  /** Keep a detached query's finished response for get_query_result — the newest few, for an hour. */
+  _keepInlineResult(id, out) {
+    const MAX = 50; const TTL_MS = 3600000;
+    const now = Date.now();
+    this._inlineResults ||= new Map();
+    for (const [k, v] of this._inlineResults) if (now - v.at > TTL_MS) this._inlineResults.delete(k);
+    this._inlineResults.set(id, { at: now, out });
+    while (this._inlineResults.size > MAX) this._inlineResults.delete(this._inlineResults.keys().next().value);
   }
 
   /**
@@ -3357,6 +3406,15 @@ export class Engine {
     }
     const job = this.jobs.get(input.query_id);
     if (!job) throw new ToolError(`unknown query_id: ${input.query_id} (pass {context_id, table} to fetch a known table directly)`, { stage: 'validate', field: 'query_id' });
+    if (job.inline) {
+      // a metric query that outlasted its call: its finished response is held here, not in a table
+      if (job.status === 'running' && this.jobs.isLive(job.id)) return { ok: true, status: 'running', query_id: job.id };
+      if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, error: { stage: 'query', message: job.error } };
+      const kept = job.status === 'ready' ? this._inlineResults?.get(job.id) : null;
+      if (!kept) return { ok: false, status: 'error', query_id: job.id, error: { stage: 'query', message: 'this query\'s result was held in memory and is gone (the server restarted, or it is over an hour old) — run the query again; materialize:true keeps a result as a table that survives restarts.' } };
+      if (input.transform || input.sample || input.offset || input.limit != null) throw new ToolError('this result is one page held in memory, not a table: re-slicing, sampling and paging need a materialized result — run the query again with materialize:true (or with the offset/limit you want).', { stage: 'validate', field: input.transform ? 'transform' : input.sample ? 'sample' : 'offset' });
+      return { ...kept.out, status: 'ready', query_id: job.id };
+    }
     if (job.status === 'running') return { ok: true, status: 'running', query_id: job.id, table: job.table };
     if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, table: job.table, error: { stage: 'materialize', message: job.error } };
     return this._fetchResult(job.id, limit, transform, offset, sample, samplePercent);

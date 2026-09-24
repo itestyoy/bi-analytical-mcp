@@ -17,17 +17,7 @@ import { loadRecipes } from './recipes.js';
 import { assetPath } from './runtime-assets.js';
 import { frameProfile } from './python-model.js';
 import { ContextManager } from './context-manager.js';
-import { createDbt, listEnvironments, DEFAULT_ENV } from './dbt/index.js';
-
-/**
- * Which dbt to run: DBT_BIN (and MF_BIN) named outright; else the environment DBT_ENV (or
- * `dbt-v2`) under DBT_ENVS_DIR when there are environments; else `dbt` / `mf` on PATH.
- */
-function dbtBinaries(env = process.env) {
-  if (env.DBT_BIN) return { dbtBin: env.DBT_BIN, mfBin: env.MF_BIN || 'mf' };
-  if (listEnvironments().length) return { environment: env.DBT_ENV || DEFAULT_ENV, ...(env.MF_BIN ? { mfBin: env.MF_BIN } : {}) };
-  return { dbtBin: 'dbt', mfBin: env.MF_BIN || 'mf' };
-}
+import { createDbt, DEFAULT_ENV } from './dbt/index.js';
 import { Engine } from './engine.js';
 import { BackgroundIndexer } from './value-index.js';
 import { createEmbedder } from './embeddings.js';
@@ -86,9 +76,10 @@ export async function makeEngine(opts = {}) {
   const runner = opts.runner !== undefined
     ? opts.runner
     : baseProjectDir
-      // dbt runs in a named environment (a venv under DBT_ENVS_DIR; DBT_ENV, else `dbt-v2`) — or with
-      // DBT_BIN/MF_BIN named outright; the client reads its version (DBT_VERSION pins it)
-      ? createDbt({ version: process.env.DBT_VERSION || 'auto', ...dbtBinaries(), profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
+      // dbt runs ONLY in one of this tool's environments (a venv under DBT_ENVS_DIR built from its
+      // lock — DBT_ENV, else `dbt-v2`; MetricFlow's is `metricflow`); anything else is refused. The
+      // client reads its version from the binary (DBT_VERSION pins it).
+      ? createDbt({ version: process.env.DBT_VERSION || 'auto', environment: process.env.DBT_ENV || DEFAULT_ENV, profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
       : null;
   // what the installed dbt can run decides what is offered (dbt v2 runs no Python models on DuckDB)
   gatePythonRuntime(catalog, runner);

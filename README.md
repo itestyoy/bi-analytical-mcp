@@ -147,23 +147,17 @@ Prerequisites for integration tests — three ENVIRONMENTS (virtualenvs under `.
 DuckDB adapter and pandas, which the python stage's file runs on (v2 runs no Python models on DuckDB);
 and `metricflow` — MetricFlow's `mf` with the DuckDB adapter, which every dbt environment queries
 metrics through (dbt's docs: without the dbt platform, "install MetricFlow separately"). `DBT_ENV` /
-`MF_ENV` pick others; `DBT_BIN` / `MF_BIN` / `PYTHON_BIN` still override one binary each.
+`MF_ENV` pick others among ours. Nothing else runs: a name the specs do not define, a venv not built by
+`create` or built with other versions than the spec names is refused, and there is no binary to name
+from outside.
 
 What goes into an environment is decided by this repository, not by whoever builds it:
-`src/dbt/environment-specs.js` names the exact packages of each, and `config/dbt-environments/` locks
-every file of every dependency by SHA-256 (for Python 3.11 on x86_64 Linux). `create` installs exactly
-that — pip's `--require-hashes`, wheels only, `--no-deps`, with a pip that is itself locked — and
-`verify` compares what is installed with the lock. There is no requirements file to pass in:
+`src/dbt/environment-specs.js` names the exact version of every package of each, and `create` installs
+exactly those (the image does it at `docker build`). There is no requirements file to pass in:
 
 ```bash
 npm run dbt:env -- create metricflow            # --adapter duckdb (default) | bigquery
 npm run dbt:env -- create dbt-v2
 npm run dbt:env -- create dbt-v1
-npm run dbt:env -- verify                        # installed == locked, for each
 npm run dbt:env -- list
-npm run dbt:env -- lock                          # maintainers: after changing a spec (needs uv)
 ```
-
-dbt v2 is published on PyPI as a download-at-install sdist whose build fetches the platform wheel
-from dbt Labs' CDN. That build is never run: `lock` reads the wheel's URL and SHA-256 from the
-`assets.json` inside the sdist (the sdist checked against PyPI's digest) and locks the wheel itself.

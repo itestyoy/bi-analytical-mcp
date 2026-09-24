@@ -12,13 +12,12 @@
   Тесты идут на DuckDB в окружении `dbt-v2`. MetricFlow — отдельное окружение `metricflow`
   (`mf` + dbt-core + адаптер), как советует документация dbt для работы без dbt platform. Файл python-стадии идёт на 1.x: v2 не запускает Python-модели на DuckDB, и там стадия не
   предлагается (`gatePythonRuntime`).
-- Docker: окружения `/opt/dbt-envs/dbt-v2`, `dbt-v1` (1.x + адаптер) и `metricflow`, собранные из
-  lock-файлов (`config/dbt-environments/`, build arg `WAREHOUSE_ADAPTER`). `docker-compose.yml`
+- Docker: окружения `/opt/dbt-envs/dbt-v2`, `dbt-v1` (1.x + адаптер) и `metricflow` собираются на
+  `docker build` из точных версий в `src/dbt/environment-specs.js` (build arg `WAREHOUSE_ADAPTER`). `docker-compose.yml`
   использует `dbt-v2`, BigQuery-сетап — `dbt-v1`, пока
   python-стадия не проверена на v2 в BigQuery.
-- `dbt` 2.0.6 на PyPI — sdist-заглушка: его build backend при установке качает платформенный wheel с
-  CDN dbt Labs и сверяет sha256 с `assets.json` внутри sdist. Мы этот backend не запускаем: `lock`
-  берёт URL и sha256 wheel из `assets.json` (sdist сверен с хешем PyPI) и фиксирует сам wheel.
+- `dbt` 2.0.6 на PyPI — sdist-заглушка: при установке его build backend качает платформенный wheel с
+  CDN dbt Labs и сверяет sha256 с `assets.json` внутри sdist.
 
 Ниже — исходная проба и план, по которому это делалось.
 

@@ -9,14 +9,34 @@
 // for a setup without the dbt platform: "install MetricFlow separately and use the mf prefix". Its
 // `mf` reads the semantic_manifest.json that the chosen dbt environment's `dbt parse` wrote, and the
 // MetricFlow sidecar runs on its Python. It cannot share a venv with a dbt v2 binary: dbt-metricflow
-// brings the Python dbt-core, whose own `dbt` command would replace it. (An environment that carries
-// its own `mf` — a single all-in-one venv — uses it when there is no MetricFlow environment.)
+// brings the Python dbt-core, whose own `dbt` command would replace it.
 //
-// Create them with `npm run dbt:env -- create <name> [--adapter duckdb|bigquery]` (scripts/dbt-env.mjs),
-// from what src/dbt/environment-specs.js defines and config/dbt-environments/ locks.
+// ONLY OUR ENVIRONMENTS RUN. A name must be one src/dbt/environment-specs.js defines, and the
+// directory must have been built by `npm run dbt:env -- create <name> [--adapter duckdb|bigquery]`
+// (scripts/dbt-env.mjs — in the image, at `docker build`) from that spec as it is now: its
+// mcp-env.json names the exact packages it was built with. A venv put there by hand, or built from
+// other versions, is refused — as is any dbt named from outside (the server has no DBT_BIN / MF_BIN /
+// PYTHON_BIN and no PATH fallback).
 
-import { existsSync, readdirSync, statSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { ENVIRONMENT_SPECS, environmentPackages } from './environment-specs.js';
+
+/**
+ * Why the environment directory `envDir` is not the one this tool builds as `name` — null when it
+ * is: built by `create` from the packages the spec names now.
+ */
+export function notOurs(name, envDir) {
+  if (!ENVIRONMENT_SPECS[name]) return `'${name}' is not an environment this tool defines (defined: ${Object.keys(ENVIRONMENT_SPECS).join(', ')} — src/dbt/environment-specs.js)`;
+  let meta;
+  try { meta = JSON.parse(readFileSync(join(envDir, 'mcp-env.json'), 'utf8')); } catch { return `'${name}' in ${dirname(envDir)} was not built by this tool (no mcp-env.json) — build it with: npm run dbt:env -- create ${name}`; }
+  let wanted;
+  try { wanted = environmentPackages(name, meta.adapter); } catch (e) { return e.message; }
+  if (meta.name !== name || JSON.stringify(meta.packages) !== JSON.stringify(wanted)) {
+    return `'${name}' in ${dirname(envDir)} was built with ${(meta.packages || []).join(' ') || 'other packages'}, the spec says ${wanted.join(' ')} — rebuild it with: npm run dbt:env -- create ${name}${meta.adapter ? ` --adapter ${meta.adapter}` : ''}`;
+  }
+  return null;
+}
 
 export const DEFAULT_ENV = 'dbt-v2';
 export const DEFAULT_MF_ENV = 'metricflow';
@@ -44,9 +64,7 @@ export function listEnvironments({ dir = envsDir() } = {}) {
 /**
  * The dbt environment `name` (DBT_ENV, else `dbt-v2`) ready to run: { name, dir, dbtBin, mfBin,
  * pythonBin, metricflowFrom } — `mfBin` / `pythonBin` from the MetricFlow environment (MF_ENV, else
- * `metricflow`), or from this environment when it carries its own `mf` and there is no MetricFlow
- * environment. Throws, naming what exists, when there is no such dbt environment or a MetricFlow
- * environment was named and is not there.
+ * `metricflow`). Throws, naming what to do, when either is missing or is not one of ours.
  */
 export function resolveEnvironment(name, { dir = envsDir(), env = process.env } = {}) {
   const wanted = name || env.DBT_ENV || DEFAULT_ENV;
@@ -56,10 +74,12 @@ export function resolveEnvironment(name, { dir = envsDir(), env = process.env } 
     const have = all.filter((x) => x.dbtBin).map((x) => x.name);
     throw new Error(`dbt environment '${wanted}' not found in ${dir}${have.length ? ` (there: ${have.join(', ')})` : ' (none there)'} — create it with: npm run dbt:env -- create ${wanted}`);
   }
+  const theirs = notOurs(wanted, e.dir);
+  if (theirs) throw new Error(`dbt environment refused: ${theirs}`);
   const mfName = env.MF_ENV || DEFAULT_MF_ENV;
   const mf = all.find((x) => x.name === mfName && x.mfBin);
-  if (mf) return { ...e, mfBin: mf.mfBin, pythonBin: mf.pythonBin, metricflowFrom: mf.name };
-  if (env.MF_ENV) throw new Error(`MetricFlow environment '${env.MF_ENV}' not found in ${dir} (or it has no mf) — create it with: npm run dbt:env -- create ${env.MF_ENV}`);
-  if (e.mfBin) return { ...e, metricflowFrom: e.name };
-  return { ...e, mfBin: null, metricflowFrom: null };
+  if (!mf) throw new Error(`MetricFlow environment '${mfName}' not found in ${dir} (or it has no mf) — create it with: npm run dbt:env -- create ${mfName}`);
+  const mfTheirs = notOurs(mfName, mf.dir);
+  if (mfTheirs) throw new Error(`MetricFlow environment refused: ${mfTheirs}`);
+  return { ...e, mfBin: mf.mfBin, pythonBin: mf.pythonBin, metricflowFrom: mf.name };
 }

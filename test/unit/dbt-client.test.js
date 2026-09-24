@@ -68,15 +68,18 @@ test('the client is chosen by the dbt major version: 1.x reads the legacy semant
 
 test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an environment of its own', async () => {
   const { resolveEnvironment, listEnvironments } = await import('../../src/dbt/environments.js');
+  const { environmentPackages } = await import('../../src/dbt/environment-specs.js');
   const { mkdirSync } = await import('node:fs');
   const dir = mkdtempSync(join(tmpdir(), 'envs-'));
-  // a venv with these executables, each answering --version for its dbt
-  const venv = (name, bins, version) => {
+  // a venv with these executables, each answering --version for its dbt, marked as built by
+  // `dbt-env create` from its spec as it is now
+  const venv = (name, bins, version, adapter = name === 'dbt-v2' ? null : 'duckdb') => {
     mkdirSync(join(dir, name, 'bin'), { recursive: true });
     for (const b of bins) {
       writeFileSync(join(dir, name, 'bin', b), `#!/bin/sh\necho "dbt ${version}"\n`);
       chmodSync(join(dir, name, 'bin', b), 0o755);
     }
+    writeFileSync(join(dir, name, 'mcp-env.json'), JSON.stringify({ name, adapter, packages: environmentPackages(name, adapter) }));
   };
   venv('dbt-v2', ['dbt'], '2.0.6');                            // dbt v2: the binary only
   venv('dbt-v1', ['dbt', 'python'], '1.11.11');                 // dbt 1.x, no MetricFlow
@@ -88,8 +91,19 @@ test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an 
   assert.deepEqual([d.metricflowFrom, d.mfBin, d.pythonBin], ['metricflow', join(dir, 'metricflow', 'bin', 'mf'), join(dir, 'metricflow', 'bin', 'python')]);
   const one = resolveEnvironment(undefined, { dir, env: { DBT_ENV: 'dbt-v1' } });
   assert.deepEqual([one.name, one.metricflowFrom], ['dbt-v1', 'metricflow'], 'DBT_ENV names another dbt; MetricFlow stays its own');
-  assert.throws(() => resolveEnvironment('nope', { dir }), /environment 'nope' not found.*there: dbt-v1, dbt-v2, metricflow/);
+  assert.throws(() => resolveEnvironment('nope', { dir }), /environment 'nope' not found.*there: dbt-v1, dbt-v2, metricflow\)/);
   assert.throws(() => resolveEnvironment(undefined, { dir, env: { MF_ENV: 'mf2' } }), /MetricFlow environment 'mf2' not found/);
+  // only OUR environments run: a name the specs do not define, a venv not built by `create`, or one
+  // built with other versions than the spec names is refused
+  mkdirSync(join(dir, 'my-dbt', 'bin'), { recursive: true });
+  writeFileSync(join(dir, 'my-dbt', 'bin', 'dbt'), '#!/bin/sh\necho "dbt 1.11.11"\n');
+  chmodSync(join(dir, 'my-dbt', 'bin', 'dbt'), 0o755);
+  assert.throws(() => resolveEnvironment('my-dbt', { dir, env: {} }), /refused: 'my-dbt' is not an environment this tool defines/);
+  writeFileSync(join(dir, 'dbt-v1', 'mcp-env.json'), JSON.stringify({ name: 'dbt-v1', adapter: 'duckdb', packages: ['dbt-core==1.10.0', 'dbt-duckdb==1.10.0'] }));
+  assert.throws(() => resolveEnvironment('dbt-v1', { dir, env: {} }), /refused: .*built with dbt-core==1\.10\.0 dbt-duckdb==1\.10\.0, the spec says dbt-core==1\.11\.11/);
+  const { rmSync } = await import('node:fs');
+  rmSync(join(dir, 'dbt-v1', 'mcp-env.json'));
+  assert.throws(() => resolveEnvironment('dbt-v1', { dir, env: {} }), /refused: .*not built by this tool/);
   // the client takes the environment's binaries, and its version from them
   const c = createDbt({ environment: d });
   assert.deepEqual([c.major, c.dbtBin, c.mfBin, c.environment.name], [2, d.dbtBin, d.mfBin, 'dbt-v2']);

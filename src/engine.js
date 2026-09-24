@@ -109,7 +109,7 @@ export class Engine {
     this.runner = runner; // optional; required for non-dry_run parse/query
     // The interpreter that runs the static gate over a python stage's functions (a local syntax /
     // safety check; the model itself runs where dbt sends it). The MetricFlow sidecar's Python.
-    this.pythonBin = pythonBin || process.env.PYTHON_BIN || runner?.pythonBin || runner?.environment?.pythonBin || 'python3';
+    this.pythonBin = pythonBin || runner?.pythonBin || runner?.environment?.pythonBin || 'python3';
   }
 
   // Internal helpers (no longer standalone tools — reached via semantic_index({ recipe })

@@ -4,7 +4,7 @@
 # to IN-MEMORY (nothing survives a restart; semantic_index reports persisted:false).
 FROM node:22-slim
 
-# Python for the dbt/MetricFlow environments (Debian bookworm's 3.11 — the Python the locks are for).
+# Python for the dbt/MetricFlow environments (Debian bookworm's 3.11; dbt v2 needs >= 3.11).
 RUN apt-get update \
   && apt-get install -y --no-install-recommends python3 python3-venv git \
   && rm -rf /var/lib/apt/lists/*
@@ -13,10 +13,9 @@ WORKDIR /app
 
 # dbt runs in named ENVIRONMENTS — one virtualenv each under DBT_ENVS_DIR (src/dbt/environments.js);
 # the server uses DBT_ENV (else `dbt-v2`) and reads its dbt version from the binary. WHAT goes into
-# each is decided by this tool, not the build: src/dbt/environment-specs.js names the exact packages,
-# config/dbt-environments/*.lock.txt locks every file of every dependency by SHA-256, and
-# scripts/dbt-env.mjs installs exactly that (--require-hashes, wheels only, a locked pip) and checks
-# the result. There is no requirements file to hand in — only which warehouse to build for:
+# each is decided by this tool, not the build: src/dbt/environment-specs.js names the exact version
+# of every package, and scripts/dbt-env.mjs installs exactly those. There is no requirements file to
+# hand in — only which warehouse to build for:
 #   WAREHOUSE_ADAPTER — duckdb (default) or bigquery: the adapter of dbt-v1 and metricflow;
 #   INSTALL_DBT_V2=0  — skip dbt-v2 (then set DBT_ENV=dbt-v1).
 #   dbt-v2     — dbt v2 (its adapters are built in; it fetches the ADBC driver on first use)
@@ -28,7 +27,6 @@ ARG INSTALL_DBT_V2=1
 ENV DBT_ENVS_DIR=/opt/dbt-envs
 COPY scripts/dbt-env.mjs ./scripts/
 COPY src/dbt/environments.js src/dbt/environment-specs.js ./src/dbt/
-COPY config/dbt-environments ./config/dbt-environments
 RUN set -e; \
     node scripts/dbt-env.mjs create metricflow --adapter "$WAREHOUSE_ADAPTER"; \
     node scripts/dbt-env.mjs create dbt-v1 --adapter "$WAREHOUSE_ADAPTER"; \

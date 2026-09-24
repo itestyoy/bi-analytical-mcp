@@ -13,9 +13,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startServer } from '../helpers/mcp-http.js';
-import { buildViewModel, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
+import { startServer, APPS_CAPS } from '../helpers/mcp-http.js';
+import { buildViewModel, drillView, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
+import { runTool } from '../../src/mcp-surface.js';
 
 let s;
 before(async () => { s = await startServer(); });
@@ -23,24 +24,52 @@ after(async () => { await s.stop(); });
 
 const VIEWED = ['query_semantic_model', 'get_query_result', 'experiment'];
 
-test('the viewed tools carry the view in both spellings, for every client in both eras', async () => {
-  for (const era of ['legacy', 'modern']) {
-    const c = await s.client({ era });
-    for (const t of (await c.listTools()).tools) {
-      const want = VIEWED.includes(t.name) ? RESULT_VIEW_URI : undefined;
-      assert.equal(t._meta?.ui?.resourceUri, want, `${era} ${t.name}`);
-      assert.equal(t._meta?.['ui/resourceUri'], want, `${era} ${t.name} (flat key)`);
-    }
+test('the viewed tools carry the view in both spellings — for a client that declares MCP Apps in its request', async () => {
+  const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
+  for (const t of (await c.listTools()).tools) {
+    const want = VIEWED.includes(t.name) ? RESULT_VIEW_URI : undefined;
+    assert.equal(t._meta?.ui?.resourceUri, want, t.name);
+    assert.equal(t._meta?.['ui/resourceUri'], want, `${t.name} (flat key)`);
+  }
+  const q = (await c.listTools()).tools.find((t) => t.name === 'query_semantic_model');
+  assert.ok(q.inputSchema.properties.display, 'display is offered');
+  assert.ok(c.getInstructions().includes('RESULT CARDS'), 'and the instructions tell how cards work');
+});
+
+test('a client that does not declare MCP Apps in its request gets none of it: no view, no display, no card hints — and display is refused', async () => {
+  // a 2025 client declares its capabilities once, in initialize: its later requests carry none, so
+  // even a declaration there does not turn the feature on; a 2026 client that declares nothing neither
+  for (const [era, capabilities] of [['legacy', APPS_CAPS], ['legacy', {}], ['modern', {}]]) {
+    const label = `${era} ${capabilities.extensions ? 'declaring at initialize' : 'declaring nothing'}`;
+    const c = await s.client({ era, capabilities });
+    const tools = (await c.listTools()).tools;
+    for (const t of tools) assert.equal(t._meta?.ui, undefined, `${label}: ${t.name} carries no _meta.ui`);
+    for (const name of ['query_semantic_model', 'get_query_result']) assert.equal(tools.find((t) => t.name === name).inputSchema.properties.display, undefined, `${label}: ${name} offers no display`);
+    assert.ok(!(await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI), `${label}: the view is not listed`);
+    assert.ok(!c.getInstructions().includes('RESULT CARDS'), `${label}: no card instructions`);
+    const r = await c.callTool({ name: 'get_query_result', arguments: { query_id: 'ffffffffffff', display: { kind: 'bar', x: 'a', y: ['b'] } } });
+    assert.equal(r.isError, true, label);
+    assert.equal(JSON.parse(r.content[0].text).error.field, 'display', label);
   }
 });
 
+test('the hint to show a result as a card reaches only a client that renders cards', async () => {
+  // a stand-in tool answering the way build_native_model's materialize does
+  const engine = { schemas: { materialize_like: {} }, materialize_like: () => ({ ok: true, rows: [{ n: 1 }], show_to_user: { tool: 'get_query_result', arguments: { context_id: 'c', table: 't' } } }) };
+  const withCards = await runTool(engine, 'materialize_like', {}, { renders: true });
+  const without = await runTool(engine, 'materialize_like', {}, { renders: false });
+  assert.deepEqual(withCards.raw.show_to_user.arguments, { context_id: 'c', table: 't' });
+  assert.equal('show_to_user' in without.raw, false);
+  assert.deepEqual(without.raw.rows, [{ n: 1 }], 'the answer itself is the same');
+});
+
 test('the view reads only its own result: one tool is app-callable, no network, one server call in its code', async () => {
-  for (const era of ['legacy', 'modern']) {
-    const c = await s.client({ era });
+  {
+    const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
     // a host refuses a view's tools/call to a tool that is not visible to "app": only the read of a result is
-    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, t.name === 'get_query_result' ? ['model', 'app'] : ['model'], `${era} ${t.name}`);
+    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, t.name === 'get_query_result' ? ['model', 'app'] : ['model'], t.name);
     const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
-    assert.deepEqual(content._meta?.ui?.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, `${era}: no origin of any kind`);
+    assert.deepEqual(content._meta?.ui?.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, 'no origin of any kind');
   }
   // the view's own code: no App method that reaches the model or other server methods, no network API
   const REACHES_OUT = /\b(readServerResource|listServerResources|createSamplingMessage|sendMessage|updateModelContext|openLink|downloadFile|sendLog|fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)\s*\(/;
@@ -59,8 +88,9 @@ test('the view reads only its own result: one tool is app-callable, no network, 
   assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
   assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'get_query_result', arguments: args }");
   // …reached for the card's OWN result only: its query_id while it waits, its stored table's next
-  // level when a drill-down row opens
+  // view when a drill-down steps down (a pivot row, a chart mark — each read built by the view model)
   assert.deepEqual(reads.filter((r) => r !== 'args').sort(), [
+    '{ ...d.source, transform: view.transform, limit: DRILL_ROWS }',
     '{ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }',
     '{ query_id: queryId }',
   ]);
@@ -81,14 +111,12 @@ test('view model: a result that moved to the background carries the query_id the
   assert.deepEqual(m, { kind: 'none', reason: 'running', query_id: 'abc123abc123' });
 });
 
-test('the view resource is one mcp-app HTML document, listed and readable in both eras', async () => {
-  for (const era of ['legacy', 'modern']) {
-    const c = await s.client({ era });
-    assert.ok((await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI && r.mimeType === 'text/html;profile=mcp-app'), era);
-    const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
-    assert.equal(content.mimeType, 'text/html;profile=mcp-app');
-    assert.ok(content.text.startsWith('<!DOCTYPE html>') && /<\/html>\s*$/.test(content.text), `${era}: a complete document`);
-  }
+test('the view resource is one mcp-app HTML document, listed and readable for a client that declares MCP Apps', async () => {
+  const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
+  assert.ok((await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI && r.mimeType === 'text/html;profile=mcp-app'));
+  const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
+  assert.equal(content.mimeType, 'text/html;profile=mcp-app');
+  assert.ok(content.text.startsWith('<!DOCTYPE html>') && /<\/html>\s*$/.test(content.text), 'a complete document');
 });
 
 test('the result carries structuredContent equal to the text the model reads (both eras)', async () => {
@@ -121,7 +149,7 @@ test('view model: a time series by segment is one line per segment, with the row
   const byName = Object.fromEntries(m.chart.series.map((x) => [x.name, x.points]));
   assert.deepEqual(byName.US, [['2024-01-01', 9], ['2024-01-02', 11]]);
   assert.deepEqual(byName.DE, [['2024-01-01', 3], ['2024-01-02', 5]], 'sorted by time');
-  assert.equal(m.rows.length, 4);
+  assert.equal(m.row_count, 4);
 });
 
 test('view model: a category and an amount is a bar per category', () => {
@@ -243,7 +271,7 @@ test('view model: a DECLARED bar split by a column groups (or stacks) a bar per 
   assert.equal(m.chart.type, 'bar');
   assert.deepEqual(m.chart.labels, ['US', 'BR'], 'categories in the order they first appear');
   // the largest series first (android 490 > ios 465); a category × series seen twice is summed
-  assert.deepEqual(m.chart.series, [{ name: 'android', values: [310, 180] }, { name: 'ios', values: [420, 45] }]);
+  assert.deepEqual(m.chart.series.map(({ name, values }) => ({ name, values })), [{ name: 'android', values: [310, 180] }, { name: 'ios', values: [420, 45] }]);
   assert.equal(m.chart.stacked, true);
   assert.equal(m.chart.horizontal, true);
   // several y columns: a bar each per category, grouped
@@ -317,6 +345,67 @@ test('pivot: one level is the rows under a path, grouped by the next level; its 
   assert.deepEqual(t.aggregations, [{ fn: 'sum', column: 'revenue', as: 'revenue' }, { fn: 'max', column: 'users', as: 'users' }]);
   const rows = pivotRows({ columns: [{ name: 'platform' }, { name: 'revenue' }, { name: 'users' }], rows: [{ platform: 'ios', revenue: '12.5', users: 3 }, { platform: null, revenue: 4, users: null }] }, display, 1);
   assert.deepEqual(rows, [{ key: 'ios', label: 'ios', values: [12.5, 3] }, { key: null, label: '∅', values: [4, null] }]);
+});
+
+test('view model: what a chart leaves out is said in numbers — categories past the cap, series by size or by column order, amounts not drawn', () => {
+  // a declared bar over 120 categories: 30 drawn, 120 counted
+  const many = Array.from({ length: 120 }, (_, i) => ({ c: `c${i}`, v: i }));
+  const bar = buildViewModel('get_query_result', { columns: [{ name: 'c' }, { name: 'v' }], rows: many, display: { kind: 'bar', x: 'c', y: ['v'] } });
+  assert.deepEqual([bar.chart.labels.length, bar.chart.categories_total], [30, 120]);
+  assert.deepEqual(bar.chart.bars.at(-1), { label: 'c29', value: 29 });
+  // split by a column: a series' total counts every row, also those past the drawn categories
+  const split = Array.from({ length: 70 }, (_, i) => ({ c: `c${i}`, p: i < 60 ? 'ios' : 'web', v: i < 60 ? 1 : 100 }));
+  const byP = buildViewModel('get_query_result', { columns: [{ name: 'c' }, { name: 'p' }, { name: 'v' }], rows: split, display: { kind: 'bar', x: 'c', y: ['v'], series_column: 'p' } });
+  assert.equal(byP.chart.series[0].name, 'web', 'web (10 rows × 100) outweighs ios (60 × 1), though its rows come last');
+  assert.equal(byP.chart.categories_total, 70);
+  // eight value columns over time: the first six in column order, and the card is told so
+  const wide = ['2026-09-01', '2026-09-02'].map((d, k) => Object.fromEntries([['day', d], ...Array.from({ length: 8 }, (_, i) => [`m${i}`, (i + 1) * 10 + k])]));
+  const line = buildViewModel('query_semantic_model', { columns: Object.keys(wide[0]).map((name) => ({ name })), rows: wide });
+  assert.deepEqual([line.chart.series.length, line.chart.kept, line.chart.folded, line.chart.folded_by], [6, 6, 2, 'order']);
+  assert.deepEqual(line.chart.series.map((x) => x.name), ['m0', 'm1', 'm2', 'm3', 'm4', 'm5']);
+  // nine segments over time: the largest six, by size
+  const seg = Array.from({ length: 9 }, (_, i) => [{ day: '2026-09-01', country: `k${i}`, dau: i }, { day: '2026-09-02', country: `k${i}`, dau: i }]).flat();
+  const bySeg = buildViewModel('query_semantic_model', { columns: [{ name: 'day' }, { name: 'country' }, { name: 'dau' }], rows: seg });
+  assert.deepEqual([bySeg.chart.folded, bySeg.chart.folded_by, bySeg.chart.series[0].name], [3, 'size', 'k8']);
+  // an inferred breakdown draws its first amount and names the others
+  const brk = buildViewModel('get_query_result', { columns: [{ name: 'platform' }, { name: 'users' }, { name: 'revenue' }, { name: 'arpu' }], rows: [{ platform: 'ios', users: 10, revenue: 50, arpu: 5 }, { platform: 'web', users: 4, revenue: 8, arpu: 2 }] });
+  assert.deepEqual([brk.chart.y, brk.chart.omitted], ['users', ['revenue', 'arpu']]);
+});
+
+test('drill: a view is the stored rows under the path, grouped by what it draws; a pie stays a pie, a line can split over time', () => {
+  const levels = [{ column: 'platform', label: 'Platform' }, { column: 'channel' }];
+  const bar = { kind: 'bar', x: 'country', y: ['revenue', 'users'], drill: { levels, agg: 'max' } };
+  // the chart as declared: folded over the drill levels
+  assert.deepEqual(drillView(bar).transform.group_by, ['country']);
+  assert.deepEqual(drillView(bar).transform.aggregations, [{ fn: 'max', column: 'revenue', as: 'revenue' }, { fn: 'max', column: 'users', as: 'users' }]);
+  // a bar of US opened by Platform: filtered to US, one bar per platform, Channel left to step into
+  const step = drillView(bar, [{ column: 'country', value: 'US' }], { level: { column: 'platform' }, mode: 'breakdown' });
+  assert.deepEqual(step.transform.where, [{ column: 'country', op: 'eq', value: 'US' }]);
+  assert.deepEqual(step.transform.group_by, ['platform']);
+  assert.deepEqual([step.display.kind, step.display.x, step.display.y], ['bar', 'platform', ['revenue', 'users']]);
+  assert.deepEqual(step.display.drill.levels, [{ column: 'channel' }]);
+  // a slice opens into slices
+  const pie = drillView({ kind: 'pie', label_column: 'country', value_column: 'revenue', drill: { levels } }, [{ column: 'country', value: null }], { level: { column: 'channel' }, mode: 'breakdown' });
+  assert.deepEqual([pie.display.kind, pie.display.label_column, pie.transform.where[0].op], ['pie', 'channel', 'is_null']);
+  // a line: that moment broken down into bars, or the line split over time
+  const line = { kind: 'line', x: 'day', y: ['dau'], series_column: 'country', drill: { levels } };
+  assert.deepEqual(drillView(line).transform.group_by, ['day', 'country']);
+  const trend = drillView(line, [{ column: 'country', value: 'US' }], { level: { column: 'platform' }, mode: 'trend' });
+  assert.deepEqual([trend.display.kind, trend.display.x, trend.display.series_column], ['line', 'day', 'platform']);
+  assert.deepEqual(trend.transform.group_by, ['day', 'platform']);
+  const moment = drillView(line, [{ column: 'country', value: 'US' }, { column: 'day', value: '2026-09-01' }], { level: { column: 'platform' }, mode: 'breakdown' });
+  assert.equal(moment.display.kind, 'bar');
+});
+
+test('view model: a drillable chart carries each mark\'s own value to filter by, and where to read the next view', () => {
+  const display = { kind: 'bar', x: 'country', y: ['v'], series_column: 'p', drill: { levels: [{ column: 'channel' }] } };
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'country' }, { name: 'p' }, { name: 'v' }], rows: [{ country: null, p: 'ios', v: 3 }, { country: 'US', p: 7, v: 5 }], display, drill_source: { query_id: 'q1' } });
+  assert.deepEqual(m.chart.labels, ['∅', 'US']);
+  assert.deepEqual(m.chart.drill.keys, [null, 'US'], 'the empty category filters by null, not by its label');
+  assert.deepEqual(m.chart.series.map((x) => x.key).sort(), [7, 'ios'], 'a numeric split value stays a number');
+  assert.deepEqual(m.chart.drill.source, { query_id: 'q1' });
+  // without a source to read from there is nothing to drill
+  assert.equal(buildViewModel('get_query_result', { columns: [{ name: 'country' }, { name: 'v' }], rows: [{ country: 'US', v: 1 }], display: { kind: 'bar', x: 'country', y: ['v'], drill: { levels: [{ column: 'p' }] } } }).chart.drill, undefined);
 });
 
 test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {

@@ -261,5 +261,8 @@ test('the card declaration (display) is structural: each kind is a closed branch
   // a drill-down reads a stored result: a metric query declaring one must materialize
   const q = (extra) => validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'm' }] }, ...extra });
   assert.equal(q({}).ok, false, 'pivot without materialize');
+  const qd = (extra) => validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'bar', x: 'a', y: ['m'], drill: { levels: [{ column: 'b', label: 'B' }] } }, ...extra });
+  assert.equal(qd({}).ok, false, 'a drillable chart without materialize');
+  assert.equal(qd({ materialize: true }).ok, true, `a drillable chart with materialize: ${qd({ materialize: true }).errors?.join(' | ')}`);
   assert.equal(q({ materialize: true }).ok, true, `pivot with materialize: ${q({ materialize: true }).errors?.join(' | ')}`);
 });

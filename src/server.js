@@ -7,7 +7,7 @@
 // a restart.
 
 import { join, dirname } from 'node:path';
-import { createMcpHandler } from '@modelcontextprotocol/server';
+import { createMcpHandler, CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpExpressApp } from '@modelcontextprotocol/express';
 import express from 'express';
@@ -24,13 +24,14 @@ import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
 import { createMcpServer } from './mcp-server.js';
 import { answerTaskRequest } from './mcp-tasks.js';
+import { withClientCapabilities, envelopeCapabilities } from './client-extensions.js';
 
 export { buildToolDefs };
 
 /** One MCP server over this engine — what the HTTP handler builds per request, and what an
  *  in-process client (the tests) connects to directly. */
-export function makeMcpServer(engine, services = servicesFor(engine), { era } = {}) {
-  return createMcpServer(services, { era });
+export function makeMcpServer(engine, services = servicesFor(engine), { era, offer } = {}) {
+  return createMcpServer(services, { era, offer });
 }
 
 // THE CEILING ON WHAT A DEPLOYMENT MAY CONFIGURE. Both grace windows (how long an SQL build and how
@@ -221,7 +222,9 @@ export function createApp(engine, opts = {}) {
   const node = toNodeHandler(handler);
   app.all('/mcp', (req, res) => {
     if (answerTaskRequest(services.tasks, req, res)) return;
-    void node(req, res, req.body);
+    // what THIS request's client declares (its envelope's capabilities) decides which extensions
+    // the server built for it offers (src/client-extensions.js)
+    void withClientCapabilities(envelopeCapabilities(req.body, CLIENT_CAPABILITIES_META_KEY), () => node(req, res, req.body));
   });
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
 

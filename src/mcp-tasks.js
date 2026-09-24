@@ -18,6 +18,7 @@
 import { classifyInboundRequest, CLIENT_CAPABILITIES_META_KEY, SERVER_INFO_META_KEY } from '@modelcontextprotocol/server';
 import { SERVER_INFO } from './mcp-surface.js';
 import { TASKS_EXTENSION } from './mcp-server.js';
+import { envelopeCapabilities, declaresExtension } from './client-extensions.js';
 
 const METHODS = new Set(['tasks/get', 'tasks/cancel']);
 
@@ -52,8 +53,8 @@ export function answerTaskRequest(tasks, req, res) {
   if (req.headers['mcp-method'] !== body.method) return fail(400, -32020, `Header mismatch: Mcp-Method header '${req.headers['mcp-method']}' does not match body value '${body.method}'`);
   if (decodeHeader(req.headers['mcp-name']) !== taskId) return fail(400, -32020, `Header mismatch: Mcp-Name header '${req.headers['mcp-name']}' does not match params.taskId '${taskId}'`);
 
-  const caps = body.params?._meta?.[CLIENT_CAPABILITIES_META_KEY];
-  if (!caps?.extensions?.[TASKS_EXTENSION]) {
+  // offered only to a client that declares the extension in this request (src/client-extensions.js)
+  if (!declaresExtension(envelopeCapabilities(body, CLIENT_CAPABILITIES_META_KEY), TASKS_EXTENSION)) {
     return fail(400, -32021, 'Missing required client capability', { requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } } });
   }
   const t = typeof taskId === 'string' ? tasks.get(taskId) : null;

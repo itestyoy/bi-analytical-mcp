@@ -6,6 +6,18 @@
 import { MAX_WAIT_SECONDS } from './schema.js';
 import { withSignal } from './request-context.js';
 import { appsSurface, viewMeta } from './apps.js';
+
+// The tools that take a card declaration (`display`) — offered only to a client that renders cards.
+const DISPLAY_TOOLS = new Set(['query_semantic_model', 'get_query_result']);
+/** A tool's input schema without the card declaration, for a client that renders no cards. */
+function withoutDisplay(schema) {
+  if (!schema?.properties?.display) return schema;
+  const { display: _drop, ...properties } = schema.properties;
+  const out = { ...schema, properties };
+  // the one rule about it at the root (a drill-down needs materialize) goes with it
+  if (out.if?.properties?.display) { delete out.if; delete out.then; }
+  return out;
+}
 import { buildSkills } from './skills.js';
 import { TaskRegistry } from './tasks.js';
 
@@ -41,6 +53,9 @@ const TOOL_TITLES = {
 
 // Server-level documentation surfaced to the AI client (serverInfo.description):
 // what this MCP is for and how to use it end-to-end.
+// Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
+const RESULT_CARDS = `RESULT CARDS: in a host that renders MCP Apps, the results of query_semantic_model, get_query_result and experiment are drawn for the person as cards — a chart, KPI tiles, a funnel, a sankey, the A/B test, the split check, the sample-size plan. A query that outlasts its call answers with a query_id; its card follows the query and draws the result in place when it is ready (where the host lets a card read its result), but YOU still need the rows: call get_query_result({ query_id }) until it is ready before you report the numbers. build_native_model draws none: after materialize, call get_query_result({ context_id, table }) on the pipeline's table (its response names it under show_to_user) to show a funnel or a chart, and do not draw your own chart of the same rows. DECLARE the card with \`display\` (on query_semantic_model or get_query_result) whenever the result is a funnel or a chart: pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order, instead of guessing from column names. It names result columns and changes no numbers; a column that is not in the result is refused with the list. Without it, a funnel is only inferred from step-like names (step1_…, a column named step) with counts that do not grow.`;
+
 const SERVER_DESCRIPTION = `Declarative semantic layer for product analytics.
 
 WHAT IT DOES
@@ -61,7 +76,6 @@ WORKFLOW
    - Beyond SQL (a statistical test, clustering, scoring, a forecast), where the overview's python_models says available: add a 'python' stage to a build_native_model pipeline — but ONLY for the part SQL cannot express, with the table it reads prepared by the SQL stages before it. Do not write one from memory: semantic_index({ guide: "python" }) is this warehouse's frame rules and the reasoning behind them, the stage description indexes the worked recipes by the move each covers, and semantic_index({ recipe: "<id>" }) returns one in full. Read the result with get_query_result as usual.
 3. query_semantic_model — run metrics with group_by / where / order_by / time_range. Options: dry_run (preview, no run), explain (query plan, no run), materialize (persist the result and read it back; long queries return a query_id to poll), limit/offset.
 4. get_query_result — poll a backgrounded query by query_id, or re-read/re-slice a stored result (where/group_by/aggregations/having) WITHOUT recomputing.
-RESULT CARDS: in a host that renders MCP Apps, the results of query_semantic_model, get_query_result and experiment are drawn for the person as cards — a chart, KPI tiles, a funnel, a sankey, the A/B test, the split check, the sample-size plan. A query that outlasts its call answers with a query_id; its card follows the query and draws the result in place when it is ready (where the host lets a card read its result), but YOU still need the rows: call get_query_result({ query_id }) until it is ready before you report the numbers. build_native_model draws none: after materialize, call get_query_result({ context_id, table }) on the pipeline's table (its response names it under show_to_user) to show a funnel or a chart, and do not draw your own chart of the same rows. DECLARE the card with \`display\` (on query_semantic_model or get_query_result) whenever the result is a funnel or a chart: pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order, instead of guessing from column names. It names result columns and changes no numbers; a column that is not in the result is refused with the list. Without it, a funnel is only inferred from step-like names (step1_…, a column named step) with counts that do not grow.
 
 KEY CONCEPTS
 - context_id: an isolated workspace; parallel tasks never collide. Manage via context({ action: list | describe | drop | delete_model | delete_semantic_model }).
@@ -130,12 +144,13 @@ function titleFromName(name) {
  * `registerAppTool` does: a host without the extension ignores it, so the list is the same for
  * everyone (and cacheable as such).
  */
-export function buildToolDefs(engine) {
+export function buildToolDefs(engine, { renders = true } = {}) {
   return Object.entries(engine.schemas)
     .filter(([name]) => !HIDDEN_TOOLS.has(name))
-    .map(([name, inputSchema]) => {
+    .map(([name, schema]) => {
       const title = TOOL_TITLES[name] || titleFromName(name);
-      const meta = viewMeta(name);
+      const meta = viewMeta(name, renders);
+      const inputSchema = renders ? schema : withoutDisplay(schema);
       // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
       // read the older annotations location. `name` remains the stable programmatic identifier.
       return {
@@ -144,7 +159,7 @@ export function buildToolDefs(engine) {
         description: TOOL_DESCRIPTIONS[name] || name,
         inputSchema,
         annotations: { title, openWorldHint: false, ...(TOOL_BEHAVIOUR[name] || {}) },
-        _meta: meta,
+        ...(meta ? { _meta: meta } : {}),
       };
     });
 }
@@ -181,12 +196,17 @@ const PROGRESS_EVERY_MS = Number(process.env.MCP_PROGRESS_INTERVAL_MS) || 5000;
  * tool. `signal` stops the processes the call started; `onProgress(params)` receives heartbeats.
  * Returns { result: CallToolResult, raw } — `raw` is the engine's value (null on error).
  */
-export async function runTool(engine, name, args, { signal, onProgress, progressEveryMs = PROGRESS_EVERY_MS } = {}) {
+export async function runTool(engine, name, args, { signal, onProgress, progressEveryMs = PROGRESS_EVERY_MS, renders = true } = {}) {
   const started = Date.now();
   logLine(name, `▶ call ${summarizeArgs(args)}`);
   if (!isCallableTool(engine, name)) {
     logLine(name, '✗ unknown tool');
     return { result: errorResult(`unknown tool: ${name}`, 'validate'), raw: null, unknown: true };
+  }
+  // a card declaration from a client that renders no cards: not offered to it, so not accepted
+  if (!renders && DISPLAY_TOOLS.has(name) && args?.display !== undefined) {
+    logLine(name, '✗ display from a client without the Apps extension');
+    return { result: errorResult('display is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so no card is drawn — drop the display field', 'validate', 'display'), raw: null };
   }
   let beat;
   if (onProgress) {
@@ -197,7 +217,9 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
     }, progressEveryMs);
   }
   try {
-    const raw = await withSignal(signal, () => (ASYNC_TOOLS.has(name) ? engine[name](args || {}) : Promise.resolve().then(() => engine[name](args || {}))));
+    let raw = await withSignal(signal, () => (ASYNC_TOOLS.has(name) ? engine[name](args || {}) : Promise.resolve().then(() => engine[name](args || {}))));
+    // the hint to show a result as a card means nothing to a client that draws none
+    if (!renders && isPlainObject(raw) && 'show_to_user' in raw) { const { show_to_user: _hint, ...rest } = raw; raw = rest; }
     logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(raw)}`);
     return { result: toCallToolResult(raw), raw };
   } catch (err) {
@@ -227,8 +249,8 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
  * Run a tool call TO ITS END: when the engine detaches a build (a query_id), follow the job until
  * it is ready or failed and return what get_query_result returns then. This is what a task runs.
  */
-export async function runToCompletion(engine, name, args, { signal, pollMs = 2000 } = {}) {
-  const first = await runTool(engine, name, args, { signal });
+export async function runToCompletion(engine, name, args, { signal, pollMs = 2000, renders = true } = {}) {
+  const first = await runTool(engine, name, args, { signal, renders });
   if (!isDetachedJob(first.raw)) return first;
   let job = first.raw;
   // Following the job has the same contract as the call itself: its failure — the job ended in
@@ -303,21 +325,26 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     apps,
     skills,
     tasks,
-    // built once: the SDK builds a server per request, and the definitions never change
-    toolDefs: buildToolDefs(engine),
+    // built once: the SDK builds a server per request, and the definitions never change — in two
+    // variants, for a client that renders MCP Apps and for one that does not (src/apps.js)
+    toolDefs: { apps: buildToolDefs(engine, { renders: true }), plain: buildToolDefs(engine, { renders: false }) },
     // how often a call with a progressToken hears it is alive; how long a call may run inline
     // before it becomes a task (for a client that declared the Tasks extension)
     progressEveryMs,
     taskAfterMs,
-    instructions: SERVER_DESCRIPTION + skillPointer,
-    resources() {
+    /** The instructions for what this client is offered: the card and skills paragraphs only for
+     *  a client that declared those extensions (src/client-extensions.js). */
+    instructionsFor(offer = {}) {
+      return [SERVER_DESCRIPTION, offer.apps ? `\n${RESULT_CARDS}` : '', offer.skills ? skillPointer : ''].join('');
+    },
+    resources(offer = {}) {
       return [
-        ...apps.resources(),
-        ...(skills ? skills.skills.map((s) => ({ uri: s.uri, name: s.frontmatter.name, title: `Skill: ${s.frontmatter.name}`, description: s.frontmatter.description, mimeType: 'text/markdown', size: s.resources.find((r) => r.uri === s.uri)?.size })) : []),
+        ...(offer.apps ? apps.resources() : []),
+        ...(skills && offer.skills ? skills.skills.map((s) => ({ uri: s.uri, name: s.frontmatter.name, title: `Skill: ${s.frontmatter.name}`, description: s.frontmatter.description, mimeType: 'text/markdown', size: s.resources.find((r) => r.uri === s.uri)?.size })) : []),
       ];
     },
-    templates() {
-      return skills
+    templates(offer = {}) {
+      return skills && offer.skills
         ? skills.skills.filter((s) => s.resources.some((r) => /\/recipes\//.test(r.uri))).map((s) => ({
           uriTemplate: s.uri.replace(/SKILL\.md$/, 'recipes/{recipe}.md'),
           name: `${s.frontmatter.name}-recipe`,
@@ -328,11 +355,11 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
         : [];
     },
     /** The contents of a resource, or null when this server has no such URI. */
-    read(uri) {
+    read(uri, offer = {}) {
       if (typeof uri !== 'string') return null;
-      const ui = apps.read(uri);
+      const ui = offer.apps ? apps.read(uri) : null;
       if (ui) return ui;
-      const f = skills?.read(uri);
+      const f = offer.skills ? skills?.read(uri) : null;
       return f ? [{ uri: f.uri, mimeType: f.mimeType, text: f.text }] : null;
     },
     onShutdown(fn) { shutdownHooks.add(fn); },

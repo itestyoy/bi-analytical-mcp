@@ -21,6 +21,10 @@ import { createServices } from '../../src/mcp-surface.js';
 export const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 export const V = '2026-07-28';
 export const TASK_CAPS = { extensions: { 'io.modelcontextprotocol/tasks': {} } };
+/** A client that declares the Skills extension. */
+export const SKILLS_CAPS = { extensions: { 'io.modelcontextprotocol/skills': {} } };
+/** A client that declares it renders MCP Apps (the extension, with the view's MIME type). */
+export const APPS_CAPS = { extensions: { 'io.modelcontextprotocol/ui': { mimeTypes: ['text/html;profile=mcp-app'] } } };
 
 export function makeEngine({ recipes = true } = {}) {
   const catalog = loadCatalog(CATALOG, {});

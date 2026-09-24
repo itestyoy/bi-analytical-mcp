@@ -122,10 +122,23 @@
   every tool is `visibility: ["model"]` except `get_query_result` (`["model", "app"]`), the view
   resource declares an empty `csp` and the page its own CSP, and the view's ONE server call is
   get_query_result for the result it was drawn from — the query_id of its own detached result,
-  polled until the rows are there so they appear in the same card, and the next level of a
-  drill-down (`display.kind: pivot`) when a row opens: its stored table, filtered to that row and
-  grouped by the level below (no other tools/call, resource, model message, link or network) — a
-  test holds its sources to that. Everything else interactive stays on the data already in the page.
+  polled until the rows are there so they appear in the same card, and a drill-down's next view
+  — a pivot row opening (`display.kind: pivot`) or a chart mark clicked (`display.drill`): its
+  stored table, filtered to the path taken and grouped by the dimension chosen, each read built by
+  the view model's one definition of a view (no other tools/call, resource, model message, link or
+  network) — a test holds its sources to that. Everything else interactive stays on the data already in the page.
+- AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
+  envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
+  * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): `_meta.ui`, the view resource,
+    the `display` declaration, the RESULT CARDS instructions, the `show_to_user` hint — a `display`
+    from any other client is refused;
+  * Skills (`io.modelcontextprotocol/skills`): skills/list and skills/get (-32021 otherwise), the
+    skill files in resources/list, templates and resources/read, the SKILLS pointer in the
+    instructions;
+  * Tasks (`io.modelcontextprotocol/tasks`): a long call becoming a task, tasks/get|cancel|update
+    (-32021 otherwise).
+  A 2025 client declares capabilities once, in `initialize`, and is served statelessly, so its later
+  requests carry nothing to go by — it gets none of them. The lists that differ are cached `private`.
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

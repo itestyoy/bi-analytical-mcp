@@ -1,7 +1,8 @@
 /**
  * @file Query Result view — the cards inside the host's conversation: a CHART (a line or multi-line,
  * a stacked area, grouped/stacked/horizontal bars, a donut of shares or a sankey of flows — the chart
- * alone, the only table is the pivot), KPI TILES (a headline number, its
+ * alone, the only table is the pivot; a declared drill lets a click open a mark into a dimension, with
+ * a breadcrumb and a back button), KPI TILES (a headline number, its
  * change, a sparkline), a PIVOT (a drill-down table, each level read when its row opens), a FUNNEL
  * (steps, conversion, the biggest drop) and the A/B
  * family (the test, the split check, the sample-size plan). Any other result gets one status line.
@@ -9,11 +10,12 @@
  * IT DRAWS, AND READS ONLY ITS OWN RESULT. The input is the tool result the host delivers
  * (ontoolresult). The one thing it asks for is more of that same result, through get_query_result
  * (readResult): the rows of a query that outlasted its call (followQuery polls its query_id), and
- * the next level of a drill-down when a row opens (its stored table, filtered to that row). Nothing
+ * a drill-down's next view (its stored table, filtered to the pivot row opened or the chart mark
+ * clicked, grouped by the dimension chosen). Nothing
  * else: no other tool, no resource, no message to the model, no link — and no network at all (the
- * page's CSP, and the resource's declared `csp`). Everything else interactive here —
- * sorting, filtering, the legend, fullscreen — works on the data already in the page or on the
- * host's own frame.
+ * page's CSP, and the resource's declared `csp`). Everything else interactive here — the
+ * tooltip, the legend, fullscreen — works on the data already in the page or on the host's own
+ * frame.
  *
  * WHAT to show is decided by buildViewModel (src/apps/result-view-model.js), a pure function the
  * unit tests run in node on real tool results; this file only draws it. Structure follows the
@@ -43,7 +45,7 @@ import {
   Tooltip,
 } from 'chart.js';
 import { Flow, SankeyController } from 'chartjs-chart-sankey';
-import { buildViewModel, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../result-view-model.js';
+import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../result-view-model.js';
 import { icon } from './icons.js';
 import './global.css';
 import './mcp-app.css';
@@ -136,6 +138,10 @@ const cardsSection = document.getElementById('cards-section');
 const notesEl = document.getElementById('notes');
 const notesList = document.getElementById('notes-list');
 const fullscreenBtn = document.getElementById('fullscreen-btn');
+const backBtn = document.getElementById('back-btn');
+const chartCrumbs = document.getElementById('chart-crumbs');
+const chartMenu = document.getElementById('chart-menu');
+const chartLoading = document.getElementById('chart-loading');
 const loadingEl = document.getElementById('loading');
 const statusEl = document.getElementById('status');
 
@@ -147,10 +153,10 @@ document.getElementById('loading-icon').append(icon('loader-circle', 'icon spin'
 const state = {
   toolName: null,
   toolInput: null,
-  lastResult: null,
-  model: null,
   chart: null,
   follow: 0, // bumps on every new result, so a stale poll loop stops
+  current: null, // the view model on screen
+  drill: [], // the drill-down path: { model, crumb } from the result as it came to the view on screen
   displayMode: 'inline',
 };
 
@@ -305,8 +311,16 @@ const CARDS = { chart: (m) => renderChartResult(m), kpi: (m) => renderKpi(m), pi
 function render(result) {
   loadingEl.hidden = true; // the result is here: the spinner's job is done, whatever is drawn next
   const model = buildViewModel(state.toolName, payloadOf(result), state.toolInput);
-  state.model = model;
+  state.drill = []; // a new result starts a new drill-down path
+  show(model);
+}
+
+/** Draw one view model — the result as it came, or a view of it a drill-down stepped into. */
+function show(model) {
+  state.current = model;
+  closeDrillMenu();
   resetSections();
+  updateDrillNav();
   const draw = CARDS[model.kind];
   mainEl.hidden = !draw;
   statusEl.hidden = !!draw;
@@ -508,8 +522,8 @@ const canFollow = () => !!app.getHostCapabilities()?.serverTools;
 
 /**
  * THE view's one way to the server: get_query_result, for the result this card was drawn from —
- * its query_id while it waits for the rows, or its stored table's next level when a row of a
- * drill-down opens. Read-only, and only this card's own result.
+ * its query_id while it waits for the rows, or its stored table's next view when a drill-down
+ * steps down (a pivot row, a chart mark). Read-only, and only this card's own result.
  */
 const readResult = (args) => app.callServerTool({ name: 'get_query_result', arguments: args });
 
@@ -537,7 +551,6 @@ async function followQuery(queryId) {
     if (token !== state.follow) return;
     if (payloadOf(next)?.status === 'running') continue;
     state.follow++; // this loop is done; the result below may not start another one for the same id
-    state.lastResult = next;
     render(next);
     return;
   }
@@ -562,12 +575,28 @@ function showStatus(model) {
 }
 
 function renderChartResult(model) {
+  // a page of a larger result says which rows it is, so a chart of one page never reads as the whole
+  const page = model.page;
+  const partial = page && (page.offset > 0 || page.has_more);
+  const rowsText = partial
+    ? `rows ${formatNumber(page.offset + 1)}–${formatNumber(page.offset + model.row_count)}${page.has_more ? ' · more exist' : ''}`
+    : `${formatNumber(model.row_count)} row${model.row_count === 1 ? '' : 's'}`;
   setDescription(
-    badge(`${formatNumber(model.row_count)} row${model.row_count === 1 ? '' : 's'}`, 'secondary'),
+    badge(rowsText, 'secondary'),
     model.sampled ? badge('random sample', 'outline') : null,
     model.approximate ? badge('approximate', 'outline') : null,
   );
   renderChart(model.chart, model.chart.y || 'Series');
+}
+
+/** What the chart left out, in the model's own numbers: series not drawn, and by what rule. */
+function showFolded(chart) {
+  if (!chart.folded) return;
+  const bySize = chart.folded_by === 'size';
+  showAlert({
+    title: `${chart.folded} ${bySize ? 'smaller ' : ''}series ${chart.folded === 1 ? 'is' : 'are'} not drawn`,
+    description: bySize ? `The chart keeps the largest ${chart.kept}.` : `The chart keeps the first ${chart.kept}, in column order.`,
+  });
 }
 
 // ── chart (shadcn charts: horizontal grid only, no axis or tick lines, HTML tooltip and legend) ─
@@ -629,6 +658,7 @@ function renderChart(chart, title) {
       // bar (a length) start at zero
       options: {
         ...common,
+        ...drillOptions(chart, (el) => linePointDrill(chart, labels, timeLabel, el)),
         scales: chart.area
           ? { x: common.scales.x, y: { ...common.scales.y, stacked: !!chart.stacked } }
           : { ...common.scales, y: { ...common.scales.y, beginAtZero: false, grace: '5%' } },
@@ -637,7 +667,7 @@ function renderChart(chart, title) {
     chartDescriptionEl.textContent = `${labels.length} points · ${chart.series.length} series`;
     chartCanvas.setAttribute('aria-label', `${title}: ${chart.series.length} series over ${labels.length} points`);
     if (chart.series.length > 1) drawLegend();
-    if (chart.folded) showAlert({ title: `${chart.folded} smaller series are not drawn`, description: 'The chart keeps the largest six readable.' });
+    showFolded(chart);
     return;
   }
 
@@ -665,6 +695,7 @@ function renderChart(chart, title) {
         layout: { padding: 8 },
         interaction: { mode: 'nearest', intersect: true },
         plugins: { legend: { display: false }, tooltip: { enabled: false, external: drawTooltip } },
+        ...drillOptions(chart, (el) => sliceDrill(chart, el)),
       },
     });
     chartDescriptionEl.textContent = `${chart.slices.length} slices · total ${formatNumber(chart.total)}${chart.folded ? ` · ${chart.folded} smallest in Other` : ''}`;
@@ -714,9 +745,10 @@ function renderChart(chart, title) {
 
   // bars: one series (a bar per category), several side by side (grouped) or stacked into one
   const series = chart.series || [{ name: chart.y || 'value', values: chart.bars.map((b) => b.value) }];
-  const allLabels = chart.labels || chart.bars.map((b) => b.label);
-  const labels = allLabels.slice(0, 30);
-  const horizontal = typeof chart.horizontal === 'boolean' ? chart.horizontal : allLabels.length > 8;
+  // the model already chose the categories drawn; categories_total says how many there were
+  const labels = chart.labels || chart.bars.map((b) => b.label);
+  const total = chart.categories_total ?? labels.length;
+  const horizontal = typeof chart.horizontal === 'boolean' ? chart.horizontal : labels.length > 8;
   const stacked = !!chart.stacked;
   state.chart = new Chart(chartCanvas, {
     type: 'bar',
@@ -738,22 +770,167 @@ function renderChart(chart, title) {
     },
     options: {
       ...common,
+      ...drillOptions(chart, (el) => barDrill(chart, labels, series, el)),
       indexAxis: horizontal ? 'y' : 'x',
       scales: horizontal
         ? { x: { ...common.scales.y, stacked }, y: { ...common.scales.x, stacked } }
         : { x: { ...common.scales.x, stacked }, y: { ...common.scales.y, stacked } },
     },
   });
-  const count = allLabels.length > labels.length ? `top ${labels.length} of ${allLabels.length}` : `${labels.length} ${labels.length === 1 ? 'bar' : 'bars'}`;
+  const count = total > labels.length ? `${labels.length} of ${formatNumber(total)} categories shown` : `${labels.length} ${labels.length === 1 ? 'bar' : 'bars'}`;
   chartDescriptionEl.textContent = series.length > 1 ? `${count.replace(/bars?$/, labels.length === 1 ? 'category' : 'categories')} · ${series.length} series${stacked ? ', stacked' : ''}` : count;
   chartCanvas.setAttribute('aria-label', `${title}: ${labels.length} categories${series.length > 1 ? `, ${series.length} series` : ''}`);
   if (series.length > 1) drawLegend();
-  if (chart.folded) showAlert({ title: `${chart.folded} smaller series are not drawn`, description: 'The chart keeps the largest six readable.' });
+  showFolded(chart);
+  // other amounts of an inferred breakdown share no axis with the drawn one: named, not drawn
+  if (chart.omitted?.length) showAlert({ title: `${chart.omitted.length} more ${chart.omitted.length === 1 ? 'column is' : 'columns are'} not drawn`, description: chart.omitted.join(', ') });
 }
+
+// ── drill-down: a click on a mark offers the dimensions left, the chart redraws filtered to it ──
+
+/**
+ * Chart.js click and hover options for a chart that can be drilled into (nothing otherwise): a
+ * mark under the pointer shows a hand, and a click on it opens the drill menu. `target` turns the
+ * clicked element into what the menu drills into — the filters it adds, how it reads, and which
+ * steps it offers — or null when the mark cannot be drilled (an "Other" slice).
+ */
+function drillOptions(chart, target) {
+  if (!chart.drill?.levels?.length || !canFollow()) return {};
+  return {
+    onHover: (evt, els) => { chartCanvas.style.cursor = els.length ? 'pointer' : 'default'; },
+    onClick: (evt, els) => {
+      const t = els.length ? target(els[0]) : null;
+      if (t) openDrillMenu(chart, t, evt.x, evt.y);
+      else closeDrillMenu();
+    },
+  };
+}
+
+const drillFilter = (column, key, label) => ({ column, value: key ?? null, label });
+
+function barDrill(chart, labels, series, el) {
+  const d = chart.drill;
+  const filters = [drillFilter(chart.x, d.keys?.[el.index], labels[el.index])];
+  // a bar of a split is one category AND one value of the split
+  if (d.series_column && series[el.datasetIndex]) filters.push(drillFilter(d.series_column, series[el.datasetIndex].key, series[el.datasetIndex].name));
+  return { filters, steps: d.levels.map((level) => ({ level, mode: 'breakdown' })) };
+}
+
+function sliceDrill(chart, el) {
+  const slice = chart.slices[el.index];
+  if (!slice || slice.other) return null; // "Other" is several slices, not one value to filter by
+  return { filters: [drillFilter(chart.x, slice.key, slice.label)], steps: chart.drill.levels.map((level) => ({ level, mode: 'breakdown' })) };
+}
+
+function linePointDrill(chart, labels, timeLabel, el) {
+  const d = chart.drill;
+  const x = labels[el.index];
+  const line = chart.series[el.datasetIndex];
+  const bySeries = d.series_column && line ? [drillFilter(d.series_column, line.key, line.name)] : [];
+  const atX = drillFilter(chart.x, d.x_keys ? d.x_keys[x] : x, timeLabel(x));
+  // a point opens into that moment broken down, or into the whole line split over time
+  return {
+    filters: [...bySeries, atX],
+    steps: d.levels.flatMap((level) => [
+      { level, mode: 'breakdown', filters: [...bySeries, atX], hint: timeLabel(x) },
+      { level, mode: 'trend', filters: bySeries, hint: 'over time' },
+    ]),
+  };
+}
+
+function closeDrillMenu() {
+  chartMenu.hidden = true;
+  chartMenu.replaceChildren();
+}
+
+function openDrillMenu(chart, target, x, y) {
+  clearTooltip();
+  const heading = el('div', 'chart-menu-label', target.filters.map((f) => f.label).join(' · '));
+  chartMenu.replaceChildren(heading, ...target.steps.map((step) => {
+    const item = el('button', 'chart-menu-item');
+    item.type = 'button';
+    item.setAttribute('role', 'menuitem');
+    item.append(icon(step.mode === 'trend' ? 'trending-up' : 'chevron-right'), el('span', null, `by ${step.level.label}`));
+    if (step.hint) item.append(el('span', 'chart-menu-hint', step.hint));
+    item.addEventListener('click', () => drillInto(chart, step.filters || target.filters, step));
+    return item;
+  }));
+  chartMenu.hidden = false;
+  // beside the click, kept inside the chart
+  const box = chartCanvas.getBoundingClientRect();
+  const w = chartMenu.offsetWidth;
+  const h = chartMenu.offsetHeight;
+  chartMenu.style.left = `${Math.max(0, Math.min(x + 8, box.width - w))}px`;
+  chartMenu.style.top = `${Math.max(0, Math.min(y + 8, box.height - h))}px`;
+  chartMenu.querySelector('.chart-menu-item')?.focus({ preventScroll: true });
+}
+
+/** One step down: read the view from the stored table, and draw it in place of this one. */
+async function drillInto(chart, filters, step) {
+  closeDrillMenu();
+  const d = chart.drill;
+  const path = [...d.path, ...filters.map(({ column, value }) => ({ column, value }))];
+  const view = drillView(d.display, path, { level: { column: step.level.column }, mode: step.mode });
+  chartLoading.replaceChildren(icon('loader-circle', 'icon spin'));
+  chartLoading.hidden = false;
+  let got;
+  try {
+    got = payloadOf(await readResult({ ...d.source, transform: view.transform, limit: DRILL_ROWS }));
+  } catch (e) {
+    log.error('drilling down failed', e);
+    got = { ok: false };
+  }
+  chartLoading.hidden = true;
+  if (got?.ok === false) {
+    showAlert(got.error?.code === 'result_gone'
+      ? { title: 'This result is no longer available', iconName: 'clock' }
+      : { title: 'Could not load this view', variant: 'destructive', iconName: 'circle-alert' });
+    return;
+  }
+  const next = buildViewModel(state.toolName, { ...got, display: view.display, drill_source: d.source, drill_path: path }, null);
+  if (next.kind !== 'chart') {
+    showAlert({ title: 'Nothing to draw for this selection' });
+    return;
+  }
+  next.title = state.current.title; // the card keeps its name; the path says where it is
+  if (!state.drill.length) state.drill.push({ model: state.current, crumb: 'All' });
+  const crumb = [...filters.map((f) => f.label), step.mode === 'trend' || !filters.length ? `by ${step.level.label}` : null].filter(Boolean).join(' · ');
+  state.drill.push({ model: next, crumb });
+  show(next);
+}
+
+/** The path taken, as a breadcrumb over the chart, and the back button beside fullscreen. */
+function updateDrillNav() {
+  const path = state.drill;
+  const deep = path.length > 1 && state.current === path[path.length - 1].model;
+  backBtn.hidden = !deep;
+  chartCrumbs.hidden = !deep;
+  if (!deep) { chartCrumbs.replaceChildren(); return; }
+  chartCrumbs.replaceChildren(...path.flatMap((entry, i) => {
+    const last = i === path.length - 1;
+    const node = last ? el('span', null, entry.crumb) : el('button', null, entry.crumb);
+    if (last) node.setAttribute('aria-current', 'page');
+    else { node.type = 'button'; node.addEventListener('click', () => goBackTo(i)); }
+    return i ? [icon('chevron-right'), node] : [node];
+  }));
+}
+
+function goBackTo(index) {
+  state.drill = state.drill.slice(0, index + 1);
+  const target = state.drill[index].model;
+  if (index === 0) state.drill = [];
+  show(target);
+}
+
+backBtn.replaceChildren(icon('chevron-left'));
+backBtn.addEventListener('click', () => { if (state.drill.length > 1) goBackTo(state.drill.length - 2); });
+document.addEventListener('pointerdown', (e) => { if (!chartMenu.hidden && !chartMenu.contains(e.target) && e.target !== chartCanvas) closeDrillMenu(); });
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeDrillMenu(); });
 
 /** shadcn ChartTooltipContent, drawn as HTML next to the canvas. */
 function drawTooltip({ chart, tooltip }) {
-  if (tooltip.opacity === 0 || !tooltip.dataPoints?.length) {
+  // an open drill menu is the answer to the click: no tooltip on top of it
+  if (tooltip.opacity === 0 || !tooltip.dataPoints?.length || !chartMenu.hidden) {
     chartTooltip.hidden = true;
     return;
   }
@@ -1183,8 +1360,8 @@ function handleHostContextChanged(ctx) {
     updateFullscreenButton();
   }
   // colors come from CSS variables: a theme change re-draws the chart in the new ones
-  if ((ctx.theme || ctx.styles) && state.chart && state.lastResult) {
-    render(state.lastResult);
+  if ((ctx.theme || ctx.styles) && state.chart && state.current) {
+    show(state.current); // the view on screen — a drilled one stays where it is
   }
 }
 
@@ -1204,7 +1381,6 @@ app.ontoolinput = (params) => {
 
 app.ontoolresult = (result) => {
   state.follow++; // a new result replaces whatever the card was following
-  state.lastResult = result;
   render(result);
 };
 

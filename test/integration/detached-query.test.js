@@ -16,7 +16,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
-import { buildViewModel, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
+import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -218,4 +218,32 @@ test('a pivot shows the top level from the warehouse, and a row opens into its c
   const children = pivotRows(level, display, 1);
   assert.ok(children.length >= 1);
   assert.equal(children.reduce((a, c) => a + (c.values[0] ?? 0), 0), 35, 'the children of US add up to US');
+});
+
+// A CHART DRILL-DOWN: the chart is drawn from the stored table folded over its drill levels, and a
+// click steps into a mark — the same read the card makes, run here against the warehouse.
+test('a drillable bar is drawn folded over its drill level, and a bar drills into its breakdown, which adds up to it', opts, async (t) => {
+  if (skip(t)) return;
+  const display = { kind: 'bar', x: 'users_country', y: ['mon_revenue'], drill: { levels: [{ column: 'users_platform', label: 'Platform' }] } };
+  const groupBy = [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }];
+  await assert.rejects(engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: groupBy, display }), (e) => e.field !== undefined || /materialize/.test(e.message));
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: groupBy, materialize: true, display });
+  const top = first.status === 'running' ? await follow(first.query_id) : first;
+  const m = buildViewModel('get_query_result', top);
+  assert.equal(m.chart.type, 'bar');
+  // one bar per country, whatever the platforms under it: the fold of the stored rows
+  const byCountry = Object.fromEntries(m.chart.bars.map((b) => [b.label, b.value]));
+  assert.deepEqual([byCountry.US, byCountry.GB, byCountry.BR], [35, 25, 25]);
+  assert.deepEqual(m.chart.drill.levels, [{ column: 'users_platform', label: 'Platform' }]);
+  // click US → by Platform
+  const i = m.chart.labels.indexOf('US');
+  const path = [{ column: 'users_country', value: m.chart.drill.keys[i] }];
+  const view = drillView(display, path, { level: { column: 'users_platform' }, mode: 'breakdown' });
+  const got = await engine.get_query_result({ ...m.chart.drill.source, transform: view.transform, limit: DRILL_ROWS });
+  const next = buildViewModel('get_query_result', { ...got, display: view.display, drill_source: m.chart.drill.source, drill_path: path });
+  assert.equal(next.chart.x, 'users_platform');
+  assert.equal(next.chart.bars.reduce((a, b) => a + b.value, 0), 35, 'US by platform adds up to US');
+  assert.deepEqual(next.chart.drill.levels, [], 'no level left to step into');
+  // a drill level the chart already draws is refused
+  await assert.rejects(engine.get_query_result({ query_id: first.query_id, display: { ...display, drill: { levels: [{ column: 'users_country' }] } } }), (e) => e.field === 'display');
 });

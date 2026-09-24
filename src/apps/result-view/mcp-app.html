@@ -28,13 +28,17 @@
         <h1 id="title" class="page-title">Query Result</h1>
         <div id="subtitle" class="page-description"></div>
       </div>
-      <button id="fullscreen-btn" class="btn btn-outline btn-icon" type="button" title="Enter fullscreen" aria-label="Enter fullscreen" hidden></button>
+      <div class="page-actions">
+        <button id="back-btn" class="btn btn-outline btn-icon" type="button" title="Back" aria-label="Back to the previous view" hidden></button>
+        <button id="fullscreen-btn" class="btn btn-outline btn-icon" type="button" title="Enter fullscreen" aria-label="Enter fullscreen" hidden></button>
+      </div>
     </header>
 
     <div id="notice" class="alert" role="status" hidden></div>
 
     <section id="chart-section" class="card" hidden>
       <div class="card-header">
+        <nav id="chart-crumbs" class="crumbs" aria-label="Drill-down path" hidden></nav>
         <h2 id="chart-title" class="card-title">Chart</h2>
         <p id="chart-description" class="card-description"></p>
       </div>
@@ -42,6 +46,8 @@
         <div class="chart-container">
           <canvas id="chart" role="img"></canvas>
           <div id="chart-tooltip" class="chart-tooltip" hidden></div>
+          <div id="chart-menu" class="chart-menu" role="menu" hidden></div>
+          <div id="chart-loading" class="chart-loading" hidden></div>
         </div>
         <div id="chart-legend" class="chart-legend" hidden></div>
       </div>

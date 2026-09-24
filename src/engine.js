@@ -27,7 +27,7 @@ import { buildProjection } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 import { detached, currentSignal } from './request-context.js';
-import { pivotTransform, PIVOT_LEVEL_ROWS } from './apps/result-view-model.js'; // what one drill-down level is: the same read for the engine and the card
+import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS } from './apps/result-view-model.js'; // what one drill-down view is: the same read for the engine and the card
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, pythonBuildGraceMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
@@ -3295,7 +3295,7 @@ export class Engine {
       },
       (e) => this.jobs.fail(id, e?.message || String(e)),
     ).catch(() => {});
-    return { ok: true, status: 'running', query_id: id, message: `the ${label} is still running in the warehouse (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — it returns the rows once it is done, so make it before you report the numbers (in a host that renders MCP Apps, this answer's card follows the query and draws the result in place when it is ready)` };
+    return { ok: true, status: 'running', query_id: id, message: `the ${label} is still running in the warehouse (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — it returns the rows once it is done, so make it before you report the numbers` };
   }
 
   /** Keep a detached query's finished response for get_query_result — the newest few, for an hour. */
@@ -3360,8 +3360,10 @@ export class Engine {
     }
     const job = this.jobs.get(id);
     if (job.status === 'error') return { ok: false, status: 'error', query_id: id, table, error: { stage: 'materialize', message: job.error } };
-    // a drill-down shows its TOP level first; the card reads the levels below from this table
-    if (input.display?.kind === 'pivot') return this._withPivot(await this._fetchResult(id, input.limit ?? PIVOT_LEVEL_ROWS, pivotTransform(input.display, [])), input.display, { query_id: id });
+    // a drill-down shows its FIRST view (a pivot's top level, a chart folded over its drill levels);
+    // the card reads the views below from this table
+    const first = this._drillFirstRead(input.display);
+    if (first) return this._withDrillSource(await this._fetchResult(id, input.limit ?? first.limit, first.transform), input.display, { query_id: id });
     return this._withDisplay(await this._fetchResult(id, input.limit ?? 1000, undefined, input.offset ?? 0), input.display);
   }
 
@@ -3412,20 +3414,21 @@ export class Engine {
    */
   async get_query_result(input) {
     this._validate('get_query_result', input);
-    // a drill-down (display kind pivot) reads its TOP level, not every detail row: the card opens the
-    // levels below one row at a time (a read with an explicit transform, which is served as it is)
-    const pivot = !input.transform && [input.display, input.query_id ? this.jobs.get(input.query_id)?.display : null].find((d) => d?.kind === 'pivot');
-    if (pivot) {
+    // a drill-down (a pivot, or a chart with drill) reads its FIRST view, not every detail row: the
+    // card reads the views below one step at a time (a read with an explicit transform, served as is)
+    const drillable = !input.transform && [input.display, input.query_id ? this.jobs.get(input.query_id)?.display : null].find((d) => this._drillFirstRead(d));
+    if (drillable) {
       if (input.display) {
-        // its columns are the stored table's, not the top level's — checked against one row of it
+        // its columns are the stored table's, not the first view's — checked against one row of it
         const probe = await this._getQueryResult({ ...input, display: undefined, limit: 1, offset: undefined });
         const cols = this._resultColumns(probe);
-        const problems = cols ? this._displayProblems(pivot, cols) : [];
+        const problems = cols ? this._displayProblems(drillable, cols) : [];
         if (problems.length) throw new ToolError(`display: ${problems.join('; ')}. This result's columns: ${cols.join(', ')}`, { stage: 'validate', field: 'display' });
         if (!cols) return probe;
       }
-      const out = await this._getQueryResult({ ...input, transform: pivotTransform(pivot, []), limit: input.limit ?? PIVOT_LEVEL_ROWS, offset: undefined });
-      return this._withPivot(out, pivot, input.query_id ? { query_id: input.query_id } : { context_id: input.context_id, table: input.table });
+      const first = this._drillFirstRead(drillable);
+      const out = await this._getQueryResult({ ...input, transform: first.transform, limit: input.limit ?? first.limit, offset: undefined });
+      return this._withDrillSource(out, drillable, input.query_id ? { query_id: input.query_id } : { context_id: input.context_id, table: input.table });
     }
     const out = await this._getQueryResult(input);
     if (input.display) {
@@ -3461,12 +3464,18 @@ export class Engine {
         : display.kind === 'kpi' ? [display.x, ...(display.values || []).flatMap((v) => [v.column, v.previous_column])]
           : display.kind === 'sankey' ? [display.source_column, display.target_column, display.value_column]
             : display.kind === 'pivot' ? [...(display.levels || []).map((l) => l.column), ...(display.values || []).map((v) => v.column)]
-            : [display.x, ...ys, ...(display.series_column ? [display.series_column] : [])];
+              : [display.x, ...ys, ...(display.series_column ? [display.series_column] : [])];
+    const drillLevels = (display.drill?.levels || []).map((l) => l.column);
+    named.push(...drillLevels);
     const problems = [...new Set(named.filter((c) => c && !have.has(c)))].map((c) => `'${c}' is not a column of this result`);
     if (display.kind === 'funnel' && stepColumns && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
     if (display.kind === 'funnel' && stepColumns && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, or declare steps: { label_column, value_column } for a row per step`);
     if (display.series_column && ys.length > 1) problems.push(`series_column splits ONE y column into a ${display.kind === 'bar' ? 'bar' : display.kind === 'area' ? 'band' : 'line'} per value — declare a single y with it`);
     if (display.kind === 'pivot' && new Set((display.levels || []).map((l) => l.column)).size !== (display.levels || []).length) problems.push('a level is listed twice');
+    // a drill level is a dimension the chart does not already draw
+    const drawn = new Set([display.x, display.label_column, display.series_column].filter(Boolean));
+    if (new Set(drillLevels).size !== drillLevels.length) problems.push('a drill level is listed twice');
+    for (const c of drillLevels.filter((c) => drawn.has(c))) problems.push(`'${c}' is drawn by the chart already — a drill level is another dimension`);
     if (display.kind === 'kpi' && !display.x && Array.isArray(rows) && rows.length !== 1) problems.push(`KPI tiles read ONE row, and this result has ${rows.length} — aggregate to one row, or give x (the time column) to show the last row with its trend`);
     if (display.kind === 'sankey' && Array.isArray(rows) && have.has(display.source_column) && have.has(display.target_column)) {
       const links = rows.map((r) => [String(r?.[display.source_column]), String(r?.[display.target_column])]);
@@ -3482,10 +3491,17 @@ export class Engine {
     return problems;
   }
 
-  /** A drill-down's top level, with where its levels are read (the card reads them from there). */
-  _withPivot(out, display, source) {
+  /** The first read of a drill-down display (a pivot's top level, a drillable chart as declared), or null. */
+  _drillFirstRead(display) {
+    if (display?.kind === 'pivot') return { transform: pivotTransform(display, []), limit: PIVOT_LEVEL_ROWS };
+    if (display?.drill) return { transform: drillView(display).transform, limit: DRILL_ROWS };
+    return null;
+  }
+
+  /** A drill-down's first view, with where the views below are read (the card reads them from there). */
+  _withDrillSource(out, display, source) {
     if (!out || out.ok === false || !Array.isArray(out.rows)) return out;
-    return { ...out, display, pivot_source: source };
+    return { ...out, display, drill_source: source };
   }
 
   /** Whether directed links [from, to] loop back anywhere (depth-first, three colours). */

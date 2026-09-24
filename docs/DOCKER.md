@@ -143,6 +143,12 @@ request's own stream, cancellation when the stream closes.
 Three extensions are declared and served; each switches on the moment a client declares it, and
 the plain tools stay exactly as they were for every client that does not:
 
+Each extension below is offered ONLY to a client that declares it in the request being served —
+its capabilities in the 2026-07-28 envelope. A 2025 client declares capabilities once, in
+`initialize`, and this server keeps no sessions, so its later requests carry nothing to go by: it is
+offered none of them (src/client-extensions.js). The listings that differ by client are cached
+`private`.
+
 - **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
   finished in `MCP_TASK_AFTER_MS` comes back as a task (`resultType: "task"`) the HOST polls; a build
   the engine hands back as a `query_id` is followed to its end, so the task's result is the rows.
@@ -152,9 +158,18 @@ the plain tools stay exactly as they were for every client that does not:
 - **Skills** (`io.modelcontextprotocol/skills`) — the analyst procedure, every recipe and (where
   python models run) the python-stage guide, served as Agent Skills (`skills/list`, `skills/get`,
   files via `resources/read` with sha256 digests). Generated at startup from the same objects
-  `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy.
-- **Apps** (`io.modelcontextprotocol/ui`) — `query_semantic_model`, `get_query_result` and
-  `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`):
+  `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy. A client
+  that does not declare it gets `skills/list` / `skills/get` refused (-32021), no skill files in the
+  resource listings or reads, and no SKILLS pointer in the instructions — the same content stays
+  reachable through `semantic_index`.
+- **Apps** (`io.modelcontextprotocol/ui`) — offered ONLY to a client that declares the extension
+  (with the view's MIME type) in the request being served, i.e. a 2026-07-28 client, whose every
+  request carries its capabilities. Every other client — including a 2025 client that declared it in
+  `initialize`, whose later requests carry nothing (this server keeps no sessions) — gets no
+  `_meta.ui`, no view resource, no `display` field (a `display` it sends is refused), no card
+  instructions and no `show_to_user` hint. For a client that declares it, `query_semantic_model`,
+  `get_query_result` and `experiment` render in the host's conversation as an interactive view
+  (`ui://betti/result-view.html`):
   a CHART (a time series or a breakdown — the chart alone; the only table is the pivot below),
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
   TEST (a stat card per variant: lift, interval, verdict, the groups — a significant change coloured
@@ -178,7 +193,12 @@ the plain tools stay exactly as they were for every client that does not:
   and each row it opens reads the next level from the stored table, filtered to that row — 200 rows
   a level; each level re-aggregates
   with the value's agg, so sums and counts add up while distinct counts, averages and ratios do not).
-  Each takes a title;
+  `line`, `area`, `bar` and `pie` may declare `drill: { levels: [{ column, label }], agg }` over a
+  materialized result grouped by those columns too: the chart is drawn folded over them, a click on
+  a bar, slice or point opens a menu of the dimensions left ("by Platform"; a point also "by Platform
+  over time"), and the chart redraws in the same card filtered to what was clicked — a breadcrumb
+  ("All › US › ios") over it and a back button beside fullscreen step back without a read. Each
+  takes a title;
   the server checks the columns exist (a
   detached query remembers it) and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
@@ -198,8 +218,8 @@ the plain tools stay exactly as they were for every client that does not:
   not call it) except `get_query_result`, `["model", "app"]`; the view resource declares an empty
   `csp` (no connect, resource or frame origin) and the page carries the same Content-Security-Policy
   itself; and the view's code makes that one call — get_query_result for its own result: its
-  query_id while it waits, the next level of its own stored table when a pivot row opens — and calls
-  no other tool, resource, model message or link.
+  query_id while it waits, the next view of its own stored table when a pivot row opens or a chart
+  mark is drilled into — and calls no other tool, resource, model message or link.
   (`semantic_index` has no view on purpose: it is the most frequent call and a view on every
   exploration step would bury the conversation.) The view is built like the official MCP Apps
   examples — the ext-apps `App` class, host theme and style variables, shadcn/ui components,

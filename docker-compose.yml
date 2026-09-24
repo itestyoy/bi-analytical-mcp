@@ -25,9 +25,9 @@ services:
       # set CATALOG_PATH, e.g. CATALOG_PATH=/config/catalog.yml.)
       DBT_BASE_PROJECT: "/dbt_project"
       DBT_PROFILES_DIR: "/dbt_project"
-      # dbt v2 (the image's /opt/dbt2venv); set DBT_BIN=dbt for 1.x. On v2 the python stage is not
-      # offered on DuckDB (v2 runs no Python models there) — 1.x runs it.
-      DBT_BIN: "${DBT_BIN:-/opt/dbt2venv/bin/dbt}"
+      # The dbt environment (a venv under /opt/dbt-envs): `default` is dbt v2, `dbt1` is dbt 1.x. On
+      # v2 the python stage is not offered on DuckDB (v2 runs no Python models there) — dbt1 runs it.
+      DBT_ENV: "${DBT_ENV:-default}"
       # Optional ready-made recipes (mounted via CONFIG_DIR below).
       RECIPES_PATH: "/config/recipes.json"
       # Persisted per-context workspace (named volume below).

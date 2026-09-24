@@ -46,14 +46,11 @@ import { openStore } from '../../src/store.js';
 import { startWarehouse } from './warehouse-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
+import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
 const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml');
-const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbt2venv', 'bin', 'dbt'); // dbt v2 (the python stage's file runs on 1.x)
-const MF_BIN = process.env.MF_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'mf');
-const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'python');
-const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);
 const opts = { timeout: 600000 };
 
 let wh; let backend; let ctxs; let engine; let catalog;

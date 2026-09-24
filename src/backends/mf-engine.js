@@ -10,18 +10,21 @@
 
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
-import { createDbt } from '../dbt/index.js';
-import { warehouseTurns } from '../dbt/process.js';
+import { createDbt, resolveEnvironment } from '../dbt/index.js';
+import { warehouseTurns, timing } from '../dbt/process.js';
 import { currentSignal } from '../request-context.js';
 // the sidecar script is a non-JS runtime asset — see src/runtime-assets.js for why it lives there
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 
 export class MfEngineBackend {
-  constructor({ pythonBin = 'python', dbtBin = 'dbt', profilesDir, timeout = 600000, version = 'auto' } = {}) {
-    this.pythonBin = pythonBin;
+  constructor({ pythonBin, dbtBin, profilesDir, timeout = 600000, version = 'auto', environment } = {}) {
+    // the sidecar runs on the Python that has MetricFlow — the environment's (its own or borrowed)
+    const env = environment ? (typeof environment === 'string' ? resolveEnvironment(environment) : environment) : null;
+    this.pythonBin = pythonBin || env?.pythonBin || 'python';
+    dbtBin = dbtBin || env?.dbtBin || 'dbt';
     this.profilesDir = profilesDir;
     this.timeout = timeout;
-    this._dbt = createDbt({ version, dbtBin, profilesDir, timeout });
+    this._dbt = createDbt({ version, dbtBin, profilesDir, timeout, ...(env ? { environment: env } : {}) });
     this._proc = null;
     this._pending = new Map();
     this._seq = 0;
@@ -88,6 +91,8 @@ export class MfEngineBackend {
 
   get major() { return this._dbt.major; }
 
+  get environment() { return this._dbt.environment; }
+
   get semanticSpec() { return this._dbt.semanticSpec; }
 
   pythonModelsOn(adapter) { return this._dbt.pythonModelsOn(adapter); }
@@ -95,8 +100,12 @@ export class MfEngineBackend {
   /** One sidecar request, in the warehouse's turn when it takes one process at a time. */
   _request(projectDir, req) {
     const { turn } = this._dbt.warehouse(projectDir);
-    if (!turn) return this._send(req);
-    return warehouseTurns.run(turn, () => this._send(req), currentSignal()).catch((e) => ({ ok: false, error: e?.message || 'cancelled' }));
+    const asked = Date.now();
+    let began = asked;
+    const send = () => { began = Date.now(); return this._send(req); };
+    const done = (r) => { timing('mf_sidecar', [req.op], asked, began, r); return r; };
+    if (!turn) return send().then(done);
+    return warehouseTurns.run(turn, send, currentSignal()).catch((e) => ({ ok: false, error: e?.message || 'cancelled' })).then(done);
   }
 
   async relationColumns(projectDir, modelName) {

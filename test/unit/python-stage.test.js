@@ -23,7 +23,7 @@ const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', imp
 // hidden. Force it on for these tests, exactly as an operator does when the submission is set per
 // model; the availability rules themselves are tested at the end of this file.
 process.env.MCP_PYTHON_MODELS = 'on';
-const VENV_PY = join(process.cwd(), '.dbtvenv', 'bin', 'python');
+const VENV_PY = join(process.cwd(), '.venvs', 'dbt1', 'bin', 'python');
 const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
 const HAS_PY = spawnSync(PY, ['--version']).status === 0;
 

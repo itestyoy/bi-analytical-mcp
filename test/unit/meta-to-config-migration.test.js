@@ -20,7 +20,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 
 const SCRIPT = fileURLToPath(new URL('../../scripts/meta-to-config.py', import.meta.url));
-const PY = ['python3', join(process.cwd(), '.dbtvenv', 'bin', 'python')].find((p) => p === 'python3' || existsSync(p));
+const PY = ['python3', join(process.cwd(), '.venvs', 'dbt1', 'bin', 'python')].find((p) => p === 'python3' || existsSync(p));
 
 const LEGACY = `version: 2
 

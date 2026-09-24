@@ -11,27 +11,26 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# dbt + MetricFlow into an isolated venv; expose `dbt`/`mf` on PATH.
-# Pick the warehouse adapter at build time: requirements.txt (DuckDB, default)
-# or requirements-bigquery.txt (BigQuery) — see docker-compose.bigquery.yml.
+# dbt runs in named ENVIRONMENTS — one virtualenv each under DBT_ENVS_DIR (src/dbt/environments.js);
+# the server uses DBT_ENV (else `default`) and reads its dbt version from the binary.
+#   dbt1    — dbt 1.x + the warehouse adapter + MetricFlow (`mf`): DBT_REQUIREMENTS picks the adapter,
+#             requirements.txt (DuckDB, default) or requirements-bigquery.txt (BigQuery);
+#   default — dbt v2 (requirements-dbt2.txt), its MetricFlow borrowed from dbt1. INSTALL_DBT_V2=0
+#             makes `default` the dbt1 environment instead.
 ARG DBT_REQUIREMENTS=requirements.txt
-ENV VENV=/opt/dbtvenv
-COPY requirements*.txt ./
-RUN python3 -m venv "$VENV" \
-  && "$VENV/bin/pip" install --no-cache-dir --upgrade pip \
-  && "$VENV/bin/pip" install --no-cache-dir -r "$DBT_REQUIREMENTS"
-ENV PATH="$VENV/bin:$PATH"
-
-# dbt v2 (the Rust binary) in a venv of its own — it and dbt-core both install a `dbt` command.
-# The server uses whichever DBT_BIN names (its client reads the version): docker-compose.yml points
-# it here; the BigQuery setup stays on 1.x until the python stage is proven on v2 there.
-# INSTALL_DBT_V2=0 skips it.
 ARG INSTALL_DBT_V2=1
-RUN if [ "$INSTALL_DBT_V2" = "1" ]; then \
-      python3 -m venv /opt/dbt2venv \
-      && /opt/dbt2venv/bin/pip install --no-cache-dir --upgrade pip \
-      && /opt/dbt2venv/bin/pip install --no-cache-dir -r requirements-dbt2.txt; \
-    fi
+ENV DBT_ENVS_DIR=/opt/dbt-envs
+COPY requirements*.txt ./
+RUN python3 -m venv "$DBT_ENVS_DIR/dbt1" \
+  && "$DBT_ENVS_DIR/dbt1/bin/pip" install --no-cache-dir --upgrade pip \
+  && "$DBT_ENVS_DIR/dbt1/bin/pip" install --no-cache-dir -r "$DBT_REQUIREMENTS" \
+  && if [ "$INSTALL_DBT_V2" = "1" ]; then \
+       python3 -m venv "$DBT_ENVS_DIR/default" \
+       && "$DBT_ENVS_DIR/default/bin/pip" install --no-cache-dir --upgrade pip \
+       && "$DBT_ENVS_DIR/default/bin/pip" install --no-cache-dir -r requirements-dbt2.txt; \
+     else ln -s dbt1 "$DBT_ENVS_DIR/default"; fi
+# (for a shell in the container: dbt 1.x and mf on PATH)
+ENV PATH="$DBT_ENVS_DIR/dbt1/bin:$PATH"
 
 # Node deps (production only — devDeps are the test harness).
 COPY package.json package-lock.json* ./
@@ -55,8 +54,7 @@ COPY config ./config
 ENV HOST=0.0.0.0 \
     PORT=3000 \
     MCP_WORKSPACE=/workspace \
-    DBT_BIN=dbt \
-    MF_BIN=mf
+    DBT_ENV=default
 
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \

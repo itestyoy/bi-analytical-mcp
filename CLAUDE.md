@@ -206,9 +206,12 @@
   do not change. What v2 writes differently into the manifest is corrected in its client (a
   percentile is always approximate there: `config.meta.mcp_percentile` puts the request back).
   Metric queries go through MetricFlow's `mf` on either version.
-- Tests run on dbt v2 (`.dbt2venv`) with `mf` and the Python adapter from `.dbtvenv`; the python
-  stage's file runs on dbt 1.x (`.dbtvenv`), since v2 runs no Python models on DuckDB — there the
-  stage is not offered (`gatePythonRuntime`).
+- dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
+  DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), `default` unless DBT_ENV names
+  another; `createDbt({ environment })` takes its binaries, and `mf` comes from the environment or
+  one that has it (a dbt v2 venv borrows `dbt1`'s). `npm run dbt:env -- create|list` manages them.
+- Tests run on the `default` environment (dbt v2); the python stage's file runs on `dbt1` (dbt 1.x),
+  since v2 runs no Python models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

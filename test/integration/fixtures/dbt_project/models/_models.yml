@@ -1,0 +1,19 @@
+# The project's own descriptions of its models — as a real project has them. On dbt's latest
+# semantic YAML spec (v2) a context's semantic model joins its model's entry, so the server MERGES
+# into these (ContextManager.writeSemanticYaml): every data test on v2 runs through that merge.
+version: 2
+models:
+  - name: dim_users
+    description: One row per player version (SCD-2 validity windows).
+    columns:
+      - name: country
+        description: Player country (ISO-2).
+      - name: platform
+        description: ios / android
+  - name: fct_analytics_events
+    description: One row per product-analytics event.
+    columns:
+      - name: event_name
+        description: What happened.
+  - name: fct_crashlytics_events
+    description: One row per crash report.

@@ -65,3 +65,29 @@ test('the client is chosen by the dbt major version: 1.x reads the legacy semant
   assert.deepEqual([c2.major, c2.semanticSpec, c2.pythonModelsOn('duckdb'), c2.pythonModelsOn('bigquery')], [2, 'latest', false, true]);
   assert.throws(() => createDbt({ version: 3 }), /dbt 3\.x is not supported/);
 });
+
+test('dbt runs in a named environment: `default` unless named, MetricFlow borrowed from one that has it', async () => {
+  const { resolveEnvironment, listEnvironments } = await import('../../src/dbt/environments.js');
+  const dir = mkdtempSync(join(tmpdir(), 'envs-'));
+  const { mkdirSync } = await import('node:fs');
+  // a venv with these executables, each answering --version for its dbt
+  const venv = (name, bins) => {
+    mkdirSync(join(dir, name, 'bin'), { recursive: true });
+    for (const b of bins) {
+      writeFileSync(join(dir, name, 'bin', b), `#!/bin/sh\necho "dbt ${name === 'default' ? '2.0.6' : '1.11.11'}"\n`);
+      chmodSync(join(dir, name, 'bin', b), 0o755);
+    }
+  };
+  venv('default', ['dbt']);                  // a dbt v2 venv: the binary only
+  venv('dbt1', ['dbt', 'mf', 'python']);     // dbt 1.x with MetricFlow
+  assert.deepEqual(listEnvironments({ dir }).map((e) => e.name), ['dbt1', 'default']);
+  const d = resolveEnvironment(undefined, { dir, env: {} });
+  assert.equal(d.name, 'default');
+  assert.equal(d.dbtBin, join(dir, 'default', 'bin', 'dbt'));
+  assert.deepEqual([d.metricflowFrom, d.mfBin, d.pythonBin], ['dbt1', join(dir, 'dbt1', 'bin', 'mf'), join(dir, 'dbt1', 'bin', 'python')]);
+  assert.equal(resolveEnvironment(undefined, { dir, env: { DBT_ENV: 'dbt1' } }).metricflowFrom, 'dbt1', 'DBT_ENV names another');
+  assert.throws(() => resolveEnvironment('nope', { dir }), /environment 'nope' not found.*there: dbt1, default/);
+  // the client takes the environment's binaries, and its version from them
+  const c = createDbt({ environment: d });
+  assert.deepEqual([c.major, c.dbtBin, c.mfBin, c.environment.name], [2, d.dbtBin, d.mfBin, 'default']);
+});

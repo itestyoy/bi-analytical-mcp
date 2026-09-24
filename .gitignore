@@ -1,5 +1,5 @@
 node_modules/
-.dbtvenv
+.venvs/
 .mcp/
 target/
 logs/
@@ -13,4 +13,3 @@ dbt_packages/
 # python bytecode
 __pycache__/
 *.pyc
-.dbt2venv

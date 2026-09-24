@@ -11,6 +11,8 @@
 //     on it (a context's queries, the indexer, the MetricFlow sidecar), and a process waits for it.
 
 import { execFile } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
+import { basename } from 'node:path';
 import { currentSignal } from '../request-context.js';
 
 /**
@@ -56,9 +58,26 @@ export const warehouseTurns = new Turns();
  */
 export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null } = {}) {
   const signal = currentSignal();
-  const start = () => spawnOnce(bin, args, { cwd, env, timeout, signal });
-  if (!turn) return start();
-  return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled'));
+  const asked = Date.now();
+  let began = asked;
+  const start = () => { began = Date.now(); return spawnOnce(bin, args, { cwd, env, timeout, signal }); };
+  const done = (r) => { timing(bin, args, asked, began, r); return r; };
+  if (!turn) return start().then(done);
+  return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
+}
+
+/**
+ * DBT_TIMING_LOG=<file>: one JSON line per process — which command, how long it WAITED for the
+ * warehouse's turn and how long it RAN — to see where the time of a run (a test suite) goes.
+ */
+export function timing(bin, args, asked, began, r) {
+  const file = process.env.DBT_TIMING_LOG;
+  if (!file) return;
+  const end = Date.now();
+  const cmd = args[0] === 'run-operation' ? `run-operation ${args[1]}` : args[0];
+  try {
+    appendFileSync(file, `${JSON.stringify({ bin: basename(bin), dir: bin.split('/').slice(-3, -2)[0], cmd, waited_ms: began - asked, ran_ms: end - began, ok: !!r?.ok, pid: process.pid })}\n`);
+  } catch { /* timing is best effort */ }
 }
 
 function cancelledResult(message) {

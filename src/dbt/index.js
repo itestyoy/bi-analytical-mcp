@@ -23,13 +23,25 @@
 import { execFileSync } from 'node:child_process';
 import { DbtV1 } from './v1.js';
 import { DbtV2 } from './v2.js';
+import { resolveEnvironment } from './environments.js';
+
+export { resolveEnvironment, listEnvironments, envsDir, DEFAULT_ENV } from './environments.js';
 
 export { formatDbtError, parseShowJson, parseCsv } from './output.js';
 
 const IMPLEMENTATIONS = { 1: DbtV1, 2: DbtV2 };
 
 /** The major version of the dbt CLI at `dbtBin` (`dbt --version`), or null when it cannot be told. */
+const detected = new Map(); // a binary's version does not change while the server runs
+
 export function detectDbtMajor(dbtBin = 'dbt') {
+  if (detected.has(dbtBin)) return detected.get(dbtBin);
+  const major = askVersion(dbtBin);
+  if (major != null) detected.set(dbtBin, major);
+  return major;
+}
+
+function askVersion(dbtBin) {
   try {
     const out = execFileSync(dbtBin, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
     const m = out.match(/installed:\s*(\d+)\.\d+/) || out.match(/\bdbt(?:-fusion)?\s+(\d+)\.\d+/i) || out.match(/(\d+)\.\d+\.\d+/);
@@ -40,14 +52,23 @@ export function detectDbtMajor(dbtBin = 'dbt') {
 }
 
 /**
- * The dbt client for `version` (a major version, or 'auto' — the default — to ask the CLI). An unsupported version is
+ * The dbt client for `version` (a major version, or 'auto' — the default — to ask the CLI), in the
+ * dbt `environment` named (a venv under DBT_ENVS_DIR) or with the binaries given. An unsupported version is
  * refused here, with what it would take — never half-served.
  */
-export function createDbt({ version = 'auto', ...opts } = {}) {
+export function createDbt({ version = 'auto', environment, ...opts } = {}) {
+  // a named environment (src/dbt/environments.js) supplies the binaries; explicit ones still win
+  let env = null;
+  if (environment) {
+    env = typeof environment === 'string' ? resolveEnvironment(environment) : environment;
+    opts = { dbtBin: env.dbtBin, ...(env.mfBin ? { mfBin: env.mfBin } : {}), ...opts };
+  }
   const major = version === 'auto' ? detectDbtMajor(opts.dbtBin) ?? 1 : Number(version);
   const Impl = IMPLEMENTATIONS[major];
   if (!Impl) {
     throw new Error(`dbt ${major}.x is not supported by this server (supported: ${Object.keys(IMPLEMENTATIONS).map((v) => `${v}.x`).join(', ')}).`);
   }
-  return new Impl(opts);
+  const client = new Impl(opts);
+  if (env) client.environment = { name: env.name, dir: env.dir, metricflowFrom: env.metricflowFrom, pythonBin: env.pythonBin };
+  return client;
 }

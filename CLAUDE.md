@@ -207,12 +207,12 @@
   percentile is always approximate there: `config.meta.mcp_percentile` puts the request back).
   Metric queries go through MetricFlow's `mf` on either version.
 - dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
-  DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), `default` unless DBT_ENV names
-  another; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own
+  DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v2`
+  (used unless DBT_ENV names another), `dbt-v1`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own
   (`metricflow`, or MF_ENV) that every dbt environment queries through — `mf` and the sidecar's
   Python — since dbt-metricflow brings the Python dbt-core, which cannot share a venv with a dbt v2
   binary. `npm run dbt:env -- create|list` manages them.
-- Tests run on the `default` environment (dbt v2); the python stage's file runs on `dbt1` (dbt 1.x),
+- Tests run on the `dbt-v2` environment; the python stage's file runs on `dbt-v1` (dbt 1.x),
   since v2 runs no Python models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 
 ## Testing (HARD RULE)

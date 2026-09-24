@@ -12,9 +12,9 @@ RUN apt-get update \
 WORKDIR /app
 
 # dbt runs in named ENVIRONMENTS — one virtualenv each under DBT_ENVS_DIR (src/dbt/environments.js);
-# the server uses DBT_ENV (else `default`) and reads its dbt version from the binary.
-#   default    — dbt v2 (requirements-dbt2.txt). INSTALL_DBT_V2=0 makes `default` the dbt1 environment.
-#   dbt1       — dbt 1.x + the warehouse adapter: DBT_REQUIREMENTS, requirements.txt (DuckDB, with
+# the server uses DBT_ENV (else `dbt-v2`) and reads its dbt version from the binary.
+#   dbt-v2     — dbt v2 (requirements-dbt2.txt). INSTALL_DBT_V2=0 skips it (set DBT_ENV=dbt-v1).
+#   dbt-v1     — dbt 1.x + the warehouse adapter: DBT_REQUIREMENTS, requirements.txt (DuckDB, with
 #                pandas for Python models) or requirements-bigquery.txt (BigQuery).
 #   metricflow — MetricFlow's `mf` + the Python dbt-core and adapter it queries with: MF_REQUIREMENTS,
 #                requirements-metricflow.txt or requirements-metricflow-bigquery.txt. Every dbt
@@ -29,9 +29,8 @@ RUN set -e; \
       && "$DBT_ENVS_DIR/$1/bin/pip" install --no-cache-dir --upgrade pip \
       && "$DBT_ENVS_DIR/$1/bin/pip" install --no-cache-dir -r "$2"; }; \
     mkenv metricflow "$MF_REQUIREMENTS"; \
-    mkenv dbt1 "$DBT_REQUIREMENTS"; \
-    if [ "$INSTALL_DBT_V2" = "1" ]; then mkenv default requirements-dbt2.txt; \
-    else ln -s dbt1 "$DBT_ENVS_DIR/default"; fi
+    mkenv dbt-v1 "$DBT_REQUIREMENTS"; \
+    if [ "$INSTALL_DBT_V2" = "1" ]; then mkenv dbt-v2 requirements-dbt2.txt; fi
 # (for a shell in the container: mf on PATH)
 ENV PATH="$DBT_ENVS_DIR/metricflow/bin:$PATH"
 
@@ -57,7 +56,7 @@ COPY config ./config
 ENV HOST=0.0.0.0 \
     PORT=3000 \
     MCP_WORKSPACE=/workspace \
-    DBT_ENV=default
+    DBT_ENV=dbt-v2
 
 EXPOSE 3000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s \

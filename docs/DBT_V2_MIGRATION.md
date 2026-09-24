@@ -9,11 +9,11 @@
 - v2 пишет в манифест каждый перцентиль как приближённый, а долю как float32. Клиент v2 возвращает запрос
   из `config.meta.mcp_percentile`, поэтому числа совпадают с 1.x.
 - Postgres убран. dbt запускается в именованных окружениях (venv в `.venvs/`, `src/dbt/environments.js`).
-  Тесты идут на DuckDB в окружении `default` (dbt v2). MetricFlow — отдельное окружение `metricflow`
+  Тесты идут на DuckDB в окружении `dbt-v2`. MetricFlow — отдельное окружение `metricflow`
   (`mf` + dbt-core + адаптер), как советует документация dbt для работы без dbt platform. Файл python-стадии идёт на 1.x: v2 не запускает Python-модели на DuckDB, и там стадия не
   предлагается (`gatePythonRuntime`).
-- Docker: окружения `/opt/dbt-envs/default` (v2), `dbt1` (1.x + адаптер) и `metricflow`. `docker-compose.yml`
-  использует `default`, BigQuery-сетап — `dbt1`, пока
+- Docker: окружения `/opt/dbt-envs/dbt-v2`, `dbt-v1` (1.x + адаптер) и `metricflow`. `docker-compose.yml`
+  использует `dbt-v2`, BigQuery-сетап — `dbt-v1`, пока
   python-стадия не проверена на v2 в BigQuery.
 
 Ниже — исходная проба и план, по которому это делалось.

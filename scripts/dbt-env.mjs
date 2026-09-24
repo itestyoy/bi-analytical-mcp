@@ -5,9 +5,9 @@
 //   node scripts/dbt-env.mjs list
 //
 // `create` makes <DBT_ENVS_DIR>/<name> a fresh virtualenv and installs the requirements into it:
-//   default    — requirements-dbt2.txt                 (dbt v2)
-//   dbt1       — requirements.txt / -bigquery.txt      (dbt 1.x + the adapter)
-//   metricflow — requirements-metricflow.txt / -bigquery.txt (MetricFlow's mf + dbt-core + adapter)
+//   dbt-v2     — requirements-dbt2.txt                        (dbt v2; the one used unless DBT_ENV)
+//   dbt-v1     — requirements.txt / requirements-bigquery.txt (dbt 1.x + the adapter)
+//   metricflow — requirements-metricflow.txt / -bigquery.txt  (MetricFlow's mf + dbt-core + adapter)
 // `list` shows each environment: its dbt version, or that it is a MetricFlow environment, and which
 // MetricFlow a dbt environment queries with.
 
@@ -54,7 +54,7 @@ if (cmd === 'create') {
   }
 } else if (cmd === 'list' || !cmd) {
   const all = listEnvironments({ dir });
-  if (!all.length) console.log(`no dbt environments in ${dir} — create one: node scripts/dbt-env.mjs create default -r requirements-dbt2.txt`);
+  if (!all.length) console.log(`no dbt environments in ${dir} — create one: node scripts/dbt-env.mjs create dbt-v2 -r requirements-dbt2.txt`);
   for (const e of all) {
     // a MetricFlow environment carries the Python dbt-core too (MetricFlow queries through it)
     if (e.mfBin) { console.log(`${e.name.padEnd(12)} MetricFlow (mf)${e.dbtBin ? ` on dbt-core ${versionOf(e.dbtBin)}` : ''}`); continue; }

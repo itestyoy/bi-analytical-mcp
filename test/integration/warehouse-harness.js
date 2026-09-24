@@ -9,9 +9,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { warehouseTurns } from '../../src/dbt/process.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
+import { DEFAULT_ENV } from '../../src/dbt/environments.js';
 
 // the Python of the environment that carries the DuckDB module (MetricFlow's, see src/dbt/environments.js)
-const PY_BIN = process.env.PYTHON_BIN || dbtEnv(process.env.DBT_ENV || 'default')?.pythonBin || 'python3';
+const PY_BIN = process.env.PYTHON_BIN || dbtEnv(process.env.DBT_ENV || DEFAULT_ENV)?.pythonBin || 'python3';
 
 // Runs the statements in one connection and prints the last one's rows as JSON (dates and decimals
 // as strings, like the rows dbt hands back).

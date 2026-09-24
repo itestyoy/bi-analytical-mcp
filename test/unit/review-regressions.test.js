@@ -121,7 +121,7 @@ models:
 // the warehouse (no SQL text is asserted).
 test('a pipeline build never holds its call: even a lone python model returns a task_id at once', async (t) => {
   process.env.MCP_PYTHON_MODELS = 'on'; // the fixture has no dbt profile, so the stage is hidden otherwise
-  const VENV_PY = join(process.cwd(), '.venvs', 'dbt1', 'bin', 'python');
+  const VENV_PY = join(process.cwd(), '.venvs', 'dbt-v1', 'bin', 'python');
   const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
   if (spawnSync(PY, ['--version']).status !== 0) { t.skip('no python interpreter for the static gate'); return; }
 

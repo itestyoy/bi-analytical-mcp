@@ -116,7 +116,7 @@ npm install
 # point at a dbt Core project whose fact/dim tables + metricflow_time_spine are built
 DBT_BASE_PROJECT=/path/to/dbt_project \
 DBT_PROFILES_DIR=/path/to/dbt_project \
-DBT_ENV=default \
+DBT_ENV=dbt-v2 \
 CATALOG_PATH=./config/catalog.json \
 npm start            # streamable-HTTP MCP on :3000/mcp
 ```
@@ -143,7 +143,7 @@ runs dbt Python models locally) and checks the returned rows. One process at a t
 file, so the dbt client queues its processes on it (`src/dbt/process.js`).
 
 Prerequisites for integration tests — three ENVIRONMENTS (virtualenvs under `.venvs/`, see
-`src/dbt/environments.js`): `default` with dbt v2, which the suite runs on; `dbt1` with dbt 1.x, the
+`src/dbt/environments.js`): `dbt-v2` with dbt v2, which the suite runs on; `dbt-v1` with dbt 1.x, the
 DuckDB adapter and pandas, which the python stage's file runs on (v2 runs no Python models on DuckDB);
 and `metricflow` — MetricFlow's `mf` with the DuckDB adapter, which every dbt environment queries
 metrics through (dbt's docs: without the dbt platform, "install MetricFlow separately"). `DBT_ENV` /
@@ -151,7 +151,7 @@ metrics through (dbt's docs: without the dbt platform, "install MetricFlow separ
 
 ```bash
 npm run dbt:env -- create metricflow -r requirements-metricflow.txt
-npm run dbt:env -- create default -r requirements-dbt2.txt
-npm run dbt:env -- create dbt1 -r requirements.txt
+npm run dbt:env -- create dbt-v2 -r requirements-dbt2.txt
+npm run dbt:env -- create dbt-v1 -r requirements.txt
 npm run dbt:env -- list
 ```

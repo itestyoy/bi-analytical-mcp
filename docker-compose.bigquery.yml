@@ -12,7 +12,7 @@ services:
     build:
       context: .
       args:
-        DBT_REQUIREMENTS: requirements-bigquery.txt              # dbt1: dbt 1.x + the BigQuery adapter
+        DBT_REQUIREMENTS: requirements-bigquery.txt              # dbt-v1: dbt 1.x + the BigQuery adapter
         MF_REQUIREMENTS: requirements-metricflow-bigquery.txt    # metricflow: mf + the BigQuery adapter
     ports:
       - "${PORT:-3000}:3000"
@@ -20,8 +20,8 @@ services:
       HOST: "0.0.0.0"
       PORT: "3000"
       WAREHOUSE_DIALECT: "bigquery"
-      # dbt 1.x (the image's `dbt1` environment) until the python stage is proven on dbt v2 on BigQuery
-      DBT_ENV: "${DBT_ENV:-dbt1}"
+      # dbt 1.x (the image's `dbt-v1` environment) until the python stage is proven on dbt v2 on BigQuery
+      DBT_ENV: "${DBT_ENV:-dbt-v1}"
       # Catalog discovered from the mounted dbt project's model YAMLs (meta.mcp.role);
       # no separate catalog file. (Set CATALOG_PATH=/config/catalog.yml to override.)
       DBT_BASE_PROJECT: "/dbt_project"

@@ -5,7 +5,7 @@
 // independently from the seed. The same files go to BigQuery/Snowflake unchanged; only the
 // profile decides where the Python runtime is.
 //
-// Runs on dbt 1.x (the dbt1 environment: dbt-duckdb + pandas) — dbt v2 runs no Python models on DuckDB, so this
+// Runs on dbt 1.x (the dbt-v1 environment: dbt-duckdb + pandas) — dbt v2 runs no Python models on DuckDB, so this
 // file alone stays on 1.x while the rest of the suite runs on v2. Skipped when the venv is absent.
 
 import { test, before, after } from 'node:test';
@@ -27,12 +27,12 @@ const execFileP = promisify(execFile);
 const ROOT = process.cwd();
 const PROJECT = fixtureProject('duckdb_project'); // a private copy: the test files run side by side
 // dbt 1.x: v2 runs no Python models on DuckDB
-const ENV = dbtEnv(process.env.DBT_PY_ENV || 'dbt1');
+const ENV = dbtEnv(process.env.DBT_PY_ENV || 'dbt-v1');
 const DBT_BIN = ENV?.dbtBin || '';
 const PY_BIN = ENV?.pythonBin || '';
 const HAS = !!(DBT_BIN && PY_BIN && existsSync(DBT_BIN) && existsSync(PY_BIN));
 const opts = { timeout: 600000 };
-const skip = (t) => { if (!HAS) { t.skip('dbt environment dbt1 not installed (npm run dbt:env -- create dbt1 -r requirements.txt)'); return true; } return false; };
+const skip = (t) => { if (!HAS) { t.skip('dbt environment dbt-v1 not installed (npm run dbt:env -- create dbt-v1 -r requirements.txt)'); return true; } return false; };
 
 let engine; let work;
 before(async () => {

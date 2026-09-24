@@ -1,4 +1,4 @@
-# The `dbt1` environment for BigQuery: dbt 1.x (the Python dbt-core) and the BigQuery adapter —
+# The `dbt-v1` environment for BigQuery: dbt 1.x (the Python dbt-core) and the BigQuery adapter —
 # used by docker-compose.bigquery.yml (build arg DBT_REQUIREMENTS). MetricFlow is an environment of
 # its own (requirements-metricflow-bigquery.txt, build arg MF_REQUIREMENTS).
 # If a running image still rejects `validity_params` ("Additional properties are not allowed"), it

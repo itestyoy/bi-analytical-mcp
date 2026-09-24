@@ -1,9 +1,9 @@
 // dbt ENVIRONMENTS — every dbt this server runs lives in a virtualenv of its own, by name.
 //
 // An environment is a directory under DBT_ENVS_DIR (default: ./.venvs; the image: /opt/dbt-envs)
-// holding a Python virtualenv. A dbt environment has a `dbt` in bin/: `default` is the one used
-// unless DBT_ENV names another (`dbt1`, …). Each may carry a different dbt — v2 in one, 1.x in
-// another — and the dbt client reads the version from the binary (src/dbt/index.js).
+// holding a Python virtualenv, named for what is in it: `dbt-v2` (dbt v2 — used unless DBT_ENV names
+// another), `dbt-v1` (dbt 1.x), `metricflow`. The dbt client reads the version from the binary
+// (src/dbt/index.js), so the name is for the reader, not a switch.
 //
 // METRICFLOW IS AN ENVIRONMENT OF ITS OWN — `metricflow`, unless MF_ENV names another. dbt's docs,
 // for a setup without the dbt platform: "install MetricFlow separately and use the mf prefix". Its
@@ -17,7 +17,7 @@
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
-export const DEFAULT_ENV = 'default';
+export const DEFAULT_ENV = 'dbt-v2';
 export const DEFAULT_MF_ENV = 'metricflow';
 
 /** Where the environments live. */
@@ -41,7 +41,7 @@ export function listEnvironments({ dir = envsDir() } = {}) {
 }
 
 /**
- * The dbt environment `name` (DBT_ENV, else `default`) ready to run: { name, dir, dbtBin, mfBin,
+ * The dbt environment `name` (DBT_ENV, else `dbt-v2`) ready to run: { name, dir, dbtBin, mfBin,
  * pythonBin, metricflowFrom } — `mfBin` / `pythonBin` from the MetricFlow environment (MF_ENV, else
  * `metricflow`), or from this environment when it carries its own `mf` and there is no MetricFlow
  * environment. Throws, naming what exists, when there is no such dbt environment or a MetricFlow

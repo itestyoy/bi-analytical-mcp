@@ -165,6 +165,34 @@ test('view model: counts that merely decrease, or steps that grow, are not a fun
   assert.equal(buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: 5 }, { step: 'b', users: 9 }] }).kind, 'chart');
 });
 
+test('view model: a DECLARED funnel draws the declared steps with their labels, whatever the columns are called', () => {
+  const row = { installs: 1000, first_level: 640, day2: 380, spend: 12.5 };
+  const m = buildViewModel('get_query_result', { columns: Object.keys(row).map((name) => ({ name })), rows: [row], display: { kind: 'funnel', title: 'Onboarding', steps: [{ column: 'installs', label: 'Install' }, { column: 'first_level', label: 'Level 1' }, { column: 'day2' }] } });
+  assert.equal(m.kind, 'funnel');
+  assert.equal(m.title, 'Onboarding');
+  assert.deepEqual(m.steps.map((x) => [x.label, x.value]), [['Install', 1000], ['Level 1', 640], ['day2', 380]]);
+  assert.equal(m.overall, 0.38);
+});
+
+test('view model: a DECLARED line over a non-time axis keeps the row order; series_column splits one value into lines', () => {
+  const rows = [{ level: 'L3', country: 'US', users: 90 }, { level: 'L1', country: 'US', users: 200 }, { level: 'L3', country: 'GB', users: 30 }, { level: 'L1', country: 'GB', users: 80 }];
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'level' }, { name: 'country' }, { name: 'users' }], rows, display: { kind: 'line', x: 'level', y: ['users'], series_column: 'country' } });
+  assert.equal(m.kind, 'chart');
+  assert.equal(m.chart.ordered, true);
+  assert.deepEqual(m.chart.series.map((x) => [x.name, x.points]), [['US', [['L3', 90], ['L1', 200]]], ['GB', [['L3', 30], ['L1', 80]]]]);
+  // a time axis is put in time order even when the rows are not
+  const t = buildViewModel('query_semantic_model', { columns: [{ name: 'metric_time_day' }, { name: 'dau' }], rows: [{ metric_time_day: '2026-09-02', dau: 5 }, { metric_time_day: '2026-09-01', dau: 3 }], display: { kind: 'line', x: 'metric_time_day', y: ['dau'] } });
+  assert.equal(t.chart.ordered, false);
+  assert.deepEqual(t.chart.series[0].points, [['2026-09-01', 3], ['2026-09-02', 5]]);
+});
+
+test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {
+  // step counts with a NULL first step cannot be a funnel; the step-per-row shape is still a bar chart
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: null }, { step: 'b', users: 4 }], display: { kind: 'funnel', label_column: 'step', value_column: 'users' } });
+  assert.equal(m.kind, 'chart');
+  assert.equal(m.chart.type, 'bar');
+});
+
 test('view model: the sample-ratio check carries each group\'s observed and intended share, from the engine\'s own test', async () => {
   const r = await s.engine.experiment({ action: 'check_split', groups: [{ label: 'base', n: 41164 }, { label: 'a', n: 41585 }] });
   const m = buildViewModel('experiment', r);

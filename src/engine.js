@@ -2529,6 +2529,10 @@ export class Engine {
       // A4: how to read this result again — these rows are a pipeline model, re-read
       // with get_query_result (NOT query_semantic_model, which is for metric queries).
       read_with: { tool: 'get_query_result', table: modelName, note: 'optional transform to re-slice; use query_semantic_model only for metric/semantic-layer queries, not for this pipeline model.' },
+      // The rows above come back WITHOUT the result card — build_native_model carries no view (its
+      // other actions return schema, and a card on each would bury the conversation). Reading the
+      // table with get_query_result is what draws a funnel or a chart for the person.
+      show_to_user: { tool: 'get_query_result', arguments: { context_id: ctx.id, table: modelName }, why: 'in a host that renders MCP Apps (Claude on the web, desktop and mobile) this call draws the result as a card — a funnel for ordered steps, a chart for a series or a breakdown. Add `display` to say which, over this table\'s columns ({ kind: \'funnel\', steps: [{ column, label }] } or { kind: \'funnel\', label_column, value_column }, { kind: \'line\', x, y: [..] }, { kind: \'bar\', x, y }). Make it before summarising, instead of drawing your own chart; the rows are the same ones returned here.' },
       assumptions: [
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
@@ -3139,6 +3143,12 @@ export class Engine {
       return `${o.direction === 'desc' ? '-' : ''}${key}`;
     });
 
+    // The card declaration names result columns — known now, before anything runs.
+    if (input.display) {
+      const problems = this._displayProblems(input.display, orderableKeys);
+      if (problems.length) throw new ToolError(`display: ${problems.join('; ')}. This query's result columns: ${orderableKeys.join(', ')}`, { stage: 'validate', field: 'display' });
+    }
+
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
 
     // Build the time-spine table before a REAL query (not needed for dry_run/explain, which only
@@ -3217,7 +3227,7 @@ export class Engine {
       }
       if (page.has_more) recs.push(`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`);
       recs.push('Re-slice or persist: pass materialize:true to keep the result as a table readable via get_query_result; group differently or compare segments by re-querying with another group_by.');
-      return {
+      const out = {
         ok: true,
         command: res.command,
         columns: res.columns,
@@ -3237,6 +3247,7 @@ export class Engine {
         warnings: [...windowWarnings, ...filterWarnings],
         recommendations: recs,
       };
+      return input.display ? this._withDisplay(out, input.display) : out;
     };
 
     const running = this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain });
@@ -3245,7 +3256,7 @@ export class Engine {
     // up on its own schedule (60s is common) and reports the tool as timed out while the warehouse
     // keeps working. So a query is held for the same grace a build gets; past it, the call returns
     // a query_id and the query runs on — its finished response is served by get_query_result.
-    return this._withinGrace(running, respond, { ctx, label: 'query' });
+    return this._withinGrace(running, respond, { ctx, label: 'query', input });
   }
 
   /**
@@ -3255,7 +3266,7 @@ export class Engine {
    * materialize:true is the form that survives a restart). The context is leased until the query
    * settles, so it cannot be dropped under it.
    */
-  async _withinGrace(running, respond, { ctx, label }) {
+  async _withinGrace(running, respond, { ctx, label, input }) {
     this.ctxs.acquire(ctx.id);
     const settled = running.finally(() => this.ctxs.release(ctx.id));
     const PENDING = Symbol('pending');
@@ -3264,7 +3275,7 @@ export class Engine {
     let first;
     try { first = await Promise.race([settled, grace]); } finally { clearTimeout(timer); }
     if (first !== PENDING) return respond(first);
-    const id = this.jobs.create({ contextId: ctx.id, inline: true });
+    const id = this.jobs.create({ contextId: ctx.id, inline: true, ...(input?.display ? { display: input.display } : {}) });
     settled.then(respond).then(
       (out) => {
         if (out?.ok === false) { this.jobs.fail(id, out.error?.message || 'the query failed'); return; }
@@ -3309,7 +3320,7 @@ export class Engine {
       ? `select ${[...(full.groupBy || []).map((g) => (rename.has(g) ? `${g} as ${rename.get(g)}` : g)), ...full.metrics].join(', ')} from (\n${explain.sql}\n) _q`
       : explain.sql;
 
-    const id = this.jobs.create({ contextId: ctx.id });
+    const id = this.jobs.create({ contextId: ctx.id, ...(input.display ? { display: input.display } : {}) });
     const table = `qr_${id}`;
     this.jobs.setTable(id, table);
     const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, order_by: input.order_by, time_range: input.time_range });
@@ -3338,7 +3349,7 @@ export class Engine {
     }
     const job = this.jobs.get(id);
     if (job.status === 'error') return { ok: false, status: 'error', query_id: id, table, error: { stage: 'materialize', message: job.error } };
-    return this._fetchResult(id, input.limit ?? 1000, undefined, input.offset ?? 0);
+    return this._withDisplay(await this._fetchResult(id, input.limit ?? 1000, undefined, input.offset ?? 0), input.display);
   }
 
   /** Read rows back from a materialized result table (resilient: no recompute). */
@@ -3381,8 +3392,60 @@ export class Engine {
    * runs a safe read-only projection over the materialized table — compress or
    * re-slice the stored results without recomputing the analytics query.
    */
+  /**
+   * get_query_result = the read below, plus the CARD DECLARATION: the caller's `display`, or the one
+   * the query was issued with (a query that detached remembers it), checked against the columns that
+   * actually came back and returned with the rows for the card to follow.
+   */
   async get_query_result(input) {
     this._validate('get_query_result', input);
+    const out = await this._getQueryResult(input);
+    if (input.display) {
+      const cols = this._resultColumns(out);
+      if (cols) {
+        const problems = this._displayProblems(input.display, cols, out.rows);
+        if (problems.length) throw new ToolError(`display: ${problems.join('; ')}. This result's columns: ${cols.join(', ')}`, { stage: 'validate', field: 'display' });
+      }
+      return this._withDisplay(out, input.display);
+    }
+    const remembered = input.query_id ? this.jobs.get(input.query_id)?.display : null;
+    return remembered ? this._withDisplay(out, remembered) : out;
+  }
+
+  /** The column names of a result with rows, or null when it has none (running, failed). */
+  _resultColumns(out) {
+    if (!out || out.ok === false || !Array.isArray(out.rows)) return null;
+    if (Array.isArray(out.columns) && out.columns.length) return out.columns.map((c) => (c && typeof c === 'object' ? c.name : String(c)));
+    return out.rows[0] && typeof out.rows[0] === 'object' ? Object.keys(out.rows[0]) : [];
+  }
+
+  /**
+   * What is wrong with a card declaration against these result columns (and rows, when known): a
+   * named column that is not there, or a shape the rows cannot have. Empty = it can be drawn.
+   */
+  _displayProblems(display, columns, rows = null) {
+    const have = new Set(columns);
+    const named = display.kind === 'funnel'
+      ? (display.steps ? display.steps.map((st) => st.column) : [display.label_column, display.value_column])
+      : display.kind === 'line' ? [display.x, ...(display.y || []), ...(display.series_column ? [display.series_column] : [])]
+        : [display.x, display.y];
+    const problems = [...new Set(named.filter((c) => c && !have.has(c)))].map((c) => `'${c}' is not a column of this result`);
+    if (display.kind === 'funnel' && display.steps && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
+    if (display.kind === 'funnel' && display.steps && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, or declare { kind: 'funnel', label_column, value_column } for a row per step`);
+    if (display.kind === 'line' && display.series_column && (display.y || []).length > 1) problems.push('series_column splits ONE y column into lines — declare a single y with it');
+    return problems;
+  }
+
+  /** A result with its card declaration attached — when it has rows the declaration fits. */
+  _withDisplay(out, display) {
+    const cols = display ? this._resultColumns(out) : null;
+    if (!cols) return out;
+    const problems = this._displayProblems(display, cols, out.rows);
+    if (problems.length) return { ...out, warnings: [...(out.warnings || []), `display was not applied: ${problems.join('; ')}`] };
+    return { ...out, display };
+  }
+
+  async _getQueryResult(input) {
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // The top-level `limit` and `transform.limit` BOTH cap rows; applied together they emit
     // two LIMITs (… LIMIT a … LIMIT b → SQL syntax error). Accept exactly one source of truth,

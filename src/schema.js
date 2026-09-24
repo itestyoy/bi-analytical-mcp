@@ -381,6 +381,21 @@ export function buildSchemas(catalog) {
   };
 
   const pdefs = predicateDefs(catalog);
+  // HOW A RESULT IS SHOWN — declared by the caller, never guessed: the card a host that renders MCP
+  // Apps draws for query_semantic_model / get_query_result follows this when it is given. It names
+  // result COLUMNS (the names the rows come back with), so a wrong one is refused with the list.
+  const resultColumn = { type: 'string', minLength: 1, description: 'A column of THIS result, exactly as the rows come back: a metric name, <model>_<attribute>, metric_time_<grain>, or a pipeline column.' };
+  const cardTitle = { type: 'string', maxLength: 120, description: 'Optional card title, in the person\'s words (e.g. "Onboarding funnel, Sep 1–23").' };
+  const display = {
+    description: 'How the result is SHOWN to the person as a card, in hosts that render MCP Apps (Claude on the web, desktop and mobile). Declare it whenever the result is a funnel or a chart — the card then draws exactly that instead of inferring it from column names. It changes no numbers: the rows are the same. Omitted, the card infers a chart or a funnel from the shape where it can.',
+    oneOf: [
+      { title: 'funnel · steps are columns of one row', type: 'object', additionalProperties: false, required: ['kind', 'steps'], description: 'A funnel whose steps are COLUMNS of a ONE-ROW result, listed in step order — e.g. the per-step counts an aggregate stage makes after match_recognize.', properties: { kind: { enum: ['funnel'] }, title: cardTitle, steps: { type: 'array', minItems: 2, maxItems: 20, description: 'The steps, in order.', items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 60, description: 'How the step reads to the person (default: the column name).' } } } } } },
+      { title: 'funnel · one row per step', type: 'object', additionalProperties: false, required: ['kind', 'label_column', 'value_column'], description: 'A funnel with ONE ROW PER STEP, in the order the rows come back (order them with order_by / a transform).', properties: { kind: { enum: ['funnel'] }, title: cardTitle, label_column: { ...resultColumn, description: 'The column naming each step.' }, value_column: { ...resultColumn, description: 'The column with each step\'s count.' } } },
+      { title: 'line chart', type: 'object', additionalProperties: false, required: ['kind', 'x', 'y'], description: 'A line chart over an ordered axis (usually time).', properties: { kind: { enum: ['line'] }, title: cardTitle, x: { ...resultColumn, description: 'The axis column (a time column, or any ordered one — kept in row order unless it is a time).' }, y: { type: 'array', minItems: 1, maxItems: 6, items: resultColumn, description: 'The value column(s): one line each.' }, series_column: { ...resultColumn, description: 'Optional: split ONE y column into a line per value of this column (e.g. users_country).' } } },
+      { title: 'bar chart', type: 'object', additionalProperties: false, required: ['kind', 'x', 'y'], description: 'A bar per category, in row order.', properties: { kind: { enum: ['bar'] }, title: cardTitle, x: { ...resultColumn, description: 'The category column.' }, y: { ...resultColumn, description: 'The value column.' } } },
+    ],
+  };
+
   const query = {
     type: 'object',
     additionalProperties: false,
@@ -409,6 +424,7 @@ export function buildSchemas(catalog) {
       materialize: { type: 'boolean', description: 'Materialize the result and read rows back from it (resilient, re-fetchable). The table holds the WHOLE result — `limit`/`offset` page the rows you get back, and get_query_result transforms run over all of it. Slow queries (> timeout) return a query_id; poll get_query_result.' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the compiled query WITHOUT executing it.' },
       explain: { type: 'boolean', description: 'If true, return the query plan (how the metrics compile) and the compiled query WITHOUT executing. A superset of dry_run; useful for inspecting/optimizing.' },
+      display,
     },
   };
 
@@ -478,6 +494,7 @@ export function buildSchemas(catalog) {
         offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging over the stored result). Ignored when sample=true.' },
         sample: { type: 'boolean', description: 'If true, return a REPRESENTATIVE random subset of rows instead of the first rows — a better peek at large results.' },
         sample_percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate % of rows to sample when sample=true (default 10).' },
+        display,
         transform: {
           type: 'object', additionalProperties: false,
           description: 'Optional read-only re-slice of the stored result (compress/aggregate/filter it WITHOUT recomputing the original query).',

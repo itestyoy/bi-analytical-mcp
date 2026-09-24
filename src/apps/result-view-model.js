@@ -6,7 +6,9 @@
 // three steps of one experiment. Anything else — a failure, a build still running, an explained
 // query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
 // status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
-// the tool's text result speaks for itself. The view imports it and the unit
+// the tool's text result speaks for itself. Rows are drawn as the caller DECLARED them when the
+// result carries `display` (a funnel, a line or a bar chart over named columns); only without one is
+// the card inferred from the shape. The view imports it and the unit
 // tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
 // Everything below is data in, data out: no DOM, no module scope.
@@ -158,7 +160,7 @@ export function buildViewModel(toolName, result, toolInput) {
     // title: the card names what it shows, and the chart names its metric
     const title = toolName === 'query_semantic_model' ? 'Metric query' : 'Query result';
 
-    // ── a FUNNEL: ordered steps whose counts never grow. Recognised only on an explicit signal —
+    // ── no declaration: a FUNNEL, ordered steps whose counts never grow. Recognised only on an explicit signal —
     // step-like names, or ordinal step labels — so a breakdown sorted by size never becomes one.
     // Two shapes: ONE row with a count column per step (a metric query over step measures), or a
     // row per step (a pipeline's step × users).
@@ -177,6 +179,67 @@ export function buildViewModel(toolName, result, toolInput) {
       for (let i = 1; i < steps.length; i++) if (steps[i].of_previous !== null && (worst === null || steps[i].of_previous < steps[worst].of_previous)) worst = i;
       return { kind: 'funnel', title: 'Funnel', measure, steps, overall: values[values.length - 1] / first, biggest_drop: worst };
     };
+    const page = isObj(result.page) ? { limit: num(result.page.limit), offset: num(result.page.offset) ?? 0, has_more: !!result.page.has_more } : null;
+    const chartCard = (chart, cardTitle = title) => ({
+      kind: 'chart',
+      title: cardTitle,
+      columns,
+      rows,
+      row_count: rows.length,
+      sampled: !!result.sampled,
+      approximate: !!result.approximate || !!result.provenance?.approximate,
+      page,
+      chart,
+    });
+
+    // ── a DECLARED card: the caller said what this result is (the server checked the columns
+    // exist), so it is drawn as declared — in the declared order, with no shape guessing ──
+    const d = isObj(result.display) ? result.display : null;
+    const at = (name) => names.indexOf(name);
+    const label = (v) => (v === null ? '∅' : String(v));
+    if (d && rows.length) {
+      const declaredTitle = typeof d.title === 'string' && d.title.trim() ? d.title.trim() : null;
+      if (d.kind === 'funnel') {
+        const steps = Array.isArray(d.steps) ? d.steps.filter((st) => isObj(st) && at(st.column) >= 0) : null;
+        const labels = steps ? steps.map((st) => (typeof st.label === 'string' && st.label ? st.label : st.column)) : rows.map((r) => label(r[at(d.label_column)]));
+        const values = steps ? steps.map((st) => num(rows[0][at(st.column)])) : rows.map((r) => num(r[at(d.value_column)]));
+        const drawable = (steps || (at(d.label_column) >= 0 && at(d.value_column) >= 0)) && labels.length >= 2 && values[0] > 0 && values.every((v) => v !== null && v >= 0);
+        if (drawable) return { ...funnelOf(labels, values, steps ? null : d.value_column), ...(declaredTitle ? { title: declaredTitle } : {}) };
+      }
+      if (d.kind === 'line' && at(d.x) >= 0 && Array.isArray(d.y) && d.y.length && d.y.every((y) => at(y) >= 0)) {
+        const xi = at(d.x);
+        // a time axis is put in time order; any other axis keeps the order the rows came in
+        const ordered = columns[xi].type !== 'time';
+        const kept = rows.filter((r) => r[xi] !== null);
+        const inOrder = ordered ? kept : kept.slice().sort((a, b) => (String(a[xi]) < String(b[xi]) ? -1 : String(a[xi]) > String(b[xi]) ? 1 : 0));
+        let series;
+        let folded = 0;
+        if (d.series_column && at(d.series_column) >= 0) {
+          const si = at(d.series_column);
+          const yi = at(d.y[0]);
+          const bySeries = new Map();
+          for (const r of inOrder) {
+            const k = label(r[si]);
+            if (!bySeries.has(k)) bySeries.set(k, []);
+            const y = num(r[yi]);
+            if (y !== null) bySeries.get(k).push([String(r[xi]), y]);
+          }
+          const all = [...bySeries.entries()].map(([name, points]) => ({ name, points, total: points.reduce((s, p) => s + p[1], 0) })).sort((a, b) => b.total - a.total);
+          series = all.slice(0, MAX_SERIES).map(({ name, points }) => ({ name, points }));
+          folded = Math.max(0, all.length - MAX_SERIES);
+        } else {
+          series = d.y.slice(0, MAX_SERIES).map((y) => ({ name: y, points: inOrder.map((r) => [String(r[xi]), num(r[at(y)])]).filter((p) => p[1] !== null) }));
+        }
+        return chartCard({ type: 'line', x: d.x, y: d.y.length === 1 ? d.y[0] : null, series, folded, ordered, title: declaredTitle }, declaredTitle || title);
+      }
+      if (d.kind === 'bar' && at(d.x) >= 0 && at(d.y) >= 0) {
+        const xi = at(d.x);
+        const yi = at(d.y);
+        return chartCard({ type: 'bar', x: d.x, y: d.y, bars: rows.slice(0, 50).map((r) => ({ label: label(r[xi]), value: num(r[yi]) ?? 0 })), title: declaredTitle }, declaredTitle || title);
+      }
+      // a declaration the rows cannot fill falls through to the inferred card
+    }
+
     if (rows.length === 1 && timeIdx < 0 && catIdx.length === 0) {
       const counts = numIdx.filter((i) => Number.isInteger(num(rows[0][i])));
       // the column names are the steps' names, shown as they are (they are the caller's metrics)
@@ -218,19 +281,8 @@ export function buildViewModel(toolName, result, toolInput) {
       chart = { type: 'bar', x: names[catIdx[0]], y: names[numIdx[0]], bars: rows.map((r) => ({ label: r[catIdx[0]] === null ? '∅' : String(r[catIdx[0]]), value: num(r[numIdx[0]]) ?? 0 })) };
     }
 
-    const page = isObj(result.page) ? { limit: num(result.page.limit), offset: num(result.page.offset) ?? 0, has_more: !!result.page.has_more } : null;
     if (!chart) return none('no_chart_shape');
-    return {
-      kind: 'chart',
-      title,
-      columns,
-      rows,
-      row_count: rows.length,
-      sampled: !!result.sampled,
-      approximate: !!result.approximate || !!result.provenance?.approximate,
-      page,
-      chart,
-    };
+    return chartCard(chart);
   }
 
   return none('no_rows');

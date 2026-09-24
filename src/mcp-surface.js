@@ -7,6 +7,17 @@ import { MAX_WAIT_SECONDS } from './schema.js';
 import { withSignal } from './request-context.js';
 import { appsSurface, viewMeta, VIEWED_TOOLS, APPS_ONLY_TOOLS } from './apps.js';
 import { buildViewModel } from './apps/result-view-model.js';
+
+// experiment draws its own card when the call asks for it (`card: true`) — a field offered only to a
+// client that renders cards, like display_model_result itself.
+const CARD_FIELD = { experiment: 'card' };
+/** A tool's input schema without the way to ask for a card, for a client that renders no cards. */
+function withoutCard(schema, name) {
+  const field = CARD_FIELD[name];
+  if (!field || !schema?.properties?.[field]) return schema;
+  const { [field]: _drop, ...properties } = schema.properties;
+  return { ...schema, properties };
+}
 import { buildSkills } from './skills.js';
 import { TaskRegistry } from './tasks.js';
 
@@ -16,7 +27,7 @@ const TOOL_DESCRIPTIONS = {
   build_pipeline_model: 'The ESCAPE HATCH for a one-off derived TABLE whose rows ARE the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express. Composed INCREMENTALLY (single `action`-driven tool): start a draft, add_step one stage at a time (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + match_recognize; a join names the RELATIONSHIP the schema declares (via: <name>) and never its columns, and joins STACK so one pipeline can reach several sources) — each add_step validates the stage and returns the columns then available for the NEXT stage (pure schema, NOTHING materialized until materialize) — optionally preview the SQL, then materialize — which returns ONLY a task_id and never waits: the build is the task, query_pipeline_model({ task_id }) returns its rows, and query_pipeline_model({ context_id, transform }) filters / regroups the built model later (NOT query_semantic_model). start with from_task re-slices the stored table of a finished task (a materialized query, an earlier build) without recomputing it. For REUSABLE named metrics you query many ways, prefer build_semantic_model (the governed path). A `python` stage is a dbt PYTHON model of its own, allowed anywhere in the pipeline and repeatedly (the pipeline becomes a chain of models reading each other via ref, run on the warehouse\'s Python runtime, never here) — and it carries ONLY what SQL cannot say. ITS OWN DESCRIPTION is where the rules are: what belongs in it, what this warehouse\'s frame raises, and the index of worked recipes to study before writing a line. Its table is read with query_pipeline_model like any pipeline.',
   query_semantic_model: `Start a metric query against a context. metrics + group_by + where are validated in the call (a mistake is refused at once, with the fix). Joins are handled for you: group or filter by an attribute addressed as { model, attribute } and the declared key is applied — including the validity window of a slowly-changing model, so the attribute is the one valid at the time of each row (no window to state). RETURNS ONLY { task_id } and never waits: the query runs as a task. The SAME tool reads it back: query_semantic_model({ task_id }) waits for a semantic task — this query, or a model build_semantic_model is parsing — (up to ${MAX_WAIT_SECONDS}s, returning the moment it is done; again while it says running) and returns its result. materialize:true stores the whole result as a table — pageable ({ task_id, offset, limit }), drawable as a drill-down, and the start of a pipeline (from_task).`,
   query_pipeline_model: `Query a BUILT pipeline model — the pipeline side's twin of query_semantic_model. With { context_id, transform? } it STARTS a query over the model build_pipeline_model built in that context — a read-only projection (where / group_by / aggregations / having / order_by) over the stored table, nothing upstream recomputed — and RETURNS ONLY { task_id }. The SAME tool reads a pipeline task back: query_pipeline_model({ task_id }) waits for it — a build (materialize) or such a query — (up to ${MAX_WAIT_SECONDS}s, returning the moment it is done; again while it says running) and returns its rows; offset/limit page a build's stored table.`,
-  display_model_result: 'SHOW a finished result to the person as a card (in a host that renders MCP Apps) — the ONLY tool that draws. It reads the task the way the query tools do and draws it ONCE: a second call for the same task is refused, so one question gets one card. Call it only for what the person should SEE — never for intermediate reads. `display` says how rows are drawn (a chart, KPI tiles, a funnel, a sankey, a drill-down pivot…; its schema lists each kind and the fields it needs), over the result\'s columns; an experiment\'s result draws its own card. A task still running is refused — wait for it with its query tool ({ task_id }) first.',
+  display_model_result: 'SHOW a finished MODEL result — a semantic query or a pipeline — to the person as a card (in a host that renders MCP Apps); the only tool that draws a model\'s rows. It reads the task the way the query tools do and draws it ONCE: a second call for the same task is refused, so one question gets one card. Call it only for what the person should SEE — never for intermediate reads. `display` says how rows are drawn (a chart, KPI tiles, a funnel, a sankey, a drill-down pivot…; its schema lists each kind and the fields it needs), over the result\'s columns. (An experiment is not a model: it draws its own card with card: true.) A task still running is refused — wait for it with its query tool ({ task_id }) first.',
   drill_result: 'The card\'s own read of the next view of a drawn drill-down (a pivot row opened, a chart mark clicked) — called by the card, never by the model.',
   // update_semantic_model is folded into build_semantic_model({ action: 'update' }) and hidden
   // from the listing; the name stays callable, so its description stays here for that caller.
@@ -47,7 +58,7 @@ const TOOL_TITLES = {
 // Server-level documentation surfaced to the AI client (serverInfo.description):
 // what this MCP is for and how to use it end-to-end.
 // Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
-const RESULT_CARDS = `RESULT CARDS: in a host that renders MCP Apps, a finished result can be drawn for the person as a card — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot, the A/B test, the split check, the sample-size plan. ONE TOOL DRAWS: display_model_result({ task_id, display }) — nothing else ever does (not a query, not a build, not the read of a task). It reads the task the way the query tools do and draws it ONCE; a second call for the same task is refused. So: start the work (it returns a task_id), read it with its query tool — query_semantic_model({ task_id }) or query_pipeline_model({ task_id }) — as often as you need to work something out — that draws nothing — and call display_model_result once, for the result the person should SEE, before summarising it; do not draw your own chart of the same rows. An experiment returns its statistics at once with a task_id — display_model_result({ task_id }) draws its card. In \`display\` pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list. A pivot or a chart with drill reads a STORED result: run the query with materialize:true (a pipeline build is stored already).`;
+const RESULT_CARDS = `RESULT CARDS: in a host that renders MCP Apps, a result can be drawn for the person as a card. A MODEL result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by ONE tool: display_model_result({ task_id, display }); no query, build or read of a task ever draws. It reads the task the way the query tools do and draws it ONCE; a second call for the same task is refused. So: start the work (it returns a task_id), read it with its query tool — query_semantic_model({ task_id }) or query_pipeline_model({ task_id }) — as often as you need to work something out — that draws nothing — and call display_model_result once, for the result the person should SEE, before summarising it; do not draw your own chart of the same rows. An EXPERIMENT is a separate process — statistics over the per-group numbers you bring, no task: experiment returns them at once, and draws its own card (the A/B test, the split check, the sample-size plan) only when you pass card: true. Without it the answer is text only — ask for the card the person should see, once. In \`display\` pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list. A pivot or a chart with drill reads a STORED result: run the query with materialize:true (a pipeline build is stored already).`;
 
 const SERVER_DESCRIPTION = `Declarative semantic layer for product analytics.
 
@@ -137,8 +148,9 @@ function titleFromName(name) {
 /**
  * The advertised tools, in two variants (src/apps.js). For a client that renders MCP Apps every
  * tool carries `_meta.ui` — its visibility (the model's; drill_result the view's only), and on
- * display_model_result the view — as the official ext-apps `registerAppTool` does. A client that does
- * not render them gets no `_meta.ui`, and neither display_model_result nor drill_result: nothing draws.
+ * display_model_result and experiment the view — as the official ext-apps `registerAppTool` does. A
+ * client that does not render them gets no `_meta.ui`, neither display_model_result nor drill_result,
+ * and no `card` on experiment: nothing draws.
  */
 export function buildToolDefs(engine, { renders = true } = {}) {
   return Object.entries(engine.schemas)
@@ -146,7 +158,7 @@ export function buildToolDefs(engine, { renders = true } = {}) {
     .map(([name, schema]) => {
       const title = TOOL_TITLES[name] || titleFromName(name);
       const meta = viewMeta(name, renders);
-      const inputSchema = schema;
+      const inputSchema = renders ? schema : withoutCard(schema, name);
       // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
       // read the older annotations location. `name` remains the stable programmatic identifier.
       return {
@@ -173,10 +185,12 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
  *  same value as `structuredContent` (what a program — the Apps view — reads; the spec asks for
  *  both, and a host that uses the structured copy does not add it to the model's context). */
 export function toCallToolResult(result, name, args) {
-  // STRUCTURED OUTPUT ONLY FOR A CARD THAT WAS DRAWN: display_model_result's answer, when the engine drew
-  // it (the task's one card), and the same view model the card runs finds something to draw.
-  // Anything else — every other tool, a refusal, a failure — is the text alone.
-  const structured = VIEWED_TOOLS.has(name) && isPlainObject(result) && result.drawn === true && buildViewModel(name, result, args).kind !== 'none';
+  // STRUCTURED OUTPUT ONLY FOR A CARD THAT IS DRAWN: display_model_result's answer when the engine drew
+  // it (the task's one card), or experiment's when the call asked for its card (`card: true`) — and
+  // only when the same view model the card runs finds something to draw. Anything else — every
+  // other tool, a refusal, a failure — is the text alone.
+  const asked = name === 'experiment' ? args?.card === true : isPlainObject(result) && result.drawn === true;
+  const structured = VIEWED_TOOLS.has(name) && asked && isPlainObject(result) && buildViewModel(name, result, args).kind !== 'none';
   return {
     content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
     ...(structured ? { structuredContent: result } : {}),
@@ -207,6 +221,11 @@ export async function runTool(engine, name, args, { signal, onProgress, progress
   if (!renders && APPS_ONLY_TOOLS.has(name)) {
     logLine(name, '✗ from a client without the Apps extension');
     return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_id })`, 'validate'), raw: null };
+  }
+  const cardField = CARD_FIELD[name];
+  if (!renders && cardField && args?.[cardField] !== undefined) {
+    logLine(name, `✗ ${cardField} from a client without the Apps extension`);
+    return { result: errorResult(`${cardField} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so no card is drawn — drop the ${cardField} field`, 'validate', cardField), raw: null };
   }
   let beat;
   if (onProgress) {

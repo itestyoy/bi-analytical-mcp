@@ -2345,14 +2345,6 @@ export class Engine {
     return { task_id: id, ...extra, next: `${this._readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
   }
 
-  /** A result that needed no warehouse time (an experiment's statistics), kept as a finished task so display_model_result can draw it. */
-  _finishedTask(tool, out, input = null) {
-    const id = this.jobs.create({ tool });
-    this._keepTaskResult(id, { tool, input, out });
-    this.jobs.ready(id);
-    return id;
-  }
-
   /** Keep a task's finished response for the query tools to read back — the newest few hundred, for an hour. A stored table outlives it. */
   _keepTaskResult(id, entry) {
     const MAX = 200; const TTL_MS = 3600000;
@@ -2918,17 +2910,14 @@ export class Engine {
    */
   experiment(input) {
     this._validate('experiment', input);
-    const { action, ...rest } = input;
-    let out;
+    // `card` asks the MCP server for the result's card (src/mcp-surface.js): not a statistic
+    const { action, card: _card, ...rest } = input;
     switch (action) {
-      case 'plan': out = this.sample_size(rest); break;
-      case 'check_split': out = this.srm_check(rest); break;
-      case 'analyze': out = this.ab_test(rest); break;
+      case 'plan': return this.sample_size(rest);
+      case 'check_split': return this.srm_check(rest);
+      case 'analyze': return this.ab_test(rest);
       default: throw new ToolError(`unknown experiment action '${action}'`, { stage: 'validate', field: 'action' });
     }
-    // statistics need no warehouse time, so they come back at once — and are kept as a finished
-    // task, which is what display_model_result draws when the person should see them
-    return { ...out, task_id: this._finishedTask('experiment', out, input) };
   }
 
   /**
@@ -3406,7 +3395,7 @@ export class Engine {
     return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: { limit, offset, has_more: res.rows.length > offset + limit }, ...(transform ? { projected: true } : {}) };
   }
 
-  /** The side a task belongs to (semantic | pipeline), or null for one no query reads (an experiment). */
+  /** The side a task belongs to (semantic | pipeline), or null when it cannot be told (a task inherited from the store without its tool). */
   _taskSide(job) {
     if (TASK_SIDE[job?.tool]) return TASK_SIDE[job.tool];
     // a task inherited from the store has lost its tool: its table still says which side built it
@@ -3418,7 +3407,7 @@ export class Engine {
   /** The call that reads a task back: its side's query tool, with the task_id. */
   _readWith(id) {
     const side = this._taskSide(this.jobs.get(id));
-    return side ? `${SIDE_READER[side]}({ task_id: '${id}' })` : `display_model_result({ task_id: '${id}' })`;
+    return side ? `${SIDE_READER[side]}({ task_id: '${id}' })` : `query_semantic_model or query_pipeline_model with { task_id: '${id}' }`;
   }
 
   /**
@@ -3436,7 +3425,6 @@ export class Engine {
     if (!job) throw new ToolError(`unknown task_id: ${input.task_id} — this server has no such task (one started before a restart is not known any more); start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
     const own = this._taskSide(job);
     if (own && own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool || 'a build'}) — read it with ${SIDE_READER[own]}({ task_id: '${job.id}' })`, { stage: 'validate', field: 'task_id' });
-    if (!own && job.tool) throw new ToolError(`task ${job.id} is an ${job.tool} result — it came back with its call; show it with display_model_result({ task_id: '${job.id}' })`, { stage: 'validate', field: 'task_id' });
     return this._awaitRead(job.id, input);
   }
 
@@ -3518,9 +3506,9 @@ export class Engine {
 
   /** How a finished result can be shown to the person — named only where there is something to draw, and only once. */
   _showHint(id, tool, out) {
-    const drawable = tool === 'experiment' || (isPlainObject(out) && Array.isArray(out.rows) && out.rows.length > 0);
+    const drawable = isPlainObject(out) && Array.isArray(out.rows) && out.rows.length > 0;
     if (!drawable || this._displayed?.has(id)) return {};
-    return { show_to_user: { tool: 'display_model_result', arguments: { task_id: id }, why: `in a host that renders MCP Apps this draws the result as a card for the person${tool === 'experiment' ? '' : ' — add `display` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns'}. Once per result, and only for what the person should SEE — not for the intermediate reads you make to work something out.` } };
+    return { show_to_user: { tool: 'display_model_result', arguments: { task_id: id }, why: `in a host that renders MCP Apps this draws the result as a card for the person — add \`display\` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns. Once per result, and only for what the person should SEE — not for the intermediate reads you make to work something out.` } };
   }
 
   /**
@@ -3528,8 +3516,9 @@ export class Engine {
    * way the query tools read one (_awaitRead). It draws each task at most ONCE: a second call for the same
    * task is refused, so one question gets one card by construction. A task still running after
    * that read's wait, or a failed one, is REFUSED (a tool error, no card): waiting is the query tools'. `display` says how rows are drawn
-   * — checked against the result's columns; without it the card follows the rows' shape. An
-   * experiment draws its own card (the test, the split check, the plan). A drill-down (a pivot, a
+   * — checked against the result's columns; without it the card follows the rows' shape. It draws
+   * MODEL results only: an experiment is its own process and draws its own card (experiment with
+   * card: true). A drill-down (a pivot, a
    * chart with drill) shows its first view, and the card reads the views below from the task's
    * stored table (drill_result).
    */
@@ -3553,12 +3542,9 @@ export class Engine {
       const kept = this._taskResults?.get(id);
       const tool = result.tool || kept?.tool || null;
       let out;
-      if (tool === 'experiment') {
-        if (input.display) throw new ToolError('an experiment result draws its own card (the test, the split check or the plan) — drop display', { stage: 'validate', field: 'display' });
-        out = { ...result, drawn_from: { tool, input: kept?.input ?? null } };
-      } else {
+      {
         const cols = this._resultColumns(result);
-        if (!cols) throw new ToolError(`task ${id} (${tool || 'a task'}) returned no rows to draw — display_model_result draws the result of a query, a pipeline build or an experiment`, { stage: 'validate', field: 'task_id' });
+        if (!cols) throw new ToolError(`task ${id} (${tool || 'a task'}) returned no rows to draw — display_model_result draws the rows of a model: a semantic query or a pipeline`, { stage: 'validate', field: 'task_id' });
         const d = input.display || null;
         const first = this._drillFirstRead(d);
         const job = this.jobs.get(id);
@@ -3749,8 +3735,8 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
 
 // WHICH SIDE A TASK BELONGS TO — and so which query tool reads it back. A semantic task (a declared
 // model being parsed, a metric query) is read with query_semantic_model({ task_id }); a pipeline
-// task (a build, a query over a built model) with query_pipeline_model({ task_id }). An experiment's
-// statistics come back with their call and are only ever drawn.
+// task (a build, a query over a built model) with query_pipeline_model({ task_id }). An experiment
+// is no task at all: its statistics come back with its call.
 const TASK_SIDE = {
   build_semantic_model: 'semantic', update_semantic_model: 'semantic', query_semantic_model: 'semantic',
   build_pipeline_model: 'pipeline', register_native_model: 'pipeline', query_pipeline_model: 'pipeline',

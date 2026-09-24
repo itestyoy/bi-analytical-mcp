@@ -22,10 +22,10 @@ let s;
 before(async () => { s = await startServer(); });
 after(async () => { await s.stop(); });
 
-const VIEWED = ['display_model_result'];
+const VIEWED = ['display_model_result', 'experiment'];
 const APPS_ONLY = ['display_model_result', 'drill_result'];
 
-test('one tool carries the view, in both spellings — for a client that declares MCP Apps in its request', async () => {
+test('the two drawing tools carry the view, in both spellings — for a client that declares MCP Apps in its request', async () => {
   const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
   const tools = (await c.listTools()).tools;
   for (const t of tools) {
@@ -34,7 +34,8 @@ test('one tool carries the view, in both spellings — for a client that declare
     assert.equal(t._meta?.['ui/resourceUri'], want, `${t.name} (flat key)`);
   }
   assert.ok(tools.find((t) => t.name === 'display_model_result').inputSchema.properties.display, 'display is declared on display_model_result');
-  for (const name of ['query_semantic_model', 'query_pipeline_model', 'experiment']) assert.equal(tools.find((t) => t.name === name).inputSchema.properties.display, undefined, `${name} draws nothing`);
+  for (const name of ['query_semantic_model', 'query_pipeline_model', 'experiment']) assert.equal(tools.find((t) => t.name === name).inputSchema.properties.display, undefined, `${name} takes no model card declaration`);
+  assert.ok(tools.find((t) => t.name === 'experiment').inputSchema.properties.card, 'experiment asks for its own card with card: true');
   assert.ok(c.getInstructions().includes('RESULT CARDS'), 'and the instructions tell how cards work');
 });
 
@@ -47,6 +48,10 @@ test('a client that does not declare MCP Apps in its request gets none of it: no
     const tools = (await c.listTools()).tools;
     for (const t of tools) assert.equal(t._meta?.ui, undefined, `${label}: ${t.name} carries no _meta.ui`);
     for (const name of APPS_ONLY) assert.equal(tools.find((t) => t.name === name), undefined, `${label}: ${name} is not offered`);
+    assert.equal(tools.find((t) => t.name === 'experiment').inputSchema.properties.card, undefined, `${label}: experiment offers no card`);
+    const card = await c.callTool({ name: 'experiment', arguments: { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true } });
+    assert.equal(card.isError, true, `${label}: card is refused`);
+    assert.equal(JSON.parse(card.content[0].text).error.field, 'card', label);
     assert.ok(!(await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI), `${label}: the view is not listed`);
     assert.ok(!c.getInstructions().includes('RESULT CARDS'), `${label}: no card instructions`);
     const r = await c.callTool({ name: 'display_model_result', arguments: { task_id: 'ffffffffffff' } });
@@ -108,13 +113,17 @@ test('a task that is gone reaches the model as result_gone over MCP, and a card 
   }
 });
 
-test('structured output only for a card that was DRAWN — display_model_result\'s answer, and the same view model decides', () => {
+test('structured output only for a card that is DRAWN — display_model_result\'s answer, experiment with card: true — and the same view model decides', () => {
   const rows = { ok: true, columns: [{ name: 'c' }, { name: 'v' }], rows: [{ c: 'US', v: 3 }, { c: 'DE', v: 1 }] };
   const display = { kind: 'bar', x: 'c', y: ['v'] };
   const drawn = { ...rows, display, drawn_from: { tool: 'query_semantic_model' }, drawn: true };
   assert.ok(toCallToolResult(drawn, 'display_model_result').structuredContent);
   // the same rows from any other tool — a query, a read — are text alone
   for (const name of ['query_semantic_model', 'query_pipeline_model', 'build_pipeline_model', 'experiment']) assert.equal(toCallToolResult({ ...rows, display }, name).structuredContent, undefined, name);
+  // experiment: its own card when the call asks for it, and only then
+  const plan = { metric: 'proportion', n_per_group: 3841, total_n: 7682, baseline: 0.1, mde: 0.02 };
+  assert.ok(toCallToolResult(plan, 'experiment', { action: 'plan', card: true }).structuredContent);
+  assert.equal(toCallToolResult(plan, 'experiment', { action: 'plan' }).structuredContent, undefined);
   // display_model_result that drew nothing: refused, failed, empty
   for (const nothing of [{ ...drawn, drawn: false }, { ok: false, error: { message: 'x' }, display }, { ...drawn, rows: [] }]) {
     const r = toCallToolResult(nothing, 'display_model_result');
@@ -131,21 +140,18 @@ test('the view resource is one mcp-app HTML document, listed and readable for a 
   assert.ok(content.text.startsWith('<!DOCTYPE html>') && /<\/html>\s*$/.test(content.text), 'a complete document');
 });
 
-test('an experiment answers as text with a task_id; display_model_result draws its card ONCE, and a second call is refused', async () => {
+test('an experiment is its own process: card: true draws its card, equal to the text; without it, text alone — and no task, nothing for display_model_result', async () => {
   const args = { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 };
   const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
+  const asked = await c.callTool({ name: 'experiment', arguments: { ...args, card: true } });
+  assert.deepEqual(asked.structuredContent, JSON.parse(asked.content[0].text));
+  assert.equal(asked.structuredContent.n_per_group, 3841, 'the card carries the plan\'s own numbers');
+  assert.equal(buildViewModel('experiment', asked.structuredContent, args).kind, 'plan');
   const plain = await c.callTool({ name: 'experiment', arguments: args });
-  assert.equal(plain.structuredContent, undefined, 'the statistics themselves draw nothing');
-  const { n_per_group: n, task_id } = JSON.parse(plain.content[0].text);
-  assert.equal(n, 3841);
-  const shown = await c.callTool({ name: 'display_model_result', arguments: { task_id } });
-  assert.deepEqual(shown.structuredContent, JSON.parse(shown.content[0].text));
-  assert.equal(shown.structuredContent.n_per_group, 3841, 'the card carries the plan\'s own numbers');
-  assert.equal(buildViewModel('display_model_result', shown.structuredContent).kind, 'plan');
-  const again = await c.callTool({ name: 'display_model_result', arguments: { task_id } });
-  assert.equal(again.isError, true, 'one result, one card');
-  assert.equal(again.structuredContent, undefined);
-  assert.match(JSON.parse(again.content[0].text).error.message, /shown already/);
+  assert.equal(plain.structuredContent, undefined, 'no card asked for: no structured output');
+  const answer = JSON.parse(plain.content[0].text);
+  assert.equal(answer.n_per_group, 3841, 'the same answer, as text');
+  assert.equal(answer.task_id, undefined, 'statistics are no task');
 });
 
 test('the checked-in view is the build of its sources (npm run build:app)', async () => {

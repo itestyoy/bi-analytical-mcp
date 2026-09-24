@@ -13,9 +13,11 @@
 //     to its sources.
 // A host without the extension ignores `_meta.ui`: the tool is the plain tool it always was.
 //
-// ONE TOOL DRAWS: display_model_result, the only tool with the view. It draws a FINISHED task's result
-// (read the way the query tools read a task), each task at most once — so one question gets one card by
-// construction, and starting, reading and showing a result stay three separate calls.
+// TWO TOOLS DRAW, EACH ITS OWN KIND OF RESULT. display_model_result draws a FINISHED model task's
+// result — a semantic query or a pipeline — read the way the query tools read a task, each task at
+// most once: one question gets one card by construction, and starting, reading and showing a result
+// stay three separate calls. experiment is a process of its own — statistics over numbers the
+// caller brings, no task — and draws its own card when the call asks for it (card: true).
 //
 // THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT — nothing else. It gets the result the host hands
 // it; the ONE thing it may ask for is more of that same result, through drill_result: a
@@ -49,9 +51,10 @@ export { RESOURCE_MIME_TYPE, EXTENSION_ID as UI_EXTENSION };
 export const RESULT_VIEW_URI = 'ui://betti/result-view.html';
 export const RESULT_VIEW_FILE = RUNTIME_ASSETS.resultView.path;
 
-// The one tool whose result is drawn: display_model_result. Nothing else carries the view — not a query,
-// not a build, not a query tool's read of a task — so no read, no poll and no intermediate step ever draws.
-export const VIEWED_TOOLS = new Set(['display_model_result']);
+// The tools whose result is drawn: display_model_result (a model's rows) and experiment (the test, the
+// split check, the plan). Nothing else carries the view — not a query, not a build, not a query
+// tool's read of a task — so no read, no poll and no intermediate step ever draws.
+export const VIEWED_TOOLS = new Set(['display_model_result', 'experiment']);
 
 /** Who may call a tool: the model only — never a view (see the header). */
 export const TOOL_VISIBILITY = Object.freeze(['model']);

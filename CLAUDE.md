@@ -136,20 +136,24 @@
   never waits (`Engine._startTask`; tasks on one context run in order). The query tool of the SAME
   side reads a task back: `{ task_id }` waits (≤ MAX_WAIT_SECONDS per call) and returns the result
   (and pages a stored one); it refuses a task of the other side, and it never draws.
-  `display_model_result` is the ONLY tool that draws, for either side: it reads the task the way the
+  `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
   query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
-  `structuredContent` is carried only by a display_model_result that drew (`drawn: true` and
-  `buildViewModel(...).kind !== 'none'`); every other answer is the text alone. An experiment's
-  statistics come back at once with a task_id display_model_result can draw. A stored result is
+  `structuredContent` is carried only by a display_model_result that drew (`drawn: true`) or an
+  experiment called with `card: true`, and only when `buildViewModel(...).kind !== 'none'`; every
+  other answer is the text alone. THE EXPERIMENT IS A SEPARATE PROCESS, NOT MIXED WITH display: it is
+  statistics over numbers the caller brings — no task, no task_id — returned at once, and it draws its
+  own card (the test, the split check, the plan) only when asked with `card: true` (a field offered to
+  an Apps client alone, refused from any other). A stored result is
   built on by a pipeline started from its task (`build_pipeline_model({ action: 'start', from_task
   })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
-  starting call, a reader shared by both sides, or a read by table name.
+  starting call, a reader shared by both sides, a read by table name, or route an experiment
+  through tasks or display_model_result.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): `_meta.ui`, the view resource,
-    display_model_result and drill_result (not even listed otherwise, and refused if called), the RESULT
-    CARDS instructions, the `show_to_user` hint;
+    display_model_result and drill_result (not even listed otherwise, and refused if called),
+    experiment's `card` field (refused otherwise), the RESULT CARDS instructions, the `show_to_user` hint;
   * Skills (`io.modelcontextprotocol/skills`): skills/list and skills/get (-32021 otherwise), the
     skill files in resources/list, templates and resources/read, the SKILLS pointer in the
     instructions;

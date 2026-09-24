@@ -90,10 +90,9 @@ export function pivotRows(result, display, depth) {
 }
 
 export function buildViewModel(toolName, result, toolInput) {
-  // display_model_result draws a result another tool produced: the view is that tool's (an experiment's
-  // input carries the group sizes its card prints)
+  // display_model_result draws the rows another tool produced: the card is that tool's
   if (toolName === 'display_model_result' && result && typeof result === 'object' && result.drawn_from && typeof result.drawn_from === 'object') {
-    return buildViewModel(result.drawn_from.tool || 'result', result, result.drawn_from.input ?? null);
+    return buildViewModel(result.drawn_from.tool || 'result', result, null);
   }
   const MAX_SERIES = 6; // lines share one axis; past six the legend stops being readable
   const MAX_BARS = 30; // past thirty categories bars stop being readable, flat or not

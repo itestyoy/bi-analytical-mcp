@@ -369,6 +369,7 @@ test('drill_result reads only a drawn task, and its row cap is given once (no tr
   // the row cap is `limit`; a second one inside the transform would emit two LIMITs
   await assert.rejects(() => e.drill_result({ task_id: 'abcdef123456', limit: 5, transform: { limit: 3 } }), /limit|additional/);
   // a task that was never drawn is not a card's to read
-  const { task_id } = e.experiment({ action: 'check_split', groups: [{ label: 'a', n: 100 }, { label: 'b', n: 100 }] });
+  const task_id = e.jobs.create({ tool: 'query_semantic_model' });
+  e.jobs.ready(task_id);
   await assert.rejects(() => e.drill_result({ task_id, transform: {} }), /not drawn/);
 });

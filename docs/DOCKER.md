@@ -162,10 +162,12 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   request carries its capabilities. Every other client — including a 2025 client that declared it in
   `initialize`, whose later requests carry nothing (this server keeps no sessions) — gets no
   `_meta.ui`, no view resource, neither `display_model_result` nor `drill_result` (not listed; a call is
-  refused), no card instructions and no `show_to_user` hint. For a client that declares it, ONE tool
-  draws: `display_model_result({ task_id, display })` renders a finished result — of a query, a pipeline
-  build or an experiment — in the host's conversation as an interactive view
-  (`ui://betti/result-view.html`):
+  refused), no `card` on `experiment` (refused if sent), no card instructions and no `show_to_user`
+  hint. For a client that declares it, two tools draw, each its own kind of result, in the host's
+  conversation as an interactive view (`ui://betti/result-view.html`):
+  `display_model_result({ task_id, display })` a finished MODEL result — a semantic query or a
+  pipeline — and `experiment` (a separate process: statistics over the numbers the caller brings, no
+  task) its own card when called with `card: true`:
   a CHART (a time series or a breakdown — the chart alone; the only table is the pivot below),
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
   TEST (a stat card per variant: lift, interval, verdict, the groups — a significant change coloured
@@ -204,10 +206,11 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   and `build_pipeline_model` / `query_pipeline_model`. A call that starts warehouse work (a build, a
   query) returns only `{ task_id }` and never waits; the query tool of the same side, given
   `{ task_id }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
-  `display_model_result` is the only tool that draws, for either side: it reads the task the same
-  way and draws each task ONCE (a second call is refused). So one question gets one
+  `display_model_result` is the only tool that draws a model result, for either side: it reads the
+  task the same way and draws each task ONCE (a second call is refused). So one question gets one
   card by construction: `structuredContent` (what a host draws a card from) is carried only by a
-  `display_model_result` that drew; every other answer, of every tool, is text alone. A task still running
+  `display_model_result` that drew, or an `experiment` called with `card: true`; every other answer,
+  of every tool, is text alone. A task still running
   is refused by display_model_result (wait with its query tool), and so is a column the result lacks.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
   not call it) except `drill_result`, `["app"]` (the model never sees it); the view resource declares

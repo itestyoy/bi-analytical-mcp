@@ -73,10 +73,8 @@ test('a query tool\'s read pages only a STORED result, reads only its own side, 
   await taskResult(e, q.task_id);
   await assert.rejects(() => e.query_semantic_model({ task_id: q.task_id, offset: 10 }), /STORED table/);
   await assert.rejects(() => e.query_semantic_model({ task_id: 'ffffffffffff' }), (err) => err.code === 'result_gone');
-  // a semantic task is not the pipeline side's to read, and an experiment is only drawn
+  // a semantic task is not the pipeline side's to read
   await assert.rejects(() => e.query_pipeline_model({ task_id: q.task_id }), /query_semantic_model/);
-  const plan = e.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
-  await assert.rejects(() => e.query_semantic_model({ task_id: plan.task_id }), /display_model_result/);
 });
 
 test('a pipeline starts only from a finished task that stored a table', async () => {
@@ -108,21 +106,24 @@ test('a pipeline starts only from a finished task that stored a table', async ()
   assert.throws(() => e.drop_context({ context_id: created.context_id }), /reads|READS|consumer|force/i);
 });
 
-test('display_model_result draws a result with rows or an experiment, once — and nothing else', async () => {
+test('display_model_result draws a model\'s rows once — and nothing else; an experiment is no task', async () => {
   const runner = orderedRunner();
   const e = engine(runner);
   const created = await e.build_semantic_model(TASK);
   runner.parses.shift()();
   await taskResult(e, created.task_id);
   await assert.rejects(() => e.display_model_result({ task_id: created.task_id }), /no rows to draw/);
-  const plan = e.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
-  await assert.rejects(() => e.display_model_result({ task_id: plan.task_id, display: { kind: 'kpi', values: [{ column: 'n_per_group' }] } }), /draws its own card/);
-  const drawn = await e.display_model_result({ task_id: plan.task_id });
+  const kpi = { kind: 'kpi', values: [{ column: 'task_cnt' }] };
+  const q = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  await taskResult(e, q.task_id);
+  const drawn = await e.display_model_result({ task_id: q.task_id, display: kpi });
   assert.equal(drawn.drawn, true);
-  assert.equal(drawn.n_per_group, plan.n_per_group);
-  await assert.rejects(() => e.display_model_result({ task_id: plan.task_id }), /shown already/);
+  await assert.rejects(() => e.display_model_result({ task_id: q.task_id, display: kpi }), /shown already/);
   // two calls at once for one task: one card
-  const split = e.experiment({ action: 'check_split', groups: [{ label: 'a', n: 100 }, { label: 'b', n: 100 }] });
-  const both = await Promise.allSettled([e.display_model_result({ task_id: split.task_id }), e.display_model_result({ task_id: split.task_id })]);
+  const q2 = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  await taskResult(e, q2.task_id);
+  const both = await Promise.allSettled([e.display_model_result({ task_id: q2.task_id, display: kpi }), e.display_model_result({ task_id: q2.task_id, display: kpi })]);
   assert.deepEqual(both.map((x) => x.status).sort(), ['fulfilled', 'rejected']);
+  // an experiment's statistics come back with the call, as before: no task to show or read
+  assert.equal(e.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 }).task_id, undefined);
 });

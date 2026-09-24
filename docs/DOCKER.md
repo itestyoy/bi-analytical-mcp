@@ -165,7 +165,9 @@ the plain tools stay exactly as they were for every client that does not:
   detached query remembers it) and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
   result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply),
-  a build still running, SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
+  a query that moved to the background (a static line saying the result comes in its own card —
+  no spinner, since the card is a snapshot of that one answer and never updates; the rows arrive
+  through `get_query_result`, which draws the result card), SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
   nothing would leave an empty box) and the text answer carries the rest.
   The view ONLY DRAWS: it reads the result the host hands it and nothing else. Every tool declares
   `_meta.ui.visibility: ["model"]` (a view may not call it), the view resource declares an empty

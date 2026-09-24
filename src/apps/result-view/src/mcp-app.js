@@ -250,11 +250,16 @@ function render(result) {
 /** The one line a result without a card gets — what happened, and that the reply carries the rest. */
 function showStatus(model) {
   const lines = {
-    running: ['loader-circle', 'Running in the warehouse…', 'icon spin'],
+    // a detached query is a HAND-OFF, not a live state: this card is a snapshot of the one answer
+    // that said so and never updates (the view calls nothing back), so it shows no spinner — the
+    // rows arrive through get_query_result, which draws its own card
+    running: ['clock', 'Moved to the background', 'The result comes in its own card'],
     error: ['circle-alert', 'Error'],
   };
-  const [name, text, cls] = lines[model.reason] || ['info', 'Nothing to chart'];
-  statusEl.replaceChildren(icon(name, cls || 'icon'), el('span', null, text));
+  const [name, text, sub] = lines[model.reason] || ['info', 'Nothing to chart'];
+  const label = el('span', 'status-text', text);
+  if (sub) label.append(el('span', 'status-sub', sub));
+  statusEl.replaceChildren(icon(name), label);
   statusEl.classList.toggle('status-line-error', model.reason === 'error');
 }
 

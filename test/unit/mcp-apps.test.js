@@ -34,22 +34,33 @@ test('the viewed tools carry the view in both spellings, for every client in bot
   }
 });
 
-test('the view only draws: every tool is model-only, the view declares no network, its code calls nothing back', async () => {
+test('the view draws and follows only its own query: one tool is app-callable, no network, one server call in its code', async () => {
   for (const era of ['legacy', 'modern']) {
     const c = await s.client({ era });
-    // a host refuses a view's tools/call to a tool that is not visible to "app"
-    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, ['model'], `${era} ${t.name}`);
+    // a host refuses a view's tools/call to a tool that is not visible to "app": only the read of a result is
+    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, t.name === 'get_query_result' ? ['model', 'app'] : ['model'], `${era} ${t.name}`);
     const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
     assert.deepEqual(content._meta?.ui?.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, `${era}: no origin of any kind`);
   }
-  // the view's own code: no App method that reaches the server or the model, no network API
-  const REACHES_OUT = /\b(callServerTool|readServerResource|listServerResources|createSamplingMessage|sendMessage|updateModelContext|openLink|downloadFile|sendLog|fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)\s*\(/;
+  // the view's own code: no App method that reaches the model or other server methods, no network API
+  const REACHES_OUT = /\b(readServerResource|listServerResources|createSamplingMessage|sendMessage|updateModelContext|openLink|downloadFile|sendLog|fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)\s*\(/;
   const dir = new URL('../../src/apps/result-view/src/', import.meta.url).pathname;
   const sources = [...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f)), new URL('../../src/apps/result-view-model.js', import.meta.url).pathname];
+  const toolCalls = [];
   for (const file of sources) {
-    const hit = readFileSync(file, 'utf8').match(REACHES_OUT);
+    const text = readFileSync(file, 'utf8');
+    const hit = text.match(REACHES_OUT);
     assert.equal(hit, null, `${file} calls ${hit?.[1]}`);
+    for (const m of text.matchAll(/callServerTool\s*\(([^)]*)\)/g)) toolCalls.push(m[1]);
   }
+  // exactly one tools/call: get_query_result, with nothing but the query_id of the card's own result
+  assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
+  assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'get_query_result', arguments: { query_id: queryId } }");
+});
+
+test('view model: a result that moved to the background carries the query_id the card follows', () => {
+  const m = buildViewModel('query_semantic_model', { ok: true, status: 'running', query_id: 'abc123abc123' });
+  assert.deepEqual(m, { kind: 'none', reason: 'running', query_id: 'abc123abc123' });
 });
 
 test('the view resource is one mcp-app HTML document, listed and readable in both eras', async () => {

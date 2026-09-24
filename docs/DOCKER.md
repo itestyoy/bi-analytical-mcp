@@ -165,14 +165,19 @@ the plain tools stay exactly as they were for every client that does not:
   detached query remembers it) and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
   result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply),
-  a query that moved to the background (a static line saying the result comes in its own card —
-  no spinner, since the card is a snapshot of that one answer and never updates; the rows arrive
-  through `get_query_result`, which draws the result card), SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
+  SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
   nothing would leave an empty box) and the text answer carries the rest.
-  The view ONLY DRAWS: it reads the result the host hands it and nothing else. Every tool declares
-  `_meta.ui.visibility: ["model"]` (a view may not call it), the view resource declares an empty
+  A query that outlasts its call answers `{ status: 'running', query_id }`; its card then FOLLOWS
+  that query — it polls `get_query_result` for that query_id every 3 s (for up to 30 min) and draws
+  the rows in place of the "Running in the warehouse…" line when they are ready. A host that does
+  not proxy a view's tool calls (no `serverTools` capability), or a refused call, leaves a static
+  "Moved to the background" line instead, and the result comes with the model's own
+  `get_query_result` card.
+  Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
+  not call it) except `get_query_result`, `["model", "app"]`; the view resource declares an empty
   `csp` (no connect, resource or frame origin) and the page carries the same Content-Security-Policy
-  itself, and the view's code calls no server tool, resource, model message or link.
+  itself; and the view's code makes that one call — get_query_result with its own query_id — and
+  calls no other tool, resource, model message or link.
   (`semantic_index` has no view on purpose: it is the most frequent call and a view on every
   exploration step would bury the conversation.) The view is built like the official MCP Apps
   examples — the ext-apps `App` class, host theme and style variables, shadcn/ui components,

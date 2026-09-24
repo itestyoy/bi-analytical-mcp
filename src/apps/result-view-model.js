@@ -3,7 +3,8 @@
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
 // WHAT to render: a CHART (a time series or a breakdown, with its rows folded underneath), a FUNNEL,
 // and the A/B TEST family — the test itself, the sample-ratio check and the sample-size plan, the
-// three steps of one experiment. Anything else — a failure, a build still running, an explained
+// three steps of one experiment. Anything else — a failure, a build still running (with the query_id
+// the card follows to its rows), an explained
 // query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
 // status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
 // the tool's text result speaks for itself. Rows are drawn as the caller DECLARED them when the
@@ -29,7 +30,8 @@ export function buildViewModel(toolName, result, toolInput) {
 
   // a build that is still running, or one that failed, says so — there is nothing to plot
   const none = (reason, extra = {}) => ({ kind: 'none', reason, ...extra });
-  if (result.status === 'running' && result.query_id) return none('running');
+  // (the query_id is what the card follows to the rows)
+  if (result.status === 'running' && result.query_id) return none('running', { query_id: String(result.query_id) });
   // a failure is only NAMED in the view — the reason is for the reply, not the card
   if (result.ok === false || (result.error && !result.rows)) return none('error');
 

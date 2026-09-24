@@ -38,10 +38,10 @@ test('2026-07-28 on the wire: discover and lists carry caching hints, the result
   assert.ok(d.body.result.supportedVersions.includes(V));
   assert.equal(d.body.result.resultType, 'complete');
   assert.equal(d.body.result._meta['io.modelcontextprotocol/serverInfo'].name, 'dbt-semantic-mcp');
-  // what they list depends on whether the client renders MCP Apps: each client's own to cache
+  // a short lifetime: a deploy that changes them reaches the client within a minute (src/surface-change.js)
   for (const m of ['server/discover', 'tools/list', 'resources/list']) {
     const r = await s.modern(m);
-    assert.equal(r.body.result.ttlMs, 3600000, m);
+    assert.equal(r.body.result.ttlMs, 60000, m);
     assert.equal(r.body.result.cacheScope, 'private', m);
   }
 });

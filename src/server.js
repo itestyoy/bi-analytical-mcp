@@ -235,6 +235,8 @@ export function createApp(engine, opts = {}) {
   });
   const handler = createMcpHandler(({ era }) => createMcpServer(services, { era }), {
     onerror: (e) => logLine('mcp', `✗ ${e?.message || e}`),
+    // subscriptions/listen streams subscribe here; a start that changed the surface announces it
+    bus: services.bus,
   });
   const node = toNodeHandler(handler);
   app.all('/mcp', (req, res) => {

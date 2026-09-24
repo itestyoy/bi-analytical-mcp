@@ -8,6 +8,7 @@
 // Repository contract (all backends implement it):
 //   jobs.init()                       -> rows[]  (ensure schema, reconcile running→error)
 //   jobs.upsert(job)
+//   meta.get(key) -> string | null;  meta.set(key, value)   (small server facts kept across restarts)
 //   Every values.* row is keyed by (SOURCE, property): each catalog source owns its own index
 //   space, so two events sources may carry the same property name without sharing a row. The
 //   source is always the FIRST argument (null/undefined = every source, where a method allows it).
@@ -73,6 +74,12 @@ export class MemoryBackend {
     this.jobs = {
       init: () => [], // nothing persisted; JobManager keeps the working set in its own Map
       upsert: () => {},
+    };
+
+    const meta = new Map();
+    this.meta = {
+      get: (key) => (meta.has(key) ? meta.get(key) : null),
+      set: (key, value) => { meta.set(key, String(value)); },
     };
 
     this.values = {
@@ -290,7 +297,13 @@ export class SqliteBackend {
     try { require('sqlite-vec').load(db); this._vec = true; } catch { /* extension unavailable */ }
     // Track the vec0 table's fixed dimensionality/model; a change rebuilds it.
     db.exec('CREATE TABLE IF NOT EXISTS memory_vec_meta (only_row INTEGER PRIMARY KEY CHECK (only_row = 1), dims INTEGER, model TEXT)');
+    db.exec('CREATE TABLE IF NOT EXISTS server_meta (key TEXT PRIMARY KEY, value TEXT)');
     const s = this;
+
+    this.meta = {
+      get(key) { return s._all('SELECT value FROM server_meta WHERE key = ?', key)[0]?.value ?? null; },
+      set(key, value) { s._run('INSERT INTO server_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value)); },
+    };
 
     this.jobs = {
       init() {

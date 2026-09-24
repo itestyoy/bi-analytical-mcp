@@ -136,6 +136,14 @@ request's own stream, cancellation when the stream closes.
 Three extensions are declared and served; each switches on the moment a client declares it, and
 the plain tools stay exactly as they were for every client that does not:
 
+A deploy that changes what the server offers reaches a client three ways: the tool and resource
+lists (and `server/discover`) may be cached for one minute only; a start whose surface differs from
+the previous process's (a fingerprint kept in the database) sends `notifications/tools/list_changed`
+and `notifications/resources/list_changed` to every `subscriptions/listen` stream opened in the next
+hour; and the fingerprint is part of `serverInfo.version` (`0.1.0+<fingerprint>`). The log says it
+at startup (`surface <fingerprint> — changed since the last start …`). A host that ignores all three
+still needs its tool list refreshed by hand after a deploy.
+
 Each extension below is offered ONLY to a client that declares it in the request being served —
 its capabilities in the 2026-07-28 envelope. A 2025 client declares capabilities once, in
 `initialize`, and this server keeps no sessions, so its later requests carry nothing to go by: it is
@@ -216,7 +224,7 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   of every tool, is text alone. A task still running
   is refused by display_model_result (wait with its query tool), and so is a column the result lacks.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
-  not call it) except `drill_result`, `["app"]` (the model never sees it); the view resource declares
+  not call it) except `drill_result`, `["model", "app"]` (served only for a drawn task); the view resource declares
   an empty `csp` (no connect, resource or frame origin) and the page carries the same
   Content-Security-Policy itself; and the view's code makes that one call — drill_result for its own
   task: the next view of its stored table when a pivot row opens or a chart mark is drilled into

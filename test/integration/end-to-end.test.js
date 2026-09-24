@@ -6,7 +6,7 @@
 //                    provenance fact from the value index.
 //   2. INDEX STATE — semantic_index reports the value-index sync after refresh().
 //   3. NATIVE PIPE — build_native_model (start/add_step/preview/commit) builds the
-//                    activation funnel; rows read back via get_query_result; the
+//                    activation funnel; rows read back via get_task_result; the
 //                    committed counts equal the all-at-once register path (12/8/5/3).
 //   4. SEMANTIC    — create_semantic_model (IAP revenue) → query_semantic_model by
 //                    country → update_semantic_model adds a payers metric → re-query;
@@ -36,6 +36,7 @@ import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
 import { startPglite } from './pglite-harness.js';
+import { settle, readTable } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -82,7 +83,7 @@ before(async () => {
   recipes = loadRecipes(join(process.cwd(), 'config', 'recipes.json'));
   // A temp-file value index so semantic_index reports a REAL persisted SQLite index.
   const dbPath = join(mkdtempSync(join(tmpdir(), 'e2e-db-')), 'value-index.sqlite');
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, recipes, dbPath, queryTimeoutMs: 60000 });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, recipes, dbPath }));
   index = engine.valueIndex;
   indexer = new BackgroundIndexer({ catalog, runner: backend, index, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });
   // Await directly so the value index is populated before the discovery assertions.
@@ -166,7 +167,7 @@ test('2. semantic_index({ status }) reports a clean value-index sync with EXACT 
   assert.equal(vi.indexed_properties, vi.last_successful_run.properties_indexed);
   assert.equal(vi.total_values, vi.last_successful_run.values_written);
   assert.ok(vi.total_values > 0, 'values stored');
-  assert.equal(typeof out.query_jobs.total, 'number');
+  assert.equal(typeof out.tasks.total, 'number');
 });
 
 // 2b. Read the index DIRECTLY (bypassing semantic_index): the exact seeded values landed.
@@ -219,24 +220,24 @@ test('3a. build_native_model: start → add_step (funnel) → preview → commit
   assert.equal(reached(c.rows, 'tut3'), 3);
   S.pipeCtx = c.context_id;
   S.pipeTable = c.model;
-  assert.equal(c.read_with?.tool, 'get_query_result');
-  assert.equal(c.read_with?.table, c.model);
+  S.pipeTask = c.task_id;
+  assert.equal(c.tool, 'build_native_model', 'the rows are the build task\'s result');
   // Provenance: a pipeline result is tagged tier=pipeline with the source + real data freshness.
   assert.equal(c.provenance?.tier, 'pipeline');
   assert.equal(c.provenance?.source, 'events');
   assert.ok(typeof c.provenance?.data_freshness === 'string' && c.provenance.data_freshness.length > 0, 'data freshness = latest event time');
 });
 
-test('3b. get_query_result re-reads the committed pipeline rows (same 12/8/5/3)', opts, async (t) => {
+test('3b. the build task\'s stored table is re-read (paged) with get_task_result (same 12/8/5/3)', opts, async (t) => {
   if (skip(t)) return;
-  const r = await engine.get_query_result({ context_id: S.pipeCtx, table: S.pipeTable });
+  const r = await engine.get_task_result({ task_id: S.pipeTask, limit: 1000 });
   assert.equal(r.ok, true, JSON.stringify(r.error));
   assert.equal(reached(r.rows, 'launch'), 12);
   assert.equal(reached(r.rows, 'tut1'), 8);
   assert.equal(reached(r.rows, 'tut2'), 5);
   assert.equal(reached(r.rows, 'tut3'), 3);
   // transform the stored table in place: count users whose furthest step is tut3 = 3
-  const t3 = await engine.get_query_result({ context_id: S.pipeCtx, table: S.pipeTable, transform: { where: [{ column: 'furthest_step_name', op: 'eq', value: 'tut3' }], aggregations: [{ fn: 'count', column: '*', as: 'n' }] } });
+  const t3 = await readTable(engine, S.pipeCtx, S.pipeTable, { transform: { where: [{ column: 'furthest_step_name', op: 'eq', value: 'tut3' }], aggregations: [{ fn: 'count', column: '*', as: 'n' }] } });
   assert.equal(t3.ok, true, JSON.stringify(t3.error));
   assert.equal(num(t3.rows[0].n), 3);
 });
@@ -308,7 +309,7 @@ test('4c. context({describe|list}) + semantic_index({status}) reflect the regist
   assert.ok(dc.measures.includes('e2e_mon_revenue') && dc.measures.includes('e2e_mon_payers'), 'both measures in context');
 
   const status = await engine.semantic_index({ status: true });
-  assert.ok(Array.isArray(status.query_jobs.recent), 'query jobs listed in the status view'); // non-materialized queries ⇒ none spawned
+  assert.ok(Array.isArray(status.tasks.recent), 'query jobs listed in the status view'); // non-materialized queries ⇒ none spawned
 
   const ctxs = await engine.context({ action: 'list' });
   assert.ok(ctxs.contexts.some((c) => c.context_id === S.semCtx), 'semantic context listed');

@@ -1,8 +1,8 @@
-// A materialized prefix and a build that takes MINUTES meet here. A pipeline with a python stage
-// builds detached: the call returns a query_id and the table appears later. That leaves a window in
-// which the prefix EXISTS as a plan but not yet as a table — and a caller who lost the response
-// (dropped connection) retries the same materialize. Nothing in that window may build the same
-// model twice, and nothing may wait forever on a build whose builder is gone.
+// A materialized prefix and a build that takes MINUTES meet here. Every build is a task: the call
+// returns a task_id at once and the table appears later. That leaves a window in which the prefix
+// EXISTS as a plan but not yet as a table — and a caller who lost the response (dropped connection)
+// retries the same materialize. Nothing in that window may build the same model twice, and nothing
+// may wait forever on a build whose builder is gone.
 //
 // Allowed non-data tests: what a second materialize is REFUSED with (input validation) and what the
 // draft/registry/job records hold (context lifecycle). No SQL/YAML text is asserted anywhere; the
@@ -19,9 +19,10 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { graceMsFromEnv, MAX_BUILD_GRACE_SECONDS } from '../../src/server.js';
+import { isStartedTask, taskResult } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-process.env.MCP_PYTHON_MODELS = 'on'; // the fixture loads without a dbt profile; a python stage is what makes a build detach
+process.env.MCP_PYTHON_MODELS = 'on'; // the fixture loads without a dbt profile; a python stage is the minutes-long build
 const VENV_PY = join(process.cwd(), '.dbtvenv', 'bin', 'python');
 const PY = existsSync(VENV_PY) ? VENV_PY : 'python3';
 const HAS_PY = spawnSync(PY, ['--version']).status === 0;
@@ -59,14 +60,12 @@ const tick = (ms = 0) => new Promise((resolve) => { setTimeout(resolve, ms); });
 const settled = async () => { for (let i = 0; i < 20; i += 1) await tick(); };
 /** Wait until a build is actually in flight (compiling + gating a python stage takes a moment). */
 const untilHeld = async (runner) => { for (let i = 0; i < 400 && !runner.held.length; i += 1) await tick(5); };
-/** Run a SYNCHRONOUS build (no python stage after the prefix → one model, awaited) to completion. */
-const runSync = async (promise, runner, ok = true) => { await untilHeld(runner); runner.finish(ok); return promise; };
+/** Let the build a started task is waiting on finish, and return what the task produced. */
+const finishTask = async (e, started, runner, ok = true) => { await untilHeld(runner); runner.finish(ok); return taskResult(e, started.task_id); };
 
 function engine(runner, { workspaceRoot, registryPath } = {}) {
   const ctxs = new ContextManager({ workspaceRoot: workspaceRoot || mkdtempSync(join(tmpdir(), 'cpb-')), registryPath });
-  // A tiny window on purpose: any real build is "slow" then, so every build here takes the
-  // detached path a minutes-long model takes in production.
-  return new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, runner, pythonBin: PY, queryTimeoutMs: 20 });
+  return new Engine({ catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, runner, pythonBin: PY });
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
@@ -80,46 +79,47 @@ async function startedDraft(e, name = 'seg') {
   return draft_id;
 }
 
-test('a slow build goes to the background; the retried materialize builds nothing new and names the job', async (t) => {
+test('a build is a task: the call returns at once; a retried materialize builds nothing new and names the task', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
   const draft_id = await startedDraft(e);
 
   const bg = await materialize(e, draft_id);
-  assert.equal(bg.status, 'running', 'a build past the window hands back a query_id');
-  assert.match(bg.query_id, /^[a-f0-9]{8,16}$/);
-  assert.equal(bg.read_with.table, bg.model);
+  assert.ok(isStartedTask(bg), 'the call answers with its task only');
+  assert.match(bg.task_id, /^[a-f0-9]{12}$/);
+  await untilHeld(runner);
   // The prefix is already a PLAN (its columns are known) but not yet a table.
   const cp = draftOf(e, draft_id).checkpoints;
   assert.equal(cp.length, 1);
-  assert.deepEqual([cp[0].at, cp[0].model, cp[0].query_id], [2, bg.model, bg.query_id]);
+  assert.deepEqual([cp[0].at, cp[0].model, cp[0].task_id], [2, bg.model, bg.task_id]);
   assert.equal(runner.held.length, 1, 'exactly one build in flight');
 
-  // The caller lost the response and retries the SAME materialize: refused, pointing at the job.
+  // The caller lost the response and retries the SAME materialize: refused, pointing at the task.
   await assert.rejects(() => materialize(e, draft_id), (err) => {
-    assert.match(err.message, /still being materialized/);
-    assert.match(err.message, new RegExp(bg.query_id));
+    assert.match(err.message, /already in flight/);
+    assert.match(err.message, new RegExp(bg.task_id));
     return true;
   });
   assert.equal(runner.held.length, 1, 'no second build was started');
   assert.equal(draftOf(e, draft_id).checkpoints.length, 1, 'and no second prefix was recorded');
-  // A client that lost the query_id can still find it.
-  assert.ok(e.list_query_jobs().jobs.some((j) => j.query_id === bg.query_id && j.table === bg.model));
-  assert.deepEqual(await e.get_query_result({ query_id: bg.query_id }), { ok: true, status: 'running', query_id: bg.query_id, table: bg.model });
+  // A client that lost the task_id can still find it, and looking at it does not wait.
+  assert.ok(e.list_query_jobs().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_native_model'));
+  const peek = await e.get_task_result({ task_id: bg.task_id, wait_seconds: 0 });
+  assert.equal(peek.status, 'running');
 
   // Meanwhile the draft keeps growing — validation needs the prefix's COLUMNS, not its table.
   const step = await add(e, draft_id, TAIL);
   assert.equal(step.from_checkpoint.model, bg.model);
   assert.equal(step.steps_recomputed, 1);
   // …but building on a table that does not exist yet is still refused.
-  await assert.rejects(() => materialize(e, draft_id), /still being materialized/);
+  await assert.rejects(() => materialize(e, draft_id), /already in flight|still being materialized/);
 
-  // The background build lands. Now the continuation runs, and ONLY the new step.
+  // The build lands. Now the continuation runs, and ONLY the new step.
   runner.finish(true);
-  await settled();
-  // the continuation is plain SQL → one model, built synchronously
-  const done = await runSync(materialize(e, draft_id), runner);
+  const built = await taskResult(e, bg.task_id);
+  assert.equal(built.status, 'done');
+  const done = await finishTask(e, await materialize(e, draft_id), runner);
   assert.equal(done.from_checkpoint.at, 2);
   assert.equal(done.steps_recomputed, 1);
   assert.notEqual(done.model, bg.model, 'a rebuild never overwrites the table it reads');
@@ -136,33 +136,30 @@ test('two materialize calls at once: the second is refused and the draft keeps O
   const first = materialize(e, draft_id); // in flight before the second call is made
   await assert.rejects(() => materialize(e, draft_id), /already in flight/);
   const bg = await first;
-  assert.equal(bg.status, 'running');
+  assert.ok(isStartedTask(bg));
+  await untilHeld(runner);
   assert.equal(runner.held.length, 1, 'one build, not two');
   assert.equal(draftOf(e, draft_id).checkpoints.length, 1);
   runner.finish(true);
-  await settled();
+  await taskResult(e, bg.task_id);
 });
 
-test('a background build that FAILED retires the prefix, and the next materialize rebuilds from the source', async (t) => {
+test('a build that FAILED is no prefix: the task says so, and the next materialize rebuilds from the source', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
   const draft_id = await startedDraft(e);
   const bg = await materialize(e, draft_id);
-  assert.equal(bg.status, 'running');
-  runner.finish(false); // dbt failed on the warehouse
-  await settled();
-  assert.equal((await e.get_query_result({ query_id: bg.query_id })).status, 'error');
+  const failed = await finishTask(e, bg, runner, false); // dbt failed on the warehouse
+  assert.equal(failed.status, 'error');
+  assert.deepEqual(draftOf(e, draft_id).checkpoints, [], 'the failed build left no prefix behind');
 
-  const out = await materialize(e, draft_id); // the whole pipeline again → detached again
-  assert.equal(out.status, 'running');
+  const out = await finishTask(e, await materialize(e, draft_id), runner); // the whole pipeline again
+  assert.equal(out.status, 'done');
   assert.equal(out.from_checkpoint, undefined, 'nothing was reused');
-  assert.match(out.checkpoints_dropped[0].reason, /failed/);
   assert.equal(out.steps_recomputed, undefined);
   assert.deepEqual(draftOf(e, draft_id).checkpoints.map((c) => c.at), [2], 'exactly one prefix — the new one');
   assert.notEqual(draftOf(e, draft_id).checkpoints[0].model, bg.model, 'and it is a new model, not the failed one');
-  runner.finish(true);
-  await settled();
 });
 
 test('a build whose builder is gone does not wedge the draft: the restart retires it and rebuilds', async (t) => {
@@ -173,10 +170,8 @@ test('a build whose builder is gone does not wedge the draft: the restart retire
   const e = engine(runner, { workspaceRoot, registryPath });
   const draft_id = await startedDraft(e);
   const bg = await materialize(e, draft_id);
-  assert.equal(bg.status, 'running');
-  // Pretend the response was being written when the process died mid-build.
-  draftOf(e, draft_id).building = { started_at: new Date().toISOString(), model: bg.model };
-  e.ctxs.touch(draft_id);
+  await untilHeld(runner);
+  e.ctxs.touch(draft_id); // the draft, in-flight marker and all, is what the registry holds when the process dies
 
   // A new process reads the same registry: no in-flight marker survives it…
   const runner2 = heldRunner();
@@ -184,14 +179,13 @@ test('a build whose builder is gone does not wedge the draft: the restart retire
   assert.equal(draftOf(e2, draft_id).building, undefined);
   assert.equal(draftOf(e2, draft_id).checkpoints.length, 1, 'the prefix record itself survived');
   // …and the prefix whose build nobody is driving any more is retired instead of waited on.
-  const out = await materialize(e2, draft_id); // the whole pipeline again → detached again
-  assert.equal(out.status, 'running');
+  const out = await finishTask(e2, await materialize(e2, draft_id), runner2);
+  assert.equal(out.status, 'done');
   assert.equal(out.from_checkpoint, undefined, 'the unfinished prefix was not read');
-  assert.match(out.checkpoints_dropped[0].reason, /did not finish|no job record/);
+  assert.match(out.checkpoints_dropped[0].reason, /did not finish|no task record/);
   assert.deepEqual(draftOf(e2, draft_id).checkpoints.map((c) => c.at), [2]);
-  runner2.finish(true);
   runner.finish(true); // release the abandoned build of the first "process"
-  await settled();
+  await taskResult(e, bg.task_id);
 });
 
 test('a view prefix is called out (reading it re-runs its SQL), and describe_context shows the open draft', async (t) => {
@@ -200,7 +194,7 @@ test('a view prefix is called out (reading it re-runs its SQL), and describe_con
   const e = engine(runner);
   const { draft_id } = await e.build_native_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
   await add(e, draft_id, { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] });
-  const r = await runSync(materialize(e, draft_id), runner);
+  const r = await finishTask(e, await materialize(e, draft_id), runner);
   assert.equal(r.materialized, 'view');
   assert.ok(r.warnings.some((w) => /VIEW/.test(w)), 'a view is not a computed prefix — said once, here');
   assert.equal(r.checkpoint.carries_source, 'events', 'a filtered slice is still the source\'s events');
@@ -216,109 +210,74 @@ test('a view prefix is called out (reading it re-runs its SQL), and describe_con
 });
 
 // Editing a step retires the prefixes at or after it and removes their files — but a build that is
-// STILL RUNNING hands its table back through get_query_result, which reads it by ref. Removing the
+// STILL RUNNING hands its table back through get_task_result, which reads it by ref. Removing the
 // definition mid-build would make that result unreadable for good.
-test('an edit during a background build does not remove the files that build is producing', async (t) => {
+test('an edit during a build does not remove the files that build is producing', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
   const draft_id = await startedDraft(e);
   const bg = await materialize(e, draft_id);
-  assert.equal(bg.status, 'running');
+  await untilHeld(runner);
 
   // an edit BELOW the pending prefix retires it (its table is not to be read as a prefix)…
   const ed = await e.build_native_model({ action: 'edit_step', draft_id, index: 1, stage: AGG });
   assert.deepEqual(ed.checkpoints_dropped.map((d) => d.model), [bg.model]);
   assert.deepEqual(draftOf(e, draft_id).checkpoints, []);
-  // …but the model it is building stays on disk, so the job's own result is still readable
+  // …but the model it is building stays on disk, so the task's own result is still readable
   assert.ok(e.ctxs.hasPipelineModel(draft_id, bg.model), 'the running build keeps its definition');
   runner.finish(true);
-  await settled();
-  assert.equal((await e.get_query_result({ query_id: bg.query_id })).status !== 'error', true);
+  assert.equal((await taskResult(e, bg.task_id)).status, 'done');
 });
 
-// WHO waits, and for how long. A build that includes a python model is a cold start of minutes on
-// the warehouse runtime, and the client that made this tool call has a timeout of its own that the
-// server neither knows nor can raise. So a python build must hand back its query_id in SECONDS —
-// otherwise the client gives up first, reports the server as unresponsive, and the build it started
-// keeps running unseen (which is exactly what was observed: eight "connector isn't responding" in
-// one session, every job finishing fine). A pure-SQL build keeps the ordinary window.
-// WHOSE property the grace is. Not one number for every python model: a remote runtime is minutes
-// of cold start (hand back a job), a local one is seconds (just return the rows). So the runtime
-// declares it, and the operator can still override it for the whole deployment.
-test('the build grace comes from the runtime, with the operator override on top', async () => {
-  const e = (rt, over) => new Engine({
-    catalog: Object.assign(loadCatalog(CATALOG, {}), { pythonRuntime: rt }),
-    contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grace2-')) }),
-    queryTimeoutMs: 20000, ...(over === undefined ? {} : { pythonBuildGraceMs: over }),
-  });
-  const remote = { available: true, runtime: 'bigquery', method: 'bigframes', config: {}, packages: '' };
-  const local = { available: true, runtime: 'duckdb', config: {}, packages: '' };
-  assert.equal(e(remote)._pythonGraceMs(), 5000, 'a notebook cold start must not hold the call');
-  assert.equal(e(local)._pythonGraceMs(), 20000, 'a local build finishes in seconds — it keeps the ordinary window, returning rows beats a job id');
-  assert.equal(e(remote, 1000)._pythonGraceMs(), 1000, 'the operator override wins');
-  assert.equal(e(local, 1000)._pythonGraceMs(), 1000);
-});
-
-test('a python build detaches on its own short grace, an SQL build keeps the long one', async (t) => {
+// WHO waits. A build that includes a python model is a cold start of minutes on the warehouse
+// runtime, and the client that made this tool call has a timeout of its own that the server neither
+// knows nor can raise — so NO build holds its call, python or SQL: each is a task, and waiting is
+// get_task_result's (a bounded wait per call).
+test('no build holds its call — a python build and an SQL build both answer with their task at once', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();
-  const ctxs = new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grace-')) });
-  // A long ordinary window (so an SQL build would sit and wait) and a short python one.
-  const e = new Engine({
-    catalog: loadCatalog(CATALOG, {}), contextManager: ctxs, runner, pythonBin: PY,
-    queryTimeoutMs: 30000, pythonBuildGraceMs: 30,
-  });
-
-  // python in the pipeline → detached, with a job to poll, long before the 30s window
+  const e = engine(runner);
   const py = await startedDraft(e, 'grace_py');
-  const started = Date.now();
   const out = await materialize(e, py);
-  assert.equal(out.status, 'running', JSON.stringify(out).slice(0, 200));
-  assert.ok(out.query_id, 'the caller gets a job id to poll');
-  assert.equal(out.read_with?.tool, 'get_query_result');
-  assert.ok(Date.now() - started < 10000, 'handed back in seconds, not after the query window');
-  // the message tells the caller not to retry the build (a retry is refused while it is in flight)
-  assert.match(out.message, /does NOT start a second one|already in flight/i);
+  assert.ok(isStartedTask(out), JSON.stringify(out).slice(0, 200));
+  await untilHeld(runner);
   const retry = await materialize(e, py).catch((err) => err);
-  // refused, and the refusal sends the caller to the job rather than to a second build
-  assert.match(String(retry.message || retry), /already in flight|still being materialized/);
-  assert.match(String(retry.message || retry), /get_query_result/);
+  // refused, and the refusal sends the caller to the task rather than to a second build
+  assert.match(String(retry.message || retry), /already in flight/);
+  assert.match(String(retry.message || retry), /get_task_result/);
   assert.equal(runner.held.length, 1, 'still ONE build for the same pipeline');
   runner.finish(true);
-  await settled();
+  await taskResult(e, out.task_id);
 
-  // …and the same pipeline without a python stage waits for its result instead of detaching
   const { draft_id: sql } = await e.build_native_model({ action: 'start', name: 'grace_sql', source: 'events' });
   await add(e, sql, AGG);
-  const sqlBuild = materialize(e, sql);
-  const done = await runSync(sqlBuild, runner);
-  assert.notEqual(done.status, 'running', 'an SQL build returns its rows, not a job id');
+  const sqlStarted = await materialize(e, sql);
+  assert.ok(isStartedTask(sqlStarted), 'an SQL build is a task too');
+  const done = await finishTask(e, sqlStarted, runner);
   assert.equal(done.build?.executed, true);
 });
 
-// THE CEILING ON WHAT A DEPLOYMENT MAY CONFIGURE. Both windows are bounded by a timeout this server
-// does not own — the client that made the call gives up on its own schedule — so an operator's 120s
-// cannot be honoured: it is capped, out loud. Input validation on the environment, nothing else.
+// THE CEILING ON WHAT A DEPLOYMENT MAY CONFIGURE. The enrichment window is bounded by a timeout this
+// server does not own — the client that made the call gives up on its own schedule — so an
+// operator's 120s cannot be honoured: it is capped, out loud. Input validation on the environment.
 test('the operator cannot configure a window longer than the ceiling', () => {
   assert.equal(MAX_BUILD_GRACE_SECONDS, 30);
-  // unset / empty / unparseable → the fallback for that knob; a null fallback means "the runtime decides"
+  // unset / empty / unparseable → the fallback
   assert.equal(graceMsFromEnv(undefined, 20, 'QUERY_TIMEOUT_SECONDS'), 20000);
   assert.equal(graceMsFromEnv('', 20, 'QUERY_TIMEOUT_SECONDS'), 20000);
   assert.equal(graceMsFromEnv('not-a-number', 20, 'QUERY_TIMEOUT_SECONDS'), 20000);
   assert.equal(graceMsFromEnv('0', 20, 'QUERY_TIMEOUT_SECONDS'), 20000);
-  assert.equal(graceMsFromEnv(undefined, null, 'PYTHON_BUILD_GRACE_SECONDS'), undefined, 'unset leaves the python grace to the runtime');
   // a value inside the ceiling is taken as it is…
   assert.equal(graceMsFromEnv('10', 20, 'QUERY_TIMEOUT_SECONDS'), 10000);
   assert.equal(graceMsFromEnv('30', 20, 'QUERY_TIMEOUT_SECONDS'), 30000);
-  // …and one above it is capped, for both knobs
+  // …and one above it is capped
   assert.equal(graceMsFromEnv('120', 20, 'QUERY_TIMEOUT_SECONDS'), MAX_BUILD_GRACE_SECONDS * 1000);
-  assert.equal(graceMsFromEnv('600', null, 'PYTHON_BUILD_GRACE_SECONDS'), MAX_BUILD_GRACE_SECONDS * 1000);
 });
 
-// The default an Engine built with no window at all uses: the SQL grace, which must be the same
-// number the deployment defaults to (docs and compose say 20s).
-test('an Engine with no configured window uses the default SQL grace', () => {
+// The default an Engine built with no window at all uses — the same number the deployment defaults
+// to (docs and compose say 20s).
+test('an Engine with no configured window uses the default enrichment window', () => {
   const e = new Engine({
     catalog: loadCatalog(CATALOG, {}),
     contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grace3-')) }),

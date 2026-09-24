@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // Allowed non-data tests: a CHECKPOINT's invalidation is draft STATE (positional — we own the
 // edit sequence), stage availability is an input-validation guard, and the file/reference
@@ -16,7 +17,7 @@ const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', imp
 
 function engine() {
   const catalog = loadCatalog(CATALOG, {});
-  return new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'cp-')) }) });
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'cp-')) }) }));
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;

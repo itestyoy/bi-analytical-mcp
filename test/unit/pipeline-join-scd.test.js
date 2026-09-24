@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // Allowed non-data test: this asserts a NUDGE/recommendation (a UX affordance surfaced in the
 // pipeline response), not query correctness and not generated SQL text. A key-only join to an
@@ -48,7 +49,7 @@ function engine() {
   const path = join(dir, 'catalog.yml');
   writeFileSync(path, SCD_CATALOG);
   const catalog = loadCatalog(path, {});
-  return new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'scdjoin-ws-')) }) });
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'scdjoin-ws-')) }) }));
 }
 
 const hasIncompleteJoin = (recs) => (recs || []).some((r) => /INCOMPLETE JOIN/.test(r) && /SCD-2/.test(r));

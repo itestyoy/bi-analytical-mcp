@@ -15,6 +15,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -56,7 +57,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mr-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend });
+  engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
 }, opts);
 
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
@@ -113,16 +114,16 @@ test('match_recognize between_steps: explicit "any" equals the default; "gap" is
   assert.ok(G <= A && G >= 0, `gap (${G}) is a subset of any (${A}) — never over-matches`);
 });
 
-// A2/A4: the pipeline response documents its output columns + how to re-read it.
-test('pipeline response: output_columns (carried partition key) + read_with hint', opts, async (t) => {
+// A2/A4: the pipeline response documents its output columns and the task it can be re-read from.
+test('pipeline response: output_columns (carried partition key) + the task that holds it', opts, async (t) => {
   if (skip(t)) return;
   const out = await pipe([matchActivation()]);
   assert.ok(Array.isArray(out.output_columns), 'output_columns present');
   const names = out.output_columns.map((c) => c.name);
   assert.ok(names.includes('player_id_of_internal'), 'partition key carried through to the output');
   assert.ok(names.includes('reached_launch') && names.includes('completed'), 'funnel columns present');
-  assert.equal(out.read_with?.tool, 'get_query_result');
-  assert.equal(out.read_with?.table, out.model);
+  assert.equal(out.table, out.model, 'the task left the model as its table');
+  assert.match(out.task_id, /^[a-f0-9]{12}$/);
 });
 
 // A5: dry_run returns a cheap source-volume estimate; a narrower window scans fewer rows.

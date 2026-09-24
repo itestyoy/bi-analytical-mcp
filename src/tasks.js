@@ -1,11 +1,11 @@
 // TASKS — a tool call that outlives its request, tracked by an id the client polls.
 //
-// This server already had the idea, by hand: a build past its grace comes back as
-// { status: 'running', query_id } and the caller polls get_query_result, pacing itself with the
-// `time` tool. A task is the same thing made native to the protocol, so the HOST polls and the
-// model never sees a query_id: the task runs the call TO ITS END (src/mcp-surface.js
-// runToCompletion follows a detached build until it is ready) and its result is exactly the
-// CallToolResult the call would have returned had it finished in time.
+// This server has the idea at the tool level too: a query or a build returns a task_id at once and
+// get_task_result waits for it (up to MAX_WAIT_SECONDS per call). A PROTOCOL task is what a call
+// that waits becomes when it outlasts services.taskAfterMs: the HOST polls instead of holding the
+// request, and the call is run TO ITS END (src/mcp-surface.js runToCompletion calls get_task_result
+// — or display_result — again while the engine's task is still running), so its result is exactly
+// the CallToolResult the call would have returned had the work finished in time.
 //
 // The protocol form is the Tasks extension `io.modelcontextprotocol/tasks` (SEP-2663, protocol
 // 2026-07-28): the SERVER decides per call; a client that declared the extension may get a

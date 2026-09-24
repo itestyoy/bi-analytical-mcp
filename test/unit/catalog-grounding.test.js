@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog, groundCatalogToPhysical } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // Catalog grounding: a field the dbt schema DECLARES but the physical table LACKS must
 // not appear ANYWHERE — not in pipeline columns, not in event properties, not in the tool
@@ -33,7 +34,7 @@ function physicalSets(catalog) {
 function groundedEngine() {
   const catalog = loadCatalog(CATALOG, {});
   catalog.groundToPhysical(physicalSets(catalog));
-  return new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) });
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) }));
 }
 
 test('groundToPhysical prunes a phantom event property from the catalog accessors', () => {
@@ -300,7 +301,7 @@ test('grounding: ordinary columns still drop one by one — the model stays avai
 test('grounding: tools explain an unavailable model instead of "unknown model"', async () => {
   const catalog = loadCatalog(CATALOG, {});
   catalog.groundToPhysical(physWithout(catalog, 'crashlytics', ['event_name']));
-  const engine = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) });
+  const engine = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'grnd-')) }) }));
   // { model } view: the status with the missing columns, not an error and not a half model
   const view = await engine.semantic_index({ model: 'crashlytics' });
   assert.equal(view.unavailable, true);

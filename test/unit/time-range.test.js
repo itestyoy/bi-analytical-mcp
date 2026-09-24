@@ -7,6 +7,7 @@ import { localToUtc, resolveTimeRange, timeRangeWarnings, isValidTimezone } from
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // Pure boundary math (no warehouse): wall-clock → UTC instants, incl. DST edges.
 test('localToUtc converts wall-clock boundaries to UTC instants (incl. DST)', () => {
@@ -52,7 +53,7 @@ test('require_time_range rejects an unbounded pipeline; a bounded one passes val
   const CATALOG = new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname;
   const catalog = loadCatalog(CATALOG, { requireTimeRange: true });
   assert.equal(catalog.requireTimeRangeFor('events'), true);
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr-')) }) });
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr-')) }) }));
   const s = await e.build_native_model({ action: 'start', name: 'guard', source: 'events' });
   await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
   // commit without a time window → blocked by the guardrail.
@@ -75,7 +76,7 @@ test('without require_time_range an unbounded pipeline is not rejected', async (
   const CATALOG = new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname;
   const catalog = loadCatalog(CATALOG, {});
   assert.equal(catalog.requireTimeRangeFor('events'), false);
-  const e = new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr0-')) }) });
+  const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'tr0-')) }) }));
   const s = await e.build_native_model({ action: 'start', name: 'free', source: 'events' });
   await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
   const out = await e.build_native_model({ action: 'materialize', draft_id: s.draft_id });

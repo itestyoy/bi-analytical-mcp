@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // Allowed non-data test: build_native_model's draft LIFECYCLE + input validation are
 // pure schema/state machinery (renderPipeline folds columns WITHOUT a warehouse), so no
@@ -16,7 +17,7 @@ const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', imp
 
 function engine() {
   const catalog = loadCatalog(CATALOG, {});
-  return new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'bnm-')) }) });
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'bnm-')) }) }));
 }
 
 const mr = { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'a', event_name: ['first_launch'] }, { name: 'b', event_name: ['tutorial'] }] };
@@ -208,7 +209,7 @@ test('build_native_model grounds source columns to the physical relation', async
   // 'complete_time_of_event_data' (declared in the fixture catalog, but "not materialized").
   const physical = ['player_id_of_internal', 'session_number', 'event_name', 'device_time', 'event_data', 'level_id_of_event_data', 'result_of_event_data', 'ad_type_of_event_data'];
   const runner = { relationColumns: async () => ({ ok: true, columns: physical.map((name) => ({ name })) }) };
-  const e = new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/grounding', workspaceRoot: mkdtempSync(join(tmpdir(), 'gr-')) }) });
+  const e = settle(new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/grounding', workspaceRoot: mkdtempSync(join(tmpdir(), 'gr-')) }) }));
 
   const s = await e.build_native_model({ action: 'start', name: 'grounded', source: 'events', include_columns: true });
   const names = s.available_columns.map((c) => c.name);
@@ -274,7 +275,7 @@ test('data_freshness re-queries after each index scan (reflects new data, not a 
   const catalog = loadCatalog(CATALOG, {});
   let maxTime = '2026-07-10T00:00:00Z';
   const runner = { show: async (_d, sql) => (/MAX\(/.test(sql) ? { ok: true, rows: [{ latest: maxTime }] } : { ok: true, rows: [] }) };
-  const e = new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/fresh', workspaceRoot: mkdtempSync(join(tmpdir(), 'fr-')) }) });
+  const e = settle(new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/fresh', workspaceRoot: mkdtempSync(join(tmpdir(), 'fr-')) }) }));
   assert.equal(await e._dataFreshness('events'), '2026-07-10T00:00:00Z', 'first read = MAX(device_time)');
   maxTime = '2026-07-21T00:00:00Z'; // new data lands
   assert.equal(await e._dataFreshness('events'), '2026-07-10T00:00:00Z', 'between scans: still the cached value');
@@ -361,15 +362,13 @@ test('build_native_model: one_per_match funnel warns to filter completed', async
 
 // P4: limit + transform.limit both cap rows — together they'd emit two LIMITs (SQL error).
 // The guard rejects the ambiguity; either source alone reads fine.
-test('get_query_result: limit + transform.limit conflict rejected; one alone works', async () => {
+test('drill_result reads only a drawn task, and its row cap is given once (no transform.limit)', async () => {
   const catalog = loadCatalog(CATALOG, {});
   const runner = { show: async () => ({ ok: true, rows: [{ a: 1 }], columns: [{ name: 'a' }] }) };
-  const e = new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/gqr', workspaceRoot: mkdtempSync(join(tmpdir(), 'gqr-')) }) });
-  const ctx = e.ctxs.create();
-  await assert.rejects(
-    () => e.get_query_result({ context_id: ctx.id, table: 'qr_abc12345', limit: 5, transform: { limit: 3 } }),
-    /once|both/,
-  );
-  const ok = await e.get_query_result({ context_id: ctx.id, table: 'qr_abc12345', transform: { limit: 3 } });
-  assert.equal(ok.status, 'ready', 'transform.limit alone reads without a double-LIMIT error');
+  const e = settle(new Engine({ catalog, runner, contextManager: new ContextManager({ baseProjectDir: '/tmp/gqr', workspaceRoot: mkdtempSync(join(tmpdir(), 'gqr-')) }) }));
+  // the row cap is `limit`; a second one inside the transform would emit two LIMITs
+  await assert.rejects(() => e.drill_result({ task_id: 'abcdef123456', limit: 5, transform: { limit: 3 } }), /limit|additional/);
+  // a task that was never drawn is not a card's to read
+  const { task_id } = e.experiment({ action: 'check_split', groups: [{ label: 'a', n: 100 }, { label: 'b', n: 100 }] });
+  await assert.rejects(() => e.drill_result({ task_id, transform: {} }), /not drawn/);
 });

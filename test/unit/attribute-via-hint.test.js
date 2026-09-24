@@ -7,6 +7,7 @@ import { loadCatalog } from '../../src/catalog.js';
 import { loadRecipes } from '../../src/recipes.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // Allowed non-data test: the property page's RECOMMENDATION (a UX affordance), not query
 // correctness. An attribute of a model that a source reaches through SEVERAL relationships is
@@ -48,7 +49,7 @@ models:
 function engine() {
   const dir = mkdtempSync(join(tmpdir(), 'viahint-'));
   writeFileSync(join(dir, 'catalog.yml'), CATALOG);
-  return new Engine({ catalog: loadCatalog(join(dir, 'catalog.yml'), {}), recipes: loadRecipes(null), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'viahint-ws-')) }) });
+  return settle(new Engine({ catalog: loadCatalog(join(dir, 'catalog.yml'), {}), recipes: loadRecipes(null), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'viahint-ws-')) }) }));
 }
 
 test('an attribute reached through several relationships: its page names via and every choice', async () => {

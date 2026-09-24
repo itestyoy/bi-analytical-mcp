@@ -1,8 +1,8 @@
-// Materialization mode + background jobs: a query is compiled to SQL, written as
-// a materialized='table' dbt model, built (dbt run), and rows are read back from
-// that table (dbt show) — results live in the warehouse (resilient/re-fetchable).
-// Slow queries (> timeout) return a query_id; get_query_result polls + fetches.
-// Data-only assertions.
+// Materialization mode: a query is a task; with materialize:true it is compiled to SQL, written as
+// a materialized='table' dbt model named after the task, built (dbt run), and rows are read back
+// from that table (dbt show) — results live in the warehouse (resilient, pageable). A stored result
+// is re-sliced by a pipeline started from its task (from_task), and a drawn card reads its views
+// from it (drill_result). Data-only assertions.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,12 +11,12 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { settle, isStartedTask, taskResult } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -38,7 +38,7 @@ before(async () => {
   await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mat-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend, queryTimeoutMs: 60000 });
+  engine = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs, runner: backend }));
   const out = await engine.create_semantic_model({
     name: 'mon', use_base_models: ['users'],
     semantic_models: [{ from: 'events', event_scope: { event_name: ['iap_purchase_completed'] }, measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],
@@ -51,96 +51,95 @@ before(async () => {
 after(async () => { backend?.close(); if (pg) await pg.stop(); });
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-test('materialize (sync): query persisted as a table, rows read back = total revenue 85', opts, async (t) => {
+test('materialize: the query is a task whose result is a stored table — rows read back = total revenue 85', opts, async (t) => {
   if (skip(t)) return;
   const r = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], materialize: true });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(r.status, 'ready');
-  assert.ok(r.query_id && r.table, 'returns query_id + table');
+  assert.equal(r.status, 'done');
+  assert.ok(r.task_id && r.table, 'the task and the table it left');
+  assert.equal(r.table, `qr_${r.task_id}`);
   assert.equal(num(r.rows[0].mon_revenue), 85);
-  globalThis.__matTable = r.table;
-  globalThis.__matQid = r.query_id;
+  globalThis.__matTask = r.task_id;
 });
 
-test('resilient re-fetch: read the materialized result table directly by name', opts, async (t) => {
+test('resilient re-read: once the in-memory response is gone, get_task_result reads the stored table', opts, async (t) => {
   if (skip(t)) return;
-  const r = await engine.get_query_result({ context_id: ctxId, table: globalThis.__matTable });
+  engine.raw._taskResults.delete(globalThis.__matTask); // what a restart (or an hour) does to the held response
+  const r = await engine.get_task_result({ task_id: globalThis.__matTask });
   assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(r.status, 'ready');
+  assert.equal(r.status, 'done');
   assert.equal(num(r.rows[0].mon_revenue), 85); // recomputes nothing — reads the table
 });
 
-test('get_query_result by query_id returns the same materialized rows', opts, async (t) => {
+test('the call that starts a query never waits: a task_id now, the rows from get_task_result', opts, async (t) => {
   if (skip(t)) return;
-  const r = await engine.get_query_result({ context_id: ctxId, query_id: globalThis.__matQid });
-  assert.equal(r.ok, true, JSON.stringify(r.error));
-  assert.equal(num(r.rows[0].mon_revenue), 85);
-});
-
-test('background: timeout -> running + query_id, then poll get_query_result to ready', opts, async (t) => {
-  if (skip(t)) return;
-  engine.queryTimeoutMs = 1; // force background
-  const started = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
-  assert.equal(started.status, 'running', JSON.stringify(started));
-  assert.ok(started.query_id);
-  let res;
-  for (let i = 0; i < 60; i++) {
-    res = await engine.get_query_result({ context_id: ctxId, query_id: started.query_id });
-    if (res.status !== 'running') break;
-    await sleep(1000);
-  }
-  engine.queryTimeoutMs = 60000;
+  const started = await engine.raw.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
+  assert.ok(isStartedTask(started), JSON.stringify(started));
+  const res = await taskResult(engine, started.task_id);
   assert.equal(res.ok, true, JSON.stringify(res.error));
-  assert.equal(res.status, 'ready');
+  assert.equal(res.status, 'done');
   const total = res.rows.reduce((s, x) => s + num(x.mon_revenue), 0);
   assert.equal(total, 85); // revenue by country sums to the grand total
 });
 
-test('transform: compress/re-slice the materialized result table (where/group_by/agg/having)', opts, async (t) => {
+test('a pipeline started FROM a stored result re-slices it without recomputing (where / aggregate / a filter on the aggregate)', opts, async (t) => {
   if (skip(t)) return;
-  // materialize revenue by country (multi-row), then project over the stored table
   const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
-  assert.equal(m.status, 'ready', JSON.stringify(m));
-
+  assert.equal(m.status, 'done', JSON.stringify(m));
+  const from = async (name, stages) => {
+    const d = await engine.build_native_model({ action: 'start', name, from_task: m.task_id });
+    assert.equal(d.reads, m.table, 'the draft reads the task\'s table');
+    await engine.build_native_model({ action: 'add_steps', draft_id: d.draft_id, stages });
+    const built = await engine.build_native_model({ action: 'materialize', draft_id: d.draft_id });
+    assert.equal(built.status, 'done', JSON.stringify(built.error));
+    return built.rows;
+  };
   // (a) compress to a single total
-  const totalR = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'total' }] } });
-  assert.equal(totalR.ok, true, JSON.stringify(totalR.error));
-  assert.equal(num(totalR.rows[0].total), 85);
-
-  // (b) filter (where) to one country -> exact seed value (US revenue = 35)
-  const us = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { where: [{ column: 'users_country', op: 'eq', value: 'US' }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
-  assert.equal(us.ok, true, JSON.stringify(us.error));
-  assert.equal(num(us.rows[0].rev), 35);
-
-  // (b2) injection/escaping proven on DATA: a value containing a quote+SQL is
-  // bound as a literal -> the query runs safely and simply matches nothing.
-  const inj = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { where: [{ column: 'users_country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
-  assert.equal(inj.ok, true, JSON.stringify(inj.error)); // no SQL error: the literal was escaped
-  assert.ok(inj.rows.length === 0 || num(inj.rows[0].rev) === 0 || inj.rows[0].rev == null); // matches no country
-
-  // (c) group_by + having + count of qualifying groups
-  const big = await engine.get_query_result({ context_id: ctxId, table: m.table, transform: { group_by: ['users_country'], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }], having: [{ fn: 'sum', column: 'mon_revenue', op: 'gte', value: 25 }], order_by: [{ key: 'rev', direction: 'desc' }] } });
-  assert.equal(big.ok, true, JSON.stringify(big.error));
-  assert.ok(big.rows.every((r) => num(r.rev) >= 25)); // HAVING applied
-  assert.ok(big.rows.reduce((s, r) => s + num(r.rev), 0) <= 85);
+  const [total] = await from('total', [{ stage: 'aggregate', measures: [{ name: 'total', fn: 'sum', column: 'mon_revenue' }] }]);
+  assert.equal(num(total.total), 85);
+  // (b) one country -> exact seed value (US revenue = 35)
+  const [us] = await from('only_us', [{ stage: 'where', conditions: [{ column: 'users_country', op: 'eq', value: 'US' }] }, { stage: 'aggregate', measures: [{ name: 'rev', fn: 'sum', column: 'mon_revenue' }] }]);
+  assert.equal(num(us.rev), 35);
+  // (c) group, then keep the groups whose total clears a bar
+  const big = await from('big', [
+    { stage: 'aggregate', group_by: ['users_country'], measures: [{ name: 'rev', fn: 'sum', column: 'mon_revenue' }] },
+    { stage: 'where', conditions: [{ column: 'rev', op: 'gte', value: 25 }] },
+  ]);
+  assert.ok(big.length >= 1 && big.every((r) => num(r.rev) >= 25));
+  assert.ok(big.reduce((s, r) => s + num(r.rev), 0) <= 85);
 });
 
-// A transform count with a `column` must count NON-NULL values (COUNT(column)), NOT rows
-// (COUNT(*)). Proven on DATA: a native pipeline derives `price` (populated only on
-// iap_purchase_completed, NULL on every other event), so count(price) < count(*), and
-// count(price) + (rows where price IS NULL) == count(*). A regression to COUNT(*) makes
-// count(price) == total and the first assertion fails.
-test('transform count(column) counts NON-NULL only, not COUNT(*)', opts, async (t) => {
+test('a drawn card reads its views from its own task: values are bound as literals, a count counts values', opts, async (t) => {
+  if (skip(t)) return;
+  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
+  const card = await engine.display_result({ task_id: m.task_id, display: { kind: 'pivot', levels: [{ column: 'users_country' }], values: [{ column: 'mon_revenue' }] } });
+  assert.equal(card.drawn, true, JSON.stringify(card).slice(0, 300));
+  assert.equal(card.rows.reduce((s, r) => s + num(r.mon_revenue), 0), 85, 'the top level is the whole result, folded by country');
+  const us = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: 'US' }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
+  assert.equal(num(us.rows[0].rev), 35);
+  // injection/escaping proven on DATA: a value containing a quote+SQL is bound as a literal ->
+  // the read runs safely and simply matches nothing.
+  const inj = await engine.drill_result({ task_id: m.task_id, transform: { where: [{ column: 'users_country', op: 'eq', value: "US'); drop table x; --" }], aggregations: [{ fn: 'sum', column: 'mon_revenue', as: 'rev' }] } });
+  assert.equal(inj.ok, true, JSON.stringify(inj.error));
+  assert.ok(inj.rows.length === 0 || num(inj.rows[0].rev) === 0 || inj.rows[0].rev == null);
+});
+
+// A count with a `column` must count NON-NULL values (COUNT(column)), NOT rows (COUNT(*)). Proven on
+// DATA through a card's read: a native pipeline derives `price` (populated only on
+// iap_purchase_completed, NULL on every other event), so count(price) < count(*), and count(price) +
+// (rows where price IS NULL) == count(*). A regression to COUNT(*) makes them equal.
+test('a card\'s count(column) counts NON-NULL only, not COUNT(*)', opts, async (t) => {
   if (skip(t)) return;
   const s = await engine.build_native_model({ action: 'start', name: 'nullcount', source: 'events' });
   await engine.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'derive', name: 'price', op: 'extract', source: 'price_in_usd_of_event_data', type: 'numeric' } });
   const mat = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
-  const ctx = mat.context_id; const table = mat.model;
-
-  const totalR = await engine.get_query_result({ context_id: ctx, table, transform: { aggregations: [{ fn: 'count', column: '*', as: 'total' }] } });
-  const nnR = await engine.get_query_result({ context_id: ctx, table, transform: { aggregations: [{ fn: 'count', column: 'price', as: 'nn' }] } });
-  const nullR = await engine.get_query_result({ context_id: ctx, table, transform: { where: [{ column: 'price', op: 'is_null' }], aggregations: [{ fn: 'count', column: '*', as: 'nulls' }] } });
+  const card = await engine.display_result({ task_id: mat.task_id, display: { kind: 'pivot', levels: [{ column: 'event_name' }], values: [{ column: 'price', agg: 'count' }] } });
+  assert.equal(card.drawn, true);
+  const read = (transform) => engine.drill_result({ task_id: mat.task_id, transform });
+  const totalR = await read({ aggregations: [{ fn: 'count', column: '*', as: 'total' }] });
+  const nnR = await read({ aggregations: [{ fn: 'count', column: 'price', as: 'nn' }] });
+  const nullR = await read({ where: [{ column: 'price', op: 'is_null' }], aggregations: [{ fn: 'count', column: '*', as: 'nulls' }] });
   assert.equal(totalR.ok && nnR.ok && nullR.ok, true, JSON.stringify({ totalR: totalR.error, nnR: nnR.error, nullR: nullR.error }));
   const total = num(totalR.rows[0].total); const nonNull = num(nnR.rows[0].nn); const nulls = num(nullR.rows[0].nulls);
   assert.ok(nulls > 0, `fixture must have NULL price rows, got ${nulls}`);
@@ -148,33 +147,18 @@ test('transform count(column) counts NON-NULL only, not COUNT(*)', opts, async (
   assert.equal(nonNull + nulls, total, `count(column) + null_count must equal count(*): ${nonNull} + ${nulls} != ${total}`);
 });
 
-test('sample: a random subset (not first-by-order) of the materialized result', opts, async (t) => {
+test('a stored result is paged with get_task_result: limit/offset + has_more reconstruct it', opts, async (t) => {
   if (skip(t)) return;
   const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
-  assert.equal(m.status, 'ready', JSON.stringify(m));
-  // capped sample returns <= limit rows, flagged as sampled
-  const s = await engine.get_query_result({ context_id: ctxId, table: m.table, sample: true, limit: 2 });
-  assert.equal(s.ok, true, JSON.stringify(s.error));
-  assert.equal(s.sampled, true);
-  assert.ok(s.rows.length <= 2 && s.rows.length >= 1);
-  // a sample wide enough to cover everything returns the full set of countries
-  const all = await engine.get_query_result({ context_id: ctxId, table: m.table, sample: true, limit: 1000 });
-  const full = await engine.get_query_result({ context_id: ctxId, table: m.table });
-  assert.equal(all.rows.length, full.rows.length); // same rows, (randomly) reordered
-});
-
-test('materialized paging: limit/offset + has_more reconstruct the full stored result', opts, async (t) => {
-  if (skip(t)) return;
-  const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });
-  assert.equal(m.status, 'ready', JSON.stringify(m));
-  const full = await engine.get_query_result({ context_id: ctxId, table: m.table, limit: 1000 });
+  assert.equal(m.status, 'done', JSON.stringify(m));
+  const full = await engine.get_task_result({ task_id: m.task_id, limit: 1000 });
   const total = full.row_count;
   assert.ok(total >= 2, `expected multiple country rows, got ${total}`);
   // page through in chunks of 2; has_more drives the loop and must terminate.
   const collected = [];
   let offset = 0; let last; let guard = 0;
   do {
-    last = await engine.get_query_result({ context_id: ctxId, table: m.table, limit: 2, offset });
+    last = await engine.get_task_result({ task_id: m.task_id, limit: 2, offset });
     assert.equal(last.ok, true, JSON.stringify(last.error));
     collected.push(...last.rows);
     offset += 2;

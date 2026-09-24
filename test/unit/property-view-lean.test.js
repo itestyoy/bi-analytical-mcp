@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 // P0 token-leanness of semantic_index({ property }): by default the per-event coverage shows ONLY
 // the events that carry the property (applies:true); the always-NULL events are omitted with a
@@ -15,7 +16,7 @@ import { Engine } from '../../src/engine.js';
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 function engine() {
   const catalog = loadCatalog(CATALOG, {});
-  return new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'lean-')) }) });
+  return settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'lean-')) }) }));
 }
 
 test('event_coverage is carriers-only by default, with an omitted count + include_coverage drill', async () => {

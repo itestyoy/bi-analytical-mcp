@@ -160,10 +160,10 @@ with the YAML config header. Two consumption modes, unchanged:
    pipeline's output (shared `user` entity → joins to `dim_users` at query time).
    Metrics/dimensions are queried via `query_semantic_model`. This is how the
    `match_recognize` pipeline is consumed today.
-2. **Direct materialization.** `query_semantic_model(materialize:true)` and the
-   `get_query_result` transform are themselves a tiny pipeline (`where` /
-   `aggregate` / `order_by` / `limit`) over a stored result — the same stage
-   vocabulary, reused.
+2. **Direct materialization.** `query_semantic_model(materialize:true)` stores a
+   result as a table named after its task; a pipeline started from that task
+   (`build_native_model({ action: 'start', from_task })`) re-slices it with the same
+   stage vocabulary (`where` / `aggregate` / `order_by` / `limit` …), reused.
 
 `create_semantic_model` stays the declarative way to define measures/metrics over
 the **scalar** two-source models. **`register_native_model` is the pipeline
@@ -172,7 +172,8 @@ MetricFlow semantic model on top, queryable via `query_semantic_model`) or a
 general `pipeline` (`source` + ordered stages — where/derive/compute/unnest/join/
 aggregate/pivot/unpivot/sample/window/order_by/limit/project, optionally ending in
 `match_recognize`). A `pipeline` is materialized as a dbt model whose rows ARE the
-result (returned directly, and re-readable/sliceable via `get_query_result`).
+result (the build is a task: `get_task_result` returns and pages its rows, and a
+pipeline started from it with `from_task` re-slices them).
 
 ### 6.1 Continuing a pipeline on top of what it already built (checkpoints)
 

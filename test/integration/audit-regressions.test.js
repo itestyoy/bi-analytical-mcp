@@ -45,6 +45,7 @@ import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
 import { openStore } from '../../src/store.js';
 import { startPglite } from './pglite-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -78,7 +79,7 @@ function variant(mutate, extra = {}) {
   const at = join(mkdtempSync(join(tmpdir(), 'aud-')), 'catalog.yml');
   writeFileSync(at, yaml.dump(doc));
   const cat = loadCatalog(at, { profilesDir: BASE, projectDir: BASE });
-  return { catalog: cat, engine: new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra }) };
+  return { catalog: cat, engine: settle(new Engine({ catalog: cat, contextManager: ctxs, runner: backend, ...extra })) };
 }
 const evtsTask = (eng, name, more = {}) => eng.create_semantic_model({
   name, semantic_models: [{ from: 'events', measures: [{ name: 'evts', agg: 'count', field: '*' }] }],
@@ -106,7 +107,7 @@ before(async () => {
   ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'aud-ws-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
   catalog = loadCatalog(CATALOG, { profilesDir: BASE, projectDir: BASE });
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath: join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite') });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend, dbPath: join(mkdtempSync(join(tmpdir(), 'aud-db-')), 'vi.sqlite') }));
   // The value index is REAL: a full pass over the warehouse, awaited, so the guard and the
   // coverage views below answer from measured data.
   const indexer = new BackgroundIndexer({ catalog, runner: backend, index: engine.valueIndex, baseProjectDir: BASE, intervalMs: 0, maxValues: 50, logger: () => {} });

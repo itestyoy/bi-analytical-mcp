@@ -10,12 +10,13 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildToolDefs } from '../../src/server.js';
 import { openStore } from '../../src/store.js';
+import { settle } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
 function engineWith(embedder, store) {
   const catalog = loadCatalog(CATALOG, {});
-  return new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), embedder, store });
+  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), embedder, store }));
 }
 function engineWithStore(store) { return engineWith(undefined, store); }
 function engine() { return engineWith(undefined); }
@@ -274,7 +275,7 @@ test('the memory migration keeps a legacy target on a model grounding set aside 
   // the table cannot be introspected this run: grounding moves `users` to catalog.unavailable
   catalog.groundToPhysical({ users: { unavailable: 'relation "dim_users" is being rebuilt' } });
   assert.ok(!catalog.models.users && catalog.unavailable.users, 'users is set aside for this run');
-  new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), store });
+  settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), store }));
   assert.deepEqual(store.memory.get('legacy-users').targets, [
     { kind: 'model', source: 'users' },
     { kind: 'property', source: 'users', name: 'country' },

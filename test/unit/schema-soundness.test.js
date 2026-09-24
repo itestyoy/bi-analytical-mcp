@@ -18,13 +18,14 @@ import { buildSchemas } from '../../src/schema.js';
 import { assertSchemaSound } from '../../src/schema-kit.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 const engineFor = (yaml) => {
   const dir = mkdtempSync(join(tmpdir(), 'snd-'));
   const file = join(dir, 'catalog.yml');
   writeFileSync(file, yaml);
   const catalog = loadCatalog(file, {});
-  return { catalog, engine: new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: dir }) }) };
+  return { catalog, engine: settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: dir }) })) };
 };
 
 const EVENTS = (extra = '') => `  - name: fct_events

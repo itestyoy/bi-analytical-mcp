@@ -30,6 +30,7 @@ import { frameProfile, pythonRunHints } from '../../src/python-model.js';
 import { pythonAuthoringGuide, mlClassesText } from '../../src/python-guide.js';
 import { buildGuide } from '../../src/guide.js';
 import { stageBranch } from '../helpers/stage-schema.js';
+import { settle } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -38,7 +39,7 @@ const FACTS = JSON.parse(readFileSync(fileURLToPath(new URL('../../config/bigfra
 const engine = () => {
   const catalog = loadCatalog(CATALOG, {});
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', method: 'bigframes', config: {}, packages: '' };
-  return new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'layer-')) }) });
+  return settle(new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'layer-')) }) }));
 };
 const stageDescription = (e) => stageBranch(e.schemas.build_native_model, 'python').description;
 

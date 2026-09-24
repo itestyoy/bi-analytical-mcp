@@ -29,6 +29,7 @@ import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { makeMcpServer } from '../../src/server.js';
 import { startPglite } from './pglite-harness.js';
+import { isStartedTask } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -77,18 +78,34 @@ after(async () => {
 
 const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return true; } return false; };
 
-/** One MCP tool call that must succeed; returns the parsed result payload. */
-async function call(name, args) {
-  const res = await client.callTool({ name, arguments: args });
-  assert.ok(!res.isError, `${name} failed: ${res.content?.[0]?.text}`);
-  return JSON.parse(res.content[0].text);
+/**
+ * One MCP tool call, the way an assistant makes it: a call that STARTS work answers with its
+ * task_id, and the result is read with get_task_result (called again while it says running).
+ */
+async function settled(name, args) {
+  let res = await client.callTool({ name, arguments: args });
+  let out = JSON.parse(res.content[0].text);
+  if (!res.isError && isStartedTask(out)) {
+    do {
+      res = await client.callTool({ name: 'get_task_result', arguments: { task_id: out.task_id } });
+      out = JSON.parse(res.content[0].text);
+    } while (!res.isError && out.status === 'running');
+  }
+  return { res, out };
 }
 
-/** One MCP tool call that must FAIL; returns the parsed { ok:false, error } payload. */
+/** One MCP tool call that must succeed; returns the parsed result payload. */
+async function call(name, args) {
+  const { res, out } = await settled(name, args);
+  assert.ok(!res.isError, `${name} failed: ${res.content?.[0]?.text}`);
+  return out;
+}
+
+/** One MCP tool call that must FAIL (refused in the call, or its task failed); returns the parsed { ok:false, error } payload. */
 async function callErr(name, args) {
-  const res = await client.callTool({ name, arguments: args });
+  const { res, out } = await settled(name, args);
   assert.equal(res.isError, true, `${name} was expected to fail but returned: ${res.content?.[0]?.text?.slice(0, 300)}`);
-  return JSON.parse(res.content[0].text);
+  return out;
 }
 
 /** A whole pipeline over MCP: start → add_step per stage → materialize. */
@@ -113,7 +130,7 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   if (skip(t)) return;
   // the protocol advertises the tools an assistant needs…
   const tools = (await client.listTools()).tools.map((x) => x.name);
-  for (const needed of ['semantic_index', 'create_semantic_model', 'query_semantic_model', 'build_native_model', 'get_query_result', 'experiment']) {
+  for (const needed of ['semantic_index', 'create_semantic_model', 'query_semantic_model', 'build_native_model', 'get_task_result', 'experiment']) {
     assert.ok(tools.includes(needed), `${needed} is advertised`);
   }
   // …and only those: editing a task is a MODE of create_semantic_model, not a tool of its own —
@@ -175,8 +192,9 @@ test('2. crash → its ad funnel → the install version then → that player\'s
   assert.equal(num(r.events), 8);
   assert.equal(num(r.funnels), 4);
   assert.ok(near(num(r.spend), 25.0), `spend=${r.spend}`);
-  // the response tells the caller how to read the rows again — and names the pipeline tier.
-  assert.equal(built.read_with?.tool, 'get_query_result');
+  // the rows are a task's result — readable again by its id — and the pipeline tier is named.
+  assert.equal(built.tool, 'build_native_model');
+  assert.equal(built.table, built.model);
   assert.equal(built.provenance?.tier, 'pipeline');
 });
 
@@ -384,7 +402,7 @@ test('8. per-variant aggregates from the warehouse, then significance: control 6
 
 // ═══════════ 9. a stored result, re-sliced without recomputing ═══════════
 
-test('9. materialize once, then re-slice the stored table: meta 18 / organic 2 / applovin 2', opts, async (t) => {
+test('9. materialize once, then re-slice the stored result from its task: meta 18 / organic 2 / applovin 2', opts, async (t) => {
   if (skip(t)) return;
   const built = await mcpPipeline('crashlytics', [
     { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id'] },
@@ -392,28 +410,29 @@ test('9. materialize once, then re-slice the stored table: meta 18 / organic 2 /
   ], `e2e_store_${seq++}`);
   assert.equal(num(built.row_count), 22, 'the row-level result is stored as a table');
 
-  // …and it is read back and aggregated WITHOUT re-running the joins.
-  const sliced = await call('get_query_result', {
-    context_id: built.context_id,
-    table: built.model,
-    transform: {
-      group_by: ['media_source'],
-      aggregations: [{ fn: 'count', as: 'n' }, { fn: 'sum', column: 'cost', as: 'spend' }],
-      order_by: [{ key: 'n', direction: 'desc' }],
-    },
-  });
+  // …and a pipeline started FROM that task aggregates it WITHOUT re-running the joins.
+  const slice = async (name, stages) => {
+    const d = await call('build_native_model', { action: 'start', name, from_task: built.task_id });
+    await call('build_native_model', { action: 'add_steps', draft_id: d.draft_id, stages });
+    return call('build_native_model', { action: 'materialize', draft_id: d.draft_id });
+  };
+  const sliced = await slice(`e2e_slice_${seq++}`, [
+    { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', fn: 'count' }, { name: 'spend', fn: 'sum', column: 'cost' }] },
+  ]);
   const n = mapCol(sliced.rows, 'media_source', 'n');
   const spend = mapCol(sliced.rows, 'media_source', 'spend');
   assert.deepEqual(n, { meta: 18, organic: 2, applovin: 2 });
   assert.ok(near(spend.meta, 20.0) && near(spend.organic, 0.0) && near(spend.applovin, 5.0), JSON.stringify(spend));
 
   // a filter over the stored result is just as cheap.
-  const meta = await call('get_query_result', {
-    context_id: built.context_id,
-    table: built.model,
-    transform: { where: [{ column: 'media_source', op: 'eq', value: 'meta' }], aggregations: [{ fn: 'count', as: 'n' }] },
-  });
+  const meta = await slice(`e2e_slice_${seq++}`, [
+    { stage: 'where', conditions: [{ column: 'media_source', op: 'eq', value: 'meta' }] },
+    { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] },
+  ]);
   assert.equal(num(meta.rows[0].n), 18);
+  // the stored result itself pages without recomputing
+  const page = await call('get_task_result', { task_id: built.task_id, limit: 5, offset: 20 });
+  assert.equal(page.rows.length, 2, 'rows 21-22 of 22');
 });
 
 // ═══════════ 10. an existing task, extended in place ═══════════

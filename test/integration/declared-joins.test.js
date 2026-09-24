@@ -58,6 +58,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { startPglite } from './pglite-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
+import { settle } from '../helpers/settle.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -97,7 +98,7 @@ before(async () => {
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-join-')), timeSpineDialect: 'postgres' });
   backend = new MfEngineBackend({ pythonBin: PY_BIN, dbtBin: DBT_BIN, profilesDir: BASE });
-  engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
+  engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
   // Governed contexts: MetricFlow reaches the SCD install record by itself, point-in-time.
   const acq = await engine.create_semantic_model({
@@ -150,7 +151,7 @@ before(async () => {
 
   ({ pruned: phantomPruned } = await groundCatalogToPhysical(phantom, backend, BASE));
 
-  phantomEngine = new Engine({ catalog: phantom, contextManager: ctxs, runner: backend });
+  phantomEngine = settle(new Engine({ catalog: phantom, contextManager: ctxs, runner: backend }));
   const pc = await phantomEngine.create_semantic_model({
     name: 'jph',
     semantic_models: [{ from: 'acquisition', measures: [{ name: 'cost', agg: 'sum', field: 'cost' }] }],
@@ -169,7 +170,7 @@ before(async () => {
   const ownerPath = join(mkdtempSync(join(tmpdir(), 'owner-')), 'catalog.yml');
   writeFileSync(ownerPath, yaml.dump(od));
   ownerCatalog = loadCatalog(ownerPath, { profilesDir: BASE, projectDir: BASE });
-  ownerEngine = new Engine({ catalog: ownerCatalog, contextManager: ctxs, runner: backend });
+  ownerEngine = settle(new Engine({ catalog: ownerCatalog, contextManager: ctxs, runner: backend }));
   const oc = await ownerEngine.create_semantic_model({
     name: 'jown',
     use_base_models: ['crashlytics'],
@@ -212,11 +213,11 @@ before(async () => {
   };
 
   oneCatalog = owned(['rewarded_tracking_id'], ['tracking_id']);
-  oneEngine = new Engine({ catalog: oneCatalog, contextManager: ctxs, runner: backend });
+  oneEngine = settle(new Engine({ catalog: oneCatalog, contextManager: ctxs, runner: backend }));
   oneCtx = (await evtsOn(oneEngine, 'jone')).context_id;
 
   trueCatalog = owned(['funnel_tracking_id'], ['tracking_id'], 'funnel_tracking_id');
-  trueEngine = new Engine({ catalog: trueCatalog, contextManager: ctxs, runner: backend });
+  trueEngine = settle(new Engine({ catalog: trueCatalog, contextManager: ctxs, runner: backend }));
   trueCtx = (await evtsOn(trueEngine, 'jtrue')).context_id;
 }, opts);
 
@@ -1469,7 +1470,7 @@ const perDayCatalog = (grain) => {
 
 /** Join events → acquisition through `player_day` on the given catalog and count what matched. */
 async function perDayMatches(catalog) {
-  const eng = new Engine({ catalog, contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'perday-ctx-')), timeSpineDialect: 'postgres' }), runner: backend });
+  const eng = settle(new Engine({ catalog, contextManager: new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'perday-ctx-')), timeSpineDialect: 'postgres' }), runner: backend }));
   const s = await eng.build_native_model({ action: 'start', name: `pd_${seq++}`, source: 'events' });
   const j = await eng.build_native_model({
     action: 'add_step',

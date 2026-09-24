@@ -19,12 +19,13 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
-const engine = () => new Engine({
+const engine = () => settle(new Engine({
   catalog: loadCatalog(CATALOG, {}),
   contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'descr-')) }),
-});
+}));
 const AGG = { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'revenue', fn: 'sum', column: 'price_in_usd_of_event_data' }] };
 
 test('a draft keeps its description, reports it, and hands it to the fork', async () => {

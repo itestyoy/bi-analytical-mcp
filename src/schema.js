@@ -7,10 +7,12 @@
 
 import { pipelineStageSchema, stageDefs } from './pipeline.js';
 import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
+import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
 const CTX = '^[a-z0-9]{6,40}$';
+const TASK_ID = '^[a-f0-9]{12}$'; // what src/jobs.js hands out
 const WINDOW = '^[0-9]+ (second|minute|hour|day|week|month|quarter|year)s?$';
 
 // Reusable property-description strings (kept consistent across tools).
@@ -286,7 +288,7 @@ export function buildSchemas(catalog) {
     // (create → name + metrics, update → context_id + semantic_model), so a caller is never told
     // to supply a field the mode it asked for does not take.
 
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). TWO MODES: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express, read back with get_query_result), use build_native_model instead.',
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). TWO MODES: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_native_model instead. It returns a task_id: get_task_result({ task_id }) returns the parsed task (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
     allOf: [
       { if: { properties: { action: { const: 'update' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'] } },
       { if: { not: { properties: { action: { const: 'update' } }, required: ['action'] } }, then: { required: ['name', 'metrics'] } },
@@ -320,7 +322,7 @@ export function buildSchemas(catalog) {
   // and materialize it. The pipeline's rows ARE the result.
   const registerModel = {
     type: 'object', additionalProperties: false, required: ['name', 'pipeline'],
-    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — returned, and re-readable/sliceable via get_query_result. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
+    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — the call returns a task_id and get_task_result returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
@@ -348,20 +350,21 @@ export function buildSchemas(catalog) {
   const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
   const buildModel = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. MATERIALIZE IS NOT THE END: the draft stays open and the table it built STANDS FOR the steps so far, so the steps you add next read THAT table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; read the rows back with get_query_result. For REUSABLE named metrics you query many ways (group_by / time / filters), use create_semantic_model instead (the governed path).',
+    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. MATERIALIZE IS NOT THE END: the draft stays open and the table it built STANDS FOR the steps so far, so the steps you add next read THAT table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; materialize returns a task_id — read the rows with get_task_result({ task_id }). For REUSABLE named metrics you query many ways (group_by / time / filters), use create_semantic_model instead (the governed path).',
     // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
     // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
     // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
     // belong to the action, so a stray param is an error rather than silently ignored.
     allOf: [
-      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name', 'source'], ...forbid(['stage', 'stages', 'index', 'after']) } },
-      { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stages', 'description']) } },
-      { if: { properties: { action: { const: 'add_steps' } }, required: ['action'] }, then: { required: ['draft_id', 'stages'], ...forbid(['name', 'source', 'materialized', 'time_range', 'index', 'after', 'stage', 'description']) } },
-      { if: { properties: { action: { enum: ['edit_step', 'insert_step'] } }, required: ['action'] }, then: { required: ['draft_id', 'index', 'stage'], ...forbid(['name', 'source', 'materialized', 'time_range', 'after', 'stages', 'description']) } },
-      { if: { properties: { action: { const: 'delete_step' } }, required: ['action'] }, then: { required: ['draft_id', 'index'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'after', 'description']) } },
-      { if: { properties: { action: { const: 'truncate' } }, required: ['action'] }, then: { required: ['draft_id', 'after'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'description']) } },
-      { if: { properties: { action: { const: 'fork' } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['source', 'materialized', 'time_range', 'stage', 'stages', 'index']) } },
-      { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'after', 'description']) } },
+      // a draft reads a catalog source, or the stored table of a finished task (from_task)
+      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'], anyOf: [{ required: ['source'] }, { required: ['from_task'] }], ...forbid(['stage', 'stages', 'index', 'after']) } },
+      { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'index', 'after', 'stages', 'description']) } },
+      { if: { properties: { action: { const: 'add_steps' } }, required: ['action'] }, then: { required: ['draft_id', 'stages'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'index', 'after', 'stage', 'description']) } },
+      { if: { properties: { action: { enum: ['edit_step', 'insert_step'] } }, required: ['action'] }, then: { required: ['draft_id', 'index', 'stage'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'after', 'stages', 'description']) } },
+      { if: { properties: { action: { const: 'delete_step' } }, required: ['action'] }, then: { required: ['draft_id', 'index'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'after', 'description']) } },
+      { if: { properties: { action: { const: 'truncate' } }, required: ['action'] }, then: { required: ['draft_id', 'after'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'description']) } },
+      { if: { properties: { action: { const: 'fork' } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['from_task', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index']) } },
+      { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'after', 'description']) } },
     ],
     properties: {
       action: { enum: ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + source columns); add_step appends ONE stage and returns the columns available after it; add_steps appends SEVERAL stages at once (applied in order) and returns a per-step breakdown of how each changed the data — atomic (all-or-nothing); edit_step replaces step `index`; insert_step inserts a stage BEFORE `index`; delete_step removes step `index`; truncate keeps only steps 1..`after` (cheap "go back to step N"); fork branches a NEW draft from steps 1..`after` of this draft (or an already-materialized pipeline) WITHOUT touching the original — iterate variants without re-typing the shared prefix; preview shows steps + the SQL that would actually run (from a materialized prefix when there is one); materialize builds the model AND keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft. Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. PREFER add_step or SMALL add_steps chunks over one giant add_steps, so you see how each chunk changes the data.' },
@@ -369,7 +372,8 @@ export function buildSchemas(catalog) {
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
       description: { type: 'string', description: 'What this pipeline computes, in your words (start, or fork to override the parent\'s). Kept with the draft and carried to the model it materializes: returned by context({ action: "describe" | "list" }) and written into the generated model\'s config banner. A draft is cheap to make and easy to lose track of — this is what tells two of them apart later.' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
-      source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads (start only, and REQUIRED there). Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
+      from_task: { type: 'string', pattern: TASK_ID, description: 'start only: begin FROM the stored table of a finished task — a query run with materialize:true, or a pipeline build — instead of a catalog source. The steps re-slice that result (filter, regroup, join, window…) WITHOUT recomputing it. `source` then names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).' },
+      source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads (start only, and REQUIRED there unless from_task). Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
       time_range: trProp,
       stage: { $ref: '#/$defs/pipeline_stage', description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
       stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
@@ -381,8 +385,8 @@ export function buildSchemas(catalog) {
   };
 
   const pdefs = predicateDefs(catalog);
-  // HOW A RESULT IS SHOWN — declared by the caller, never guessed: the card a host that renders MCP
-  // Apps draws for query_semantic_model / get_query_result follows this when it is given. Every form
+  // HOW A RESULT IS SHOWN — declared by the caller, never guessed: the card display_result draws in
+  // a host that renders MCP Apps follows this when it is given. Every form
   // is one closed branch tagged by `kind` (a discriminator), and what a form needs is said by the
   // schema itself — required fields, array bounds, enums, if/then — not in prose. It names result
   // COLUMNS (the names the rows come back with), so a wrong one is refused with the list.
@@ -396,7 +400,7 @@ export function buildSchemas(catalog) {
   // a chart the person can drill into: the dimensions a clicked point, bar or slice opens into
   const drill = {
     type: 'object', additionalProperties: false, required: ['levels'],
-    description: 'Let the person DRILL DOWN: a click on a bar, slice or point offers these dimensions, and the chart is redrawn filtered to what was clicked and broken down by the one chosen — then again, one level deeper, with the ones left. Reads a MATERIALIZED result whose rows carry these columns too (group the query by them as well); the chart is drawn from it folded over them. Each view RE-AGGREGATES with `agg`: sums and counts add up, but a distinct count, an average or a ratio does NOT (a user in two platforms counts twice) — be careful with non-additive metrics.',
+    description: 'Let the person DRILL DOWN: a click on a bar, slice or point offers these dimensions, and the chart is redrawn filtered to what was clicked and broken down by the one chosen — then again, one level deeper, with the ones left. Reads a STORED result (materialize: true, or a pipeline build) whose rows carry these columns too (group the query by them as well); the chart is drawn from it folded over them. Each view RE-AGGREGATES with `agg`: sums and counts add up, but a distinct count, an average or a ratio does NOT (a user in two platforms counts twice) — be careful with non-additive metrics.',
     properties: {
       levels: { type: 'array', minItems: 1, maxItems: 5, description: 'The dimensions offered, in the order the menu lists them.', items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 40, description: 'How the dimension reads in the menu (default: the column name).' } } } },
       agg: { enum: ['sum', 'count', 'min', 'max', 'avg'], default: 'sum', description: 'How the rows under a view fold into its values.' },
@@ -409,7 +413,7 @@ export function buildSchemas(catalog) {
     ...extra,
   });
   const display = {
-    description: 'Draw the result as a CARD for the person, in hosts that render MCP Apps (Claude on the web, desktop and mobile) — and how. Omitted: no card. Pick the `kind` whose description matches the question; the card draws exactly that. It changes no numbers.',
+    description: 'How the card draws the rows. Pick the `kind` whose description matches the question; the card draws exactly that, in the declared order. It names result columns and changes no numbers. Omitted: the card follows the rows\' shape.',
     discriminator: { propertyName: 'kind' },
     oneOf: [
       form('line', 'line — a trend', 'A TREND over an ordered axis (usually time): one line, or several to compare series.', {
@@ -459,7 +463,7 @@ export function buildSchemas(catalog) {
           },
         },
       }, ['values']),
-      form('pivot', 'pivot — a table to drill into', 'A TABLE TO DRILL INTO, level by level: the card shows the top level, and each row expands into the next level ON DEMAND — read from the stored result, filtered to that row — so the detail is never loaded all at once. Reads a MATERIALIZED result (materialize: true, or a pipeline table). Each level RE-AGGREGATES the rows under it with the value\'s agg: sum, count, min and max fold honestly, but a distinct count, an average or a ratio does NOT add up across levels (a user present in two children counts twice) — be careful with non-additive metrics: prefer additive columns (counts, sums, the numerator and denominator of a ratio) as the values.', {
+      form('pivot', 'pivot — a table to drill into', 'A TABLE TO DRILL INTO, level by level: the card shows the top level, and each row expands into the next level ON DEMAND — read from the stored result, filtered to that row — so the detail is never loaded all at once. Reads a STORED result (a query run with materialize: true, or a pipeline build). Each level RE-AGGREGATES the rows under it with the value\'s agg: sum, count, min and max fold honestly, but a distinct count, an average or a ratio does NOT add up across levels (a user present in two children counts twice) — be careful with non-additive metrics: prefer additive columns (counts, sums, the numerator and denominator of a ratio) as the values.', {
         levels: {
           type: 'array', minItems: 1, maxItems: 5, description: 'The dimension columns, from the top level down.',
           items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 40, description: 'How the level reads to the person — short, it names a column and each opened row (default: the column name).' } } },
@@ -492,9 +496,6 @@ export function buildSchemas(catalog) {
     required: ['context_id'],
     description: 'Run a metric query against a context.',
     $defs: pdefs,
-    // a drill-down — a pivot, or a chart with drill — reads the STORED result view by view, so it needs one
-    if: { required: ['display'], properties: { display: { anyOf: [{ required: ['kind'], properties: { kind: { const: 'pivot' } } }, { required: ['drill'] }] } } },
-    then: { required: ['materialize'], properties: { materialize: { const: true } } },
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
@@ -514,10 +515,9 @@ export function buildSchemas(catalog) {
       time_range: { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
-      materialize: { type: 'boolean', description: 'Materialize the result and read rows back from it (resilient, re-fetchable). The table holds the WHOLE result — `limit`/`offset` page the rows you get back, and get_query_result transforms run over all of it. Slow queries (> timeout) return a query_id; poll get_query_result.' },
+      materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with get_task_result({ task_id, offset, limit }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_native_model({ action: "start", from_task })).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the compiled query WITHOUT executing it.' },
       explain: { type: 'boolean', description: 'If true, return the query plan (how the metrics compile) and the compiled query WITHOUT executing. A superset of dry_run; useful for inspecting/optimizing.' },
-      display,
     },
   };
 
@@ -551,10 +551,10 @@ export function buildSchemas(catalog) {
     type: 'object', additionalProperties: false, required: ['action'],
     description: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, with cascade for dependent metrics).',
     allOf: [
-      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['context_id', 'semantic_model', 'cascade', 'force']) },
-      { if: { properties: { action: { enum: ['describe', 'delete_model'] } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['semantic_model', 'cascade', 'force']) } },
-      { if: { properties: { action: { const: 'drop' } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['semantic_model', 'cascade']) } },
-      { if: { properties: { action: { const: 'delete_semantic_model' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'], ...forbid(['force']) } },
+      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['from_task', 'context_id', 'semantic_model', 'cascade', 'force']) },
+      { if: { properties: { action: { enum: ['describe', 'delete_model'] } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['from_task', 'semantic_model', 'cascade', 'force']) } },
+      { if: { properties: { action: { const: 'drop' } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['from_task', 'semantic_model', 'cascade']) } },
+      { if: { properties: { action: { const: 'delete_semantic_model' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'], ...forbid(['from_task', 'force']) } },
     ],
     properties: {
       action: { enum: ['list', 'describe', 'drop', 'delete_model', 'delete_semantic_model'], description: 'list → all active contexts; describe → one context in depth; drop → tear down the whole context; delete_model → remove the native pipeline model only; delete_semantic_model → remove one model\'s task additions.' },
@@ -573,31 +573,39 @@ export function buildSchemas(catalog) {
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     context: contextTool,
     query_semantic_model: query,
-    get_query_result: {
-      type: 'object', additionalProperties: false,
-      // Either poll by query_id (context_id not needed — taken from the job), or
-      // fetch a known table directly (which requires its context_id).
-      anyOf: [{ required: ['query_id'] }, { required: ['table', 'context_id'] }],
-      description: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}; optionally re-slice it with a read-only transform.',
+    get_task_result: {
+      type: 'object', additionalProperties: false, required: ['task_id'],
+      description: 'Read what a task produced — waiting for it first.',
       properties: {
-        context_id: { type: 'string', pattern: CTX, description: D.context_id },
-        query_id: { type: 'string', pattern: '^[a-f0-9]{8,16}$', description: 'ID returned by a backgrounded materialize query; poll it for status + results.' },
-        table: { type: 'string', pattern: '^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$', description: 'A known result table to read directly (its name is returned by a prior materialize or register call) — works even if the job record is gone.' },
-        limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
-        offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging over the stored result). Ignored when sample=true.' },
-        sample: { type: 'boolean', description: 'If true, return a REPRESENTATIVE random subset of rows instead of the first rows — a better peek at large results.' },
-        sample_percent: { type: 'number', exclusiveMinimum: 0, maximum: 100, description: 'Approximate % of rows to sample when sample=true (default 10).' },
+        task_id: { type: 'string', pattern: TASK_ID, description: 'The task_id a call returned (create_semantic_model, query_semantic_model, build_native_model materialize, experiment).' },
+        wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait for the task at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment the task is done. 0 = just look.` },
+        offset: { type: 'integer', minimum: 0, description: 'Page a STORED result (a materialized query, a pipeline build): rows to skip.' },
+        limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Page a STORED result: rows to return (default 1000).' },
+      },
+    },
+    display_result: {
+      type: 'object', additionalProperties: false, required: ['task_id'],
+      description: 'Draw a finished result as a card for the person — once.',
+      properties: {
+        task_id: { type: 'string', pattern: TASK_ID, description: 'The task whose result to draw: a query, a pipeline build, or an experiment.' },
         display,
+      },
+    },
+    drill_result: {
+      type: 'object', additionalProperties: false, required: ['task_id', 'transform'],
+      description: 'One view of a drawn drill-down card, read from its task\'s stored table (the card calls this; the model does not).',
+      properties: {
+        task_id: { type: 'string', pattern: TASK_ID, description: 'The task the card was drawn from.' },
+        limit: { type: 'integer', minimum: 1, maximum: DRILL_ROWS, description: 'Rows of the view.' },
         transform: {
           type: 'object', additionalProperties: false,
-          description: 'Optional read-only re-slice of the stored result (compress/aggregate/filter it WITHOUT recomputing the original query).',
+          description: 'The view: the stored table filtered to the path taken, grouped by the level chosen (the card builds it with the view model\'s one definition of a view).',
           properties: {
             where: { type: 'array', description: 'Row filters on result columns.', items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Result column to filter.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'is_null', 'is_not_null'], description: 'Comparison operator.' }, value: { description: 'Comparison value (array for in/not_in).' } } } },
             group_by: { type: 'array', items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
             aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function.' }, column: { type: 'string', description: 'Column to aggregate (omit for count).' }, as: { type: 'string', description: 'Output column alias.' } } } },
             having: { type: 'array', description: 'Post-aggregation filters on aggregate values.', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' }, value: { description: 'Threshold value.' } } } },
             order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
-            limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows after projection.' },
           },
         },
       },
@@ -615,10 +623,9 @@ export function buildSchemas(catalog) {
     semantic_index: semanticIndexSchema(catalog),
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
-      description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.`,
+      description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return. Purely a timer; it touches no data and follows no task — waiting for a task is get_task_result.`,
       properties: {
         seconds: { type: 'number', minimum: 0, maximum: 86400, description: `Seconds to wait; the actual wait is capped at ${MAX_WAIT_SECONDS} (larger values are clamped, with clamped:true and cap_seconds in the result).` },
-        query_id: { type: 'string', pattern: '^[a-f0-9]{12}$', description: 'Wait FOR this query: return as soon as it is no longer running (or after `seconds`), with its status. Then read it ONCE with get_query_result.' },
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
       },
     },
@@ -1124,7 +1131,6 @@ function experimentSchema() {
   const srm = srmCheckSchema();
   const ss = sampleSizeSchema();
   const properties = {
-    card: { type: 'boolean', description: 'Draw the result as a CARD for the person (the test, the split check or the plan), in hosts that render MCP Apps. Omitted: no card — ask for it only when the person should see this result.' },
     action: { enum: ['plan', 'check_split', 'analyze'], description: 'plan → required sample size / MDE (power planning, BEFORE running); check_split → Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run BEFORE trusting any lift); analyze → the A/B significance test on per-group aggregates.' },
     // union of all three actions' fields (analyze/ab_test wins on shared keys like metric).
     ...ss.properties,

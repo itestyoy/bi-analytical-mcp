@@ -7,9 +7,9 @@
  * (steps, conversion, the biggest drop) and the A/B
  * family (the test, the split check, the sample-size plan). Any other result gets one status line.
  *
- * IT DRAWS, AND READS ONLY ITS OWN RESULT. The input is the tool result the host delivers
- * (ontoolresult). The one thing it asks for is more of that same result, through get_query_result
- * (readResult): a drill-down's next view — its stored table, filtered to the pivot row opened or
+ * IT DRAWS, AND READS ONLY ITS OWN RESULT. The input is the display_result the host delivers
+ * (ontoolresult). The one thing it asks for is more of that same result, through drill_result
+ * (readResult): a drill-down's next view — its task's stored table, filtered to the pivot row opened or
  * the chart mark clicked, grouped by the dimension chosen. Nothing
  * else: no other tool, no resource, no message to the model, no link — and no network at all (the
  * page's CSP, and the resource's declared `csp`). Everything else interactive here — the
@@ -514,18 +514,17 @@ function renderPivot(model) {
 const canFollow = () => !!app.getHostCapabilities()?.serverTools;
 
 /**
- * THE view's one way to the server: get_query_result, for the result this card was drawn from —
- * its stored table's next view when a drill-down steps down (a pivot row, a chart mark).
- * Read-only, and only this card's own result.
+ * THE view's one way to the server: drill_result (a tool only a view may call), for the task this
+ * card was drawn from — its stored table's next view when a drill-down steps down (a pivot row, a
+ * chart mark). Read-only, and only this card's own result.
  */
-const readResult = (args) => app.callServerTool({ name: 'get_query_result', arguments: args });
+const readResult = (args) => app.callServerTool({ name: 'drill_result', arguments: args });
 
 /** The one line a result without a card gets — what happened, and that the reply carries the rest. */
 function showStatus(model) {
   const lines = {
-    // a query that moved to the background: a hand-off, not a live state — its one card is the read
-    // of its result (get_query_result) once it is done
-    running: ['clock', 'Continues in the background'],
+    // display_result draws finished results only; a running one is refused before it gets here
+    running: ['clock', 'Still running'],
     // the result this card showed or waited for was deleted or expired since — not an error
     gone: ['clock', 'This result is no longer available'],
     error: ['circle-alert', 'Error'],

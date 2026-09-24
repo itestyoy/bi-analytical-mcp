@@ -233,7 +233,7 @@ test('the tool surface stays within its size budget on the production catalog', 
 
 test('the card declaration (display) is structural: each kind is a closed branch, and what it needs is enforced by the schema', () => {
   const validators = makeValidators(schemas);
-  const check = (display) => validateInput(validators.get_query_result, { query_id: 'abc123abc123', display });
+  const check = (display) => validateInput(validators.display_result, { task_id: 'abc123abc123', display });
   for (const ok of [
     { kind: 'line', x: 'metric_time_day', y: ['dau', 'wau'] },
     { kind: 'area', x: 'metric_time_day', y: ['dau'], series_column: 'users_platform' },
@@ -258,11 +258,7 @@ test('the card declaration (display) is structural: each kind is a closed branch
     [{ kind: 'pivot', levels: ['a'], values: [{ column: 'v' }] }, 'a level is { column, label }'],
     [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'count_distinct' }] }, 'an agg a level cannot fold'],
   ]) assert.equal(check(bad).ok, false, why);
-  // a drill-down reads a stored result: a metric query declaring one must materialize
-  const q = (extra) => validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'm' }] }, ...extra });
-  assert.equal(q({}).ok, false, 'pivot without materialize');
-  const qd = (extra) => validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'bar', x: 'a', y: ['m'], drill: { levels: [{ column: 'b', label: 'B' }] } }, ...extra });
-  assert.equal(qd({}).ok, false, 'a drillable chart without materialize');
-  assert.equal(qd({ materialize: true }).ok, true, `a drillable chart with materialize: ${qd({ materialize: true }).errors?.join(' | ')}`);
-  assert.equal(q({ materialize: true }).ok, true, `pivot with materialize: ${q({ materialize: true }).errors?.join(' | ')}`);
+  // the declaration lives on display_result alone: no other tool takes one
+  assert.equal(validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
+  assert.equal(validateInput(validators.get_task_result, { task_id: 'abc123abc123', display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'reading a result does not draw');
 });

@@ -9,7 +9,7 @@
 // Two rules keep that honest:
 //   * work SHARED between callers (the enrichment reads of Engine._bestEffort: one in-flight read
 //     serves every caller waiting on it) must not die with the first caller — it runs `detached`;
-//   * work that deliberately OUTLIVES its call (a build handed back as a query_id) is protected by
+//   * work that deliberately OUTLIVES its call (a task: a query or a build started by it) runs `detached`, and is protected by
 //     the server, which stops forwarding the call's cancellation the moment the call returns.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -35,7 +35,7 @@ export function detached(fn) {
  * A signal that follows `source` only until `release()` is called. The server hands this to a
  * call instead of the transport's own signal: a cancellation that arrives while the call is in
  * flight stops its work; one that arrives after the call has returned (a build already handed
- * back as a query_id, a session torn down later) no longer reaches it.
+ * back as a task, a session torn down later) no longer reaches it.
  */
 export function releasableSignal(source) {
   const ctl = new AbortController();

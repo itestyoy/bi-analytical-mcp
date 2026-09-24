@@ -34,22 +34,19 @@ export function makeMcpServer(engine, services = servicesFor(engine), { era, off
   return createMcpServer(services, { era, offer });
 }
 
-// THE CEILING ON WHAT A DEPLOYMENT MAY CONFIGURE. Both grace windows (how long an SQL build and how
-// long a Python build may hold the tool call before handing back a query_id) are bounded by a
-// timeout this server does not own: the client that made the call gives up on its own schedule,
-// reports the server as unresponsive, and the build it started runs on unseen. So a value above the
-// ceiling is not honoured — it is capped, out loud, and the operator sees why.
+// THE CEILING ON WHAT A DEPLOYMENT MAY CONFIGURE. The enrichment window (how long a best-effort
+// warehouse read may hold an interactive call — QUERY_TIMEOUT_SECONDS) is bounded by a timeout
+// this server does not own: the client that made the call gives up on its own schedule and reports
+// the server as unresponsive. So a value above the ceiling is not honoured — it is capped, out
+// loud, and the operator sees why. (A query or a build never holds a call: it is a task.)
 //
 // The cap lives HERE, on the environment, and not in the Engine constructor: the Engine is a
-// library, and a caller that embeds it can legitimately hand a long window to a LOCAL build
-// (test/integration/python-stage.test.js gives a DuckDB Python build 600s, where waiting for rows
-// beats polling for a job). Capping in the constructor would make those builds asynchronous.
+// library, and a caller that embeds it may hand a long window to a local warehouse.
 export const MAX_BUILD_GRACE_SECONDS = 30;
 
 /**
  * Seconds from the environment → ms, capped at MAX_BUILD_GRACE_SECONDS. An unset, empty or
- * unparseable value falls back to `fallbackSeconds`; a fallback of null means "unset" (the runtime
- * decides), which is what the Python grace needs.
+ * unparseable value falls back to `fallbackSeconds` (null: unset).
  */
 export function graceMsFromEnv(raw, fallbackSeconds, name = 'grace') {
   const asked = Number(raw);
@@ -57,7 +54,7 @@ export function graceMsFromEnv(raw, fallbackSeconds, name = 'grace') {
     return fallbackSeconds == null ? undefined : fallbackSeconds * 1000;
   }
   if (asked > MAX_BUILD_GRACE_SECONDS) {
-    console.error(`[mcp] ${name}=${raw}s is above the ceiling — using ${MAX_BUILD_GRACE_SECONDS}s: a longer wait inside one tool call outlives the calling client's own timeout, which this server cannot raise. The build still finishes in the background; poll it with get_query_result.`);
+    console.error(`[mcp] ${name}=${raw}s is above the ceiling — using ${MAX_BUILD_GRACE_SECONDS}s: a longer wait inside one tool call outlives the calling client's own timeout, which this server cannot raise. The read still finishes in the background and primes the cache for the next call.`);
     return MAX_BUILD_GRACE_SECONDS * 1000;
   }
   return asked * 1000;
@@ -100,11 +97,6 @@ export async function makeEngine(opts = {}) {
       ? new DbtRunner({ dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
       : null;
   const queryTimeoutMs = graceMsFromEnv(process.env.QUERY_TIMEOUT_SECONDS, 20, 'QUERY_TIMEOUT_SECONDS');
-  // A build that includes a PYTHON model may hand back its query_id much sooner — how soon is the
-  // RUNTIME's own property (a remote one cold-starts for minutes and must not hold the caller's
-  // client; a local one finishes in seconds and should just return the rows). This env var is the
-  // operator's override of that, and stays UNSET unless they set it.
-  const pythonBuildGraceMs = graceMsFromEnv(process.env.PYTHON_BUILD_GRACE_SECONDS, null, 'PYTHON_BUILD_GRACE_SECONDS');
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
   // <workspaceRoot>/mcp.sqlite; pin it elsewhere (e.g. a persistent volume) via MCP_DB.
   const dbPath = opts.dbPath || process.env.MCP_DB || join(ctxs.workspaceRoot, 'mcp.sqlite');
@@ -150,7 +142,7 @@ export async function makeEngine(opts = {}) {
   } else {
     console.error(`[mcp] ${new Date().toISOString()} memory: findings live in the shared store at ${dbPath} — set MCP_MEMORY_DB to a persistent volume to retain them across container restarts`);
   }
-  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, pythonBuildGraceMs, dbPath, resetDb, embedder, memoryDbPath });
+  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath });
   // Persistence surfaces as semantic_index({ status }).value_index.persisted. If a DB path was
   // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
   // loudly, because otherwise the index silently rebuilds from scratch on every restart.

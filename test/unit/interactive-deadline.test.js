@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { settle } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const GRACE = 200; // the grace under test — a real deployment's is 20s, capped at 30s
@@ -46,7 +47,7 @@ function engineWith(runner) {
     workspaceRoot: mkdtempSync(join(tmpdir(), 'deadline-ws-')),
     baseProjectDir: mkdtempSync(join(tmpdir(), 'deadline-proj-')),
   });
-  return new Engine({ catalog, contextManager: ctxs, runner, queryTimeoutMs: GRACE });
+  return settle(new Engine({ catalog, contextManager: ctxs, runner, queryTimeoutMs: GRACE }));
 }
 
 test('build_native_model({ start }) answers within the grace when introspection hangs — with the declared columns', async () => {

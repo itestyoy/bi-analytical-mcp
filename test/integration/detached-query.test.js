@@ -137,3 +137,21 @@ test('a declaration naming a column the result does not have is refused, with th
     (e) => e.field === 'display',
   );
 });
+
+test('a declared pie carries each country\'s share of the warehouse total; a pie of negative or single values is refused', opts, async (t) => {
+  if (skip(t)) return;
+  const paying = { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB', 'BR'] }] };
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], where: paying, display: { kind: 'pie', label_column: 'users_country', value_column: 'mon_revenue' } });
+  const done = await follow(first.query_id);
+  const m = buildViewModel('get_query_result', done);
+  assert.equal(m.chart.type, 'pie');
+  assert.equal(m.chart.total, 85);
+  // the largest share first (US 35 of 85); GB and BR tie at 25 each
+  assert.deepEqual([m.chart.slices[0].label, m.chart.slices[0].share], ['US', 35 / 85]);
+  assert.deepEqual(m.chart.slices.slice(1).map((x) => x.label).sort(), ['BR', 'GB']);
+  assert.deepEqual(m.chart.slices.slice(1).map((x) => x.share), [25 / 85, 25 / 85]);
+  // one row is a number, not a pie
+  const one = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
+  await follow(one.query_id);
+  await assert.rejects(engine.get_query_result({ query_id: one.query_id, display: { kind: 'pie', label_column: 'mon_revenue', value_column: 'mon_revenue' } }), (e) => e.field === 'display');
+});

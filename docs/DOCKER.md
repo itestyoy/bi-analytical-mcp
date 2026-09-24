@@ -159,9 +159,13 @@ the plain tools stay exactly as they were for every client that does not:
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
   TEST (a stat card per variant: lift, interval, verdict, the groups), the SAMPLE-RATIO CHECK (the
   observed split against the intended one) and the SAMPLE-SIZE PLAN. What a result with rows IS is
-  declared by the caller: `display` on `query_semantic_model` / `get_query_result` names a funnel
-  (step columns of one row, or a label and a value column over a row per step), a line or a bar
-  chart over the result's columns, with an optional title; the server checks the columns exist (a
+  declared by the caller: `display` on `query_semantic_model` / `get_query_result` names the form
+  the question calls for, over the result's columns, with an optional title — a LINE (a trend; several
+  y columns or a `series_column` make it multi-line), a stacked AREA (a total split into parts over
+  time), BARS (a comparison; several y or a `series_column` group them, `stacked` stacks them,
+  `horizontal` lays them flat — the default past 8 categories), a PIE drawn as a donut (shares of one
+  total; past 6 slices the smallest fold into "Other"; negative values or a single row are refused)
+  or a FUNNEL (step columns of one row, or a label and a value column over a row per step); the server checks the columns exist (a
   detached query remembers it) and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
   result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply),

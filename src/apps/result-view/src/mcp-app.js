@@ -1,8 +1,8 @@
 /**
- * @file Query Result view — three cards inside the host's conversation: a CHART (a time series or a
- * breakdown, its rows folded underneath as a data table with filter and sorting), an A/B TEST (a
- * stat card per variant), a FUNNEL (steps, conversion, the biggest drop). Any other result draws
- * nothing: the tool's text answer is the whole reply.
+ * @file Query Result view — the cards inside the host's conversation: a CHART (a line or multi-line,
+ * a stacked area, grouped/stacked/horizontal bars or a donut of shares, its rows folded underneath as
+ * a data table with filter and sorting), a FUNNEL (steps, conversion, the biggest drop) and the A/B
+ * family (the test, the split check, the sample-size plan). Any other result gets one status line.
  *
  * IT DRAWS, AND FOLLOWS ITS OWN QUERY. The input is the tool result the host delivers
  * (ontoolresult). The one thing it asks for is the rest of that result: a query that outlasted its
@@ -27,10 +27,13 @@ import {
   applyHostStyleVariables,
 } from '@modelcontextprotocol/ext-apps';
 import {
+  ArcElement,
   BarController,
   BarElement,
   CategoryScale,
   Chart,
+  DoughnutController,
+  Filler,
   LinearScale,
   LineController,
   LineElement,
@@ -43,7 +46,7 @@ import './global.css';
 import './mcp-app.css';
 
 // Only the pieces this view draws — Chart.js is tree-shakable, and the whole view ships in one file
-Chart.register(BarController, BarElement, CategoryScale, LinearScale, LineController, LineElement, PointElement, Tooltip);
+Chart.register(ArcElement, BarController, BarElement, CategoryScale, DoughnutController, Filler, LinearScale, LineController, LineElement, PointElement, Tooltip);
 
 const log = {
   info: console.log.bind(console, '[APP]'),
@@ -162,6 +165,8 @@ function cssVar(name) {
   return `rgba(${r}, ${g}, ${b}, ${(a / 255).toFixed(3)})`;
 }
 const seriesColor = (i) => cssVar(`--color-series-${(i % 6) + 1}`);
+/** A resolved rgba color at another opacity — an area's wash is its line's color, lighter. */
+const withAlpha = (rgba, a) => rgba.replace(/[\d.]+\)$/, `${a})`);
 
 // ── building blocks ──────────────────────────────────────────────────────────────────────────
 
@@ -323,7 +328,7 @@ function renderChartResult(model) {
 // ── chart (shadcn charts: horizontal grid only, no axis or tick lines, HTML tooltip and legend) ─
 
 function renderChart(chart, title) {
-  chartTitleEl.textContent = chart.type === 'line' ? `${title} over ${chart.x}` : `${title} by ${chart.x}`;
+  chartTitleEl.textContent = chart.type === 'line' ? `${title} over ${chart.x}` : chart.type === 'pie' ? `${title} · share by ${chart.x}` : `${title} by ${chart.x}`;
   chartSection.hidden = false;
   const muted = cssVar('--muted-foreground');
   const grid = cssVar('--border');
@@ -356,9 +361,12 @@ function renderChart(chart, title) {
           const byX = new Map(s.points);
           return {
             label: s.name,
+            swatch: seriesColor(i), // what the legend and the tooltip show for this series
             data: labels.map((x) => (byX.has(x) ? byX.get(x) : null)),
             borderColor: seriesColor(i),
-            backgroundColor: seriesColor(i),
+            // an area is a wash of its line's color; stacked bands sit on the one below
+            backgroundColor: chart.area ? withAlpha(seriesColor(i), chart.stacked ? 0.35 : 0.12) : seriesColor(i),
+            fill: chart.area ? (chart.stacked && i > 0 ? '-1' : 'origin') : false,
             borderWidth: 2,
             pointRadius: 0,
             pointHoverRadius: 4,
@@ -369,8 +377,14 @@ function renderChart(chart, title) {
           };
         }),
       },
-      // a line reads a CHANGE, so its axis fits the data; only bars (a length) must start at zero
-      options: { ...common, scales: { ...common.scales, y: { ...common.scales.y, beginAtZero: false, grace: '5%' } } },
+      // a line reads a CHANGE, so its axis fits the data; an area (an amount, stacked or not) and a
+      // bar (a length) start at zero
+      options: {
+        ...common,
+        scales: chart.area
+          ? { x: common.scales.x, y: { ...common.scales.y, stacked: !!chart.stacked } }
+          : { ...common.scales, y: { ...common.scales.y, beginAtZero: false, grace: '5%' } },
+      },
     });
     chartDescriptionEl.textContent = `${labels.length} points · ${chart.series.length} series`;
     chartCanvas.setAttribute('aria-label', `${title}: ${chart.series.length} series over ${labels.length} points`);
@@ -379,32 +393,75 @@ function renderChart(chart, title) {
     return;
   }
 
-  const horizontal = chart.bars.length > 8;
-  const bars = chart.bars.slice(0, 30);
+  if (chart.type === 'pie') {
+    const colors = chart.slices.map((x, i) => (x.other ? cssVar('--muted-foreground') : seriesColor(i)));
+    state.chart = new Chart(chartCanvas, {
+      type: 'doughnut',
+      data: {
+        labels: chart.slices.map((x) => x.label),
+        datasets: [{
+          label: chart.y || 'value',
+          data: chart.slices.map((x) => x.value),
+          backgroundColor: colors,
+          hoverBackgroundColor: colors,
+          borderColor: cssVar('--card'), // the surface gap between slices
+          borderWidth: 2,
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        cutout: '62%',
+        layout: { padding: 8 },
+        interaction: { mode: 'nearest', intersect: true },
+        plugins: { legend: { display: false }, tooltip: { enabled: false, external: drawTooltip } },
+      },
+    });
+    chartDescriptionEl.textContent = `${chart.slices.length} slices · total ${formatNumber(chart.total)}${chart.folded ? ` · ${chart.folded} smallest in Other` : ''}`;
+    chartCanvas.setAttribute('aria-label', `${title}: ${chart.slices.map((x) => `${x.label} ${formatShare(x.share)}`).join(', ')}`);
+    drawSliceLegend(chart.slices);
+    return;
+  }
+
+  // bars: one series (a bar per category), several side by side (grouped) or stacked into one
+  const series = chart.series || [{ name: chart.y || 'value', values: chart.bars.map((b) => b.value) }];
+  const allLabels = chart.labels || chart.bars.map((b) => b.label);
+  const labels = allLabels.slice(0, 30);
+  const horizontal = typeof chart.horizontal === 'boolean' ? chart.horizontal : allLabels.length > 8;
+  const stacked = !!chart.stacked;
   state.chart = new Chart(chartCanvas, {
     type: 'bar',
     data: {
-      labels: bars.map((b) => b.label),
-      datasets: [{
-        label: chart.y || 'value',
-        data: bars.map((b) => b.value),
-        backgroundColor: seriesColor(0),
-        hoverBackgroundColor: seriesColor(0),
-        borderRadius: 8,
-        borderSkipped: 'start', // the data end is rounded, the baseline stays square
-        maxBarThickness: 48,
-      }],
+      labels,
+      datasets: series.map((s, i) => ({
+        label: s.name,
+        swatch: seriesColor(i),
+        data: s.values.slice(0, labels.length),
+        backgroundColor: seriesColor(i),
+        hoverBackgroundColor: seriesColor(i),
+        // stacked segments are parted by a 2px gap in the surface color, never by a drawn stroke
+        borderColor: stacked ? cssVar('--card') : seriesColor(i),
+        borderWidth: stacked ? 1 : 0,
+        borderRadius: stacked ? 4 : 8,
+        borderSkipped: stacked ? false : 'start', // the data end is rounded, the baseline stays square
+        maxBarThickness: series.length > 1 && !stacked ? 24 : 48,
+      })),
     },
     options: {
       ...common,
       indexAxis: horizontal ? 'y' : 'x',
       scales: horizontal
-        ? { x: { ...common.scales.y }, y: { ...common.scales.x } }
-        : common.scales,
+        ? { x: { ...common.scales.y, stacked }, y: { ...common.scales.x, stacked } }
+        : { x: { ...common.scales.x, stacked }, y: { ...common.scales.y, stacked } },
     },
   });
-  chartDescriptionEl.textContent = chart.bars.length > bars.length ? `top ${bars.length} of ${chart.bars.length}` : `${bars.length} ${bars.length === 1 ? 'bar' : 'bars'}`;
-  chartCanvas.setAttribute('aria-label', `${title}: ${bars.length} bars`);
+  const count = allLabels.length > labels.length ? `top ${labels.length} of ${allLabels.length}` : `${labels.length} ${labels.length === 1 ? 'bar' : 'bars'}`;
+  chartDescriptionEl.textContent = series.length > 1 ? `${count.replace(/bars?$/, labels.length === 1 ? 'category' : 'categories')} · ${series.length} series${stacked ? ', stacked' : ''}` : count;
+  chartCanvas.setAttribute('aria-label', `${title}: ${labels.length} categories${series.length > 1 ? `, ${series.length} series` : ''}`);
+  if (series.length > 1) drawLegend();
+  if (chart.folded) showAlert({ title: `${chart.folded} smaller series are in the table only`, description: 'The chart keeps the largest series readable; every row is in the table below.' });
 }
 
 /** shadcn ChartTooltipContent, drawn as HTML next to the canvas. */
@@ -414,16 +471,21 @@ function drawTooltip({ chart, tooltip }) {
     return;
   }
   const items = el('div', 'chart-tooltip-items');
+  const slice = chart.config.type === 'doughnut';
   for (const p of tooltip.dataPoints) {
     const row = el('div', 'chart-tooltip-item');
     const swatch = el('span', 'chart-indicator');
-    swatch.style.backgroundColor = p.dataset.borderColor || p.dataset.backgroundColor;
+    // a slice wears its own color and reads as its share of the whole
+    swatch.style.backgroundColor = slice ? p.dataset.backgroundColor[p.dataIndex] : p.dataset.swatch;
     const value = el('div', 'chart-tooltip-value');
-    value.append(el('span', 'chart-tooltip-name', p.dataset.label), el('span', 'chart-tooltip-number', formatNumber(p.parsed[chart.options.indexAxis === 'y' ? 'x' : 'y'])));
+    const n = slice ? p.parsed : p.parsed[chart.options.indexAxis === 'y' ? 'x' : 'y'];
+    const total = slice ? p.dataset.data.reduce((a, v) => a + v, 0) : 0;
+    value.append(el('span', 'chart-tooltip-name', p.dataset.label), el('span', 'chart-tooltip-number', slice ? `${formatNumber(n)} · ${formatShare(total ? n / total : null)}` : formatNumber(n)));
     row.append(swatch, value);
     items.append(row);
   }
-  chartTooltip.replaceChildren(el('div', 'chart-tooltip-label', tooltip.title?.[0] ?? ''), items);
+  const heading = slice ? chart.data.labels[tooltip.dataPoints[0].dataIndex] : tooltip.title?.[0];
+  chartTooltip.replaceChildren(el('div', 'chart-tooltip-label', heading ?? ''), items);
   chartTooltip.hidden = false;
   // beside the cursor, flipped to the other side near the right edge, always inside the chart
   const { width, height } = chart.canvas.getBoundingClientRect();
@@ -442,12 +504,33 @@ function drawLegend() {
     item.type = 'button';
     item.setAttribute('aria-pressed', 'true');
     const swatch = el('span', 'chart-indicator');
-    swatch.style.backgroundColor = ds.borderColor;
+    swatch.style.backgroundColor = ds.swatch;
     item.append(swatch, document.createTextNode(ds.label));
     item.addEventListener('click', () => {
       const visible = !chart.isDatasetVisible(i);
       chart.setDatasetVisibility(i, visible);
       item.setAttribute('aria-pressed', String(visible));
+      chart.update();
+    });
+    return item;
+  }));
+  chartLegend.hidden = false;
+}
+
+/** The legend of a donut: a swatch, the slice and its share; a click shows or hides the slice. */
+function drawSliceLegend(slices) {
+  const chart = state.chart;
+  const colors = chart.data.datasets[0].backgroundColor;
+  chartLegend.replaceChildren(...slices.map((x, i) => {
+    const item = el('button', 'chart-legend-item');
+    item.type = 'button';
+    item.setAttribute('aria-pressed', 'true');
+    const swatch = el('span', 'chart-indicator');
+    swatch.style.backgroundColor = colors[i];
+    item.append(swatch, document.createTextNode(`${x.label} · ${formatShare(x.share)}`));
+    item.addEventListener('click', () => {
+      chart.toggleDataVisibility(i);
+      item.setAttribute('aria-pressed', String(chart.getDataVisibility(i)));
       chart.update();
     });
     return item;

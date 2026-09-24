@@ -8,7 +8,7 @@
 // query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
 // status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
 // the tool's text result speaks for itself. Rows are drawn as the caller DECLARED them when the
-// result carries `display` (a funnel, a line or a bar chart over named columns); only without one is
+// result carries `display` (a funnel, a line, area, bar or pie chart over named columns); only without one is
 // the card inferred from the shape. The view imports it and the unit
 // tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
@@ -208,7 +208,7 @@ export function buildViewModel(toolName, result, toolInput) {
         const drawable = (steps || (at(d.label_column) >= 0 && at(d.value_column) >= 0)) && labels.length >= 2 && values[0] > 0 && values.every((v) => v !== null && v >= 0);
         if (drawable) return { ...funnelOf(labels, values, steps ? null : d.value_column), ...(declaredTitle ? { title: declaredTitle } : {}) };
       }
-      if (d.kind === 'line' && at(d.x) >= 0 && Array.isArray(d.y) && d.y.length && d.y.every((y) => at(y) >= 0)) {
+      if ((d.kind === 'line' || d.kind === 'area') && at(d.x) >= 0 && Array.isArray(d.y) && d.y.length && d.y.every((y) => at(y) >= 0)) {
         const xi = at(d.x);
         // a time axis is put in time order; any other axis keeps the order the rows came in
         const ordered = columns[xi].type !== 'time';
@@ -232,12 +232,61 @@ export function buildViewModel(toolName, result, toolInput) {
         } else {
           series = d.y.slice(0, MAX_SERIES).map((y) => ({ name: y, points: inOrder.map((r) => [String(r[xi]), num(r[at(y)])]).filter((p) => p[1] !== null) }));
         }
-        return chartCard({ type: 'line', x: d.x, y: d.y.length === 1 ? d.y[0] : null, series, folded, ordered, title: declaredTitle }, declaredTitle || title);
+        // an area stacks its series: they are the parts of one total over time
+        return chartCard({ type: 'line', x: d.x, y: d.y.length === 1 ? d.y[0] : null, series, folded, ordered, ...(d.kind === 'area' ? { area: true, stacked: series.length > 1 } : {}), title: declaredTitle }, declaredTitle || title);
       }
-      if (d.kind === 'bar' && at(d.x) >= 0 && at(d.y) >= 0) {
+      const ys = d.y === undefined ? [] : [].concat(d.y);
+      if (d.kind === 'bar' && at(d.x) >= 0 && ys.length && ys.every((y) => at(y) >= 0)) {
         const xi = at(d.x);
-        const yi = at(d.y);
-        return chartCard({ type: 'bar', x: d.x, y: d.y, bars: rows.slice(0, 50).map((r) => ({ label: label(r[xi]), value: num(r[yi]) ?? 0 })), title: declaredTitle }, declaredTitle || title);
+        const kept = rows.slice(0, 50);
+        let labels;
+        let series;
+        let folded = 0;
+        if (d.series_column && at(d.series_column) >= 0) {
+          // categories in the order they first appear; a bar per series value inside each
+          const si = at(d.series_column);
+          const yi = at(ys[0]);
+          labels = [...new Set(kept.map((r) => label(r[xi])))];
+          const bySeries = new Map();
+          for (const r of kept) {
+            const k = label(r[si]);
+            if (!bySeries.has(k)) bySeries.set(k, new Map());
+            const cell = bySeries.get(k);
+            cell.set(label(r[xi]), (cell.get(label(r[xi])) ?? 0) + (num(r[yi]) ?? 0));
+          }
+          const all = [...bySeries.entries()].map(([name, byX]) => ({ name, values: labels.map((l) => byX.get(l) ?? 0) })).map((x) => ({ ...x, total: x.values.reduce((a, v) => a + v, 0) })).sort((a, b) => b.total - a.total);
+          series = all.slice(0, MAX_SERIES).map(({ name, values }) => ({ name, values }));
+          folded = Math.max(0, all.length - MAX_SERIES);
+        } else {
+          labels = kept.map((r) => label(r[xi]));
+          series = ys.slice(0, MAX_SERIES).map((y) => ({ name: y, values: kept.map((r) => num(r[at(y)]) ?? 0) }));
+        }
+        const single = series.length === 1 && !d.series_column;
+        return chartCard({
+          type: 'bar',
+          x: d.x,
+          y: ys.length === 1 ? ys[0] : null,
+          labels,
+          series,
+          ...(single ? { bars: labels.map((l, i) => ({ label: l, value: series[0].values[i] })) } : {}),
+          stacked: !!d.stacked && series.length > 1,
+          horizontal: typeof d.horizontal === 'boolean' ? d.horizontal : null,
+          folded,
+          title: declaredTitle,
+        }, declaredTitle || title);
+      }
+      if (d.kind === 'pie' && at(d.label_column) >= 0 && at(d.value_column) >= 0) {
+        const li = at(d.label_column);
+        const vi = at(d.value_column);
+        const MAX_SLICES = 6; // a donut reads a share at a glance only while the slices are few
+        const all = rows.map((r) => ({ label: label(r[li]), value: num(r[vi]) })).filter((x) => x.value !== null && x.value > 0).sort((a, b) => b.value - a.value);
+        const total = all.reduce((a, x) => a + x.value, 0);
+        if (all.length >= 2 && total > 0) {
+          const shown = all.length > MAX_SLICES ? all.slice(0, MAX_SLICES - 1) : all;
+          const rest = all.slice(shown.length);
+          const slices = [...shown, ...(rest.length ? [{ label: 'Other', value: rest.reduce((a, x) => a + x.value, 0), other: rest.length }] : [])].map((x) => ({ ...x, share: x.value / total }));
+          return chartCard({ type: 'pie', x: d.label_column, y: d.value_column, slices, total, folded: rest.length, title: declaredTitle }, declaredTitle || title);
+        }
       }
       // a declaration the rows cannot fill falls through to the inferred card
     }

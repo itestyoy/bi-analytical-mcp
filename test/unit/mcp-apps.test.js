@@ -197,6 +197,42 @@ test('view model: a DECLARED line over a non-time axis keeps the row order; seri
   assert.deepEqual(t.chart.series[0].points, [['2026-09-01', 3], ['2026-09-02', 5]]);
 });
 
+test('view model: a DECLARED bar split by a column groups (or stacks) a bar per value inside each category', () => {
+  const rows = [{ c: 'US', p: 'ios', v: 420 }, { c: 'US', p: 'android', v: 310 }, { c: 'BR', p: 'android', v: 180 }, { c: 'BR', p: 'ios', v: 40 }, { c: 'BR', p: 'ios', v: 5 }];
+  const cols = [{ name: 'c' }, { name: 'p' }, { name: 'v' }];
+  const m = buildViewModel('get_query_result', { columns: cols, rows, display: { kind: 'bar', x: 'c', y: 'v', series_column: 'p', stacked: true, horizontal: true } });
+  assert.equal(m.chart.type, 'bar');
+  assert.deepEqual(m.chart.labels, ['US', 'BR'], 'categories in the order they first appear');
+  // the largest series first (android 490 > ios 465); a category × series seen twice is summed
+  assert.deepEqual(m.chart.series, [{ name: 'android', values: [310, 180] }, { name: 'ios', values: [420, 45] }]);
+  assert.equal(m.chart.stacked, true);
+  assert.equal(m.chart.horizontal, true);
+  // several y columns: a bar each per category, grouped
+  const g = buildViewModel('get_query_result', { columns: [{ name: 'c' }, { name: 'a' }, { name: 'b' }], rows: [{ c: 'x', a: 1, b: 2 }, { c: 'y', a: 3, b: 4 }], display: { kind: 'bar', x: 'c', y: ['a', 'b'] } });
+  assert.deepEqual(g.chart.series, [{ name: 'a', values: [1, 3] }, { name: 'b', values: [2, 4] }]);
+  assert.equal(g.chart.stacked, false);
+});
+
+test('view model: a DECLARED area stacks its series; a single line stays a line', () => {
+  const rows = [{ d: '2026-09-01', p: 'ios', n: 5 }, { d: '2026-09-01', p: 'web', n: 1 }, { d: '2026-09-02', p: 'ios', n: 6 }, { d: '2026-09-02', p: 'web', n: 2 }];
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'd' }, { name: 'p' }, { name: 'n' }], rows, display: { kind: 'area', x: 'd', y: ['n'], series_column: 'p' } });
+  assert.equal(m.chart.area, true);
+  assert.equal(m.chart.stacked, true);
+  assert.deepEqual(m.chart.series.map((x) => [x.name, x.points.map((p) => p[1])]), [['ios', [5, 6]], ['web', [1, 2]]]);
+  const l = buildViewModel('get_query_result', { columns: [{ name: 'd' }, { name: 'p' }, { name: 'n' }], rows, display: { kind: 'line', x: 'd', y: ['n'], series_column: 'p' } });
+  assert.equal(l.chart.area, undefined);
+});
+
+test('view model: a DECLARED pie is slices in size order with their shares; past six the smallest fold into Other', () => {
+  const vals = [['US', 730], ['GB', 270], ['BR', 220], ['DE', 160], ['FR', 95], ['JP', 60], ['KR', 40], ['IN', 25]];
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'c' }, { name: 'v' }], rows: vals.map(([c, v]) => ({ c, v })).reverse(), display: { kind: 'pie', label_column: 'c', value_column: 'v' } });
+  assert.equal(m.chart.type, 'pie');
+  assert.equal(m.chart.total, 1600);
+  assert.deepEqual(m.chart.slices.map((x) => [x.label, x.value]), [['US', 730], ['GB', 270], ['BR', 220], ['DE', 160], ['FR', 95], ['Other', 125]]);
+  assert.equal(m.chart.folded, 3);
+  assert.ok(Math.abs(m.chart.slices.reduce((a, x) => a + x.share, 0) - 1) < 1e-12, 'the slices make up the whole');
+});
+
 test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {
   // step counts with a NULL first step cannot be a funnel; the step-per-row shape is still a bar chart
   const m = buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: null }, { step: 'b', users: 4 }], display: { kind: 'funnel', label_column: 'step', value_column: 'users' } });

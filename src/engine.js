@@ -2532,7 +2532,7 @@ export class Engine {
       // The rows above come back WITHOUT the result card — build_native_model carries no view (its
       // other actions return schema, and a card on each would bury the conversation). Reading the
       // table with get_query_result is what draws a funnel or a chart for the person.
-      show_to_user: { tool: 'get_query_result', arguments: { context_id: ctx.id, table: modelName }, why: 'in a host that renders MCP Apps (Claude on the web, desktop and mobile) this call draws the result as a card — a funnel for ordered steps, a chart for a series or a breakdown. Add `display` to say which, over this table\'s columns ({ kind: \'funnel\', steps: [{ column, label }] } or { kind: \'funnel\', label_column, value_column }, { kind: \'line\', x, y: [..] }, { kind: \'bar\', x, y }). Make it before summarising, instead of drawing your own chart; the rows are the same ones returned here.' },
+      show_to_user: { tool: 'get_query_result', arguments: { context_id: ctx.id, table: modelName }, why: 'in a host that renders MCP Apps (Claude on the web, desktop and mobile) this call draws the result as a card — a funnel for ordered steps, a chart for a series or a breakdown. Add `display` to say which, over this table\'s columns: a funnel ({ kind: \'funnel\', steps: [{ column, label }] } or { kind: \'funnel\', label_column, value_column }), a line or a stacked area ({ kind: \'line\' | \'area\', x, y: [..], series_column? }), bars ({ kind: \'bar\', x, y, series_column?, stacked?, horizontal? }) or a pie of shares ({ kind: \'pie\', label_column, value_column }). Make it before summarising, instead of drawing your own chart; the rows are the same ones returned here.' },
       assumptions: [
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
@@ -3425,14 +3425,19 @@ export class Engine {
    */
   _displayProblems(display, columns, rows = null) {
     const have = new Set(columns);
+    const ys = display.y === undefined ? [] : [].concat(display.y);
     const named = display.kind === 'funnel'
       ? (display.steps ? display.steps.map((st) => st.column) : [display.label_column, display.value_column])
-      : display.kind === 'line' ? [display.x, ...(display.y || []), ...(display.series_column ? [display.series_column] : [])]
-        : [display.x, display.y];
+      : display.kind === 'pie' ? [display.label_column, display.value_column]
+        : [display.x, ...ys, ...(display.series_column ? [display.series_column] : [])];
     const problems = [...new Set(named.filter((c) => c && !have.has(c)))].map((c) => `'${c}' is not a column of this result`);
     if (display.kind === 'funnel' && display.steps && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
     if (display.kind === 'funnel' && display.steps && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, or declare { kind: 'funnel', label_column, value_column } for a row per step`);
-    if (display.kind === 'line' && display.series_column && (display.y || []).length > 1) problems.push('series_column splits ONE y column into lines — declare a single y with it');
+    if (display.series_column && ys.length > 1) problems.push(`series_column splits ONE y column into a ${display.kind === 'bar' ? 'bar' : display.kind === 'area' ? 'band' : 'line'} per value — declare a single y with it`);
+    if (display.kind === 'pie' && Array.isArray(rows) && have.has(display.value_column)) {
+      if (rows.length < 2) problems.push(`a pie needs a slice per row, and this result has ${rows.length} — a single number is better said as a number`);
+      if (rows.some((r) => Number(r?.[display.value_column]) < 0)) problems.push(`a pie's slices are shares of one total, and '${display.value_column}' has negative values — use a bar`);
+    }
     return problems;
   }
 

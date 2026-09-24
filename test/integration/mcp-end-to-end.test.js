@@ -83,15 +83,12 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
  * task_id, and the result is read back with the query tool of its side ({ task_id }, called again
  * while it says running).
  */
-/** Which query tool reads back a task the named tool started. */
-const reader = (name) => (['build_pipeline_model', 'query_pipeline_model', 'register_native_model'].includes(name) ? 'query_pipeline_model' : 'query_semantic_model');
-
 async function settled(name, args) {
   let res = await client.callTool({ name, arguments: args });
   let out = JSON.parse(res.content[0].text);
   if (!res.isError && isStartedTask(out)) {
     do {
-      res = await client.callTool({ name: reader(name), arguments: { task_id: out.task_id } });
+      res = await client.callTool({ name: out.read_with, arguments: { task_id: out.task_id } }); // the started task names its reader
       out = JSON.parse(res.content[0].text);
     } while (!res.isError && out.status === 'running');
   }

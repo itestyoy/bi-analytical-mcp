@@ -23,7 +23,7 @@ import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { MemoryStore, targetKey, targetWords } from './memory.js';
 import { openStore } from './store.js';
-import { buildProjection } from './projection.js';
+import { buildProjection, projectionProblems } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 import { detached, currentSignal } from './request-context.js';
@@ -1582,7 +1582,7 @@ export class Engine {
     const job = this.jobs.get(input.from_task);
     if (!job) throw new ToolError(`unknown task_id '${input.from_task}' — start the pipeline from a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
     if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start the pipeline from it`, { stage: 'validate', field: 'from_task' });
-    if (job.status !== 'ready' || !job.table) throw new ToolError(`task ${job.id} holds no stored table to start from — ${job.status === 'error' ? 'it failed' : 'only a query run with materialize:true, or a pipeline build, stores its result as a table'}`, { stage: 'validate', field: 'from_task' });
+    if (job.status !== 'ready' || !job.table) throw new ToolError(`task ${job.id} holds no stored table to start from — ${job.status === 'error' ? 'it failed' : job.tool === 'query_pipeline_model' ? 'a query over a pipeline model is not stored: start from the pipeline BUILD\'s task, or continue that draft' : 'only a query run with materialize:true, or a pipeline build, stores its result as a table'}`, { stage: 'validate', field: 'from_task' });
     if (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table)) throw new ToolError(`the table of task ${job.id} (${job.table}) is gone — its context or model was deleted; run it again`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
     if (input.time_range) throw new ToolError('time_range bounds a catalog source — a task\'s table was computed under its own window already; filter it with a where step instead', { stage: 'validate', field: 'time_range' });
     const kept = this._taskResults?.get(job.id)?.out;
@@ -2342,7 +2342,8 @@ export class Engine {
 
   /** What a tool that started a task answers: the task's id and where to read it — nothing else. */
   _taskStarted(id, extra = {}) {
-    return { task_id: id, ...extra, next: `${this._readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
+    const side = this._taskSide(this.jobs.get(id));
+    return { task_id: id, ...extra, ...(side ? { read_with: SIDE_READER[side] } : {}), next: `${this._readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
   }
 
   /** Keep a task's finished response for the query tools to read back — the newest few hundred, for an hour. A stored table outlives it. */
@@ -3395,13 +3396,16 @@ export class Engine {
     return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: { limit, offset, has_more: res.rows.length > offset + limit }, ...(transform ? { projected: true } : {}) };
   }
 
-  /** The side a task belongs to (semantic | pipeline), or null when it cannot be told (a task inherited from the store without its tool). */
+  /** The side a task belongs to (semantic | pipeline), from the tool that started it (persisted with the task). */
   _taskSide(job) {
-    if (TASK_SIDE[job?.tool]) return TASK_SIDE[job.tool];
-    // a task inherited from the store has lost its tool: its table still says which side built it
-    if (/^qr_/.test(job?.table || '')) return 'semantic';
-    if (/^pipe_/.test(job?.table || '')) return 'pipeline';
-    return null;
+    return TASK_SIDE[job?.tool] || null;
+  }
+
+  /** How to get rows past what a task holds — said in the terms of the tool that ran it. */
+  _pageHint(job) {
+    if (job.tool === 'query_pipeline_model') return 'query the model again with the offset/limit you want — query_pipeline_model({ context_id, transform, limit, offset }) — or page the build\'s own task, whose table is stored';
+    if (this._taskSide(job) === 'pipeline') return 'build it again — a pipeline build stores its table, which then pages';
+    return 'run the query again with the offset/limit you want, or with materialize:true to store the whole result as a table that pages';
   }
 
   /** The call that reads a task back: its side's query tool, with the task_id. */
@@ -3421,15 +3425,43 @@ export class Engine {
    * that reads it.
    */
   async _pollTask(input, side) {
-    const job = this.jobs.get(input.task_id);
-    if (!job) throw new ToolError(`unknown task_id: ${input.task_id} — this server has no such task (one started before a restart is not known any more); start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
+    this._taskForSide(input.task_id, side);
+    return this._awaitRead(input.task_id, input);
+  }
+
+  /** The task behind an id — or the one refusal of an id this server does not know. */
+  _knownTask(id) {
+    const job = this.jobs.get(id);
+    if (!job) throw new ToolError(`unknown task_id: ${id} — this server has no such task (one started before a restart is not known any more); start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
+    return job;
+  }
+
+  /** A known task of THIS side — a task of the other side is refused with the tool that reads it. */
+  _taskForSide(id, side) {
+    const job = this._knownTask(id);
     const own = this._taskSide(job);
-    if (own && own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool || 'a build'}) — read it with ${SIDE_READER[own]}({ task_id: '${job.id}' })`, { stage: 'validate', field: 'task_id' });
-    return this._awaitRead(job.id, input);
+    if (own && own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${SIDE_READER[own]}({ task_id: '${job.id}' })`, { stage: 'validate', field: 'task_id' });
+    return job;
+  }
+
+  /**
+   * Everything a call that WAITS on a task (a query tool's read, display_model_result) would refuse,
+   * checked before any waiting — so a protocol task that follows the call (src/mcp-surface.js
+   * runToCompletion) never sits through a build only to be refused at the end.
+   */
+  _precheckWait(tool, args) {
+    this._validate(tool, args);
+    if (tool === 'query_semantic_model') this._taskForSide(args.task_id, 'semantic');
+    else if (tool === 'query_pipeline_model') this._taskForSide(args.task_id, 'pipeline');
+    else if (tool === 'display_model_result') {
+      this._knownTask(args.task_id);
+      if (this._displayed?.get(args.task_id) === 'drawn') throw new ToolError(`task ${args.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'task_id' });
+    }
   }
 
   /** Wait for a task (within the cap) and read what it produced — the one read the query tools and display_model_result share. */
   async _awaitRead(id, { wait_seconds: wait, offset, limit } = {}) {
+    this._knownTask(id);
     const seconds = Math.min(Math.max(wait ?? MAX_WAIT_SECONDS, 0), MAX_WAIT_SECONDS);
     const waited = await this._awaitTask(id, seconds);
     return this._taskResult(id, { waited, offset, limit });
@@ -3446,13 +3478,24 @@ export class Engine {
     this._validate('query_pipeline_model', input);
     if (input.task_id) return this._pollTask(input, 'pipeline');
     const ctx = this._ctx(input.context_id);
-    if (ctx.state.engine !== 'pipeline' || !ctx.state.model) {
+    // A build in flight is the model this query is about: tasks on a context run in order, so the
+    // query runs once that build is done — against ITS columns and ITS table, not the previous one.
+    const building = ctx.state.draft?.building?.task_id ? ctx.state.draft.building : null;
+    const columns = building
+      ? ((ctx.state.draft.checkpoints || []).find((cp) => cp.task_id === building.task_id)?.columns || []).map((c) => c.name)
+      : (ctx.state.engine === 'pipeline' && ctx.state.model ? ctx.state.native?.columns || [] : null);
+    if (!columns) {
       throw new ToolError(`context ${ctx.id} holds no built pipeline model — build one with build_pipeline_model (… materialize)${(ctx.state.metrics || []).length ? '; the metrics it declares are queried with query_semantic_model' : ''}`, { stage: 'validate', field: 'context_id' });
     }
+    // the transform is checked HERE, against the model's columns: a mistake is refused in the call
+    if (input.transform) {
+      const problems = projectionProblems(input.transform, columns);
+      if (problems.length) throw new ToolError(`transform: ${problems.join('; ')}. The model's columns: ${columns.join(', ')}`, { stage: 'validate', field: 'transform' });
+    }
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
-    const table = ctx.state.model;
     const taskId = this._startTask(ctx, 'query_pipeline_model', async () => {
-      if (!this.ctxs.hasPipelineModel(ctx.id, table)) return { ok: false, error: { stage: 'fetch', code: RESULT_GONE, message: `the pipeline model ${table} was deleted — build it again` } };
+      const table = ctx.state.model; // resolved when the query runs: after any build queued before it
+      if (!table || !this.ctxs.hasPipelineModel(ctx.id, table)) return { ok: false, error: { stage: 'fetch', code: RESULT_GONE, message: `the pipeline model ${table || ''} is not there (its build failed, or it was deleted) — build it again` } };
       const out = await this._readTable(this.ctxs.dir(ctx.id), table, input.limit ?? 1000, input.transform, {}, input.offset ?? 0);
       return out.ok === false ? out : { ...out, model: table, provenance: { tier: 'pipeline', model: table } };
     });
@@ -3485,6 +3528,19 @@ export class Engine {
     }
     const paging = offset != null || limit != null;
     const kept = this._taskResults?.get(id);
+    const stored = job.status === 'ready' && !!job.table;
+    if (kept && paging && !stored && isPlainObject(kept.out) && Array.isArray(kept.out.rows)) {
+      // a result held in memory is the page the query returned: offset/limit page WITHIN it
+      const out = kept.out;
+      const off = offset ?? 0; const lim = limit ?? out.rows.length;
+      const rows = out.rows.slice(off, off + lim);
+      const beyond = off + lim > out.rows.length && !!out.page?.has_more;
+      return {
+        ...head, ...out, rows, row_count: rows.length, status: 'done',
+        page: { limit: lim, offset: off, held_rows: out.rows.length, has_more: off + lim < out.rows.length || beyond },
+        ...(beyond ? { warnings: [...(out.warnings || []), `the task holds the ${out.rows.length} row(s) its query returned — rows past them were not kept: ${this._pageHint(job)}`] } : {}),
+      };
+    }
     if (kept && !paging) {
       const out = kept.out;
       const failed = isPlainObject(out) && out.ok === false;
@@ -3499,7 +3555,7 @@ export class Engine {
       const page = await this._readTable(this.ctxs.dir(job.contextId), job.table, limit ?? 1000, undefined, {}, offset ?? 0);
       return { ...head, ...page, status: page.ok === false ? 'error' : 'done', ...(page.ok === false ? {} : this._showHint(id, job.tool, page)) };
     }
-    if (paging) throw new ToolError('offset/limit page a STORED table, and this task\'s result is one response held in memory — run the query again with materialize:true (or with the offset/limit you want)', { stage: 'validate', field: offset != null ? 'offset' : 'limit' });
+    if (paging) throw new ToolError(`offset/limit page a stored table or a result still held in memory, and this task has neither — ${this._pageHint(job)}`, { stage: 'validate', field: offset != null ? 'offset' : 'limit' });
     if (job.status === 'error') return { ok: false, ...head, status: 'error', error: { stage: 'task', message: job.error } };
     return { ok: false, ...head, status: 'error', error: { stage: 'task', code: RESULT_GONE, message: 'this task\'s result was held in memory and is gone (the server restarted, or it is over an hour old) — run it again; materialize:true keeps a query\'s result as a table that survives restarts.' } };
   }
@@ -3534,7 +3590,6 @@ export class Engine {
     this._displayed.set(id, 'pending');
     let drawn = false;
     try {
-      if (!this.jobs.get(id)) throw new ToolError(`unknown task_id: ${id} — this server has no such task; run the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
       const got = await this._awaitRead(id); // the one read — the same one the query tools make
       if (got.status === 'running') throw new ToolError(`task ${id} is still running — nothing is drawn. Wait for it with ${this._readWith(id)} (it draws nothing), then show it once`, { stage: 'validate', field: 'task_id' });
       if (got.status !== 'done') return got; // failed: nothing to draw, and the reply says why
@@ -3548,7 +3603,7 @@ export class Engine {
         const d = input.display || null;
         const first = this._drillFirstRead(d);
         const job = this.jobs.get(id);
-        if (first && !job?.table) throw new ToolError(`a ${d.kind === 'pivot' ? 'pivot' : 'drill-down'} reads the STORED result view by view — run the query with materialize:true (a pipeline build is stored already), then show that task`, { stage: 'validate', field: 'display' });
+        if (first && !job?.table) throw new ToolError(`a ${d.kind === 'pivot' ? 'pivot' : 'drill-down'} reads the STORED result view by view, and this task holds none — ${job?.tool === 'query_pipeline_model' ? 'show the pipeline BUILD\'s task instead (its table is stored)' : 'run the query with materialize:true, then show that task'}`, { stage: 'validate', field: 'display' });
         if (d) {
           // a drill-down's columns are the stored table's, not one view's: its row shape is not checked
           const problems = this._displayProblems(d, cols, first ? null : result.rows);

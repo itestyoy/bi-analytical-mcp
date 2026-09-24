@@ -5,7 +5,7 @@
 // (read with its side's query tool, waiting until it is done). The raw engine stays reachable as
 // `engine.raw`, for a test about the task itself.
 
-const STARTED_KEYS = new Set(['task_id', 'context_id', 'draft_id', 'model', 'next']);
+const STARTED_KEYS = new Set(['task_id', 'context_id', 'draft_id', 'model', 'read_with', 'next']);
 
 /** Whether a tool's answer is a started task (and nothing else). */
 export function isStartedTask(out) {
@@ -13,12 +13,10 @@ export function isStartedTask(out) {
     && Object.keys(out).every((k) => STARTED_KEYS.has(k)) && 'next' in out;
 }
 
-const PIPELINE_TOOLS = new Set(['build_pipeline_model', 'register_native_model', 'query_pipeline_model']);
-
-/** The public read of a task: the query tool of its side, with { task_id }. */
+/** The public read of a task: the query tool of its side (the engine's own mapping), with { task_id }. */
 export function readTask(engine, taskId, extra = {}) {
   const raw = engine.raw || engine;
-  const tool = PIPELINE_TOOLS.has(raw.jobs.get(taskId)?.tool) ? 'query_pipeline_model' : 'query_semantic_model';
+  const tool = raw._taskSide(raw.jobs.get(taskId)) === 'pipeline' ? 'query_pipeline_model' : 'query_semantic_model';
   return raw[tool]({ task_id: taskId, ...extra });
 }
 

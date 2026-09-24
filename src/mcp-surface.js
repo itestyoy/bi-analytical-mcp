@@ -172,11 +172,33 @@ export function buildToolDefs(engine, { renders = true } = {}) {
     });
 }
 
-/** Every name that dispatches to the engine: the advertised tools AND the hidden ones kept for
- *  callers that learned them — and nothing else. The engine is an object with private methods
- *  (`_draftStart`, `close`, `gc`); a tool name is never a free method lookup. */
+// RENAMED TOOLS stay callable under the name a client learned — never advertised, the same call
+// under the new name (so a task one started is read back as before). get_task_result is not here:
+// it was not renamed but split, each side's query tool reading its own tasks, and a call to it is
+// answered with that (see runTool).
+export const TOOL_ALIASES = Object.freeze({
+  create_semantic_model: 'build_semantic_model',
+  build_native_model: 'build_pipeline_model',
+  display_result: 'display_model_result',
+});
+const REMOVED_TOOLS = {
+  get_task_result: 'a task is read back by the query tool of its side: query_semantic_model({ task_id }) for a semantic model or a metric query, query_pipeline_model({ task_id }) for a pipeline build or a query over one',
+  get_query_result: 'a task is read back by the query tool of its side ({ task_id }); a built pipeline model is queried with query_pipeline_model({ context_id, transform })',
+};
+/** What a call to a name that is not a tool is told — with the replacement, for a tool that was removed. */
+export function unknownToolMessage(name) {
+  return REMOVED_TOOLS[name] ? `${name} no longer exists: ${REMOVED_TOOLS[name]}` : `unknown tool: ${name}`;
+}
+/** The tool a name dispatches to: itself, or the current name of a renamed tool. */
+export const canonicalTool = (name) => TOOL_ALIASES[name] || name;
+
+/** Every name that dispatches to the engine: the advertised tools, the hidden ones kept for
+ *  callers that learned them and the old names of renamed tools — and nothing else. The engine is
+ *  an object with private methods (`_draftStart`, `close`, `gc`); a tool name is never a free
+ *  method lookup. */
 export function isCallableTool(engine, name) {
-  return typeof name === 'string' && Object.prototype.hasOwnProperty.call(engine.schemas, name) && typeof engine[name] === 'function';
+  const tool = typeof name === 'string' ? canonicalTool(name) : name;
+  return typeof tool === 'string' && Object.prototype.hasOwnProperty.call(engine.schemas, tool) && typeof engine[tool] === 'function';
 }
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -210,13 +232,14 @@ const PROGRESS_EVERY_MS = Number(process.env.MCP_PROGRESS_INTERVAL_MS) || 5000;
  * tool. `signal` stops the processes the call started; `onProgress(params)` receives heartbeats.
  * Returns { result: CallToolResult, raw } — `raw` is the engine's value (null on error).
  */
-export async function runTool(engine, name, args, { signal, onProgress, progressEveryMs = PROGRESS_EVERY_MS, renders = true } = {}) {
+export async function runTool(engine, calledAs, args, { signal, onProgress, progressEveryMs = PROGRESS_EVERY_MS, renders = true } = {}) {
   const started = Date.now();
-  logLine(name, `▶ call ${summarizeArgs(args)}`);
-  if (!isCallableTool(engine, name)) {
-    logLine(name, '✗ unknown tool');
-    return { result: errorResult(`unknown tool: ${name}`, 'validate'), raw: null, unknown: true };
+  logLine(calledAs, `▶ call ${summarizeArgs(args)}`);
+  if (!isCallableTool(engine, calledAs)) {
+    logLine(calledAs, '✗ unknown tool');
+    return { result: errorResult(unknownToolMessage(calledAs), 'validate'), raw: null, unknown: true };
   }
+  const name = canonicalTool(calledAs);
   // a card for a client that renders none: the tool is not offered to it, so not accepted
   if (!renders && APPS_ONLY_TOOLS.has(name)) {
     logLine(name, '✗ from a client without the Apps extension');
@@ -261,8 +284,15 @@ const WAITS_ON_TASK = new Set(['query_semantic_model', 'query_pipeline_model', '
  * the model calling again. A call that STARTS work returns its task_id at once, as always — it is
  * never held.
  */
-export async function runToCompletion(engine, name, args, { signal, renders = true } = {}) {
-  if (WAITS_ON_TASK.has(name) && typeof args?.task_id === 'string' && engine.jobs?.get?.(args.task_id)) {
+export async function runToCompletion(engine, calledAs, args, { signal, renders = true } = {}) {
+  const name = canonicalTool(calledAs);
+  let waits = WAITS_ON_TASK.has(name) && typeof args?.task_id === 'string' && engine.jobs?.get?.(args.task_id);
+  // what the call would refuse — bad arguments, a task of the other side, a card already drawn — is
+  // refused NOW, not after sitting through the whole task
+  if (waits && typeof engine._precheckWait === 'function') {
+    try { engine._precheckWait(name, args); } catch { waits = false; }
+  }
+  if (waits) {
     // Following the task has the same contract as the call itself: a failure while waiting is a
     // TOOL error the caller reads, never a protocol fault or a 'completed' success.
     try {
@@ -276,7 +306,7 @@ export async function runToCompletion(engine, name, args, { signal, renders = tr
       return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : (err?.stage || 'task'), err?.field, cancelled ? undefined : err?.code), raw: null };
     }
   }
-  return runTool(engine, name, args, { signal, renders });
+  return runTool(engine, calledAs, args, { signal, renders });
 }
 
 export { TOOL_DESCRIPTIONS, TOOL_TITLES, SERVER_DESCRIPTION, SERVER_SUMMARY, HIDDEN_TOOLS };

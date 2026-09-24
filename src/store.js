@@ -233,7 +233,9 @@ export class SqliteBackend {
     this.persistent = true;
     this._db = db;
     this._stmts = new Map();
-    db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER)');
+    db.exec('CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, context_id TEXT, table_name TEXT, status TEXT, error TEXT, started_at INTEGER, ready_at INTEGER, tool TEXT)');
+    // `tool` came later: the tool that started a task is what says which query tool reads it back
+    try { db.exec('ALTER TABLE jobs ADD COLUMN tool TEXT'); } catch { /* already present */ }
     // Every index table is keyed by (SOURCE, property): each catalog source — an events fact,
     // the users dimension — owns its own index space, so two facts may carry the same property
     // name without sharing a row. A table keyed any other way is DROPPED and recreated: the value
@@ -292,10 +294,10 @@ export class SqliteBackend {
       init() {
         // a job left 'running' across a restart can never complete -> terminal error.
         s._run("UPDATE jobs SET status='error', error='interrupted by server restart; re-issue the query' WHERE status='running'");
-        return s._all('SELECT * FROM jobs').map((r) => ({ id: r.id, contextId: r.context_id, table: r.table_name, status: r.status, error: r.error, startedAt: r.started_at, readyAt: r.ready_at }));
+        return s._all('SELECT * FROM jobs').map((r) => ({ id: r.id, contextId: r.context_id, table: r.table_name, status: r.status, error: r.error, startedAt: r.started_at, readyAt: r.ready_at, ...(r.tool ? { tool: r.tool } : {}) }));
       },
       upsert(j) {
-        s._run('INSERT INTO jobs (id, context_id, table_name, status, error, started_at, ready_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET context_id=excluded.context_id, table_name=excluded.table_name, status=excluded.status, error=excluded.error, ready_at=excluded.ready_at', j.id, j.contextId ?? null, j.table ?? null, j.status, j.error ?? null, j.startedAt, j.readyAt ?? null);
+        s._run('INSERT INTO jobs (id, context_id, table_name, status, error, started_at, ready_at, tool) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET context_id=excluded.context_id, table_name=excluded.table_name, status=excluded.status, error=excluded.error, ready_at=excluded.ready_at, tool=excluded.tool', j.id, j.contextId ?? null, j.table ?? null, j.status, j.error ?? null, j.startedAt, j.readyAt ?? null, j.tool ?? null);
       },
     };
 

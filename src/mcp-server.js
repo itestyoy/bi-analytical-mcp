@@ -22,7 +22,7 @@
 
 import { z } from 'zod';
 import { Server, ProtocolError, ResourceNotFoundError } from '@modelcontextprotocol/server';
-import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine } from './mcp-surface.js';
+import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine, unknownToolMessage } from './mcp-surface.js';
 import { releasableSignal } from './request-context.js';
 import { UI_EXTENSION, RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
 import { clientCapabilities, declaresExtension } from './client-extensions.js';
@@ -85,7 +85,7 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     const { name, arguments: args } = request.params;
     // an unknown tool is a protocol error (-32602) in every revision; a private engine method is
     // an unknown tool — a name never dispatches to anything but a tool
-    if (!isCallableTool(engine, name)) throw new ProtocolError(-32602, `Unknown tool: ${name}`);
+    if (!isCallableTool(engine, name)) throw new ProtocolError(-32602, unknownToolMessage(name).replace(/^unknown tool/, 'Unknown tool'));
 
     // The call's cancellation reaches its dbt processes only while the call is in flight: a task it
     // started is meant to outlive the call (the per-request transport closes when the response is

@@ -2993,15 +2993,40 @@ export class Engine {
     const requested = Number(input.seconds) || 0;
     const seconds = Math.min(Math.max(requested, 0), MAX_WAIT_SECONDS); // clamp to [0, MAX_WAIT_SECONDS]
     const startedAt = new Date().toISOString();
+    // waiting FOR a query: wake as soon as it is no longer running (checked every half second)
+    const queryStatus = () => {
+      const job = input.query_id ? this.jobs.get(input.query_id) : null;
+      if (!input.query_id) return null;
+      if (!job) return 'gone';
+      return job.status === 'running' && !this.jobs.isLive(job.id) ? 'error' : job.status;
+    };
     // a cancelled call (the client gave up, a task was cancelled) stops waiting at once
     const signal = currentSignal();
     let cancelled = false;
+    let early = false;
     await new Promise((resolve) => {
-      const t = setTimeout(resolve, seconds * 1000);
-      signal?.addEventListener?.('abort', () => { cancelled = true; clearTimeout(t); resolve(); }, { once: true });
+      let tick;
+      const done = () => { clearTimeout(t); clearInterval(tick); resolve(); };
+      const t = setTimeout(done, seconds * 1000);
+      if (input.query_id) {
+        const check = () => { if (queryStatus() !== 'running') { early = true; done(); } };
+        check();
+        tick = setInterval(check, 500);
+      }
+      signal?.addEventListener?.('abort', () => { cancelled = true; done(); }, { once: true });
     });
-    const waited = cancelled ? Math.round((Date.now() - Date.parse(startedAt)) / 100) / 10 : seconds;
-    return { ok: true, waited_seconds: waited, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, ...(cancelled ? { cancelled: true } : {}), started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
+    const waited = cancelled || early ? Math.round((Date.now() - Date.parse(startedAt)) / 100) / 10 : seconds;
+    const status = queryStatus();
+    // the status only: the result is read ONCE, with get_query_result — the one card of the query
+    const next = status === 'running' ? `still running — wait again with time({ query_id: '${input.query_id}' })`
+      : status === 'gone' ? 'no such query (it is gone) — run it again'
+        : `done — read it once with get_query_result({ query_id: '${input.query_id}' })`;
+    return {
+      ok: true, waited_seconds: waited, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS,
+      ...(cancelled ? { cancelled: true } : {}),
+      ...(input.query_id ? { query: { query_id: input.query_id, status, next } } : {}),
+      started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}),
+    };
   }
 
   async describe_context(input) {
@@ -3295,7 +3320,7 @@ export class Engine {
       },
       (e) => this.jobs.fail(id, e?.message || String(e)),
     ).catch(() => {});
-    return { ok: true, status: 'running', query_id: id, message: `the ${label} is still running in the warehouse (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — it returns the rows once it is done, so make it before you report the numbers` };
+    return { ok: true, status: 'running', query_id: id, message: `the ${label} is still running in the warehouse (> ${this.queryTimeoutMs / 1000}s). Wait for it with time({ query_id: '${id}' }) — it returns as soon as the query is done — then read it ONCE with get_query_result({ query_id: '${id}' }); do not poll get_query_result` };
   }
 
   /** Keep a detached query's finished response for get_query_result — the newest few, for an hour. */

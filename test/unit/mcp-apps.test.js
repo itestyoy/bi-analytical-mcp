@@ -16,7 +16,7 @@ import { join } from 'node:path';
 import { startServer, APPS_CAPS } from '../helpers/mcp-http.js';
 import { buildViewModel, drillView, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
-import { runTool } from '../../src/mcp-surface.js';
+import { runTool, toCallToolResult } from '../../src/mcp-surface.js';
 
 let s;
 before(async () => { s = await startServer(); });
@@ -87,12 +87,11 @@ test('the view reads only its own result: one tool is app-callable, no network, 
   // exactly one tools/call site: get_query_result…
   assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
   assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'get_query_result', arguments: args }");
-  // …reached for the card's OWN result only: its query_id while it waits, its stored table's next
-  // view when a drill-down steps down (a pivot row, a chart mark — each read built by the view model)
+  // …reached for the card's OWN result only: its stored table's next view when a drill-down steps
+  // down (a pivot row, a chart mark — each read built by the view model)
   assert.deepEqual(reads.filter((r) => r !== 'args').sort(), [
     '{ ...d.source, transform: view.transform, limit: DRILL_ROWS }',
     '{ ...model.source, transform: pivotTransform(model.display, at), limit: PIVOT_LEVEL_ROWS }',
-    '{ query_id: queryId }',
   ]);
 });
 
@@ -106,9 +105,16 @@ test('a result that is gone reaches the card as result_gone over MCP, and the ca
   }
 });
 
-test('view model: a result that moved to the background carries the query_id the card follows', () => {
-  const m = buildViewModel('query_semantic_model', { ok: true, status: 'running', query_id: 'abc123abc123' });
-  assert.deepEqual(m, { kind: 'none', reason: 'running', query_id: 'abc123abc123' });
+test('one query, one card: an answer with nothing to draw carries no structured output — the same view model decides', () => {
+  // a viewed tool: rows → structured; still running, failed, nothing to draw → text only
+  assert.ok(toCallToolResult({ ok: true, columns: [{ name: 'c' }, { name: 'v' }], rows: [{ c: 'US', v: 3 }, { c: 'DE', v: 1 }] }, 'get_query_result').structuredContent);
+  for (const nothing of [{ ok: true, status: 'running', query_id: 'abc123abc123' }, { ok: false, error: { message: 'x' } }, { ok: true, columns: [{ name: 'a' }], rows: [] }]) {
+    const r = toCallToolResult(nothing, 'query_semantic_model');
+    assert.equal(r.structuredContent, undefined, JSON.stringify(nothing));
+    assert.deepEqual(JSON.parse(r.content[0].text), nothing, 'the model still reads the whole answer');
+  }
+  // a tool without a card keeps its structured output
+  assert.ok(toCallToolResult({ ok: true, waited_seconds: 1 }, 'time').structuredContent);
 });
 
 test('the view resource is one mcp-app HTML document, listed and readable for a client that declares MCP Apps', async () => {

@@ -14,10 +14,9 @@
 // A host without the extension ignores `_meta.ui`: the tool is the plain tool it always was.
 //
 // THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT — nothing else. It gets the result the host hands
-// it; the ONE thing it may ask for is more of that same result, through get_query_result: the rows
-// of a query that outlasted its call (it polls THAT query_id, so the result appears in the card that
-// announced it), and a drill-down's next view — a pivot row opened, a chart mark clicked (its stored
-// table, filtered to the path taken). Held in three places, so no single one is load-bearing:
+// it; the ONE thing it may ask for is more of that same result, through get_query_result: a
+// drill-down's next view — a pivot row opened, a chart mark clicked (its stored table, filtered to
+// the path taken). Held in three places, so no single one is load-bearing:
 //   * every tool declares `_meta.ui.visibility` — ["model"] (callable by the model, NOT by a view;
 //     the spec's default is ["model", "app"]), except get_query_result, a read-only lookup of a
 //     finished result, which is ["model", "app"]; a host refuses a view's tools/call to any other;
@@ -47,7 +46,7 @@ export const RESULT_VIEW_FILE = RUNTIME_ASSETS.resultView.path;
 // The tools whose results are data a person looks at. NOT semantic_index: it is the most frequent
 // call and mostly returns catalog structure — a view on every exploration step would bury the
 // conversation.
-const VIEWED_TOOLS = new Set(['query_semantic_model', 'get_query_result', 'experiment']);
+export const VIEWED_TOOLS = new Set(['query_semantic_model', 'get_query_result', 'experiment']);
 
 /** Who may call a tool: the model only — never a view (see the header). */
 export const TOOL_VISIBILITY = Object.freeze(['model']);

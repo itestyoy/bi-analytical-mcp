@@ -70,7 +70,7 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 - `CATALOG_PATH` — optional; set to a standalone catalog file instead of project discovery.
 - `QUERY_TIMEOUT_SECONDS` — how long an **SQL** build may hold the tool call before it hands back a
   `query_id` to poll (default **20 s**). It cancels nothing: past it the build runs on in the
-  background and the caller polls `get_query_result`. **Values above 30 s are capped at 30**, with a
+  background: the caller waits with `time({ query_id })` and reads it once with `get_query_result`. **Values above 30 s are capped at 30**, with a
   line on stderr saying so — a longer wait inside one tool call outlives the calling client's own
   timeout, which this server cannot raise, and the caller then sees "the server is not responding"
   while the build it started keeps running unseen. The same window bounds the WAREHOUSE READS that
@@ -208,18 +208,17 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   re-drawn later that follows such a query says so instead of "Error"),
   SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
   nothing would leave an empty box) and the text answer carries the rest.
-  A query that outlasts its call answers `{ status: 'running', query_id }`; its card then FOLLOWS
-  that query — it polls `get_query_result` for that query_id every 3 s (for up to 30 min) and draws
-  the rows in place of the "Running in the warehouse…" line when they are ready. A host that does
-  not proxy a view's tool calls (no `serverTools` capability), or a refused call, leaves a static
-  "The result comes in a separate card" line instead, and the result comes with the model's own
-  `get_query_result` card.
+  ONE QUERY, ONE CARD: a tool with a card carries `structuredContent` only when the view model has
+  something to draw — a query that outlasts its call (`{ status: 'running', query_id }`), a failure
+  or rows with no shape carry the text alone, so the host has nothing to render. The model waits for
+  such a query with `time({ query_id })` (no card; it wakes as soon as the query is done) and reads it
+  ONCE with `get_query_result`: that read is the query's card.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
   not call it) except `get_query_result`, `["model", "app"]`; the view resource declares an empty
   `csp` (no connect, resource or frame origin) and the page carries the same Content-Security-Policy
-  itself; and the view's code makes that one call — get_query_result for its own result: its
-  query_id while it waits, the next view of its own stored table when a pivot row opens or a chart
-  mark is drilled into — and calls no other tool, resource, model message or link.
+  itself; and the view's code makes that one call — get_query_result for its own result: the next
+  view of its own stored table when a pivot row opens or a chart mark is drilled into — and calls no
+  other tool, resource, model message or link.
   (`semantic_index` has no view on purpose: it is the most frequent call and a view on every
   exploration step would bury the conversation.) The view is built like the official MCP Apps
   examples — the ext-apps `App` class, host theme and style variables, shadcn/ui components,

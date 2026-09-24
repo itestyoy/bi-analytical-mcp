@@ -618,6 +618,7 @@ export function buildSchemas(catalog) {
       description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return. Use it to PACE background work: after a materialized/long query returns a query_id, call time to wait an interval, then poll get_query_result — repeat until ready. Purely a timer; it touches no data.`,
       properties: {
         seconds: { type: 'number', minimum: 0, maximum: 86400, description: `Seconds to wait; the actual wait is capped at ${MAX_WAIT_SECONDS} (larger values are clamped, with clamped:true and cap_seconds in the result).` },
+        query_id: { type: 'string', pattern: '^[a-f0-9]{12}$', description: 'Wait FOR this query: return as soon as it is no longer running (or after `seconds`), with its status. Then read it ONCE with get_query_result.' },
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
       },
     },

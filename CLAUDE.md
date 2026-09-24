@@ -194,11 +194,21 @@
   the warehouse's turn (`src/dbt/process.js`, keyed by the database file read from the profile), the
   MetricFlow sidecar lets go of it after each request, and a batch's members run one after another
   there (side by side on BigQuery).
-- dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`): one contract (parse
-  / run / seed / show / relationColumns / query / validate / warehouse) over the installed dbt's
-  version, each version its own implementation. dbt 1.x is implemented (`src/dbt/v1.js`); v2 is
-  refused at start with the reason (`docs/DBT_V2_MIGRATION.md`). Do NOT spawn dbt or `mf` anywhere
-  else, and do NOT branch on the dbt version outside `src/dbt/`.
+- dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
+  the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
+  / semanticSpec / pythonModelsOn) over the installed dbt, each major version its own implementation
+  — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
+  and do NOT branch on the dbt version outside `src/dbt/`.
+- ONE SEMANTIC LAYER, TWO YAML SPECS: the context is rendered once (`src/yaml-render.js`, legacy
+  shape) and, for a dbt whose `semanticSpec` is 'latest' (v2), converted by `src/semantic-latest.js`
+  — the semantic model joins its dbt model's entry (merged with the project's own entry by
+  `ContextManager.writeSemanticYaml`), keeping OUR semantic-model names so paths and metric names
+  do not change. What v2 writes differently into the manifest is corrected in its client (a
+  percentile is always approximate there: `config.meta.mcp_percentile` puts the request back).
+  Metric queries go through MetricFlow's `mf` on either version.
+- Tests run on dbt v2 (`.dbt2venv`) with `mf` and the Python adapter from `.dbtvenv`; the python
+  stage's file runs on dbt 1.x (`.dbtvenv`), since v2 runs no Python models on DuckDB — there the
+  stage is not offered (`gatePythonRuntime`).
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

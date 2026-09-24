@@ -350,7 +350,7 @@ test('run as a batch member, a dbt command writes to a target directory of its o
   const bin = join(dir, 'dbt');
   writeFileSync(bin, '#!/bin/sh\nT="${DBT_TARGET_PATH:-target}"\nC=no; [ -f "$T/partial_parse.msgpack" ] && C=yes\necho "{\\"show\\": [{\\"target\\": \\"$T\\", \\"cache\\": \\"$C\\"}]}"\n');
   chmodSync(bin, 0o755);
-  const runner = createDbt({ dbtBin: bin });
+  const runner = createDbt({ version: 1, dbtBin: bin });
   const plain = await runner.show(project, 'select 1');
   assert.equal(plain.rows[0].target, 'target', 'alone, a command uses the context\'s own target/');
   const iso = await isolatedTarget(() => runner.show(project, 'select 1'));

@@ -28,7 +28,7 @@ function sleepyDbt(seconds = 10) {
 
 test('a cancelled call kills its dbt process', async () => {
   const { bin, dir } = sleepyDbt();
-  const runner = createDbt({ dbtBin: bin, timeout: 60000 });
+  const runner = createDbt({ version: 1, dbtBin: bin, timeout: 60000 });
   const ctl = new AbortController();
   const t0 = Date.now();
   const p = withSignal(ctl.signal, () => runner.run(dir));
@@ -45,7 +45,7 @@ test('a cancelled call kills its dbt process', async () => {
 
 test('a call without a signal runs to its end', async () => {
   const { bin, dir } = sleepyDbt(0.2);
-  const r = await createDbt({ dbtBin: bin }).run(dir);
+  const r = await createDbt({ version: 1, dbtBin: bin }).run(dir);
   assert.equal(r.ok, true);
 });
 

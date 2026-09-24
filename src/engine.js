@@ -7,6 +7,7 @@ import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validat
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration } from './compile.js';
 import { renderContext } from './yaml-render.js';
+import { gatePythonRuntime } from './catalog.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
 import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt/index.js';
@@ -71,6 +72,8 @@ export class Engine {
     // per move is worth more than any amount of description text, and the caller has to know the
     // index exists before writing the first function.
     if (recipes) catalog.pythonRecipes = recipes.entriesRequiring('python_models');
+    // what the installed dbt can run, before the schemas exist (dbt v2 runs no Python models on DuckDB)
+    gatePythonRuntime(catalog, runner);
     this.schemas = buildSchemas(catalog);
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
@@ -2385,6 +2388,11 @@ export class Engine {
     };
   }
 
+  /** The semantic YAML the installed dbt reads (its client decides; no runner: the legacy spec). */
+  _semanticSpec() {
+    return this.runner?.semanticSpec || 'legacy';
+  }
+
   /** What a tool that started a task answers: the task's id and where to read it — nothing else. */
   _taskStarted(id, extra = {}) {
     const side = this._taskSide(this.jobs.get(id));
@@ -2771,7 +2779,7 @@ export class Engine {
         mergeCompiled(draft, { additions: clone(cur.additions), metrics: clone(cur.metrics), usedModels: [...cur.usedModels], task: null });
       }
       mergeCompiled(draft, compiled);
-      const render = renderContext(this.catalog, draft);
+      const render = renderContext(this.catalog, draft, { spec: this._semanticSpec() });
       const out = { context_id: input.context_id || null, task: compiled.task, dry_run: true, yaml: render.yaml, semantic_models: render.semanticModels, metrics: render.metricNames, warnings: render.warnings || [] };
       return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), input.context_id ? { context_id: input.context_id } : {});
     }
@@ -2781,8 +2789,8 @@ export class Engine {
     // context waits for it (tasks on one context run in order).
     const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
     mergeCompiled(ctx.state, compiled);
-    const render = renderContext(this.catalog, ctx.state);
-    const file = this.ctxs.writeYaml(ctx.id, render.yaml);
+    const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
+    const file = this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const taskId = this._startTask(ctx, 'build_semantic_model', () => this._declared(ctx, input, compiled, render, file));
     return this._taskStarted(taskId, { context_id: ctx.id });
@@ -2873,12 +2881,12 @@ export class Engine {
     }
 
     mergeCompiled(state, compiled);
-    const render = renderContext(this.catalog, state);
+    const render = renderContext(this.catalog, state, { spec: this._semanticSpec() });
     if (input.dry_run) {
       const out = { context_id: ctx.id, semantic_model: modelKey, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
       return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), { context_id: ctx.id });
     }
-    const file = this.ctxs.writeYaml(ctx.id, render.yaml);
+    const file = this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const taskId = this._startTask(ctx, 'build_semantic_model', async () => {
       const parse = await this._parse(ctx.id);
@@ -2904,8 +2912,8 @@ export class Engine {
     }
     ctx.state.metrics = ctx.state.metrics.filter((m) => !dependents.includes(m));
     delete ctx.state.additions[modelKey];
-    const render = renderContext(this.catalog, ctx.state);
-    this.ctxs.writeYaml(ctx.id, render.yaml);
+    const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
+    this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
     const parse = await this._parse(ctx.id);
     return { context_id: ctx.id, semantic_model: modelKey, removed: true, metrics: render.metricNames, parse };

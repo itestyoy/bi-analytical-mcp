@@ -20,6 +20,12 @@ export class DbtV1 {
     this.major = 1;
   }
 
+  /** The semantic-layer YAML this dbt reads: 1.x (below 1.12) knows only the legacy spec. */
+  get semanticSpec() { return 'legacy'; }
+
+  /** Whether this dbt runs Python models on `adapter` — 1.x leaves that to the adapter (catalog.js decides). */
+  pythonModelsOn(_adapter) { return true; }
+
   _env(projectDir) {
     const env = { DBT_PROJECT_DIR: projectDir };
     if (this.profilesDir) env.DBT_PROFILES_DIR = this.profilesDir;

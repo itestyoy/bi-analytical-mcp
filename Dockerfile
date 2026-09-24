@@ -22,6 +22,17 @@ RUN python3 -m venv "$VENV" \
   && "$VENV/bin/pip" install --no-cache-dir -r "$DBT_REQUIREMENTS"
 ENV PATH="$VENV/bin:$PATH"
 
+# dbt v2 (the Rust binary) in a venv of its own — it and dbt-core both install a `dbt` command.
+# The server uses whichever DBT_BIN names (its client reads the version): docker-compose.yml points
+# it here; the BigQuery setup stays on 1.x until the python stage is proven on v2 there.
+# INSTALL_DBT_V2=0 skips it.
+ARG INSTALL_DBT_V2=1
+RUN if [ "$INSTALL_DBT_V2" = "1" ]; then \
+      python3 -m venv /opt/dbt2venv \
+      && /opt/dbt2venv/bin/pip install --no-cache-dir --upgrade pip \
+      && /opt/dbt2venv/bin/pip install --no-cache-dir -r requirements-dbt2.txt; \
+    fi
+
 # Node deps (production only — devDeps are the test harness).
 COPY package.json package-lock.json* ./
 RUN npm ci --omit=dev || npm install --omit=dev

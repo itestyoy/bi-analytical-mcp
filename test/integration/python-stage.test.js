@@ -5,7 +5,8 @@
 // independently from the seed. The same files go to BigQuery/Snowflake unchanged; only the
 // profile decides where the Python runtime is.
 //
-// Needs the test venv (.dbtvenv: dbt-duckdb + pandas); skipped when absent.
+// Runs on dbt 1.x (.dbtvenv: dbt-duckdb + pandas) — dbt v2 runs no Python models on DuckDB, so this
+// file alone stays on 1.x while the rest of the suite runs on v2. Skipped when the venv is absent.
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -36,7 +37,7 @@ before(async () => {
   process.env.DUCKDB_PATH = join(work, 'wh.duckdb');
   const env = { ...process.env, DBT_PROFILES_DIR: PROJECT, DBT_PROJECT_DIR: PROJECT };
   await execFileP(DBT_BIN, ['seed'], { cwd: PROJECT, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  const runner = createDbt({ dbtBin: DBT_BIN, profilesDir: PROJECT, timeout: 600000 });
+  const runner = createDbt({ version: 1, dbtBin: DBT_BIN, profilesDir: PROJECT, timeout: 600000 });
   const ctxs = new ContextManager({ baseProjectDir: PROJECT, workspaceRoot: join(work, 'ctx'), timeSpineDialect: 'duckdb' });
   const catalog = loadCatalog(join(ROOT, 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: PROJECT, projectDir: PROJECT });
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner, pythonBin: PY_BIN, dbPath: join(work, 'index.sqlite') }));

@@ -12,7 +12,7 @@ import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpExpressApp } from '@modelcontextprotocol/express';
 import express from 'express';
 import { mkdirSync } from 'node:fs';
-import { loadCatalog, validateDbtProject, groundCatalogToPhysical } from './catalog.js';
+import { loadCatalog, validateDbtProject, groundCatalogToPhysical, gatePythonRuntime } from './catalog.js';
 import { loadRecipes } from './recipes.js';
 import { assetPath } from './runtime-assets.js';
 import { frameProfile } from './python-model.js';
@@ -73,6 +73,14 @@ export async function makeEngine(opts = {}) {
   // Fail fast if the dbt project doesn't implement the required macro(s) / model
   // nodes the server depends on (unless explicitly skipped, e.g. catalog-only dev).
   if (baseProjectDir && process.env.SKIP_PROJECT_VALIDATION !== '1') validateDbtProject(baseProjectDir, catalog);
+  const runner = opts.runner !== undefined
+    ? opts.runner
+    : baseProjectDir
+      // the dbt client for the installed CLI's version (DBT_VERSION pins it; an unsupported one is refused at start)
+      ? createDbt({ version: process.env.DBT_VERSION || 'auto', dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
+      : null;
+  // what the installed dbt can run decides what is offered (dbt v2 runs no Python models on DuckDB)
+  gatePythonRuntime(catalog, runner);
   // Recipes come in TWO LAYERS, merged: the system file that ships with the server (technical and
   // universal) and the deployment's own file(s) — RECIPES_PATH, comma-separated for several — with
   // the deployment winning an id collision. Before this, RECIPES_PATH REPLACED the system set, so a
@@ -91,12 +99,6 @@ export async function makeEngine(opts = {}) {
     workspaceRoot: opts.workspaceRoot || process.env.MCP_WORKSPACE,
     timeSpineDialect: catalog.dialect,
   });
-  const runner = opts.runner !== undefined
-    ? opts.runner
-    : baseProjectDir
-      // the dbt client for the installed CLI's version (DBT_VERSION pins it; an unsupported one is refused at start)
-      ? createDbt({ version: process.env.DBT_VERSION || 'auto', dbtBin: process.env.DBT_BIN || 'dbt', mfBin: process.env.MF_BIN || 'mf', profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
-      : null;
   const queryTimeoutMs = graceMsFromEnv(process.env.QUERY_TIMEOUT_SECONDS, 20, 'QUERY_TIMEOUT_SECONDS');
   // ONE shared db file (jobs + value index live in it as separate tables). Defaults to
   // <workspaceRoot>/mcp.sqlite; pin it elsewhere (e.g. a persistent volume) via MCP_DB.

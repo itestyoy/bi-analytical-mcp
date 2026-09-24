@@ -13,3 +13,4 @@ dbt_packages/
 # python bytecode
 __pycache__/
 *.pyc
+.dbt2venv

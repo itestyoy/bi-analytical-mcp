@@ -10,21 +10,23 @@
 //   query(projectDir, opts)               → { ok, command, columns, rows } | explain: { ok, sql, plan? }
 //   validate(projectDir)                  → { ok, stdout, stderr }
 //   warehouse(projectDir)                 → { adapter, singleWriter, turn }
+//   semanticSpec                          → 'legacy' | 'latest'   (the semantic YAML this dbt reads)
+//   pythonModelsOn(adapter)               → can this dbt run Python models there
 //
 // Every method takes the project it works on (a context's overlay project) and never throws for a
 // dbt failure: `ok: false` with what dbt printed. The cancellation of the call or task in progress
 // stops its process (src/request-context.js), and a warehouse that takes one process at a time is
 // given one (src/dbt/process.js).
 //
-// Implemented: dbt 1.x (src/dbt/v1.js). dbt v2 is refused with the reason — see
-// docs/DBT_V2_MIGRATION.md for what it needs (the new semantic-model YAML above all).
+// Implemented: dbt 1.x (src/dbt/v1.js) and dbt v2 (src/dbt/v2.js, the latest semantic YAML spec).
 
 import { execFileSync } from 'node:child_process';
 import { DbtV1 } from './v1.js';
+import { DbtV2 } from './v2.js';
 
 export { formatDbtError, parseShowJson, parseCsv } from './output.js';
 
-const IMPLEMENTATIONS = { 1: DbtV1 };
+const IMPLEMENTATIONS = { 1: DbtV1, 2: DbtV2 };
 
 /** The major version of the dbt CLI at `dbtBin` (`dbt --version`), or null when it cannot be told. */
 export function detectDbtMajor(dbtBin = 'dbt') {
@@ -38,14 +40,14 @@ export function detectDbtMajor(dbtBin = 'dbt') {
 }
 
 /**
- * The dbt client for `version` (1, or 'auto' to ask the CLI; default 1). An unsupported version is
+ * The dbt client for `version` (a major version, or 'auto' — the default — to ask the CLI). An unsupported version is
  * refused here, with what it would take — never half-served.
  */
-export function createDbt({ version = 1, ...opts } = {}) {
+export function createDbt({ version = 'auto', ...opts } = {}) {
   const major = version === 'auto' ? detectDbtMajor(opts.dbtBin) ?? 1 : Number(version);
   const Impl = IMPLEMENTATIONS[major];
   if (!Impl) {
-    throw new Error(`dbt ${major}.x is not supported by this server yet (supported: ${Object.keys(IMPLEMENTATIONS).map((v) => `${v}.x`).join(', ')}). For dbt v2 see docs/DBT_V2_MIGRATION.md — it needs the new semantic-model YAML.`);
+    throw new Error(`dbt ${major}.x is not supported by this server (supported: ${Object.keys(IMPLEMENTATIONS).map((v) => `${v}.x`).join(', ')}).`);
   }
   return new Impl(opts);
 }

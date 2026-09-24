@@ -107,7 +107,7 @@ analytics:
 ```
 
 ## Notes
-- The image bundles the `dbt` + `mf` (MetricFlow) CLIs, dbt 1.x (see `requirements.txt`: dbt-duckdb; `requirements-bigquery.txt`: dbt-bigquery). The server talks to dbt through `src/dbt/` (one client per dbt major version; 1.x today — v2 is refused with the reason, see `docs/DBT_V2_MIGRATION.md`); `DBT_VERSION` pins the version instead of asking the CLI.
+- The image bundles the `dbt` + `mf` (MetricFlow) CLIs, dbt 1.x (see `requirements.txt`: dbt-duckdb; `requirements-bigquery.txt`: dbt-bigquery), and dbt v2 in `/opt/dbt2venv` (`requirements-dbt2.txt`; build arg `INSTALL_DBT_V2=0` skips it). `DBT_BIN` picks the dbt: `docker-compose.yml` uses v2, the BigQuery setup 1.x. The server talks to dbt through `src/dbt/` (one client per major version, read from the CLI; `DBT_VERSION` pins it). On v2 the semantic layer is written in dbt's latest YAML spec, and the python stage is not offered on DuckDB (v2 runs no Python models there). v2 downloads its ADBC driver from dbt's CDN on the first run — allow that once, or warm it at build time.
 - For BigQuery, use `docker-compose.bigquery.yml` (and `.env.bigquery.example`).
 - A dbt project (or an explicit `CATALOG_PATH`) is required — the image bakes no catalog. With a project mounted, build/query work via the bundled `dbt`/`mf` runner.
 - **Restarting the container loses nothing a client holds.** The server keeps no sessions (the SDK

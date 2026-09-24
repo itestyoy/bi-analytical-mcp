@@ -17,11 +17,11 @@ import { currentSignal } from '../request-context.js';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 
 export class MfEngineBackend {
-  constructor({ pythonBin = 'python', dbtBin = 'dbt', profilesDir, timeout = 600000 } = {}) {
+  constructor({ pythonBin = 'python', dbtBin = 'dbt', profilesDir, timeout = 600000, version = 'auto' } = {}) {
     this.pythonBin = pythonBin;
     this.profilesDir = profilesDir;
     this.timeout = timeout;
-    this._dbt = createDbt({ version: 1, dbtBin, profilesDir, timeout });
+    this._dbt = createDbt({ version, dbtBin, profilesDir, timeout });
     this._proc = null;
     this._pending = new Map();
     this._seq = 0;
@@ -85,6 +85,12 @@ export class MfEngineBackend {
   warehouse(projectDir) {
     return this._dbt.warehouse(projectDir);
   }
+
+  get major() { return this._dbt.major; }
+
+  get semanticSpec() { return this._dbt.semanticSpec; }
+
+  pythonModelsOn(adapter) { return this._dbt.pythonModelsOn(adapter); }
 
   /** One sidecar request, in the warehouse's turn when it takes one process at a time. */
   _request(projectDir, req) {

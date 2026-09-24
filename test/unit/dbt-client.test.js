@@ -44,22 +44,24 @@ test('on a single-writer warehouse the client runs one process at a time; elsewh
   const order = () => readFileSync(log, 'utf8').trim().split('\n').map((l) => l.split(' ')[0]);
   process.env.DUCKDB_PATH = join(dir, 'w.duckdb');
   const duck = project('duckdb');
-  const c = createDbt({ dbtBin: dbt, profilesDir: duck });
+  const c = createDbt({ version: 1, dbtBin: dbt, profilesDir: duck });
   await Promise.all([c.show(duck, 'select 1'), c.show(duck, 'select 2'), c.show(duck, 'select 3')]);
   assert.deepEqual(order(), ['start', 'end', 'start', 'end', 'start', 'end'], 'strictly one after another');
   writeFileSync(log, '');
   const bq = project('bigquery');
-  await Promise.all([createDbt({ dbtBin: dbt, profilesDir: bq }).show(bq, 'select 1'), createDbt({ dbtBin: dbt, profilesDir: bq }).show(bq, 'select 2')]);
+  await Promise.all([createDbt({ version: 1, dbtBin: dbt, profilesDir: bq }).show(bq, 'select 1'), createDbt({ version: 1, dbtBin: dbt, profilesDir: bq }).show(bq, 'select 2')]);
   assert.deepEqual(order().slice(0, 2), ['start', 'start'], 'both running at once');
 });
 
-test('the client is chosen by the dbt major version: 1.x is served, v2 is refused with the reason', () => {
+test('the client is chosen by the dbt major version: 1.x reads the legacy semantic YAML, v2 the latest; others are refused', () => {
   const dir = mkdtempSync(join(tmpdir(), 'ver-'));
   const v1 = bin(dir, 'echo "Core:"; echo "  - installed: 1.11.11"');
   const v2 = bin(dir, 'echo "dbt 2.0.6"');
   assert.equal(detectDbtMajor(v1), 1);
   assert.equal(detectDbtMajor(v2), 2);
-  assert.equal(createDbt({ version: 'auto', dbtBin: v1 }).major, 1);
-  assert.throws(() => createDbt({ version: 'auto', dbtBin: v2 }), /dbt 2\.x is not supported.*DBT_V2_MIGRATION/);
-  assert.throws(() => createDbt({ version: 3 }), /not supported/);
+  const c1 = createDbt({ version: 'auto', dbtBin: v1 });
+  const c2 = createDbt({ version: 'auto', dbtBin: v2 });
+  assert.deepEqual([c1.major, c1.semanticSpec, c1.pythonModelsOn('duckdb')], [1, 'legacy', true]);
+  assert.deepEqual([c2.major, c2.semanticSpec, c2.pythonModelsOn('duckdb'), c2.pythonModelsOn('bigquery')], [2, 'latest', false, true]);
+  assert.throws(() => createDbt({ version: 3 }), /dbt 3\.x is not supported/);
 });

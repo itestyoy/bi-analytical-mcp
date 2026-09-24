@@ -142,9 +142,11 @@ The integration suite runs on **DuckDB**: each test file gets a database file of
 runs dbt Python models locally) and checks the returned rows. One process at a time can hold a DuckDB
 file, so the dbt client queues its processes on it (`src/dbt/process.js`).
 
-Prerequisites for integration tests — one venv with dbt 1.x, the DuckDB adapter, MetricFlow and
-pandas (`requirements.txt`), as `.dbtvenv` (or via `DBT_BIN`/`MF_BIN`/`PYTHON_BIN`):
+Prerequisites for integration tests — the suite runs on **dbt v2** (`.dbt2venv`), with MetricFlow
+(`mf`) and the DuckDB adapter from a dbt 1.x venv (`.dbtvenv`, also the python stage's dbt: v2 runs
+no Python models on DuckDB). Override with `DBT_BIN` / `MF_BIN` / `PYTHON_BIN`:
 
 ```bash
 python3 -m venv .dbtvenv && .dbtvenv/bin/pip install -r requirements.txt
+python3 -m venv .dbt2venv && .dbt2venv/bin/pip install -r requirements-dbt2.txt
 ```

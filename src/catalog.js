@@ -414,6 +414,19 @@ function dialectFromProfile(profilesDir, projectDir) {
 }
 
 /**
+ * The adapter may run Python models while the installed dbt does not (dbt v2 on DuckDB): the dbt
+ * client (src/dbt/) says so, and the python stage is then not offered. Applied to the catalog
+ * before anything reads its python runtime (the recipes, the tool schemas).
+ */
+export function gatePythonRuntime(catalog, runner) {
+  const rt = catalog.pythonRuntime;
+  if (rt?.available && typeof runner?.pythonModelsOn === 'function' && !runner.pythonModelsOn(rt.runtime)) {
+    catalog.pythonRuntime = { ...rt, available: false, reason: `dbt ${runner.major}.x runs no dbt Python models on ${rt.runtime}` };
+  }
+  return catalog.pythonRuntime;
+}
+
+/**
  * Can dbt run PYTHON models on this profile? Decided the way dbt itself would decide — from the
  * adapter and its settings in the active profile output — so the `python` pipeline stage is
  * offered only where it can actually run:

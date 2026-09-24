@@ -50,7 +50,7 @@ import { settle } from '../helpers/settle.js';
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
 const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml');
-const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'dbt');
+const DBT_BIN = process.env.DBT_BIN || join(process.cwd(), '.dbt2venv', 'bin', 'dbt'); // dbt v2 (the python stage's file runs on 1.x)
 const MF_BIN = process.env.MF_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'mf');
 const PY_BIN = process.env.PYTHON_BIN || join(process.cwd(), '.dbtvenv', 'bin', 'python');
 const HAS_DBT = existsSync(DBT_BIN) && existsSync(MF_BIN);

@@ -66,11 +66,13 @@ const tableEl = document.getElementById('table');
 const notesEl = document.getElementById('notes');
 const notesList = document.getElementById('notes-list');
 const fullscreenBtn = document.getElementById('fullscreen-btn');
+const loadingEl = document.getElementById('loading');
 
 // static icons
 document.getElementById('filter-icon').append(icon('search'));
 document.getElementById('notes-chevron').append(icon('chevron-down'));
 document.getElementById('data-chevron').append(icon('chevron-down'));
+document.getElementById('loading-icon').append(icon('loader-circle', 'icon spin'));
 
 // App state
 const state = {
@@ -107,15 +109,29 @@ const formatSignedPercent = (v, digits = 1) => `${sign(v)}${Math.abs(v * 100).to
  * is shown as its date ("Sep 16"), with the year when the values span more than one; a real time of
  * day keeps it. The raw value stays the sort key; only the label changes.
  */
+/**
+ * A warehouse time value as a Date. Warehouses spell it several ways — '2026-09-16',
+ * '2026-09-16T00:00:00+00:00', '2026-09-16 00:00:00' — and the last one is not a format the
+ * standard guarantees: WebKit (Safari, every iOS app) refuses it. So the value is normalised to
+ * ISO 8601 first, and a time with no zone is read as UTC, which is what the warehouse means.
+ */
+function parseTime(v) {
+  let t = String(v).trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(t)) t += 'T00:00:00';
+  t = t.replace(/^(\d{4}-\d{2}-\d{2})[ T]/, '$1T');
+  if (!/(Z|[+-]\d{2}:?\d{2})$/i.test(t)) t += 'Z';
+  return new Date(t.replace(/([+-]\d{2})(\d{2})$/, '$1:$2'));
+}
+
 function timeFormatter(values) {
-  const dates = values.map((v) => new Date(String(v))).filter((d) => !Number.isNaN(d.getTime()));
+  const dates = values.map(parseTime).filter((d) => !Number.isNaN(d.getTime()));
   if (!dates.length) return (v) => String(v);
   const midnight = dates.every((d) => d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0);
   const years = new Set(dates.map((d) => d.getUTCFullYear()));
   const fmt = new Intl.DateTimeFormat(undefined, midnight
     ? { month: 'short', day: 'numeric', ...(years.size > 1 ? { year: 'numeric' } : {}), timeZone: 'UTC' }
     : { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: 'UTC' });
-  return (v) => { const d = new Date(String(v)); return Number.isNaN(d.getTime()) ? String(v) : fmt.format(d); };
+  return (v) => { const d = parseTime(v); return Number.isNaN(d.getTime()) ? String(v) : fmt.format(d); };
 }
 
 const formatShare = (v) => (v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`);
@@ -215,6 +231,7 @@ function resetSections() {
 // ── render ───────────────────────────────────────────────────────────────────────────────────
 
 function render(result) {
+  loadingEl.hidden = true; // the result is here: the spinner's job is done, whatever is drawn next
   const model = buildViewModel(state.toolName, payloadOf(result), state.toolInput);
   state.model = model;
   resetSections();
@@ -372,7 +389,31 @@ function drawLegend() {
   chartLegend.hidden = false;
 }
 
-chartCanvas.addEventListener('mouseleave', () => { chartTooltip.hidden = true; });
+/**
+ * The tooltip is for the moment of looking. A pointer that leaves the chart hides it at once; a
+ * finger has no "leave" (Chart.js keeps the last tapped point active), so it goes a moment after the
+ * touch ends — and with it the highlighted points, so the chart is back to itself.
+ */
+let tooltipTimer;
+function clearTooltip() {
+  clearTimeout(tooltipTimer);
+  chartTooltip.hidden = true;
+  const chart = state.chart;
+  if (chart && (chart.getActiveElements().length || chart.tooltip?.getActiveElements().length)) {
+    chart.setActiveElements([]);
+    chart.tooltip?.setActiveElements([], { x: 0, y: 0 });
+    chart.update('none');
+  }
+}
+// A lifted finger also fires pointerleave — and the browser then replays the touch as a mouse move,
+// which Chart.js answers by showing the tooltip again. So only a MOUSE leaving hides it at once; a
+// touch (or pen) schedules the hide, which lands after that replay.
+const hideSoon = () => { clearTimeout(tooltipTimer); tooltipTimer = setTimeout(clearTooltip, 1200); };
+chartCanvas.addEventListener('pointerleave', (e) => (e.pointerType === 'mouse' ? clearTooltip() : hideSoon()));
+chartCanvas.addEventListener('pointercancel', hideSoon);
+chartCanvas.addEventListener('pointerdown', () => clearTimeout(tooltipTimer));
+chartCanvas.addEventListener('pointerup', (e) => { if (e.pointerType !== 'mouse') hideSoon(); });
+window.addEventListener('scroll', clearTooltip, { passive: true });
 
 // ── data table (shadcn data-table: filter input, sortable headers, count + pager footer) ──────
 
@@ -660,10 +701,10 @@ function handleHostContextChanged(ctx) {
     applyHostFonts(ctx.styles.css.fonts);
   }
   if (ctx.safeAreaInsets) {
-    mainEl.style.paddingTop = `${ctx.safeAreaInsets.top}px`;
-    mainEl.style.paddingRight = `${ctx.safeAreaInsets.right}px`;
-    mainEl.style.paddingBottom = `${ctx.safeAreaInsets.bottom}px`;
-    mainEl.style.paddingLeft = `${ctx.safeAreaInsets.left}px`;
+    // the host's insets ADD to the view's own padding (the CSS reads them) — setting them as the
+    // padding would put the content flush against a frame the host rounds, where it gets clipped
+    const root = document.documentElement.style;
+    for (const side of ['top', 'right', 'bottom', 'left']) root.setProperty(`--safe-${side}`, `${Number(ctx.safeAreaInsets[side]) || 0}px`);
   }
   if (ctx.toolInfo?.tool?.name) {
     state.toolName = ctx.toolInfo.tool.name;
@@ -703,6 +744,7 @@ app.ontoolresult = (result) => {
 
 app.ontoolcancelled = () => {
   // a cancelled call has no result to draw
+  loadingEl.hidden = true;
   resetSections();
   mainEl.hidden = true;
 };

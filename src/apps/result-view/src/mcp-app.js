@@ -67,6 +67,7 @@ const notesEl = document.getElementById('notes');
 const notesList = document.getElementById('notes-list');
 const fullscreenBtn = document.getElementById('fullscreen-btn');
 const loadingEl = document.getElementById('loading');
+const statusEl = document.getElementById('status');
 
 // static icons
 document.getElementById('filter-icon').append(icon('search'));
@@ -230,20 +231,31 @@ function resetSections() {
 
 // ── render ───────────────────────────────────────────────────────────────────────────────────
 
+const CARDS = { chart: (m) => renderChartResult(m), funnel: (m) => renderFunnel(m), experiment: (m) => renderExperiment(m), srm: (m) => renderSrm(m), plan: (m) => renderPlan(m) };
+
 function render(result) {
   loadingEl.hidden = true; // the result is here: the spinner's job is done, whatever is drawn next
   const model = buildViewModel(state.toolName, payloadOf(result), state.toolInput);
   state.model = model;
   resetSections();
-  // only the three cards are drawn; any other result leaves the view empty (and the iframe at 0px)
-  mainEl.hidden = !['chart', 'experiment', 'funnel'].includes(model.kind);
-  if (mainEl.hidden) return;
+  const draw = CARDS[model.kind];
+  mainEl.hidden = !draw;
+  statusEl.hidden = !!draw;
+  if (!draw) { showStatus(model); return; }
   titleEl.textContent = model.title;
   setDescription();
+  draw(model);
+}
 
-  if (model.kind === 'experiment') renderExperiment(model);
-  else if (model.kind === 'funnel') renderFunnel(model);
-  else renderChartResult(model);
+/** The one line a result without a card gets — what happened, and that the reply carries the rest. */
+function showStatus(model) {
+  const lines = {
+    running: ['loader-circle', 'Still running in the warehouse — the result comes back in a later step.', 'icon spin'],
+    error: ['circle-alert', model.message ? `The call failed: ${model.message}` : 'The call failed — the reason is in the reply.'],
+  };
+  const [name, text, cls] = lines[model.reason] || ['info', 'Nothing to chart in this result — it is in the reply.'];
+  statusEl.replaceChildren(icon(name, cls || 'icon'), el('span', null, text));
+  statusEl.classList.toggle('status-line-error', model.reason === 'error');
 }
 
 function renderChartResult(model) {
@@ -633,6 +645,82 @@ function renderFunnel(model) {
   cardsSection.hidden = false;
 }
 
+// ── A/B: the sample-ratio check and the sample-size plan — the steps before the test ──────────
+
+/** The observed split as one bar of segments, with the INTENDED boundaries marked on it. */
+function splitBar(groups) {
+  const bar = el('div', 'split-bar');
+  bar.setAttribute('role', 'img');
+  bar.setAttribute('aria-label', groups.map((g) => `${g.label} ${formatShare(g.observed_share)} (expected ${formatShare(g.expected_share)})`).join(', '));
+  groups.forEach((g, i) => {
+    const seg = el('div', 'split-segment');
+    seg.style.flexGrow = String(Math.max(0, g.observed_share ?? 0));
+    seg.style.backgroundColor = seriesColor(i);
+    seg.title = `${g.label}: ${formatShare(g.observed_share)} observed, ${formatShare(g.expected_share)} expected`;
+    bar.append(seg);
+  });
+  let at = 0;
+  for (const g of groups.slice(0, -1)) {
+    at += g.expected_share ?? 0;
+    const mark = el('div', 'split-marker');
+    mark.style.left = `${(at * 100).toFixed(3)}%`;
+    bar.append(mark);
+  }
+  return bar;
+}
+
+function renderSrm(model) {
+  setDescription(
+    model.p_value !== null ? badge(model.p_value < 0.001 ? 'p < 0.001' : `p = ${model.p_value.toFixed(3)}`, 'outline') : null,
+    badge(`${integerFormat.format(model.total)} users`, 'outline'),
+  );
+  const content = el('div', 'card-content');
+  const legend = el('p', 'split-legend', 'Bars: the observed split · dashed marks: the intended one');
+  content.append(splitBar(model.groups), legend);
+  const stats = el('dl', 'stat-grid');
+  model.groups.forEach((g, i) => {
+    const node = stat(g.label, formatShare(g.observed_share), `${integerFormat.format(g.observed ?? 0)} users · expected ${formatShare(g.expected_share)}`);
+    const swatch = el('span', 'chart-indicator');
+    swatch.style.backgroundColor = seriesColor(i);
+    node.querySelector('.stat-label').prepend(swatch);
+    stats.append(node);
+  });
+  cardsSection.className = 'ab-list';
+  const node = card({
+    description: 'Observed split vs the intended one',
+    title: model.srm_detected ? 'Mismatch' : 'Healthy',
+    titleClass: 'card-title card-title-stat',
+    subline: model.srm_detected ? 'The split is off: randomization or logging is broken, so no lift from this test can be trusted.' : 'The split matches the intended one: the test result can be read.',
+    action: model.srm_detected ? badge('Do not trust the lift', 'destructive', 'circle-x') : badge('Split is sound', 'accent', 'circle-check'),
+  }, content, stats);
+  cardsSection.append(node);
+  cardsSection.hidden = false;
+}
+
+function renderPlan(model) {
+  const isRate = model.metric === 'proportion';
+  const effect = (v) => (v === null ? '—' : isRate ? formatPoints(v) : formatSignedNumber(v));
+  setDescription(
+    model.power !== null ? badge(`${Math.round(model.power * 100)}% power`, 'outline') : null,
+    model.confidence !== null ? badge(`${Math.round(model.confidence * 100)}% confidence`, 'outline') : null,
+    model.alternative && model.alternative !== 'two_sided' ? badge(`one-sided · ${model.alternative}`, 'outline') : null,
+  );
+  const base = isRate ? (model.baseline !== null ? `a ${formatPercent(model.baseline)} baseline` : null) : (model.stddev !== null ? `a standard deviation of ${formatNumber(model.stddev)}` : null);
+  const head = model.solved === 'n'
+    ? { description: 'Users needed per group', title: integerFormat.format(model.n_per_group ?? 0), subline: [model.total_n !== null ? `${integerFormat.format(model.total_n)} in total` : null, `to detect ${effect(model.mde)}${base ? ` on ${base}` : ''}`].filter(Boolean).join(' · ') }
+    : { description: 'Smallest effect this test can detect', title: effect(model.mde), subline: [`with ${integerFormat.format(model.n_per_group ?? 0)} users per group`, base ? `on ${base}` : null].filter(Boolean).join(' · ') };
+  const stats = el('dl', 'stat-grid');
+  stats.append(...[
+    isRate ? stat('Baseline', formatPercent(model.baseline)) : stat('Std deviation', formatNumber(model.stddev)),
+    stat('Detectable effect', effect(model.mde), model.relative_mde !== null ? `${formatSignedPercent(model.relative_mde)} relative` : null),
+    model.power !== null ? stat('Power', `${Math.round(model.power * 100)}%`, 'chance to see a real effect') : null,
+    model.confidence !== null ? stat('Confidence', `${Math.round(model.confidence * 100)}%`) : null,
+  ].filter(Boolean));
+  cardsSection.className = 'ab-list';
+  cardsSection.append(card({ ...head, titleClass: 'card-title card-title-stat' }, stats));
+  cardsSection.hidden = false;
+}
+
 /** The server's advice is for whoever acts next — kept, but folded under the result. */
 function showNotes(notes) {
   if (!notes?.length) return;
@@ -745,6 +833,8 @@ app.ontoolresult = (result) => {
 app.ontoolcancelled = () => {
   // a cancelled call has no result to draw
   loadingEl.hidden = true;
+  statusEl.replaceChildren(icon('circle-x'), el('span', null, 'The call was cancelled.'));
+  statusEl.hidden = false;
   resetSections();
   mainEl.hidden = true;
 };

@@ -152,12 +152,14 @@ the plain tools stay exactly as they were for every client that does not:
   files via `resources/read` with sha256 digests). Generated at startup from the same objects
   `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy.
 - **Apps** (`io.modelcontextprotocol/ui`) — `query_semantic_model`, `get_query_result` and
-  `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`),
-  and it draws exactly three cards: a CHART (a time series or a breakdown, its rows folded underneath
-  as a filterable, sortable table), an A/B TEST (a stat card per variant: lift, interval,
-  verdict, the groups), a FUNNEL (steps, share of the first and of the previous, the biggest drop).
-  Every other result — a failure, a build still running, SQL, a sample-size plan, a split check,
-  rows with no chart shape — draws nothing (the view reports 0px) and the text answer stands alone.
+  `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`):
+  a CHART (a time series or a breakdown, its rows folded underneath as a filterable, sortable table),
+  a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
+  TEST (a stat card per variant: lift, interval, verdict, the groups), the SAMPLE-RATIO CHECK (the
+  observed split against the intended one) and the SAMPLE-SIZE PLAN. A spinner shows until the
+  result arrives. Any other result — a failure, a build still running, SQL, rows with no chart
+  shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
+  nothing would leave an empty box) and the text answer carries the rest.
   The view ONLY DRAWS: it reads the result the host hands it and nothing else. Every tool declares
   `_meta.ui.visibility: ["model"]` (a view may not call it), the view resource declares an empty
   `csp` (no connect, resource or frame origin) and the page carries the same Content-Security-Policy

@@ -1,10 +1,12 @@
 // THE MODEL OF WHAT THE RESULT VIEW SHOWS — a pure function from a tool result to a view.
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
-// WHAT to render, and there are exactly three cards: a CHART (a time series or a breakdown, with its
-// rows folded underneath), an A/B TEST, a FUNNEL. Anything else — a failure, a build still running,
-// an explained query's SQL, a plan, a split check, rows with no chart shape — is `none`: the view
-// draws nothing and the tool's text result speaks for itself. The view imports it and the unit
+// WHAT to render: a CHART (a time series or a breakdown, with its rows folded underneath), a FUNNEL,
+// and the A/B TEST family — the test itself, the sample-ratio check and the sample-size plan, the
+// three steps of one experiment. Anything else — a failure, a build still running, an explained
+// query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
+// status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
+// the tool's text result speaks for itself. The view imports it and the unit
 // tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
 // Everything below is data in, data out: no DOM, no module scope.
@@ -24,9 +26,12 @@ export function buildViewModel(toolName, result, toolInput) {
   if (!isObj(result)) return { kind: 'none', reason: 'not_an_object' };
 
   // a build that is still running, or one that failed, says so — there is nothing to plot
-  const none = (reason) => ({ kind: 'none', reason });
+  const none = (reason, extra = {}) => ({ kind: 'none', reason, ...extra });
   if (result.status === 'running' && result.query_id) return none('running');
-  if (result.ok === false || (result.error && !result.rows)) return none('error');
+  if (result.ok === false || (result.error && !result.rows)) {
+    const e = isObj(result.error) ? result.error : {};
+    return none('error', { message: String(e.message || result.error || 'the call failed').split('\n')[0].slice(0, 300), stage: e.stage || null });
+  }
 
   // ── A/B: significance per variant (experiment analyze) ──
   if (toolName === 'experiment' && Array.isArray(result.results)) {
@@ -93,7 +98,44 @@ export function buildViewModel(toolName, result, toolInput) {
       notes: result.recommendations || [],
     };
   }
-  // a split check, a sample-size plan, an explained query: text results, no card
+  // ── A/B: the sample-ratio check — is the observed split the one that was intended? ──
+  if (toolName === 'experiment' && Array.isArray(result.groups) && 'srm_detected' in result) {
+    const groups = result.groups.map((g) => ({ label: String(g.label ?? ''), observed: num(g.observed), expected: num(g.expected) }));
+    const total = groups.reduce((a, g) => a + (g.observed ?? 0), 0);
+    const expectedTotal = groups.reduce((a, g) => a + (g.expected ?? 0), 0);
+    return {
+      kind: 'srm',
+      title: 'Sample ratio check',
+      p_value: num(result.p_value),
+      srm_detected: !!result.srm_detected,
+      total,
+      groups: groups.map((g) => ({
+        ...g,
+        observed_share: total > 0 && g.observed !== null ? g.observed / total : null,
+        expected_share: expectedTotal > 0 && g.expected !== null ? g.expected / expectedTotal : null,
+      })),
+    };
+  }
+  // ── A/B: the sample-size plan — how many users, or the smallest effect a given n can see ──
+  if (toolName === 'experiment' && 'n_per_group' in result) {
+    const metricLabel = { proportion: 'conversion rate', mean: 'mean' }[result.metric] || result.metric || 'metric';
+    return {
+      kind: 'plan',
+      title: `Sample-size plan · ${metricLabel}`,
+      metric: result.metric || null,
+      // which side was solved: a total comes back only when n was the unknown
+      solved: 'total_n' in result ? 'n' : 'mde',
+      n_per_group: num(result.n_per_group),
+      total_n: num(result.total_n),
+      baseline: num(result.baseline),
+      stddev: num(result.stddev),
+      mde: num(result.mde),
+      relative_mde: num(result.relative_mde),
+      power: num(result.power),
+      confidence: num(result.confidence),
+      alternative: result.alternative || null,
+    };
+  }
   if (toolName === 'experiment') return none('experiment');
   if (typeof result.sql === 'string' && !Array.isArray(result.rows)) return none('sql');
 

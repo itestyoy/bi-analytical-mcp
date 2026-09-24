@@ -48,19 +48,57 @@ import './global.css';
 import './mcp-app.css';
 
 /**
- * The sankey's nodes with rounded ends, like every other mark here (bars, slices, tiles). The plugin
- * has no radius for nodes and draws them with fillRect/strokeRect; its geometry is kept as it is and
- * only those two calls are drawn as rounded rectangles while it paints the nodes.
+ * The sankey drawn with rounded corners, like every other mark here (bars, slices, tiles): the nodes'
+ * ends and the four corners where a flow meets its nodes, all one radius. The plugin has neither, so
+ * its geometry is kept as it is and only the shapes it paints are drawn rounded — the node
+ * rectangles while it paints the nodes, the flow's outline while it paints a flow.
  */
+const SANKEY_RADIUS = 3;
+
+class RoundedFlow extends Flow {
+  // its own id: Chart.js registers an element's parent first and skips a second one under the same id
+  static id = 'roundedFlow';
+
+  draw(ctx) {
+    const { x, x2, y, y2, height: h } = this;
+    const r = Math.max(0, Math.min(SANKEY_RADIUS, h / 2, Math.abs(x2 - x) / 4));
+    // the plugin's own curve (horizontal): control points at two thirds and one third of the way
+    const c1 = x + ((x2 - x) * 2) / 3;
+    const c2 = x + (x2 - x) / 3;
+    const outline = () => {
+      ctx.beginPath();
+      ctx.moveTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.bezierCurveTo(c1, y, c2, y2, x2 - r, y2);
+      ctx.quadraticCurveTo(x2, y2, x2, y2 + r);
+      ctx.lineTo(x2, y2 + h - r);
+      ctx.quadraticCurveTo(x2, y2 + h, x2 - r, y2 + h);
+      ctx.bezierCurveTo(c2, y2 + h, c1, y + h, x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.closePath();
+    };
+    const { fill, stroke } = ctx;
+    ctx.fill = () => { outline(); fill.call(ctx); };
+    ctx.stroke = () => { outline(); stroke.call(ctx); };
+    try {
+      super.draw(ctx);
+    } finally {
+      delete ctx.fill; // the context's own methods again
+      delete ctx.stroke;
+    }
+  }
+}
+
 class RoundedSankeyController extends SankeyController {
-  // its own id: Chart.js registers a controller's parent first and skips a second one under the same id
+  // its own id, for the same reason; and it draws its flows with the rounded element
   static id = 'roundedSankey';
+  static defaults = { ...SankeyController.defaults, dataElementType: RoundedFlow.id };
 
   _drawNodes() {
     const ctx = this.chart.ctx;
     const rounded = (paint) => (x, y, w, h) => {
       ctx.beginPath();
-      ctx.roundRect(x, y, w, h, Math.max(0, Math.min(4, w / 2, h / 2)));
+      ctx.roundRect(x, y, w, h, Math.max(0, Math.min(SANKEY_RADIUS, w / 2, h / 2)));
       paint();
     };
     ctx.fillRect = rounded(() => ctx.fill());
@@ -68,14 +106,14 @@ class RoundedSankeyController extends SankeyController {
     try {
       super._drawNodes();
     } finally {
-      delete ctx.fillRect; // the context's own methods again
+      delete ctx.fillRect;
       delete ctx.strokeRect;
     }
   }
 }
 
 // Only the pieces this view draws — Chart.js is tree-shakable, and the whole view ships in one file
-Chart.register(ArcElement, BarController, BarElement, CategoryScale, DoughnutController, Filler, Flow, LinearScale, LineController, LineElement, PointElement, RoundedSankeyController, Tooltip);
+Chart.register(ArcElement, BarController, BarElement, CategoryScale, DoughnutController, Filler, RoundedFlow, LinearScale, LineController, LineElement, PointElement, RoundedSankeyController, Tooltip);
 
 const log = {
   info: console.log.bind(console, '[APP]'),

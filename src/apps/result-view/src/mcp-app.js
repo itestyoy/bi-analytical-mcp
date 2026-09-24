@@ -47,8 +47,35 @@ import { icon } from './icons.js';
 import './global.css';
 import './mcp-app.css';
 
+/**
+ * The sankey's nodes with rounded ends, like every other mark here (bars, slices, tiles). The plugin
+ * has no radius for nodes and draws them with fillRect/strokeRect; its geometry is kept as it is and
+ * only those two calls are drawn as rounded rectangles while it paints the nodes.
+ */
+class RoundedSankeyController extends SankeyController {
+  // its own id: Chart.js registers a controller's parent first and skips a second one under the same id
+  static id = 'roundedSankey';
+
+  _drawNodes() {
+    const ctx = this.chart.ctx;
+    const rounded = (paint) => (x, y, w, h) => {
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, Math.max(0, Math.min(4, w / 2, h / 2)));
+      paint();
+    };
+    ctx.fillRect = rounded(() => ctx.fill());
+    ctx.strokeRect = rounded(() => ctx.stroke());
+    try {
+      super._drawNodes();
+    } finally {
+      delete ctx.fillRect; // the context's own methods again
+      delete ctx.strokeRect;
+    }
+  }
+}
+
 // Only the pieces this view draws — Chart.js is tree-shakable, and the whole view ships in one file
-Chart.register(ArcElement, BarController, BarElement, CategoryScale, DoughnutController, Filler, Flow, LinearScale, LineController, LineElement, PointElement, SankeyController, Tooltip);
+Chart.register(ArcElement, BarController, BarElement, CategoryScale, DoughnutController, Filler, Flow, LinearScale, LineController, LineElement, PointElement, RoundedSankeyController, Tooltip);
 
 const log = {
   info: console.log.bind(console, '[APP]'),
@@ -495,7 +522,7 @@ function renderChart(chart, title) {
     // the largest nodes keep a series color, the rest share the muted one — never a generated 7th hue
     const colorOf = new Map(chart.nodes.map((n, i) => [n.name, i < 6 ? seriesColor(i) : muted]));
     state.chart = new Chart(chartCanvas, {
-      type: 'sankey',
+      type: RoundedSankeyController.id,
       data: {
         datasets: [{
           label: chart.y || 'flow',
@@ -577,7 +604,7 @@ function drawTooltip({ chart, tooltip }) {
   }
   const items = el('div', 'chart-tooltip-items');
   const slice = chart.config.type === 'doughnut';
-  if (chart.config.type === 'sankey') {
+  if (chart.config.type === RoundedSankeyController.id) {
     // a flow: where it starts, where it goes, how much of the source it carries
     const { from, to, flow } = tooltip.dataPoints[0].raw;
     const out = chart.data.datasets[0].data.filter((l) => l.from === from).reduce((a, l) => a + l.flow, 0);

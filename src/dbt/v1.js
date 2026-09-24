@@ -12,7 +12,7 @@ import { warehouseOf } from './warehouse.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan } from './output.js';
 
 export class DbtV1 {
-  constructor({ dbtBin = 'dbt', mfBin = 'mf', profilesDir, timeout = 600000 } = {}) {
+  constructor({ dbtBin, mfBin, profilesDir, timeout = 600000 } = {}) {
     this.dbtBin = dbtBin;
     this.mfBin = mfBin;
     this.profilesDir = profilesDir;

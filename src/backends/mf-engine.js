@@ -20,8 +20,10 @@ export class MfEngineBackend {
   constructor({ pythonBin, dbtBin, profilesDir, timeout = 600000, version = 'auto', environment } = {}) {
     // the sidecar runs on the Python that has MetricFlow — the environment's (its own or borrowed)
     const env = environment ? (typeof environment === 'string' ? resolveEnvironment(environment) : environment) : null;
-    this.pythonBin = pythonBin || env?.pythonBin || 'python';
-    dbtBin = dbtBin || env?.dbtBin || 'dbt';
+    // nothing is taken from PATH: the binaries come from an environment (or, for a test, are named)
+    this.pythonBin = pythonBin || env?.pythonBin;
+    dbtBin = dbtBin || env?.dbtBin;
+    if (!this.pythonBin || !dbtBin) throw new Error('MetricFlow backend: name a dbt environment (or pythonBin + dbtBin) — nothing is taken from PATH');
     this.profilesDir = profilesDir;
     this.timeout = timeout;
     this._dbt = createDbt({ version, dbtBin, profilesDir, timeout, ...(env ? { environment: env } : {}) });

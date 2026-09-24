@@ -354,6 +354,7 @@ export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20
   // file" — a message that reads like the analyst's code broke. Say what actually happened.
   const gate = assetPath('astGate');
   if (!gate) return Promise.reject(new Error(missingAssetMessage('astGate')));
+  if (!pythonBin) return Promise.reject(new Error('ast gate has no Python to run on: the engine was given neither pythonBin nor a dbt environment (whose MetricFlow Python runs it) — nothing is taken from PATH'));
   return new Promise((resolve, reject) => {
     const proc = spawn(pythonBin, [gate], { stdio: ['pipe', 'pipe', 'pipe'] });
     let out = ''; let err = '';

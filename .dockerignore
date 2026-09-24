@@ -1,5 +1,5 @@
 node_modules
-.dbtvenv
+.venvs
 .git
 .gitignore
 .mcp

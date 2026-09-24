@@ -215,10 +215,13 @@
 - WHAT IS IN AN ENVIRONMENT IS THIS TOOL'S DECISION (HARD RULE): `src/dbt/environment-specs.js` names
   each one's packages at EXACT versions and `create` installs exactly those; the image builds them at
   `docker build`. Every environment carries the adapters of BOTH warehouses (dbt picks one from the
-  profile), so the image is one for DuckDB and BigQuery — there is no warehouse build argument. ONLY OURS RUN: `resolveEnvironment` refuses a name
-  the specs do not define and a directory whose mcp-env.json does not record the spec's packages as
-  they are now, and the server has no DBT_BIN / MF_BIN / PYTHON_BIN or PATH fallback (the library's
-  `createDbt({ dbtBin })` stays for tests, which take their bins from the same environments).
+  profile), so the image is one for DuckDB and BigQuery — there is no warehouse build argument.
+  ONLY OURS RUN: `resolveEnvironment` refuses a name the specs do not define, one asked for as what
+  its spec's `role` is not (DBT_ENV must be a `dbt` environment, MF_ENV a `metricflow` one), and a
+  directory whose mcp-env.json does not record the spec's pip and packages as they are now. NOTHING IS
+  TAKEN FROM PATH: no DBT_BIN / MF_BIN / PYTHON_BIN, and `createDbt`, `MfEngineBackend` and the AST
+  gate refuse without a named binary (tests name theirs from the same environments; a refused
+  environment fails the test run instead of skipping it).
   Do NOT add a requirements file, a `pip install <pkg>` in the Dockerfile, or an option to hand the
   tool packages, versions or a dbt of one's own: a version change is a spec change, reviewed as code.
 - Tests run on the `dbt-v2` environment; the python stage's file runs on `dbt-v1` (dbt 1.x),

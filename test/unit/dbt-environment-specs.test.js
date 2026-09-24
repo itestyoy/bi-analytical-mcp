@@ -21,3 +21,13 @@ test('the Python dbt environments carry the adapters of both warehouses', () => 
     assert.ok(names.includes('dbt-duckdb') && names.includes('dbt-bigquery'), `${name}: ${names.join(', ')}`);
   }
 });
+
+test('nothing is taken from PATH: no dbt client, MetricFlow backend or AST gate without a named binary', async () => {
+  const { createDbt } = await import('../../src/dbt/index.js');
+  const { MfEngineBackend } = await import('../../src/backends/mf-engine.js');
+  const { runAstGate } = await import('../../src/python-model.js');
+  assert.throws(() => createDbt({}), /no dbt to run: name a dbt environment/);
+  assert.throws(() => createDbt({ version: 1 }), /no dbt to run/);
+  assert.throws(() => new MfEngineBackend({ profilesDir: '/tmp' }), /name a dbt environment .* nothing is taken from PATH/);
+  await assert.rejects(runAstGate(null, []), /no Python to run on/);
+});

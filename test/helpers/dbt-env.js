@@ -6,9 +6,16 @@
 import { existsSync } from 'node:fs';
 import { resolveEnvironment, DEFAULT_ENV } from '../../src/dbt/environments.js';
 
-/** The environment `name`, or null when it is not there (the file then skips). */
+/**
+ * The environment `name`, or null when it is not built (the file then skips). One that IS there but
+ * is refused — built with other versions than the spec names, or not by this tool — throws: a stale
+ * .venvs must fail the run, not skip every data test as "not installed".
+ */
 export function dbtEnv(name) {
-  try { return resolveEnvironment(name); } catch { return null; }
+  try { return resolveEnvironment(name); } catch (e) {
+    if (/ not found in /.test(e.message)) return null;
+    throw e;
+  }
 }
 
 const ENV = dbtEnv(process.env.DBT_ENV || DEFAULT_ENV);

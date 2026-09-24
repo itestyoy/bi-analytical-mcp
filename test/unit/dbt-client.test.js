@@ -68,7 +68,7 @@ test('the client is chosen by the dbt major version: 1.x reads the legacy semant
 
 test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an environment of its own', async () => {
   const { resolveEnvironment, listEnvironments } = await import('../../src/dbt/environments.js');
-  const { environmentPackages } = await import('../../src/dbt/environment-specs.js');
+  const { environmentBuild, INSTALLER } = await import('../../src/dbt/environment-specs.js');
   const { mkdirSync } = await import('node:fs');
   const dir = mkdtempSync(join(tmpdir(), 'envs-'));
   // a venv with these executables, each answering --version for its dbt, marked as built by
@@ -79,7 +79,7 @@ test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an 
       writeFileSync(join(dir, name, 'bin', b), `#!/bin/sh\necho "dbt ${version}"\n`);
       chmodSync(join(dir, name, 'bin', b), 0o755);
     }
-    writeFileSync(join(dir, name, 'mcp-env.json'), JSON.stringify({ name, packages: environmentPackages(name) }));
+    writeFileSync(join(dir, name, 'mcp-env.json'), JSON.stringify({ name, ...environmentBuild(name) }));
   };
   venv('dbt-v2', ['dbt'], '2.0.6');                            // dbt v2: the binary only
   venv('dbt-v1', ['dbt', 'python'], '1.11.11');                 // dbt 1.x, no MetricFlow
@@ -99,8 +99,16 @@ test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an 
   writeFileSync(join(dir, 'my-dbt', 'bin', 'dbt'), '#!/bin/sh\necho "dbt 1.11.11"\n');
   chmodSync(join(dir, 'my-dbt', 'bin', 'dbt'), 0o755);
   assert.throws(() => resolveEnvironment('my-dbt', { dir, env: {} }), /refused: 'my-dbt' is not an environment this tool defines/);
-  writeFileSync(join(dir, 'dbt-v1', 'mcp-env.json'), JSON.stringify({ name: 'dbt-v1', packages: ['dbt-core==1.10.0', 'dbt-duckdb==1.10.0'] }));
-  assert.throws(() => resolveEnvironment('dbt-v1', { dir, env: {} }), /refused: .*built with dbt-core==1\.10\.0 dbt-duckdb==1\.10\.0, the spec says dbt-core==1\.11\.11/);
+  // …and each serves only as what it is: the MetricFlow venv has a `dbt` too, but is not a dbt environment
+  assert.throws(() => resolveEnvironment('metricflow', { dir, env: {} }), /refused: 'metricflow' is a metricflow environment, not a dbt one \(dbt environments: dbt-v2, dbt-v1\)/);
+  assert.throws(() => resolveEnvironment('dbt-v2', { dir, env: { MF_ENV: 'dbt-v1' } }), /MetricFlow environment 'dbt-v1' not found/);
+  // the same packages in another order are the same build; another pip is not
+  writeFileSync(join(dir, 'dbt-v1', 'mcp-env.json'), JSON.stringify({ name: 'dbt-v1', ...environmentBuild('dbt-v1'), packages: [...environmentBuild('dbt-v1').packages].reverse() }));
+  assert.equal(resolveEnvironment('dbt-v1', { dir, env: {} }).name, 'dbt-v1');
+  writeFileSync(join(dir, 'dbt-v1', 'mcp-env.json'), JSON.stringify({ name: 'dbt-v1', ...environmentBuild('dbt-v1'), installer: 'pip==23.0.1' }));
+  assert.throws(() => resolveEnvironment('dbt-v1', { dir, env: {} }), new RegExp(`refused: .*built with pip==23\\.0\\.1 .*the spec says ${INSTALLER.replace(/\./g, '\\.')}`));
+  writeFileSync(join(dir, 'dbt-v1', 'mcp-env.json'), JSON.stringify({ name: 'dbt-v1', installer: INSTALLER, packages: ['dbt-core==1.10.0', 'dbt-duckdb==1.10.0'] }));
+  assert.throws(() => resolveEnvironment('dbt-v1', { dir, env: {} }), /refused: .*built with pip==[\d.]+ dbt-core==1\.10\.0 dbt-duckdb==1\.10\.0, the spec says/);
   const { rmSync } = await import('node:fs');
   rmSync(join(dir, 'dbt-v1', 'mcp-env.json'));
   assert.throws(() => resolveEnvironment('dbt-v1', { dir, env: {} }), /refused: .*not built by this tool/);

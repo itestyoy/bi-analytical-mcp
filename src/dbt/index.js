@@ -20,7 +20,6 @@
 //
 // Implemented: dbt 1.x (src/dbt/v1.js) and dbt v2 (src/dbt/v2.js, the latest semantic YAML spec).
 
-import { execFileSync } from 'node:child_process';
 import { DbtV1 } from './v1.js';
 import { DbtV2 } from './v2.js';
 import { resolveEnvironment } from './environments.js';
@@ -28,13 +27,15 @@ import { resolveEnvironment } from './environments.js';
 export { resolveEnvironment, listEnvironments, envsDir, DEFAULT_ENV, DEFAULT_MF_ENV } from './environments.js';
 
 export { formatDbtError, parseShowJson, parseCsv } from './output.js';
+export { dbtVersion } from './version.js';
+import { dbtVersion } from './version.js';
 
 const IMPLEMENTATIONS = { 1: DbtV1, 2: DbtV2 };
 
 /** The major version of the dbt CLI at `dbtBin` (`dbt --version`), or null when it cannot be told. */
 const detected = new Map(); // a binary's version does not change while the server runs
 
-export function detectDbtMajor(dbtBin = 'dbt') {
+export function detectDbtMajor(dbtBin) {
   if (detected.has(dbtBin)) return detected.get(dbtBin);
   const major = askVersion(dbtBin);
   if (major != null) detected.set(dbtBin, major);
@@ -42,14 +43,10 @@ export function detectDbtMajor(dbtBin = 'dbt') {
 }
 
 function askVersion(dbtBin) {
-  try {
-    const out = execFileSync(dbtBin, ['--version'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: 60000 });
-    const m = out.match(/installed:\s*(\d+)\.\d+/) || out.match(/\bdbt(?:-fusion)?\s+(\d+)\.\d+/i) || out.match(/(\d+)\.\d+\.\d+/);
-    return m ? Number(m[1]) : null;
-  } catch {
-    return null;
-  }
+  const version = dbtVersion(dbtBin);
+  return version ? Number(version.split('.')[0]) : null;
 }
+
 
 /**
  * The dbt client for `version` (a major version, or 'auto' — the default — to ask the CLI), in the
@@ -68,6 +65,8 @@ export function createDbt({ version = 'auto', environment, ...opts } = {}) {
   if (!Impl) {
     throw new Error(`dbt ${major}.x is not supported by this server (supported: ${Object.keys(IMPLEMENTATIONS).map((v) => `${v}.x`).join(', ')}).`);
   }
+  // nothing is taken from PATH: a dbt comes from an environment (or, for a test, is named)
+  if (!opts.dbtBin) throw new Error('no dbt to run: name a dbt environment (createDbt({ environment })) — nothing is taken from PATH');
   const client = new Impl(opts);
   if (env) client.environment = { name: env.name, dir: env.dir, metricflowFrom: env.metricflowFrom, pythonBin: env.pythonBin };
   return client;

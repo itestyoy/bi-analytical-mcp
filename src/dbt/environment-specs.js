@@ -11,17 +11,22 @@
 export const INSTALLER = 'pip==26.2.1';
 
 // Every environment carries the adapters of BOTH warehouses this server speaks (DuckDB and
-// BigQuery): one image serves either, and dbt picks the adapter from the project's profile.
+// BigQuery): one image serves either, and dbt picks the adapter from the project's profile. `role`
+// says what an environment may serve as: `dbt` (DBT_ENV) or `metricflow` (MF_ENV) — the MetricFlow
+// venv has a dbt-core `dbt` too, but not what a dbt environment needs (pandas for Python models).
 export const ENVIRONMENT_SPECS = {
   'dbt-v2': {
+    role: 'dbt',
     description: 'dbt v2 — the Rust binary. Its warehouse adapters are built in (it fetches their ADBC driver on first use), so there is no adapter package.',
     packages: ['dbt==2.0.6'],
   },
   'dbt-v1': {
+    role: 'dbt',
     description: 'dbt 1.x — the Python dbt-core with the DuckDB and BigQuery adapters, plus pandas + pyarrow, with which dbt-duckdb runs dbt Python models locally (the python stage; dbt v2 runs none on DuckDB).',
     packages: ['dbt-core==1.11.11', 'dbt-duckdb==1.11.0', 'dbt-bigquery==1.11.3', 'pandas==3.0.6', 'pyarrow==25.0.1'],
   },
   metricflow: {
+    role: 'metricflow',
     description: "MetricFlow's `mf` and the Python dbt-core + the DuckDB and BigQuery adapters it queries the warehouse with. Every dbt environment queries metrics through it (dbt's docs, without the dbt platform: \"install MetricFlow separately\"). dbt-metricflow 0.13.0 pins metricflow 0.211.0 and caps dbt-core below 1.12.",
     packages: ['dbt-metricflow==0.13.0', 'dbt-core==1.11.11', 'dbt-duckdb==1.11.0', 'dbt-bigquery==1.11.3'],
   },
@@ -32,4 +37,9 @@ export function environmentPackages(name) {
   const spec = ENVIRONMENT_SPECS[name];
   if (!spec) throw new Error(`no dbt environment '${name}' is defined (defined: ${Object.keys(ENVIRONMENT_SPECS).join(', ')}) — environments are declared in src/dbt/environment-specs.js`);
   return spec.packages;
+}
+
+/** What the environment `name` was built from: its packages, as a set, and the pip that installed them. */
+export function environmentBuild(name) {
+  return { installer: INSTALLER, packages: [...environmentPackages(name)].sort() };
 }

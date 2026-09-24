@@ -108,8 +108,9 @@ export class Engine {
     this.ctxs = contextManager || new ContextManager({});
     this.runner = runner; // optional; required for non-dry_run parse/query
     // The interpreter that runs the static gate over a python stage's functions (a local syntax /
-    // safety check; the model itself runs where dbt sends it). The MetricFlow sidecar's Python.
-    this.pythonBin = pythonBin || runner?.pythonBin || runner?.environment?.pythonBin || 'python3';
+    // safety check; the model itself runs where dbt sends it). The MetricFlow environment's Python —
+    // never one found on PATH: an engine given neither refuses the gate (runAstGate says why).
+    this.pythonBin = pythonBin || runner?.pythonBin || runner?.environment?.pythonBin || null;
   }
 
   // Internal helpers (no longer standalone tools — reached via semantic_index({ recipe })

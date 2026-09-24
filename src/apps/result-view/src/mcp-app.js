@@ -292,8 +292,10 @@ function renderChart(chart, title) {
   };
 
   if (chart.type === 'line') {
-    const labels = [...new Set(chart.series.flatMap((s) => s.points.map((p) => p[0])))].sort();
-    const timeLabel = timeFormatter(labels);
+    // a declared non-time axis (chart.ordered) keeps the order the rows came in; time is sorted
+    const seen = [...new Set(chart.series.flatMap((s) => s.points.map((p) => p[0])))];
+    const labels = chart.ordered ? seen : seen.sort();
+    const timeLabel = chart.ordered ? String : timeFormatter(labels);
     state.chart = new Chart(chartCanvas, {
       type: 'line',
       data: {

@@ -16,6 +16,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
+import { buildViewModel } from '../../src/apps/result-view-model.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -88,4 +89,51 @@ test('a detached query that FAILS reports the failure through get_query_result',
   const done = await follow(first.query_id);
   assert.equal(done.ok, false);
   assert.equal(done.status, 'error');
+});
+
+// THE CARD DECLARATION (`display`): the caller says what the result is, the card draws exactly that.
+// A query that detaches remembers it, so the rows read back through get_query_result come with it —
+// and the card's numbers are the warehouse's.
+test('a declared bar chart survives the detach and draws the warehouse\'s numbers in row order', opts, async (t) => {
+  if (skip(t)) return;
+  const display = { kind: 'bar', title: 'Revenue by country', x: 'users_country', y: 'mon_revenue' };
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], order_by: [{ key: 'mon_revenue', direction: 'asc' }], display });
+  assert.equal(first.status, 'running');
+  const done = await follow(first.query_id);
+  assert.deepEqual(done.display, display);
+  const m = buildViewModel('get_query_result', done);
+  assert.equal(m.kind, 'chart');
+  assert.equal(m.title, 'Revenue by country');
+  // bars in the order the rows came back (ascending revenue; the country with none sorts last)
+  assert.deepEqual(m.chart.bars.map((b) => b.label), done.rows.map((r) => String(r.users_country)));
+  assert.deepEqual(m.chart.bars.map((b) => b.value), [25, 25, 35, 0]);
+  assert.equal(m.chart.bars[2].label, 'US');
+});
+
+test('a funnel declared on a read of that result follows the declared steps, not the column names', opts, async (t) => {
+  if (skip(t)) return;
+  const paying = { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB', 'BR'] }] };
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], where: paying, order_by: [{ key: 'mon_revenue', direction: 'desc' }] });
+  const done = await follow(first.query_id);
+  assert.equal(done.display, undefined, 'no declaration, none attached');
+  const read = await engine.get_query_result({ query_id: first.query_id, display: { kind: 'funnel', label_column: 'users_country', value_column: 'mon_revenue' } });
+  const m = buildViewModel('get_query_result', read);
+  assert.equal(m.kind, 'funnel');
+  assert.deepEqual(m.steps.map((x) => x.label), read.rows.map((r) => String(r.users_country)));
+  assert.deepEqual(m.steps.map((x) => x.value), [35, 25, 25]);
+  assert.equal(m.overall, 25 / 35);
+});
+
+test('a declaration naming a column the result does not have is refused, with the columns it has', opts, async (t) => {
+  if (skip(t)) return;
+  await assert.rejects(
+    engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], display: { kind: 'line', x: 'metric_time_day', y: ['mon_revenue'] } }),
+    (e) => e.field === 'display',
+  );
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
+  await follow(first.query_id);
+  await assert.rejects(
+    engine.get_query_result({ query_id: first.query_id, display: { kind: 'funnel', steps: [{ column: 'mon_revenue' }, { column: 'no_such_step' }] } }),
+    (e) => e.field === 'display',
+  );
 });

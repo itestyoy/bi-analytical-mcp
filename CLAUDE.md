@@ -153,7 +153,10 @@
   through tasks or display_model_result.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
-  * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): `_meta.ui`, the view resource,
+  * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): `_meta.ui`, the view resource
+    in resources/list (a resources/read of its URI is served to ANY request: a host re-draws a card
+    already in a conversation — reopened, or on another device — on a fetch that need not carry the
+    declaration, and refusing it broke every stored card),
     display_model_result and drill_result (not even listed otherwise; display_model_result is refused
     if called — drill_result is served for a DRAWN task whatever envelope the host puts on the
     card's proxied read, the drawn mark being persisted with the task so a card outlives a restart),

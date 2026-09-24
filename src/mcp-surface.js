@@ -400,7 +400,13 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     /** The contents of a resource, or null when this server has no such URI. */
     read(uri, offer = {}) {
       if (typeof uri !== 'string') return null;
-      const ui = offer.apps ? apps.read(uri) : null;
+      // The view page is served to ANY request that asks for it by its URI. A card already in a
+      // conversation is re-drawn by the host when the chat is reopened — on this device or another
+      // — and that fetch need not carry the Apps declaration; refusing it broke every stored card
+      // ("Connector not found"). It is a static page that draws only the result the host hands it:
+      // reading it offers nothing. What is OFFERED — the listing, the tools that draw, the
+      // instructions — stays for a client that declares the extension.
+      const ui = apps.read(uri);
       if (ui) return ui;
       const f = offer.skills ? skills?.read(uri) : null;
       return f ? [{ uri: f.uri, mimeType: f.mimeType, text: f.text }] : null;

@@ -250,10 +250,10 @@ function render(result) {
 /** The one line a result without a card gets — what happened, and that the reply carries the rest. */
 function showStatus(model) {
   const lines = {
-    running: ['loader-circle', 'Still running in the warehouse — the result comes back in a later step.', 'icon spin'],
+    running: ['loader-circle', 'Running in the warehouse…', 'icon spin'],
     error: ['circle-alert', 'Error'],
   };
-  const [name, text, cls] = lines[model.reason] || ['info', 'Nothing to chart in this result — it is in the reply.'];
+  const [name, text, cls] = lines[model.reason] || ['info', 'Nothing to chart'];
   statusEl.replaceChildren(icon(name, cls || 'icon'), el('span', null, text));
   statusEl.classList.toggle('status-line-error', model.reason === 'error');
 }

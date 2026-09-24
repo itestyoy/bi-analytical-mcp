@@ -61,20 +61,19 @@
   }
 }
 
-/* ── A result without a card: one quiet line ──────────────────────────────────────────────── */
+/* ── A result without a card: one quiet line, centred in the frame like the spinner before it ── */
 .status-line {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  justify-content: center;
   gap: calc(var(--space) * 2);
-  padding: calc(var(--space) * 5);
+  min-height: 9rem;
+  padding: calc(var(--space) * 6);
+  text-align: center;
   font-size: var(--font-text-sm-size);
   line-height: var(--font-text-sm-line-height);
   color: var(--muted-foreground);
   overflow-wrap: anywhere;
-
-  > .icon {
-    margin-top: 0.125rem;
-  }
 
   &.status-line-error {
     color: var(--destructive);

@@ -1,12 +1,8 @@
-# Python tooling the dbt client shells out to (dbt CLI + MetricFlow `mf`), for the DuckDB warehouse
-# (local work, the tests, the default compose setup). Pinned to the versions this server is developed
-# and tested against. The BigQuery build uses requirements-bigquery.txt.
-#   * dbt 1.x only: the dbt client (src/dbt/) implements 1.x; v2 needs the new semantic-model YAML
-#     (docs/DBT_V2_MIGRATION.md).
-#   * dbt-metricflow 0.13.0 pins metricflow 0.211.0 and caps dbt-core < 1.12.
-#   * pandas + pyarrow: dbt-duckdb runs dbt PYTHON models locally with them (the python stage).
+# The `dbt1` environment for DuckDB: dbt 1.x (the Python dbt-core) and the DuckDB adapter, with
+# pandas + pyarrow so dbt-duckdb runs dbt PYTHON models locally (the python stage — dbt v2 runs no
+# Python models on DuckDB). MetricFlow is an environment of its own (requirements-metricflow.txt);
+# dbt v2 is requirements-dbt2.txt. The BigQuery build uses requirements-bigquery.txt.
 dbt-core==1.11.11
 dbt-duckdb>=1.10,<1.12
-dbt-metricflow==0.13.0
 pandas
 pyarrow

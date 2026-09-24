@@ -1,0 +1,8 @@
+# The METRICFLOW environment for BigQuery: MetricFlow's `mf` + the Python dbt-core and BigQuery
+# adapter it queries with (see requirements-metricflow.txt for why it is an environment of its own).
+#   * dbt-metricflow 0.13.0 is the version this server is tested with; it pins metricflow==0.211.0
+#     and caps dbt-core<1.12.
+#   * This stack ships the dbt-semantic-interfaces that supports SCD Type II `validity_params`.
+dbt-metricflow==0.13.0
+dbt-core>=1.11.11,<1.12
+dbt-bigquery>=1.11,<1.13

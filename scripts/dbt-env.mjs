@@ -4,10 +4,12 @@
 //   node scripts/dbt-env.mjs create <name> -r <requirements file> [-r <another>] [--python python3]
 //   node scripts/dbt-env.mjs list
 //
-// `create` makes <DBT_ENVS_DIR>/<name> a fresh virtualenv and installs the requirements into it
-// (requirements.txt: dbt 1.x + DuckDB + MetricFlow; requirements-dbt2.txt: dbt v2;
-// requirements-bigquery.txt: dbt 1.x + BigQuery + MetricFlow). `list` shows each environment with
-// its dbt version and where its MetricFlow comes from.
+// `create` makes <DBT_ENVS_DIR>/<name> a fresh virtualenv and installs the requirements into it:
+//   default    — requirements-dbt2.txt                 (dbt v2)
+//   dbt1       — requirements.txt / -bigquery.txt      (dbt 1.x + the adapter)
+//   metricflow — requirements-metricflow.txt / -bigquery.txt (MetricFlow's mf + dbt-core + adapter)
+// `list` shows each environment: its dbt version, or that it is a MetricFlow environment, and which
+// MetricFlow a dbt environment queries with.
 
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdirSync, rmSync } from 'node:fs';
@@ -41,15 +43,24 @@ if (cmd === 'create') {
   step(python, ['-m', 'venv', target]);
   step(join(target, 'bin', 'pip'), ['install', '--quiet', '--upgrade', 'pip']);
   step(join(target, 'bin', 'pip'), ['install', '--quiet', ...reqs.flatMap((r) => ['-r', r])]);
-  const e = resolveEnvironment(name, { dir });
-  console.log(`${name}: dbt ${versionOf(e.dbtBin)} at ${e.dbtBin}; MetricFlow ${e.metricflowFrom ? `from '${e.metricflowFrom}'` : 'none yet — create an environment that has it (requirements.txt)'}`);
+  const made = listEnvironments({ dir }).find((x) => x.name === name);
+  if (made?.dbtBin) {
+    const e = resolveEnvironment(name, { dir });
+    console.log(`${name}: dbt ${versionOf(e.dbtBin)} at ${e.dbtBin}; MetricFlow ${e.metricflowFrom ? `from '${e.metricflowFrom}'` : 'none yet — create it: node scripts/dbt-env.mjs create metricflow -r requirements-metricflow.txt'}`);
+  } else if (made?.mfBin) {
+    console.log(`${name}: MetricFlow at ${made.mfBin}`);
+  } else {
+    console.log(`${name}: created, but it has neither dbt nor mf in bin/`);
+  }
 } else if (cmd === 'list' || !cmd) {
   const all = listEnvironments({ dir });
   if (!all.length) console.log(`no dbt environments in ${dir} — create one: node scripts/dbt-env.mjs create default -r requirements-dbt2.txt`);
   for (const e of all) {
+    // a MetricFlow environment carries the Python dbt-core too (MetricFlow queries through it)
+    if (e.mfBin) { console.log(`${e.name.padEnd(12)} MetricFlow (mf)${e.dbtBin ? ` on dbt-core ${versionOf(e.dbtBin)}` : ''}`); continue; }
     let mf = '';
-    try { mf = resolveEnvironment(e.name, { dir }).metricflowFrom; } catch { /* mf-only env */ }
-    console.log(`${e.name.padEnd(12)} dbt ${e.dbtBin ? versionOf(e.dbtBin).padEnd(10) : '-'.padEnd(10)} mf: ${mf || '-'}`);
+    try { mf = resolveEnvironment(e.name, { dir }).metricflowFrom; } catch (err) { mf = `! ${err.message}`; }
+    console.log(`${e.name.padEnd(12)} dbt ${versionOf(e.dbtBin).padEnd(10)} queries with MetricFlow from: ${mf || '-'}`);
   }
 } else {
   console.error(`unknown command '${cmd}' (create | list)`);

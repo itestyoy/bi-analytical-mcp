@@ -1,21 +1,24 @@
 // dbt ENVIRONMENTS — every dbt this server runs lives in a virtualenv of its own, by name.
 //
 // An environment is a directory under DBT_ENVS_DIR (default: ./.venvs; the image: /opt/dbt-envs)
-// holding a Python virtualenv with a `dbt` in bin/: `default` is the one used unless DBT_ENV names
-// another (`dbt1`, `bigquery`, …). Each may carry a different dbt — v2 in one, 1.x in another — and
-// the dbt client reads the version from the binary (src/dbt/index.js).
+// holding a Python virtualenv. A dbt environment has a `dbt` in bin/: `default` is the one used
+// unless DBT_ENV names another (`dbt1`, …). Each may carry a different dbt — v2 in one, 1.x in
+// another — and the dbt client reads the version from the binary (src/dbt/index.js).
 //
-// MetricFlow's `mf` (and the Python the MetricFlow sidecar runs on) is taken from the environment
-// itself, or — for an environment without one, like a dbt v2 venv, whose `dbt` is a standalone
-// binary — from another environment that has it (`dbt1` first, then any), since `mf` only reads the
-// semantic manifest the chosen dbt writes.
+// METRICFLOW IS AN ENVIRONMENT OF ITS OWN — `metricflow`, unless MF_ENV names another. dbt's docs,
+// for a setup without the dbt platform: "install MetricFlow separately and use the mf prefix". Its
+// `mf` reads the semantic_manifest.json that the chosen dbt environment's `dbt parse` wrote, and the
+// MetricFlow sidecar runs on its Python. It cannot share a venv with a dbt v2 binary: dbt-metricflow
+// brings the Python dbt-core, whose own `dbt` command would replace it. (An environment that carries
+// its own `mf` — a single all-in-one venv — uses it when there is no MetricFlow environment.)
 //
-// Create one with `npm run dbt:env -- create <name> -r <requirements file>` (scripts/dbt-env.mjs).
+// Create them with `npm run dbt:env -- create <name> -r <requirements file>` (scripts/dbt-env.mjs).
 
 import { existsSync, readdirSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 
 export const DEFAULT_ENV = 'default';
+export const DEFAULT_MF_ENV = 'metricflow';
 
 /** Where the environments live. */
 export function envsDir(env = process.env) {
@@ -38,9 +41,11 @@ export function listEnvironments({ dir = envsDir() } = {}) {
 }
 
 /**
- * The environment `name` (DBT_ENV, else `default`) ready to run: { name, dir, dbtBin, mfBin,
- * pythonBin, metricflowFrom }. `mfBin`/`pythonBin` come from the environment itself or from the
- * one named in `metricflowFrom`. Throws, naming what exists, when there is no such environment.
+ * The dbt environment `name` (DBT_ENV, else `default`) ready to run: { name, dir, dbtBin, mfBin,
+ * pythonBin, metricflowFrom } — `mfBin` / `pythonBin` from the MetricFlow environment (MF_ENV, else
+ * `metricflow`), or from this environment when it carries its own `mf` and there is no MetricFlow
+ * environment. Throws, naming what exists, when there is no such dbt environment or a MetricFlow
+ * environment was named and is not there.
  */
 export function resolveEnvironment(name, { dir = envsDir(), env = process.env } = {}) {
   const wanted = name || env.DBT_ENV || DEFAULT_ENV;
@@ -50,7 +55,10 @@ export function resolveEnvironment(name, { dir = envsDir(), env = process.env } 
     const have = all.filter((x) => x.dbtBin).map((x) => x.name);
     throw new Error(`dbt environment '${wanted}' not found in ${dir}${have.length ? ` (there: ${have.join(', ')})` : ' (none there)'} — create it with: npm run dbt:env -- create ${wanted} -r <requirements file>`);
   }
+  const mfName = env.MF_ENV || DEFAULT_MF_ENV;
+  const mf = all.find((x) => x.name === mfName && x.mfBin);
+  if (mf) return { ...e, mfBin: mf.mfBin, pythonBin: mf.pythonBin, metricflowFrom: mf.name };
+  if (env.MF_ENV) throw new Error(`MetricFlow environment '${env.MF_ENV}' not found in ${dir} (or it has no mf) — create it with: npm run dbt:env -- create ${env.MF_ENV} -r requirements-metricflow.txt`);
   if (e.mfBin) return { ...e, metricflowFrom: e.name };
-  const donor = [all.find((x) => x.name === 'dbt1'), ...all].find((x) => x?.mfBin && x.name !== e.name);
-  return { ...e, mfBin: donor?.mfBin || null, pythonBin: donor?.pythonBin || e.pythonBin, metricflowFrom: donor?.name || null };
+  return { ...e, mfBin: null, metricflowFrom: null };
 }

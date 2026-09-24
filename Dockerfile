@@ -13,24 +13,27 @@ WORKDIR /app
 
 # dbt runs in named ENVIRONMENTS — one virtualenv each under DBT_ENVS_DIR (src/dbt/environments.js);
 # the server uses DBT_ENV (else `default`) and reads its dbt version from the binary.
-#   dbt1    — dbt 1.x + the warehouse adapter + MetricFlow (`mf`): DBT_REQUIREMENTS picks the adapter,
-#             requirements.txt (DuckDB, default) or requirements-bigquery.txt (BigQuery);
-#   default — dbt v2 (requirements-dbt2.txt), its MetricFlow borrowed from dbt1. INSTALL_DBT_V2=0
-#             makes `default` the dbt1 environment instead.
+#   default    — dbt v2 (requirements-dbt2.txt). INSTALL_DBT_V2=0 makes `default` the dbt1 environment.
+#   dbt1       — dbt 1.x + the warehouse adapter: DBT_REQUIREMENTS, requirements.txt (DuckDB, with
+#                pandas for Python models) or requirements-bigquery.txt (BigQuery).
+#   metricflow — MetricFlow's `mf` + the Python dbt-core and adapter it queries with: MF_REQUIREMENTS,
+#                requirements-metricflow.txt or requirements-metricflow-bigquery.txt. Every dbt
+#                environment queries metrics through it (MF_ENV names another).
 ARG DBT_REQUIREMENTS=requirements.txt
+ARG MF_REQUIREMENTS=requirements-metricflow.txt
 ARG INSTALL_DBT_V2=1
 ENV DBT_ENVS_DIR=/opt/dbt-envs
 COPY requirements*.txt ./
-RUN python3 -m venv "$DBT_ENVS_DIR/dbt1" \
-  && "$DBT_ENVS_DIR/dbt1/bin/pip" install --no-cache-dir --upgrade pip \
-  && "$DBT_ENVS_DIR/dbt1/bin/pip" install --no-cache-dir -r "$DBT_REQUIREMENTS" \
-  && if [ "$INSTALL_DBT_V2" = "1" ]; then \
-       python3 -m venv "$DBT_ENVS_DIR/default" \
-       && "$DBT_ENVS_DIR/default/bin/pip" install --no-cache-dir --upgrade pip \
-       && "$DBT_ENVS_DIR/default/bin/pip" install --no-cache-dir -r requirements-dbt2.txt; \
-     else ln -s dbt1 "$DBT_ENVS_DIR/default"; fi
-# (for a shell in the container: dbt 1.x and mf on PATH)
-ENV PATH="$DBT_ENVS_DIR/dbt1/bin:$PATH"
+RUN set -e; \
+    mkenv() { python3 -m venv "$DBT_ENVS_DIR/$1" \
+      && "$DBT_ENVS_DIR/$1/bin/pip" install --no-cache-dir --upgrade pip \
+      && "$DBT_ENVS_DIR/$1/bin/pip" install --no-cache-dir -r "$2"; }; \
+    mkenv metricflow "$MF_REQUIREMENTS"; \
+    mkenv dbt1 "$DBT_REQUIREMENTS"; \
+    if [ "$INSTALL_DBT_V2" = "1" ]; then mkenv default requirements-dbt2.txt; \
+    else ln -s dbt1 "$DBT_ENVS_DIR/default"; fi
+# (for a shell in the container: mf on PATH)
+ENV PATH="$DBT_ENVS_DIR/metricflow/bin:$PATH"
 
 # Node deps (production only — devDeps are the test harness).
 COPY package.json package-lock.json* ./

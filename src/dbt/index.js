@@ -25,7 +25,7 @@ import { DbtV1 } from './v1.js';
 import { DbtV2 } from './v2.js';
 import { resolveEnvironment } from './environments.js';
 
-export { resolveEnvironment, listEnvironments, envsDir, DEFAULT_ENV } from './environments.js';
+export { resolveEnvironment, listEnvironments, envsDir, DEFAULT_ENV, DEFAULT_MF_ENV } from './environments.js';
 
 export { formatDbtError, parseShowJson, parseCsv } from './output.js';
 

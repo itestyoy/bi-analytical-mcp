@@ -142,14 +142,16 @@ The integration suite runs on **DuckDB**: each test file gets a database file of
 runs dbt Python models locally) and checks the returned rows. One process at a time can hold a DuckDB
 file, so the dbt client queues its processes on it (`src/dbt/process.js`).
 
-Prerequisites for integration tests — two dbt ENVIRONMENTS (virtualenvs under `.venvs/`, see
-`src/dbt/environments.js`): `default` with dbt v2, which the suite runs on, and `dbt1` with dbt 1.x,
-the DuckDB adapter, MetricFlow and pandas — `default` borrows its `mf` from it, and the python stage's
-file runs on it (v2 runs no Python models on DuckDB). `DBT_ENV` picks another environment for the
-suite; `DBT_BIN` / `MF_BIN` / `PYTHON_BIN` still override one binary each:
+Prerequisites for integration tests — three ENVIRONMENTS (virtualenvs under `.venvs/`, see
+`src/dbt/environments.js`): `default` with dbt v2, which the suite runs on; `dbt1` with dbt 1.x, the
+DuckDB adapter and pandas, which the python stage's file runs on (v2 runs no Python models on DuckDB);
+and `metricflow` — MetricFlow's `mf` with the DuckDB adapter, which every dbt environment queries
+metrics through (dbt's docs: without the dbt platform, "install MetricFlow separately"). `DBT_ENV` /
+`MF_ENV` pick others; `DBT_BIN` / `MF_BIN` / `PYTHON_BIN` still override one binary each:
 
 ```bash
-npm run dbt:env -- create dbt1 -r requirements.txt
+npm run dbt:env -- create metricflow -r requirements-metricflow.txt
 npm run dbt:env -- create default -r requirements-dbt2.txt
+npm run dbt:env -- create dbt1 -r requirements.txt
 npm run dbt:env -- list
 ```

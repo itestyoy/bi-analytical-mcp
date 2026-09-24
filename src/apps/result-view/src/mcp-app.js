@@ -397,8 +397,8 @@ function renderPivot(model) {
   setDescription(badge(`${model.levels.length} ${model.levels.length === 1 ? 'level' : 'levels'}`, 'secondary'));
   const table = el('table', 'table pivot-table');
   const head = document.createElement('tr');
-  // the levels, top down, name the one column their rows share
-  const first = el('th', 'pivot-levels', model.levels.join(' › '));
+  // the header names the TOP level only; a row names the level it opens into while it is open
+  const first = el('th', null, model.levels[0].label);
   first.scope = 'col';
   head.append(first, ...model.values.map((v) => { const th = el('th', 'num', v.label); th.scope = 'col'; return th; }));
   table.append(document.createElement('thead'), document.createElement('tbody'));
@@ -418,12 +418,19 @@ function renderPivot(model) {
     return tr;
   };
 
+  // the open state shows twice: the chevron turns, and the row names the level under it
+  const markOpen = (tr, open) => {
+    tr.querySelector('.pivot-toggle')?.setAttribute('aria-expanded', String(open));
+    const by = tr.querySelector('.pivot-by');
+    if (by) by.hidden = !open;
+  };
+
   const collapse = (tr) => {
     const state = opened.get(tr);
     if (!state?.open) return;
     for (const child of state.rows) { collapse(child); child.remove(); }
     state.open = false;
-    tr.querySelector('.pivot-toggle')?.setAttribute('aria-expanded', 'false');
+    markOpen(tr, false);
   };
 
   const rowEl = (row, path, depth) => {
@@ -435,7 +442,7 @@ function renderPivot(model) {
       const btn = el('button', 'btn btn-ghost btn-icon pivot-toggle');
       btn.type = 'button';
       btn.setAttribute('aria-expanded', 'false');
-      btn.setAttribute('aria-label', `Open ${row.label} by ${model.levels[depth + 1]}`);
+      btn.setAttribute('aria-label', `Open ${row.label} by ${model.levels[depth + 1].label}`);
       btn.append(icon('chevron-right'));
       btn.addEventListener('click', () => toggle(tr, row, path, depth));
       cell.append(btn);
@@ -443,6 +450,11 @@ function renderPivot(model) {
       cell.append(el('span', 'pivot-leaf'));
     }
     cell.append(el('span', row.key === null ? 'null' : null, row.label));
+    if (canOpen) {
+      const by = el('span', 'pivot-by', `by ${model.levels[depth + 1].label}`);
+      by.hidden = true;
+      cell.append(by);
+    }
     tr.append(cell, ...model.values.map((v, i) => el('td', 'num', formatKpi(row.values[i], v))));
     return tr;
   };
@@ -453,11 +465,11 @@ function renderPivot(model) {
     const state = opened.get(tr);
     if (state?.open) { collapse(tr); return; }
     const btn = tr.querySelector('.pivot-toggle');
-    btn.setAttribute('aria-expanded', 'true');
+    markOpen(tr, true);
     if (state?.rows) { insertAfter(tr, state.rows); state.open = true; return; }
     if (state?.loading) return;
     opened.set(tr, { loading: true });
-    const loading = note(`Loading ${model.levels[depth + 1]}…`, depth + 1, 'pivot-loading');
+    const loading = note(`Loading ${model.levels[depth + 1].label}…`, depth + 1, 'pivot-loading');
     loading.querySelector('td').prepend(icon('loader-circle', 'icon spin'));
     tr.after(loading);
     const at = [...path, row.key];

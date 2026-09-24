@@ -25,8 +25,8 @@ export const PIVOT_LEVEL_ROWS = 200;
  */
 export function pivotTransform(display, path) {
   return {
-    where: path.map((key, i) => (key === null ? { column: display.levels[i], op: 'is_null' } : { column: display.levels[i], op: 'eq', value: key })),
-    group_by: [display.levels[path.length]],
+    where: path.map((key, i) => (key === null ? { column: display.levels[i].column, op: 'is_null' } : { column: display.levels[i].column, op: 'eq', value: key })),
+    group_by: [display.levels[path.length].column],
     aggregations: display.values.map((v) => ({ fn: v.agg || 'sum', column: v.column, as: v.column })),
     // the largest first, an empty value last — the same on every warehouse
     order_by: [{ key: display.values[0].column, direction: 'desc', nulls: 'last' }],
@@ -35,7 +35,7 @@ export function pivotTransform(display, path) {
 
 /** The rows of one drill-down level read with pivotTransform: the key as it came (to filter by), and the values. */
 export function pivotRows(result, display, depth) {
-  const level = display.levels[depth];
+  const level = display.levels[depth].column;
   const rows = Array.isArray(result?.rows) ? result.rows : [];
   const names = Array.isArray(result?.columns) && result.columns.length ? result.columns.map((c) => (c && typeof c === 'object' ? c.name : String(c))) : null;
   const get = (r, name) => (Array.isArray(r) ? (names ? r[names.indexOf(name)] : undefined) : r?.[name]);
@@ -332,12 +332,12 @@ export function buildViewModel(toolName, result, toolInput) {
         }, declaredTitle || title);
       }
       // a drill-down: the top level the server read, and where the card reads the levels below
-      if (d.kind === 'pivot' && Array.isArray(d.levels) && d.levels.length && Array.isArray(d.values) && d.values.length && isObj(result.pivot_source)) {
+      if (d.kind === 'pivot' && Array.isArray(d.levels) && d.levels.length && d.levels.every(isObj) && Array.isArray(d.values) && d.values.length && isObj(result.pivot_source)) {
         return {
           kind: 'pivot',
           title: declaredTitle || 'Pivot',
           display: d,
-          levels: d.levels,
+          levels: d.levels.map((l) => ({ column: l.column, label: typeof l.label === 'string' && l.label ? l.label : l.column })),
           values: d.values.map((v) => ({ column: v.column, label: typeof v.label === 'string' && v.label ? v.label : v.column, agg: v.agg || 'sum', format: v.format || 'number', currency: v.currency || 'USD' })),
           rows: pivotRows(result, d, 0),
           has_more: !!result.page?.has_more,

@@ -449,7 +449,10 @@ export function buildSchemas(catalog) {
         },
       }, ['values']),
       form('pivot', 'pivot — a table to drill into', 'A TABLE TO DRILL INTO, level by level: the card shows the top level, and each row expands into the next level ON DEMAND — read from the stored result, filtered to that row — so the detail is never loaded all at once. Reads a MATERIALIZED result (materialize: true, or a pipeline table). Each level RE-AGGREGATES the rows under it with the value\'s agg: sum, count, min and max fold honestly, but a distinct count, an average or a ratio does NOT add up across levels (a user present in two children counts twice) — be careful with non-additive metrics: prefer additive columns (counts, sums, the numerator and denominator of a ratio) as the values.', {
-        levels: { type: 'array', minItems: 1, maxItems: 5, uniqueItems: true, items: resultColumn, description: 'The dimension columns, from the top level down.' },
+        levels: {
+          type: 'array', minItems: 1, maxItems: 5, description: 'The dimension columns, from the top level down.',
+          items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 40, description: 'How the level reads to the person — short, it names a column and each opened row (default: the column name).' } } },
+        },
         values: {
           type: 'array', minItems: 1, maxItems: 6, description: 'The value columns, each re-aggregated per level.',
           items: {

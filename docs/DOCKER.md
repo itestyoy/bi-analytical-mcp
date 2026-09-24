@@ -173,8 +173,10 @@ the plain tools stay exactly as they were for every client that does not:
   row with the change against a `previous_column`, coloured only when `good: up|down` says which way
   is good — or, with an `x` axis, the last row, its change and a sparkline), `sankey` (a row per
   link source → target with an amount; links that loop back are refused) and `pivot` (a drill-down
-  table over a MATERIALIZED result: the card gets the top level, and each row it opens reads the
-  next level from the stored table, filtered to that row — 200 rows a level; each level re-aggregates
+  table over a MATERIALIZED result, `levels: [{ column, label }]`: the card gets the top level —
+  the header names only that one, and an opened row names the level under it ("US · by Platform") —
+  and each row it opens reads the next level from the stored table, filtered to that row — 200 rows
+  a level; each level re-aggregates
   with the value's agg, so sums and counts add up while distinct counts, averages and ratios do not).
   Each takes a title;
   the server checks the columns exist (a

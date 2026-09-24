@@ -1145,10 +1145,6 @@
 }
 
 .pivot-table {
-  th.pivot-levels {
-    white-space: normal;
-  }
-
   .pivot-label {
     display: flex;
     align-items: center;
@@ -1172,6 +1168,13 @@
     &[aria-expanded="true"] .icon {
       transform: rotate(90deg);
     }
+  }
+
+  /* while a row is open it names the level its children are — quiet, next to its label */
+  .pivot-by {
+    margin-left: calc(var(--space) * 1.5);
+    font-size: var(--font-text-xs-size);
+    color: var(--muted-foreground);
   }
 
   /* a row with no level below it keeps its label in line with the ones that open */

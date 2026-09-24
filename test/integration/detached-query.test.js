@@ -199,7 +199,7 @@ test('a result that is gone — forgotten, expired or deleted — is result_gone
 // stored result, filtered to that row — the same read the card makes, run here against the warehouse.
 test('a pivot shows the top level from the warehouse, and a row opens into its children, which add up to it', opts, async (t) => {
   if (skip(t)) return;
-  const display = { kind: 'pivot', levels: ['users_country', 'users_platform'], values: [{ column: 'mon_revenue', agg: 'sum', label: 'Revenue' }] };
+  const display = { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform', label: 'Platform' }], values: [{ column: 'mon_revenue', agg: 'sum', label: 'Revenue' }] };
   // a drill-down reads a stored result: without materialize the schema refuses it
   await assert.rejects(engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }], display }), (e) => e.field !== undefined || /materialize/.test(e.message));
   const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }], materialize: true, display });
@@ -208,6 +208,7 @@ test('a pivot shows the top level from the warehouse, and a row opens into its c
   const m = buildViewModel('get_query_result', top);
   assert.equal(m.kind, 'pivot');
   assert.deepEqual(m.source, { query_id: first.query_id });
+  assert.deepEqual(m.levels, [{ column: 'users_country', label: 'Country' }, { column: 'users_platform', label: 'Platform' }]);
   const byCountry = Object.fromEntries(m.rows.map((r) => [r.label, r.values[0]]));
   assert.deepEqual([byCountry.US, byCountry.GB, byCountry.BR], [35, 25, 25]);
   assert.equal(m.rows[0].label, 'US', 'the largest first');

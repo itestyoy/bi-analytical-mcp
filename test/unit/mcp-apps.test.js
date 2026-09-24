@@ -306,10 +306,11 @@ test('display guard: a sankey that loops back, or KPI tiles over many rows with 
   assert.equal(s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links.slice(0, 2)).length, 0, 'a chain is fine');
   assert.equal(s.engine._displayProblems({ kind: 'kpi', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 1);
   assert.equal(s.engine._displayProblems({ kind: 'kpi', x: 'a', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 0);
+  assert.equal(s.engine._displayProblems({ kind: 'pivot', levels: [{ column: 'a' }, { column: 'a', label: 'again' }], values: [{ column: 'v' }] }, ['a', 'b', 'v']).length, 1, 'a level twice');
 });
 
 test('pivot: one level is the rows under a path, grouped by the next level; its rows keep the key as it came', () => {
-  const display = { kind: 'pivot', levels: ['country', 'platform', 'channel'], values: [{ column: 'revenue' }, { column: 'users', agg: 'max' }] };
+  const display = { kind: 'pivot', levels: [{ column: 'country' }, { column: 'platform' }, { column: 'channel' }], values: [{ column: 'revenue' }, { column: 'users', agg: 'max' }] };
   const t = pivotTransform(display, ['US', null]);
   assert.deepEqual(t.where, [{ column: 'country', op: 'eq', value: 'US' }, { column: 'platform', op: 'is_null' }]);
   assert.deepEqual(t.group_by, ['channel']);

@@ -198,6 +198,31 @@ export function logRefusals(req, res, next) {
   next();
 }
 
+/**
+ * One line per request on the endpoint — what a host asks for, and whether it declared the Apps
+ * extension on it — so what a host does when it re-opens a conversation (and what it is refused)
+ * is readable from the log. Request metadata only: the JSON-RPC method, the tool or resource name,
+ * the protocol version, the origin and user agent — never a body, an argument or a credential.
+ */
+function logRequest(req, res) {
+  const msg = Array.isArray(req.body) ? req.body[0] : req.body;
+  const method = msg && typeof msg === 'object' ? msg.method : undefined;
+  if (!method || method === 'tools/call') return; // tool calls are logged by runTool, with their outcome
+  const h = req.headers;
+  const caps = envelopeCapabilities(req.body, CLIENT_CAPABILITIES_META_KEY);
+  const target = msg.params?.uri || msg.params?.name;
+  const bits = [
+    `${req.method} rpc=${method}`,
+    target ? `target=${String(target).slice(0, 120)}` : null,
+    h['mcp-protocol-version'] ? `protocol=${h['mcp-protocol-version']}` : null,
+    h['mcp-session-id'] ? 'session-id=yes' : null,
+    `declares=${caps?.extensions ? Object.keys(caps.extensions).join('+') || 'none' : 'none'}`,
+    h.origin ? `origin=${h.origin}` : null,
+    h['user-agent'] ? `ua=${String(h['user-agent']).slice(0, 80)}` : null,
+  ].filter(Boolean);
+  res.on('finish', () => logLine('http', `${bits.join(' ')} → ${res.statusCode}`));
+}
+
 export function createApp(engine, opts = {}) {
   const services = opts.services || servicesFor(engine);
   const allowedOrigins = [...LOOPBACK, ...(opts.allowedOrigins ?? csv(process.env.MCP_ALLOWED_ORIGINS))];
@@ -213,6 +238,7 @@ export function createApp(engine, opts = {}) {
   });
   const node = toNodeHandler(handler);
   app.all('/mcp', (req, res) => {
+    logRequest(req, res);
     if (answerTaskRequest(services.tasks, req, res)) return;
     // what THIS request's client declares (its envelope's capabilities) decides which extensions
     // the server built for it offers (src/client-extensions.js)

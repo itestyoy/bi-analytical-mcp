@@ -79,7 +79,10 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     cacheHints: { 'server/discover': PER_CLIENT, 'tools/list': PER_CLIENT, 'resources/list': PER_CLIENT, 'resources/templates/list': PER_CLIENT, 'resources/read': PER_CLIENT },
   });
 
-  server.setRequestHandler('tools/list', async () => ({ tools: services.toolDefs[variant] }));
+  server.setRequestHandler('tools/list', async () => {
+    logLine('rpc', `tools/list → ${services.toolDefs[variant].length} tools (${era || '?'}, apps=${renders})`);
+    return { tools: services.toolDefs[variant] };
+  });
 
   server.setRequestHandler('tools/call', async (request, ctx) => {
     const { name, arguments: args } = request.params;
@@ -125,10 +128,16 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
     return { resultType: 'task', ...tasks.detailed(t), statusMessage: 'The call is running; poll tasks/get.' };
   }
 
-  server.setRequestHandler('resources/list', async () => ({ resources: services.resources(offer) }));
+  server.setRequestHandler('resources/list', async () => {
+    const resources = services.resources(offer);
+    logLine('rpc', `resources/list → ${resources.length} (${era || '?'}, apps=${renders})`);
+    return { resources };
+  });
   server.setRequestHandler('resources/templates/list', async () => ({ resourceTemplates: services.templates(offer) }));
   server.setRequestHandler('resources/read', async (request) => {
     const contents = services.read(request.params.uri, offer);
+    // what a host fetches to (re-)draw a card is one line away from its answer
+    logLine('rpc', `resources/read ${String(request.params.uri).slice(0, 120)} → ${contents ? 'ok' : 'NOT FOUND'} (${era || '?'}, apps=${renders})`);
     // the SDK puts this on the wire as each revision spells it (-32002 in 2025, -32602 in 2026-07-28)
     if (!contents) throw new ResourceNotFoundError(request.params.uri);
     return { contents };

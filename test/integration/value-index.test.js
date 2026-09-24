@@ -17,12 +17,12 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
-import { startWarehouse } from './warehouse-harness.js';
+import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle } from '../helpers/settle.js';
 import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
-const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
+const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 // 10-min budget: before() awaits a FULL real indexer pass (37 targets × ~3 mf round-trips
 // each ≈ several minutes); the production indexer is background/non-blocking, but the test
 // awaits it synchronously to assert on populated values, so give the hook ample headroom.

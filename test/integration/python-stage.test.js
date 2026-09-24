@@ -21,10 +21,11 @@ import { createDbt } from '../../src/dbt/index.js';
 import { Engine } from '../../src/engine.js';
 import { settle, readTable } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
+import { fixtureProject } from './warehouse-harness.js';
 
 const execFileP = promisify(execFile);
 const ROOT = process.cwd();
-const PROJECT = join(ROOT, 'test', 'integration', 'fixtures', 'duckdb_project');
+const PROJECT = fixtureProject('duckdb_project'); // a private copy: the test files run side by side
 // dbt 1.x: v2 runs no Python models on DuckDB
 const ENV = dbtEnv(process.env.DBT_PY_ENV || 'dbt1');
 const DBT_BIN = ENV?.dbtBin || '';

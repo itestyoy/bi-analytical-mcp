@@ -20,12 +20,12 @@ import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
-import { startWarehouse } from './warehouse-harness.js';
+import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, readTable } from '../helpers/settle.js';
 import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
-const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'scd_project');
+const BASE = fixtureProject('scd_project'); // a private copy: the test files run side by side
 const CATALOG = join(process.cwd(), 'test', 'integration', 'fixtures', 'scd_catalog.yml');
 const opts = { timeout: 300000 };
 const num = (v) => Number(v);

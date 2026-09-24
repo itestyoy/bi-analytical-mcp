@@ -12,11 +12,11 @@ import { promisify } from 'node:util';
 import { loadCatalog } from '../../src/catalog.js';
 import { createDbt } from '../../src/dbt/index.js';
 import { renderPipeline } from '../../src/pipeline.js';
-import { startWarehouse } from './warehouse-harness.js';
+import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
-const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
+const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 const num = (v) => Number(v);
 

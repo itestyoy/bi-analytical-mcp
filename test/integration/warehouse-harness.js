@@ -4,7 +4,7 @@
 // warehouse's turn like every dbt process does (one process at a time holds a DuckDB file).
 
 import { execFile } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { warehouseTurns } from '../../src/dbt/process.js';
@@ -36,6 +36,18 @@ function run(path, statements) {
     });
     child.stdin.end(JSON.stringify(statements));
   }));
+}
+
+/**
+ * A private copy of a fixture dbt project for this test file. dbt writes into its project's
+ * target/ (dbt v2 even stages seed data there as parquet), and the test files run side by side:
+ * sharing one fixture directory, they overwrite each other's files mid-run.
+ */
+export function fixtureProject(name) {
+  const src = join(process.cwd(), 'test', 'integration', 'fixtures', name);
+  const dst = join(mkdtempSync(join(tmpdir(), `fx-${name}-`)), name);
+  cpSync(src, dst, { recursive: true, filter: (p) => !/\/(target|logs)(\/|$)/.test(p.slice(src.length)) });
+  return dst;
 }
 
 /** A fresh database file; DUCKDB_PATH points at it for everything this process starts. */

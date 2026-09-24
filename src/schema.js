@@ -448,6 +448,25 @@ export function buildSchemas(catalog) {
           },
         },
       }, ['values']),
+      form('pivot', 'pivot — a table to drill into', 'A TABLE TO DRILL INTO, level by level: the card shows the top level, and each row expands into the next level ON DEMAND — read from the stored result, filtered to that row — so the detail is never loaded all at once. Reads a MATERIALIZED result (materialize: true, or a pipeline table). Each level RE-AGGREGATES the rows under it with the value\'s agg: sum, count, min and max fold honestly, but a distinct count, an average or a ratio does NOT add up across levels (a user present in two children counts twice) — be careful with non-additive metrics: prefer additive columns (counts, sums, the numerator and denominator of a ratio) as the values.', {
+        levels: {
+          type: 'array', minItems: 1, maxItems: 5, description: 'The dimension columns, from the top level down.',
+          items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 40, description: 'How the level reads to the person — short, it names a column and each opened row (default: the column name).' } } },
+        },
+        values: {
+          type: 'array', minItems: 1, maxItems: 6, description: 'The value columns, each re-aggregated per level.',
+          items: {
+            type: 'object', additionalProperties: false, required: ['column'],
+            properties: {
+              column: resultColumn,
+              agg: { enum: ['sum', 'count', 'min', 'max', 'avg'], default: 'sum', description: 'How the rows under a level fold into its value.' },
+              label: { type: 'string', maxLength: 60, description: 'How the value reads to the person (default: the column name).' },
+              format: { enum: ['number', 'percent', 'currency'], default: 'number' },
+              currency: { type: 'string', pattern: '^[A-Z]{3}$', default: 'USD' },
+            },
+          },
+        },
+      }, ['levels', 'values']),
       form('sankey', 'sankey — flows between stages', 'FLOWS between stages: a row per link, source → target with an amount (installs from channel to platform). Links chain — a target can be the next source — and never loop back.', {
         source_column: { ...resultColumn, description: 'The column naming where a flow starts.' },
         target_column: { ...resultColumn, description: 'The column naming where it goes.' },
@@ -462,6 +481,9 @@ export function buildSchemas(catalog) {
     required: ['context_id'],
     description: 'Run a metric query against a context.',
     $defs: pdefs,
+    // a drill-down reads the STORED result level by level, so it needs one
+    if: { required: ['display'], properties: { display: { required: ['kind'], properties: { kind: { const: 'pivot' } } } } },
+    then: { required: ['materialize'], properties: { materialize: { const: true } } },
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
@@ -563,7 +585,7 @@ export function buildSchemas(catalog) {
             group_by: { type: 'array', items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
             aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function.' }, column: { type: 'string', description: 'Column to aggregate (omit for count).' }, as: { type: 'string', description: 'Output column alias.' } } } },
             having: { type: 'array', description: 'Post-aggregation filters on aggregate values.', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' }, value: { description: 'Threshold value.' } } } },
-            order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' } } } },
+            order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
             limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows after projection.' },
           },
         },

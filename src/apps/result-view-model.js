@@ -8,11 +8,43 @@
 // query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
 // status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
 // the tool's text result speaks for itself. Rows are drawn as the caller DECLARED them when the
-// result carries `display` (a funnel, KPI tiles, a line, area, bar, pie or sankey chart over named columns); only without one is
+// result carries `display` (a funnel, KPI tiles, a drill-down pivot, a line, area, bar, pie or sankey chart over named columns); only without one is
 // the card inferred from the shape. The view imports it and the unit
 // tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
-// Everything below is data in, data out: no DOM, no module scope.
+// Everything below is data in, data out: no DOM, no module state.
+
+/** How many rows one drill-down level reads — the top level and every level a row opens into. */
+export const PIVOT_LEVEL_ROWS = 200;
+
+/**
+ * A drill-down's read of one level (display kind pivot): the rows of the stored result under `path`
+ * (the keys of the rows opened above, top level first), grouped by the next level, each value folded
+ * with its agg, the largest first. The engine reads the top level with it and the card each level it
+ * opens — one definition of what a level is.
+ */
+export function pivotTransform(display, path) {
+  return {
+    where: path.map((key, i) => (key === null ? { column: display.levels[i].column, op: 'is_null' } : { column: display.levels[i].column, op: 'eq', value: key })),
+    group_by: [display.levels[path.length].column],
+    aggregations: display.values.map((v) => ({ fn: v.agg || 'sum', column: v.column, as: v.column })),
+    // the largest first, an empty value last — the same on every warehouse
+    order_by: [{ key: display.values[0].column, direction: 'desc', nulls: 'last' }],
+  };
+}
+
+/** The rows of one drill-down level read with pivotTransform: the key as it came (to filter by), and the values. */
+export function pivotRows(result, display, depth) {
+  const level = display.levels[depth].column;
+  const rows = Array.isArray(result?.rows) ? result.rows : [];
+  const names = Array.isArray(result?.columns) && result.columns.length ? result.columns.map((c) => (c && typeof c === 'object' ? c.name : String(c))) : null;
+  const get = (r, name) => (Array.isArray(r) ? (names ? r[names.indexOf(name)] : undefined) : r?.[name]);
+  const num = (v) => (v === null || v === undefined || v === '' ? null : Number.isFinite(Number(v)) ? Number(v) : null);
+  return rows.map((r) => {
+    const key = get(r, level) ?? null;
+    return { key, label: key === null ? '∅' : String(key), values: display.values.map((v) => num(get(r, v.column))) };
+  });
+}
 
 export function buildViewModel(toolName, result, toolInput) {
   const MAX_SERIES = 6; // lines share one axis; past six the legend stops being readable
@@ -32,6 +64,9 @@ export function buildViewModel(toolName, result, toolInput) {
   const none = (reason, extra = {}) => ({ kind: 'none', reason, ...extra });
   // (the query_id is what the card follows to the rows)
   if (result.status === 'running' && result.query_id) return none('running', { query_id: String(result.query_id) });
+  // a result that existed and is no longer there (deleted, expired) is not a failure: it says so
+  // plainly — error.code is RESULT_GONE in src/validate.js
+  if (result.ok === false && result.error?.code === 'result_gone') return none('gone');
   // a failure is only NAMED in the view — the reason is for the reply, not the card
   if (result.ok === false || (result.error && !result.rows)) return none('error');
 
@@ -295,6 +330,19 @@ export function buildViewModel(toolName, result, toolInput) {
           folded,
           title: declaredTitle,
         }, declaredTitle || title);
+      }
+      // a drill-down: the top level the server read, and where the card reads the levels below
+      if (d.kind === 'pivot' && Array.isArray(d.levels) && d.levels.length && d.levels.every(isObj) && Array.isArray(d.values) && d.values.length && isObj(result.pivot_source)) {
+        return {
+          kind: 'pivot',
+          title: declaredTitle || 'Pivot',
+          display: d,
+          levels: d.levels.map((l) => ({ column: l.column, label: typeof l.label === 'string' && l.label ? l.label : l.column })),
+          values: d.values.map((v) => ({ column: v.column, label: typeof v.label === 'string' && v.label ? v.label : v.column, agg: v.agg || 'sum', format: v.format || 'number', currency: v.currency || 'USD' })),
+          rows: pivotRows(result, d, 0),
+          has_more: !!result.page?.has_more,
+          source: result.pivot_source,
+        };
       }
       if (d.kind === 'kpi' && Array.isArray(d.values) && d.values.length && d.values.every((v) => isObj(v) && at(v.column) >= 0) && (at(d.x) >= 0 || rows.length === 1)) {
         // with an axis: the rows in its order (time sorted, any other axis as the rows came); the

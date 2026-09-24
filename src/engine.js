@@ -3,7 +3,7 @@
 
 import { buildSchemas, MAX_WAIT_SECONDS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
-import { makeValidators, validateInput, ToolError } from './validate.js';
+import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration } from './compile.js';
 import { renderContext } from './yaml-render.js';
@@ -27,6 +27,7 @@ import { buildProjection } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 import { detached, currentSignal } from './request-context.js';
+import { pivotTransform, PIVOT_LEVEL_ROWS } from './apps/result-view-model.js'; // what one drill-down level is: the same read for the engine and the card
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, pythonBuildGraceMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
@@ -3359,6 +3360,8 @@ export class Engine {
     }
     const job = this.jobs.get(id);
     if (job.status === 'error') return { ok: false, status: 'error', query_id: id, table, error: { stage: 'materialize', message: job.error } };
+    // a drill-down shows its TOP level first; the card reads the levels below from this table
+    if (input.display?.kind === 'pivot') return this._withPivot(await this._fetchResult(id, input.limit ?? PIVOT_LEVEL_ROWS, pivotTransform(input.display, [])), input.display, { query_id: id });
     return this._withDisplay(await this._fetchResult(id, input.limit ?? 1000, undefined, input.offset ?? 0), input.display);
   }
 
@@ -3409,6 +3412,21 @@ export class Engine {
    */
   async get_query_result(input) {
     this._validate('get_query_result', input);
+    // a drill-down (display kind pivot) reads its TOP level, not every detail row: the card opens the
+    // levels below one row at a time (a read with an explicit transform, which is served as it is)
+    const pivot = !input.transform && [input.display, input.query_id ? this.jobs.get(input.query_id)?.display : null].find((d) => d?.kind === 'pivot');
+    if (pivot) {
+      if (input.display) {
+        // its columns are the stored table's, not the top level's — checked against one row of it
+        const probe = await this._getQueryResult({ ...input, display: undefined, limit: 1, offset: undefined });
+        const cols = this._resultColumns(probe);
+        const problems = cols ? this._displayProblems(pivot, cols) : [];
+        if (problems.length) throw new ToolError(`display: ${problems.join('; ')}. This result's columns: ${cols.join(', ')}`, { stage: 'validate', field: 'display' });
+        if (!cols) return probe;
+      }
+      const out = await this._getQueryResult({ ...input, transform: pivotTransform(pivot, []), limit: input.limit ?? PIVOT_LEVEL_ROWS, offset: undefined });
+      return this._withPivot(out, pivot, input.query_id ? { query_id: input.query_id } : { context_id: input.context_id, table: input.table });
+    }
     const out = await this._getQueryResult(input);
     if (input.display) {
       const cols = this._resultColumns(out);
@@ -3442,11 +3460,13 @@ export class Engine {
       : display.kind === 'pie' ? [display.label_column, display.value_column]
         : display.kind === 'kpi' ? [display.x, ...(display.values || []).flatMap((v) => [v.column, v.previous_column])]
           : display.kind === 'sankey' ? [display.source_column, display.target_column, display.value_column]
+            : display.kind === 'pivot' ? [...(display.levels || []).map((l) => l.column), ...(display.values || []).map((v) => v.column)]
             : [display.x, ...ys, ...(display.series_column ? [display.series_column] : [])];
     const problems = [...new Set(named.filter((c) => c && !have.has(c)))].map((c) => `'${c}' is not a column of this result`);
     if (display.kind === 'funnel' && stepColumns && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
     if (display.kind === 'funnel' && stepColumns && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, or declare steps: { label_column, value_column } for a row per step`);
     if (display.series_column && ys.length > 1) problems.push(`series_column splits ONE y column into a ${display.kind === 'bar' ? 'bar' : display.kind === 'area' ? 'band' : 'line'} per value — declare a single y with it`);
+    if (display.kind === 'pivot' && new Set((display.levels || []).map((l) => l.column)).size !== (display.levels || []).length) problems.push('a level is listed twice');
     if (display.kind === 'kpi' && !display.x && Array.isArray(rows) && rows.length !== 1) problems.push(`KPI tiles read ONE row, and this result has ${rows.length} — aggregate to one row, or give x (the time column) to show the last row with its trend`);
     if (display.kind === 'sankey' && Array.isArray(rows) && have.has(display.source_column) && have.has(display.target_column)) {
       const links = rows.map((r) => [String(r?.[display.source_column]), String(r?.[display.target_column])]);
@@ -3460,6 +3480,12 @@ export class Engine {
       if (rows.some((r) => Number(r?.[display.value_column]) < 0)) problems.push(`a pie's slices are shares of one total, and '${display.value_column}' has negative values — use a bar`);
     }
     return problems;
+  }
+
+  /** A drill-down's top level, with where its levels are read (the card reads them from there). */
+  _withPivot(out, display, source) {
+    if (!out || out.ok === false || !Array.isArray(out.rows)) return out;
+    return { ...out, display, pivot_source: source };
   }
 
   /** Whether directed links [from, to] loop back anywhere (depth-first, three colours). */
@@ -3488,7 +3514,8 @@ export class Engine {
   }
 
   async _getQueryResult(input) {
-    if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
+    // the engine is needed to READ a table; looking a job up, or a result held in memory, is not
+    const needEngine = () => { if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' }); };
     // The top-level `limit` and `transform.limit` BOTH cap rows; applied together they emit
     // two LIMITs (… LIMIT a … LIMIT b → SQL syntax error). Accept exactly one source of truth,
     // and when it lives in transform, strip it so buildProjection doesn't also emit a LIMIT —
@@ -3507,21 +3534,29 @@ export class Engine {
     if (input.table) {
       this._ctx(input.context_id); // validate the context exists (throws otherwise)
       if (!/^(qr_[a-f0-9]{8,16}|pipe_[a-z][a-z0-9_]{0,80})$/.test(input.table)) throw new ToolError(`invalid result table name: ${input.table}`, { stage: 'validate', field: 'table' });
+      needEngine();
       return this._readTable(this.ctxs.dir(input.context_id), input.table, limit, transform, {}, offset, sample, samplePercent);
     }
     const job = this.jobs.get(input.query_id);
-    if (!job) throw new ToolError(`unknown query_id: ${input.query_id} (pass {context_id, table} to fetch a known table directly)`, { stage: 'validate', field: 'query_id' });
+    // RESULT_GONE marks a result that existed and is no longer there (as opposed to a query that
+    // failed): a card that follows its query says "no longer available", not "error"
+    if (!job) throw new ToolError(`unknown query_id: ${input.query_id} (pass {context_id, table} to fetch a known table directly)`, { stage: 'validate', field: 'query_id', code: RESULT_GONE });
     if (job.inline) {
       // a metric query that outlasted its call: its finished response is held here, not in a table
       if (job.status === 'running' && this.jobs.isLive(job.id)) return { ok: true, status: 'running', query_id: job.id };
       if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, error: { stage: 'query', message: job.error } };
       const kept = job.status === 'ready' ? this._inlineResults?.get(job.id) : null;
-      if (!kept) return { ok: false, status: 'error', query_id: job.id, error: { stage: 'query', message: 'this query\'s result was held in memory and is gone (the server restarted, or it is over an hour old) — run the query again; materialize:true keeps a result as a table that survives restarts.' } };
+      if (!kept) return { ok: false, status: 'error', query_id: job.id, error: { stage: 'query', code: RESULT_GONE, message: 'this query\'s result was held in memory and is gone (the server restarted, or it is over an hour old) — run the query again; materialize:true keeps a result as a table that survives restarts.' } };
       if (input.transform || input.sample || input.offset || input.limit != null) throw new ToolError('this result is one page held in memory, not a table: re-slicing, sampling and paging need a materialized result — run the query again with materialize:true (or with the offset/limit you want).', { stage: 'validate', field: input.transform ? 'transform' : input.sample ? 'sample' : 'offset' });
       return { ...kept.out, status: 'ready', query_id: job.id };
     }
     if (job.status === 'running') return { ok: true, status: 'running', query_id: job.id, table: job.table };
     if (job.status === 'error') return { ok: false, status: 'error', query_id: job.id, table: job.table, error: { stage: 'materialize', message: job.error } };
+    // a built result whose context or table definition was deleted since: gone, not failed
+    if (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table)) {
+      return { ok: false, status: 'error', query_id: job.id, table: job.table, error: { stage: 'fetch', code: RESULT_GONE, message: `the result table ${job.table} was deleted (its context or model is gone) — run the query again to rebuild it` } };
+    }
+    needEngine();
     return this._fetchResult(job.id, limit, transform, offset, sample, samplePercent);
   }
 

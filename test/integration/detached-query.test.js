@@ -16,7 +16,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startPglite } from './pglite-harness.js';
-import { buildViewModel } from '../../src/apps/result-view-model.js';
+import { buildViewModel, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
 
 const execFileP = promisify(execFile);
 const BASE = join(process.cwd(), 'test', 'integration', 'fixtures', 'dbt_project');
@@ -168,4 +168,54 @@ test('a KPI tile over the warehouse total shows its number; over many rows it ne
   assert.equal(many.display, undefined);
   assert.ok((many.warnings || []).some((w) => w.startsWith('display was not applied')), JSON.stringify(many.warnings));
   assert.equal(many.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85);
+});
+
+// A result that EXISTED and is no longer there says so structurally (error.code result_gone), and the
+// card reads it as "no longer available" — not as the failure a broken query is.
+test('a result that is gone — forgotten, expired or deleted — is result_gone, and the card says so instead of "Error"', opts, async (t) => {
+  if (skip(t)) return;
+  // held in memory, then forgotten (what a restart or the hour does)
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
+  const done = await follow(first.query_id);
+  assert.equal(Number(done.rows[0].mon_revenue), 85);
+  engine._inlineResults.delete(first.query_id);
+  const forgotten = await engine.get_query_result({ query_id: first.query_id });
+  assert.deepEqual([forgotten.ok, forgotten.error.code], [false, 'result_gone']);
+  assert.deepEqual(buildViewModel('get_query_result', forgotten), { kind: 'none', reason: 'gone' });
+  // a query_id this server never issued
+  await assert.rejects(engine.get_query_result({ query_id: 'ffffffffffff' }), (e) => e.code === 'result_gone');
+  // a materialized result whose table definition was deleted
+  const mat = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], materialize: true });
+  const built = await follow(mat.query_id);
+  assert.equal(Number(built.rows[0].mon_revenue), 85);
+  engine.ctxs.removeGeneratedFile(ctxId, `${built.table}.sql`);
+  const deleted = await engine.get_query_result({ query_id: mat.query_id });
+  assert.deepEqual([deleted.ok, deleted.error.code], [false, 'result_gone']);
+  // …while a query that FAILED stays an error
+  assert.equal(buildViewModel('get_query_result', { ok: false, status: 'error', error: { stage: 'query', message: 'x' } }).reason, 'error');
+});
+
+// A DRILL-DOWN: the card gets the top level, and each row it opens reads the next level from the
+// stored result, filtered to that row — the same read the card makes, run here against the warehouse.
+test('a pivot shows the top level from the warehouse, and a row opens into its children, which add up to it', opts, async (t) => {
+  if (skip(t)) return;
+  const display = { kind: 'pivot', levels: [{ column: 'users_country', label: 'Country' }, { column: 'users_platform', label: 'Platform' }], values: [{ column: 'mon_revenue', agg: 'sum', label: 'Revenue' }] };
+  // a drill-down reads a stored result: without materialize the schema refuses it
+  await assert.rejects(engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }], display }), (e) => e.field !== undefined || /materialize/.test(e.message));
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }, { model: 'users', attribute: 'platform' }], materialize: true, display });
+  const top = first.status === 'running' ? await follow(first.query_id) : first;
+  assert.equal(top.ok, true, JSON.stringify(top.error));
+  const m = buildViewModel('get_query_result', top);
+  assert.equal(m.kind, 'pivot');
+  assert.deepEqual(m.source, { query_id: first.query_id });
+  assert.deepEqual(m.levels, [{ column: 'users_country', label: 'Country' }, { column: 'users_platform', label: 'Platform' }]);
+  const byCountry = Object.fromEntries(m.rows.map((r) => [r.label, r.values[0]]));
+  assert.deepEqual([byCountry.US, byCountry.GB, byCountry.BR], [35, 25, 25]);
+  assert.equal(m.rows[0].label, 'US', 'the largest first');
+  // open US: the card's own read
+  const us = m.rows.find((r) => r.label === 'US');
+  const level = await engine.get_query_result({ ...m.source, transform: pivotTransform(display, [us.key]), limit: PIVOT_LEVEL_ROWS });
+  const children = pivotRows(level, display, 1);
+  assert.ok(children.length >= 1);
+  assert.equal(children.reduce((a, c) => a + (c.values[0] ?? 0), 0), 35, 'the children of US add up to US');
 });

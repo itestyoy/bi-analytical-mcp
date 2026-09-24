@@ -171,12 +171,21 @@ the plain tools stay exactly as they were for every client that does not:
   fold into "Other"; negative values or a single row are refused), `funnel` (`steps` as columns of one
   row, or `{ label_column, value_column }` over a row per step), `kpi` (1–4 headline tiles from one
   row with the change against a `previous_column`, coloured only when `good: up|down` says which way
-  is good — or, with an `x` axis, the last row, its change and a sparkline) and `sankey` (a row per
-  link source → target with an amount; links that loop back are refused). Each takes a title;
+  is good — or, with an `x` axis, the last row, its change and a sparkline), `sankey` (a row per
+  link source → target with an amount; links that loop back are refused) and `pivot` (a drill-down
+  table over a MATERIALIZED result, `levels: [{ column, label }]`: the card gets the top level —
+  the header names only that one, and an opened row names the level under it ("US · by Platform") —
+  and each row it opens reads the next level from the stored table, filtered to that row — 200 rows
+  a level; each level re-aggregates
+  with the value's agg, so sums and counts add up while distinct counts, averages and ratios do not).
+  Each takes a title;
   the server checks the columns exist (a
   detached query remembers it) and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
-  result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply),
+  result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply), a result that is gone — its table
+  or context deleted, a result held in memory expired or lost to a restart, a query_id the server
+  does not know (`error.code: result_gone`, shown as "This result is no longer available": a card
+  re-drawn later that follows such a query says so instead of "Error"),
   SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
   nothing would leave an empty box) and the text answer carries the rest.
   A query that outlasts its call answers `{ status: 'running', query_id }`; its card then FOLLOWS
@@ -188,8 +197,9 @@ the plain tools stay exactly as they were for every client that does not:
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
   not call it) except `get_query_result`, `["model", "app"]`; the view resource declares an empty
   `csp` (no connect, resource or frame origin) and the page carries the same Content-Security-Policy
-  itself; and the view's code makes that one call — get_query_result with its own query_id — and
-  calls no other tool, resource, model message or link.
+  itself; and the view's code makes that one call — get_query_result for its own result: its
+  query_id while it waits, the next level of its own stored table when a pivot row opens — and calls
+  no other tool, resource, model message or link.
   (`semantic_index` has no view on purpose: it is the most frequent call and a view on every
   exploration step would bury the conversation.) The view is built like the official MCP Apps
   examples — the ext-apps `App` class, host theme and style variables, shadcn/ui components,

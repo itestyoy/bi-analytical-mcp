@@ -1138,3 +1138,72 @@
     vector-effect: non-scaling-stroke;
   }
 }
+
+/* ── Pivot: a drill-down table — a chevron opens a row into the next level, indented under it ── */
+.pivot-container {
+  max-height: 560px;
+}
+
+.pivot-table {
+  .pivot-label {
+    display: flex;
+    align-items: center;
+    gap: calc(var(--space) * 1);
+    /* one step of indent per level, so a row reads as part of the one above it */
+    padding-left: calc(var(--space) * 1 + var(--depth, 0) * var(--space) * 6);
+  }
+
+  .pivot-toggle {
+    width: 1.5rem;
+    height: 1.5rem;
+    border-radius: var(--border-radius-sm);
+    color: var(--muted-foreground);
+
+    .icon {
+      width: 1rem;
+      height: 1rem;
+      transition: transform 0.15s;
+    }
+
+    &[aria-expanded="true"] .icon {
+      transform: rotate(90deg);
+    }
+  }
+
+  /* while a row is open it names the level its children are — quiet, next to its label */
+  .pivot-by {
+    margin-left: calc(var(--space) * 1.5);
+    font-size: var(--font-text-xs-size);
+    color: var(--muted-foreground);
+  }
+
+  /* a row with no level below it keeps its label in line with the ones that open */
+  .pivot-leaf {
+    width: 1.5rem;
+    flex-shrink: 0;
+  }
+
+  .pivot-note td {
+    padding-left: calc(var(--space) * 8 + var(--depth, 0) * var(--space) * 6);
+    color: var(--muted-foreground);
+    font-size: var(--font-text-xs-size);
+
+    > * {
+      vertical-align: middle;
+    }
+
+    .icon {
+      width: 0.875rem;
+      height: 0.875rem;
+      margin-right: calc(var(--space) * 1.5);
+    }
+  }
+
+  .pivot-error td {
+    color: var(--destructive);
+  }
+
+  tbody tr:hover.pivot-note {
+    background-color: transparent;
+  }
+}

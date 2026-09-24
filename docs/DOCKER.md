@@ -157,20 +157,39 @@ the plain tools stay exactly as they were for every client that does not:
   `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`):
   a CHART (a time series or a breakdown, its rows folded underneath as a filterable, sortable table),
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
-  TEST (a stat card per variant: lift, interval, verdict, the groups), the SAMPLE-RATIO CHECK (the
+  TEST (a stat card per variant: lift, interval, verdict, the groups — a significant change coloured
+  by what it means for the metric: green an improvement, red a regression; `good: down` on the
+  analyze call marks a metric where lower is better, such as crash rate or churn, and the card says
+  "lower is better"), the SAMPLE-RATIO CHECK (the
   observed split against the intended one) and the SAMPLE-SIZE PLAN. What a result with rows IS is
-  declared by the caller: `display` on `query_semantic_model` / `get_query_result` names a funnel
-  (step columns of one row, or a label and a value column over a row per step), a line or a bar
-  chart over the result's columns, with an optional title; the server checks the columns exist (a
+  declared by the caller: `display` on `query_semantic_model` / `get_query_result`, a union of closed
+  forms tagged by `kind` — each form's schema says which question it fits and what it needs (required
+  fields, bounds, enums, if/then), so nothing about a form lives in prose: `line` (a trend; several
+  `y`, or one `y` with a `series_column`, is a multi-line), `area` (a total split into parts over time,
+  stacked), `bar` (a comparison: grouped by several `y` or a `series_column`, `stacked`, `horizontal` —
+  the default past 8 categories), `pie` (shares of one total as a donut; past 6 slices the smallest
+  fold into "Other"; negative values or a single row are refused), `funnel` (`steps` as columns of one
+  row, or `{ label_column, value_column }` over a row per step), `kpi` (1–4 headline tiles from one
+  row with the change against a `previous_column`, coloured only when `good: up|down` says which way
+  is good — or, with an `x` axis, the last row, its change and a sparkline) and `sankey` (a row per
+  link source → target with an amount; links that loop back are refused). Each takes a title;
+  the server checks the columns exist (a
   detached query remembers it) and the card draws exactly that, in the declared order. Without it
   the card is inferred from the shape. A spinner shows until the
   result arrives. Any other result — a failure (shown only as "Error"; the reason is in the reply),
-  a build still running, SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
+  SQL, rows with no chart shape — gets one quiet status line (the host keeps a minimum frame for the view, so drawing
   nothing would leave an empty box) and the text answer carries the rest.
-  The view ONLY DRAWS: it reads the result the host hands it and nothing else. Every tool declares
-  `_meta.ui.visibility: ["model"]` (a view may not call it), the view resource declares an empty
+  A query that outlasts its call answers `{ status: 'running', query_id }`; its card then FOLLOWS
+  that query — it polls `get_query_result` for that query_id every 3 s (for up to 30 min) and draws
+  the rows in place of the "Running in the warehouse…" line when they are ready. A host that does
+  not proxy a view's tool calls (no `serverTools` capability), or a refused call, leaves a static
+  "The result comes in a separate card" line instead, and the result comes with the model's own
+  `get_query_result` card.
+  Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
+  not call it) except `get_query_result`, `["model", "app"]`; the view resource declares an empty
   `csp` (no connect, resource or frame origin) and the page carries the same Content-Security-Policy
-  itself, and the view's code calls no server tool, resource, model message or link.
+  itself; and the view's code makes that one call — get_query_result with its own query_id — and
+  calls no other tool, resource, model message or link.
   (`semantic_index` has no view on purpose: it is the most frequent call and a view on every
   exploration step would bury the conversation.) The view is built like the official MCP Apps
   examples — the ext-apps `App` class, host theme and style variables, shadcn/ui components,

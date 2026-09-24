@@ -96,7 +96,7 @@ test('a detached query that FAILS reports the failure through get_query_result',
 // and the card's numbers are the warehouse's.
 test('a declared bar chart survives the detach and draws the warehouse\'s numbers in row order', opts, async (t) => {
   if (skip(t)) return;
-  const display = { kind: 'bar', title: 'Revenue by country', x: 'users_country', y: 'mon_revenue' };
+  const display = { kind: 'bar', title: 'Revenue by country', x: 'users_country', y: ['mon_revenue'] };
   const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], order_by: [{ key: 'mon_revenue', direction: 'asc' }], display });
   assert.equal(first.status, 'running');
   const done = await follow(first.query_id);
@@ -116,7 +116,7 @@ test('a funnel declared on a read of that result follows the declared steps, not
   const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], where: paying, order_by: [{ key: 'mon_revenue', direction: 'desc' }] });
   const done = await follow(first.query_id);
   assert.equal(done.display, undefined, 'no declaration, none attached');
-  const read = await engine.get_query_result({ query_id: first.query_id, display: { kind: 'funnel', label_column: 'users_country', value_column: 'mon_revenue' } });
+  const read = await engine.get_query_result({ query_id: first.query_id, display: { kind: 'funnel', steps: { label_column: 'users_country', value_column: 'mon_revenue' } } });
   const m = buildViewModel('get_query_result', read);
   assert.equal(m.kind, 'funnel');
   assert.deepEqual(m.steps.map((x) => x.label), read.rows.map((r) => String(r.users_country)));
@@ -136,4 +136,36 @@ test('a declaration naming a column the result does not have is refused, with th
     engine.get_query_result({ query_id: first.query_id, display: { kind: 'funnel', steps: [{ column: 'mon_revenue' }, { column: 'no_such_step' }] } }),
     (e) => e.field === 'display',
   );
+});
+
+test('a declared pie carries each country\'s share of the warehouse total; a pie of negative or single values is refused', opts, async (t) => {
+  if (skip(t)) return;
+  const paying = { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'country' }, op: 'in', value: ['US', 'GB', 'BR'] }] };
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], where: paying, display: { kind: 'pie', label_column: 'users_country', value_column: 'mon_revenue' } });
+  const done = await follow(first.query_id);
+  const m = buildViewModel('get_query_result', done);
+  assert.equal(m.chart.type, 'pie');
+  assert.equal(m.chart.total, 85);
+  // the largest share first (US 35 of 85); GB and BR tie at 25 each
+  assert.deepEqual([m.chart.slices[0].label, m.chart.slices[0].share], ['US', 35 / 85]);
+  assert.deepEqual(m.chart.slices.slice(1).map((x) => x.label).sort(), ['BR', 'GB']);
+  assert.deepEqual(m.chart.slices.slice(1).map((x) => x.share), [25 / 85, 25 / 85]);
+  // one row is a number, not a pie
+  const one = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'] });
+  await follow(one.query_id);
+  await assert.rejects(engine.get_query_result({ query_id: one.query_id, display: { kind: 'pie', label_column: 'mon_revenue', value_column: 'mon_revenue' } }), (e) => e.field === 'display');
+});
+
+test('a KPI tile over the warehouse total shows its number; over many rows it needs an axis', opts, async (t) => {
+  if (skip(t)) return;
+  const first = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], display: { kind: 'kpi', title: 'Revenue', values: [{ column: 'mon_revenue', label: 'IAP revenue', format: 'currency' }] } });
+  const done = await follow(first.query_id);
+  const m = buildViewModel('get_query_result', done);
+  assert.equal(m.kind, 'kpi');
+  assert.deepEqual(m.tiles.map((x) => [x.label, x.value]), [['IAP revenue', 85]]);
+  // a row per country and no axis: the rows come back, the tiles are not drawn, and the reply says why
+  const many = await follow((await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], display: { kind: 'kpi', values: [{ column: 'mon_revenue' }] } })).query_id);
+  assert.equal(many.display, undefined);
+  assert.ok((many.warnings || []).some((w) => w.startsWith('display was not applied')), JSON.stringify(many.warnings));
+  assert.equal(many.rows.reduce((a, r) => a + Number(r.mon_revenue ?? 0), 0), 85);
 });

@@ -34,22 +34,33 @@ test('the viewed tools carry the view in both spellings, for every client in bot
   }
 });
 
-test('the view only draws: every tool is model-only, the view declares no network, its code calls nothing back', async () => {
+test('the view draws and follows only its own query: one tool is app-callable, no network, one server call in its code', async () => {
   for (const era of ['legacy', 'modern']) {
     const c = await s.client({ era });
-    // a host refuses a view's tools/call to a tool that is not visible to "app"
-    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, ['model'], `${era} ${t.name}`);
+    // a host refuses a view's tools/call to a tool that is not visible to "app": only the read of a result is
+    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, t.name === 'get_query_result' ? ['model', 'app'] : ['model'], `${era} ${t.name}`);
     const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
     assert.deepEqual(content._meta?.ui?.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, `${era}: no origin of any kind`);
   }
-  // the view's own code: no App method that reaches the server or the model, no network API
-  const REACHES_OUT = /\b(callServerTool|readServerResource|listServerResources|createSamplingMessage|sendMessage|updateModelContext|openLink|downloadFile|sendLog|fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)\s*\(/;
+  // the view's own code: no App method that reaches the model or other server methods, no network API
+  const REACHES_OUT = /\b(readServerResource|listServerResources|createSamplingMessage|sendMessage|updateModelContext|openLink|downloadFile|sendLog|fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)\s*\(/;
   const dir = new URL('../../src/apps/result-view/src/', import.meta.url).pathname;
   const sources = [...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f)), new URL('../../src/apps/result-view-model.js', import.meta.url).pathname];
+  const toolCalls = [];
   for (const file of sources) {
-    const hit = readFileSync(file, 'utf8').match(REACHES_OUT);
+    const text = readFileSync(file, 'utf8');
+    const hit = text.match(REACHES_OUT);
     assert.equal(hit, null, `${file} calls ${hit?.[1]}`);
+    for (const m of text.matchAll(/callServerTool\s*\(([^)]*)\)/g)) toolCalls.push(m[1]);
   }
+  // exactly one tools/call: get_query_result, with nothing but the query_id of the card's own result
+  assert.equal(toolCalls.length, 1, `server tool calls: ${toolCalls.join(' | ')}`);
+  assert.deepEqual(toolCalls[0].replace(/\s+/g, ' ').trim(), "{ name: 'get_query_result', arguments: { query_id: queryId } }");
+});
+
+test('view model: a result that moved to the background carries the query_id the card follows', () => {
+  const m = buildViewModel('query_semantic_model', { ok: true, status: 'running', query_id: 'abc123abc123' });
+  assert.deepEqual(m, { kind: 'none', reason: 'running', query_id: 'abc123abc123' });
 });
 
 test('the view resource is one mcp-app HTML document, listed and readable in both eras', async () => {
@@ -111,6 +122,27 @@ test('view model: the A/B card carries the test\'s own numbers', async () => {
   assert.equal(v.variant_value, r.results[0].variant_rate);
   assert.deepEqual(v.ci, r.results[0].confidence_interval);
   assert.equal(v.p_value, r.results[0].p_value);
+});
+
+test('A/B outcome: the same significant rise is an improvement where up is good and a regression where down is', async () => {
+  // crash sessions: 400 of 10 000 in control, 520 of 10 000 in the variant — a clear rise
+  const args = { action: 'analyze', metric: 'proportion', control: { n: 10000, conversions: 400 }, variants: [{ label: 'new_sdk', n: 10000, conversions: 520 }] };
+  const up = await s.engine.experiment(args);
+  const down = await s.engine.experiment({ ...args, good: 'down' });
+  // no statistic changes with the reading
+  assert.equal(down.results[0].p_value, up.results[0].p_value);
+  assert.equal(down.results[0].absolute_lift, 0.052 - 0.04);
+  assert.equal(up.results[0].significant_adjusted, true);
+  assert.deepEqual([up.good, up.results[0].outcome], ['up', 'better']);
+  assert.deepEqual([down.good, down.results[0].outcome], ['down', 'worse']);
+  assert.ok(down.recommendations.some((x) => x.startsWith('new_sdk is significantly WORSE')));
+  // the card carries it: the direction stays "increase", its reading flips
+  const m = buildViewModel('experiment', down, { ...args, good: 'down' });
+  assert.equal(m.good, 'down');
+  assert.deepEqual([m.variants[0].verdict, m.variants[0].outcome], ['increase', 'worse']);
+  // a result with no significance reads as no difference either way
+  const flat = await s.engine.experiment({ ...args, good: 'down', variants: [{ label: 'same', n: 10000, conversions: 402 }] });
+  assert.equal(flat.results[0].outcome, 'no_difference');
 });
 
 test('view model: each A/B variant carries its verdict, its interval in the headline\'s unit, its group sizes, on one shared scale', async () => {
@@ -186,9 +218,81 @@ test('view model: a DECLARED line over a non-time axis keeps the row order; seri
   assert.deepEqual(t.chart.series[0].points, [['2026-09-01', 3], ['2026-09-02', 5]]);
 });
 
+test('view model: a DECLARED bar split by a column groups (or stacks) a bar per value inside each category', () => {
+  const rows = [{ c: 'US', p: 'ios', v: 420 }, { c: 'US', p: 'android', v: 310 }, { c: 'BR', p: 'android', v: 180 }, { c: 'BR', p: 'ios', v: 40 }, { c: 'BR', p: 'ios', v: 5 }];
+  const cols = [{ name: 'c' }, { name: 'p' }, { name: 'v' }];
+  const m = buildViewModel('get_query_result', { columns: cols, rows, display: { kind: 'bar', x: 'c', y: ['v'], series_column: 'p', stacked: true, horizontal: true } });
+  assert.equal(m.chart.type, 'bar');
+  assert.deepEqual(m.chart.labels, ['US', 'BR'], 'categories in the order they first appear');
+  // the largest series first (android 490 > ios 465); a category × series seen twice is summed
+  assert.deepEqual(m.chart.series, [{ name: 'android', values: [310, 180] }, { name: 'ios', values: [420, 45] }]);
+  assert.equal(m.chart.stacked, true);
+  assert.equal(m.chart.horizontal, true);
+  // several y columns: a bar each per category, grouped
+  const g = buildViewModel('get_query_result', { columns: [{ name: 'c' }, { name: 'a' }, { name: 'b' }], rows: [{ c: 'x', a: 1, b: 2 }, { c: 'y', a: 3, b: 4 }], display: { kind: 'bar', x: 'c', y: ['a', 'b'] } });
+  assert.deepEqual(g.chart.series, [{ name: 'a', values: [1, 3] }, { name: 'b', values: [2, 4] }]);
+  assert.equal(g.chart.stacked, false);
+});
+
+test('view model: a DECLARED area stacks its series; a single line stays a line', () => {
+  const rows = [{ d: '2026-09-01', p: 'ios', n: 5 }, { d: '2026-09-01', p: 'web', n: 1 }, { d: '2026-09-02', p: 'ios', n: 6 }, { d: '2026-09-02', p: 'web', n: 2 }];
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'd' }, { name: 'p' }, { name: 'n' }], rows, display: { kind: 'area', x: 'd', y: ['n'], series_column: 'p' } });
+  assert.equal(m.chart.area, true);
+  assert.equal(m.chart.stacked, true);
+  assert.deepEqual(m.chart.series.map((x) => [x.name, x.points.map((p) => p[1])]), [['ios', [5, 6]], ['web', [1, 2]]]);
+  const l = buildViewModel('get_query_result', { columns: [{ name: 'd' }, { name: 'p' }, { name: 'n' }], rows, display: { kind: 'line', x: 'd', y: ['n'], series_column: 'p' } });
+  assert.equal(l.chart.area, undefined);
+});
+
+test('view model: a DECLARED pie is slices in size order with their shares; past six the smallest fold into Other', () => {
+  const vals = [['US', 730], ['GB', 270], ['BR', 220], ['DE', 160], ['FR', 95], ['JP', 60], ['KR', 40], ['IN', 25]];
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'c' }, { name: 'v' }], rows: vals.map(([c, v]) => ({ c, v })).reverse(), display: { kind: 'pie', label_column: 'c', value_column: 'v' } });
+  assert.equal(m.chart.type, 'pie');
+  assert.equal(m.chart.total, 1600);
+  assert.deepEqual(m.chart.slices.map((x) => [x.label, x.value]), [['US', 730], ['GB', 270], ['BR', 220], ['DE', 160], ['FR', 95], ['Other', 125]]);
+  assert.equal(m.chart.folded, 3);
+  assert.ok(Math.abs(m.chart.slices.reduce((a, x) => a + x.share, 0) - 1) < 1e-12, 'the slices make up the whole');
+});
+
+test('view model: KPI tiles read one row, with the change against a previous column', () => {
+  const row = { revenue: 184230.5, revenue_prev: 171020, crash_rate: 0.0041, crash_rate_prev: 0.0052 };
+  const m = buildViewModel('get_query_result', { columns: Object.keys(row).map((name) => ({ name })), rows: [row], display: { kind: 'kpi', values: [{ column: 'revenue', label: 'Revenue', format: 'currency', previous_column: 'revenue_prev', good: 'up' }, { column: 'crash_rate', format: 'percent', previous_column: 'crash_rate_prev', good: 'down' }] } });
+  assert.equal(m.kind, 'kpi');
+  assert.deepEqual(m.tiles.map((t) => [t.label, t.value, t.previous, t.good]), [['Revenue', 184230.5, 171020, 'up'], ['crash_rate', 0.0041, 0.0052, 'down']]);
+  assert.equal(m.tiles[0].change, (184230.5 - 171020) / 171020);
+  assert.equal(m.tiles[1].change, (0.0041 - 0.0052) / 0.0052);
+  assert.equal(m.tiles[0].trend, null);
+});
+
+test('view model: KPI tiles over a time axis show the LAST row, its change from the row before and the trend', () => {
+  const rows = [{ d: '2026-09-03', dau: 130 }, { d: '2026-09-01', dau: 100 }, { d: '2026-09-02', dau: 120 }];
+  const m = buildViewModel('query_semantic_model', { columns: [{ name: 'd' }, { name: 'dau' }], rows, display: { kind: 'kpi', x: 'd', values: [{ column: 'dau' }] } });
+  assert.equal(m.as_of, '2026-09-03');
+  assert.equal(m.compared_to, '2026-09-02');
+  assert.deepEqual([m.tiles[0].value, m.tiles[0].previous], [130, 120]);
+  assert.deepEqual(m.tiles[0].trend, [100, 120, 130], 'in time order, whatever order the rows came in');
+});
+
+test('view model: a sankey sums a link seen twice, drops empty flows and sizes each node by what passes through', () => {
+  const rows = [['organic', 'ios', 40], ['organic', 'ios', 2], ['organic', 'android', 60], ['ios', 'payer', 5], ['android', 'payer', 4], ['android', 'x', null]].map(([a, b, v]) => ({ a, b, v }));
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'a' }, { name: 'b' }, { name: 'v' }], rows, display: { kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' } });
+  assert.equal(m.chart.type, 'sankey');
+  assert.deepEqual(m.chart.links, [{ from: 'organic', to: 'ios', flow: 42 }, { from: 'organic', to: 'android', flow: 60 }, { from: 'ios', to: 'payer', flow: 5 }, { from: 'android', to: 'payer', flow: 4 }]);
+  assert.deepEqual(m.chart.nodes.map((n) => [n.name, n.size]), [['organic', 102], ['android', 60], ['ios', 42], ['payer', 9]]);
+});
+
+test('display guard: a sankey that loops back, or KPI tiles over many rows with no axis, are refused', () => {
+  const links = [{ a: 'menu', b: 'level' }, { a: 'level', b: 'shop' }, { a: 'shop', b: 'menu' }].map((r) => ({ ...r, v: 1 }));
+  const loop = s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links);
+  assert.equal(loop.length, 1);
+  assert.equal(s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links.slice(0, 2)).length, 0, 'a chain is fine');
+  assert.equal(s.engine._displayProblems({ kind: 'kpi', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 1);
+  assert.equal(s.engine._displayProblems({ kind: 'kpi', x: 'a', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 0);
+});
+
 test('view model: a declaration the rows cannot fill falls back to the inferred card', () => {
   // step counts with a NULL first step cannot be a funnel; the step-per-row shape is still a bar chart
-  const m = buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: null }, { step: 'b', users: 4 }], display: { kind: 'funnel', label_column: 'step', value_column: 'users' } });
+  const m = buildViewModel('get_query_result', { columns: [{ name: 'step' }, { name: 'users' }], rows: [{ step: 'a', users: null }, { step: 'b', users: 4 }], display: { kind: 'funnel', steps: { label_column: 'step', value_column: 'users' } } });
   assert.equal(m.kind, 'chart');
   assert.equal(m.chart.type, 'bar');
 });

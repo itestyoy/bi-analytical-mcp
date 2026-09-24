@@ -382,17 +382,77 @@ export function buildSchemas(catalog) {
 
   const pdefs = predicateDefs(catalog);
   // HOW A RESULT IS SHOWN — declared by the caller, never guessed: the card a host that renders MCP
-  // Apps draws for query_semantic_model / get_query_result follows this when it is given. It names
-  // result COLUMNS (the names the rows come back with), so a wrong one is refused with the list.
+  // Apps draws for query_semantic_model / get_query_result follows this when it is given. Every form
+  // is one closed branch tagged by `kind` (a discriminator), and what a form needs is said by the
+  // schema itself — required fields, array bounds, enums, if/then — not in prose. It names result
+  // COLUMNS (the names the rows come back with), so a wrong one is refused with the list.
   const resultColumn = { type: 'string', minLength: 1, description: 'A column of THIS result, exactly as the rows come back: a metric name, <model>_<attribute>, metric_time_<grain>, or a pipeline column.' };
-  const cardTitle = { type: 'string', maxLength: 120, description: 'Optional card title, in the person\'s words (e.g. "Onboarding funnel, Sep 1–23").' };
+  const cardTitle = { type: 'string', maxLength: 120, description: 'Card title, in the person\'s words (e.g. "Onboarding funnel, Sep 1–23").' };
+  const valueColumns = (what) => ({ type: 'array', minItems: 1, maxItems: 6, uniqueItems: true, items: resultColumn, description: `The value column(s): one ${what} each.` });
+  const seriesColumn = (what) => ({ ...resultColumn, description: `Split the ONE y column into a ${what} per value of this column (e.g. users_platform).` });
+  // a split names ONE value column: the schema says so, not a sentence
+  const oneYWhenSplit = { if: { required: ['series_column'] }, then: { properties: { y: { maxItems: 1 } } } };
+  const axis = { ...resultColumn, description: 'The axis column: time is put in time order, any other column keeps the row order.' };
+  const form = (kind, title, description, properties, required, extra = {}) => ({
+    title, description, type: 'object', additionalProperties: false,
+    required: ['kind', ...required],
+    properties: { kind: { const: kind }, title: cardTitle, ...properties },
+    ...extra,
+  });
   const display = {
-    description: 'How the result is SHOWN to the person as a card, in hosts that render MCP Apps (Claude on the web, desktop and mobile). Declare it whenever the result is a funnel or a chart — the card then draws exactly that instead of inferring it from column names. It changes no numbers: the rows are the same. Omitted, the card infers a chart or a funnel from the shape where it can.',
+    description: 'How the result is SHOWN to the person as a card, in hosts that render MCP Apps (Claude on the web, desktop and mobile). Pick the `kind` whose description matches the question; the card then draws exactly that. It changes no numbers. Omitted, the card infers a chart or a funnel from the shape where it can.',
+    discriminator: { propertyName: 'kind' },
     oneOf: [
-      { title: 'funnel · steps are columns of one row', type: 'object', additionalProperties: false, required: ['kind', 'steps'], description: 'A funnel whose steps are COLUMNS of a ONE-ROW result, listed in step order — e.g. the per-step counts an aggregate stage makes after match_recognize.', properties: { kind: { enum: ['funnel'] }, title: cardTitle, steps: { type: 'array', minItems: 2, maxItems: 20, description: 'The steps, in order.', items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 60, description: 'How the step reads to the person (default: the column name).' } } } } } },
-      { title: 'funnel · one row per step', type: 'object', additionalProperties: false, required: ['kind', 'label_column', 'value_column'], description: 'A funnel with ONE ROW PER STEP, in the order the rows come back (order them with order_by / a transform).', properties: { kind: { enum: ['funnel'] }, title: cardTitle, label_column: { ...resultColumn, description: 'The column naming each step.' }, value_column: { ...resultColumn, description: 'The column with each step\'s count.' } } },
-      { title: 'line chart', type: 'object', additionalProperties: false, required: ['kind', 'x', 'y'], description: 'A line chart over an ordered axis (usually time).', properties: { kind: { enum: ['line'] }, title: cardTitle, x: { ...resultColumn, description: 'The axis column (a time column, or any ordered one — kept in row order unless it is a time).' }, y: { type: 'array', minItems: 1, maxItems: 6, items: resultColumn, description: 'The value column(s): one line each.' }, series_column: { ...resultColumn, description: 'Optional: split ONE y column into a line per value of this column (e.g. users_country).' } } },
-      { title: 'bar chart', type: 'object', additionalProperties: false, required: ['kind', 'x', 'y'], description: 'A bar per category, in row order.', properties: { kind: { enum: ['bar'] }, title: cardTitle, x: { ...resultColumn, description: 'The category column.' }, y: { ...resultColumn, description: 'The value column.' } } },
+      form('line', 'line — a trend', 'A TREND over an ordered axis (usually time): one line, or several to compare series.', {
+        x: axis, y: valueColumns('line'), series_column: seriesColumn('line'),
+      }, ['x', 'y'], oneYWhenSplit),
+      form('area', 'area — a total split into parts over time', 'A COMPOSITION OVER TIME: series that add up to one total, STACKED (DAU by platform). Series that do not add up → line.', {
+        x: axis, y: valueColumns('band'), series_column: seriesColumn('band'),
+      }, ['x', 'y'], oneYWhenSplit),
+      form('bar', 'bar — a comparison across categories', 'A COMPARISON across categories, in row order: a bar per category, several per category (grouped), or stacked into one (part-to-whole per category).', {
+        x: { ...resultColumn, description: 'The category column.' },
+        y: valueColumns('bar per category'),
+        series_column: seriesColumn('bar within each category'),
+        stacked: { type: 'boolean', default: false, description: 'Stack the bars of a category into one instead of grouping them side by side.' },
+        horizontal: { type: 'boolean', description: 'Lay the bars flat. Omitted: flat past 8 categories.' },
+      }, ['x', 'y'], oneYWhenSplit),
+      form('pie', 'pie — shares of one total', 'A PART-TO-WHOLE at a glance, drawn as a donut: a slice per row. For a few clearly different shares — close values read better as bars. Past 6 slices the smallest fold into "Other".', {
+        label_column: { ...resultColumn, description: 'The column naming each slice.' },
+        value_column: { ...resultColumn, description: 'The column with each slice\'s amount (non-negative).' },
+      }, ['label_column', 'value_column']),
+      form('funnel', 'funnel — ordered steps', 'ORDERED STEPS and how many reach each, with the conversion between them.', {
+        steps: {
+          description: 'The steps, in order — as COLUMNS of a one-row result, or as ROWS (one per step).',
+          oneOf: [
+            { title: 'steps are columns of one row', type: 'array', minItems: 2, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 60, description: 'How the step reads to the person (default: the column name).' } } } },
+            { title: 'one row per step', type: 'object', additionalProperties: false, required: ['label_column', 'value_column'], properties: { label_column: { ...resultColumn, description: 'The column naming each step.' }, value_column: { ...resultColumn, description: 'The column with each step\'s count.' } } },
+          ],
+        },
+      }, ['steps']),
+      form('kpi', 'kpi — headline numbers', 'HEADLINE NUMBERS as stat tiles: a big value, its change against a previous value. One row, or with x a series whose last row is shown with its trend. A single number beats any chart.', {
+        x: { ...axis, description: 'The axis of a multi-row result: each tile shows the LAST row, its change from the row before, and the trend as a sparkline.' },
+        values: {
+          type: 'array', minItems: 1, maxItems: 4, description: 'The tiles, in order.',
+          items: {
+            type: 'object', additionalProperties: false, required: ['column'],
+            properties: {
+              column: resultColumn,
+              label: { type: 'string', maxLength: 60, description: 'How the number reads to the person (default: the column name).' },
+              format: { enum: ['number', 'percent', 'currency'], default: 'number', description: 'percent: the value is a ratio (0.123 → 12.3%).' },
+              currency: { type: 'string', pattern: '^[A-Z]{3}$', default: 'USD', description: 'ISO 4217 code.' },
+              previous_column: { ...resultColumn, description: 'A column with the value to compare against (the previous period).' },
+              good: { enum: ['up', 'down'], description: 'Which direction of change is good — colors the change. Omitted: shown without judgement.' },
+            },
+            // a currency code is for a currency value
+            if: { required: ['currency'] }, then: { required: ['format'], properties: { format: { const: 'currency' } } },
+          },
+        },
+      }, ['values']),
+      form('sankey', 'sankey — flows between stages', 'FLOWS between stages: a row per link, source → target with an amount (installs from channel to platform). Links chain — a target can be the next source — and never loop back.', {
+        source_column: { ...resultColumn, description: 'The column naming where a flow starts.' },
+        target_column: { ...resultColumn, description: 'The column naming where it goes.' },
+        value_column: { ...resultColumn, description: 'The column with the amount that flows (positive).' },
+      }, ['source_column', 'target_column', 'value_column']),
     ],
   };
 
@@ -897,6 +957,10 @@ function abTestSchema() {
   const familyP = { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, description: 'p-values of OTHER metrics in the same experiment readout — included in the multiplicity-correction family (Holm/BH) alongside the variants.' };
   const sequential = { type: 'boolean', description: 'Also compute an ALWAYS-VALID p per variant (mixture SPRT): p_value_sequential stays honest under repeated peeking at a RUNNING experiment, unlike the fixed-horizon p_value. proportion/mean only.' };
   const expectedEffect = { type: 'number', exclusiveMinimum: 0, description: 'Optional expected ABSOLUTE effect size — sets the sequential test\'s mixture prior scale (more power near this effect). Default: the observed sampling noise scale.' };
+  // Whether a rise is good is a property of the METRIC, which the test cannot know: conversion up is
+  // an improvement, crash rate or churn up is a regression. It changes no statistic — only how a
+  // significant result is read (outcome: better | worse).
+  const good = { enum: ['up', 'down'], default: 'up', description: 'Which direction of the metric is GOOD: up (conversion, revenue, retention) or down (crash rate, churn, load time, cost). Decides whether a significant change is an improvement or a regression; no statistic changes.' };
 
   // One metric branch of the union.
   const branch = (metric, branchDesc, fields, armDesc, extraProps = {}) => {
@@ -906,7 +970,7 @@ function abTestSchema() {
       description: branchDesc,
       properties: {
         metric: { enum: [metric] },
-        confidence, alternative, correction,
+        confidence, alternative, correction, good,
         family_p_values: familyP,
         ...extraProps,
         control: a,
@@ -926,7 +990,7 @@ function abTestSchema() {
     required: ['metric', 'control', 'variants'],
     properties: {
       metric: { enum: ['proportion', 'mean', 'ratio', 'cuped'], description: 'Which test to run and which group fields are required: proportion→conversions; mean→mean,stddev; ratio→sumNum,sumDen,sumNum2,sumDen2,sumNumDen; cuped→sumY,sumY2,sumX,sumX2,sumXY.' },
-      confidence, alternative, correction,
+      confidence, alternative, correction, good,
       family_p_values: familyP,
       sequential,
       expected_effect: expectedEffect,

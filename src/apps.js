@@ -13,13 +13,18 @@
 //     to its sources.
 // A host without the extension ignores `_meta.ui`: the tool is the plain tool it always was.
 //
-// THE VIEW ONLY DRAWS. It never reaches back: it gets the result the host hands it and nothing else.
-// Held in three places, so no single one is load-bearing:
-//   * every tool declares `_meta.ui.visibility: ["model"]` — callable by the model, NOT by a view
-//     (the spec's default is ["model", "app"]), so a host refuses a view's tools/call to this server;
+// THE VIEW DRAWS, AND FOLLOWS ITS OWN QUERY — nothing else. It gets the result the host hands it;
+// the ONE thing it may ask for is the rest of that same result: a query that outlasted its call
+// answers { status: 'running', query_id }, and the card polls get_query_result for THAT query_id
+// until the rows are there, so the result appears in the card that announced it. Held in three
+// places, so no single one is load-bearing:
+//   * every tool declares `_meta.ui.visibility` — ["model"] (callable by the model, NOT by a view;
+//     the spec's default is ["model", "app"]), except get_query_result, a read-only lookup of a
+//     finished result, which is ["model", "app"]; a host refuses a view's tools/call to any other;
 //   * the view resource declares an empty `csp` — no connect/resource/frame origins, i.e. no fetch,
 //     XHR, WebSocket, remote script or nested frame — and the page carries the same policy itself;
-//   * the view's code calls no server method (a unit test holds its sources to that).
+//   * the view's code makes exactly one server call, get_query_result with the query_id of its own
+//     result, and no other (a unit test holds its sources to that).
 
 import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage, RUNTIME_ASSETS } from './runtime-assets.js';
@@ -36,6 +41,9 @@ const VIEWED_TOOLS = new Set(['query_semantic_model', 'get_query_result', 'exper
 
 /** Who may call a tool: the model only — never a view (see the header). */
 export const TOOL_VISIBILITY = Object.freeze(['model']);
+/** The one tool a view may also call: the card following its own detached query to its rows. */
+export const APP_CALLABLE_TOOLS = Object.freeze(['get_query_result']);
+const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? [...TOOL_VISIBILITY, 'app'] : [...TOOL_VISIBILITY]);
 
 /**
  * The `_meta` every tool carries: its visibility, and — for a viewed tool — the view, in both
@@ -43,8 +51,8 @@ export const TOOL_VISIBILITY = Object.freeze(['model']);
  */
 export function viewMeta(tool) {
   return VIEWED_TOOLS.has(tool)
-    ? { ui: { resourceUri: RESULT_VIEW_URI, visibility: [...TOOL_VISIBILITY] }, [RESOURCE_URI_META_KEY]: RESULT_VIEW_URI }
-    : { ui: { visibility: [...TOOL_VISIBILITY] } };
+    ? { ui: { resourceUri: RESULT_VIEW_URI, visibility: visibilityOf(tool) }, [RESOURCE_URI_META_KEY]: RESULT_VIEW_URI }
+    : { ui: { visibility: visibilityOf(tool) } };
 }
 
 /** The view's network policy: nothing. Maps to CSP connect-src / resource / frame-src 'none'. */
@@ -54,7 +62,7 @@ const RESOURCE = {
   uri: RESULT_VIEW_URI,
   name: 'result-view',
   title: 'Query Result',
-  description: 'Interactive card for a result: a chart (time series or breakdown, rows folded underneath), a funnel (steps, conversion, biggest drop), or the A/B family — the test (lift, interval, verdict per variant), the sample-ratio check and the sample-size plan. Other results get one status line.',
+  description: 'Interactive card for a result: a chart as the caller declares it (line, multi-line, stacked area, grouped/stacked/horizontal bars, a pie of shares, a sankey of flows — rows folded underneath), KPI tiles, a funnel (steps, conversion, biggest drop), or the A/B family — the test (lift, interval, verdict per variant), the sample-ratio check and the sample-size plan. Other results get one status line.',
   mimeType: RESOURCE_MIME_TYPE,
   _meta: { ui: { prefersBorder: true, csp: VIEW_CSP } },
 };

@@ -34,6 +34,7 @@
     "@electric-sql/pglite-socket": "^0.1.6",
     "@modelcontextprotocol/client": "^2.1.0",
     "chart.js": "^4.5.1",
+    "chartjs-chart-sankey": "^0.19.1",
     "vite": "^6.4.3",
     "vite-plugin-singlefile": "^2.3.3"
   }

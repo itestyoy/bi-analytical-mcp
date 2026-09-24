@@ -1,13 +1,14 @@
 // THE MODEL OF WHAT THE RESULT VIEW SHOWS — a pure function from a tool result to a view.
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
-// WHAT to render: a CHART (a time series or a breakdown, with its rows folded underneath), a FUNNEL,
+// WHAT to render: a CHART (a time series or a breakdown, with its rows folded underneath), KPI tiles, a FUNNEL,
 // and the A/B TEST family — the test itself, the sample-ratio check and the sample-size plan, the
-// three steps of one experiment. Anything else — a failure, a build still running, an explained
+// three steps of one experiment. Anything else — a failure, a build still running (with the query_id
+// the card follows to its rows), an explained
 // query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
 // status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
 // the tool's text result speaks for itself. Rows are drawn as the caller DECLARED them when the
-// result carries `display` (a funnel, a line or a bar chart over named columns); only without one is
+// result carries `display` (a funnel, KPI tiles, a line, area, bar, pie or sankey chart over named columns); only without one is
 // the card inferred from the shape. The view imports it and the unit
 // tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
@@ -29,7 +30,8 @@ export function buildViewModel(toolName, result, toolInput) {
 
   // a build that is still running, or one that failed, says so — there is nothing to plot
   const none = (reason, extra = {}) => ({ kind: 'none', reason, ...extra });
-  if (result.status === 'running' && result.query_id) return none('running');
+  // (the query_id is what the card follows to the rows)
+  if (result.status === 'running' && result.query_id) return none('running', { query_id: String(result.query_id) });
   // a failure is only NAMED in the view — the reason is for the reply, not the card
   if (result.ok === false || (result.error && !result.rows)) return none('error');
 
@@ -70,8 +72,10 @@ export function buildViewModel(toolName, result, toolInput) {
         p_value_sequential: num(r.p_value_sequential),
         significant,
         // a significant result has a direction; whether that direction is GOOD depends on the
-        // metric (conversion up is good, crash rate up is not), which the test does not know
+        // metric (conversion up is good, crash rate up is not) — the `outcome` below
         verdict: !significant ? 'no_difference' : (lift ?? 0) >= 0 ? 'increase' : 'decrease',
+        // whether that direction is GOOD is the caller's to say (good: up | down, echoed by the test)
+        outcome: r.outcome || (!significant || !lift ? 'no_difference' : (lift > 0) === ((result.good || 'up') === 'up') ? 'better' : 'worse'),
         variance_reduction: num(r.variance_reduction),
       };
     });
@@ -82,7 +86,8 @@ export function buildViewModel(toolName, result, toolInput) {
       const p = 10 ** Math.floor(Math.log10(x));
       return [1, 2, 2.5, 5, 10].map((m) => m * p).find((m) => m >= x);
     };
-    const metricLabel = { proportion: 'conversion rate', mean: 'mean', ratio: 'ratio', cuped: 'mean (CUPED-adjusted)' }[result.metric] || result.metric || 'metric';
+    // a proportion where lower is better (crash rate, churn) is not a conversion — it is a rate
+    const metricLabel = { proportion: result.good === 'down' ? 'rate' : 'conversion rate', mean: 'mean', ratio: 'ratio', cuped: 'mean (CUPED-adjusted)' }[result.metric] || result.metric || 'metric';
     return {
       kind: 'experiment',
       title: `A/B test · ${metricLabel}`,
@@ -94,6 +99,7 @@ export function buildViewModel(toolName, result, toolInput) {
       correction: result.correction && result.correction !== 'none' ? result.correction : null,
       variants,
       significant_count: variants.filter((v) => v.significant).length,
+      good: result.good || 'up',
       scale: nice(extent * 1.1),
       notes: result.recommendations || [],
     };
@@ -195,18 +201,35 @@ export function buildViewModel(toolName, result, toolInput) {
     // ── a DECLARED card: the caller said what this result is (the server checked the columns
     // exist), so it is drawn as declared — in the declared order, with no shape guessing ──
     const d = isObj(result.display) ? result.display : null;
+    // a sankey flows one way: links that loop back cannot be laid out
+    const acyclic = (links) => {
+      const next = new Map();
+      for (const l of links) { if (!next.has(l.from)) next.set(l.from, []); next.get(l.from).push(l.to); }
+      const seen = new Map();
+      const loops = (n) => {
+        if (seen.get(n) === 1) return true;
+        if (seen.get(n) === 2) return false;
+        seen.set(n, 1);
+        for (const m of next.get(n) || []) if (loops(m)) return true;
+        seen.set(n, 2);
+        return false;
+      };
+      return ![...next.keys()].some(loops);
+    };
     const at = (name) => names.indexOf(name);
     const label = (v) => (v === null ? '∅' : String(v));
     if (d && rows.length) {
       const declaredTitle = typeof d.title === 'string' && d.title.trim() ? d.title.trim() : null;
       if (d.kind === 'funnel') {
+        // steps as COLUMNS of one row, or as ROWS ({ label_column, value_column })
         const steps = Array.isArray(d.steps) ? d.steps.filter((st) => isObj(st) && at(st.column) >= 0) : null;
-        const labels = steps ? steps.map((st) => (typeof st.label === 'string' && st.label ? st.label : st.column)) : rows.map((r) => label(r[at(d.label_column)]));
-        const values = steps ? steps.map((st) => num(rows[0][at(st.column)])) : rows.map((r) => num(r[at(d.value_column)]));
-        const drawable = (steps || (at(d.label_column) >= 0 && at(d.value_column) >= 0)) && labels.length >= 2 && values[0] > 0 && values.every((v) => v !== null && v >= 0);
-        if (drawable) return { ...funnelOf(labels, values, steps ? null : d.value_column), ...(declaredTitle ? { title: declaredTitle } : {}) };
+        const byRow = isObj(d.steps) && at(d.steps.label_column) >= 0 && at(d.steps.value_column) >= 0 ? d.steps : null;
+        const labels = steps ? steps.map((st) => (typeof st.label === 'string' && st.label ? st.label : st.column)) : byRow ? rows.map((r) => label(r[at(byRow.label_column)])) : [];
+        const values = steps ? steps.map((st) => num(rows[0][at(st.column)])) : byRow ? rows.map((r) => num(r[at(byRow.value_column)])) : [];
+        const drawable = labels.length >= 2 && values[0] > 0 && values.every((v) => v !== null && v >= 0);
+        if (drawable) return { ...funnelOf(labels, values, byRow ? byRow.value_column : null), ...(declaredTitle ? { title: declaredTitle } : {}) };
       }
-      if (d.kind === 'line' && at(d.x) >= 0 && Array.isArray(d.y) && d.y.length && d.y.every((y) => at(y) >= 0)) {
+      if ((d.kind === 'line' || d.kind === 'area') && at(d.x) >= 0 && Array.isArray(d.y) && d.y.length && d.y.every((y) => at(y) >= 0)) {
         const xi = at(d.x);
         // a time axis is put in time order; any other axis keeps the order the rows came in
         const ordered = columns[xi].type !== 'time';
@@ -230,12 +253,114 @@ export function buildViewModel(toolName, result, toolInput) {
         } else {
           series = d.y.slice(0, MAX_SERIES).map((y) => ({ name: y, points: inOrder.map((r) => [String(r[xi]), num(r[at(y)])]).filter((p) => p[1] !== null) }));
         }
-        return chartCard({ type: 'line', x: d.x, y: d.y.length === 1 ? d.y[0] : null, series, folded, ordered, title: declaredTitle }, declaredTitle || title);
+        // an area stacks its series: they are the parts of one total over time
+        return chartCard({ type: 'line', x: d.x, y: d.y.length === 1 ? d.y[0] : null, series, folded, ordered, ...(d.kind === 'area' ? { area: true, stacked: series.length > 1 } : {}), title: declaredTitle }, declaredTitle || title);
       }
-      if (d.kind === 'bar' && at(d.x) >= 0 && at(d.y) >= 0) {
+      const ys = d.y === undefined ? [] : [].concat(d.y);
+      if (d.kind === 'bar' && at(d.x) >= 0 && ys.length && ys.every((y) => at(y) >= 0)) {
         const xi = at(d.x);
-        const yi = at(d.y);
-        return chartCard({ type: 'bar', x: d.x, y: d.y, bars: rows.slice(0, 50).map((r) => ({ label: label(r[xi]), value: num(r[yi]) ?? 0 })), title: declaredTitle }, declaredTitle || title);
+        const kept = rows.slice(0, 50);
+        let labels;
+        let series;
+        let folded = 0;
+        if (d.series_column && at(d.series_column) >= 0) {
+          // categories in the order they first appear; a bar per series value inside each
+          const si = at(d.series_column);
+          const yi = at(ys[0]);
+          labels = [...new Set(kept.map((r) => label(r[xi])))];
+          const bySeries = new Map();
+          for (const r of kept) {
+            const k = label(r[si]);
+            if (!bySeries.has(k)) bySeries.set(k, new Map());
+            const cell = bySeries.get(k);
+            cell.set(label(r[xi]), (cell.get(label(r[xi])) ?? 0) + (num(r[yi]) ?? 0));
+          }
+          const all = [...bySeries.entries()].map(([name, byX]) => ({ name, values: labels.map((l) => byX.get(l) ?? 0) })).map((x) => ({ ...x, total: x.values.reduce((a, v) => a + v, 0) })).sort((a, b) => b.total - a.total);
+          series = all.slice(0, MAX_SERIES).map(({ name, values }) => ({ name, values }));
+          folded = Math.max(0, all.length - MAX_SERIES);
+        } else {
+          labels = kept.map((r) => label(r[xi]));
+          series = ys.slice(0, MAX_SERIES).map((y) => ({ name: y, values: kept.map((r) => num(r[at(y)]) ?? 0) }));
+        }
+        const single = series.length === 1 && !d.series_column;
+        return chartCard({
+          type: 'bar',
+          x: d.x,
+          y: ys.length === 1 ? ys[0] : null,
+          labels,
+          series,
+          ...(single ? { bars: labels.map((l, i) => ({ label: l, value: series[0].values[i] })) } : {}),
+          stacked: !!d.stacked && series.length > 1,
+          horizontal: typeof d.horizontal === 'boolean' ? d.horizontal : null,
+          folded,
+          title: declaredTitle,
+        }, declaredTitle || title);
+      }
+      if (d.kind === 'kpi' && Array.isArray(d.values) && d.values.length && d.values.every((v) => isObj(v) && at(v.column) >= 0) && (at(d.x) >= 0 || rows.length === 1)) {
+        // with an axis: the rows in its order (time sorted, any other axis as the rows came); the
+        // tile is the LAST row, its change is against the row before, its trend is every row
+        const xi = at(d.x);
+        const series = xi >= 0
+          ? (columns[xi].type === 'time' ? rows.filter((r) => r[xi] !== null).slice().sort((a, b) => (String(a[xi]) < String(b[xi]) ? -1 : String(a[xi]) > String(b[xi]) ? 1 : 0)) : rows.filter((r) => r[xi] !== null))
+          : rows;
+        const last = series[series.length - 1];
+        const before = series.length > 1 ? series[series.length - 2] : null;
+        if (last) {
+          const tiles = d.values.map((v) => {
+            const value = num(last[at(v.column)]);
+            const previous = at(v.previous_column) >= 0 ? num(last[at(v.previous_column)]) : before ? num(before[at(v.column)]) : null;
+            const trend = xi >= 0 && series.length >= 2 ? series.map((r) => num(r[at(v.column)])) : null;
+            return {
+              label: typeof v.label === 'string' && v.label ? v.label : v.column,
+              value,
+              previous,
+              change: value !== null && previous !== null && previous !== 0 ? (value - previous) / Math.abs(previous) : null,
+              format: v.format || 'number',
+              currency: v.currency || 'USD',
+              good: v.good || null,
+              trend: trend && trend.filter((y) => y !== null).length >= 2 ? trend : null,
+            };
+          });
+          return { kind: 'kpi', title: declaredTitle || 'Key metrics', as_of: xi >= 0 ? String(last[xi]) : null, x: xi >= 0 ? d.x : null, compared_to: at(d.values[0].previous_column) >= 0 ? 'previous' : before && xi >= 0 ? String(before[xi]) : null, tiles };
+        }
+      }
+      if (d.kind === 'sankey' && at(d.source_column) >= 0 && at(d.target_column) >= 0 && at(d.value_column) >= 0) {
+        const fi = at(d.source_column);
+        const ti = at(d.target_column);
+        const vi = at(d.value_column);
+        // a link seen twice is one link with the sum; empty or non-positive amounts carry no flow
+        const byLink = new Map();
+        for (const r of rows) {
+          const from = label(r[fi]);
+          const to = label(r[ti]);
+          const flow = num(r[vi]);
+          if (flow === null || flow <= 0 || from === to) continue;
+          const k = JSON.stringify([from, to]);
+          byLink.set(k, (byLink.get(k) ?? 0) + flow);
+        }
+        const links = [...byLink.entries()].map(([k, flow]) => { const [from, to] = JSON.parse(k); return { from, to, flow }; });
+        // a node's size is the larger of what flows in and what flows out
+        const inOut = new Map();
+        for (const l of links) {
+          inOut.set(l.from, { in: inOut.get(l.from)?.in ?? 0, out: (inOut.get(l.from)?.out ?? 0) + l.flow });
+          inOut.set(l.to, { in: (inOut.get(l.to)?.in ?? 0) + l.flow, out: inOut.get(l.to)?.out ?? 0 });
+        }
+        const nodes = [...inOut.entries()].map(([name, v]) => ({ name, size: Math.max(v.in, v.out) })).sort((a, b) => b.size - a.size);
+        if (links.length && !acyclic(links)) return none('no_chart_shape');
+        if (links.length) return chartCard({ type: 'sankey', x: d.source_column, to: d.target_column, y: d.value_column, links, nodes, title: declaredTitle }, declaredTitle || title);
+      }
+      if (d.kind === 'pie' && at(d.label_column) >= 0 && at(d.value_column) >= 0) {
+        const li = at(d.label_column);
+        const vi = at(d.value_column);
+        const MAX_SLICES = 6; // a donut reads a share at a glance only while the slices are few
+        const all = rows.map((r) => ({ label: label(r[li]), value: num(r[vi]) })).filter((x) => x.value !== null && x.value > 0).sort((a, b) => b.value - a.value);
+        const total = all.reduce((a, x) => a + x.value, 0);
+        if (all.length >= 2 && total > 0) {
+          const shown = all.length > MAX_SLICES ? all.slice(0, MAX_SLICES - 1) : all;
+          const rest = all.slice(shown.length);
+          const slices = [...shown, ...(rest.length ? [{ label: 'Other', value: rest.reduce((a, x) => a + x.value, 0), other: rest.length }] : [])].map((x) => ({ ...x, share: x.value / total }));
+          return chartCard({ type: 'pie', x: d.label_column, y: d.value_column, slices, total, folded: rest.length, title: declaredTitle }, declaredTitle || title);
+        }
       }
       // a declaration the rows cannot fill falls through to the inferred card
     }

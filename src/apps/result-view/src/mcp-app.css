@@ -268,6 +268,12 @@
   background-color: color-mix(in oklab, var(--color-series-1) 12%, transparent);
 }
 
+.badge-success {
+  color: color-mix(in oklab, var(--success) 85%, var(--foreground));
+  border-color: color-mix(in oklab, var(--success) 30%, transparent);
+  background-color: color-mix(in oklab, var(--success) 12%, transparent);
+}
+
 .badge-destructive {
   color: color-mix(in oklab, var(--destructive) 85%, var(--foreground));
   border-color: color-mix(in oklab, var(--destructive) 25%, transparent);
@@ -866,8 +872,13 @@
 .ci-plot {
   --ci-color: var(--muted-foreground);
 
-  &.ci-significant {
-    --ci-color: var(--color-series-1);
+  /* a significant change is coloured by what it means for this metric, not by its sign */
+  &.ci-better {
+    --ci-color: var(--success);
+  }
+
+  &.ci-worse {
+    --ci-color: var(--destructive);
   }
 }
 
@@ -1062,5 +1073,68 @@
   /* an odd tile out takes the whole row instead of leaving an empty cell */
   .stat:last-child:nth-child(odd) {
     grid-column: 1 / -1;
+  }
+}
+
+/* ── KPI tiles: shadcn stat cards in a grid that wraps by the width it gets ──────────────────── */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 10rem), 1fr));
+  gap: calc(var(--space) * 4);
+
+  > .card {
+    gap: calc(var(--space) * 3);
+    padding: calc(var(--space) * 5) 0;
+  }
+}
+
+.kpi-change {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: calc(var(--space) * 1);
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+
+  .icon {
+    width: 1rem;
+    height: 1rem;
+  }
+
+  &.kpi-change-good {
+    color: var(--success);
+  }
+
+  &.kpi-change-bad {
+    color: var(--destructive);
+  }
+}
+
+.kpi-body {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 3);
+}
+
+.kpi-vs {
+  font-size: var(--font-text-xs-size);
+  color: var(--muted-foreground);
+}
+
+.kpi-sparkline {
+  display: block;
+  width: 100%;
+  height: 2rem;
+  overflow: visible;
+
+  polyline {
+    fill: none;
+    stroke: var(--color-series-1);
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
   }
 }

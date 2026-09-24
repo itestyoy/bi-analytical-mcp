@@ -65,6 +65,8 @@
   --primary: var(--color-background-inverse);
   --primary-foreground: var(--color-text-inverse);
   --destructive: var(--color-text-danger);
+  /* a change the caller called good (shadcn has no success token; the green of its charts' family) */
+  --success: light-dark(oklch(0.52 0.14 155), oklch(0.72 0.16 155));
   --border: var(--color-border-primary);
   --input: var(--color-border-secondary);
   --ring: var(--color-ring-primary);

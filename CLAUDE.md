@@ -127,6 +127,13 @@
   stored table, filtered to the path taken and grouped by the dimension chosen, each read built by
   the view model's one definition of a view (no other tools/call, resource, model message, link or
   network) — a test holds its sources to that. Everything else interactive stays on the data already in the page.
+- MCP APPS ARE OFFERED ONLY TO A CLIENT THAT DECLARES THEM, IN THE REQUEST BEING SERVED: its
+  capabilities carry `extensions["io.modelcontextprotocol/ui"]` with the view's MIME type. Only then
+  does it get `_meta.ui`, the view resource, the `display` declaration, the RESULT CARDS instructions
+  and the `show_to_user` hint; any other client gets none of them, and a `display` it sends is
+  refused. A 2025 client declares capabilities once, in `initialize`, and is served statelessly, so
+  its later requests carry nothing to go by — it gets the plain surface (src/apps.js). The lists
+  that differ are cached `private`.
 
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model

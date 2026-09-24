@@ -153,8 +153,14 @@ the plain tools stay exactly as they were for every client that does not:
   python models run) the python-stage guide, served as Agent Skills (`skills/list`, `skills/get`,
   files via `resources/read` with sha256 digests). Generated at startup from the same objects
   `semantic_index({ guide })` and `semantic_index({ recipe })` return — never a second copy.
-- **Apps** (`io.modelcontextprotocol/ui`) — `query_semantic_model`, `get_query_result` and
-  `experiment` render in the host's conversation as an interactive view (`ui://betti/result-view.html`):
+- **Apps** (`io.modelcontextprotocol/ui`) — offered ONLY to a client that declares the extension
+  (with the view's MIME type) in the request being served, i.e. a 2026-07-28 client, whose every
+  request carries its capabilities. Every other client — including a 2025 client that declared it in
+  `initialize`, whose later requests carry nothing (this server keeps no sessions) — gets no
+  `_meta.ui`, no view resource, no `display` field (a `display` it sends is refused), no card
+  instructions and no `show_to_user` hint. For a client that declares it, `query_semantic_model`,
+  `get_query_result` and `experiment` render in the host's conversation as an interactive view
+  (`ui://betti/result-view.html`):
   a CHART (a time series or a breakdown — the chart alone; the only table is the pivot below),
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
   TEST (a stat card per variant: lift, interval, verdict, the groups — a significant change coloured

@@ -7,7 +7,7 @@
 // a restart.
 
 import { join, dirname } from 'node:path';
-import { createMcpHandler } from '@modelcontextprotocol/server';
+import { createMcpHandler, CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpExpressApp } from '@modelcontextprotocol/express';
 import express from 'express';
@@ -24,6 +24,7 @@ import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
 import { createMcpServer } from './mcp-server.js';
 import { answerTaskRequest } from './mcp-tasks.js';
+import { withAppsClient, requestRendersApps } from './apps.js';
 
 export { buildToolDefs };
 
@@ -221,7 +222,9 @@ export function createApp(engine, opts = {}) {
   const node = toNodeHandler(handler);
   app.all('/mcp', (req, res) => {
     if (answerTaskRequest(services.tasks, req, res)) return;
-    void node(req, res, req.body);
+    // whether THIS request's client declares MCP Apps (its envelope's capabilities) — what the
+    // server built for it offers (src/apps.js)
+    void withAppsClient(requestRendersApps(req.body, CLIENT_CAPABILITIES_META_KEY), () => node(req, res, req.body));
   });
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
 

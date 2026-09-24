@@ -13,9 +13,10 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startServer } from '../helpers/mcp-http.js';
+import { startServer, APPS_CAPS } from '../helpers/mcp-http.js';
 import { buildViewModel, drillView, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
+import { runTool } from '../../src/mcp-surface.js';
 
 let s;
 before(async () => { s = await startServer(); });
@@ -23,24 +24,52 @@ after(async () => { await s.stop(); });
 
 const VIEWED = ['query_semantic_model', 'get_query_result', 'experiment'];
 
-test('the viewed tools carry the view in both spellings, for every client in both eras', async () => {
-  for (const era of ['legacy', 'modern']) {
-    const c = await s.client({ era });
-    for (const t of (await c.listTools()).tools) {
-      const want = VIEWED.includes(t.name) ? RESULT_VIEW_URI : undefined;
-      assert.equal(t._meta?.ui?.resourceUri, want, `${era} ${t.name}`);
-      assert.equal(t._meta?.['ui/resourceUri'], want, `${era} ${t.name} (flat key)`);
-    }
+test('the viewed tools carry the view in both spellings — for a client that declares MCP Apps in its request', async () => {
+  const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
+  for (const t of (await c.listTools()).tools) {
+    const want = VIEWED.includes(t.name) ? RESULT_VIEW_URI : undefined;
+    assert.equal(t._meta?.ui?.resourceUri, want, t.name);
+    assert.equal(t._meta?.['ui/resourceUri'], want, `${t.name} (flat key)`);
+  }
+  const q = (await c.listTools()).tools.find((t) => t.name === 'query_semantic_model');
+  assert.ok(q.inputSchema.properties.display, 'display is offered');
+  assert.ok(c.getInstructions().includes('RESULT CARDS'), 'and the instructions tell how cards work');
+});
+
+test('a client that does not declare MCP Apps in its request gets none of it: no view, no display, no card hints — and display is refused', async () => {
+  // a 2025 client declares its capabilities once, in initialize: its later requests carry none, so
+  // even a declaration there does not turn the feature on; a 2026 client that declares nothing neither
+  for (const [era, capabilities] of [['legacy', APPS_CAPS], ['legacy', {}], ['modern', {}]]) {
+    const label = `${era} ${capabilities.extensions ? 'declaring at initialize' : 'declaring nothing'}`;
+    const c = await s.client({ era, capabilities });
+    const tools = (await c.listTools()).tools;
+    for (const t of tools) assert.equal(t._meta?.ui, undefined, `${label}: ${t.name} carries no _meta.ui`);
+    for (const name of ['query_semantic_model', 'get_query_result']) assert.equal(tools.find((t) => t.name === name).inputSchema.properties.display, undefined, `${label}: ${name} offers no display`);
+    assert.ok(!(await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI), `${label}: the view is not listed`);
+    assert.ok(!c.getInstructions().includes('RESULT CARDS'), `${label}: no card instructions`);
+    const r = await c.callTool({ name: 'get_query_result', arguments: { query_id: 'ffffffffffff', display: { kind: 'bar', x: 'a', y: ['b'] } } });
+    assert.equal(r.isError, true, label);
+    assert.equal(JSON.parse(r.content[0].text).error.field, 'display', label);
   }
 });
 
+test('the hint to show a result as a card reaches only a client that renders cards', async () => {
+  // a stand-in tool answering the way build_native_model's materialize does
+  const engine = { schemas: { materialize_like: {} }, materialize_like: () => ({ ok: true, rows: [{ n: 1 }], show_to_user: { tool: 'get_query_result', arguments: { context_id: 'c', table: 't' } } }) };
+  const withCards = await runTool(engine, 'materialize_like', {}, { renders: true });
+  const without = await runTool(engine, 'materialize_like', {}, { renders: false });
+  assert.deepEqual(withCards.raw.show_to_user.arguments, { context_id: 'c', table: 't' });
+  assert.equal('show_to_user' in without.raw, false);
+  assert.deepEqual(without.raw.rows, [{ n: 1 }], 'the answer itself is the same');
+});
+
 test('the view reads only its own result: one tool is app-callable, no network, one server call in its code', async () => {
-  for (const era of ['legacy', 'modern']) {
-    const c = await s.client({ era });
+  {
+    const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
     // a host refuses a view's tools/call to a tool that is not visible to "app": only the read of a result is
-    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, t.name === 'get_query_result' ? ['model', 'app'] : ['model'], `${era} ${t.name}`);
+    for (const t of (await c.listTools()).tools) assert.deepEqual(t._meta?.ui?.visibility, t.name === 'get_query_result' ? ['model', 'app'] : ['model'], t.name);
     const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
-    assert.deepEqual(content._meta?.ui?.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, `${era}: no origin of any kind`);
+    assert.deepEqual(content._meta?.ui?.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] }, 'no origin of any kind');
   }
   // the view's own code: no App method that reaches the model or other server methods, no network API
   const REACHES_OUT = /\b(readServerResource|listServerResources|createSamplingMessage|sendMessage|updateModelContext|openLink|downloadFile|sendLog|fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)\s*\(/;
@@ -82,14 +111,12 @@ test('view model: a result that moved to the background carries the query_id the
   assert.deepEqual(m, { kind: 'none', reason: 'running', query_id: 'abc123abc123' });
 });
 
-test('the view resource is one mcp-app HTML document, listed and readable in both eras', async () => {
-  for (const era of ['legacy', 'modern']) {
-    const c = await s.client({ era });
-    assert.ok((await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI && r.mimeType === 'text/html;profile=mcp-app'), era);
-    const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
-    assert.equal(content.mimeType, 'text/html;profile=mcp-app');
-    assert.ok(content.text.startsWith('<!DOCTYPE html>') && /<\/html>\s*$/.test(content.text), `${era}: a complete document`);
-  }
+test('the view resource is one mcp-app HTML document, listed and readable for a client that declares MCP Apps', async () => {
+  const c = await s.client({ era: 'modern', capabilities: APPS_CAPS });
+  assert.ok((await c.listResources()).resources.some((r) => r.uri === RESULT_VIEW_URI && r.mimeType === 'text/html;profile=mcp-app'));
+  const [content] = (await c.readResource({ uri: RESULT_VIEW_URI })).contents;
+  assert.equal(content.mimeType, 'text/html;profile=mcp-app');
+  assert.ok(content.text.startsWith('<!DOCTYPE html>') && /<\/html>\s*$/.test(content.text), 'a complete document');
 });
 
 test('the result carries structuredContent equal to the text the model reads (both eras)', async () => {

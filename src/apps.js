@@ -27,8 +27,40 @@
 //     its own drill-down source and nothing else (a unit test holds its sources to that).
 
 import { readFileSync } from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { assetPath, missingAssetMessage, RUNTIME_ASSETS } from './runtime-assets.js';
-import { RESOURCE_MIME_TYPE, RESOURCE_URI_META_KEY, EXTENSION_ID } from '@modelcontextprotocol/ext-apps/server';
+import { RESOURCE_MIME_TYPE, RESOURCE_URI_META_KEY, EXTENSION_ID, getUiCapability } from '@modelcontextprotocol/ext-apps/server';
+
+// OFFERED ONLY TO A CLIENT THAT SAYS IT RENDERS THEM. Everything of this extension — `_meta.ui` on
+// the tools, the view resource, the `display` declaration, the instructions and hints about cards —
+// is served only to a client that declares `extensions["io.modelcontextprotocol/ui"]` with this
+// view's MIME type, IN THE REQUEST BEING SERVED. That is a 2026-07-28 client, whose every request
+// carries its capabilities. A 2025 client declares them once, in `initialize`, and this server
+// serves it statelessly — its tools/list and tools/call carry nothing to go by — so it gets none of
+// it: not declared in the request, not offered.
+const clientContext = new AsyncLocalStorage();
+
+/** Whether a set of client capabilities declares that it renders this view. */
+export function rendersApps(clientCapabilities) {
+  const ui = getUiCapability(clientCapabilities);
+  return Array.isArray(ui?.mimeTypes) && ui.mimeTypes.includes(RESOURCE_MIME_TYPE);
+}
+
+/** Whether the JSON-RPC request in `body` is from a client that declares the view — in its envelope. */
+export function requestRendersApps(body, capabilitiesKey) {
+  const msg = Array.isArray(body) ? body[0] : body;
+  return rendersApps(msg?.params?._meta?.[capabilitiesKey]);
+}
+
+/** Serve `fn` knowing whether the request's client renders the view (read by the server factory). */
+export function withAppsClient(renders, fn) {
+  return clientContext.run({ renders: !!renders }, fn);
+}
+
+/** Whether the request being served comes from a client that declared the view. */
+export function clientRendersApps() {
+  return clientContext.getStore()?.renders === true;
+}
 
 export { RESOURCE_MIME_TYPE, EXTENSION_ID as UI_EXTENSION };
 export const RESULT_VIEW_URI = 'ui://betti/result-view.html';
@@ -49,7 +81,8 @@ const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? [...TOOL_VIS
  * The `_meta` every tool carries: its visibility, and — for a viewed tool — the view, in both
  * spellings registerAppTool writes.
  */
-export function viewMeta(tool) {
+export function viewMeta(tool, renders = true) {
+  if (!renders) return undefined; // a client without the extension gets no `_meta.ui` at all
   return VIEWED_TOOLS.has(tool)
     ? { ui: { resourceUri: RESULT_VIEW_URI, visibility: visibilityOf(tool) }, [RESOURCE_URI_META_KEY]: RESULT_VIEW_URI }
     : { ui: { visibility: visibilityOf(tool) } };

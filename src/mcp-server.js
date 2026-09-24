@@ -4,8 +4,9 @@
 // `createMcpServer` is the factory `createMcpHandler` calls for every request (src/server.js). The
 // SDK owns the protocol: which revision a request speaks (the initialize handshake of 2025, or the
 // per-request `_meta` envelope of 2026-07-28), headers, `server/discover`, `resultType`, caching
-// hints on the wire, error codes. This file only says WHAT the server offers — and says it once,
-// for every client.
+// hints on the wire, error codes. This file only says WHAT the server offers — the same for every
+// client, except MCP Apps (cards, `display`, the hints about them), offered only to a client that
+// declares the extension in the request being served (src/apps.js).
 //
 // The tools are registered on the low-level `Server`, the SDK's documented path for a JSON Schema
 // you already have (docs: "Low-level Server"): our input schemas are built from the catalog, and
@@ -23,13 +24,15 @@ import { z } from 'zod';
 import { Server, ProtocolError, ResourceNotFoundError, CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
 import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine } from './mcp-surface.js';
 import { releasableSignal } from './request-context.js';
-import { UI_EXTENSION, RESOURCE_MIME_TYPE } from './apps.js';
+import { UI_EXTENSION, RESOURCE_MIME_TYPE, clientRendersApps } from './apps.js';
 import { SKILLS_EXTENSION } from './skills.js';
 
 export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
 
-// Nothing this server lists changes while it runs, and nothing in it depends on who asks.
+// Nothing this server lists changes while it runs. What it lists and says depends on whether the
+// client renders MCP Apps (src/apps.js), so those answers are the asking client's own to cache.
 const STATIC = { ttlMs: 3600000, cacheScope: 'public' };
+const PER_CLIENT = { ttlMs: 3600000, cacheScope: 'private' };
 
 const SkillsListParams = z.object({ cursor: z.string().optional() }).passthrough();
 const SkillsGetParams = z.object({ uri: z.string() }).passthrough();
@@ -49,15 +52,18 @@ export function serverCapabilities(services) {
   };
 }
 
-export function createMcpServer(services, { era } = {}) {
+export function createMcpServer(services, { era, renders = era === 'modern' && clientRendersApps() } = {}) {
   const { engine, tasks } = services;
+  // MCP Apps — cards, `display`, the hints about them — only for a client that declared it in THIS
+  // request (a 2026-07-28 envelope); a 2025 client carries no capabilities past initialize (src/apps.js)
+  const variant = renders ? 'apps' : 'plain';
   const server = new Server(SERVER_INFO, {
     capabilities: serverCapabilities(services),
-    instructions: services.instructions,
-    cacheHints: { 'server/discover': STATIC, 'tools/list': STATIC, 'resources/list': STATIC, 'resources/templates/list': STATIC, 'resources/read': STATIC },
+    instructions: services.instructions[variant],
+    cacheHints: { 'server/discover': PER_CLIENT, 'tools/list': PER_CLIENT, 'resources/list': PER_CLIENT, 'resources/templates/list': STATIC, 'resources/read': PER_CLIENT },
   });
 
-  server.setRequestHandler('tools/list', async () => ({ tools: services.toolDefs }));
+  server.setRequestHandler('tools/list', async () => ({ tools: services.toolDefs[variant] }));
 
   server.setRequestHandler('tools/call', async (request, ctx) => {
     const { name, arguments: args } = request.params;
@@ -75,6 +81,7 @@ export function createMcpServer(services, { era } = {}) {
       const token = ctx.mcpReq._meta?.progressToken;
       const { result } = await runTool(engine, name, args, {
         signal: cancel.signal,
+        renders,
         progressEveryMs: services.progressEveryMs,
         onProgress: token !== undefined ? (p) => ctx.mcpReq.notify({ method: 'notifications/progress', params: { progressToken: token, ...p } }) : undefined,
       });
@@ -94,7 +101,7 @@ export function createMcpServer(services, { era } = {}) {
     const ctl = new AbortController();
     const forward = () => ctl.abort(requestCancel.signal.reason);
     requestCancel.signal.addEventListener('abort', forward, { once: true });
-    const work = runToCompletion(engine, name, args, { signal: ctl.signal, pollMs: tasks.pollIntervalMs });
+    const work = runToCompletion(engine, name, args, { signal: ctl.signal, pollMs: tasks.pollIntervalMs, renders });
     const finished = await Promise.race([work.then((r) => r.result), new Promise((r) => { setTimeout(() => r(null), services.taskAfterMs).unref?.(); })]);
     requestCancel.signal.removeEventListener('abort', forward);
     if (finished) return finished;
@@ -103,10 +110,10 @@ export function createMcpServer(services, { era } = {}) {
     return { resultType: 'task', ...tasks.detailed(t), statusMessage: 'The call is running; poll tasks/get.' };
   }
 
-  server.setRequestHandler('resources/list', async () => ({ resources: services.resources() }));
+  server.setRequestHandler('resources/list', async () => ({ resources: services.resources(renders) }));
   server.setRequestHandler('resources/templates/list', async () => ({ resourceTemplates: services.templates() }));
   server.setRequestHandler('resources/read', async (request) => {
-    const contents = services.read(request.params.uri);
+    const contents = services.read(request.params.uri, renders);
     // the SDK puts this on the wire as each revision spells it (-32002 in 2025, -32602 in 2026-07-28)
     if (!contents) throw new ResourceNotFoundError(request.params.uri);
     return { contents };

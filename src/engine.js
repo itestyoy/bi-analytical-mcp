@@ -3295,7 +3295,7 @@ export class Engine {
       },
       (e) => this.jobs.fail(id, e?.message || String(e)),
     ).catch(() => {});
-    return { ok: true, status: 'running', query_id: id, message: `the ${label} is still running in the warehouse (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — it returns the rows once it is done, so make it before you report the numbers (in a host that renders MCP Apps, this answer's card follows the query and draws the result in place when it is ready)` };
+    return { ok: true, status: 'running', query_id: id, message: `the ${label} is still running in the warehouse (> ${this.queryTimeoutMs / 1000}s); poll get_query_result with query_id — it returns the rows once it is done, so make it before you report the numbers` };
   }
 
   /** Keep a detached query's finished response for get_query_result — the newest few, for an hour. */

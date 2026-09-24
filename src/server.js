@@ -10,6 +10,7 @@ import { join, dirname } from 'node:path';
 import { createMcpHandler } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
 import { createMcpExpressApp } from '@modelcontextprotocol/express';
+import express from 'express';
 import { mkdirSync } from 'node:fs';
 import { loadCatalog, validateDbtProject, groundCatalogToPhysical } from './catalog.js';
 import { loadRecipes } from './recipes.js';
@@ -179,6 +180,31 @@ const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
  * SDK arms that check by itself only for a loopback bind, and a container binds 0.0.0.0 — so the
  * list is passed explicitly.) MCP_ALLOWED_HOSTS adds the Host check.
  */
+/**
+ * One line for every request the endpoint REFUSED or failed (status >= 400) — including the ones the
+ * SDK's Host/Origin fences reject before any handler runs, which otherwise leave no trace: a client
+ * that "cannot reach" the server is then one log line away from its reason (a browser-based host
+ * sending an Origin that is not in MCP_ALLOWED_ORIGINS, a wrong Host, a protocol version the
+ * server does not speak). Only request metadata is logged, never a body or a credential.
+ */
+export function logRefusals(req, res, next) {
+  res.on('finish', () => {
+    if (res.statusCode < 400) return;
+    const h = req.headers;
+    const method = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body.method : undefined;
+    const bits = [
+      `${res.statusCode} ${req.method} ${req.path}`,
+      method ? `rpc=${method}` : null,
+      h.origin ? `origin=${h.origin}` : null,
+      h.host ? `host=${h.host}` : null,
+      h['mcp-protocol-version'] ? `protocol=${h['mcp-protocol-version']}` : null,
+      h['user-agent'] ? `ua=${String(h['user-agent']).slice(0, 120)}` : null,
+    ].filter(Boolean);
+    logLine('http', `✗ refused ${bits.join(' ')}${res.statusCode === 403 && h.origin ? ' — if this client is legitimate, add its origin hostname to MCP_ALLOWED_ORIGINS' : ''}`);
+  });
+  next();
+}
+
 export function createApp(engine, opts = {}) {
   const services = opts.services || servicesFor(engine);
   const allowedOrigins = [...LOOPBACK, ...(opts.allowedOrigins ?? csv(process.env.MCP_ALLOWED_ORIGINS))];
@@ -212,8 +238,13 @@ export function createApp(engine, opts = {}) {
     return reply(err?.status && err.status < 500 ? err.status : 500, -32603, `Internal error: ${err?.message || err}`);
   });
 
-  app.locals.close = () => handler.close();
-  return app;
+  // the refusal log wraps the SDK's app, so it also sees what that app's Host/Origin fences reject
+  const outer = express();
+  outer.disable('x-powered-by');
+  outer.use(logRefusals);
+  outer.use(app);
+  outer.locals.close = () => handler.close();
+  return outer;
 }
 
 // Entry point

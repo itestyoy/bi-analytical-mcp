@@ -248,7 +248,7 @@ test('register_native_model warns about an incomplete SCD join, like the step bu
 // still reported success.
 test('remove_dimensions takes the attribute it was offered, and refuses an unknown one', async () => {
   const e = engine();
-  const first = await e.create_semantic_model({
+  const first = await e.build_semantic_model({
     name: 'ret',
     semantic_models: [
       { from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] },
@@ -279,7 +279,7 @@ test('remove_dimensions takes the attribute it was offered, and refuses an unkno
 // which is not loaded in this context".
 test('groupable and the example only name models this context loaded', async () => {
   const e = engine();
-  const out = await e.create_semantic_model({
+  const out = await e.build_semantic_model({
     name: 'evonly',
     semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
     metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }],
@@ -478,7 +478,7 @@ test('an attribute of a LOADED model no source can reach is refused here, not by
   const e = engine();
   // measures on one events source; the OTHER events source is loaded, but nothing declares a
   // relationship to it (two facts do not point at each other).
-  const out = await e.create_semantic_model({
+  const out = await e.build_semantic_model({
     name: 'evonly',
     use_base_models: ['crashlytics', 'users'],
     semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }],
@@ -531,15 +531,15 @@ models:
 // instead of a stage-time refusal at add_step.
 test('unnest is refused when the payload column it explodes is gone', async () => {
   const e = engine();
-  const s = await e.build_native_model({ action: 'start', name: 'items', source: 'events' });
+  const s = await e.build_pipeline_model({ action: 'start', name: 'items', source: 'events' });
   // the array property is readable while the rows are still events
-  const ok = await e.build_native_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } });
+  const ok = await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } });
   assert.equal(ok.step_index, 1);
   // …and after an aggregate collapses the grain, the same stage cannot read it any more
-  const agg = await e.build_native_model({ action: 'start', name: 'items2', source: 'events' });
-  await e.build_native_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }] } });
+  const agg = await e.build_pipeline_model({ action: 'start', name: 'items2', source: 'events' });
+  await e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'aggregate', group_by: ['player_id_of_internal'], measures: [{ name: 'n', fn: 'count' }] } });
   await assert.rejects(
-    () => e.build_native_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } }),
+    () => e.build_pipeline_model({ action: 'add_step', draft_id: agg.draft_id, stage: { stage: 'unnest', source: 'words_collected', as: 'word' } }),
     /unknown column 'event_data' at this stage/,
   );
 });

@@ -7,7 +7,7 @@
  * (steps, conversion, the biggest drop) and the A/B
  * family (the test, the split check, the sample-size plan). Any other result gets one status line.
  *
- * IT DRAWS, AND READS ONLY ITS OWN RESULT. The input is the display_result the host delivers
+ * IT DRAWS, AND READS ONLY ITS OWN RESULT. The input is the display_model_result the host delivers
  * (ontoolresult). The one thing it asks for is more of that same result, through drill_result
  * (readResult): a drill-down's next view — its task's stored table, filtered to the pivot row opened or
  * the chart mark clicked, grouped by the dimension chosen. Nothing
@@ -523,7 +523,7 @@ const readResult = (args) => app.callServerTool({ name: 'drill_result', argument
 /** The one line a result without a card gets — what happened, and that the reply carries the rest. */
 function showStatus(model) {
   const lines = {
-    // display_result draws finished results only; a running one is refused before it gets here
+    // display_model_result draws finished results only; a running one is refused before it gets here
     running: ['clock', 'Still running'],
     // the result this card showed or waited for was deleted or expired since — not an error
     gone: ['clock', 'This result is no longer available'],

@@ -42,7 +42,7 @@ const sumCol = (rows, col) => rows.reduce((s, r) => s + (Number.isFinite(num(r[c
 const mapCol = (rows, keyCol, valCol) => Object.fromEntries(rows.map((r) => [String(r[keyCol]), num(r[valCol])]));
 
 async function create(decl) {
-  const out = await engine.create_semantic_model(decl);
+  const out = await engine.build_semantic_model(decl);
   assert.equal(out.parse.ok, true, `parse failed for ${decl.name}: ${JSON.stringify(out.parse)}`);
   ctxOf[decl.name] = out.context_id;
   return out;

@@ -14,7 +14,7 @@
      properties, its `meta.mcp.primary_entity` and its own space in the value
      index (keyed by `(source, property)`), and they are never mixed. No source is
      privileged: the SOURCE is always a separate argument — `semantic_index({
-     source, event })`, `build_native_model({ source })`, `semantic_models[].from`
+     source, event })`, `build_pipeline_model({ source })`, `semantic_models[].from`
      — never glued into a name. Within a source, names are used as-is. A source is
      named ALWAYS, in every catalog, including one that declares a single source:
      one address for one thing, so no name ever has a second, owner-less spelling
@@ -127,24 +127,28 @@
   model's one definition of a view (no other tools/call, resource, model message, link or network)
   — a test holds its sources to that; the server serves it only for a task that was drawn.
   Everything else interactive stays on the data already in the page.
-- START, READ, SHOW — THREE CALLS (HARD RULE). A tool that STARTS warehouse work
-  (create_semantic_model incl. action:update, query_semantic_model, build_native_model materialize,
-  the hidden register_native_model/update_semantic_model) validates its input in the call and
-  returns ONLY `{ task_id, context_id? }` — it never waits (`Engine._startTask`; tasks on one context
-  run in order). `get_task_result` is the one way to wait (≤ MAX_WAIT_SECONDS per call) and to read
-  a result (and to page a stored one); it never draws. `display_result` is the ONLY tool that draws:
-  it reads the task through get_task_result, validates `display` against the result's columns, and
-  draws each task AT MOST ONCE (a second call is refused) — so one question gets one card by
-  construction. `structuredContent` is carried only by a display_result that drew
-  (`drawn: true` and `buildViewModel(...).kind !== 'none'`); every other answer is the text alone.
-  An experiment's statistics come back at once with a task_id display_result can draw. A stored
-  result is re-sliced by a pipeline started from its task (`build_native_model({ action: 'start',
-  from_task })`), never by a read tool; `time` is a pure timer. Do NOT add a second tool that draws,
-  a tool that waits inside a starting call, or a read by table name.
+- BUILD, QUERY, SHOW — TWO SIDES, ONE NAMING (HARD RULE). Each side has a builder and a query
+  tool: `build_semantic_model` / `query_semantic_model` and `build_pipeline_model` /
+  `query_pipeline_model`. A call that STARTS warehouse work — a build (incl. action:update, a
+  pipeline materialize, the hidden register_native_model/update_semantic_model) or a query
+  (`query_semantic_model({ context_id, metrics… })`, `query_pipeline_model({ context_id,
+  transform })`) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
+  never waits (`Engine._startTask`; tasks on one context run in order). The query tool of the SAME
+  side reads a task back: `{ task_id }` waits (≤ MAX_WAIT_SECONDS per call) and returns the result
+  (and pages a stored one); it refuses a task of the other side, and it never draws.
+  `display_model_result` is the ONLY tool that draws, for either side: it reads the task the way the
+  query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
+  task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
+  `structuredContent` is carried only by a display_model_result that drew (`drawn: true` and
+  `buildViewModel(...).kind !== 'none'`); every other answer is the text alone. An experiment's
+  statistics come back at once with a task_id display_model_result can draw. A stored result is
+  built on by a pipeline started from its task (`build_pipeline_model({ action: 'start', from_task
+  })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
+  starting call, a reader shared by both sides, or a read by table name.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): `_meta.ui`, the view resource,
-    display_result and drill_result (not even listed otherwise, and refused if called), the RESULT
+    display_model_result and drill_result (not even listed otherwise, and refused if called), the RESULT
     CARDS instructions, the `show_to_user` hint;
   * Skills (`io.modelcontextprotocol/skills`): skills/list and skills/get (-32021 otherwise), the
     skill files in resources/list, templates and resources/read, the SKILLS pointer in the

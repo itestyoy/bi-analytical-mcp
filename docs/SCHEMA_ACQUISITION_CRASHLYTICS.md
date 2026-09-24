@@ -32,7 +32,7 @@
 `known_events`, свои событийные свойства `*_of_event_data`, свой `primary_entity` и своё
 место в индексе значений по ключу `(source, property)`. Ни один не «главный». Поэтому
 источник всегда идёт **отдельным аргументом**:
-`semantic_index({ source, event })`, `build_native_model({ source })`,
+`semantic_index({ source, event })`, `build_pipeline_model({ source })`,
 `semantic_models[].from` — и никогда не приклеивается к имени.
 
 ---

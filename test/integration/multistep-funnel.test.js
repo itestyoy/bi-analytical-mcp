@@ -32,7 +32,7 @@ let pg; let engine; let backend;
 const ctxOf = {};
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const create = async (decl) => {
-  const out = await engine.create_semantic_model(decl);
+  const out = await engine.build_semantic_model(decl);
   assert.equal(out.parse.ok, true, `parse failed for ${decl.name}: ${JSON.stringify(out.parse.error || out.parse)}`);
   ctxOf[decl.name] = out.context_id;
   return out;

@@ -1,8 +1,8 @@
-// A call that STARTS work (create_semantic_model, query_semantic_model, register_native_model,
-// build_native_model materialize) returns only { task_id, … }; what it produced is read with
-// get_task_result. Most tests are about what the work produced, so they run their engine through
+// A call that STARTS work (build_semantic_model, query_semantic_model, build_pipeline_model
+// materialize, query_pipeline_model, register_native_model) returns only { task_id, … }; what it
+// produced is read back with the query tool of its side ({ task_id }). Most tests are about what the work produced, so they run their engine through
 // `settle(engine)`: the same engine, where a call that started a task returns that task's result
-// (read with get_task_result, waiting until it is done). The raw engine stays reachable as
+// (read with its side's query tool, waiting until it is done). The raw engine stays reachable as
 // `engine.raw`, for a test about the task itself.
 
 const STARTED_KEYS = new Set(['task_id', 'context_id', 'draft_id', 'model', 'next']);
@@ -13,10 +13,19 @@ export function isStartedTask(out) {
     && Object.keys(out).every((k) => STARTED_KEYS.has(k)) && 'next' in out;
 }
 
-/** Wait for a task and return what get_task_result says once it is no longer running. */
+const PIPELINE_TOOLS = new Set(['build_pipeline_model', 'register_native_model', 'query_pipeline_model']);
+
+/** The public read of a task: the query tool of its side, with { task_id }. */
+export function readTask(engine, taskId, extra = {}) {
+  const raw = engine.raw || engine;
+  const tool = PIPELINE_TOOLS.has(raw.jobs.get(taskId)?.tool) ? 'query_pipeline_model' : 'query_semantic_model';
+  return raw[tool]({ task_id: taskId, ...extra });
+}
+
+/** Wait for a task and return what its query tool says once it is no longer running. */
 export async function taskResult(engine, taskId) {
   for (;;) {
-    const r = await engine.get_task_result({ task_id: taskId, wait_seconds: 30 });
+    const r = await readTask(engine, taskId, { wait_seconds: 30 });
     if (r.status !== 'running') return r;
   }
 }
@@ -31,7 +40,7 @@ function refusal(r) {
   return Object.assign(new Error(r.error.message), { stage: r.error.stage, field: r.error.field, code: r.error.code });
 }
 
-const TASK_TOOLS = new Set(['create_semantic_model', 'update_semantic_model', 'query_semantic_model', 'register_native_model', 'build_native_model']);
+const TASK_TOOLS = new Set(['build_semantic_model', 'update_semantic_model', 'query_semantic_model', 'register_native_model', 'build_pipeline_model', 'query_pipeline_model']);
 
 /** The engine, with every started task settled into its result. */
 export function settle(engine) {

@@ -5,7 +5,7 @@
 // inline window comes back as a task (`resultType: "task"`); tasks/get returns the result inline;
 // tasks/cancel is an ack; a client that did not declare it never gets a task and is refused
 // tasks/*. And what a protocol task means for the engine's own tasks: a call that WAITS on one
-// (get_task_result, display_result) is followed to its end, so the protocol task's result is the
+// (a query tool with { task_id }, display_model_result) is followed to its end, so the protocol task's result is the
 // rows, not "still running"; a call that STARTS work returns its task_id at once, as always.
 //
 // The long call is the `time` tool (a pure timer, cancellable); the followed task is a stub engine
@@ -98,36 +98,39 @@ function stubEngine({ after = 3, rows = [], fail = null, throws = null } = {}) {
   const result = () => (fail ? { ok: false, task_id: 't1', status: 'error', error: fail } : { ok: true, task_id: 't1', status: 'done', columns: [{ name: 'day' }, { name: 'dau' }], rows, row_count: rows.length });
   const engine = {
     state,
-    schemas: { get_task_result: {}, display_result: {}, query_semantic_model: {} },
+    schemas: { query_pipeline_model: {}, display_model_result: {}, query_semantic_model: {} },
     jobs: { get: (id) => (id === 't1' ? { id, status: done() ? (fail ? 'error' : 'ready') : 'running' } : undefined), isLive: () => true },
-    async get_task_result({ wait_seconds }) {
+    async _awaitTask() {
       if (throws) throw throws;
-      if (wait_seconds !== 0) state.waits += 1;
+      state.waits += 1;
+    },
+    async query_pipeline_model({ task_id }) {
+      if (!task_id) return { task_id: 't1', context_id: 'c1', next: 'query_pipeline_model' };
       return done() ? result() : { ok: true, task_id: 't1', status: 'running' };
     },
-    async display_result({ display }) {
+    async display_model_result({ display }) {
       const r = result();
       return r.ok === false ? r : { ...r, display, drawn_from: { tool: 'query_semantic_model' }, drawn: true };
     },
-    async query_semantic_model() { return { task_id: 't1', context_id: 'c1', next: 'get_task_result' }; },
+    async query_semantic_model() { return { task_id: 't1', context_id: 'c1', next: 'query_semantic_model' }; },
   };
   return engine;
 }
 
-test('a protocol task follows get_task_result while the engine task runs, and returns its rows — never a card', async () => {
+test('a protocol task follows a query tool\'s read while the engine task runs, and returns its rows — never a card', async () => {
   const rows = [{ day: '2024-01-01', dau: 42 }, { day: '2024-01-02', dau: 57 }];
   const engine = stubEngine({ rows });
-  const { result, raw } = await runToCompletion(engine, 'get_task_result', { task_id: 't1' });
+  const { result, raw } = await runToCompletion(engine, 'query_pipeline_model', { task_id: 't1' });
   assert.equal(raw.status, 'done');
   assert.deepEqual(payload(result).rows, rows);
   assert.equal(result.structuredContent, undefined, 'reading a result draws nothing');
   assert.ok(engine.state.waits >= 3, 'it waited until the task was done');
 });
 
-test('display_result under a protocol task waits for the task, then draws its ONE card', async () => {
+test('display_model_result under a protocol task waits for the task, then draws its ONE card', async () => {
   const rows = [{ day: '2024-01-01', dau: 42 }, { day: '2024-01-02', dau: 57 }];
   const engine = stubEngine({ rows });
-  const { result } = await runToCompletion(engine, 'display_result', { task_id: 't1', display: { kind: 'line', x: 'day', y: ['dau'] } });
+  const { result } = await runToCompletion(engine, 'display_model_result', { task_id: 't1', display: { kind: 'line', x: 'day', y: ['dau'] } });
   assert.deepEqual(result.structuredContent.rows, rows, 'the card is drawn from the finished rows');
 });
 
@@ -140,14 +143,14 @@ test('a call that STARTS work is never held by a protocol task: it answers with 
 
 test('a followed task that FAILS is a tool error, not a completed success', async () => {
   const engine = stubEngine({ after: 1, fail: { stage: 'materialize', message: 'dbt run failed' } });
-  const { result } = await runToCompletion(engine, 'get_task_result', { task_id: 't1' });
+  const { result } = await runToCompletion(engine, 'query_pipeline_model', { task_id: 't1' });
   assert.equal(result.isError, true);
   assert.equal(payload(result).error.message, 'dbt run failed');
 });
 
 test('a wait that THROWS while following a task is a tool error the caller reads', async () => {
   const engine = stubEngine({ throws: Object.assign(new Error('relation "qr_x" does not exist'), { stage: 'query' }) });
-  const { result, raw } = await runToCompletion(engine, 'get_task_result', { task_id: 't1' });
+  const { result, raw } = await runToCompletion(engine, 'query_pipeline_model', { task_id: 't1' });
   assert.equal(raw, null);
   assert.equal(result.isError, true);
   assert.equal(payload(result).error.stage, 'query');
@@ -162,7 +165,7 @@ test('following a long task leaves no abort listener behind on the protocol task
   const remove = ctl.signal.removeEventListener.bind(ctl.signal);
   ctl.signal.addEventListener = (type, fn, o) => { if (type === 'abort') live += 1; add(type, fn, o); };
   ctl.signal.removeEventListener = (type, fn, o) => { if (type === 'abort') live -= 1; remove(type, fn, o); };
-  await runToCompletion(engine, 'get_task_result', { task_id: 't1' }, { signal: ctl.signal });
+  await runToCompletion(engine, 'query_pipeline_model', { task_id: 't1' }, { signal: ctl.signal });
   assert.ok(engine.state.waits >= 40);
   assert.ok(live <= 1, `listeners still attached after 40 waits: ${live}`);
 });

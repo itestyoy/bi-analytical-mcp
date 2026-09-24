@@ -1,4 +1,4 @@
-// Tracks TASKS (src/engine.js _startTask): the work a tool started and get_task_result reads. A
+// Tracks TASKS (src/engine.js _startTask): the work a tool started and its side's query tool reads back ({ task_id }). A
 // task that stores a table (a materialized query, a pipeline build) keeps its result in the
 // warehouse — re-readable after a restart. This store tracks status + which context/table to read from,
 // persisted in the shared store (one SQLite db, see store.js) so the job registry

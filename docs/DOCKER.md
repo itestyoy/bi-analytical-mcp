@@ -77,7 +77,7 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
   **Values above 30 s are capped at 30**, with a line on stderr saying so — a longer wait inside one
   tool call outlives the calling client's own timeout, which this server cannot raise. (A query or a
   build never holds a call at all: it is a task — the call returns its `task_id` at once and
-  `get_task_result` waits for it, at most 30 s per call.)
+  the query tool of its side, given `{ task_id }`, waits for it, at most 30 s per call.)
 - `CONTEXT_TTL_MS` — context GC tuning.
 - `MCP_ALLOWED_ORIGINS` — comma-separated browser origin HOSTNAMES allowed to call the endpoint
   (port-agnostic, e.g. `console.example.com`). The spec requires a server to validate `Origin`
@@ -144,7 +144,7 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
 
 - **Tasks** (`io.modelcontextprotocol/tasks`) — for a client that declares it, a call that has not
   finished in `MCP_TASK_AFTER_MS` comes back as a task (`resultType: "task"`) the HOST polls; a call
-  that waits on an engine task (`get_task_result`, `display_result`) is followed to its end, so the
+  that waits on an engine task (a query tool with `{ task_id }`, `display_model_result`) is followed to its end, so the
   protocol task's result is the rows, not "still running". A call that starts work still answers
   with its `task_id` at once.
   `tasks/cancel` stops the call's dbt process. (The TypeScript SDK does not implement this extension
@@ -161,9 +161,9 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   (with the view's MIME type) in the request being served, i.e. a 2026-07-28 client, whose every
   request carries its capabilities. Every other client — including a 2025 client that declared it in
   `initialize`, whose later requests carry nothing (this server keeps no sessions) — gets no
-  `_meta.ui`, no view resource, neither `display_result` nor `drill_result` (not listed; a call is
+  `_meta.ui`, no view resource, neither `display_model_result` nor `drill_result` (not listed; a call is
   refused), no card instructions and no `show_to_user` hint. For a client that declares it, ONE tool
-  draws: `display_result({ task_id, display })` renders a finished result — of a query, a pipeline
+  draws: `display_model_result({ task_id, display })` renders a finished result — of a query, a pipeline
   build or an experiment — in the host's conversation as an interactive view
   (`ui://betti/result-view.html`):
   a CHART (a time series or a breakdown — the chart alone; the only table is the pivot below),
@@ -173,7 +173,7 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   analyze call marks a metric where lower is better, such as crash rate or churn, and the card says
   "lower is better"), the SAMPLE-RATIO CHECK (the
   observed split against the intended one) and the SAMPLE-SIZE PLAN. What a result with rows IS is
-  declared by the caller: `display` on `display_result`, a union of closed
+  declared by the caller: `display` on `display_model_result`, a union of closed
   forms tagged by `kind` — each form's schema says which question it fits and what it needs (required
   fields, bounds, enums, if/then), so nothing about a form lives in prose: `line` (a trend; several
   `y`, or one `y` with a `series_column`, is a multi-line), `area` (a total split into parts over time,
@@ -200,14 +200,15 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   result arrives. A result that is gone — its table or context deleted, a result held in memory
   expired or lost to a restart, a task_id the server does not know — is `error.code: result_gone`
   (a card of it reads "This result is no longer available", not "Error").
-  START, READ, SHOW — THREE CALLS: a call that starts warehouse work (`create_semantic_model`,
-  `query_semantic_model`, `build_native_model` materialize) returns only `{ task_id }` and never
-  waits; `get_task_result({ task_id })` waits for it (up to 30 s per call) and returns the rows —
-  and never draws; `display_result` is the only tool that draws, reads the task through
-  get_task_result, and draws each task ONCE (a second call is refused). So one question gets one
+  BUILD, QUERY, SHOW: two sides with one naming — `build_semantic_model` / `query_semantic_model`
+  and `build_pipeline_model` / `query_pipeline_model`. A call that starts warehouse work (a build, a
+  query) returns only `{ task_id }` and never waits; the query tool of the same side, given
+  `{ task_id }`, waits for it (up to 30 s per call) and returns the rows — and never draws;
+  `display_model_result` is the only tool that draws, for either side: it reads the task the same
+  way and draws each task ONCE (a second call is refused). So one question gets one
   card by construction: `structuredContent` (what a host draws a card from) is carried only by a
-  `display_result` that drew; every other answer, of every tool, is text alone. A task still running
-  is refused by display_result (wait with get_task_result), and so is a column the result lacks.
+  `display_model_result` that drew; every other answer, of every tool, is text alone. A task still running
+  is refused by display_model_result (wait with its query tool), and so is a column the result lacks.
   Beyond that the view ONLY DRAWS. Every tool declares `_meta.ui.visibility: ["model"]` (a view may
   not call it) except `drill_result`, `["app"]` (the model never sees it); the view resource declares
   an empty `csp` (no connect, resource or frame origin) and the page carries the same

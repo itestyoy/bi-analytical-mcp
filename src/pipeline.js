@@ -709,7 +709,7 @@ function requireCol(cols, name) {
   // A stage counts rows by leaving `column` out entirely, so say that instead of listing every
   // column and leaving the caller to guess what a SQL habit translates to here.
   if (name === '*') {
-    throw new Error("pipeline: '*' is not a column — a stage counts ROWS by omitting `column` ({ name, fn: 'count' }); `field: '*'` is the governed path's spelling (create_semantic_model measures)");
+    throw new Error("pipeline: '*' is not a column — a stage counts ROWS by omitting `column` ({ name, fn: 'count' }); `field: '*'` is the governed path's spelling (build_semantic_model measures)");
   }
   throw new Error(`pipeline: unknown column '${name}' at this stage (available: ${[...cols.keys()].join(', ')})`);
 }

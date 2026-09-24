@@ -22,7 +22,7 @@ test('every advertised tool declares its behaviour', () => {
     if (!t.annotations.readOnlyHint) assert.equal(typeof t.annotations.destructiveHint, 'boolean', t.name);
   }
   const by = Object.fromEntries(tools.map((t) => [t.name, t.annotations]));
-  for (const ro of ['semantic_index', 'get_task_result', 'display_result', 'drill_result', 'experiment', 'time']) assert.equal(by[ro].readOnlyHint, true, ro);
+  for (const ro of ['semantic_index', 'query_pipeline_model', 'display_model_result', 'drill_result', 'experiment', 'time']) assert.equal(by[ro].readOnlyHint, true, ro);
   for (const d of ['context', 'memory']) assert.equal(by[d].destructiveHint, true, `${d} can remove what it holds`);
-  for (const w of ['create_semantic_model', 'build_native_model', 'query_semantic_model']) assert.equal(by[w].readOnlyHint, false, `${w} writes into its context`);
+  for (const w of ['build_semantic_model', 'build_pipeline_model', 'query_semantic_model']) assert.equal(by[w].readOnlyHint, false, `${w} writes into its context`);
 });

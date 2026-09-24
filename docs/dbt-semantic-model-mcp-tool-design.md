@@ -16,7 +16,7 @@
 
 ```
         ┌──────────────────────────── MCP server ────────────────────────────┐
- AI ──► │  create_semantic_model(декларация, enum-constrained)                │
+ AI ──► │  build_semantic_model(декларация, enum-constrained)                │
         │      │  рендер YAML (events SM + metrics, namespaced)               │
         │      ▼                                                              │
         │  .mcp/ctx/<context_id>/…/<task>.yml  ──►  dbt parse  ──►  manifest   │
@@ -263,9 +263,9 @@ spine не сконфигурирован — тул возвращает пон
 
 **Поток `context_id` (правило для AI):**
 ```
-create_semantic_model({ ... })                  // БЕЗ context_id
+build_semantic_model({ ... })                  // БЕЗ context_id
    → сервер аллоцирует НОВЫЙ context_id, поднимает workspace, возвращает его
-create_semantic_model({ context_id, ... })      // С context_id из прошлого ответа
+build_semantic_model({ context_id, ... })      // С context_id из прошлого ответа
    → добавляет/домешивает SM/метрики в ТОТ ЖЕ контекст
 query/update/delete_*({ context_id, ... })       // всегда в рамках контекста
 ```
@@ -308,7 +308,7 @@ query/update/delete_*({ context_id, ... })       // всегда в рамках
   отдать пользователю/закоммитить, но по умолчанию они эфемерны).
 - `list_contexts`/`describe_context` показывают активные контексты и их возраст/TTL.
 
-## 3a. Тул `create_semantic_model`
+## 3a. Тул `build_semantic_model`
 
 **Назначение.** Декларативно описать SM нужных таблиц (по одной на таблицу) и
 метрики к ним. Тул материализует/домешивает YAML в overlay контекста, проставляет
@@ -716,7 +716,7 @@ workspace контекста** (time spine уже материализован �
 стабильным базовым моделям). Транслируется в **`mf query`** (dbt Core) в
 workspace контекста. Все имена — `enum`.
 
-> Динамический enum: после `create_semantic_model` сервер знает метрики и
+> Динамический enum: после `build_semantic_model` сервер знает метрики и
 > достижимые измерения (включая multi-hop пути присоединённых моделей) и
 > **сужает** `enum` запроса под конкретную задачу. Это «контекстная» схема: для
 > задачи `lvl_econ` нельзя спросить чужую метрику или недостижимый путь.
@@ -729,7 +729,7 @@ workspace контекста. Все имена — `enum`.
   "required": ["context_id", "metrics"],
   "properties": {
     "context_id": { "type": "string", "enum": ["« ACTIVE_CONTEXTS »"],
-                    "description": "Контекст, в котором созданы модели (id из ответа create_semantic_model). Запрос выполняется в его изолированном dbt-workspace." },
+                    "description": "Контекст, в котором созданы модели (id из ответа build_semantic_model). Запрос выполняется в его изолированном dbt-workspace." },
     "task": { "type": "string", "enum": ["« CONTEXT_TASKS »"],
               "description": "Опц.: если в контексте несколько задач — какую запрашивать. Сужает enum метрик/путей." },
 
@@ -786,8 +786,8 @@ workspace контекста. Все имена — `enum`.
                  "description": "true → вернуть только сгенерированный SQL (mf --explain) + оценку стоимости, без выполнения." }
   },
 
-  "$defs": { "predicate":      { "...": "как в create_semantic_model; fieldRef.path сужен до TASK_GROUPABLE_PATH" },
-             "predicateGroup": { "...": "как в create_semantic_model" } }
+  "$defs": { "predicate":      { "...": "как в build_semantic_model; fieldRef.path сужен до TASK_GROUPABLE_PATH" },
+             "predicateGroup": { "...": "как в build_semantic_model" } }
 }
 ```
 
@@ -944,7 +944,7 @@ mf query \
 
 `describe_catalog` — «карта территории»: его выход питает `enum`'ы и позволяет AI
 заполнять декларацию осознанно. Системный промпт обязывает вызвать его перед
-первым `create_semantic_model` по новой теме. Управление жизненным циклом
+первым `build_semantic_model` по новой теме. Управление жизненным циклом
 моделей — через `update_semantic_model` / `delete_semantic_model` / `drop_context`
 (§4a).
 
@@ -957,7 +957,7 @@ mf query \
      → models: events/users/campaigns; props: [revenue:numeric, level:int, …];
        groupable: [user__country, user__campaign__channel, …]
 
-2. create_semantic_model({               // БЕЗ context_id → новая задача
+2. build_semantic_model({               // БЕЗ context_id → новая задача
        name:"lvl_econ", use_base_models:["users","campaigns"],
        semantic_models:[{ from:"events", event_scope:{event_name:["purchase"]},
          dimensions:[product_id, level],

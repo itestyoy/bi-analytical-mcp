@@ -62,7 +62,7 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 // Build a recipe's model once via the published get_recipe payload.
 async function buildRecipe(t, id) {
-  const out = await engine.create_semantic_model(engine.get_recipe({ id }).create_payload);
+  const out = await engine.build_semantic_model(engine.get_recipe({ id }).create_payload);
   assert.equal(out.parse.ok, true, `parse failed for ${id}: ${JSON.stringify(out.parse.error || out.parse)}`);
   return out.context_id;
 }
@@ -72,7 +72,7 @@ const q = (ctx, input) => engine.query_semantic_model({ context_id: ctx, ...inpu
 // #6: a numeric value that arrives as STRING is aggregable via cast:numeric.
 test('TASK cast: sum/avg a STRING-numeric property with cast:numeric', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.create_semantic_model({
+  const out = await engine.build_semantic_model({
     name: 'castq',
     semantic_models: [{
       from: 'events',
@@ -93,7 +93,7 @@ test('TASK cast: sum/avg a STRING-numeric property with cast:numeric', opts, asy
   assert.equal(num(r.rows[0].castq_sum_ct), 1263);            // exact Σ complete_time
   assert.ok(Math.abs(num(r.rows[0].castq_avg_ct) - 50.52) < 1e-6);
   // the same aggregation WITHOUT a cast is rejected (string is not numeric)
-  await assert.rejects(engine.create_semantic_model({
+  await assert.rejects(engine.build_semantic_model({
     name: 'castbad',
     semantic_models: [{ from: 'events', event_scope: { event_name: ['level_completed'] }, measures: [{ name: 'bad', agg: 'average', field: 'complete_time_of_event_data' }] }],
     metrics: [{ name: 'bad', type: 'simple', measure: { name: 'bad' } }],

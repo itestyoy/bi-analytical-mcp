@@ -69,11 +69,11 @@ function engine(runner, { workspaceRoot, registryPath } = {}) {
 }
 
 const draftOf = (e, id) => e.ctxs.get(id).state.draft;
-const add = (e, draft_id, stage) => e.build_native_model({ action: 'add_step', draft_id, stage });
-const materialize = (e, draft_id) => e.build_native_model({ action: 'materialize', draft_id });
+const add = (e, draft_id, stage) => e.build_pipeline_model({ action: 'add_step', draft_id, stage });
+const materialize = (e, draft_id) => e.build_pipeline_model({ action: 'materialize', draft_id });
 
 async function startedDraft(e, name = 'seg') {
-  const { draft_id } = await e.build_native_model({ action: 'start', name, source: 'events' });
+  const { draft_id } = await e.build_pipeline_model({ action: 'start', name, source: 'events' });
   await add(e, draft_id, AGG);
   await add(e, draft_id, PY_STAGE);
   return draft_id;
@@ -104,8 +104,8 @@ test('a build is a task: the call returns at once; a retried materialize builds 
   assert.equal(runner.held.length, 1, 'no second build was started');
   assert.equal(draftOf(e, draft_id).checkpoints.length, 1, 'and no second prefix was recorded');
   // A client that lost the task_id can still find it, and looking at it does not wait.
-  assert.ok(e.list_query_jobs().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_native_model'));
-  const peek = await e.get_task_result({ task_id: bg.task_id, wait_seconds: 0 });
+  assert.ok(e.list_query_jobs().tasks.some((j) => j.task_id === bg.task_id && j.table === bg.model && j.tool === 'build_pipeline_model'));
+  const peek = await e.query_pipeline_model({ task_id: bg.task_id, wait_seconds: 0 });
   assert.equal(peek.status, 'running');
 
   // Meanwhile the draft keeps growing — validation needs the prefix's COLUMNS, not its table.
@@ -192,7 +192,7 @@ test('a view prefix is called out (reading it re-runs its SQL), and describe_con
   if (skipNoPy(t)) return;
   const runner = heldRunner();
   const e = engine(runner);
-  const { draft_id } = await e.build_native_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
+  const { draft_id } = await e.build_pipeline_model({ action: 'start', name: 'slice', source: 'events', materialized: 'view' });
   await add(e, draft_id, { stage: 'where', conditions: [{ column: 'event_name', op: 'eq', value: 'level_completed' }] });
   const r = await finishTask(e, await materialize(e, draft_id), runner);
   assert.equal(r.materialized, 'view');
@@ -203,14 +203,14 @@ test('a view prefix is called out (reading it re-runs its SQL), and describe_con
   assert.deepEqual(d.draft.checkpoints.map((c) => [c.at, c.model, c.carries_source]), [[1, r.model, 'events']]);
   assert.equal(d.draft.steps.length, 1);
   // preview says what materialize would actually build now (nothing — everything is the table).
-  const pv = await e.build_native_model({ action: 'preview', draft_id });
+  const pv = await e.build_pipeline_model({ action: 'preview', draft_id });
   assert.equal(pv.steps_recomputed, 0);
   assert.match(pv.checkpoint_note, /Every step is already materialized/);
   await assert.rejects(() => materialize(e, draft_id), /nothing to build/);
 });
 
 // Editing a step retires the prefixes at or after it and removes their files — but a build that is
-// STILL RUNNING hands its table back through get_task_result, which reads it by ref. Removing the
+// STILL RUNNING hands its table back through query_pipeline_model, which reads it by ref. Removing the
 // definition mid-build would make that result unreadable for good.
 test('an edit during a build does not remove the files that build is producing', async (t) => {
   if (skipNoPy(t)) return;
@@ -221,7 +221,7 @@ test('an edit during a build does not remove the files that build is producing',
   await untilHeld(runner);
 
   // an edit BELOW the pending prefix retires it (its table is not to be read as a prefix)…
-  const ed = await e.build_native_model({ action: 'edit_step', draft_id, index: 1, stage: AGG });
+  const ed = await e.build_pipeline_model({ action: 'edit_step', draft_id, index: 1, stage: AGG });
   assert.deepEqual(ed.checkpoints_dropped.map((d) => d.model), [bg.model]);
   assert.deepEqual(draftOf(e, draft_id).checkpoints, []);
   // …but the model it is building stays on disk, so the task's own result is still readable
@@ -233,7 +233,7 @@ test('an edit during a build does not remove the files that build is producing',
 // WHO waits. A build that includes a python model is a cold start of minutes on the warehouse
 // runtime, and the client that made this tool call has a timeout of its own that the server neither
 // knows nor can raise — so NO build holds its call, python or SQL: each is a task, and waiting is
-// get_task_result's (a bounded wait per call).
+// the query tool's ({ task_id }, a bounded wait per call).
 test('no build holds its call — a python build and an SQL build both answer with their task at once', async (t) => {
   if (skipNoPy(t)) return;
   const runner = heldRunner();
@@ -245,12 +245,12 @@ test('no build holds its call — a python build and an SQL build both answer wi
   const retry = await materialize(e, py).catch((err) => err);
   // refused, and the refusal sends the caller to the task rather than to a second build
   assert.match(String(retry.message || retry), /already in flight/);
-  assert.match(String(retry.message || retry), /get_task_result/);
+  assert.match(String(retry.message || retry), /query_pipeline_model/);
   assert.equal(runner.held.length, 1, 'still ONE build for the same pipeline');
   runner.finish(true);
   await taskResult(e, out.task_id);
 
-  const { draft_id: sql } = await e.build_native_model({ action: 'start', name: 'grace_sql', source: 'events' });
+  const { draft_id: sql } = await e.build_pipeline_model({ action: 'start', name: 'grace_sql', source: 'events' });
   await add(e, sql, AGG);
   const sqlStarted = await materialize(e, sql);
   assert.ok(isStartedTask(sqlStarted), 'an SQL build is a task too');

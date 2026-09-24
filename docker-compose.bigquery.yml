@@ -26,7 +26,7 @@ services:
       RECIPES_PATH: "/config/recipes.json"
       MCP_WORKSPACE: "/workspace"
       # How long a best-effort warehouse read (column set, freshness) may hold a call (max 30).
-      # Queries and builds never hold one: they are tasks, read with get_task_result.
+      # Queries and builds never hold one: they are tasks, read back with query_semantic_model / query_pipeline_model ({ task_id }).
       QUERY_TIMEOUT_SECONDS: "${QUERY_TIMEOUT_SECONDS:-20}"
       CONTEXT_TTL_MS: "${CONTEXT_TTL_MS:-0}"
       # PERSISTENCE — keep the value index / job history / memory across restarts. The DBs live

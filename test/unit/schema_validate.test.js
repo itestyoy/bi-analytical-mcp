@@ -17,7 +17,7 @@ test('create: accepts a valid declaration', () => {
   // evolves (vocabulary differs across catalogs; the shape under test does not).
   const numericField = catalog.eventNumericProps('events')[0];
   const someEvent = catalog.eventNames('events')[0];
-  const r = v('create_semantic_model', {
+  const r = v('build_semantic_model', {
     name: 'task_a',
     semantic_models: [{ from: 'events', event_scope: { event_name: [someEvent] }, measures: [{ name: 'rev', agg: 'sum', field: numericField }] }],
     metrics: [{ name: 'rev', type: 'simple', measure: { name: 'rev' } }],
@@ -26,7 +26,7 @@ test('create: accepts a valid declaration', () => {
 });
 
 test('create: rejects unknown event property in dimension (enum from catalog)', () => {
-  const r = v('create_semantic_model', {
+  const r = v('build_semantic_model', {
     name: 'task_a',
     semantic_models: [{ from: 'events', dimensions: [{ source: 'event_property', property: 'not_a_real_prop' }] }],
     metrics: [{ name: 'm', type: 'simple', measure: { name: 'x' } }],
@@ -35,7 +35,7 @@ test('create: rejects unknown event property in dimension (enum from catalog)', 
 });
 
 test('create: rejects unknown event_name in scope', () => {
-  const r = v('create_semantic_model', {
+  const r = v('build_semantic_model', {
     name: 'task_a',
     semantic_models: [{ from: 'events', event_scope: { event_name: ['not_an_event'] } }],
     metrics: [{ name: 'm', type: 'simple', measure: { name: 'x' } }],
@@ -44,7 +44,7 @@ test('create: rejects unknown event_name in scope', () => {
 });
 
 test('create: rejects percentile measure without percentile value', () => {
-  const r = v('create_semantic_model', {
+  const r = v('build_semantic_model', {
     name: 'task_a',
     semantic_models: [{ from: 'events', measures: [{ name: 'p', agg: 'percentile', field: 'complete_time' }] }],
     metrics: [{ name: 'm', type: 'simple', measure: { name: 'p' } }],
@@ -53,7 +53,7 @@ test('create: rejects percentile measure without percentile value', () => {
 });
 
 test('create: rejects unknown model in from', () => {
-  const r = v('create_semantic_model', {
+  const r = v('build_semantic_model', {
     name: 'task_a',
     semantic_models: [{ from: 'nope', measures: [] }],
     metrics: [{ name: 'm', type: 'simple', measure: { name: 'x' } }],
@@ -62,12 +62,12 @@ test('create: rejects unknown model in from', () => {
 });
 
 test('create: rejects additional properties', () => {
-  const r = v('create_semantic_model', { name: 'task_a', metrics: [{ name: 'm', type: 'simple', measure: { name: 'x' } }], bogus: 1 });
+  const r = v('build_semantic_model', { name: 'task_a', metrics: [{ name: 'm', type: 'simple', measure: { name: 'x' } }], bogus: 1 });
   assert.equal(r.ok, false);
 });
 
 test('create: ratio requires numerator and denominator', () => {
-  const r = v('create_semantic_model', {
+  const r = v('build_semantic_model', {
     name: 'task_a',
     metrics: [{ name: 'r', type: 'ratio', numerator: { name: 'a' } }],
   });
@@ -91,9 +91,9 @@ test('update: semantic_model must be a known model key', () => {
 //
 // Input-validation checks: what each mode requires, and that neither mode is asked for the other's
 // fields.
-test('create_semantic_model: the create mode and the update mode require their own fields', () => {
+test('build_semantic_model: the create mode and the update mode require their own fields', () => {
   const validators = makeValidators(buildSchemas(catalog));
-  const check = (input) => validateInput(validators.create_semantic_model, input);
+  const check = (input) => validateInput(validators.build_semantic_model, input);
   const TASK = {
     name: 'rev',
     semantic_models: [{ from: 'events', measures: [{ name: 'revenue', agg: 'sum', field: 'price_in_usd_of_event_data' }] }],

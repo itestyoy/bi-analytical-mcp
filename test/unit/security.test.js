@@ -11,7 +11,7 @@ const validators = makeValidators(buildSchemas(catalog));
 const v = (tool, input) => validateInput(validators[tool], input);
 
 test('a task is addressed by its id alone — no table name or path reaches a read', () => {
-  for (const tool of ['get_task_result', 'display_result']) {
+  for (const tool of ['query_semantic_model', 'query_pipeline_model', 'display_model_result']) {
     assert.equal(v(tool, { task_id: "x') }} ; drop table dim_users -- " }).ok, false, `${tool}: a task id is hex`);
     assert.equal(v(tool, { task_id: 'aabbccddeeff', table: 'fct_analytics_events' }).ok, false, `${tool}: no table to name`);
     assert.ok(v(tool, { task_id: 'aabbccddeeff' }).ok);

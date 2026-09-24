@@ -13,8 +13,8 @@
 //     to its sources.
 // A host without the extension ignores `_meta.ui`: the tool is the plain tool it always was.
 //
-// ONE TOOL DRAWS: display_result, the only tool with the view. It draws a FINISHED task's result
-// (read through get_task_result), each task at most once — so one question gets one card by
+// ONE TOOL DRAWS: display_model_result, the only tool with the view. It draws a FINISHED task's result
+// (read the way the query tools read a task), each task at most once — so one question gets one card by
 // construction, and starting, reading and showing a result stay three separate calls.
 //
 // THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT — nothing else. It gets the result the host hands
@@ -49,16 +49,16 @@ export { RESOURCE_MIME_TYPE, EXTENSION_ID as UI_EXTENSION };
 export const RESULT_VIEW_URI = 'ui://betti/result-view.html';
 export const RESULT_VIEW_FILE = RUNTIME_ASSETS.resultView.path;
 
-// The one tool whose result is drawn: display_result. Nothing else carries the view — not a query,
-// not a build, not get_task_result — so no read, no poll and no intermediate step ever draws.
-export const VIEWED_TOOLS = new Set(['display_result']);
+// The one tool whose result is drawn: display_model_result. Nothing else carries the view — not a query,
+// not a build, not a query tool's read of a task — so no read, no poll and no intermediate step ever draws.
+export const VIEWED_TOOLS = new Set(['display_model_result']);
 
 /** Who may call a tool: the model only — never a view (see the header). */
 export const TOOL_VISIBILITY = Object.freeze(['model']);
 /** The one tool a view calls, and ONLY a view: the card reading the next view of its own drawn task. */
 export const APP_CALLABLE_TOOLS = Object.freeze(['drill_result']);
 /** Tools that exist only with the view: offered to a client that renders MCP Apps, and to no other. */
-export const APPS_ONLY_TOOLS = new Set(['display_result', 'drill_result']);
+export const APPS_ONLY_TOOLS = new Set(['display_model_result', 'drill_result']);
 const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? ['app'] : [...TOOL_VISIBILITY]);
 
 /**

@@ -7,7 +7,7 @@
 // dbt process and an untouched warehouse, could outlive the timeout of the client in front of it:
 // the client reported a generic tool failure, the caller retried, the retry hit the cache the
 // abandoned call had primed, and the difference looked like whichever argument happened to change
-// between the two attempts (this was observed as `build_native_model({ action: 'start' })` failing
+// between the two attempts (this was observed as `build_pipeline_model({ action: 'start' })` failing
 // with description + include_columns and passing without them).
 //
 // Context-lifecycle tests (the non-data kind this project allows): how long a call may hold, what
@@ -50,11 +50,11 @@ function engineWith(runner) {
   return settle(new Engine({ catalog, contextManager: ctxs, runner, queryTimeoutMs: GRACE }));
 }
 
-test('build_native_model({ start }) answers within the grace when introspection hangs — with the declared columns', async () => {
+test('build_pipeline_model({ start }) answers within the grace when introspection hangs — with the declared columns', async () => {
   const runner = hangingRunner();
   const e = engineWith(runner);
   const t0 = Date.now();
-  const r = await e.build_native_model({ action: 'start', name: 'slow_start', source: 'events', description: 'a description', include_columns: true, time_range: { start: '2024-01-01', end: '2024-01-31' } });
+  const r = await e.build_pipeline_model({ action: 'start', name: 'slow_start', source: 'events', description: 'a description', include_columns: true, time_range: { start: '2024-01-01', end: '2024-01-31' } });
   const held = Date.now() - t0;
 
   assert.ok(held < GRACE * 5, `the call held ${held}ms — it must hand back at the grace, not at dbt's own timeout`);
@@ -72,12 +72,12 @@ test('the abandoned introspection primes the cache: the NEXT call is grounded to
   const e = engineWith(runner);
   const declared = e.catalog.modelColumns('events').map((c) => c.name);
 
-  await e.build_native_model({ action: 'start', name: 'first', source: 'events' }); // times out
+  await e.build_pipeline_model({ action: 'start', name: 'first', source: 'events' }); // times out
   // the warehouse answers late — with one declared column missing from the real relation
   runner.state.release(declared.slice(1).map((name) => ({ name })));
   await new Promise((resolve) => setImmediate(resolve));
 
-  const second = await e.build_native_model({ action: 'start', name: 'second', source: 'events', include_columns: true });
+  const second = await e.build_pipeline_model({ action: 'start', name: 'second', source: 'events', include_columns: true });
   assert.equal(runner.state.calls, 1, 'the cached set is reused — no second dbt round trip');
   assert.equal(second.column_count, declared.length - 1, 'the column the relation lacks is not offered');
   assert.ok(!second.available_columns.some((c) => c.name === declared[0]));
@@ -87,8 +87,8 @@ test('concurrent calls share ONE introspection instead of spawning a dbt process
   const runner = hangingRunner();
   const e = engineWith(runner);
   const results = await Promise.all([
-    e.build_native_model({ action: 'start', name: 'concurrent_a', source: 'events' }),
-    e.build_native_model({ action: 'start', name: 'concurrent_b', source: 'events' }),
+    e.build_pipeline_model({ action: 'start', name: 'concurrent_a', source: 'events' }),
+    e.build_pipeline_model({ action: 'start', name: 'concurrent_b', source: 'events' }),
     e.semantic_index({ model: 'events' }),
   ]);
   assert.equal(runner.state.calls, 1, 'one in-flight read serves every caller waiting on it');

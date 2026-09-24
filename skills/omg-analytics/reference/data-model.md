@@ -4,7 +4,7 @@ The governed dimensions and metrics are defined in Confluence (**BI & Integratio
 as `[Dimension] …` / `[Metric] …` pages, each with a Description + Calculation (the event +
 parameter it derives from). **This file does not copy those definitions** (they change) — it
 points you to them and shows how to find and use them. Read the page for the authoritative
-calculation, then reproduce it in the MCP with `create_semantic_model`.
+calculation, then reproduce it in the MCP with `build_semantic_model`.
 
 ## How to find a definition
 - **By name:** search the BI space for `[Metric] <name>` or `[Dimension] <name>`
@@ -41,7 +41,7 @@ BI space filtered by label — this index is a starting map, not the authority.
 
 ## Using them in the MCP
 1. Read the metric/dimension page for its Calculation (event + param + filters/grain).
-2. Reproduce the metric with `create_semantic_model` (measure over the right event scope),
+2. Reproduce the metric with `build_semantic_model` (measure over the right event scope),
    query with `query_semantic_model`; segment by a `users` attribute or an `event_data`
    dimension. Prefer governed metrics over ad-hoc aggregates.
 3. Confirm the exact field name + real values with `semantic_index` before relying on them.

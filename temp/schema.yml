@@ -13,7 +13,7 @@ version: 2
 #   acquisition  fct_player_acquisition MEASURES source: is_time + measures, NO event_name
 # The two events sources are equal, not nested: each has its own known_events, its own
 # primary_entity and its own place in the value index, so the source is always a separate
-# argument — semantic_index({ source, event }), build_native_model({ source }) — never
+# argument — semantic_index({ source, event }), build_pipeline_model({ source }) — never
 # glued onto a name.
 # The parsing/attribution already happened upstream — we DO NOT re-parse anything;
 # we take the ready, flattened columns as-is and only re-shape (rename role columns).
@@ -1912,7 +1912,7 @@ models:
   # ── SECOND EVENTS FACT — ad-associated stability events ────────────────────────────────
   # An EQUAL source to the analytics fact, not nested under it. Address it with
   # source: 'crashlytics' (semantic_index({ source, event }),
-  # build_native_model({ source: 'crashlytics' }), semantic_models[].from).
+  # build_pipeline_model({ source: 'crashlytics' }), semantic_models[].from).
   #
   # Structural rules observed here:
   #   · primary_entity is `crash`, declared on event_id — NOT `event`, which
@@ -2224,7 +2224,7 @@ models:
   # ── MEASURES SOURCE — user-acquisition spend ───────────────────────────────────────────
   # NOT an events source: it declares is_time and a measure, and NO event_name. Rows are
   # amounts, not events. Address it with source: 'acquisition'
-  # (build_native_model({ source: 'acquisition' }), semantic_models[].from).
+  # (build_pipeline_model({ source: 'acquisition' }), semantic_models[].from).
   #
   # Structural rules observed here:
   #   · primary_entity is `acquisition` — distinct from `event`, `crash` and `user`. It is

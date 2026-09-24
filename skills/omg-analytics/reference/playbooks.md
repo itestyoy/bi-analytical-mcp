@@ -8,7 +8,7 @@ ready payload + the reusable technique (`hack`). Report the tier (governed metri
 ---
 ## 1. Trends (DAU/WAU/MAU, sessions, event volume)
 Governed metric path. Define once, query by time grain.
-1. `create_semantic_model` — measure = `count_distinct(player)` over the relevant event;
+1. `build_semantic_model` — measure = `count_distinct(player)` over the relevant event;
    or use the governed *Cumulative Sessions* / *Session Duration* definitions.
 2. `query_semantic_model` — `group_by: [{ time: "metric_time", grain: "day" }]`; for a
    series `order_by: [{ key: "metric_time" }]` (alias resolves to the grained token).
@@ -17,7 +17,7 @@ Governed metric path. Define once, query by time grain.
 
 ## 2. Progression funnel / conversion (events-only)
 Use a pipeline with a `match_recognize` stage.
-1. `build_native_model { action: "start", name, source: "events" }`.
+1. `build_pipeline_model { action: "start", name, source: "events" }`.
 2. `add_step` a `match_recognize` stage: `partition_by: ["<player key>"]`, ordered `steps`
    (each = event + an `event_data` value), e.g. `level_started → level_completed (result=win)`
    or a tutorial chain. Add `between_steps` if repeats may occur.
@@ -41,7 +41,7 @@ Use a pipeline with a `match_recognize` stage.
 ## 4. Monetization — IAP
 1. Revenue/buyers from `iap_purchase_completed`; segment by *Inapp Placement* (`location`
    in `event_data`) / *Product Category*.
-2. Metric via `create_semantic_model` (sum revenue, `count_distinct` payers) →
+2. Metric via `build_semantic_model` (sum revenue, `count_distinct` payers) →
    `query_semantic_model`; or a pipeline for bespoke cuts.
 - **Gotcha:** reconcile to AppsFlyer by `order_id`/`transaction_id` — in-event amount ≠
   reconciled revenue; state which. Subscriptions have a sequence number
@@ -58,7 +58,7 @@ Use a pipeline with a `match_recognize` stage.
 1. Flows from `currency_income` / `currency_outcome`; dimensions *Source Type*, *Source
    Name*, *Resource Currency*.
 2. Use governed *Resource Income/Outcome* (+ "in Coins", Cumulative, per Player) and
-   *Resources Balance* / *Resource Return Ratio*; reproduce with `create_semantic_model`
+   *Resources Balance* / *Resource Return Ratio*; reproduce with `build_semantic_model`
    (sum amounts, group by source) or a pipeline.
 - **Gotcha:** income vs outcome are different events; "in Coins" applies a conversion; "per
   Player" divides by distinct players. ([Income](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4207280165) · [Outcome](https://openmygame.atlassian.net/wiki/spaces/BI/pages/4207018040))

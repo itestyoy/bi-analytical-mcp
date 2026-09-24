@@ -54,7 +54,7 @@ before(async () => {
 
   // Metrics built FROM the crashlytics source. A semantic model is built from ONE source, so
   // inside it the source's own events and properties are named as-is.
-  const crash = await engine.create_semantic_model({
+  const crash = await engine.build_semantic_model({
     name: 'stab',
     use_base_models: ['users'],
     semantic_models: [
@@ -78,7 +78,7 @@ before(async () => {
 
   // ONE context, TWO facts: a measure over the analytics fact and a measure over the crash
   // fact, each scoped to its own vocabulary.
-  const both = await engine.create_semantic_model({
+  const both = await engine.build_semantic_model({
     name: 'mix',
     semantic_models: [
       { from: 'events', event_scope: { event_name: ['first_launch'] }, measures: [{ name: 'launches', agg: 'count', field: '*' }] },
@@ -137,7 +137,7 @@ test('fatal crashes by users.country are attributed point-in-time = US 2 / GB 4'
 // those 3 rows, because the column is NULL on every other crash event.
 test('a payload property scoped to ONE event: anr rows 3, seconds 26, avg 26/3', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.create_semantic_model({
+  const out = await engine.build_semantic_model({
     context_id: crashCtx,
     name: 'anr',
     semantic_models: [{
@@ -167,7 +167,7 @@ test('a payload property scoped to ONE event: anr rows 3, seconds 26, avg 26/3',
 // A physical column of the crash fact, grouped without any join.
 test('all crash rows by app_version (a column of the crash fact) = 1.0 -> 7, 1.1 -> 6', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.create_semantic_model({
+  const out = await engine.build_semantic_model({
     context_id: crashCtx,
     name: 'ver',
     semantic_models: [{
@@ -200,9 +200,9 @@ test('metrics from BOTH facts in one query: launches 12, fatal 6', opts, async (
 // u1 (3 crashes) and u2 (2) reached a second one, u3 (1) did not.
 test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'crash_repeat', source: 'crashlytics' });
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'crash_repeat', source: 'crashlytics' });
   assert.ok(s.draft_id, 'start returns a draft_id');
-  const a = await engine.build_native_model({
+  const a = await engine.build_pipeline_model({
     action: 'add_step',
     draft_id: s.draft_id,
     stage: {
@@ -215,7 +215,7 @@ test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, asy
     },
   });
   assert.equal(a.step_index, 1);
-  const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   assert.equal(c.rows.length, 3, 'one row per player who crashed');
   assert.equal(c.rows.filter((r) => r.reached_again === true || r.reached_again === 't').length, 2);
@@ -226,8 +226,8 @@ test('funnel over the crash fact: 3 players crashed, 2 crashed again', opts, asy
 // silently matching nothing.
 test('an event of the other fact is rejected in a crash-fact funnel', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'crash_mixed', source: 'crashlytics' });
-  const a = await engine.build_native_model({
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'crash_mixed', source: 'crashlytics' });
+  const a = await engine.build_pipeline_model({
     action: 'add_step',
     draft_id: s.draft_id,
     stage: {
@@ -248,20 +248,20 @@ test('an event of the other fact is rejected in a crash-fact funnel', opts, asyn
 // the same unnest pipeline that works on the analytics fact works here.
 test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retry 4', opts, async (t) => {
   if (skip(t)) return;
-  const s = await engine.build_native_model({ action: 'start', name: 'crumbs', source: 'crashlytics' });
-  const a = await engine.build_native_model({
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'crumbs', source: 'crashlytics' });
+  const a = await engine.build_pipeline_model({
     action: 'add_step',
     draft_id: s.draft_id,
     stage: { stage: 'unnest', source: 'breadcrumbs_of_event_data', as: 'crumb', type: 'string' },
   });
   assert.equal(a.step_index, 1);
-  const g = await engine.build_native_model({
+  const g = await engine.build_pipeline_model({
     action: 'add_step',
     draft_id: s.draft_id,
     stage: { stage: 'aggregate', group_by: ['crumb'], measures: [{ name: 'n', fn: 'count' }] },
   });
   assert.equal(g.step_index, 2);
-  const c = await engine.build_native_model({ action: 'materialize', draft_id: s.draft_id });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
   const by = mapCol(c.rows, 'crumb', 'n');
   assert.equal(sumCol(c.rows, 'n'), 20, 'every array element became a row');
@@ -279,7 +279,7 @@ test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retr
 // contain. Same 3 ANR rows, same 26 seconds — but the function is fixed for every caller.
 test('a governed measure declared on an events source: anr_seconds = 26', opts, async (t) => {
   if (skip(t)) return;
-  const out = await engine.create_semantic_model({
+  const out = await engine.build_semantic_model({
     name: 'gov',
     semantic_models: [{ from: 'crashlytics', dimensions: [{ source: 'model_column', column: 'app_version' }] }],
     metrics: [{ name: 'anr_seconds', type: 'simple', measure: { name: 'anr_seconds' } }],

@@ -216,7 +216,7 @@ test('every $ref resolves inside its own tool, and every definition earns its pl
   }
   // …and the fold actually happened where it was worth it: the stage union is ONE definition that
   // both the single-stage and the list-of-stages field point at.
-  const bnm = schemas.build_native_model;
+  const bnm = schemas.build_pipeline_model;
   assert.ok(bnm.$defs?.pipeline_stage, 'the stage union is a definition');
   assert.equal(bnm.properties.stage.$ref, '#/$defs/pipeline_stage');
   assert.equal(bnm.properties.stages.items.$ref, '#/$defs/pipeline_stage');
@@ -233,7 +233,7 @@ test('the tool surface stays within its size budget on the production catalog', 
 
 test('the card declaration (display) is structural: each kind is a closed branch, and what it needs is enforced by the schema', () => {
   const validators = makeValidators(schemas);
-  const check = (display) => validateInput(validators.display_result, { task_id: 'abc123abc123', display });
+  const check = (display) => validateInput(validators.display_model_result, { task_id: 'abc123abc123', display });
   for (const ok of [
     { kind: 'line', x: 'metric_time_day', y: ['dau', 'wau'] },
     { kind: 'area', x: 'metric_time_day', y: ['dau'], series_column: 'users_platform' },
@@ -258,7 +258,12 @@ test('the card declaration (display) is structural: each kind is a closed branch
     [{ kind: 'pivot', levels: ['a'], values: [{ column: 'v' }] }, 'a level is { column, label }'],
     [{ kind: 'pivot', levels: [{ column: 'a' }], values: [{ column: 'v', agg: 'count_distinct' }] }, 'an agg a level cannot fold'],
   ]) assert.equal(check(bad).ok, false, why);
-  // the declaration lives on display_result alone: no other tool takes one
+  // the declaration lives on display_model_result alone: no other tool takes one
   assert.equal(validateInput(validators.query_semantic_model, { context_id: 'abc123abc123', metrics: ['m'], display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'a query does not draw');
-  assert.equal(validateInput(validators.get_task_result, { task_id: 'abc123abc123', display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, 'reading a result does not draw');
+  for (const tool of ['query_semantic_model', 'query_pipeline_model']) assert.equal(validateInput(validators[tool], { task_id: 'abc123abc123', display: { kind: 'kpi', values: [{ column: 'm' }] } }).ok, false, `${tool}: reading a result does not draw`);
+  // a query tool either starts a query or reads a task back — never both in one call
+  assert.equal(validateInput(validators.query_semantic_model, { task_id: 'abc123abc123', context_id: 'abc123abc123', metrics: ['m'] }).ok, false, 'task_id with a query');
+  assert.equal(validateInput(validators.query_pipeline_model, { task_id: 'abc123abc123', transform: {} }).ok, false, 'task_id with a transform');
+  assert.equal(validateInput(validators.query_pipeline_model, {}).ok, false, 'neither a query nor a task');
+  assert.equal(validateInput(validators.query_semantic_model, { task_id: 'abc123abc123', offset: 10, wait_seconds: 0 }).ok, true, 'a read may page and look without waiting');
 });

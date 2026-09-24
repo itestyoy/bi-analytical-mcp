@@ -130,7 +130,7 @@ export class Engine {
       ...(payload ? { register_payload: payload } : {}),
       ...(fitted.length ? { fitted_to_catalog: fitted } : {}),
       naming_note: 'Metric/measure names are namespaced by the task name: query them as <task>_<metric> (the example_queries already use the full names).',
-      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question; feed a pipeline payload through build_native_model, a create_payload through create_semantic_model.',
+      building_block: 'This is a reusable template: take its `hack` (the technique) and adapt the payload to your exact question; feed a pipeline payload through build_pipeline_model, a create_payload through build_semantic_model.',
     };
   }
 
@@ -561,7 +561,7 @@ export class Engine {
         const viaable = rels.filter((r) => r.joins);
         const pipeOnly = rels.filter((r) => r.use === 'pipeline only').map((r) => r.entity);
         const notes = [];
-        if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_native_model add_step { stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}' }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>'${viaable[0].entity !== c.primaryEntityName(viaable[0].joins) ? `, via: '${viaable[0].entity}'` : ''} } with use_base_models: ['${viaable[0].joins}'].`);
+        if (viaable.length) notes.push(`Join with the declared relationship rather than restating columns: build_pipeline_model add_step { stage: 'join', with: '${viaable[0].joins}', via: '${viaable[0].entity}' }. In a metric query, group by { model: '${viaable[0].joins}', attribute: '<attr>'${viaable[0].entity !== c.primaryEntityName(viaable[0].joins) ? `, via: '${viaable[0].entity}'` : ''} } with use_base_models: ['${viaable[0].joins}'].`);
         // A relationship NO model owns cannot be a governed group-by path (MetricFlow joins only
         // onto a unique key) — say so here, or it looks like a missing feature at query time.
         if (pipeOnly.length) notes.push(`No model owns ${pipeOnly.map((n) => `'${n}'`).join(', ')}, so ${pipeOnly.length === 1 ? 'it has' : 'they have'} NO governed group-by path — join ${pipeOnly.length === 1 ? 'it' : 'them'} in a pipeline (via: '${pipeOnly[0]}'). That is by nature: several rows share the key, so neither side is unique on it.`);
@@ -579,7 +579,7 @@ export class Engine {
           ...(a.label ? { label: a.label } : {}),
           ...(a.description ? { description: a.description } : {}),
         }));
-        out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: create_semantic_model({ semantic_models: [{ from: '${k}', measures: [{ name: <your name>, agg: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', field: '${amounts[0].name}' }] }] }) (percentile also takes { percentile: 0.9 }).`;
+        out.aggregatable_note = `Amounts, not attributes: aggregate them, do not group by them. No aggregation is fixed in the schema — pick the one the question needs: build_semantic_model({ semantic_models: [{ from: '${k}', measures: [{ name: <your name>, agg: 'sum' | 'average' | 'max' | 'min' | 'median' | 'percentile' | 'count' | 'count_distinct', field: '${amounts[0].name}' }] }] }) (percentile also takes { percentile: 0.9 }).`;
       }
       // GOVERNED measures, if the schema fixes one: a standard KPI everyone computes the same way.
       out.measures = Object.entries(m.measures || {}).map(([name, mm]) => ({
@@ -757,7 +757,7 @@ export class Engine {
         const viaHint = several.length ? `; from ${several.map(([src, rels]) => `'${src}' add via: one of ${rels.map((r) => `'${r}'`).join(', ')}`).join(', from ')}` : '';
         recommendations.push(ent
           ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}' } (declare use_base_models: ['${mk}']${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
-          : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
+          : `Reference '${col}' after a pipeline join with:'${mk}' (build_pipeline_model join stage).`);
         const attrOut = {
           property: col, source: mk, model: mk, column: col, type: dim.type,
           description: dDescs[col],
@@ -1011,7 +1011,7 @@ export class Engine {
           ...(c.pythonRuntime.method && !c.pythonRuntime.method_declared
             ? { submission_note: `Nothing declares the submission: '${c.pythonRuntime.method}' is inferred from the profile's settings, and this server writes it into every python model it generates so the frame API and the runtime agree. Declare it where dbt itself looks — dbt_project.yml, models: +submission_method — and direct \`dbt run\` outside this server matches too.` }
             : {}),
-          note: 'A pipeline may end in a `python` stage (build_native_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.',
+          note: 'A pipeline may end in a `python` stage (build_pipeline_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.',
         }
         : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
       // dbt connects with an adapter this server writes no SQL for, so the SQL is rendered in
@@ -1021,7 +1021,7 @@ export class Engine {
       // Declared models the warehouse cannot back (a structural column or the table is missing):
       // excluded from every tool; the reason is here so the analyst can be told what to fix.
       ...(Object.keys(c.unavailableModels()).length ? { unavailable_models: Object.fromEntries(Object.entries(c.unavailableModels()).map(([k, u]) => [k, { role: u.role, dbt_model: u.dbt_model, reason: u.reason }])), unavailable_note: 'These models are declared in the catalog but their tables lack a structural column (or do not exist), so no tool accepts them. semantic_index({ model }) on one shows what is missing.' } : {}),
-      ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ source, event }), build_native_model({ source }), semantic_models[].from; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
+      ...(c.facts.length > 1 ? { facts_note: `${c.facts.length} INDEPENDENT, equal events sources (${c.facts.join(', ')}) — each owns its events, payload properties and indexed values, and they are never mixed. Name the source you mean: semantic_index({ source, event }), build_pipeline_model({ source }), semantic_models[].from; within one source, names are used as-is. A funnel runs over ONE source, while metrics from different sources can still be compared side by side over metric_time.` } : {}),
       // Each events source lists its OWN event names — they are never merged into one list,
       // because two sources may legitimately carry the same event name.
       event_names: Object.fromEntries(c.facts.map((f) => [f, c.eventNames(f)])),
@@ -1036,7 +1036,7 @@ export class Engine {
       // native pipelines. The fact holds only per-event columns — user/experiment attributes
       // always come via their model.
       join_note: userModel
-        ? `Group or filter by { model: '${userModel}', attribute: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (declare use_base_models: ['${userModel}'] in create_semantic_model) — never spell a join path. In native pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
+        ? `Group or filter by { model: '${userModel}', attribute: '${exAttr || 'country'}' } and the '${userModel}' model is joined by its declared key at query time (declare use_base_models: ['${userModel}'] in build_semantic_model) — never spell a join path. In native pipelines, reach the same attributes with a join stage (with: '${userModel}', via: '${c.primaryEntityName(userModel) || 'user'}').`
         : null,
       value_index_status: sync ? {
         ready: (sync.indexed_properties || 0) > 0,
@@ -1208,7 +1208,7 @@ export class Engine {
     else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ source, property }) will show no sample_values until the first sync (it runs in the background at startup).`);
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
     else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ source, property }).`);
-    if (running.length) recommendations.push(`${running.length} task(s) running — read one with get_task_result({ task_id }); it waits for the task. semantic_index({ status }) lists them.`);
+    if (running.length) recommendations.push(`${running.length} task(s) running — read one with its side's query tool — query_semantic_model({ task_id }) or query_pipeline_model({ task_id }); it waits for the task. semantic_index({ status }) lists them.`);
     if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ source: '${slowest[0].source}', property: '${slowest[0].property}' }) for one property across syncs.`);
     if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property — combined scan failed. Full reason in value_index.last_run_fallbacks[] (also semantic_index({ run: ${last.id} }).fallbacks).`);
     if (!recommendations.length) recommendations.push(`No running tasks and the value index is idle/current.`);
@@ -1275,7 +1275,7 @@ export class Engine {
    */
   async register_native_model(input) {
     this._validate('register_native_model', input);
-    // a build is a task: the id now, the rows from get_task_result
+    // a build is a task: the id now, the rows from query_pipeline_model({ task_id })
     const existing = input.context_id ? this._ctx(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
     const taskId = this._startTask(existing, 'register_native_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }));
@@ -1289,13 +1289,13 @@ export class Engine {
    * The all-at-once register_native_model path is unchanged. Lifecycle:
    * start → add_step* → (preview) → materialize | discard.
    */
-  async build_native_model(input) {
-    this._validate('build_native_model', input);
+  async build_pipeline_model(input) {
+    this._validate('build_pipeline_model', input);
     if (input.action === 'start') return this._draftStart(input);
     if (input.action === 'fork') return this._draftFork(input); // branches a NEW draft (no live draft required)
     const ctx = this._ctx(input.draft_id);
     const draft = ctx.state.draft;
-    if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_native_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
+    if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_pipeline_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
     if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns, input.include_steps);
     if (input.action === 'add_steps') return this._draftAddSteps(ctx, draft, input.stages, input.include_columns);
@@ -1441,7 +1441,7 @@ export class Engine {
       if (st?.building && forBuild) {
         throw new ToolError(
           `steps 1..${list[i].at} are still being materialized as ${list[i].model} — nothing can read that table yet, so a second build would only duplicate the work. `
-          + `Wait for it with get_task_result({ task_id: '${st.building}' }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with truncate/edit_step at or before step ${list[i].at} — or context({ action: 'delete_model' }) — and materialize again.`,
+          + `Wait for it with query_pipeline_model({ task_id: '${st.building}' }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with truncate/edit_step at or before step ${list[i].at} — or context({ action: 'delete_model' }) — and materialize again.`,
           { stage: 'validate', field: 'draft_id' },
         );
       }
@@ -1496,11 +1496,11 @@ export class Engine {
     for (const cp of checkpoints) {
       if (cp.owner !== ctx.id) continue; // another context's model: not ours to remove
       // The context's REGISTERED result keeps its definition even when the prefix it stood for is
-      // retired: `ctx.state.model` still advertises that table and get_task_result pages it
+      // retired: `ctx.state.model` still advertises that table and query_pipeline_model reads it
       // through `{{ ref() }}`, which needs the file. A later build of the same name cleans it.
       if (cp.model === ctx.state.model) continue;
       // Nor one whose build is STILL RUNNING here: the task will hand its table back through
-      // get_task_result, which reads it by ref — removing the definition mid-build would make the
+      // query_pipeline_model, which reads it by ref — removing the definition mid-build would make the
       // result unreadable for good.
       if (cp.task_id && this.jobs.isLive?.(cp.task_id) && this.jobs.get(cp.task_id)?.status === 'running') continue;
       if ((ctx.state.checkpoint_consumers?.[cp.model] || []).some((id) => this.ctxs.has(id))) continue;
@@ -1581,7 +1581,7 @@ export class Engine {
   _taskBase(input) {
     const job = this.jobs.get(input.from_task);
     if (!job) throw new ToolError(`unknown task_id '${input.from_task}' — start the pipeline from a task this server ran (a materialized query or a pipeline build)`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
-    if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with get_task_result({ task_id: '${job.id}' }), then start the pipeline from it`, { stage: 'validate', field: 'from_task' });
+    if (job.status === 'running') throw new ToolError(`task ${job.id} is still running — wait for it with ${this._readWith(job.id)}, then start the pipeline from it`, { stage: 'validate', field: 'from_task' });
     if (job.status !== 'ready' || !job.table) throw new ToolError(`task ${job.id} holds no stored table to start from — ${job.status === 'error' ? 'it failed' : 'only a query run with materialize:true, or a pipeline build, stores its result as a table'}`, { stage: 'validate', field: 'from_task' });
     if (!this.ctxs.has(job.contextId) || !this.ctxs.hasPipelineModel(job.contextId, job.table)) throw new ToolError(`the table of task ${job.id} (${job.table}) is gone — its context or model was deleted; run it again`, { stage: 'validate', field: 'from_task', code: RESULT_GONE });
     if (input.time_range) throw new ToolError('time_range bounds a catalog source — a task\'s table was computed under its own window already; filter it with a where step instead', { stage: 'validate', field: 'time_range' });
@@ -1624,13 +1624,13 @@ export class Engine {
       ...(base ? { from_task: base.task_id, reads: base.model } : {}),
       ...(ctx.state.draft.description ? { description: ctx.state.draft.description } : {}),
       steps: [], column_count: cols.length,
-      next: 'Append stages one at a time with build_native_model({ action: "add_step", draft_id, stage }); each response shows only the columns that stage added/removed (use include_columns:true or preview for the full list).',
+      next: 'Append stages one at a time with build_pipeline_model({ action: "add_step", draft_id, stage }); each response shows only the columns that stage added/removed (use include_columns:true or preview for the full list).',
       recommendations: [
         base
           ? `The table of task ${base.task_id} (${base.model}) has ${cols.length} columns your first stage can reference (include_columns:true lists them); nothing before it is recomputed.`
-          : `The source has ${cols.length} columns your first stage can reference; get the full list with build_native_model({ action: "start", ..., include_columns: true }) or inspect via semantic_index({ model: '${source}' }).`,
+          : `The source has ${cols.length} columns your first stage can reference; get the full list with build_pipeline_model({ action: "start", ..., include_columns: true }) or inspect via semantic_index({ model: '${source}' }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
-        `When the steps look right, materialize with build_native_model({ action: "materialize", draft_id }).`,
+        `When the steps look right, materialize with build_pipeline_model({ action: "materialize", draft_id }).`,
       ],
     };
     if (input.include_columns) resp.available_columns = cols;
@@ -1779,7 +1779,7 @@ export class Engine {
       recommendations: [
         `Forked ${after} of ${total} step(s) into a new draft ${ctx.id}; the source ${input.draft_id} is unchanged — branch variants freely.`,
         ...(inherited.length ? [`Steps 1..${inherited[inherited.length - 1].at} are already materialized (${inherited[inherited.length - 1].model}, built in ${inherited[inherited.length - 1].owner}) and this fork READS that table: only the steps you add here are computed. Keep that context alive while this fork uses it — context({ action: 'drop' }) on it is refused unless forced.`] : []),
-        `Materialize with build_native_model({ action: "materialize", draft_id: "${ctx.id}" }).`,
+        `Materialize with build_pipeline_model({ action: "materialize", draft_id: "${ctx.id}" }).`,
       ],
     };
     if (input.include_columns) resp.available_columns = cols;
@@ -1870,7 +1870,7 @@ export class Engine {
         ...filterWarnings,
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
-        ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_native_model({ action: "preview", draft_id }).`] : []),
+        ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_pipeline_model({ action: "preview", draft_id }).`] : []),
         ...(changedStage ? [...this._eventScopeWarnings(draft, changedStage), ...this._emptyCombinationWarnings(draft, changedStage), ...this._funnelCompletionWarnings(changedStage), ...this._joinCompletenessWarnings(changedStage, draft), ...this._pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this._globalWindowWarnings(changedStage), ...this._draftStepRecommendations(changedStage, after)] : []),
       ],
     };
@@ -2143,7 +2143,7 @@ export class Engine {
     } else {
       recs.push(`Reference any of available_columns in the next stage (${available.slice(0, 6).map((c) => c.name).join(', ')}${available.length > 6 ? ', …' : ''}).`);
     }
-    recs.push(`Preview the SQL anytime with build_native_model({ action: "preview", draft_id }); materialize when done.`);
+    recs.push(`Preview the SQL anytime with build_pipeline_model({ action: "preview", draft_id }); materialize when done.`);
     return recs;
   }
 
@@ -2299,11 +2299,12 @@ export class Engine {
   /**
    * A TASK — the one shape of work that takes warehouse time, and the reason starting, reading and
    * showing a result are three different calls:
-   *   * a tool that STARTS work (create_semantic_model, query_semantic_model, a pipeline build)
+   *   * a tool that STARTS work (build_semantic_model, query_semantic_model, a pipeline build)
    *     validates its input inside the call, hands the rest to a task and returns the task's id AT
    *     ONCE — it never waits, so no call outlives the client in front of it;
-   *   * get_task_result waits for the task (within MAX_WAIT_SECONDS) and returns what it produced;
-   *   * display_result reads it through get_task_result and draws it — once.
+   *   * the query tool of its side — query_semantic_model({ task_id }) / query_pipeline_model({
+   *     task_id }) — waits for the task (within MAX_WAIT_SECONDS) and returns what it produced;
+   *   * display_model_result reads it the same way and draws it — once.
    * The work runs detached from the call that started it (the call returns immediately; its
    * cancellation must not reach a build that is supposed to go on), with a lease on its context.
    * Tasks on ONE context run one after another: a query issued right after its task was declared
@@ -2341,10 +2342,10 @@ export class Engine {
 
   /** What a tool that started a task answers: the task's id and where to read it — nothing else. */
   _taskStarted(id, extra = {}) {
-    return { task_id: id, ...extra, next: `get_task_result({ task_id: '${id}' }) — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
+    return { task_id: id, ...extra, next: `${this._readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
   }
 
-  /** A result that needed no warehouse time (an experiment's statistics), kept as a finished task so display_result can draw it. */
+  /** A result that needed no warehouse time (an experiment's statistics), kept as a finished task so display_model_result can draw it. */
   _finishedTask(tool, out, input = null) {
     const id = this.jobs.create({ tool });
     this._keepTaskResult(id, { tool, input, out });
@@ -2352,7 +2353,7 @@ export class Engine {
     return id;
   }
 
-  /** Keep a task's finished response for get_task_result — the newest few hundred, for an hour. A stored table outlives it. */
+  /** Keep a task's finished response for the query tools to read back — the newest few hundred, for an hour. A stored table outlives it. */
   _keepTaskResult(id, entry) {
     const MAX = 200; const TTL_MS = 3600000;
     const now = Date.now();
@@ -2372,7 +2373,7 @@ export class Engine {
     if (draft.building) {
       throw new ToolError(
         `a build of this draft is already in flight (started ${draft.building.started_at}) — it is the SAME pipeline, so a second run would build nothing new and would write over the first one. `
-        + `${draft.building.task_id ? `Read it with get_task_result({ task_id: '${draft.building.task_id}' })` : 'Read it with get_task_result and the task_id its call returned'}; the result table is ${draft.building.model}.`,
+        + `${draft.building.task_id ? `Read it with query_pipeline_model({ task_id: '${draft.building.task_id}' })` : 'Read it with query_pipeline_model and the task_id its call returned'}; the result table is ${draft.building.model}.`,
         { stage: 'validate', field: 'draft_id' },
       );
     }
@@ -2382,7 +2383,7 @@ export class Engine {
     const plan = this._renderPlan(draft, draft.stages, { forBuild: true });
     const retiredNow = this._applyCheckpointPlan(ctx, draft, plan);
     if (plan.checkpoint && !plan.stages.length) {
-      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_step first${plan.checkpoint.task_id ? `, or read that build with get_task_result({ task_id: '${plan.checkpoint.task_id}' })` : ''}`, { stage: 'validate', field: 'draft_id' });
+      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_step first${plan.checkpoint.task_id ? `, or read that build with query_pipeline_model({ task_id: '${plan.checkpoint.task_id}' })` : ''}`, { stage: 'validate', field: 'draft_id' });
     }
     const modelName = this._nextPipelineModel(ctx, draft.name, { advance: true });
     // What this build computes, fixed now: the draft stays open and may grow while it runs.
@@ -2394,7 +2395,7 @@ export class Engine {
       columns = this._draftColumns(draft, await this._physicalCols(draft.source));
     } catch (e) { delete draft.building; throw e; }
     const from = plan.from ? { at: plan.checkpoint ? plan.checkpoint.at : 0, model: plan.from.model, columns: plan.from.columns } : null;
-    const taskId = this._startTask(ctx, 'build_native_model', async (id) => {
+    const taskId = this._startTask(ctx, 'build_pipeline_model', async (id) => {
       let result;
       try {
         result = await this._registerPipeline({
@@ -2464,8 +2465,8 @@ export class Engine {
    * Register (or rebuild) a general transformation PIPELINE as a dbt model.
    * The pipeline's rows ARE the result: we materialize, build, and read them back.
    * It runs INSIDE a task (register_native_model, or a draft's materialize): the build is waited
-   * for here, and the caller reads the response with get_task_result. A later pipeline re-slices
-   * the table without recomputing it: build_native_model({ action: 'start', from_task }).
+   * for here, and the caller reads the response with query_pipeline_model({ task_id }). A later pipeline re-slices
+   * the table without recomputing it: build_pipeline_model({ action: 'start', from_task }).
    */
   async _registerPipeline(input, { ctxId: presetCtxId = null, taskId = null } = {}) {
     const dialect = this.catalog.dialect;
@@ -2603,7 +2604,7 @@ export class Engine {
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
           : [`Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`]),
-        `To re-slice it without recomputing, start a pipeline FROM this build: build_native_model({ action: 'start', name, from_task: '<this task_id>' }) — its steps read ${modelName}. Page its rows with get_task_result({ task_id, offset, limit }).`,
+        `To re-slice it without recomputing, start a pipeline FROM this build: build_pipeline_model({ action: 'start', name, from_task: '<this task_id>' }) — its steps read ${modelName}. Page its rows with query_pipeline_model({ task_id, offset, limit }), or filter / regroup them with query_pipeline_model({ context_id, transform }).`,
       ],
       warnings: [
         // The same per-stage judgements the incremental builder makes — a pipeline submitted all at
@@ -2717,8 +2718,8 @@ export class Engine {
     return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (context({ action: 'drop' })) or the store cleans ephemeral objects" };
   }
 
-  async create_semantic_model(input) {
-    this._validate('create_semantic_model', input);
+  async build_semantic_model(input) {
+    this._validate('build_semantic_model', input);
     // Two modes, one tool: declaring a task from scratch, and adding to / removing from the task
     // already in a context. They share this schema (and therefore its vocabularies, which is the
     // whole reason they are one tool) but not their bodies.
@@ -2734,7 +2735,7 @@ export class Engine {
       mergeCompiled(draft, compiled);
       const render = renderContext(this.catalog, draft);
       const out = { context_id: input.context_id || null, task: compiled.task, dry_run: true, yaml: render.yaml, semantic_models: render.semanticModels, metrics: render.metricNames, warnings: render.warnings || [] };
-      return this._taskStarted(this._startTask(null, 'create_semantic_model', async () => out), input.context_id ? { context_id: input.context_id } : {});
+      return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), input.context_id ? { context_id: input.context_id } : {});
     }
 
     // The declaration is taken IN THE CALL — compiled, merged, written — so a query issued right
@@ -2745,7 +2746,7 @@ export class Engine {
     const render = renderContext(this.catalog, ctx.state);
     const file = this.ctxs.writeYaml(ctx.id, render.yaml);
     this.ctxs.touch(ctx.id);
-    const taskId = this._startTask(ctx, 'create_semantic_model', () => this._declared(ctx, input, compiled, render, file));
+    const taskId = this._startTask(ctx, 'build_semantic_model', () => this._declared(ctx, input, compiled, render, file));
     return this._taskStarted(taskId, { context_id: ctx.id });
   }
 
@@ -2783,7 +2784,7 @@ export class Engine {
 
   /**
    * The INCREMENTAL path on an existing task. It is reachable two ways and the body is one: as
-   * create_semantic_model({ action: 'update', … }) — the mode the tool listing advertises — and as
+   * build_semantic_model({ action: 'update', … }) — the mode the tool listing advertises — and as
    * update_semantic_model({ … }), kept callable for a client that learned that name, but no longer
    * advertised, because the two schemas repeat the same vocabulary and the listing is what every
    * request carries.
@@ -2837,11 +2838,11 @@ export class Engine {
     const render = renderContext(this.catalog, state);
     if (input.dry_run) {
       const out = { context_id: ctx.id, semantic_model: modelKey, dry_run: true, yaml: render.yaml, metrics: render.metricNames, warnings: render.warnings || [] };
-      return this._taskStarted(this._startTask(null, 'create_semantic_model', async () => out), { context_id: ctx.id });
+      return this._taskStarted(this._startTask(null, 'build_semantic_model', async () => out), { context_id: ctx.id });
     }
     const file = this.ctxs.writeYaml(ctx.id, render.yaml);
     this.ctxs.touch(ctx.id);
-    const taskId = this._startTask(ctx, 'create_semantic_model', async () => {
+    const taskId = this._startTask(ctx, 'build_semantic_model', async () => {
       const parse = await this._parse(ctx.id);
       return {
         context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
@@ -2926,7 +2927,7 @@ export class Engine {
       default: throw new ToolError(`unknown experiment action '${action}'`, { stage: 'validate', field: 'action' });
     }
     // statistics need no warehouse time, so they come back at once — and are kept as a finished
-    // task, which is what display_result draws when the person should see them
+    // task, which is what display_model_result draws when the person should see them
     return { ...out, task_id: this._finishedTask('experiment', out, input) };
   }
 
@@ -3064,7 +3065,7 @@ export class Engine {
 
   /**
    * A bounded wait (0–MAX_WAIT_SECONDS). Purely a timer: it touches no data and follows no task —
-   * waiting for a task is get_task_result, which returns the moment the task is done.
+   * waiting for a task is its side's query tool ({ task_id }), which returns the moment it is done.
    *
    * The ceiling is the same one every other number here answers to: the wait happens INSIDE a tool
    * call, so a caller that asks for a minute gets a dropped connection rather than a minute. The
@@ -3122,7 +3123,7 @@ export class Engine {
           },
         } : {}),
         ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { checkpoint_consumers: ctx.state.checkpoint_consumers } : {}),
-        ...(n.task_id ? { built_by_task: n.task_id, read_with: `get_task_result({ task_id: '${n.task_id}' }); re-slice with build_native_model({ action: 'start', name, from_task: '${n.task_id}' })` } : {}),
+        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ task_id: '${n.task_id}' }) for its rows, query_pipeline_model({ context_id: '${ctx.id}', transform }) to filter or regroup them; build on them with build_pipeline_model({ action: 'start', name, from_task: '${n.task_id}' })` } : {}),
         files: this.ctxs.generatedFiles(ctx.id),
       };
     }
@@ -3156,13 +3157,15 @@ export class Engine {
 
   async query_semantic_model(input) {
     this._validate('query_semantic_model', input);
+    // the read half: { task_id } waits for a semantic task (a model being parsed, a query) and returns it
+    if (input.task_id) return this._pollTask(input, 'semantic');
     const ctx = this._ctx(input.context_id);
 
     // A pipeline-registered model has no MetricFlow semantic model — its rows ARE
     // the result: read them from its build's task, or re-slice them with a pipeline started from it.
     if (ctx.state.engine === 'pipeline') {
       const built = ctx.state.native?.task_id;
-      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with get_task_result({ task_id: '${built}' }), or re-slice them with build_native_model({ action: 'start', name, from_task: '${built}' })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
+      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ task_id: '${built}' }), filter or regroup them with query_pipeline_model({ context_id: '${ctx.id}', transform }), or build on them with build_pipeline_model({ action: 'start', name, from_task: '${built}' })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
     }
 
     const known = new Set(ctx.state.metrics.map((m) => m.name));
@@ -3307,10 +3310,10 @@ export class Engine {
       for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
       const usesDistinct = distinctMeasures.size && input.metrics.some((name) => { const metric = ctx.state.metrics.find((x) => x.name === name); return metric && [...distinctMeasures].some((dm) => metricUsesMeasure(metric, dm)); });
       if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
-        recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_native_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
+        recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_pipeline_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
       if (page.has_more) recs.push(`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`);
-      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_native_model({ action: \'start\', from_task })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
+      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_pipeline_model({ action: \'start\', from_task })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
       const out = {
         ok: true,
         command: res.command,
@@ -3334,7 +3337,7 @@ export class Engine {
       return out;
     };
 
-    // The query is a TASK: validated above, run below, its response read with get_task_result.
+    // The query is a TASK: validated above, run below, its response read with query_semantic_model({ task_id }).
     // A metric query over a big window can outlast the client in front of this call — so no call
     // holds it.
     const taskId = this._startTask(ctx, 'query_semantic_model', async (id) => {
@@ -3350,7 +3353,7 @@ export class Engine {
   /**
    * Materialization mode (inside the query's task): compile the query to SQL, write it as a
    * materialized='table' dbt model named after the task (`qr_<task_id>`), build it, and read the
-   * first page back. The table is the durable result: get_task_result pages it after the in-memory
+   * first page back. The table is the durable result: query_semantic_model({ task_id }) pages it after the in-memory
    * response is gone, a card drills into it, and a pipeline can start from it (from_task).
    */
   async _materialize(ctx, qopts, input, rename, id) {
@@ -3403,21 +3406,69 @@ export class Engine {
     return { ok: true, status: 'ready', table, ...extra, columns: res.columns, rows: pageRows, row_count: pageRows.length, page: { limit, offset, has_more: res.rows.length > offset + limit }, ...(transform ? { projected: true } : {}) };
   }
 
+  /** The side a task belongs to (semantic | pipeline), or null for one no query reads (an experiment). */
+  _taskSide(job) {
+    if (TASK_SIDE[job?.tool]) return TASK_SIDE[job.tool];
+    // a task inherited from the store has lost its tool: its table still says which side built it
+    if (/^qr_/.test(job?.table || '')) return 'semantic';
+    if (/^pipe_/.test(job?.table || '')) return 'pipeline';
+    return null;
+  }
+
+  /** The call that reads a task back: its side's query tool, with the task_id. */
+  _readWith(id) {
+    const side = this._taskSide(this.jobs.get(id));
+    return side ? `${SIDE_READER[side]}({ task_id: '${id}' })` : `display_model_result({ task_id: '${id}' })`;
+  }
+
   /**
-   * THE ONE WAY TO READ WHAT A TASK PRODUCED — and to wait for it. Waits for the task (at most
-   * `wait_seconds`, capped at MAX_WAIT_SECONDS, returning the moment it is done) and returns its
-   * finished response: the rows of a query or a build, a parsed task, or the error it ended in.
-   * Still running → `status: 'running'`: call again. A task that stored a table (a materialized
-   * query, a pipeline build) can be PAGED with offset/limit, and is still readable after its
-   * in-memory response is gone. It never draws: showing a result is display_result.
+   * THE READ HALF OF A QUERY TOOL — query_semantic_model({ task_id }) / query_pipeline_model({
+   * task_id }): wait for a task of THAT side (at most `wait_seconds`, capped at MAX_WAIT_SECONDS,
+   * returning the moment it is done) and return its finished response — the rows of a query or a
+   * build, a parsed model, or the error it ended in. Still running → `status: 'running'`: call
+   * again. A task that stored a table (a materialized query, a pipeline build) can be PAGED with
+   * offset/limit, and is still readable after its in-memory response is gone. It never draws:
+   * showing a result is display_model_result. A task of the other side is refused with the tool
+   * that reads it.
    */
-  async get_task_result(input) {
-    this._validate('get_task_result', input);
+  async _pollTask(input, side) {
     const job = this.jobs.get(input.task_id);
     if (!job) throw new ToolError(`unknown task_id: ${input.task_id} — this server has no such task (one started before a restart is not known any more); start the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
-    const seconds = Math.min(Math.max(input.wait_seconds ?? MAX_WAIT_SECONDS, 0), MAX_WAIT_SECONDS);
-    const waited = await this._awaitTask(job.id, seconds);
-    return this._taskResult(job.id, { waited, offset: input.offset, limit: input.limit });
+    const own = this._taskSide(job);
+    if (own && own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool || 'a build'}) — read it with ${SIDE_READER[own]}({ task_id: '${job.id}' })`, { stage: 'validate', field: 'task_id' });
+    if (!own && job.tool) throw new ToolError(`task ${job.id} is an ${job.tool} result — it came back with its call; show it with display_model_result({ task_id: '${job.id}' })`, { stage: 'validate', field: 'task_id' });
+    return this._awaitRead(job.id, input);
+  }
+
+  /** Wait for a task (within the cap) and read what it produced — the one read the query tools and display_model_result share. */
+  async _awaitRead(id, { wait_seconds: wait, offset, limit } = {}) {
+    const seconds = Math.min(Math.max(wait ?? MAX_WAIT_SECONDS, 0), MAX_WAIT_SECONDS);
+    const waited = await this._awaitTask(id, seconds);
+    return this._taskResult(id, { waited, offset, limit });
+  }
+
+  /**
+   * QUERY A BUILT PIPELINE MODEL — the pipeline side's twin of query_semantic_model. Two modes:
+   * with a query ({ context_id, transform?, limit?, offset? }) it STARTS a task that reads the
+   * context's built model, optionally filtered / grouped / aggregated (a read-only projection over
+   * the stored table, nothing upstream recomputed) and returns its task_id at once; with { task_id }
+   * it waits for a pipeline task (a build, or such a query) and returns its rows.
+   */
+  async query_pipeline_model(input) {
+    this._validate('query_pipeline_model', input);
+    if (input.task_id) return this._pollTask(input, 'pipeline');
+    const ctx = this._ctx(input.context_id);
+    if (ctx.state.engine !== 'pipeline' || !ctx.state.model) {
+      throw new ToolError(`context ${ctx.id} holds no built pipeline model — build one with build_pipeline_model (… materialize)${(ctx.state.metrics || []).length ? '; the metrics it declares are queried with query_semantic_model' : ''}`, { stage: 'validate', field: 'context_id' });
+    }
+    if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
+    const table = ctx.state.model;
+    const taskId = this._startTask(ctx, 'query_pipeline_model', async () => {
+      if (!this.ctxs.hasPipelineModel(ctx.id, table)) return { ok: false, error: { stage: 'fetch', code: RESULT_GONE, message: `the pipeline model ${table} was deleted — build it again` } };
+      const out = await this._readTable(this.ctxs.dir(ctx.id), table, input.limit ?? 1000, input.transform, {}, input.offset ?? 0);
+      return out.ok === false ? out : { ...out, model: table, provenance: { tier: 'pipeline', model: table } };
+    });
+    return this._taskStarted(taskId, { context_id: ctx.id });
   }
 
   /** Wait for a task to settle, `seconds` at most — or until the call is cancelled. Returns the seconds waited. */
@@ -3439,10 +3490,10 @@ export class Engine {
 
   async _taskResult(id, { waited = 0, offset, limit } = {}) {
     const job = this.jobs.get(id);
-    const head = { task_id: id, ...(job.tool ? { tool: job.tool } : {}), ...(job.contextId ? { context_id: job.contextId } : {}) };
+    const head = { task_id: id, ...(job.tool ? { tool: job.tool } : {}), ...(job.contextId ? { context_id: job.contextId } : {}), ...(job.table ? { table: job.table } : {}) };
     if (job.status === 'running') {
       if (!this.jobs.isLive(id)) return { ok: false, ...head, status: 'error', error: { stage: 'task', message: 'this task was started by a server process that is gone (it restarted), so nothing is running it — start the work again' } };
-      return { ok: true, ...head, status: 'running', waited_seconds: waited, next: `still running — call get_task_result({ task_id: '${id}' }) again; it waits up to ${MAX_WAIT_SECONDS}s` };
+      return { ok: true, ...head, status: 'running', waited_seconds: waited, next: `still running — call ${this._readWith(id)} again; it waits up to ${MAX_WAIT_SECONDS}s` };
     }
     const paging = offset != null || limit != null;
     const kept = this._taskResults?.get(id);
@@ -3469,21 +3520,21 @@ export class Engine {
   _showHint(id, tool, out) {
     const drawable = tool === 'experiment' || (isPlainObject(out) && Array.isArray(out.rows) && out.rows.length > 0);
     if (!drawable || this._displayed?.has(id)) return {};
-    return { show_to_user: { tool: 'display_result', arguments: { task_id: id }, why: `in a host that renders MCP Apps this draws the result as a card for the person${tool === 'experiment' ? '' : ' — add `display` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns'}. Once per result, and only for what the person should SEE — not for the intermediate reads you make to work something out.` } };
+    return { show_to_user: { tool: 'display_model_result', arguments: { task_id: id }, why: `in a host that renders MCP Apps this draws the result as a card for the person${tool === 'experiment' ? '' : ' — add `display` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns'}. Once per result, and only for what the person should SEE — not for the intermediate reads you make to work something out.` } };
   }
 
   /**
    * DRAW A FINISHED RESULT AS A CARD — the only tool that does, and it reads the result the only
-   * way there is: get_task_result. It draws each task at most ONCE: a second call for the same
+   * way the query tools read one (_awaitRead). It draws each task at most ONCE: a second call for the same
    * task is refused, so one question gets one card by construction. A task still running after
-   * that read's wait, or a failed one, is REFUSED (a tool error, no card): waiting is get_task_result's. `display` says how rows are drawn
+   * that read's wait, or a failed one, is REFUSED (a tool error, no card): waiting is the query tools'. `display` says how rows are drawn
    * — checked against the result's columns; without it the card follows the rows' shape. An
    * experiment draws its own card (the test, the split check, the plan). A drill-down (a pivot, a
    * chart with drill) shows its first view, and the card reads the views below from the task's
    * stored table (drill_result).
    */
-  async display_result(input) {
-    this._validate('display_result', input);
+  async display_model_result(input) {
+    this._validate('display_model_result', input);
     const id = input.task_id;
     this._displayed ||= new Map();
     if (this._displayed.has(id)) {
@@ -3494,8 +3545,9 @@ export class Engine {
     this._displayed.set(id, 'pending');
     let drawn = false;
     try {
-      const got = await this.get_task_result({ task_id: id }); // the one read
-      if (got.status === 'running') throw new ToolError(`task ${id} is still running — nothing is drawn. Wait for it with get_task_result({ task_id: '${id}' }) (it draws nothing), then show it once`, { stage: 'validate', field: 'task_id' });
+      if (!this.jobs.get(id)) throw new ToolError(`unknown task_id: ${id} — this server has no such task; run the work again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
+      const got = await this._awaitRead(id); // the one read — the same one the query tools make
+      if (got.status === 'running') throw new ToolError(`task ${id} is still running — nothing is drawn. Wait for it with ${this._readWith(id)} (it draws nothing), then show it once`, { stage: 'validate', field: 'task_id' });
       if (got.status !== 'done') return got; // failed: nothing to draw, and the reply says why
       const { show_to_user: _hint, ...result } = got;
       const kept = this._taskResults?.get(id);
@@ -3506,7 +3558,7 @@ export class Engine {
         out = { ...result, drawn_from: { tool, input: kept?.input ?? null } };
       } else {
         const cols = this._resultColumns(result);
-        if (!cols) throw new ToolError(`task ${id} (${tool || 'a task'}) returned no rows to draw — display_result draws the result of a query, a pipeline build or an experiment`, { stage: 'validate', field: 'task_id' });
+        if (!cols) throw new ToolError(`task ${id} (${tool || 'a task'}) returned no rows to draw — display_model_result draws the result of a query, a pipeline build or an experiment`, { stage: 'validate', field: 'task_id' });
         const d = input.display || null;
         const first = this._drillFirstRead(d);
         const job = this.jobs.get(id);
@@ -3523,7 +3575,7 @@ export class Engine {
         } else out = { ...result, ...(d ? { display: d } : {}) };
         out.drawn_from = { tool };
       }
-      const view = buildViewModel('display_result', out, input);
+      const view = buildViewModel('display_model_result', out, input);
       if (view.kind === 'none') return { ...out, drawn: false, warnings: [...(out.warnings || []), `nothing was drawn (${view.reason}) — declare \`display\` with the kind that fits the rows`] };
       drawn = true;
       return { ...out, drawn: true };
@@ -3694,6 +3746,16 @@ function walkPredicates(group, fn) {
 }
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+// WHICH SIDE A TASK BELONGS TO — and so which query tool reads it back. A semantic task (a declared
+// model being parsed, a metric query) is read with query_semantic_model({ task_id }); a pipeline
+// task (a build, a query over a built model) with query_pipeline_model({ task_id }). An experiment's
+// statistics come back with their call and are only ever drawn.
+const TASK_SIDE = {
+  build_semantic_model: 'semantic', update_semantic_model: 'semantic', query_semantic_model: 'semantic',
+  build_pipeline_model: 'pipeline', register_native_model: 'pipeline', query_pipeline_model: 'pipeline',
+};
+const SIDE_READER = { semantic: 'query_semantic_model', pipeline: 'query_pipeline_model' };
 
 function clone(x) {
   return JSON.parse(JSON.stringify(x ?? null));

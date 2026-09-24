@@ -288,7 +288,7 @@ export function buildSchemas(catalog) {
     // (create → name + metrics, update → context_id + semantic_model), so a caller is never told
     // to supply a field the mode it asked for does not take.
 
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). TWO MODES: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_native_model instead. It returns a task_id: get_task_result({ task_id }) returns the parsed task (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). TWO MODES: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_pipeline_model instead. It returns a task_id: query_semantic_model({ task_id }) returns the parsed model (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
     allOf: [
       { if: { properties: { action: { const: 'update' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'] } },
       { if: { not: { properties: { action: { const: 'update' } }, required: ['action'] } }, then: { required: ['name', 'metrics'] } },
@@ -322,7 +322,7 @@ export function buildSchemas(catalog) {
   // and materialize it. The pipeline's rows ARE the result.
   const registerModel = {
     type: 'object', additionalProperties: false, required: ['name', 'pipeline'],
-    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — the call returns a task_id and get_task_result returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
+    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — the call returns a task_id and query_pipeline_model({ task_id }) returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
@@ -341,7 +341,7 @@ export function buildSchemas(catalog) {
     },
   };
 
-  // build_native_model: compose a pipeline INCREMENTALLY, one stage at a time. A
+  // build_pipeline_model: compose a pipeline INCREMENTALLY, one stage at a time. A
   // single stateful tool with an `action`; each add_step validates the stage and
   // returns the columns now available for the NEXT stage (schema only — nothing is
   // materialized until materialize). The all-at-once register_native_model still works.
@@ -350,7 +350,7 @@ export function buildSchemas(catalog) {
   const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
   const buildModel = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. MATERIALIZE IS NOT THE END: the draft stays open and the table it built STANDS FOR the steps so far, so the steps you add next read THAT table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; materialize returns a task_id — read the rows with get_task_result({ task_id }). For REUSABLE named metrics you query many ways (group_by / time / filters), use create_semantic_model instead (the governed path).',
+    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. MATERIALIZE IS NOT THE END: the draft stays open and the table it built STANDS FOR the steps so far, so the steps you add next read THAT table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; materialize returns a task_id — read the rows with query_pipeline_model({ task_id }), filter or regroup them with query_pipeline_model({ context_id, transform }). For REUSABLE named metrics you query many ways (group_by / time / filters), use build_semantic_model instead (the governed path).',
     // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
     // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
     // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
@@ -385,7 +385,7 @@ export function buildSchemas(catalog) {
   };
 
   const pdefs = predicateDefs(catalog);
-  // HOW A RESULT IS SHOWN — declared by the caller, never guessed: the card display_result draws in
+  // HOW A RESULT IS SHOWN — declared by the caller, never guessed: the card display_model_result draws in
   // a host that renders MCP Apps follows this when it is given. Every form
   // is one closed branch tagged by `kind` (a discriminator), and what a form needs is said by the
   // schema itself — required fields, array bounds, enums, if/then — not in prose. It names result
@@ -490,13 +490,34 @@ export function buildSchemas(catalog) {
     ],
   };
 
+  // A read-only projection over a stored table — what query_pipeline_model runs over a built model
+  // and what a drill-down card reads one view with. The row cap is the tool's own `limit`.
+  const projection = {
+    type: 'object', additionalProperties: false,
+    description: 'A read-only projection over the stored table: filter rows, group, aggregate, filter the aggregates, sort — nothing upstream is recomputed.',
+    properties: {
+      where: { type: 'array', description: 'Row filters on result columns.', items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Result column to filter.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'is_null', 'is_not_null'], description: 'Comparison operator.' }, value: { description: 'Comparison value (array for in/not_in).' } } } },
+      group_by: { type: 'array', items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
+      aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function.' }, column: { type: 'string', description: 'Column to aggregate (omit for count).' }, as: { type: 'string', description: 'Output column alias.' } } } },
+      having: { type: 'array', description: 'Post-aggregation filters on aggregate values.', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' }, value: { description: 'Threshold value.' } } } },
+      order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
+    },
+  };
+  // The read half of a query tool: { task_id } waits for a task of its side and returns it.
+  const taskRead = {
+    task_id: { type: 'string', pattern: TASK_ID, description: 'READ a task of this side back (instead of starting a query): wait for it and return its result.' },
+    wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `With task_id: how long to wait for the task at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment the task is done. 0 = just look.` },
+  };
+  const readMode = (queryFields) => ({ if: { required: ['task_id'] }, then: forbid(queryFields), else: { required: ['context_id'] } });
+
   const query = {
     type: 'object',
     additionalProperties: false,
-    required: ['context_id'],
-    description: 'Run a metric query against a context.',
+    description: 'Start a metric query against a context — or, with task_id, read a semantic task back.',
     $defs: pdefs,
+    allOf: [readMode(['context_id', 'task', 'metrics', 'group_by', 'where', 'order_by', 'time_range', 'materialize', 'dry_run', 'explain'])],
     properties: {
+      ...taskRead,
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
       metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Metric names to fetch (as exposed by the context, e.g. task_<metric>).' },
@@ -506,16 +527,16 @@ export function buildSchemas(catalog) {
         items: {
           oneOf: [
             { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
-            { type: 'object', additionalProperties: false, required: ['model', 'attribute'], description: 'An attribute addressed by where it lives: { model: "users", attribute: "country" }. semantic_index() lists every one under groupable_attributes; create_semantic_model returns the context\'s under groupable. The response echoes the resolved column under group_by_resolved.', properties: { model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column or task dimension) on that model, as semantic_index({ model }) lists it.' }, via: { type: 'string', description: 'Optional: the relationship to reach the model through, when there are several (key variants).' } } },
+            { type: 'object', additionalProperties: false, required: ['model', 'attribute'], description: 'An attribute addressed by where it lives: { model: "users", attribute: "country" }. semantic_index() lists every one under groupable_attributes; build_semantic_model returns the context\'s under groupable. The response echoes the resolved column under group_by_resolved.', properties: { model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column or task dimension) on that model, as semantic_index({ model }) lists it.' }, via: { type: 'string', description: 'Optional: the relationship to reach the model through, when there are several (key variants).' } } },
           ],
         },
       },
       where: { $ref: '#/$defs/predicateGroup', description: 'Row filter applied before aggregation (boolean tree of conditions on dimensions / metric_time).' },
       order_by: { type: 'array', description: 'Sort order. Each key is a requested metric name, a RESULT COLUMN of this query ("metric_time_day", "users_country" — the names the rows come back with; "metric_time" is an alias of the time column), or a group_by attribute as { model, attribute }.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { oneOf: [{ type: 'string', description: 'A requested metric name, a result column name (e.g. "users_country", "metric_time_day"), or "metric_time".' }, { type: 'object', additionalProperties: false, required: ['model', 'attribute'], properties: { model: { enum: catalog.modelKeys() }, attribute: { type: 'string' }, via: { type: 'string' } }, description: 'A group_by attribute, addressed as in group_by.' }] }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
       time_range: { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
-      limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000).' },
-      offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging).' },
-      materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with get_task_result({ task_id, offset, limit }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_native_model({ action: "start", from_task })).' },
+      limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000); with task_id, pages a stored result.' },
+      offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging); with task_id, pages a stored result.' },
+      materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with query_semantic_model({ task_id, offset, limit }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_pipeline_model({ action: "start", from_task })).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the compiled query WITHOUT executing it.' },
       explain: { type: 'boolean', description: 'If true, return the query plan (how the metrics compile) and the compiled query WITHOUT executing. A superset of dry_run; useful for inspecting/optimizing.' },
     },
@@ -549,7 +570,7 @@ export function buildSchemas(catalog) {
   // drop_context / delete_native_model / delete_semantic_model. Strict per-action fields.
   const contextTool = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, with cascade for dependent metrics).',
+    description: 'Manage isolated execution contexts (the workspaces build_semantic_model / build_pipeline_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, with cascade for dependent metrics).',
     allOf: [
       { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['from_task', 'context_id', 'semantic_model', 'cascade', 'force']) },
       { if: { properties: { action: { enum: ['describe', 'delete_model'] } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['from_task', 'semantic_model', 'cascade', 'force']) } },
@@ -566,24 +587,26 @@ export function buildSchemas(catalog) {
   };
 
   const tools = {
-    create_semantic_model: create,
+    build_semantic_model: create,
     // Stage schemas may reference root-level definitions (the recursive python body): hoist them.
     register_native_model: withStageDefs(registerModel, catalog),
-    build_native_model: withStageDefs(buildModel, catalog),
+    build_pipeline_model: withStageDefs(buildModel, catalog),
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     context: contextTool,
     query_semantic_model: query,
-    get_task_result: {
-      type: 'object', additionalProperties: false, required: ['task_id'],
-      description: 'Read what a task produced — waiting for it first.',
+    query_pipeline_model: {
+      type: 'object', additionalProperties: false,
+      description: 'Query a built pipeline model — or, with task_id, read a pipeline task back.',
+      allOf: [readMode(['context_id', 'transform'])],
       properties: {
-        task_id: { type: 'string', pattern: TASK_ID, description: 'The task_id a call returned (create_semantic_model, query_semantic_model, build_native_model materialize, experiment).' },
-        wait_seconds: { type: 'number', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait for the task at most (default and cap ${MAX_WAIT_SECONDS}); it returns the moment the task is done. 0 = just look.` },
-        offset: { type: 'integer', minimum: 0, description: 'Page a STORED result (a materialized query, a pipeline build): rows to skip.' },
-        limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Page a STORED result: rows to return (default 1000).' },
+        ...taskRead,
+        context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the draft_id build_pipeline_model returned, after materialize).' },
+        transform: projection,
+        limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Rows to return (default 1000); with task_id, pages a stored result.' },
+        offset: { type: 'integer', minimum: 0, description: 'Rows to skip (paging); with task_id, pages a stored result.' },
       },
     },
-    display_result: {
+    display_model_result: {
       type: 'object', additionalProperties: false, required: ['task_id'],
       description: 'Draw a finished result as a card for the person — once.',
       properties: {
@@ -597,17 +620,7 @@ export function buildSchemas(catalog) {
       properties: {
         task_id: { type: 'string', pattern: TASK_ID, description: 'The task the card was drawn from.' },
         limit: { type: 'integer', minimum: 1, maximum: DRILL_ROWS, description: 'Rows of the view.' },
-        transform: {
-          type: 'object', additionalProperties: false,
-          description: 'The view: the stored table filtered to the path taken, grouped by the level chosen (the card builds it with the view model\'s one definition of a view).',
-          properties: {
-            where: { type: 'array', description: 'Row filters on result columns.', items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Result column to filter.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'is_null', 'is_not_null'], description: 'Comparison operator.' }, value: { description: 'Comparison value (array for in/not_in).' } } } },
-            group_by: { type: 'array', items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
-            aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function.' }, column: { type: 'string', description: 'Column to aggregate (omit for count).' }, as: { type: 'string', description: 'Output column alias.' } } } },
-            having: { type: 'array', description: 'Post-aggregation filters on aggregate values.', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' }, value: { description: 'Threshold value.' } } } },
-            order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
-          },
-        },
+        transform: projection,
       },
     },
     list_query_jobs: empty,
@@ -623,7 +636,7 @@ export function buildSchemas(catalog) {
     semantic_index: semanticIndexSchema(catalog),
     time: {
       type: 'object', additionalProperties: false, required: ['seconds'],
-      description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return. Purely a timer; it touches no data and follows no task — waiting for a task is get_task_result.`,
+      description: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return. Purely a timer; it touches no data and follows no task — waiting for a task is its side\'s query tool with { task_id }.`,
       properties: {
         seconds: { type: 'number', minimum: 0, maximum: 86400, description: `Seconds to wait; the actual wait is capped at ${MAX_WAIT_SECONDS} (larger values are clamped, with clamped:true and cap_seconds in the result).` },
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },

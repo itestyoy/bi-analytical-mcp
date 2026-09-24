@@ -51,7 +51,7 @@ before(async () => {
   engine = settle(new Engine({ catalog, contextManager: ctxs, runner: backend }));
 
   // Monetization model: only two data sources (events fact + user attributes).
-  const out = await engine.create_semantic_model({
+  const out = await engine.build_semantic_model({
     name: 'mon',
     use_base_models: ['users'],
     semantic_models: [{

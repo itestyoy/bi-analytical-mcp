@@ -80,14 +80,18 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
 
 /**
  * One MCP tool call, the way an assistant makes it: a call that STARTS work answers with its
- * task_id, and the result is read with get_task_result (called again while it says running).
+ * task_id, and the result is read back with the query tool of its side ({ task_id }, called again
+ * while it says running).
  */
+/** Which query tool reads back a task the named tool started. */
+const reader = (name) => (['build_pipeline_model', 'query_pipeline_model', 'register_native_model'].includes(name) ? 'query_pipeline_model' : 'query_semantic_model');
+
 async function settled(name, args) {
   let res = await client.callTool({ name, arguments: args });
   let out = JSON.parse(res.content[0].text);
   if (!res.isError && isStartedTask(out)) {
     do {
-      res = await client.callTool({ name: 'get_task_result', arguments: { task_id: out.task_id } });
+      res = await client.callTool({ name: reader(name), arguments: { task_id: out.task_id } });
       out = JSON.parse(res.content[0].text);
     } while (!res.isError && out.status === 'running');
   }
@@ -110,16 +114,16 @@ async function callErr(name, args) {
 
 /** A whole pipeline over MCP: start → add_step per stage → materialize. */
 async function mcpPipeline(source, stages, name) {
-  const s = await call('build_native_model', { action: 'start', name: name || `e2e_${seq++}`, source });
-  for (const stage of stages) await call('build_native_model', { action: 'add_step', draft_id: s.draft_id, stage });
-  const built = await call('build_native_model', { action: 'materialize', draft_id: s.draft_id });
+  const s = await call('build_pipeline_model', { action: 'start', name: name || `e2e_${seq++}`, source });
+  for (const stage of stages) await call('build_pipeline_model', { action: 'add_step', draft_id: s.draft_id, stage });
+  const built = await call('build_pipeline_model', { action: 'materialize', draft_id: s.draft_id });
   assert.equal(built.build?.ok, true, JSON.stringify(built.error || built.build));
   return built;
 }
 
 /** A governed task over MCP: create it, then query it. */
 async function mcpTask(payload) {
-  const created = await call('create_semantic_model', payload);
+  const created = await call('build_semantic_model', payload);
   assert.equal(created.parse?.ok, true, JSON.stringify(created.parse));
   return created.context_id;
 }
@@ -130,13 +134,13 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   if (skip(t)) return;
   // the protocol advertises the tools an assistant needs…
   const tools = (await client.listTools()).tools.map((x) => x.name);
-  for (const needed of ['semantic_index', 'create_semantic_model', 'query_semantic_model', 'build_native_model', 'get_task_result', 'experiment']) {
+  for (const needed of ['semantic_index', 'build_semantic_model', 'query_semantic_model', 'build_pipeline_model', 'query_pipeline_model', 'experiment']) {
     assert.ok(tools.includes(needed), `${needed} is advertised`);
   }
-  // …and only those: editing a task is a MODE of create_semantic_model, not a tool of its own —
+  // …and only those: editing a task is a MODE of build_semantic_model, not a tool of its own —
   // two tools meant the deployment's whole vocabulary twice in every listing.
-  assert.ok(!tools.includes('update_semantic_model'), 'the update tool is folded into create_semantic_model');
-  const createTool = (await client.listTools()).tools.find((x) => x.name === 'create_semantic_model');
+  assert.ok(!tools.includes('update_semantic_model'), 'the update tool is folded into build_semantic_model');
+  const createTool = (await client.listTools()).tools.find((x) => x.name === 'build_semantic_model');
   assert.deepEqual(createTool.inputSchema.properties.action.enum, ['create', 'update']);
   // …the overview names the four sources…
   const overview = await call('semantic_index', {});
@@ -193,7 +197,7 @@ test('2. crash → its ad funnel → the install version then → that player\'s
   assert.equal(num(r.funnels), 4);
   assert.ok(near(num(r.spend), 25.0), `spend=${r.spend}`);
   // the rows are a task's result — readable again by its id — and the pipeline tier is named.
-  assert.equal(built.tool, 'build_native_model');
+  assert.equal(built.tool, 'build_pipeline_model');
   assert.equal(built.table, built.model);
   assert.equal(built.provenance?.tier, 'pipeline');
 });
@@ -215,8 +219,8 @@ test('3. the validity window decides the answer: 13 attributed rows vs 15 duplic
   assert.deepEqual(keyOnly, { n: 15, distinct: 13 }, 'u1 has two spend rows and two install versions');
 
   // …and the step that omits it says so, before anything is built.
-  const s = await call('build_native_model', { action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
-  const step = await call('build_native_model', {
+  const s = await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'acquisition' });
+  const step = await call('build_pipeline_model', {
     action: 'add_step', draft_id: s.draft_id,
     stage: { stage: 'join', with: 'users', via: 'user', attrs: ['country'] },
   });
@@ -256,10 +260,10 @@ test('4. the caller picks the ad format: 14 / 12 / 8 rows, and k1 keeps its funn
 
 test('5. the attrs contract, enforced at the protocol boundary', opts, async (t) => {
   if (skip(t)) return;
-  const start = async () => (await call('build_native_model', { action: 'start', name: `e2e_${seq++}`, source: 'crashlytics' })).draft_id;
+  const start = async () => (await call('build_pipeline_model', { action: 'start', name: `e2e_${seq++}`, source: 'crashlytics' })).draft_id;
 
   // (a) no attrs → refused, and the error lists what the model actually offers.
-  const missing = await callErr('build_native_model', {
+  const missing = await callErr('build_pipeline_model', {
     action: 'add_step', draft_id: await start(),
     stage: { stage: 'join', with: 'acquisition', via: 'user' },
   });
@@ -267,7 +271,7 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
   assert.match(missing.error.message, /Columns of 'acquisition':.*cost.*impressions.*clicks/s);
 
   // (b) a name the pipeline already carries → refused, with the rename to apply.
-  const dup = await callErr('build_native_model', {
+  const dup = await callErr('build_pipeline_model', {
     action: 'add_step', draft_id: await start(),
     stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', attrs: ['event_name'] },
   });
@@ -289,8 +293,8 @@ test('5. the attrs contract, enforced at the protocol boundary', opts, async (t)
 
   // (d) an unlisted column of the joined model is simply not there.
   const s = await start();
-  await call('build_native_model', { action: 'add_step', draft_id: s, stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id'] } });
-  const unlisted = await callErr('build_native_model', {
+  await call('build_pipeline_model', { action: 'add_step', draft_id: s, stage: { stage: 'join', with: 'events', via: 'ad_funnel_rewarded', kind: 'inner', attrs: ['event_id'] } });
+  const unlisted = await callErr('build_pipeline_model', {
     action: 'add_step', draft_id: s,
     stage: { stage: 'aggregate', measures: [{ name: 'x', fn: 'count_distinct', column: 'tracking_id' }] },
   });
@@ -412,9 +416,9 @@ test('9. materialize once, then re-slice the stored result from its task: meta 1
 
   // …and a pipeline started FROM that task aggregates it WITHOUT re-running the joins.
   const slice = async (name, stages) => {
-    const d = await call('build_native_model', { action: 'start', name, from_task: built.task_id });
-    await call('build_native_model', { action: 'add_steps', draft_id: d.draft_id, stages });
-    return call('build_native_model', { action: 'materialize', draft_id: d.draft_id });
+    const d = await call('build_pipeline_model', { action: 'start', name, from_task: built.task_id });
+    await call('build_pipeline_model', { action: 'add_steps', draft_id: d.draft_id, stages });
+    return call('build_pipeline_model', { action: 'materialize', draft_id: d.draft_id });
   };
   const sliced = await slice(`e2e_slice_${seq++}`, [
     { stage: 'aggregate', group_by: ['media_source'], measures: [{ name: 'n', fn: 'count' }, { name: 'spend', fn: 'sum', column: 'cost' }] },
@@ -431,7 +435,7 @@ test('9. materialize once, then re-slice the stored result from its task: meta 1
   ]);
   assert.equal(num(meta.rows[0].n), 18);
   // the stored result itself pages without recomputing
-  const page = await call('get_task_result', { task_id: built.task_id, limit: 5, offset: 20 });
+  const page = await call('query_pipeline_model', { task_id: built.task_id, limit: 5, offset: 20 });
   assert.equal(page.rows.length, 2, 'rows 21-22 of 22');
 });
 
@@ -453,7 +457,7 @@ test('10. extend a task over MCP and re-query: cost 17.50 alongside 64 clicks', 
   assert.ok(tooEarly.error.message.length > 0, JSON.stringify(tooEarly));
 
   // add a second amount from the SAME source, choosing its aggregation here and now.
-  const grown = await call('create_semantic_model', {
+  const grown = await call('build_semantic_model', {
     action: 'update',
     context_id: ctx,
     semantic_model: 'acquisition',

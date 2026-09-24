@@ -122,7 +122,7 @@ for (const r of recipes.list) {
     }
 
     // Semantic-model recipe: create + run its first example query.
-    const out = await engine.create_semantic_model(r.create_payload);
+    const out = await engine.build_semantic_model(r.create_payload);
     assert.equal(out.parse.ok, true, `parse failed for ${r.id}: ${JSON.stringify(out.parse.error || out.parse)}`);
     const example = (r.example_queries || [])[0];
     if (example) {

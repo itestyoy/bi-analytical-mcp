@@ -10,11 +10,15 @@
     "pretest": "npm run lint:names",
     "test": "node --test test/unit/*.test.js",
     "test:integration": "node --test test/integration/*.test.js",
-    "test:all": "node --test test/unit/*.test.js test/integration/*.test.js"
+    "test:all": "node --test test/unit/*.test.js test/integration/*.test.js",
+    "build:app": "vite build --config src/apps/result-view/vite.config.js"
   },
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/express": "^2.0.1",
+    "@modelcontextprotocol/ext-apps": "^2.0.0",
+    "@modelcontextprotocol/node": "^2.1.0",
+    "@modelcontextprotocol/server": "^2.1.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "express": "^5.2.1",
@@ -27,6 +31,10 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.4.6",
-    "@electric-sql/pglite-socket": "^0.1.6"
+    "@electric-sql/pglite-socket": "^0.1.6",
+    "@modelcontextprotocol/client": "^2.1.0",
+    "chart.js": "^4.5.1",
+    "vite": "^6.4.3",
+    "vite-plugin-singlefile": "^2.3.3"
   }
 }

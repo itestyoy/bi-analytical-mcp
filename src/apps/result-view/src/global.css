@@ -1,0 +1,127 @@
+/*
+ * Host-aware base styles, following the official MCP Apps templates (ext-apps
+ * examples/basic-server-vanillajs/src/global.css): every value the view uses is a
+ * host style variable (McpUiStyleVariableKey) with a fallback here, so the view
+ * looks native inside a host that sends its theme and stays readable in one that
+ * does not. light-dark() follows the document's color-scheme, which the view sets
+ * from the host's theme (applyDocumentTheme).
+ *
+ * The FALLBACKS are the shadcn/ui theme (base color "neutral", new-york v4 registry):
+ * a host that sends no theme gets the shadcn look, a host that does gets its own.
+ * The components (mcp-app.css) are written against the shadcn semantic names below
+ * (--background, --muted, --primary, …), each of which reads a host variable.
+ */
+:root {
+  color-scheme: light dark;
+
+  /* ── host style variables: fallbacks = shadcn neutral (light, dark) ── */
+  --color-background-primary: light-dark(oklch(1 0 0), oklch(0.145 0 0));
+  --color-background-secondary: light-dark(oklch(0.97 0 0), oklch(0.269 0 0));
+  --color-background-tertiary: light-dark(oklch(0.97 0 0), oklch(0.269 0 0));
+  --color-background-inverse: light-dark(oklch(0.205 0 0), oklch(0.922 0 0));
+  --color-text-primary: light-dark(oklch(0.145 0 0), oklch(0.985 0 0));
+  --color-text-secondary: light-dark(oklch(0.556 0 0), oklch(0.708 0 0));
+  --color-text-tertiary: light-dark(oklch(0.708 0 0), oklch(0.556 0 0));
+  --color-text-inverse: light-dark(oklch(0.985 0 0), oklch(0.205 0 0));
+  --color-text-danger: light-dark(oklch(0.577 0.245 27.325), oklch(0.704 0.191 22.216));
+  --color-border-primary: light-dark(oklch(0.922 0 0), oklch(1 0 0 / 10%));
+  --color-border-secondary: light-dark(oklch(0.922 0 0), oklch(1 0 0 / 15%));
+  --color-ring-primary: light-dark(oklch(0.708 0 0), oklch(0.556 0 0));
+  --border-radius-sm: 0.375rem;
+  --border-radius-md: 0.5rem;
+  --border-radius-lg: 0.625rem;
+  --border-radius-xl: 0.875rem;
+  --border-radius-full: 9999px;
+  --border-width-regular: 1px;
+  --shadow-sm: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
+  --shadow-lg: 0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);
+  --font-sans: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 600;
+  --font-weight-bold: 700;
+  --font-text-xs-size: 0.75rem;
+  --font-text-xs-line-height: 1rem;
+  --font-text-sm-size: 0.875rem;
+  --font-text-sm-line-height: 1.25rem;
+  --font-text-md-size: 1rem;
+  --font-text-md-line-height: 1.5rem;
+  --font-text-lg-size: 1.125rem;
+  --font-text-lg-line-height: 1.75rem;
+  --font-heading-md-size: 1.25rem;
+  --font-heading-md-line-height: 1.75rem;
+  --font-heading-xl-size: 1.875rem;
+  --font-heading-xl-line-height: 2.25rem;
+
+  /* ── shadcn semantic names, each read from a host variable ── */
+  --background: var(--color-background-primary);
+  --foreground: var(--color-text-primary);
+  /* shadcn lifts the card one step off the page in dark mode (0.145 → 0.205) */
+  --card: light-dark(var(--color-background-primary), color-mix(in oklab, var(--color-background-primary), white 6%));
+  --muted: var(--color-background-secondary);
+  --muted-foreground: var(--color-text-secondary);
+  --accent: var(--color-background-tertiary);
+  --primary: var(--color-background-inverse);
+  --primary-foreground: var(--color-text-inverse);
+  --destructive: var(--color-text-danger);
+  --border: var(--color-border-primary);
+  --input: var(--color-border-secondary);
+  --ring: var(--color-ring-primary);
+  --ring-soft: color-mix(in oklab, var(--ring) 50%, transparent);
+  --shadow-xs: 0 1px 2px 0 rgb(0 0 0 / 0.05);
+
+  /* Tailwind's 0.25rem spacing step, so paddings read as p-2 / p-4 / p-6 */
+  --space: 0.25rem;
+
+  /*
+   * Chart series: the categorical slots of a colorblind-validated palette, stepped
+   * separately for the light and the dark surface (not an automatic flip). Kept instead
+   * of shadcn's chart-1..5, whose light set has two neighbouring ambers. Text never
+   * wears a series color.
+   */
+  --color-series-1: light-dark(#2a78d6, #3987e5);
+  --color-series-2: light-dark(#eb6834, #d95926);
+  --color-series-3: light-dark(#1baf7a, #199e70);
+  --color-series-4: light-dark(#eda100, #c98500);
+  --color-series-5: light-dark(#e87ba4, #d55181);
+  --color-series-6: light-dark(#008300, #008300);
+}
+
+* {
+  box-sizing: border-box;
+  border-color: var(--border);
+}
+
+/* `hidden` wins over any display a class sets (a grid or flex section, an SVG icon) */
+[hidden] {
+  display: none !important;
+}
+
+html, body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--font-text-md-size);
+  font-weight: var(--font-weight-normal);
+  line-height: var(--font-text-md-line-height);
+  color: var(--foreground);
+  background-color: var(--background);
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3, p, dl, dd {
+  margin: 0;
+}
+
+code, pre, kbd {
+  font-family: var(--font-mono);
+}
+
+b, strong {
+  font-weight: var(--font-weight-semibold);
+}
+
+::selection {
+  color: var(--primary-foreground);
+  background-color: var(--primary);
+}

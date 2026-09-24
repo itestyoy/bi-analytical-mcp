@@ -118,3 +118,15 @@ test('no shipped or degenerate catalog produces an empty enum or choice anywhere
     }
   }
 });
+
+// A key set to `undefined` is not JSON: serialization drops it silently, but a client that
+// validates the tool list as objects (the SDK's in-memory transport) rejects the WHOLE list. It
+// happened — `strEnum` wrote `description: undefined` for event-name items — and surfaced only when
+// the tests moved to the SDK v2 client.
+test('the guard names a key left undefined, and no built schema carries one', () => {
+  assert.deepEqual(assertSchemaSound({ type: 'object', properties: { a: { type: 'string', description: undefined } } }), ['#/properties/a/description is undefined']);
+  for (const file of ['config/catalog.yml', 'test/integration/fixtures/catalog.yml']) {
+    const schemas = buildSchemas(loadCatalog(join(process.cwd(), file), {}));
+    for (const [tool, schema] of Object.entries(schemas)) assert.deepEqual(assertSchemaSound(schema, `#/${tool}`), [], `${file} ${tool}`);
+  }
+});

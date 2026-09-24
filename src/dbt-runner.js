@@ -7,21 +7,32 @@ import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { currentSignal } from './request-context.js';
 
 function run(bin, args, { cwd, env, timeout = 600000 } = {}) {
+  // The cancellation of the tool call this process works for (src/request-context.js): a call the
+  // client abandoned stops its dbt process instead of letting it scan the warehouse to the end.
+  const signal = currentSignal();
+  if (signal?.aborted) {
+    return Promise.resolve({ ok: false, code: null, killed: true, signal: 'SIGTERM', cancelled: true, stdout: '', stderr: '', error: 'dbt not started — the tool call was cancelled' });
+  }
   return new Promise((resolve) => {
-    execFile(bin, args, { cwd, env: { ...process.env, ...env }, timeout, maxBuffer: 64 * 1024 * 1024 }, (err, stdout, stderr) => {
+    execFile(bin, args, { cwd, env: { ...process.env, ...env }, timeout, maxBuffer: 64 * 1024 * 1024, ...(signal ? { signal } : {}) }, (err, stdout, stderr) => {
       // The useful failure fact JS gives us is killed/signal/code — NOT err.message/err.stack,
       // which is just the "Command failed: <whole command>" + node-internal-stack wrapper.
-      // A killed/SIGTERM exit means the runner timeout fired (the query never finished); a
-      // non-zero exit means dbt itself failed and printed the real reason to stdout/stderr.
+      // A killed/SIGTERM exit means the runner timeout fired (the query never finished) — unless
+      // the call was cancelled, which kills it the same way; a non-zero exit means dbt itself
+      // failed and printed the real reason to stdout/stderr.
+      const cancelled = !!err && (err.name === 'AbortError' || err.code === 'ABORT_ERR' || !!signal?.aborted);
       let error;
       if (err) {
-        error = (err.killed || err.signal)
-          ? `dbt killed by ${err.signal || 'signal'} — hit the ${timeout}ms runner timeout (query did not finish)`
-          : `dbt exited with code ${err.code}`;
+        error = cancelled
+          ? 'dbt stopped — the tool call was cancelled'
+          : (err.killed || err.signal)
+            ? `dbt killed by ${err.signal || 'signal'} — hit the ${timeout}ms runner timeout (query did not finish)`
+            : `dbt exited with code ${err.code}`;
       }
-      resolve({ ok: !err, code: err?.code ?? 0, killed: !!err?.killed, signal: err?.signal ?? null, stdout: stdout || '', stderr: stderr || '', error });
+      resolve({ ok: !err, code: err?.code ?? 0, killed: !!err?.killed || cancelled, signal: err?.signal ?? null, ...(cancelled ? { cancelled: true } : {}), stdout: stdout || '', stderr: stderr || '', error });
     });
   });
 }
@@ -50,7 +61,7 @@ export class DbtRunner {
     const args = ['run'];
     if (select) args.push('--select', select);
     const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout });
-    return { ok: r.ok, stdout: r.stdout, stderr: r.stderr };
+    return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, ...(r.error ? { error: r.error } : {}), ...(r.cancelled ? { cancelled: true } : {}) };
   }
 
   /** Real physical columns of a model's relation, via adapter.get_columns_in_relation. */
@@ -75,7 +86,7 @@ export class DbtRunner {
     const r = await run(this.dbtBin, args, { cwd: projectDir, env: this._env(projectDir), timeout });
     // Preserve r.error (the process-level message from execFile: timeout, ENOENT, spawn
     // failure) so callers can log the REAL reason from ANY level — not just dbt's own stderr.
-    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, rows: [], columns: [] };
+    if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, ...(r.cancelled ? { cancelled: true } : {}), rows: [], columns: [] };
     const rows = parseShowJson(r.stdout);
     return { ok: true, rows, columns: rows[0] ? Object.keys(rows[0]).map((name) => ({ name })) : [] };
   }

@@ -26,6 +26,7 @@ import { openStore } from './store.js';
 import { buildProjection } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
+import { detached, currentSignal } from './request-context.js';
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, pythonBuildGraceMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
@@ -100,13 +101,14 @@ export class Engine {
     // An empty vocabulary (a source with no events yet, a model with no groupable column) renders
     // as `enum: []` / `oneOf: []`, which ajv refuses — and it refuses the WHOLE schema, so the
     // server would not start and the message would point at a branch instead of at the catalog.
-    // schema-kit keeps those constructs from being built; this is the backstop that names the
-    // offender if one ever gets in another way.
+    // A key left `undefined` is the other unusable construct: not JSON, and a client that validates
+    // the tool list as objects rejects the whole list. schema-kit keeps both from being built; this
+    // is the backstop that names the offender if one ever gets in another way.
     for (const [tool, schema] of Object.entries(this.schemas)) {
       const bad = assertSchemaSound(schema, `#/${tool}`);
       if (bad.length) {
-        throw new Error(`the catalog produced an unusable tool schema (an empty vocabulary): ${bad.join('; ')}. `
-          + `A source with no known events, or a model with nothing groupable, must render as an open field — see src/schema-kit.js.`);
+        throw new Error(`the catalog produced an unusable tool schema: ${bad.join('; ')}. `
+          + `A source with no known events, or a model with nothing groupable, must render as an open field; an optional key is omitted, never set to undefined — see src/schema-kit.js.`);
       }
     }
     this.validators = makeValidators(this.schemas);
@@ -200,11 +202,14 @@ export class Engine {
     if (kind === 'term') return memoryTarget('term', key).target;
     const dot = key.indexOf('.');
     // 'model:<source>' and the scoped 'property:<source>.<name>' name a real entity — keep what
-    // they name, as the structure.
-    if (kind === 'model' && this.catalog.models[key]) return memoryTarget('model', key).target;
+    // they name, as the structure. A model the CATALOG DECLARES counts even when grounding set it
+    // aside this run (its table was being rebuilt, the warehouse blinked): the migration is
+    // one-way, and demoting its notes to terms would lose the link for good once the table is back.
+    const declared = (m) => !!(this.catalog.models[m] || this.catalog.unavailable?.[m]);
+    if (kind === 'model' && declared(key)) return memoryTarget('model', key).target;
     if ((kind === 'property' || kind === 'event') && dot > 0) {
       const source = key.slice(0, dot); const name = key.slice(dot + 1);
-      if (this.catalog.models[source]) return memoryTarget(kind, source, name).target;
+      if (declared(source)) return memoryTarget(kind, source, name).target;
     }
     return memoryTarget('term', key.toLowerCase()).target;
   }
@@ -753,8 +758,15 @@ export class Engine {
         recommendations.push(...nullRecs);
         // A metric query names the attribute STRUCTURALLY — { model, attribute } — and the old
         // '<entity>__<attr>' path string is refused by the schema, so it must not be recommended.
+        // `via` is needed exactly where the query resolver asks for it: a source carrying SEVERAL
+        // relationships to this model. Which source the caller will query from is not known here,
+        // so each such source is named with its choices — the same candidates the resolver lists.
+        const several = c.modelKeys().filter((src) => src !== mk)
+          .map((src) => [src, Object.keys(c.entitiesOf(src)).filter((e) => c.joinTargetFor(e) === mk)])
+          .filter(([, rels]) => rels.length > 1);
+        const viaHint = several.length ? `; from ${several.map(([src, rels]) => `'${src}' add via: one of ${rels.map((r) => `'${r}'`).join(', ')}`).join(', from ')}` : '';
         recommendations.push(ent
-          ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}'${ent !== this.catalog.primaryEntityName(mk) ? `, via: '${ent}'` : ''} } (declare use_base_models: ['${mk}']), or reference '${col}' after a pipeline join with:'${mk}'.`
+          ? `Group/filter by it in metric queries as { model: '${mk}', attribute: '${col}' } (declare use_base_models: ['${mk}']${viaHint}), or reference '${col}' after a pipeline join with:'${mk}'.`
           : `Reference '${col}' after a pipeline join with:'${mk}' (build_native_model join stage).`);
         const attrOut = {
           property: col, source: mk, model: mk, column: col, type: dim.type,
@@ -1303,22 +1315,66 @@ export class Engine {
   }
 
   /**
+   * A BEST-EFFORT WAREHOUSE READ INSIDE AN INTERACTIVE CALL — WITH A DEADLINE OF OUR OWN.
+   *
+   * Several answers are ENRICHED from the warehouse: the physical column set that grounds a
+   * source, the freshness of its time column, a row estimate. Each is an extra — the answer is
+   * complete without it — but each is a dbt round trip, and dbt's own timeout is the build
+   * timeout (10 minutes by default): long enough that the FIRST such call after a restart, when
+   * the dbt process is cold and the warehouse has not been touched yet, outlives the timeout of
+   * the client in front of the call. The client then reports a generic tool failure, the caller
+   * retries, the retry hits the cache the abandoned call primed, and the difference looks like
+   * whatever argument happened to change between the two.
+   *
+   * So the wait is bounded HERE, by the same grace a build gets (queryTimeoutMs, itself capped
+   * below any client's patience): when it expires the caller gets `fallback` — the documented
+   * "this could not be known" value every one of these already has a path for — while the read
+   * runs on in the background and primes the cache for the next call. Concurrent callers share
+   * one in-flight read, so a burst of tool calls cannot spawn a dbt process each.
+   */
+  async _bestEffort(key, work, fallback = null) {
+    this._inFlight ??= new Map();
+    let p = this._inFlight.get(key);
+    if (!p) {
+      // detached: this read serves every caller waiting on it, so it must not die with the first
+      // one's cancellation (src/request-context.js).
+      p = detached(async () => work()).finally(() => { if (this._inFlight.get(key) === p) this._inFlight.delete(key); });
+      p.catch(() => {}); // it finishes unobserved after a timeout — never an unhandled rejection
+      this._inFlight.set(key, p);
+    }
+    let timer;
+    const expired = Symbol('expired');
+    // NOT unref'd: a tool call is in flight, and the process must stay alive to answer it. The
+    // timer is cleared the moment the race settles, so it never outlives the call.
+    const deadline = new Promise((resolve) => { timer = setTimeout(() => resolve(expired), this.queryTimeoutMs); });
+    try {
+      const v = await Promise.race([p, deadline]);
+      if (v !== expired) return v;
+      console.error(`[mcp] warehouse enrichment '${key}' is still running after ${this.queryTimeoutMs / 1000}s — answering without it; it will be cached for the next call`);
+      return fallback;
+    } catch { return fallback; } finally { clearTimeout(timer); }
+  }
+
+  /**
    * Physical column NAMES (lowercased Set) of a source's relation, via the same
    * introspection semantic_index({ model }) uses — cached per source. null when it
-   * cannot be known (no runner / relation not built / introspection failed), in which
-   * case the catalog's declared columns are used as-is (grounding is skipped).
+   * cannot be known (no runner / relation not built / introspection failed / slower than
+   * the grace), in which case the catalog's declared columns are used as-is (grounding
+   * is skipped).
    */
   async _physicalCols(source) {
     if (!this.runner || !this.ctxs.baseProjectDir) return null;
     this._physColCache ??= new Map();
     if (this._physColCache.has(source)) return this._physColCache.get(source);
-    let set = null;
-    try {
-      const r = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
-      if (r.ok && Array.isArray(r.columns)) set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
-    } catch { /* introspection unavailable → grounding skipped */ }
-    this._physColCache.set(source, set);
-    return set;
+    return this._bestEffort(`columns:${source}`, async () => {
+      let set = null;
+      try {
+        const r = await this.runner.relationColumns(this.ctxs.baseProjectDir, this.catalog.getModel(source).dbt_model);
+        if (r.ok && Array.isArray(r.columns)) set = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
+      } catch { /* introspection unavailable → grounding skipped */ }
+      this._physColCache.set(source, set);
+      return set;
+    });
   }
 
   /** Declared source columns GROUNDED to physical truth: { cols, phantom } where phantom
@@ -2392,16 +2448,19 @@ export class Engine {
       return resp;
     }
     // Everything that can refuse the declaration runs BEFORE a context exists, so a refused one
-    // leaves nothing behind: the chain is laid out and its python bodies gated on this probe.
-    const probe = render('pipe');
-    await this._gateCompiled(this._chainModels(probe.chain, input).filter((m) => m.kind === 'python'));
-    const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
+    // leaves nothing behind. The context id is CHOSEN first (a new one is not created yet), so the
+    // chain is laid out ONCE, under its final names, and its python bodies are gated on that very
+    // layout — one render, one compile per python stage.
+    const existing = input.context_id ? this._ctx(input.context_id) : null;
+    const ctxId = existing ? existing.id : this.ctxs.newId();
     // The caller may pass the name: every build of a draft gets its own (`_c2`, `_c3`, …), because
     // a rebuild must never overwrite the table it reads as its checkpoint, nor one a fork
     // inherited. The all-at-once path has no such history and uses the plain name.
-    const modelName = input.model_name || `pipe_${input.name}_${ctx.id}`;
+    const modelName = input.model_name || `pipe_${input.name}_${ctxId}`;
     const out = render(modelName);
     const models = this._chainModels(out.chain, input);
+    await this._gateCompiled(models.filter((m) => m.kind === 'python'));
+    const ctx = existing || this.ctxs.create(ctxId);
     const last = models[models.length - 1];
     const hasPython = models.some((m) => m.kind === 'python');
     // The last model takes the requested materialization when it is SQL; a Python model, and every
@@ -2495,7 +2554,8 @@ export class Engine {
    * partition metadata, or an orchestration mark — and it is scoped to THIS model's relation.
    * Recomputed ONCE PER INDEX SCAN: the cache is keyed on the value-index sync generation, so a
    * completed background scan invalidates it and the next read re-queries MAX(time) — tied to the
-   * scan, not a wall-clock timer. Best-effort: null with no runner/time column, or if it fails.
+   * scan, not a wall-clock timer. Best-effort: null with no runner/time column, if it fails, or if
+   * it is slower than the interactive grace (_bestEffort) — the next call reads the primed cache.
    */
   async _dataFreshness(sourceKey) {
     const base = this.ctxs.baseProjectDir;
@@ -2506,20 +2566,22 @@ export class Engine {
     const gen = this.valueIndex?.syncGeneration ? this.valueIndex.syncGeneration() : 0;
     const hit = this._freshCache.get(sourceKey);
     if (hit && hit.gen === gen) return hit.value; // re-query only after the next index scan completes
-    let latest = null;
-    try {
-      const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}`, 1);
-      if (r.ok && r.rows?.[0]?.latest != null) latest = String(r.rows[0].latest);
-    } catch { /* freshness is best-effort */ }
-    this._freshCache.set(sourceKey, { value: latest, gen });
-    return latest;
+    return this._bestEffort(`freshness:${sourceKey}:${gen}`, async () => {
+      let latest = null;
+      try {
+        const r = await this.runner.show(base, `SELECT MAX(${tcol}) AS latest FROM {{ ref('${m.dbt_model}') }}`, 1);
+        if (r.ok && r.rows?.[0]?.latest != null) latest = String(r.rows[0].latest);
+      } catch { /* freshness is best-effort */ }
+      this._freshCache.set(sourceKey, { value: latest, gen });
+      return latest;
+    });
   }
 
   /**
    * A5: a cheap pre-run volume estimate — COUNT(*) over a source model within an
    * optional time window (the same window the pipeline will apply). Lets the caller
    * gauge the scan before materializing. Best-effort: returns null when there is no
-   * runner / base project, or the count fails.
+   * runner / base project, the count fails, or it is slower than the interactive grace.
    */
   async _estimateSourceRows(sourceKey, tr) {
     const base = this.ctxs.baseProjectDir;
@@ -2535,11 +2597,13 @@ export class Engine {
       else if (r.end) cl.push(`${tcol} <= ${sqlLiteral(r.end)}`);
       if (cl.length) where = ` WHERE ${cl.join(' AND ')}`;
     }
-    try {
-      const r = await this.runner.show(base, `SELECT COUNT(*) AS n FROM {{ ref('${m.dbt_model}') }}${where}`, 1);
-      if (r.ok && r.rows?.[0]) return Number(r.rows[0].n);
-    } catch { /* estimate is best-effort */ }
-    return null;
+    return this._bestEffort(`rows:${sourceKey}:${where}`, async () => {
+      try {
+        const r = await this.runner.show(base, `SELECT COUNT(*) AS n FROM {{ ref('${m.dbt_model}') }}${where}`, 1);
+        if (r.ok && r.rows?.[0]) return Number(r.rows[0].n);
+      } catch { /* estimate is best-effort */ }
+      return null;
+    });
   }
 
   /**
@@ -2914,8 +2978,15 @@ export class Engine {
     const requested = Number(input.seconds) || 0;
     const seconds = Math.min(Math.max(requested, 0), MAX_WAIT_SECONDS); // clamp to [0, MAX_WAIT_SECONDS]
     const startedAt = new Date().toISOString();
-    await new Promise((resolve) => { setTimeout(resolve, seconds * 1000); });
-    return { ok: true, waited_seconds: seconds, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
+    // a cancelled call (the client gave up, a task was cancelled) stops waiting at once
+    const signal = currentSignal();
+    let cancelled = false;
+    await new Promise((resolve) => {
+      const t = setTimeout(resolve, seconds * 1000);
+      signal?.addEventListener?.('abort', () => { cancelled = true; clearTimeout(t); resolve(); }, { once: true });
+    });
+    const waited = cancelled ? Math.round((Date.now() - Date.parse(startedAt)) / 100) / 10 : seconds;
+    return { ok: true, waited_seconds: waited, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, ...(cancelled ? { cancelled: true } : {}), started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
   }
 
   async describe_context(input) {
@@ -2928,8 +2999,10 @@ export class Engine {
       const n = ctx.state.native || {};
       let columns = n.columns || [];
       if (this.runner && n.model) {
-        const cols = await this.runner.relationColumns(this.ctxs.dir(ctx.id), n.model);
-        if (cols.ok) {
+        // Bounded like every other warehouse enrichment: a slow introspection leaves the
+        // declared columns standing rather than holding the whole description hostage.
+        const cols = await this._bestEffort(`context-columns:${ctx.id}:${n.model}`, () => this.runner.relationColumns(this.ctxs.dir(ctx.id), n.model));
+        if (cols?.ok) {
           const names = new Set(cols.columns.map((col) => String(col.name).toLowerCase()));
           const declared = (n.columns || []).filter((col) => names.has(String(col).toLowerCase()));
           columns = declared.length ? declared : cols.columns.map((col) => col.name);

@@ -11,6 +11,11 @@ typed semantic objects whose column/property/event names come from a **catalog**
 product-analytics events and crash reports — a user-attributes dimension, and optional
 dimension models such as experiment assignments).
 
+Protocol: MCP **2026-07-28** on the official TypeScript SDK v2 (which also answers clients that
+still open with the 2025 handshake — no second code path here), plus the **Tasks**, **Skills** and
+**Apps** extensions, active for a client that declares them and invisible to one that does not.
+See [`docs/DOCKER.md`](docs/DOCKER.md#protocol-mcp-2026-07-28-on-the-official-sdk-plus-three-extensions).
+
 Design docs:
 - [`docs/dbt-semantic-layer-spec.md`](docs/dbt-semantic-layer-spec.md) — dbt SL spec
 - [`docs/dbt-semantic-model-mcp-tool-design.md`](docs/dbt-semantic-model-mcp-tool-design.md) — tool design

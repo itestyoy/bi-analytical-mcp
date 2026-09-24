@@ -107,6 +107,22 @@
   nothing before it — a recommendation, never a refusal: the shape is legitimate when
   the analysis really is per source row.
 
+## Protocol surface
+- THE OFFICIAL SDK OWNS THE PROTOCOL. The server is built on `@modelcontextprotocol/server` v2
+  (protocol 2026-07-28; it also serves clients that open with the 2025 `initialize`, from the same
+  factory). `src/mcp-server.js` only says WHAT is offered — tools, resources, skills, the Apps view,
+  tasks — using `src/mcp-surface.js` (+ `tasks.js`, `skills.js`, `apps.js`). Do NOT hand-roll wire
+  behaviour the SDK provides (headers, envelope, discover, sessions, error codes); the one exception
+  is `src/mcp-tasks.js`, which exists only until the SDK serves the Tasks extension.
+- Skills and the Apps view RENDER existing objects (buildGuide, `engine.get_recipe`, the python
+  guide, a tool's result); they never carry text or numbers of their own. The Apps view follows the
+  official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Input, Table,
+  Alert, Accordion, Chart) over the HOST's style variables, whose fallbacks are the shadcn neutral
+  theme; its build is checked in and held to its sources by a test. THE VIEW ONLY DRAWS: every tool
+  is `visibility: ["model"]`, the view resource declares an empty `csp` and the page its own CSP,
+  and the view calls nothing back (no tools/call, resource, model message, link or network) — a test
+  holds its sources to that. Interactivity stays on the data already in the page.
+
 ## Testing (HARD RULE)
 - Tests MUST assert on DATA — real query result values from running the model
   against the warehouse (PGlite + dbt + MetricFlow).

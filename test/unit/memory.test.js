@@ -264,6 +264,23 @@ test('memory targets written without a source become searchable terms at open', 
   }
 });
 
+// Grounding may set a DECLARED model aside for one run (its table was being rebuilt, the warehouse
+// blinked). The legacy-key migration is one-way, so it must not demote that model's notes to terms:
+// once the table is back the link would be gone for good.
+test('the memory migration keeps a legacy target on a model grounding set aside this run', () => {
+  const store = openStore({});
+  store.memory.add({ id: 'legacy-users', note: 'country comes from the store listing', targets: ['model:users', 'property:users.country'], aliases: [], links: [], created_at: Date.now() });
+  const catalog = loadCatalog(CATALOG, {});
+  // the table cannot be introspected this run: grounding moves `users` to catalog.unavailable
+  catalog.groundToPhysical({ users: { unavailable: 'relation "dim_users" is being rebuilt' } });
+  assert.ok(!catalog.models.users && catalog.unavailable.users, 'users is set aside for this run');
+  new Engine({ catalog, recipes: loadRecipes(RECIPES), contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'mem-')) }), store });
+  assert.deepEqual(store.memory.get('legacy-users').targets, [
+    { kind: 'model', source: 'users' },
+    { kind: 'property', source: 'users', name: 'country' },
+  ], 'still the structure it named, not a term');
+});
+
 // An entity is ALWAYS { source, name }; a phrase is { term }. Neither a bare name nor the glued
 // '<source>.<name>' spelling exists, so a finding is never linked by a string that has to be taken
 // apart — or silently kept as a free phrase, which would link it to nothing.

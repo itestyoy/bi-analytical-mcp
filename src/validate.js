@@ -1,6 +1,10 @@
 // ajv-backed validation of tool inputs against the catalog-derived JSON Schemas.
 
-import Ajv from 'ajv';
+// JSON Schema 2020-12 — the dialect MCP defines for a tool schema without `$schema` (the default
+// since 2025-11-25, and what a client validating our schemas uses). The draft-07 validator reads a
+// few things differently (siblings of `$ref` are ignored there), so validating in another dialect
+// than the client's is how the two could disagree about the same argument.
+import Ajv from 'ajv/dist/2020.js';
 import addFormats from 'ajv-formats';
 
 export function makeValidators(schemas) {

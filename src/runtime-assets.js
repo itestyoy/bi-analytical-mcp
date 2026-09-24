@@ -31,6 +31,11 @@ export const RUNTIME_ASSETS = {
     repoPath: 'config/bigframes-facts.json',
     why: 'the facts the python-stage guide states about the BigFrames runtime, EXTRACTED from that library (scripts/bigframes-facts.py) instead of written from its prose — which method raises without an index, which without an ordering, and what the signatures actually take. Without it the guide still renders, minus those lists.',
   },
+  resultView: {
+    path: join(ROOT, 'src', 'apps', 'result-view', 'dist', 'mcp-app.html'),
+    repoPath: 'src/apps/result-view/dist/mcp-app.html',
+    why: 'the MCP Apps view of a query result (ui://betti/result-view.html) — the BUILT single file (npm run build:app); the server reads it, nothing imports it',
+  },
   mfSidecar: {
     path: join(ROOT, 'python', 'mf_sidecar.py'),
     repoPath: 'python/mf_sidecar.py',

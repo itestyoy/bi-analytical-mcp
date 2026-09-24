@@ -186,8 +186,16 @@ export class ContextManager {
   }
 
   /** Create a fresh context: allocate id + a FULL independent copy of the base project. */
-  create() {
-    const id = newContextId();
+  /** A fresh context id, chosen before the context exists (see create). */
+  newId() {
+    return newContextId();
+  }
+
+  /**
+   * Create a context. `id` lets a caller pick it IN ADVANCE (newId) — to lay out and check what it
+   * will write under its final names before anything touches the disk.
+   */
+  create(id = newContextId()) {
     const dir = this.dir(id);
     mkdirSync(dir, { recursive: true });
     if (this.baseProjectDir && existsSync(this.baseProjectDir)) {

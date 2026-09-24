@@ -22,6 +22,7 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import { registerStage } from './pipeline.js';
 import { pythonRulesText, mlClassesText, bigframesRunHints } from './python-guide.js';
+import { inertText } from './jinja-inert.js';
 
 // the gate script is a non-JS runtime asset — see src/runtime-assets.js for why it is resolved there
 const IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -331,7 +332,8 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
     version: 2,
     models: [{
       name: modelName,
-      description: stage.description || `Python stage of pipeline '${pipeline?.name || modelName}': ${steps.map((s) => s.call).join(' → ')} over ${inputModel}.`,
+      // dbt renders a YAML description as Jinja: the caller's text goes in inert
+      description: inertText(stage.description) || `Python stage of pipeline '${pipeline?.name || modelName}': ${steps.map((s) => s.call).join(' → ')} over ${inputModel}.`,
       ...(outCols ? { columns: outCols.map((c) => ({ name: c })) } : {}),
     }],
   }, { lineWidth: 100, noRefs: true });

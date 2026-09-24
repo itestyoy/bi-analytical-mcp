@@ -1,12 +1,16 @@
 // Streamable-HTTP MCP server exposing the declarative dbt Semantic Layer tools.
+//
+// Built on the official MCP SDK v2 (@modelcontextprotocol/server), which implements protocol
+// revision 2026-07-28 and serves every earlier revision from the same factory: `createMcpHandler`
+// builds a fresh server per request (src/mcp-server.js) and decides by itself how the request is
+// spoken — there is no second code path here for an older client, and no session state to lose on
+// a restart.
 
-import { randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
-import express from 'express';
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { CallToolRequestSchema, ListToolsRequestSchema, isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
-import { existsSync, mkdirSync } from 'node:fs';
+import { createMcpHandler } from '@modelcontextprotocol/server';
+import { toNodeHandler } from '@modelcontextprotocol/node';
+import { createMcpExpressApp } from '@modelcontextprotocol/express';
+import { mkdirSync } from 'node:fs';
 import { loadCatalog, validateDbtProject, groundCatalogToPhysical } from './catalog.js';
 import { loadRecipes } from './recipes.js';
 import { assetPath } from './runtime-assets.js';
@@ -14,173 +18,18 @@ import { frameProfile } from './python-model.js';
 import { ContextManager } from './context-manager.js';
 import { DbtRunner } from './dbt-runner.js';
 import { Engine } from './engine.js';
-import { MAX_WAIT_SECONDS } from './schema.js';
 import { BackgroundIndexer } from './value-index.js';
 import { createEmbedder } from './embeddings.js';
+import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
+import { createMcpServer } from './mcp-server.js';
+import { answerTaskRequest } from './mcp-tasks.js';
 
-const TOOL_DESCRIPTIONS = {
-  semantic_index: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. No args → overview (models, event names, event_semantics = which event marks install/session/purchase, group-by paths, value-index freshness, available recipe ids). Exactly one view key to drill: { model } → columns + dimension attributes with real sample values + physical columns + the RELATIONSHIPS it declares (each join name, its key columns and what it points at) + the AMOUNTS it marks aggregatable (with unit and meaning); { source, event } → the properties that event carries; { source, property } → one column\'s full passport (spec/unit, real value distribution — pageable, NULL coverage per event distinguishing expected NULLs from data gaps, indexing history). The SOURCE is always named: each events source owns its own events and payload, and they are never mixed; { search } → FUZZY search over events/properties/attributes/VALUES/recipes (typo- and paraphrase-tolerant: "retenton"→retention recipe, "germny"→Germany value; exact hits first, each scored, fuzzy:false for substring-only); { recipe: id } → one ready-made recipe in full (payload + example_queries + the reusable `hack`); { guide: true } → HOW to approach a question: the analyst workflow + IF/DO routing triggers (which tool when) + per-task recipe families (pass a family name to narrow) — read it first if unsure; { bundle: "<bundle id>" } → for ONE app, which event properties are POPULATED vs EMPTY (skip the empties for that app); the overview lists apps under `bundles`; { status: true } → value-index sync state + background query jobs; { run } → one sync run\'s per-property breakdown.',
-  create_semantic_model: 'The GOVERNED path: declaratively create/augment semantic models for a task (one SM per source, SEVERAL sources allowed in the same task — e.g. a spend measure and an event measure side by side) + metrics, in an isolated context. Produces NAMED metrics you then query many ways with query_semantic_model (group_by / time / filters) — reusable & re-sliceable. Use for measurable metrics (DAU, revenue, conversion, retention). Omit context_id for a new task; pass it to extend the same one. To CHANGE a task already in a context — add or remove measures, dimensions, metrics on one model without restating the rest — call the same tool with action:"update" (context_id + semantic_model + the add_*/remove_* fields). (For a one-off derived table — funnel/sessionization/window/pivot — use build_native_model.)',
-  build_native_model: 'The ESCAPE HATCH for a one-off derived TABLE whose rows ARE the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express. Composed INCREMENTALLY (single `action`-driven tool): start a draft, add_step one stage at a time (where/derive/compute/unnest/join/aggregate/pivot/unpivot/window/order_by/limit + match_recognize; a join names the RELATIONSHIP the schema declares (via: <name>) and never its columns, and joins STACK so one pipeline can reach several sources) — each add_step validates the stage and returns the columns then available for the NEXT stage (pure schema, NOTHING materialized until materialize) — optionally preview the SQL, then materialize (builds + runs the model). The rows are read back with get_query_result (NOT query_semantic_model). For REUSABLE named metrics you query many ways, prefer create_semantic_model (the governed path). A `python` stage is a dbt PYTHON model of its own, allowed anywhere in the pipeline and repeatedly (the pipeline becomes a chain of models reading each other via ref, run on the warehouse\'s Python runtime, never here) — and it carries ONLY what SQL cannot say. ITS OWN DESCRIPTION is where the rules are: what belongs in it, what this warehouse\'s frame raises, and the index of worked recipes to study before writing a line. Its table is read with get_query_result like any pipeline.',
-  query_semantic_model: 'Run a metric query against a context. metrics + group_by + where are validated against the context. Joins are handled for you: group or filter by an attribute addressed as { model, attribute } and the declared key is applied — including the validity window of a slowly-changing model, so the attribute is the one valid at the time of each row (no window to state). Pass materialize:true to persist the result and read it back (resilient); slow queries return a query_id to poll.',
-  get_query_result: 'Poll a background (materialized) query by query_id, or fetch a known result table directly by {context_id, table}. Returns status (running/ready/error) and rows read from the materialized table.',
-  // update_semantic_model is folded into create_semantic_model({ action: 'update' }) and hidden
-  // from the listing; the name stays callable, so its description stays here for that caller.
-  update_semantic_model: 'Add/remove task measures, dimensions or metrics for a table SM within a context; re-parses.',
-  context: 'Manage isolated execution contexts (the workspaces create_semantic_model / build_native_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, cascade for dependent metrics).',
-  memory: 'DURABLE analyst memory — remember what you FOUND OUT so it comes back through semantic_index. After you resolve something non-obvious (a vague request tracked down to a real field, a gotcha, a useful source), record:"action" it: `note` the finding, `question` the ORIGINAL business question it answers (in the stakeholder\'s words — embedded with the note so a future similar question retrieves this insight by meaning), `targets` the catalog entities it is about, each as { source, name } (a property, attribute or event of that source — e.g. { source: "events", name: "ad_type_of_event_data" }, { source: "users", name: "country" }) or { source } for a model, `aliases` the words the user actually used ("ad format") — give them in BOTH the original language and English so search works cross-language, `links` any sources. The note then surfaces inline on the linked semantic_index views ({ model }/{ source, event }/{ source, property }) and in semantic_index({ search }) — so the next fuzzy phrasing resolves straight to the right field instead of re-investigating. RECORD ONE ATOMIC FINDING PER NOTE: when studying a topic or a document, split it into several small single-fact notes (each with its own targets/aliases) rather than dumping a whole topic into one big note — atomic notes link precisely and retrieve far better; an over-long note matches poorly and may fail to index. action: list (all, or one { target }) | search (by word — typo-tolerant fuzzy, and SEMANTIC/meaning-based when embeddings are enabled) | forget (by id).',
-  experiment: 'The A/B EXPERIMENT lifecycle in one tool (action-driven): plan → check_split → analyze. action:"plan" = power/sample-size (required users, or the MDE at a given n) BEFORE running. action:"check_split" = Sample-Ratio-Mismatch χ² guardrail; p < 0.001 means randomization/logging is broken and the result is INVALID — run it BEFORE trusting any lift. action:"analyze" = the significance test on PRE-AGGREGATED per-group stats (metric: proportion → two-proportion z-test; mean → Welch t-test; ratio → delta-method; cuped → variance reduction), returning lift (+ relative-lift CI), p-value, CI, significance, and a multiplicity-adjusted p-value per variant; sequential:true adds an always-valid p for live peeking. Compute the per-group aggregates first with a pipeline. Field names are exact: use `baseline` (NOT baseline_rate) and `confidence` (NOT alpha); there is no `allocation` field (use check_split.expected_ratio). For proportion, each group needs `conversions` (0..n; conversions > n is rejected). Examples — plan: {action:"plan",metric:"proportion",baseline:0.1,mde:0.02}; check_split: {action:"check_split",groups:[{label:"control",n:5000},{label:"variant_b",n:5020}]}; analyze: {action:"analyze",metric:"proportion",control:{n:5000,conversions:500},variants:[{label:"variant_b",n:5020,conversions:580}],correction:"holm"}.',
-  time: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return — a pure timer that touches no data. Use it to PACE polling: after query_semantic_model({ materialize:true }) (or a long build) returns a query_id, call time to wait, then poll get_query_result; repeat until ready.`,
-};
+export { buildToolDefs };
 
-// Human-readable display names for the tools (MCP `title` / annotations.title). The `name` stays
-// the stable programmatic id; the title is what a client shows in its UI/picker.
-const TOOL_TITLES = {
-  semantic_index: 'Explore Semantic Index',
-  create_semantic_model: 'Create Semantic Model',
-  build_native_model: 'Build Pipeline',
-  query_semantic_model: 'Query Semantic Model',
-  get_query_result: 'Fetch Query Result',
-  update_semantic_model: 'Update Semantic Model',
-  context: 'Manage Contexts',
-  memory: 'Use Memory',
-  experiment: 'A/B Experiment Toolkit',
-  time: 'Timer',
-};
-
-// Server-level documentation surfaced to the AI client (serverInfo.description):
-// what this MCP is for and how to use it end-to-end.
-const SERVER_DESCRIPTION = `Declarative semantic layer for product analytics.
-
-WHAT IT DOES
-You define "virtual" semantic models — measures, dimensions, and metrics — on the fly over a FIXED set of catalog data sources, and query them by name. You never write SQL. Everything you can reference (events, properties, user attributes, join paths) is enumerated by the catalog and enforced by schema, so you cannot name a field that does not exist.
-
-DATA MODEL (fixed roles)
-- events source: one row per event — a user id, a session id, an event timestamp (the time axis), an event_name, and typed event-data properties. ONLY per-event columns live here. A catalog may declare SEVERAL events sources (e.g. product analytics events and crash reports). They are INDEPENDENT AND EQUAL: each owns its event vocabulary, its payload properties and its own indexed values, and they are never mixed — none is a default. The semantic_index overview lists them under "facts" with each one's own event_names. ALWAYS name the source you mean: semantic_index({ source, event }) / ({ source, property }), build_native_model({ source }), create_semantic_model({ semantic_models: [{ from: <source> }] }). Within a source, event and property names are used as-is. Choose the source that records what the question is about.
-- users dimension: one row per user — attributes (country, platform, media_source, acquisition_type, install_date, ...). Reached by JOIN: group/filter by { model: 'users', attribute } in metric queries (declare use_base_models: ['users']), or a join stage in pipelines. User attributes are NEVER columns of the fact.
-- experiments: one row per user×experiment (experiment_name, variant_group, assigned_at, ended_at) — join to events by the user entity, window to the assignment period, aggregate per group, then experiment({ action: check_split | analyze }).
-- measures sources (optional): a NON-events fact whose columns are amounts rather than events (e.g. acquisition spend at one row per player x day). It has no event_name; it declares its own time axis, and the catalog MARKS which of its fields are amounts — semantic_index({ model }) lists them under "aggregatable" with their unit and meaning. No aggregation is fixed: name the field in a measure's "field" and choose "agg" yourself (sum / average / max / median / percentile / count_distinct), per question. It carries the user entity, so { model: 'users', attribute } segments it too. In a pipeline it joins an events source by the PLAYER key alone (via the declared relationship): one player has many events and several dated rows, so that pairing is MANY-TO-MANY by design — use it to carry an attribute (channel, campaign) onto events, never to total the amounts over it. To total an amount, aggregate the source itself.
-JOINS BETWEEN SOURCES are declared in the catalog, never assembled by hand: a relationship has a name and its key columns live in the schema. Group by { model: '<the model that carries the attribute>', attribute } in a metric query (with that model in use_base_models; add via when several relationships lead to it), or join with via: '<relationship>' in a pipeline. A key may span SEVERAL columns and the two sides may name their columns differently — only the relationship name and the NUMBER of key parts have to agree. A relationship that no model OWNS has no governed path (MetricFlow joins only onto a unique key) and is a pipeline join, which is correct rather than a limitation. semantic_index({ model }) lists a model's relationships, their key columns and what each points at. Two events sources are joined the same way — in a pipeline, since a row-to-row match between two event streams is many-to-many. When a source carries several alternative key columns for one relationship (one tracking id per ad format), each is listed as its own relationship <name>_<variant> and you pick the one the question is about. The users dimension may be SLOWLY-CHANGING (several versions per player, each with a validity window): joining it on the player key alone matches every version and inflates counts, so a pipeline join must add between: { value: <this source's time column>, from: <validity start>, to: <validity end> } — a metric query needs nothing, MetricFlow applies the window itself.
-Funnels/sequences are built from events (a step = an event + an event_data property value) and run over ONE source — a sequence cannot span two sources. Metrics from different sources CAN be compared side by side when grouped by metric_time.
-
-WORKFLOW
-1. semantic_index — discover the catalog PROGRESSIVELY. Call it first with no arguments for an overview (models, event names, group-by paths, event_semantics = which event marks install/session/purchase, value-index freshness), then drill down: semantic_index({ model }) for a model's columns and attributes (with REAL sample values), ({ source, event }) for the properties an event carries, ({ source, property }) for one property or user attribute with its real value distribution, ({ search }) to find events/properties/attributes/values/recipes. The events fact has ~150 event-scoped properties, so they are fetched per event rather than all at once.
-2. create_semantic_model — declare measures/dimensions/metrics for a task in an ISOLATED context (returns a context_id). Pass that context_id back to extend the same context.
-   - For ordered multi-step funnels/paths (and any custom transform) use build_native_model: compose a PIPELINE one stage at a time (start → add_step* → materialize; each add_step shows the columns available next), building a model whose ROWS are the result — read/slice them with get_query_result (a pipeline context is not queried via query_semantic_model). It accepts a time_range and an internal pre-filter (event subset / user segment).
-   - Beyond SQL (a statistical test, clustering, scoring, a forecast), where the overview's python_models says available: add a 'python' stage to a build_native_model pipeline — but ONLY for the part SQL cannot express, with the table it reads prepared by the SQL stages before it. Do not write one from memory: semantic_index({ guide: "python" }) is this warehouse's frame rules and the reasoning behind them, the stage description indexes the worked recipes by the move each covers, and semantic_index({ recipe: "<id>" }) returns one in full. Read the result with get_query_result as usual.
-3. query_semantic_model — run metrics with group_by / where / order_by / time_range. Options: dry_run (preview, no run), explain (query plan, no run), materialize (persist the result and read it back; long queries return a query_id to poll), limit/offset.
-4. get_query_result — poll a backgrounded query by query_id, or re-read/re-slice a stored result (where/group_by/aggregations/having) WITHOUT recomputing.
-
-KEY CONCEPTS
-- context_id: an isolated workspace; parallel tasks never collide. Manage via context({ action: list | describe | drop | delete_model | delete_semantic_model }).
-- metric types: simple, ratio, cumulative, derived, conversion.
-- group_by: { time: "metric_time", grain } for a time series, or { model, attribute } for an attribute addressed by where it lives (e.g. { model: "users", attribute: "country" }). Never a path string.
-- recipes: ready-made, warehouse-proven payloads. The ones shipped with the server are per TECHNIQUE, not per business task — metric_types (ratio / derived / cumulative / conversion-window / boolean measure / the agg chosen per question / a governed measure), joins (an attribute of another model, a cohort grid on two time axes, two independent sources, a pipeline join by relationship name, a point-in-time join), pipeline (window lag, episodes by gap, an age axis, an ordered sequence, unnest, reshape, a volume/coverage check), ab_test (proportion, mean, CUPED, ratio, SRM, power) and, where python models run, bigframes (the correct form of one frame operation next to the form that raises, plus one per ml capability — parameters and scaling, a prediction per row, a supervised fit(X, y), an evaluation with a split, dimensionality reduction, categorical features) with GENERATED reference entries carrying the installed library's own signatures and method preconditions. A real question combines two or three. A deployment ADDS its own domain recipes on top (RECIPES_PATH), and those may be per task. The semantic_index overview lists every available id; semantic_index({ recipe: id }) returns one in full, semantic_index({ guide: true }) groups them by family.
-- memory: durable findings. When you track a vague request down to a real field (or hit a gotcha, or find a useful source), record it with the memory tool, linked to the catalog entities it concerns — it then resurfaces on those semantic_index views and in semantic_index({ search }), so the next fuzzy phrasing resolves straight to the right field.
-- when in doubt which builder: create_semantic_model = reusable named metrics (query many ways); build_native_model = a one-off derived table (funnel/sessionization/window/pivot), rows read via get_query_result.`;
-
-// Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
-const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over fixed, catalog-enumerated data sources (one or more events facts + a user-attributes dimension + experiment assignments) and query them by name; you never write SQL. Start with semantic_index, then create_semantic_model / build_native_model, then query_semantic_model.';
-
-const ASYNC_TOOLS = new Set(['create_semantic_model', 'register_native_model', 'build_native_model', 'delete_native_model', 'query_semantic_model', 'get_query_result', 'update_semantic_model', 'delete_semantic_model', 'semantic_index', 'context', 'describe_context', 'memory', 'time']);
-
-// Tools that still EXIST (schema + engine method + dispatch) but are no longer
-// advertised to the AI — superseded by / folded into a newer tool. Code is kept so the
-// new tool can delegate to them and existing callers/recipes/tests keep working.
-//   register_native_model        → all-at-once path behind the incremental build_native_model
-//   list_query_jobs              → folded into semantic_index({ status })
-//   list_recipes / get_recipe    → folded into semantic_index (overview list + { recipe: id })
-//   list/describe/drop_context,
-//   delete_native/semantic_model → folded into the single context({ action }) tool
-const HIDDEN_TOOLS = new Set([
-  'register_native_model',
-  // Folded into create_semantic_model({ action: 'update' }) — the two schemas carried the same
-  // catalog vocabulary twice in every listing. Still callable by name for a client that learned
-  // it; just not advertised.
-  'update_semantic_model',
-  'list_query_jobs',
-  'list_contexts', 'describe_context', 'drop_context', 'delete_native_model', 'delete_semantic_model',
-  'ab_test', 'srm_check', 'sample_size', // folded into experiment({ action: analyze | check_split | plan })
-]);
-
-// Fallback title from a snake_case name: "get_query_result" → "Get Query Result".
-function titleFromName(name) {
-  return String(name).split('_').map((w) => (w ? w[0].toUpperCase() + w.slice(1) : w)).join(' ');
-}
-
-export function buildToolDefs(engine) {
-  return Object.entries(engine.schemas)
-    .filter(([name]) => !HIDDEN_TOOLS.has(name))
-    .map(([name, inputSchema]) => {
-      const title = TOOL_TITLES[name] || titleFromName(name);
-      // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
-      // read the older annotations location. `name` remains the stable programmatic identifier.
-      return { name, title, description: TOOL_DESCRIPTIONS[name] || name, inputSchema, annotations: { title } };
-    });
-}
-
-export function makeMcpServer(engine) {
-  const server = new Server(
-    { name: 'dbt-semantic-mcp', version: '0.1.0', description: SERVER_SUMMARY },
-    { capabilities: { tools: {} }, instructions: SERVER_DESCRIPTION },
-  );
-
-  server.setRequestHandler(ListToolsRequestSchema, async () => {
-    const tools = buildToolDefs(engine);
-    logLine('list_tools', `→ ${tools.length} tools`);
-    return { tools };
-  });
-
-  server.setRequestHandler(CallToolRequestSchema, async (req) => {
-    const { name, arguments: args } = req.params;
-    const started = Date.now();
-    logLine(name, `▶ call ${summarizeArgs(args)}`);
-    if (typeof engine[name] !== 'function') {
-      logLine(name, '✗ unknown tool');
-      return errorResult(`unknown tool: ${name}`);
-    }
-    try {
-      const result = ASYNC_TOOLS.has(name) ? await engine[name](args || {}) : engine[name](args || {});
-      logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(result)}`);
-      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
-    } catch (err) {
-      logLine(name, `✗ error in ${Date.now() - started}ms: ${err?.message || String(err)}${err?.field ? ` (field: ${err.field})` : ''}`);
-      return errorResult(err?.message || String(err), err?.stage, err?.field);
-    }
-  });
-
-  return server;
-}
-
-// ── console logging (to stderr) so every tool call is visible in the logs ──────
-function logLine(tool, msg) {
-  console.error(`[mcp] ${new Date().toISOString()} ${tool} ${msg}`);
-}
-
-/** Compact, truncated one-line view of the tool arguments. */
-function summarizeArgs(args) {
-  if (args === undefined || args === null) return '(no args)';
-  let s;
-  try { s = JSON.stringify(args); } catch { return '(unserializable args)'; }
-  return s.length > 800 ? `${s.slice(0, 800)}… (${s.length} chars)` : s;
-}
-
-/** A short outcome hint from the result (status, row/result counts) without dumping it. */
-function summarizeResult(result) {
-  if (!result || typeof result !== 'object') return '';
-  const bits = [];
-  if ('ok' in result) bits.push(`ok=${result.ok}`);
-  if (Array.isArray(result.rows)) bits.push(`rows=${result.rows.length}`);
-  if (Array.isArray(result.results)) bits.push(`results=${result.results.length}`);
-  if (result.context_id) bits.push(`ctx=${result.context_id}`);
-  if (result.query_id) bits.push(`query_id=${result.query_id}`);
-  if (result.status) bits.push(`status=${result.status}`);
-  return bits.length ? ` [${bits.join(' ')}]` : '';
-}
-
-function errorResult(message, stage, field) {
-  const payload = { ok: false, error: { stage: stage || 'error', message, ...(field ? { field } : {}) } };
-  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: true };
+/** One MCP server over this engine — what the HTTP handler builds per request, and what an
+ *  in-process client (the tests) connects to directly. */
+export function makeMcpServer(engine, services = servicesFor(engine), { era } = {}) {
+  return createMcpServer(services, { era });
 }
 
 // THE CEILING ON WHAT A DEPLOYMENT MAY CONFIGURE. Both grace windows (how long an SQL build and how
@@ -311,67 +160,59 @@ export async function makeEngine(opts = {}) {
   return engine;
 }
 
-export function createApp(engine) {
-  const app = express();
-  app.use(express.json({ limit: '4mb' }));
-  // No authentication: run behind your own network boundary / proxy as needed.
-  const transports = {}; // sessionId -> transport
+// ── the HTTP endpoint ──────────────────────────────────────────────────────────────────────
 
-  // THE SESSIONS LIVE IN THIS PROCESS, so every deploy invalidates the ids already in clients'
-  // hands — and what the client does about that is decided by the STATUS CODE. The spec is exact:
-  // an unknown session id is 404, and only a 404 makes a client start a new session ("When a
-  // client receives HTTP 404 in response to a request containing an Mcp-Session-Id, it MUST start
-  // a new session by sending a new InitializeRequest without a session ID attached"). A 400 says
-  // "your request was malformed", which the client can only answer by retrying the same request —
-  // which is how one user spent 16 minutes getting an error on every call after a restart, with a
-  // healthy server, until the connector was re-added by hand.
-  const rpcError = (res, status, code, message) => res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
-  const gone = (res) => rpcError(res, 404, -32001, 'Session not found: this server restarted or the session expired. Start a new session by sending initialize (the Mcp-Session-Id header is ignored on initialize).');
-  const noSession = (res) => rpcError(res, 400, -32000, 'Bad Request: Mcp-Session-Id header is required — send initialize first.');
-  const isInit = (body) => (Array.isArray(body) ? body.some(isInitializeRequest) : isInitializeRequest(body));
+/** "a, b ,c" → ['a','b','c'] (empty → []). */
+const csv = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolean);
 
-  app.post('/mcp', async (req, res) => {
-    const sid = req.headers['mcp-session-id'];
+// Hostnames a browser page may call from without being listed: the loopback names (the MCP
+// Inspector, a local tool). The SDK's Express app validates Origin by hostname.
+const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
 
-    // INITIALIZATION IS OUTSIDE THE SESSION RULES ("Servers that require a session ID SHOULD
-    // respond to requests without an Mcp-Session-Id header (other than initialization) with 400"),
-    // so a stale header never blocks a client from getting a new session. It is ignored even when
-    // it names a LIVE session: re-initializing replaces that session (the old transport is closed
-    // rather than left behind), which is one more way out of the trap and costs nothing.
-    if (isInit(req.body)) {
-      if (sid && transports[sid]) {
-        const previous = transports[sid];
-        delete transports[sid];
-        try { await previous.close(); } catch { /* replacing it is the point; a failed close is not the caller's problem */ }
-      }
-      const transport = new StreamableHTTPServerTransport({
-        sessionIdGenerator: () => randomUUID(),
-        onsessioninitialized: (id) => { transports[id] = transport; },
-      });
-      transport.onclose = () => { if (transport.sessionId) delete transports[transport.sessionId]; };
-      const server = makeMcpServer(engine);
-      await server.connect(transport);
-      await transport.handleRequest(req, res, req.body);
-      return;
-    }
-
-    const transport = sid ? transports[sid] : undefined;
-    if (!transport) { (sid ? gone : noSession)(res); return; }
-    await transport.handleRequest(req, res, req.body);
+/**
+ * The Express app: `createMcpExpressApp` (the SDK's app factory — JSON body parsing, Host/Origin
+ * validation) with `createMcpHandler` mounted on /mcp.
+ *
+ * Origin is ALWAYS validated ("Servers MUST validate the Origin header"): a request without one —
+ * every native client, every hosted connector calling from its backend — passes; a browser page
+ * passes from a loopback origin or one listed in MCP_ALLOWED_ORIGINS; anything else is 403. (The
+ * SDK arms that check by itself only for a loopback bind, and a container binds 0.0.0.0 — so the
+ * list is passed explicitly.) MCP_ALLOWED_HOSTS adds the Host check.
+ */
+export function createApp(engine, opts = {}) {
+  const services = opts.services || servicesFor(engine);
+  const allowedOrigins = [...LOOPBACK, ...(opts.allowedOrigins ?? csv(process.env.MCP_ALLOWED_ORIGINS))];
+  const allowedHosts = opts.allowedHosts ?? csv(process.env.MCP_ALLOWED_HOSTS);
+  const app = createMcpExpressApp({
+    host: opts.host ?? process.env.HOST ?? '127.0.0.1',
+    allowedOrigins,
+    ...(allowedHosts.length ? { allowedHosts } : {}),
+    jsonLimit: '4mb',
   });
-
-  // The stream (GET) and the explicit teardown (DELETE) answer the same way: an id this process
-  // does not know is 404 — never the Express default HTML page, which a client cannot parse.
-  const sessionEndpoint = async (req, res) => {
-    const sid = req.headers['mcp-session-id'];
-    const transport = sid ? transports[sid] : undefined;
-    if (!transport) { (sid ? gone : noSession)(res); return; }
-    await transport.handleRequest(req, res);
-  };
-  app.get('/mcp', sessionEndpoint);
-  app.delete('/mcp', sessionEndpoint);
+  const handler = createMcpHandler(({ era }) => createMcpServer(services, { era }), {
+    onerror: (e) => logLine('mcp', `✗ ${e?.message || e}`),
+  });
+  const node = toNodeHandler(handler);
+  app.all('/mcp', (req, res) => {
+    if (answerTaskRequest(services.tasks, req, res)) return;
+    void node(req, res, req.body);
+  });
   app.get('/healthz', (_req, res) => res.json({ ok: true }));
 
+  // EVERY failure on the endpoint is a JSON-RPC error a client can parse, including the ones raised
+  // before the protocol sees the request: a body that is not JSON (-32700, the JSON-RPC parse
+  // error), a body over the size limit. Express' default is an HTML page.
+  // eslint-disable-next-line no-unused-vars
+  app.use((err, req, res, next) => {
+    if (res.headersSent) { res.end(); return; }
+    const reply = (status, code, message) => res.status(status).json({ jsonrpc: '2.0', error: { code, message }, id: null });
+    if (err?.type === 'entity.parse.failed') return reply(400, -32700, `Parse error: the body is not valid JSON (${err.message})`);
+    if (err?.type === 'entity.too.large') return reply(413, -32600, 'Invalid Request: the body is larger than the 4 MB limit');
+    logLine('http', `✗ ${req.method} ${req.path}: ${err?.stack || err}`);
+    return reply(err?.status && err.status < 500 ? err.status : 500, -32603, `Internal error: ${err?.message || err}`);
+  });
+
+  app.locals.close = () => handler.close();
   return app;
 }
 
@@ -446,6 +287,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     console.log(`received ${sig}, shutting down`);
     if (gcTimer) clearInterval(gcTimer);
     indexer.stop();
+    try { app.locals.close(); servicesFor(engine).close(); } catch { /* noop */ }
     httpServer.close(() => {});
     try { engine.close(); } catch { /* noop */ }
     setTimeout(() => process.exit(0), 200).unref?.();

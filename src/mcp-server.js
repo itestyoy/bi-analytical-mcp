@@ -1,0 +1,141 @@
+// THE MCP SERVER — built on the official SDK (@modelcontextprotocol/server v2), which implements
+// protocol revision 2026-07-28 and serves the earlier revisions from the same code.
+//
+// `createMcpServer` is the factory `createMcpHandler` calls for every request (src/server.js). The
+// SDK owns the protocol: which revision a request speaks (the initialize handshake of 2025, or the
+// per-request `_meta` envelope of 2026-07-28), headers, `server/discover`, `resultType`, caching
+// hints on the wire, error codes. This file only says WHAT the server offers — and says it once,
+// for every client.
+//
+// The tools are registered on the low-level `Server`, the SDK's documented path for a JSON Schema
+// you already have (docs: "Low-level Server"): our input schemas are built from the catalog, and
+// the engine validates arguments itself so a refusal comes back as a tool error the model can fix,
+// naming the field and the branch.
+//
+// The three extensions, each declared in `capabilities.extensions`:
+//   * Apps  (io.modelcontextprotocol/ui)     — `_meta.ui` on the viewed tools, the `ui://` view;
+//   * Skills (io.modelcontextprotocol/skills) — skills/list, skills/get, files via resources/read;
+//   * Tasks (io.modelcontextprotocol/tasks)   — a call that outgrows its window comes back as a
+//     task (`resultType: "task"`); tasks/update here; tasks/get and tasks/cancel are served in
+//     front of the SDK (src/mcp-tasks.js) until the SDK serves the extension itself.
+
+import { z } from 'zod';
+import { Server, ProtocolError, ResourceNotFoundError, CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
+import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine } from './mcp-surface.js';
+import { releasableSignal } from './request-context.js';
+import { UI_EXTENSION, RESOURCE_MIME_TYPE } from './apps.js';
+import { SKILLS_EXTENSION } from './skills.js';
+
+export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
+
+// Nothing this server lists changes while it runs, and nothing in it depends on who asks.
+const STATIC = { ttlMs: 3600000, cacheScope: 'public' };
+
+const SkillsListParams = z.object({ cursor: z.string().optional() }).passthrough();
+const SkillsGetParams = z.object({ uri: z.string() }).passthrough();
+const TaskUpdateParams = z.object({ taskId: z.string(), inputResponses: z.record(z.string(), z.unknown()).optional() }).passthrough();
+const AnyResult = z.object({}).passthrough();
+
+/** The capabilities this server declares (also what server/discover and initialize report). */
+export function serverCapabilities(services) {
+  return {
+    tools: {},
+    resources: {},
+    extensions: {
+      [TASKS_EXTENSION]: {},
+      [UI_EXTENSION]: { mimeTypes: [RESOURCE_MIME_TYPE] },
+      ...(services.skills ? { [SKILLS_EXTENSION]: {} } : {}),
+    },
+  };
+}
+
+export function createMcpServer(services, { era } = {}) {
+  const { engine, tasks } = services;
+  const server = new Server(SERVER_INFO, {
+    capabilities: serverCapabilities(services),
+    instructions: services.instructions,
+    cacheHints: { 'server/discover': STATIC, 'tools/list': STATIC, 'resources/list': STATIC, 'resources/templates/list': STATIC, 'resources/read': STATIC },
+  });
+
+  server.setRequestHandler('tools/list', async () => ({ tools: services.toolDefs }));
+
+  server.setRequestHandler('tools/call', async (request, ctx) => {
+    const { name, arguments: args } = request.params;
+    // an unknown tool is a protocol error (-32602) in every revision; a private engine method is
+    // an unknown tool — a name never dispatches to anything but a tool
+    if (!isCallableTool(engine, name)) throw new ProtocolError(-32602, `Unknown tool: ${name}`);
+
+    // The call's cancellation reaches its dbt processes only while the call is in flight: a build
+    // handed back as a query_id is meant to outlive the call (the per-request transport closes when
+    // the response is sent, which aborts this signal).
+    const cancel = releasableSignal(ctx.mcpReq.signal);
+    try {
+      const caps = ctx.mcpReq.envelope?.[CLIENT_CAPABILITIES_META_KEY];
+      if (era === 'modern' && caps?.extensions?.[TASKS_EXTENSION]) return await callAsTask(name, args, cancel);
+      const token = ctx.mcpReq._meta?.progressToken;
+      const { result } = await runTool(engine, name, args, {
+        signal: cancel.signal,
+        progressEveryMs: services.progressEveryMs,
+        onProgress: token !== undefined ? (p) => ctx.mcpReq.notify({ method: 'notifications/progress', params: { progressToken: token, ...p } }) : undefined,
+      });
+      return result;
+    } finally {
+      cancel.release();
+    }
+  });
+
+  /**
+   * The Tasks extension: a call that has not finished within services.taskAfterMs becomes a task
+   * the client polls; one that has, answers inline. The work keeps its own cancellation from the
+   * moment it becomes a task — the request that started it is over, tasks/cancel is the way to
+   * stop it now. A detached build is followed to its rows (runToCompletion).
+   */
+  async function callAsTask(name, args, requestCancel) {
+    const ctl = new AbortController();
+    const forward = () => ctl.abort(requestCancel.signal.reason);
+    requestCancel.signal.addEventListener('abort', forward, { once: true });
+    const work = runToCompletion(engine, name, args, { signal: ctl.signal, pollMs: tasks.pollIntervalMs });
+    const finished = await Promise.race([work.then((r) => r.result), new Promise((r) => { setTimeout(() => r(null), services.taskAfterMs).unref?.(); })]);
+    requestCancel.signal.removeEventListener('abort', forward);
+    if (finished) return finished;
+    const t = tasks.create({ ctl, run: () => work.then((r) => r.result) });
+    logLine(name, `↪ task ${t.taskId}`);
+    return { resultType: 'task', ...tasks.detailed(t), statusMessage: 'The call is running; poll tasks/get.' };
+  }
+
+  server.setRequestHandler('resources/list', async () => ({ resources: services.resources() }));
+  server.setRequestHandler('resources/templates/list', async () => ({ resourceTemplates: services.templates() }));
+  server.setRequestHandler('resources/read', async (request) => {
+    const contents = services.read(request.params.uri);
+    // the SDK puts this on the wire as each revision spells it (-32002 in 2025, -32602 in 2026-07-28)
+    if (!contents) throw new ResourceNotFoundError(request.params.uri);
+    return { contents };
+  });
+
+  if (services.skills) {
+    server.setRequestHandler('skills/list', { params: SkillsListParams, result: AnyResult }, async () => ({ skills: services.skills.list(), ...STATIC }));
+    server.setRequestHandler('skills/get', { params: SkillsGetParams, result: AnyResult }, async ({ uri }) => {
+      const s = services.skills.get(uri);
+      if (!s) throw new ProtocolError(-32602, `Not a skill this server serves: ${uri}`);
+      return { skill: s };
+    });
+  }
+
+  // tasks/update carries input for a task waiting on the client; this server never asks for any,
+  // so a response is acknowledged and ignored (the extension tells servers to ignore responses to
+  // keys that are not outstanding). tasks/get and tasks/cancel: src/mcp-tasks.js.
+  server.setRequestHandler('tasks/update', { params: TaskUpdateParams, result: AnyResult }, async ({ taskId }, ctx) => {
+    requireTasks(ctx);
+    if (!tasks.get(taskId)) throw new ProtocolError(-32602, 'Failed to retrieve task: Task not found');
+    return {};
+  });
+
+  return server;
+}
+
+function requireTasks(ctx) {
+  const caps = ctx.mcpReq.envelope?.[CLIENT_CAPABILITIES_META_KEY];
+  if (!caps?.extensions?.[TASKS_EXTENSION]) {
+    throw new ProtocolError(-32021, 'Missing required client capability', { requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } } });
+  }
+}

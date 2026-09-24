@@ -216,7 +216,7 @@ export class BigQueryDialect extends Dialect {
         const proj = [...keys.map((k, i) => `${k.right} AS ${priv(`key${i}`)}`), ...win, ...attrs];
         const on = [
           ...keys.map((k, i) => `${k.left} = ${op.alias}.${priv(`key${i}`)}`),
-          ...(op.between ? [`base.${this.ident(op.between.value)} BETWEEN ${op.alias}.${priv('from')} AND ${op.alias}.${priv('to')}`] : []),
+          ...(op.between ? [this.validityWindow(`base.${this.ident(op.between.value)}`, `${op.alias}.${priv('from')}`, `${op.alias}.${priv('to')}`)] : []),
         ];
         const drop = [...keys.map((_, i) => priv(`key${i}`)), ...(op.between ? [priv('from'), priv('to')] : [])];
         return `|> AS base

@@ -5,6 +5,7 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
+import { RESEARCH_DOMAINS } from './research-guides.js';
 import { pipelineStageSchema, stageDefs } from './pipeline.js';
 import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
@@ -843,7 +844,7 @@ function semanticIndexSchema(catalog) {
     run: { type: 'integer', minimum: 1, description: 'Run id, from the status view.' },
     bundle: { type: 'string', description: 'The app/bundle id; the overview lists them.' },
     recipe: { type: 'string', description: 'Recipe id, from the overview.' },
-    guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: 'true for the whole guide, a task family name, "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation), or "research" for how to run an investigation (sequence, checks, report) — with "research/product", "research/monetization" and "research/ua" for what matters in each domain.' },
+    guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: `true for the whole guide, a task family name, "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation), or "research" for how to run an investigation (sequence, checks, report) — with ${RESEARCH_DOMAINS.map((d) => `"${d}"`).join(', ')} for what matters in each domain. "python", "research" and "research/<domain>" are reserved: not recipe families.` },
   };
 
   const branches = [

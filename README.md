@@ -108,13 +108,12 @@ each python text lives is written at the top of `src/python-guide.js`.
 
 For an open research question — why a metric moved, what drives it, whether a
 change worked — `semantic_index({ guide: "research" })` is how to run the
-investigation (frame the decision, lock the metric contract, check the data
-before the behaviour, reproduce the headline, decompose, separate mix from rate,
-test the explanation, review, report), with a guide per domain:
-`research/product` (engagement, retention), `research/monetization` (IAP, ads)
-and `research/ua` (CPI, ROAS, payback, incrementality). They are also served as
-the `research` skill, and adapted from Anthropic's and OpenAI's open analytics
-skills (sources in `src/research-guides.js`).
+investigation: the sequence of steps from framing the decision to the report, the
+checks to run before presenting, and the report's shape. A guide per domain plugs
+into it: `research/product` (engagement, retention), `research/monetization`
+(IAP, ads) and `research/ua` (CPI, ROAS, payback, incrementality). They are also
+served as the `research` skill, and adapted from Anthropic's and OpenAI's open
+analytics skills (sources in `src/research-guides.js`).
 
 A deployment ADDS its own recipes via `RECIPES_PATH` (comma-separated files);
 the shipped ones stay, and an id collision lets an operator override one

@@ -20,7 +20,7 @@
 import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
 import { buildGuide } from './guide.js';
-import { RESEARCH_GUIDES } from './research-guides.js';
+import { RESEARCH_DOMAINS, RESEARCH_GUIDES, RESEARCH_SCOPE, researchGuide } from './research-guides.js';
 import { pythonAuthoringGuide } from './python-guide.js';
 import { frameProfile } from './python-model.js';
 
@@ -117,7 +117,6 @@ export function buildSkills(engine) {
     ...(guide.event_semantics ? ['', '## Event semantics', '', mdValue(Object.entries(guide.event_semantics).map(([k, v]) => ({ meaning: k, event: v })))] : []),
     ...(guide.events_sources ? ['', '## Events sources', '', guide.events_sources.note] : []),
     ...(recipeIndex ? ['', '## Recipes by family', '', 'Each links to the full entry (payload, example queries, the reusable technique). A real question combines two or three.', '', recipeIndex] : []),
-    '', '## Research questions', '', 'An open question — why a metric moved, what drives it, whether a change worked? Load the `research` skill of this server first: the investigation sequence, the checks, the report, and a guide per domain (product, monetization, UA).',
     ...(python ? ['', '## Python stages', '', 'Writing a python stage? Load the `python-stage` skill of this server — the authoring guide for this warehouse\'s python runtime.'] : []),
     '',
     '## Report with provenance',
@@ -130,25 +129,21 @@ export function buildSkills(engine) {
   }, body, visible.map(recipeFile));
 
   // ── the research guides: how to run an investigation, and one reference per domain ──
-  // (the objects semantic_index({ guide: "research" | "research/<domain>" }) returns)
-  const research = RESEARCH_GUIDES.research;
-  const domains = Object.entries(RESEARCH_GUIDES).filter(([k]) => k !== 'research');
-  const domainFile = ([key, g]) => [`${key.split('/')[1]}.md`, [`# ${g.title}`, '', `The same guide the tool returns: \`semantic_index({ guide: "${key}" })\`. It plugs into the investigation sequence of the research skill.`, '', mdValue(Object.fromEntries(Object.entries(g).filter(([k]) => k !== 'title')))].join('\n')];
+  // Each file renders exactly what semantic_index({ guide: "research" | "research/<domain>" }) returns.
+  const research = researchGuide('research');
+  const fileOf = (key) => `${key.split('/')[1]}.md`;
+  const guideMarkdown = (key, g, drop = []) => [`# ${g.title}`, '', `The same guide the tool returns: \`semantic_index({ guide: "${key}" })\`.`, '', mdValue(Object.fromEntries(Object.entries(g).filter(([k]) => !['task', 'title', ...drop].includes(k))))].join('\n');
   const researchBody = [
-    `# ${research.title}`,
+    guideMarkdown('research', research, ['domains']),
     '',
-    `The same guide the tool returns: \`semantic_index({ guide: "research" })\`.`,
+    '## Domains',
     '',
-    mdValue(Object.fromEntries(Object.entries(research).filter(([k]) => !['title', 'domains'].includes(k)))),
-    '',
-    '## Domain guides',
-    '',
-    domains.map(([key, g]) => `- [${g.title}](${key.split('/')[1]}.md) — ${research.domains[key] || g.when_to_use}`).join('\n'),
+    Object.entries(research.domains).map(([key, when]) => `- [${RESEARCH_GUIDES[key].title}](${fileOf(key)}) — ${when}`).join('\n'),
   ].join('\n');
   addSkill('betti/research', {
     name: 'research',
-    description: 'How to run an analytical investigation with this server — frame the decision, lock the metric contract, check the data before the behaviour, reproduce the headline, decompose into drivers, separate mix from rate, test the explanation, review and report — plus what matters in product (engagement, retention), monetization (IAP, ads) and user acquisition (CPI, ROAS, payback). Use for an open question: why a metric moved, what drives it, whether a change worked, a deep dive.',
-  }, researchBody, domains.map(domainFile));
+    description: `How to run an analytical investigation with this server (${research.sequence.map((st) => st.step.toLowerCase()).join(' → ')}), plus what matters per domain: ${RESEARCH_DOMAINS.map((d) => RESEARCH_GUIDES[d].title.split(':')[0].toLowerCase()).join(', ')}. Use for ${RESEARCH_SCOPE}.`,
+  }, researchBody, RESEARCH_DOMAINS.map((key) => [fileOf(key), guideMarkdown(key, researchGuide(key))]));
 
   // ── the python-stage authoring guide (only where python models run) ──
   if (python) {

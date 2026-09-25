@@ -8,6 +8,8 @@
 // Built from the catalog (roles/event_semantics) + recipes (the per-task playbooks),
 // so it stays correct for ANY catalog without hardcoding names.
 
+import { RESEARCH_GUIDES, RESEARCH_ROUTE, RESEARCH_SCOPE, isResearchGuide, researchGuide } from './research-guides.js';
+
 export function buildGuide(catalog, recipes, { task, python = null } = {}) {
   const usersModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'users') || 'users';
   const experimentsModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'experiments') || 'experiments';
@@ -37,7 +39,7 @@ export function buildGuide(catalog, recipes, { task, python = null } = {}) {
   ];
 
   const routing_triggers = [
-    { if: 'an open, exploratory question rather than a lookup — why a metric moved, what drives an outcome, whether a change worked, a product / monetization / UA deep dive', do: 'read semantic_index({ guide: "research" }) before the first query — the investigation sequence, the checks and the report — and the domain guide it points to (research/product, research/monetization, research/ua); then follow it with these tools.' },
+    { if: RESEARCH_SCOPE, do: `read ${RESEARCH_ROUTE} before the first query, then follow it with these tools.` },
     { if: 'a named KPI / rate / cumulative metric', do: 'governed metric: build_semantic_model + query_semantic_model — NOT a hand-rolled pipeline.' },
     { if: 'an ordered multi-step funnel / path / time-between-steps', do: 'a build_pipeline_model pipeline with a match_recognize stage (funnels are events-only).' },
     { if: 'an A/B question ("is variant B better")', do: `compute per-variant aggregates first (a pipeline joining '${experimentsModel}'), then experiment({ action: 'analyze' }); run experiment({ action: 'check_split' }) BEFORE trusting any lift.` },
@@ -84,6 +86,9 @@ export function buildGuide(catalog, recipes, { task, python = null } = {}) {
   // A reserved family: 'python' is not a recipe family but the AUTHORING GUIDE for the warehouse
   // runtime this deployment submits python models to — served here so the examples reach the model
   // through the tools, on demand, instead of bloating every tool description.
+  // Reserved too: 'research' and 'research/<domain>' are the research guides (src/research-guides.js)
+  // — method for an open question, not a recipe family.
+  if (isResearchGuide(task)) return researchGuide(task);
   if (task === 'python') {
     return python || { task: 'python', note: 'This deployment runs no python models (no warehouse runtime for them), so there is no python authoring guide. The overview reports python_models.' };
   }
@@ -91,7 +96,7 @@ export function buildGuide(catalog, recipes, { task, python = null } = {}) {
     const list = tasks[task];
     return list
       ? { task, workflow, routing_triggers, recipes: list, next: `Fetch a recipe in full with semantic_index({ recipe: '${list[0].id}' }).` }
-      : { task, workflow, routing_triggers, recipes: [], note: `No recipes for task family '${task}'. Known families: ${Object.keys(tasks).join(', ') || '(none configured)'}.` };
+      : { task, workflow, routing_triggers, recipes: [], note: `No recipes for task family '${task}'. Known families: ${Object.keys(tasks).join(', ') || '(none configured)'}. Guides: ${[...Object.keys(RESEARCH_GUIDES), ...(python ? ['python'] : [])].join(', ')}.` };
   }
 
   return {

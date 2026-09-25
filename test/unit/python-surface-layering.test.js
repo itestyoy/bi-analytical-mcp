@@ -49,9 +49,9 @@ test('the stage description states the SQL-first rule ONCE, through the guide it
   const d = stageDescription(engine());
   // it IS there — a caller who reads only the description still learns what belongs in the stage
   assert.match(d, /only what SQL cannot say/);
-  assert.match(d, /PREPARED table/);
+  assert.match(d, /prepared table/);
   // …and exactly once: the description's own job is the mechanics, the rule comes from the guide
-  for (const probe of ['only what SQL cannot say', 'PREPARED table', 'WHAT BELONGS HERE']) {
+  for (const probe of ['only what SQL cannot say', 'prepared table', 'What belongs here']) {
     assert.equal(occurrences(d, probe), 1, `"${probe}" appears ${occurrences(d, probe)}× in the stage description — the rule has one home`);
   }
   // the mechanics that ARE the description's own: where the stage sits, what the server writes

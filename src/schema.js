@@ -1047,6 +1047,9 @@ function abTestSchema() {
   const familyP = { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, description: 'p-values of OTHER metrics in the same experiment readout — included in the multiplicity-correction family (Holm/BH) alongside the variants.' };
   const sequential = { type: 'boolean', description: 'Also compute an always-valid p per variant (mixture SPRT): p_value_sequential stays honest under repeated peeking at a running experiment, unlike the fixed-horizon p_value. proportion/mean only.' };
   const expectedEffect = { type: 'number', exclusiveMinimum: 0, description: 'Optional expected ABSOLUTE effect size — sets the sequential test\'s mixture prior scale (more power near this effect). Default: the observed sampling noise scale.' };
+  // The split this test was designed for: given, the sample-ratio check runs in the same call, so
+  // the readout carries its own trust gate instead of relying on a separate check_split.
+  const expectedRatio = { type: 'array', minItems: 2, items: { type: 'number', exclusiveMinimum: 0 }, description: 'Intended split weights, in group order (e.g. [1,1] for 50/50, [2,1,1]). check_split: the order of `groups`, defaulting to an equal split. analyze: control first, then the variants — given, the result also carries the sample-ratio check (`split`); omitted, no split is assumed.' };
   // Whether a rise is good is a property of the METRIC, which the test cannot know: conversion up is
   // an improvement, crash rate or churn up is a regression. It changes no statistic — only how a
   // significant result is read (outcome: better | worse).
@@ -1062,6 +1065,7 @@ function abTestSchema() {
         metric: { enum: [metric] },
         confidence, alternative, correction, good,
         family_p_values: familyP,
+        expected_ratio: expectedRatio,
         ...extraProps,
         control: a,
         variants: { type: 'array', minItems: 1, items: a, description: 'One or more variant groups, each tested against control.' },
@@ -1082,6 +1086,7 @@ function abTestSchema() {
       metric: { enum: ['proportion', 'mean', 'ratio', 'cuped'], description: 'Which test to run and which group fields are required: proportion→conversions; mean→mean,stddev; ratio→sumNum,sumDen,sumNum2,sumDen2,sumNumDen; cuped→sumY,sumY2,sumX,sumX2,sumXY.' },
       confidence, alternative, correction, good,
       family_p_values: familyP,
+      expected_ratio: expectedRatio,
       sequential,
       expected_effect: expectedEffect,
       control: unionArm,

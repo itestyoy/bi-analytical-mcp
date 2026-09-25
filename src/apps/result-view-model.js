@@ -159,6 +159,10 @@ export function buildViewModel(toolName, result, toolInput) {
         // whether that direction is GOOD is the caller's to say (good: up | down, echoed by the test)
         outcome: r.outcome || (!significant || !lift ? 'no_difference' : (lift > 0) === ((result.good || 'up') === 'up') ? 'better' : 'worse'),
         variance_reduction: num(r.variance_reduction),
+        // significant on the raw p but not after the correction: the interval clears zero, the verdict does not
+        significant_raw: !!r.significant,
+        // the smallest effect this sample could detect, in the unit the interval is drawn in
+        detectable: effect?.unit === 'relative' ? num(r.detectable_relative_lift) : num(r.detectable_lift),
       };
     });
     // one symmetric scale for every variant, so their intervals line up and compare at a glance
@@ -181,6 +185,8 @@ export function buildViewModel(toolName, result, toolInput) {
       correction: result.correction && result.correction !== 'none' ? result.correction : null,
       variants,
       significant_count: variants.filter((v) => v.significant).length,
+      // the sample-ratio check, when the call gave the designed split: a mismatch invalidates every lift
+      split: isObj(result.split) ? { p_value: num(result.split.p_value), detected: !!result.split.srm_detected } : null,
       good: result.good || 'up',
       scale: nice(extent * 1.1),
       notes: result.recommendations || [],

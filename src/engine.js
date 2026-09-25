@@ -3004,6 +3004,12 @@ export class Engine {
       }
     }
 
+    // the designed split, when given, is checked in the same call: control first, then the variants
+    const groupsIn = [control, ...(input.variants || [])];
+    if (input.expected_ratio && input.expected_ratio.length !== groupsIn.length) {
+      throw new ToolError(`expected_ratio has ${input.expected_ratio.length} weights for ${groupsIn.length} groups (control first, then each variant)`, { stage: 'validate', field: 'expected_ratio' });
+    }
+
     let results; const extra = {};
     if (metric === 'cuped') {
       const suff = ['sumY', 'sumY2', 'sumX', 'sumX2', 'sumXY'];
@@ -3029,6 +3035,16 @@ export class Engine {
           r = welchTTest({ controlMean: control.mean, controlStddev: control.stddev, controlN: control.n, variantMean: v.mean, variantStddev: v.stddev, variantN: v.n, alternative, confidence });
           delta = v.mean - control.mean; variance = (control.stddev ** 2) / control.n + (v.stddev ** 2) / v.n;
         }
+        // the smallest effect this sample could detect (power 0.8 at the test's own α, the smaller
+        // group's n) — what an inconclusive result could have seen, never a power computed from the
+        // observed effect
+        const nMin = Math.min(control.n, v.n);
+        const alpha = 1 - confidence;
+        const base = metric === 'proportion' ? control.conversions / control.n : control.mean;
+        const detectable = metric === 'proportion'
+          ? (base > 0 && base < 1 ? mdeProportion({ baseline: base, n: nMin, alpha, power: 0.8, alternative }) : null)
+          : (control.stddev > 0 ? mdeMean({ stddev: control.stddev, n: nMin, alpha, power: 0.8, alternative }) : null);
+        r = { ...r, detectable_lift: detectable, detectable_relative_lift: detectable !== null && base ? detectable / Math.abs(base) : null };
         // sequential: an ALWAYS-VALID p (mixture SPRT) that stays honest when the
         // experiment is checked repeatedly while running — use it for live peeking;
         // the fixed-horizon p remains the readout at the planned end.
@@ -3060,13 +3076,16 @@ export class Engine {
     });
     const worse = results.filter((r) => r.outcome === 'worse').map((r) => r.variant);
     const anySig = results.some((r) => (r.significant_adjusted ?? r.significant));
+    const split = input.expected_ratio ? srmTest({ groups: groupsIn.map((g, i) => ({ label: labelOf(g, i - 1), n: g.n })), ratios: input.expected_ratio }) : null;
     const recommendations = [
+      ...(split?.srm_detected ? [`Sample ratio mismatch (p = ${split.p_value.toExponential(2)}): the groups are not the split that was designed, so randomization or logging is broken and none of these lifts can be trusted until the cause is found.`] : []),
       `Trust significant_adjusted (multiplicity-corrected${familyExtra.length ? `, family includes ${familyExtra.length} other metric(s)` : ''}) over raw significant.`,
       ...(input.sequential ? ['p_value_sequential is valid under repeated peeking; the fixed-horizon p_value is only valid at the planned sample size.'] : ['Peeking at a RUNNING experiment with fixed-horizon p-values inflates false positives — pass sequential:true for an always-valid p.']),
       ...(worse.length ? [`${worse.join(', ')} ${worse.length === 1 ? 'is' : 'are'} significantly WORSE than control on this metric (${good === 'up' ? 'lower' : 'higher'} where ${good} is good) — a regression, not a win.`] : []),
-      ...(anySig ? [] : ['No significant lift: check power with experiment({ action: "plan", ... }) before calling it a true null — and verify the split with experiment({ action: "check_split", ... }) if you have not.']),
+      ...(anySig ? [] : ['No significant lift: that is inconclusive, not proof of no effect — detectable_lift says how large an effect this sample could have seen.']),
+      ...(split ? [] : ['Pass expected_ratio (control first) to check the split in this same call — a sample ratio mismatch invalidates every lift.']),
     ];
-    return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, results, recommendations };
+    return { ok: true, metric, confidence, alternative, correction, good, control: labelOf(control, -1), ...extra, ...(split ? { split } : {}), results, recommendations };
   }
 
   /**

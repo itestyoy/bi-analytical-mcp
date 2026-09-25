@@ -844,6 +844,34 @@
   .ab-foot > :not(.ab-plot) { display: none; }
 }
 
+/* the badge sits beside the description only; the headline below takes the card's full width and
+   never breaks inside a number */
+.ab-card:not(.ab-multi) {
+  .card-action {
+    grid-row: 1;
+  }
+
+  .card-title-stat {
+    grid-column: 1 / -1;
+    white-space: nowrap;
+  }
+}
+
+/* A split that is not the designed one: the figures stay readable for diagnosis but lose their
+   colour and weight, so no lift reads as a result (the alert above says why) */
+.ab-untrusted {
+  .card-title-stat,
+  .ab-lift .ab-main {
+    color: var(--muted-foreground);
+  }
+
+  .card-content,
+  .stat-grid {
+    opacity: 0.55;
+    filter: grayscale(1);
+  }
+}
+
 /* Interval plot: a range bar, the estimate, the no-effect line — HTML, so it stretches crisply */
 .ci-plot {
   --ci-color: var(--muted-foreground);

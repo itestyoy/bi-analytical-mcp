@@ -178,6 +178,14 @@
   A 2025 client declares capabilities once, in `initialize`, and is served statelessly, so its later
   requests carry nothing to go by — it gets none of them. The lists that differ are cached `private`.
 
+- WHAT THE MODEL READS IS WRITTEN FOR THE CURRENT MODELS (Anthropic's and OpenAI's prompting guidance):
+  a tool description opens with what the tool does and when to use it, says when another tool fits
+  instead, and gives the reason behind a rule rather than stressing it — plain wording, no emphatic
+  capitals or blanket ALWAYS/NEVER (newer models follow instructions literally and over-apply
+  shouted ones; keep absolutes for true invariants). The server instructions OPEN WITH A CORE BLOCK
+  (`coreInstructions`, src/mcp-surface.js) — what the server is for, how a question flows, when to
+  stop — that fits the 2,048 characters a client may cut instructions to; the detail follows it.
+  Every tool description fits that budget too (test/unit/tool-surface.test.js).
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`

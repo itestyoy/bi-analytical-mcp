@@ -313,3 +313,20 @@ test('match_recognize partition_by: a column, or { entity } from the declared re
   // a relationship no source declares never gets past the SCHEMA — the enum is the contract
   await assert.rejects(() => add([{ entity: 'nope' }]), /entity` must be one of: ad_funnel, .*, user/);
 });
+
+// A client may pass on only the first 2,048 characters of a tool description or of the server's
+// instructions (Claude Code does). Each description fits whole, and the instructions open with a
+// core block that fits whatever the client was offered — the detail after it is extra, not needed.
+test('every tool description, and the core of the instructions for any offer, fits in 2,048 characters', async () => {
+  const { coreInstructions, servicesFor } = await import('../../src/mcp-surface.js');
+  for (const d of buildToolDefs(engine())) assert.ok(d.description.length <= 2048, `${d.name}: ${d.description.length} characters`);
+  const skillUris = ['skill://omg-analytics/SKILL.md'];
+  for (const offer of [{}, { apps: true }, { skillUris }, { apps: true, skillUris }]) {
+    const core = coreInstructions(offer);
+    assert.ok(core.length <= 2048, `${JSON.stringify(offer)}: ${core.length} characters`);
+  }
+  const services = servicesFor(engine());
+  for (const offer of [{}, { apps: true, skills: true }]) {
+    assert.ok(services.instructionsFor(offer).startsWith(coreInstructions({ apps: !!offer.apps, skillUris: offer.skills ? (services.skills?.skills.map((s) => s.uri) ?? []) : [] })), 'the instructions open with the core block');
+  }
+});

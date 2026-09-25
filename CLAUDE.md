@@ -115,7 +115,7 @@
   behaviour the SDK provides (headers, envelope, discover, sessions, error codes); the one exception
   is `src/mcp-tasks.js`, which exists only until the SDK serves the Tasks extension.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine.get_recipe`, the python
-  guide, a tool's result); they never carry text or numbers of their own. The Apps view follows the
+  guide, the research guides of `src/research-guides.js`, a tool's result); they never carry text or numbers of their own. The Apps view follows the
   official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Table — the
   pivot's only, Alert, Accordion, Chart) over the HOST's style variables, whose fallbacks are the shadcn neutral
   theme; its build is checked in and held to its sources by a test. THE VIEW DRAWS, AND READS ONLY ITS OWN RESULT:
@@ -178,6 +178,25 @@
   A 2025 client declares capabilities once, in `initialize`, and is served statelessly, so its later
   requests carry nothing to go by — it gets none of them. The lists that differ are cached `private`.
 
+- RESEARCH GUIDES ARE METHOD, NOT DATA (`src/research-guides.js`): how to run an investigation
+  (sequence, checks, report) and what matters in product, monetization and UA — served by
+  semantic_index({ guide: "research" | "research/<domain>" }) — reserved names that buildGuide
+  dispatches next to "python", an unknown one refused — and as the `research` skill rendered from the
+  same `researchGuide()` objects. ONE routing line (`RESEARCH_SCOPE` + `RESEARCH_ROUTE`) is
+  interpolated by the guide's trigger, the semantic_index description, the schema's `guide` field,
+  the core instructions and the skill description; the domain list is derived from the guide set.
+  They name no column, event or model (the catalog says what exists), every "how" points at a tool
+  or a recipe written `recipe "<id>"` (test/unit/research-guides.test.js holds each to the loaded
+  recipes), and they are adapted from Anthropic's (Apache-2.0) and OpenAI's (MIT) analytics skills
+  with the sources listed.
+- WHAT THE MODEL READS IS WRITTEN FOR THE CURRENT MODELS (Anthropic's and OpenAI's prompting guidance):
+  a tool description opens with what the tool does and when to use it, says when another tool fits
+  instead, and gives the reason behind a rule rather than stressing it — plain wording, no emphatic
+  capitals or blanket ALWAYS/NEVER (newer models follow instructions literally and over-apply
+  shouted ones; keep absolutes for true invariants). The server instructions OPEN WITH A CORE BLOCK
+  (`coreInstructions`, src/mcp-surface.js) — what the server is for, how a question flows, when to
+  stop — that fits the 2,048 characters a client may cut instructions to; the detail follows it.
+  Every tool description fits that budget too (test/unit/tool-surface.test.js).
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`

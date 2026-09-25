@@ -51,6 +51,12 @@ to use when) are served by the server itself — **call `semantic_index({ guide:
 follow it (narrow to a family with `semantic_index({ guide: "retention" })`). This skill does
 **not** copy them, so the two never drift; it adds only the **OMG-specific** layer below.
 
+For an **open research question** — why a metric moved, what drives it, whether a change
+worked, a product / monetization / UA deep dive — read **`semantic_index({ guide: "research" })`**
+first (also served as the server's `research` skill): the investigation sequence, the checks
+before presenting, the report shape, and a guide per domain — `research/product`,
+`research/monetization`, `research/ua`. Apply the OMG cautions below on top of it.
+
 OMG cautions on top of the generic procedure:
 - **Complete periods**: "last week" = last full calendar week; anchor freshness on the latest
   event time, not "today".

@@ -367,10 +367,10 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   // the library and points at the generated reference (see python-surface-layering.test.js)
   assert.match(bq.mlClasses, /cluster\.KMeans/);
   assert.ok(!/cluster\.KMeans/.test(bq.ml), 'the one-liner does not carry the list');
-  assert.match(bq.guide, /NEVER sklearn/);
-  assert.match(bq.guide, /stay in COLUMN EXPRESSIONS/);
+  assert.match(bq.guide, /sklearn\/scipy\/statsmodels, which need to_pandas\(\)/);
+  assert.match(bq.guide, /stay in column expressions/);
   assert.match(bq.guide, /apply\/map/);
-  assert.match(bq.guide, /THE RIGHT FORM PER OPERATION/, 'the right form for each operation is in the description itself');
+  assert.match(bq.guide, /The right form per operation/, 'the right form for each operation is in the description itself');
   // the guide names the FAILURE, not just the property: unordered head/tail raises, it does not
   // quietly return an arbitrary slice
   assert.match(bq.guide, /ordering_mode="partial"/);
@@ -389,7 +389,7 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
     const e = settle(new Engine({ catalog: c, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'pystage-')) }), pythonBin: PY }));
     const py = stageBranch(e.schemas.build_pipeline_model, 'python');
     assert.match(py.description, /MODELLING: bigframes\.ml/);
-    assert.match(py.description, /RULES FOR BIGFRAMES/);
+    assert.match(py.description, /Rules for bigframes/);
     assert.match(py.properties.functions.items.properties.body.description, /Modelling: bigframes\.ml/);
     assert.match(py.properties.functions.items.properties.body.description, /converts itself with df\.to_pandas\(\)/);
     assert.match(py.properties.imports.items.properties.package.description, /prefer bigframes \(bigframes\.ml\) over sklearn/);
@@ -473,7 +473,7 @@ test('the BigFrames rules state both runtime traps and the form that works', () 
   assert.match(guide, /OrderRequiredError/);
   assert.match(guide, /sort_values/);
   // no index → an alignment raises, and the form that works is a merge
-  assert.match(guide, /NO INDEX/);
+  assert.match(guide, /no index/i);
   assert.match(guide, /NullIndexError/);
   assert.match(guide, /merge/);
   assert.match(guide, /set_index/);
@@ -493,7 +493,7 @@ test('a run failure explains the runtime behind the error class, without prescri
   const log = 'Compilation Error in model pipe_seg_ab12\n  NullIndexError: Cannot implicitly align objects. Please set an index using set_index.';
   const hints = pythonRunHints(bq, log);
   assert.equal(hints.length, 1);
-  assert.match(hints[0], /NO INDEX/);
+  assert.match(hints[0], /no index/i);
   assert.match(hints[0], /^About this runtime:/, 'it states what the runtime is like…');
   assert.ok(!/\b(Put|Express|Wrap|Use|Rewrite)\b/.test(hints[0]), '…and does not prescribe a rewrite it cannot know is the right one');
   assert.deepEqual(pythonRunHints(duck, log), [], 'a runtime whose frames carry an index says nothing');
@@ -588,20 +588,21 @@ test('the stage description and the guide send the caller to this deployment\'s 
   // it no longer LISTS them: every caller is handed this string on every request, and the ids with
   // the move each covers belong one call away, in the guide. (Progressive disclosure: the schema
   // stays small, the detail arrives when it is asked for.)
-  assert.match(py.description, /DO NOT WRITE A FUNCTION FROM MEMORY/, 'the description INSISTS on reading them');
-  assert.ok(py.description.includes(`${entries.length} worked`), 'it says how many there are');
+  assert.match(py.description, /read the ones your question involves/, 'the description asks for them to be read');
+  assert.ok(py.description.includes(`${entries.filter((r) => !['bf_ml_signatures', 'bf_frame_method_rules'].includes(r.id)).length} worked`), 'it says how many there are (the generated references apart)');
   assert.match(py.description, /semantic_index\(\{ recipe: "<id>" \}\)/, 'and the description says HOW to fetch one');
-  // The one id it may name is the REFERENCE (the library's own signatures), because that lookup is
-  // what a caller needs mid-write; the worked recipes are fetched from the guide's index.
+  // The ids it may name are the two REFERENCES generated from the library (its signatures, its
+  // method preconditions), because that lookup is what a caller needs mid-write; the worked recipes
+  // are fetched from the guide's index.
   const named = entries.map((r) => r.id).filter((id) => py.description.includes(id));
-  assert.deepEqual(named, named.filter((id) => id === 'bf_ml_signatures'), `the worked recipe ids are dumped into every request: ${named.join(', ')}`);
+  assert.deepEqual(named, named.filter((id) => id === 'bf_ml_signatures' || id === 'bf_frame_method_rules'), `the worked recipe ids are dumped into every request: ${named.join(', ')}`);
   // …and the guide, one call away, names every id with the move it covers
   const pyGuide = await e.semantic_index({ guide: 'python' });
   assert.deepEqual(pyGuide.recipes.ids, entries.map((r) => r.id));
   for (const { id, title } of entries) assert.ok(pyGuide.recipes.moves.includes(`${id}: ${title}`), `${id} is listed without its move`);
   // …and it is an INDEX, not a manual: the per-operation code forms live in the recipes and the
   // full guide now, so the description no longer repeats them (that is what makes it shorter).
-  assert.ok(!py.description.includes('THE RIGHT FORM PER OPERATION'), 'the forms are in the recipes, not inlined here');
+  assert.ok(!py.description.includes('The right form per operation'), 'the forms are in the recipes, not inlined here');
   // what it still carries itself: why this runtime bites, and where the reasoning lives
   assert.match(py.description, /NullIndexError/);
   assert.match(py.description, /OrderRequiredError/);
@@ -611,8 +612,8 @@ test('the stage description and the guide send the caller to this deployment\'s 
   assert.deepEqual(g.recipes.ids, ids);
   assert.deepEqual(g.recipes.moves, entries.map((r) => `${r.id}: ${r.title}`), 'the guide names the move behind every id too');
   assert.match(g.recipes.fetch, /semantic_index\(\{ recipe: '/);
-  assert.match(g.read_next, /STUDY THE RECIPES BEFORE YOU WRITE/);
-  assert.match(g.recipes.note, /STUDY THESE BEFORE WRITING A FUNCTION/);
+  assert.match(g.read_next, /Read the recipes before you write/);
+  assert.match(g.recipes.note, /Read these before writing a function/);
 
   // every one of them is fetchable and carries what makes it adaptable
   for (const id of ids) {
@@ -637,7 +638,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
   assert.ok(!py2.description.includes('STUDY THE RECIPES FIRST'));
   for (const { id } of entries) assert.ok(!py2.description.includes(id), 'no recipe of another deployment is advertised');
   // …and with nothing to point at, the description carries the forms itself instead of dropping them
-  assert.match(py2.description, /THE RIGHT FORM PER OPERATION/);
+  assert.match(py2.description, /The right form per operation/);
   assert.ok(py2.description.length > py.description.length, 'pointing at recipes is what makes the description shorter');
 });
 
@@ -757,16 +758,16 @@ test('the SQL-vs-python division of labour is in the stage description and the g
   catalog.pythonRuntime = { available: true, runtime: 'bigquery', config: {}, packages: '' };
   const e = settle(new Engine({ catalog, contextManager: new ContextManager({ workspaceRoot: mkdtempSync(join(tmpdir(), 'sqlfirst-')) }), pythonBin: PY }));
   const py = stageBranch(e.schemas.build_pipeline_model, 'python');
-  assert.match(py.description, /WHAT BELONGS HERE/);
-  assert.match(py.description, /the preparation of the table this analysis reads/);
-  assert.match(py.description, /never the raw source/);
+  assert.match(py.description, /What belongs here/);
+  assert.match(py.description, /table it reads is prepared in SQL stages/);
+  assert.match(py.description, /rather than the raw source/);
   // …and it is there ONCE, because the description renders the guide's rule instead of restating it
-  assert.equal(py.description.split('never the raw source').length - 1, 1);
+  assert.equal(py.description.split('rather than the raw source').length - 1, 1);
 
   const g = await e.semantic_index({ guide: 'python' });
   const first = g.rules[0];
-  assert.match(first.rule, /ONLY what SQL cannot say/, 'it is the FIRST rule, before the runtime traps');
-  assert.match(first.why, /COST AND EXACTNESS|READABILITY/, 'and it says why, so it does not read as taste');
+  assert.match(first.rule, /only what SQL cannot say/, 'it is the FIRST rule, before the runtime traps');
+  assert.match(first.why, /cost and exactness|readability/i, 'and it says why, so it does not read as taste');
   // the routing triggers say it too, for the caller that never opens the python guide
   const routing = JSON.stringify((await e.semantic_index({ guide: true })).routing_triggers);
   assert.match(routing, /computed in SQL/);

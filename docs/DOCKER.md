@@ -176,7 +176,11 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   task) its own card when called with `card: true`:
   a CHART (a time series or a breakdown — the chart alone; the only table is the pivot below),
   a FUNNEL (steps, share of the first and of the previous, the biggest drop) and the A/B family — the
-  TEST (a stat card per variant: lift, interval, verdict, the groups — a significant change coloured
+  TEST (one variant: a stat card — lift, interval, verdict, the groups; several: ONE card, the control
+  as the baseline row and a row per variant with its value, lift, interval and verdict, every interval
+  on one shared axis; an interval across zero reads "Inconclusive" with the effect the sample could
+  have detected, and `expected_ratio` on the analyze call adds the split check, whose mismatch puts
+  an alert over the card and withholds every verdict — a significant change coloured
   by what it means for the metric: green an improvement, red a regression; `good: down` on the
   analyze call marks a metric where lower is better, such as crash rate or churn, and the card says
   "lower is better"), the SAMPLE-RATIO CHECK (the

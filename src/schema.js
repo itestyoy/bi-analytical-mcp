@@ -5,6 +5,7 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
+import { RESEARCH_DOMAINS } from './research-guides.js';
 import { pipelineStageSchema, stageDefs } from './pipeline.js';
 import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
@@ -304,7 +305,7 @@ export function buildSchemas(catalog) {
     // (create → name + metrics, update → context_id + semantic_model), so a caller is never told
     // to supply a field the mode it asked for does not take.
 
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the GOVERNED path. Produces NAMED metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). TWO MODES: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived TABLE (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_pipeline_model instead. It returns a task_id: query_semantic_model({ task_id }) returns the parsed model (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the governed path. Produces named metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). Two modes: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived table (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_pipeline_model instead. It returns a task_id: query_semantic_model({ task_id }) returns the parsed model (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
     allOf: [
       { if: { properties: { action: { const: 'update' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'] } },
       { if: { not: { properties: { action: { const: 'update' } }, required: ['action'] } }, then: { required: ['name', 'metrics'] } },
@@ -366,7 +367,7 @@ export function buildSchemas(catalog) {
   const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
   const buildModel = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Compose a native pipeline model INCREMENTALLY, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the NEXT stage (pure schema; NOTHING is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. MATERIALIZE IS NOT THE END: the draft stays open and the table it built STANDS FOR the steps so far, so the steps you add next read THAT table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). WHEN TO USE: a one-off derived TABLE whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; materialize returns a task_id — read the rows with query_pipeline_model({ task_id }), filter or regroup them with query_pipeline_model({ context_id, transform }). For REUSABLE named metrics you query many ways (group_by / time / filters), use build_semantic_model instead (the governed path).',
+    description: 'Compose a native pipeline model incrementally, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the next stage (pure schema; nothing is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. Materialize is not the end: the draft stays open and the table it built stands for the steps so far, so the steps you add next read that table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). When to use: a one-off derived table whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; materialize returns a task_id — read the rows with query_pipeline_model({ task_id }), filter or regroup them with query_pipeline_model({ context_id, transform }). For reusable named metrics you query many ways (group_by / time / filters), use build_semantic_model instead (the governed path).',
     // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
     // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
     // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
@@ -383,7 +384,7 @@ export function buildSchemas(catalog) {
       { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'after', 'description']) } },
     ],
     properties: {
-      action: { enum: ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + source columns); add_step appends ONE stage and returns the columns available after it; add_steps appends SEVERAL stages at once (applied in order) and returns a per-step breakdown of how each changed the data — atomic (all-or-nothing); edit_step replaces step `index`; insert_step inserts a stage BEFORE `index`; delete_step removes step `index`; truncate keeps only steps 1..`after` (cheap "go back to step N"); fork branches a NEW draft from steps 1..`after` of this draft (or an already-materialized pipeline) WITHOUT touching the original — iterate variants without re-typing the shared prefix; preview shows steps + the SQL that would actually run (from a materialized prefix when there is one); materialize builds the model AND keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft. Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. PREFER add_step or SMALL add_steps chunks over one giant add_steps, so you see how each chunk changes the data.' },
+      action: { enum: ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + source columns); add_step appends one stage and returns the columns available after it; add_steps appends several stages at once (applied in order) and returns a per-step breakdown of how each changed the data — atomic (all-or-nothing); edit_step replaces step `index`; insert_step inserts a stage before `index`; delete_step removes step `index`; truncate keeps only steps 1..`after` (cheap "go back to step N"); fork branches a new draft from steps 1..`after` of this draft (or an already-materialized pipeline) without touching the original — iterate variants without re-typing the shared prefix; preview shows steps + the SQL that would actually run (from a materialized prefix when there is one); materialize builds the model and keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft. Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. Prefer add_step or small add_steps chunks over one giant add_steps, so you see how each chunk changes the data.' },
       draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for everything except start. For fork it may also be a context whose pipeline was already materialized.' },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
       description: { type: 'string', description: 'What this pipeline computes, in your words (start, or fork to override the parent\'s). Kept with the draft and carried to the model it materializes: returned by context({ action: "describe" | "list" }) and written into the generated model\'s config banner. A draft is cheap to make and easy to lose track of — this is what tells two of them apart later.' },
@@ -416,7 +417,7 @@ export function buildSchemas(catalog) {
   // a chart the person can drill into: the dimensions a clicked point, bar or slice opens into
   const drill = {
     type: 'object', additionalProperties: false, required: ['levels'],
-    description: 'Let the person DRILL DOWN: a click on a bar, slice or point offers these dimensions, and the chart is redrawn filtered to what was clicked and broken down by the one chosen — then again, one level deeper, with the ones left. Reads a STORED result (materialize: true, or a pipeline build) whose rows carry these columns too (group the query by them as well); the chart is drawn from it folded over them. Each view RE-AGGREGATES with `agg`: sums and counts add up, but a distinct count, an average or a ratio does NOT (a user in two platforms counts twice) — be careful with non-additive metrics.',
+    description: 'Let the person drill down: a click on a bar, slice or point offers these dimensions, and the chart is redrawn filtered to what was clicked and broken down by the one chosen — then again, one level deeper, with the ones left. Reads a stored result (materialize: true, or a pipeline build) whose rows carry these columns too (group the query by them as well); the chart is drawn from it folded over them. Each view re-aggregates with `agg`: sums and counts add up, but a distinct count, an average or a ratio does not (a user in two platforms counts twice) — be careful with non-additive metrics.',
     properties: {
       levels: { type: 'array', minItems: 1, maxItems: 5, description: 'The dimensions offered, in the order the menu lists them.', items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 40, description: 'How the dimension reads in the menu (default: the column name).' } } } },
       agg: { enum: ['sum', 'count', 'min', 'max', 'avg'], default: 'sum', description: 'How the rows under a view fold into its values.' },
@@ -435,7 +436,7 @@ export function buildSchemas(catalog) {
       form('line', 'line — a trend', 'A TREND over an ordered axis (usually time): one line, or several to compare series.', {
         x: axis, y: valueColumns('line'), series_column: seriesColumn('line'), drill,
       }, ['x', 'y'], oneYWhenSplit),
-      form('area', 'area — a total split into parts over time', 'A COMPOSITION OVER TIME: series that add up to one total, STACKED (DAU by platform). Series that do not add up → line.', {
+      form('area', 'area — a total split into parts over time', 'A composition OVER time: series that add up to one total, stacked (DAU by platform). Series that do not add up → line.', {
         x: axis, y: valueColumns('band'), series_column: seriesColumn('band'), drill,
       }, ['x', 'y'], oneYWhenSplit),
       form('bar', 'bar — a comparison across categories', 'A COMPARISON across categories, in row order: a bar per category, several per category (grouped), or stacked into one (part-to-whole per category).', {
@@ -479,7 +480,7 @@ export function buildSchemas(catalog) {
           },
         },
       }, ['values']),
-      form('pivot', 'pivot — a table to drill into', 'A TABLE TO DRILL INTO, level by level: the card shows the top level, and each row expands into the next level ON DEMAND — read from the stored result, filtered to that row — so the detail is never loaded all at once. Reads a STORED result (a query run with materialize: true, or a pipeline build). Each level RE-AGGREGATES the rows under it with the value\'s agg: sum, count, min and max fold honestly, but a distinct count, an average or a ratio does NOT add up across levels (a user present in two children counts twice) — be careful with non-additive metrics: prefer additive columns (counts, sums, the numerator and denominator of a ratio) as the values.', {
+      form('pivot', 'pivot — a table to drill into', 'A table to drill into, level by level: the card shows the top level, and each row expands into the next level ON demand — read from the stored result, filtered to that row — so the detail is never loaded all at once. Reads a stored result (a query run with materialize: true, or a pipeline build). Each level re-aggregates the rows under it with the value\'s agg: sum, count, min and max fold honestly, but a distinct count, an average or a ratio does not add up across levels (a user present in two children counts twice) — be careful with non-additive metrics: prefer additive columns (counts, sums, the numerator and denominator of a ratio) as the values.', {
         levels: {
           type: 'array', minItems: 1, maxItems: 5, description: 'The dimension columns, from the top level down.',
           items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 40, description: 'How the level reads to the person — short, it names a column and each opened row (default: the column name).' } } },
@@ -843,7 +844,7 @@ function semanticIndexSchema(catalog) {
     run: { type: 'integer', minimum: 1, description: 'Run id, from the status view.' },
     bundle: { type: 'string', description: 'The app/bundle id; the overview lists them.' },
     recipe: { type: 'string', description: 'Recipe id, from the overview.' },
-    guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: 'true for the whole guide, a task family name, or "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation).' },
+    guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: `true for the whole guide, a task family name, "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation), or "research" for how to run an investigation (sequence, checks, report) — with ${RESEARCH_DOMAINS.map((d) => `"${d}"`).join(', ')} for what matters in each domain. "python", "research" and "research/<domain>" are reserved: not recipe families.` },
   };
 
   const branches = [
@@ -981,7 +982,7 @@ function memorySchema(catalog) {
   return {
     type: 'object',
     required: ['action'],
-    description: 'DURABLE analyst memory: save what you FOUND OUT — a vague request tracked down to a real field, a gotcha, a useful source — LINKED to the catalog entities it concerns, so it comes back THROUGH semantic_index next time. Pick EXACTLY ONE action; each action has its OWN fixed field set (a field that does not belong to the action is rejected): record = save a finding (note [required] + question + targets[] + aliases[] + links[]); list = read notes (no args = all; { target } = notes about one entity); search = find notes by a word/phrase ({ query } [required] + fuzzy + limit); forget = delete one note ({ id } [required]). RECORD ONE ATOMIC FINDING PER NOTE — when studying a topic/document, make several small single-fact notes, not one big dump. Note: record takes the PLURAL `targets` (array); list takes the SINGULAR `target`.',
+    description: 'Durable analyst memory: save what you found out — a vague request tracked down to a real field, a gotcha, a useful source — linked to the catalog entities it concerns, so it comes back through semantic_index next time. Pick exactly one action; each action has its own fixed field set (a field that does not belong to the action is rejected): record = save a finding (note [required] + question + targets[] + aliases[] + links[]); list = read notes (no args = all; { target } = notes about one entity); search = find notes by a word/phrase ({ query } [required] + fuzzy + limit); forget = delete one note ({ id } [required]). Record one atomic finding per note — when studying a topic/document, make several small single-fact notes, not one big dump. Note: record takes the plural `targets` (array); list takes the singular `target`.',
     discriminator: { propertyName: 'action' },
     // Union of every action\'s fields (gives MCP clients the real types); the selected
     // oneOf branch below enforces the exact per-action field set + rejects foreign fields.
@@ -1044,8 +1045,11 @@ function abTestSchema() {
   // Cross-metric multiplicity: p-values of the experiment's OTHER metrics join the
   // correction family, so a 10-metric scorecard cannot fish significance.
   const familyP = { type: 'array', items: { type: 'number', minimum: 0, maximum: 1 }, description: 'p-values of OTHER metrics in the same experiment readout — included in the multiplicity-correction family (Holm/BH) alongside the variants.' };
-  const sequential = { type: 'boolean', description: 'Also compute an ALWAYS-VALID p per variant (mixture SPRT): p_value_sequential stays honest under repeated peeking at a RUNNING experiment, unlike the fixed-horizon p_value. proportion/mean only.' };
+  const sequential = { type: 'boolean', description: 'Also compute an always-valid p per variant (mixture SPRT): p_value_sequential stays honest under repeated peeking at a running experiment, unlike the fixed-horizon p_value. proportion/mean only.' };
   const expectedEffect = { type: 'number', exclusiveMinimum: 0, description: 'Optional expected ABSOLUTE effect size — sets the sequential test\'s mixture prior scale (more power near this effect). Default: the observed sampling noise scale.' };
+  // The split this test was designed for: given, the sample-ratio check runs in the same call, so
+  // the readout carries its own trust gate instead of relying on a separate check_split.
+  const expectedRatio = { type: 'array', minItems: 2, items: { type: 'number', exclusiveMinimum: 0 }, description: 'Intended split weights, in group order (e.g. [1,1] for 50/50, [2,1,1]). check_split: the order of `groups`, defaulting to an equal split. analyze: control first, then the variants — given, the result also carries the sample-ratio check (`split`); omitted, no split is assumed.' };
   // Whether a rise is good is a property of the METRIC, which the test cannot know: conversion up is
   // an improvement, crash rate or churn up is a regression. It changes no statistic — only how a
   // significant result is read (outcome: better | worse).
@@ -1061,6 +1065,7 @@ function abTestSchema() {
         metric: { enum: [metric] },
         confidence, alternative, correction, good,
         family_p_values: familyP,
+        expected_ratio: expectedRatio,
         ...extraProps,
         control: a,
         variants: { type: 'array', minItems: 1, items: a, description: 'One or more variant groups, each tested against control.' },
@@ -1075,12 +1080,13 @@ function abTestSchema() {
 
   return {
     type: 'object',
-    description: 'Two-sample (or multi-group) STATISTICAL SIGNIFICANCE test on PRE-AGGREGATED group stats — use it for ANY comparison of two groups, NOT only randomized A/B experiments. "control" and "variants" are just group A vs group B(…): e.g. mean time at first occurrence vs last occurrence, conversion of cohort X vs Y, before vs after. Don\'t hand-roll a t-test/z-test — compute per-group aggregates with a pipeline, then call this. The required group fields DEPEND ON metric (discriminated union): proportion → conversions+n (two-proportion z-test); mean → mean+stddev+n (Welch t-test); ratio → the five per-user sums sumNum/sumDen/sumNum2/sumDen2/sumNumDen (delta-method for ratio metrics whose analysis unit is finer than the randomization unit, e.g. completed/started or clicks/impressions per user); cuped → sumY/sumY2/sumX/sumX2/sumXY (CUPED variance reduction via a pre-period covariate, then Welch). Returns each variant vs control: lift (absolute+relative, with a relative-lift CI), test statistic, p-value, confidence interval, significance, and a multiplicity-adjusted p-value across the family.',
+    description: 'Two-sample (or multi-group) statistical significance test on pre-aggregated group stats — use it for any comparison of two groups, not only randomized A/B experiments. "control" and "variants" are just group A vs group B(…): e.g. mean time at first occurrence vs last occurrence, conversion of cohort X vs Y, before vs after. Don\'t hand-roll a t-test/z-test — compute per-group aggregates with a pipeline, then call this. The required group fields depend ON metric (discriminated union): proportion → conversions+n (two-proportion z-test); mean → mean+stddev+n (Welch t-test); ratio → the five per-user sums sumNum/sumDen/sumNum2/sumDen2/sumNumDen (delta-method for ratio metrics whose analysis unit is finer than the randomization unit, e.g. completed/started or clicks/impressions per user); cuped → sumY/sumY2/sumX/sumX2/sumXY (CUPED variance reduction via a pre-period covariate, then Welch). Returns each variant vs control: lift (absolute+relative, with a relative-lift CI), test statistic, p-value, confidence interval, significance, and a multiplicity-adjusted p-value across the family.',
     required: ['metric', 'control', 'variants'],
     properties: {
       metric: { enum: ['proportion', 'mean', 'ratio', 'cuped'], description: 'Which test to run and which group fields are required: proportion→conversions; mean→mean,stddev; ratio→sumNum,sumDen,sumNum2,sumDen2,sumNumDen; cuped→sumY,sumY2,sumX,sumX2,sumXY.' },
       confidence, alternative, correction, good,
       family_p_values: familyP,
+      expected_ratio: expectedRatio,
       sequential,
       expected_effect: expectedEffect,
       control: unionArm,
@@ -1110,7 +1116,7 @@ function abTestSchema() {
 function srmCheckSchema() {
   return {
     type: 'object', additionalProperties: false, required: ['groups'],
-    description: 'Sample Ratio Mismatch (SRM) guardrail: a χ² goodness-of-fit test that the OBSERVED per-group sample sizes match the intended split. A detected mismatch (p < 0.001) means randomization or logging is broken and the experiment is INVALID — run this BEFORE trusting any lift. Compute per-group n with a pipeline first.',
+    description: 'Sample Ratio Mismatch (SRM) guardrail: a χ² goodness-of-fit test that the observed per-group sample sizes match the intended split. A detected mismatch (p < 0.001) means randomization or logging is broken and the experiment is invalid — run this before trusting any lift. Compute per-group n with a pipeline first.',
     properties: {
       groups: {
         type: 'array', minItems: 2, description: 'Observed groups with their sample sizes.',
@@ -1188,7 +1194,7 @@ function experimentSchema() {
   };
   return {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'The A/B EXPERIMENT lifecycle in ONE tool (action-driven): plan → check_split → analyze. plan = power/sample-size (how many users, or the MDE at a given n) BEFORE running; check_split = Sample-Ratio-Mismatch χ² guardrail (a bad split invalidates the experiment — run it BEFORE trusting any lift); analyze = the significance test on PRE-AGGREGATED per-group stats (metric: proportion → conversions, mean → mean+stddev, ratio → per-user sums, cuped → variance reduction), returning lift + p-value + CI + significance, multiplicity-adjusted across variants. Compute the per-group aggregates first with a pipeline.',
+    description: 'The A/B experiment lifecycle in one tool (action-driven): plan → check_split → analyze. plan = power/sample-size (how many users, or the MDE at a given n) before running; check_split = Sample-Ratio-Mismatch χ² guardrail (a bad split invalidates the experiment — run it before trusting any lift); analyze = the significance test on pre-aggregated per-group stats (metric: proportion → conversions, mean → mean+stddev, ratio → per-user sums, cuped → variance reduction), returning lift + p-value + CI + significance, multiplicity-adjusted across variants. Compute the per-group aggregates first with a pipeline.',
     allOf: [
       { if: { properties: { action: { const: 'plan' } }, required: ['action'] }, then: { required: ['metric'], properties: { metric: { enum: ['proportion', 'mean'] } } } },
       { if: { properties: { action: { const: 'check_split' } }, required: ['action'] }, then: { required: ['groups'] } },

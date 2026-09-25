@@ -90,10 +90,12 @@ APPROACH — the correct form of a single move on the frame `dbt.ref()` returns
 capability (an estimator's parameters and where scaling goes, a prediction per
 row, a supervised `fit(X, y)`, an evaluation with a split, PCA, categorical
 features) — each carrying `approach` (the form that works) next to `instead_of`
-(the form that raises, and why). A real question combines several, so the python
-stage description is an INDEX of them — every id with the move it covers, under
-an instruction to study them before writing a function — and the code forms
-themselves live in the recipes and in `semantic_index({ guide: "python" })`.
+(the form that raises, and why). A real question combines several. The python
+stage description carries what a caller must meet even without opening anything:
+the five ways pandas code fails on this frame, a checklist to run before
+declaring the stage, and where the full text is — `semantic_index({ guide:
+"python" })` (every rule with its reasoning, a works / fails / why example per
+operation, the ids of the worked recipes) and the recipes themselves.
 
 Two entries in that family are GENERATED rather than written: a fact about an
 external library belongs to the library, so `scripts/bigframes-facts.py` reads
@@ -103,6 +105,15 @@ keyword-only) and `bf_frame_method_rules` (which methods need an ordering or an
 index, and the signatures that surprise) — fetchable by id mid-write, and the
 one source the guide, the failure hints and the recipes all render from. Where
 each python text lives is written at the top of `src/python-guide.js`.
+
+For an open research question — why a metric moved, what drives it, whether a
+change worked — `semantic_index({ guide: "research" })` is how to run the
+investigation: the sequence of steps from framing the decision to the report, the
+checks to run before presenting, and the report's shape. A guide per domain plugs
+into it: `research/product` (engagement, retention), `research/monetization`
+(IAP, ads) and `research/ua` (CPI, ROAS, payback, incrementality). They are also
+served as the `research` skill, and adapted from Anthropic's and OpenAI's open
+analytics skills (sources in `src/research-guides.js`).
 
 A deployment ADDS its own recipes via `RECIPES_PATH` (comma-separated files);
 the shipped ones stay, and an id collision lets an operator override one

@@ -160,3 +160,42 @@ test('ab_test family_p_values: cross-metric correction tightens the verdict', ()
   assert.ok(fam.p_value_adjusted > alone.p_value_adjusted, 'family inflates the adjusted p');
   assert.equal(fam.p_value, alone.p_value, 'raw p unchanged');
 });
+
+test('analyze with expected_ratio carries its own split check; without it, none is assumed', async () => {
+  const skewed = await engine.experiment({ action: 'analyze', metric: 'proportion', expected_ratio: [1, 1], control: { label: 'c', n: 10000, conversions: 1000 }, variants: [{ label: 'b', n: 10600, conversions: 1170 }] });
+  // χ² = 2·300²/10300 on 1 df
+  assert.ok(Math.abs(skewed.split.chi_square - 2 * 300 ** 2 / 10300) < 1e-9);
+  assert.ok(skewed.split.p_value < 0.001 && skewed.split.srm_detected === true);
+  assert.deepEqual(skewed.split.groups.map((g) => g.expected), [10300, 10300]);
+  const planned = await engine.experiment({ action: 'analyze', metric: 'proportion', expected_ratio: [2, 1], control: { n: 2000, conversions: 200 }, variants: [{ label: 'b', n: 1000, conversions: 110 }] });
+  assert.equal(planned.split.chi_square, 0, 'a 2:1 design observed at 2:1 is no mismatch');
+  assert.equal(planned.split.srm_detected, false);
+  const none = await engine.experiment({ action: 'analyze', metric: 'proportion', control: { n: 2000, conversions: 200 }, variants: [{ label: 'b', n: 1000, conversions: 110 }] });
+  assert.equal(none.split, undefined, 'no designed split given, none is guessed');
+  await assert.rejects(async () => engine.experiment({ action: 'analyze', metric: 'proportion', expected_ratio: [1, 1, 1], control: { n: 10, conversions: 1 }, variants: [{ n: 10, conversions: 2 }] }), (e) => e.field === 'expected_ratio');
+});
+
+test('each variant carries the smallest effect its sample could detect (power 0.8, the test\'s α, the smaller group)', async () => {
+  const { sampleSizeProportion, normalQuantile } = await import('../../src/stats.js');
+  const p = engine.ab_test({ metric: 'proportion', control: { n: 10000, conversions: 1000 }, variants: [{ label: 'b', n: 12000, conversions: 1250 }] }).results[0];
+  // the detectable lift is the one the plan would need this n for (to the user, the plan rounds up)
+  assert.ok(Math.abs(sampleSizeProportion({ baseline: 0.1, mde: p.detectable_lift }) - 10000) <= 1);
+  assert.ok(Math.abs(p.detectable_relative_lift - p.detectable_lift / 0.1) < 1e-12);
+  const m = engine.ab_test({ metric: 'mean', confidence: 0.9, control: { n: 500, mean: 10, stddev: 2 }, variants: [{ label: 'b', n: 800, mean: 10.1, stddev: 2.5 }] }).results[0];
+  const expected = (normalQuantile(0.95) + normalQuantile(0.8)) * 2 * Math.sqrt(2 / 500);
+  assert.ok(Math.abs(m.detectable_lift - expected) < 1e-12, `${m.detectable_lift} vs ${expected}`);
+  assert.ok(Math.abs(m.detectable_relative_lift - expected / 10) < 1e-12);
+});
+
+test('the A/B card reads the split check and the detectable effect in the unit its interval is drawn in', async () => {
+  const { buildViewModel } = await import('../../src/apps/result-view-model.js');
+  const args = { action: 'analyze', metric: 'proportion', expected_ratio: [1, 1], control: { n: 10000, conversions: 1000 }, variants: [{ label: 'b', n: 10600, conversions: 1030 }] };
+  const r = await engine.experiment(args);
+  const m = buildViewModel('experiment', r, args);
+  assert.equal(m.split.detected, true);
+  assert.equal(m.split.p_value, r.split.p_value);
+  const v = m.variants[0];
+  assert.equal(v.effect.unit, 'relative');
+  assert.equal(v.detectable, r.results[0].detectable_relative_lift);
+  assert.equal(v.significant, false);
+});

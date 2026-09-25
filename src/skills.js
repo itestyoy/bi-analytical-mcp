@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
 import { buildGuide } from './guide.js';
+import { RESEARCH_DOMAINS, RESEARCH_GUIDES, RESEARCH_SCOPE, researchGuide } from './research-guides.js';
 import { pythonAuthoringGuide } from './python-guide.js';
 import { frameProfile } from './python-model.js';
 
@@ -126,6 +127,23 @@ export function buildSkills(engine) {
     name: 'analytics',
     description: 'How to answer a product-analytics question with this server\'s tools: discover the catalog with semantic_index, prefer a governed metric (build_semantic_model + query_semantic_model) over a one-off pipeline (build_pipeline_model), bound and review the query, report with provenance. Includes the IF/DO routing and every recipe by family. Use for any question that needs this data.',
   }, body, visible.map(recipeFile));
+
+  // ── the research guides: how to run an investigation, and one reference per domain ──
+  // Each file renders exactly what semantic_index({ guide: "research" | "research/<domain>" }) returns.
+  const research = researchGuide('research');
+  const fileOf = (key) => `${key.split('/')[1]}.md`;
+  const guideMarkdown = (key, g, drop = []) => [`# ${g.title}`, '', `The same guide the tool returns: \`semantic_index({ guide: "${key}" })\`.`, '', mdValue(Object.fromEntries(Object.entries(g).filter(([k]) => !['task', 'title', ...drop].includes(k))))].join('\n');
+  const researchBody = [
+    guideMarkdown('research', research, ['domains']),
+    '',
+    '## Domains',
+    '',
+    Object.entries(research.domains).map(([key, when]) => `- [${RESEARCH_GUIDES[key].title}](${fileOf(key)}) — ${when}`).join('\n'),
+  ].join('\n');
+  addSkill('betti/research', {
+    name: 'research',
+    description: `How to run an analytical investigation with this server (${research.sequence.map((st) => st.step.toLowerCase()).join(' → ')}), plus what matters per domain: ${RESEARCH_DOMAINS.map((d) => RESEARCH_GUIDES[d].title.split(':')[0].toLowerCase()).join(', ')}. Use for ${RESEARCH_SCOPE}.`,
+  }, researchBody, RESEARCH_DOMAINS.map((key) => [fileOf(key), guideMarkdown(key, researchGuide(key))]));
 
   // ── the python-stage authoring guide (only where python models run) ──
   if (python) {

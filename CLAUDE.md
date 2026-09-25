@@ -193,10 +193,16 @@
   a tool description opens with what the tool does and when to use it, says when another tool fits
   instead, and gives the reason behind a rule rather than stressing it — plain wording, no emphatic
   capitals or blanket ALWAYS/NEVER (newer models follow instructions literally and over-apply
-  shouted ones; keep absolutes for true invariants). The server instructions OPEN WITH A CORE BLOCK
-  (`coreInstructions`, src/mcp-surface.js) — what the server is for, how a question flows, when to
-  stop — that fits the 2,048 characters a client may cut instructions to; the detail follows it.
-  Every tool description fits that budget too (test/unit/tool-surface.test.js).
+  shouted ones; keep absolutes for true invariants). The server instructions (the spec's
+  `instructions`: InitializeResult in 2025, DiscoverResult in 2026-07-28 — a hint a client MAY add to
+  the system prompt) are cut differently by each client, and some read none, so they are layered:
+  an OPENING paragraph of at most 512 characters that stands alone (what the server is for, how a
+  question flows — ChatGPT and Codex), then a CORE BLOCK (`coreInstructions`, src/mcp-surface.js)
+  within 2,048 (the rules that span several tools, when to stop — Claude Code's cut), then the data
+  model and its joins. They carry only what no single tool says — the spec asks them not to repeat
+  the tool descriptions, and every tool description stands on its own (each within 2,048 too); long
+  procedures live behind semantic_index ({ guide }, { recipe }) and the skills
+  (test/unit/tool-surface.test.js holds the budgets).
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`

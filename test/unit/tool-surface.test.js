@@ -317,6 +317,14 @@ test('match_recognize partition_by: a column, or { entity } from the declared re
 // A client may pass on only the first 2,048 characters of a tool description or of the server's
 // instructions (Claude Code does). Each description fits whole, and the instructions open with a
 // core block that fits whatever the client was offered — the detail after it is extra, not needed.
+test('the instructions open with a paragraph of at most 512 characters — what ChatGPT and Codex ask to stand alone', async () => {
+  const { coreInstructions } = await import('../../src/mcp-surface.js');
+  for (const offer of [{}, { apps: true, skillUris: ['skill://omg-analytics/SKILL.md'] }]) {
+    const opening = coreInstructions(offer).split('\n\n')[0];
+    assert.ok(opening.length <= 512, `${opening.length} characters`);
+  }
+});
+
 test('every tool description, and the core of the instructions for any offer, fits in 2,048 characters', async () => {
   const { coreInstructions, servicesFor } = await import('../../src/mcp-surface.js');
   for (const d of buildToolDefs(engine())) assert.ok(d.description.length <= 2048, `${d.name}: ${d.description.length} characters`);

@@ -50,42 +50,40 @@ const TOOL_TITLES = {
   time: 'Timer',
 };
 
-// Server-level documentation surfaced to the AI client (serverInfo.description):
-// what this MCP is for and how to use it end-to-end.
 // Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
 const RESULT_CARDS = `RESULT CARDS
 In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ task_id, display }); starting work and reading tasks never draws. It reads the task the way the query tools do and draws it once; a second call for the same task is refused, so one question gets one card. The flow: start the work (it returns a task_id), read it with its query tool — query_semantic_model({ task_id }) or query_pipeline_model({ task_id }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card (the A/B test, the split check, the sample-size plan) only when you pass card: true; without it the answer is text only. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
 
 /**
- * THE FIRST THING A CLIENT READS, and in some the only thing: Claude Code passes the server's
- * instructions on up to 2,048 characters, and a host routes between servers on their opening lines.
- * So this block states, within that budget, what the server is for, how a question flows through
- * it, and when to stop; the detail follows it, for a client that reads on. What the client was
- * offered (cards, skills) gets one line here and its full paragraph below.
+ * THE FIRST THING A CLIENT READS, and in some the only thing. `instructions` (InitializeResult in
+ * the 2025 revisions, DiscoverResult in 2026-07-28) is a hint a client MAY put in the model's system
+ * prompt, and each client cuts it differently: ChatGPT and Codex ask for the first 512 characters to
+ * stand alone, Claude Code keeps 2,048, and some clients (the OpenAI Agents SDK, API connectors)
+ * read none of it. So the OPENING paragraph says, within 512 characters, what the server is for and
+ * how a question flows; the core block adds, within 2,048, the rules that span several tools; what
+ * follows is for a client that reads on. Nothing a single call needs lives only here — every tool
+ * description stands on its own, and the spec asks instructions not to repeat them.
  */
 function coreInstructions({ apps = false, skillUris = [] } = {}) {
   return [
-    'Declarative semantic layer for product analytics: you declare metrics and derived tables over a fixed data catalog and query them by name; the server writes and runs the SQL. Everything you can reference — events sources, a users dimension, experiment assignments, measures sources — is listed by the catalog.',
+    'Semantic layer for product analytics over a fixed data catalog: you declare metrics and derived tables and query them by name; the server writes and runs the SQL. Flow: semantic_index (find what exists) → build_semantic_model (reusable named metrics) or build_pipeline_model (a one-off table: funnels, sessions, pivots) → query_semantic_model / query_pipeline_model. Warehouse work returns a task_id at once; read it back with the same side\'s query tool.',
     '',
-    'How a question flows:',
-    '1. semantic_index — find the events, properties and attributes the question is about (no arguments: the overview; { guide: true }: the analyst workflow and which tool fits which question).',
-    '2. build_semantic_model for reusable named metrics (DAU, revenue, retention, conversion); build_pipeline_model for a one-off table whose rows are the answer (funnels, sessions, windows, pivots, a python analysis).',
-    `3. query_semantic_model / query_pipeline_model. A call that runs warehouse work returns a task_id at once; read the result with the same side's query tool ({ task_id }), which waits up to ${MAX_WAIT_SECONDS}s per call.`,
+    `semantic_index with no arguments gives the overview of the catalog — events sources, a users dimension, experiment assignments, measures sources; { guide: true } gives the analyst workflow and which tool fits which question. A read ({ task_id }) waits up to ${MAX_WAIT_SECONDS}s per call.`,
     '',
     'Name the events source in every call: sources are independent and never mixed. User attributes live on the users model ({ model: "users", attribute }), not on the events, and joins follow the relationships the catalog declares — you never state join columns.',
-    `For ${RESEARCH_SCOPE}, read ${RESEARCH_ROUTE} first.`,
+    `For ${RESEARCH_SCOPE}, first read ${RESEARCH_ROUTE}.`,
     'Answer as soon as a result answers the question; query again when the numbers look wrong or the question needs another cut, not to re-confirm a result you already have.',
     ...(apps ? ['Show the result the person should see as a card, once: display_model_result({ task_id, display }) (see RESULT CARDS below).'] : []),
     ...(skillUris.length ? [`The same procedure is served as Agent Skills: ${skillUris.join(', ')}.`] : []),
     '',
-    'The sections below give the details.',
+    'The sections below describe the data model and how its sources join.',
   ].join('\n');
 }
 
-const SERVER_DESCRIPTION = `WHAT IT DOES
-You define "virtual" semantic models — measures, dimensions and metrics — on the fly over a fixed set of catalog data sources, and query them by name. You do not write SQL: everything you can reference (events, properties, user attributes, join paths) is enumerated by the catalog and enforced by the schema, so a field that does not exist cannot be named.
-
-DATA MODEL (fixed roles)
+// The rules that span several tools — what the sources are and how they join — which no single tool
+// description carries; the per-tool detail lives in the tool descriptions and the schema, the long
+// procedures behind semantic_index ({ guide }, { recipe }) and the skills.
+const SERVER_DESCRIPTION = `DATA MODEL (fixed roles)
 - events source: one row per event — a user id, a session id, an event timestamp (the time axis), an event_name and typed event-data properties. Only per-event columns live here. A catalog may declare several events sources (e.g. product analytics events and crash reports). They are independent and equal: each owns its event vocabulary, its payload properties and its own indexed values, none is a default, and they are never mixed. The semantic_index overview lists them under "facts" with each one's own event_names. Name the source you mean in every call — semantic_index({ source, event }) / ({ source, property }), build_pipeline_model({ source }), build_semantic_model({ semantic_models: [{ from: <source> }] }) — so a name always has one owner. Within a source, event and property names are used as-is. Choose the source that records what the question is about.
 - users dimension: one row per user — attributes (country, platform, media_source, acquisition_type, install_date, ...). It is reached by a join: group or filter by { model: 'users', attribute } in metric queries (declare use_base_models: ['users']), or add a join stage in pipelines. User attributes are not columns of the fact.
 - experiments: one row per user×experiment (experiment_name, variant_group, assigned_at, ended_at) — join to events by the user entity, window to the assignment period, aggregate per group, then experiment({ action: check_split | analyze }).
@@ -95,21 +93,12 @@ JOINS BETWEEN SOURCES
 Relationships are declared in the catalog: each has a name, and its key columns live in the schema. Group by { model: '<the model that carries the attribute>', attribute } in a metric query (with that model in use_base_models; add via when several relationships lead to it), or join with via: '<relationship>' in a pipeline. A key may span several columns and the two sides may name their columns differently — only the relationship name and the number of key parts have to agree. A relationship that no model owns has no governed path (MetricFlow joins only onto a unique key) and is a pipeline join; that is correct rather than a limitation. semantic_index({ model }) lists a model's relationships, their key columns and what each points at. Two events sources are joined the same way — in a pipeline, since a row-to-row match between two event streams is many-to-many. When a source carries several alternative key columns for one relationship (one tracking id per ad format), each is listed as its own relationship <name>_<variant>; pick the one the question is about. The users dimension may be slowly-changing (several versions per player, each with a validity window): joining it on the player key alone matches every version and inflates counts, so a pipeline join adds between: { value: <this source's time column>, from: <validity start>, to: <validity end> }. A metric query needs nothing — MetricFlow applies the window itself.
 Funnels and sequences are built from events (a step = an event + an event_data property value) and run over one source, since a row-pattern match scans one table. Metrics from different sources can still be compared side by side when grouped by metric_time.
 
-WORKFLOW
-1. semantic_index — discover the catalog progressively. Call it with no arguments for the overview (models, event names, group-by paths, event_semantics = which event marks install/session/purchase, value-index freshness), then drill down: semantic_index({ model }) for a model's columns and attributes (with real sample values), ({ source, event }) for the properties an event carries, ({ source, property }) for one property or user attribute with its real value distribution, ({ search }) to find events/properties/attributes/values/recipes. An events fact can carry ~150 event-scoped properties, so they are fetched per event rather than all at once.
-2. build_semantic_model — declare measures/dimensions/metrics for a task in an isolated context (it returns a context_id). Pass that context_id back to extend the same context.
-   - For ordered multi-step funnels/paths (and any custom transform) use build_pipeline_model: compose a pipeline one stage at a time (start → add_step* → materialize; each add_step shows the columns available next), building a model whose rows are the result. materialize returns a task_id; query_pipeline_model({ task_id }) returns the rows, and query_pipeline_model({ context_id, transform }) filters or regroups the built model later (query_semantic_model does not read a pipeline context). It accepts a time_range and an internal pre-filter (event subset / user segment). start with from_task instead of a source re-slices a finished task's stored table (a materialized query, an earlier build) without recomputing it.
-   - Beyond SQL (a statistical test, clustering, scoring, a forecast), where the overview's python_models says available: add a 'python' stage to a build_pipeline_model pipeline, for the part SQL cannot express only, with the table it reads prepared by the SQL stages before it — SQL runs where the data lives and stays exact and readable. Look up the frame rather than writing it from memory: semantic_index({ guide: "python" }) gives this warehouse's frame rules and the reasoning behind them, the stage description indexes the worked recipes by the move each covers, and semantic_index({ recipe: "<id>" }) returns one in full. Read the result with query_pipeline_model as usual.
-3. query_semantic_model — run metrics with group_by / where / order_by / time_range. Options: dry_run (preview, no run), explain (query plan, no run), materialize (store the whole result as a table), limit/offset.
-4. Tasks — every call that does warehouse work (build_semantic_model, query_semantic_model, build_pipeline_model materialize, query_pipeline_model) returns only a task_id and does not wait. The query tool of the same side reads it back: query_semantic_model({ task_id }) for the semantic side (a model being parsed, a metric query), query_pipeline_model({ task_id }) for the pipeline side (a build, a query over a built model). It waits up to ${MAX_WAIT_SECONDS}s per call (call again while it says running) and returns the result; offset/limit page a stored one. Independent queries on one context go in one call (queries: up to ${MAX_BATCH}, run side by side) and are read together ({ task_ids }). To build further on a stored result without recomputing it, start a pipeline from it: build_pipeline_model({ action: 'start', name, from_task }).
-
-KEY CONCEPTS
-- context_id: an isolated workspace, so parallel tasks do not collide. Manage it with context({ action: list | describe | drop | delete_model | delete_semantic_model }).
-- metric types: simple, ratio, cumulative, derived, conversion.
-- group_by: { time: "metric_time", grain } for a time series, or { model, attribute } for an attribute addressed by where it lives (e.g. { model: "users", attribute: "country" }) — an object, not a path string.
-- recipes: ready-made, warehouse-proven payloads. The ones shipped with the server are per technique, not per business task — metric_types (ratio / derived / cumulative / conversion-window / boolean measure / the agg chosen per question / a governed measure), joins (an attribute of another model, a cohort grid on two time axes, two independent sources, a pipeline join by relationship name, a point-in-time join), pipeline (window lag, episodes by gap, an age axis, an ordered sequence, unnest, reshape, a volume/coverage check), ab_test (proportion, mean, CUPED, ratio, SRM, power) and, where python models run, bigframes (the correct form of one frame operation next to the form that raises, plus one per ml capability — parameters and scaling, a prediction per row, a supervised fit(X, y), an evaluation with a split, dimensionality reduction, categorical features) with generated reference entries carrying the installed library's own signatures and method preconditions. A real question usually combines two or three. A deployment adds its own domain recipes on top (RECIPES_PATH), and those may be per task. The semantic_index overview lists every available id; semantic_index({ recipe: id }) returns one in full, semantic_index({ guide: true }) groups them by family.
-- memory: durable findings. When you track a vague request down to a real field (or hit a gotcha, or find a useful source), record it with the memory tool, linked to the catalog entities it concerns — it then resurfaces on those semantic_index views and in semantic_index({ search }), so the next fuzzy phrasing resolves straight to the right field.
-- which builder: build_semantic_model for reusable named metrics you query many ways; build_pipeline_model for a one-off derived table (funnel / sessionization / window / pivot), queried with query_pipeline_model.`;
+WHERE THE DETAIL IS
+- semantic_index({ guide: true }): the analyst workflow, which tool fits which question, the recipe families.
+- semantic_index({ recipe: "<id>" }): one warehouse-proven payload in full; the overview lists the ids, and a real question usually combines two or three.
+- semantic_index({ guide: "python" }): the frame rules for a python stage, where the overview's python_models says it is available; the SQL stages before it prepare the table it reads.
+- memory: record a vague phrase you tracked down to a real field, or a gotcha, linked to the catalog entities it concerns; it resurfaces on their semantic_index views and in semantic_index({ search }).
+- context({ action }): list, describe or drop a workspace (context_id) and the models in it.`;
 
 
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).

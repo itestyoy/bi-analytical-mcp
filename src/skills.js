@@ -20,6 +20,7 @@
 import { createHash } from 'node:crypto';
 import yaml from 'js-yaml';
 import { buildGuide } from './guide.js';
+import { RESEARCH_GUIDES } from './research-guides.js';
 import { pythonAuthoringGuide } from './python-guide.js';
 import { frameProfile } from './python-model.js';
 
@@ -116,6 +117,7 @@ export function buildSkills(engine) {
     ...(guide.event_semantics ? ['', '## Event semantics', '', mdValue(Object.entries(guide.event_semantics).map(([k, v]) => ({ meaning: k, event: v })))] : []),
     ...(guide.events_sources ? ['', '## Events sources', '', guide.events_sources.note] : []),
     ...(recipeIndex ? ['', '## Recipes by family', '', 'Each links to the full entry (payload, example queries, the reusable technique). A real question combines two or three.', '', recipeIndex] : []),
+    '', '## Research questions', '', 'An open question — why a metric moved, what drives it, whether a change worked? Load the `research` skill of this server first: the investigation sequence, the checks, the report, and a guide per domain (product, monetization, UA).',
     ...(python ? ['', '## Python stages', '', 'Writing a python stage? Load the `python-stage` skill of this server — the authoring guide for this warehouse\'s python runtime.'] : []),
     '',
     '## Report with provenance',
@@ -126,6 +128,27 @@ export function buildSkills(engine) {
     name: 'analytics',
     description: 'How to answer a product-analytics question with this server\'s tools: discover the catalog with semantic_index, prefer a governed metric (build_semantic_model + query_semantic_model) over a one-off pipeline (build_pipeline_model), bound and review the query, report with provenance. Includes the IF/DO routing and every recipe by family. Use for any question that needs this data.',
   }, body, visible.map(recipeFile));
+
+  // ── the research guides: how to run an investigation, and one reference per domain ──
+  // (the objects semantic_index({ guide: "research" | "research/<domain>" }) returns)
+  const research = RESEARCH_GUIDES.research;
+  const domains = Object.entries(RESEARCH_GUIDES).filter(([k]) => k !== 'research');
+  const domainFile = ([key, g]) => [`${key.split('/')[1]}.md`, [`# ${g.title}`, '', `The same guide the tool returns: \`semantic_index({ guide: "${key}" })\`. It plugs into the investigation sequence of the research skill.`, '', mdValue(Object.fromEntries(Object.entries(g).filter(([k]) => k !== 'title')))].join('\n')];
+  const researchBody = [
+    `# ${research.title}`,
+    '',
+    `The same guide the tool returns: \`semantic_index({ guide: "research" })\`.`,
+    '',
+    mdValue(Object.fromEntries(Object.entries(research).filter(([k]) => !['title', 'domains'].includes(k)))),
+    '',
+    '## Domain guides',
+    '',
+    domains.map(([key, g]) => `- [${g.title}](${key.split('/')[1]}.md) — ${research.domains[key] || g.when_to_use}`).join('\n'),
+  ].join('\n');
+  addSkill('betti/research', {
+    name: 'research',
+    description: 'How to run an analytical investigation with this server — frame the decision, lock the metric contract, check the data before the behaviour, reproduce the headline, decompose into drivers, separate mix from rate, test the explanation, review and report — plus what matters in product (engagement, retention), monetization (IAP, ads) and user acquisition (CPI, ROAS, payback). Use for an open question: why a metric moved, what drives it, whether a change worked, a deep dive.',
+  }, researchBody, domains.map(domainFile));
 
   // ── the python-stage authoring guide (only where python models run) ──
   if (python) {

@@ -37,6 +37,7 @@ export function buildGuide(catalog, recipes, { task, python = null } = {}) {
   ];
 
   const routing_triggers = [
+    { if: 'an open, exploratory question rather than a lookup — why a metric moved, what drives an outcome, whether a change worked, a product / monetization / UA deep dive', do: 'read semantic_index({ guide: "research" }) before the first query — the investigation sequence, the checks and the report — and the domain guide it points to (research/product, research/monetization, research/ua); then follow it with these tools.' },
     { if: 'a named KPI / rate / cumulative metric', do: 'governed metric: build_semantic_model + query_semantic_model — NOT a hand-rolled pipeline.' },
     { if: 'an ordered multi-step funnel / path / time-between-steps', do: 'a build_pipeline_model pipeline with a match_recognize stage (funnels are events-only).' },
     { if: 'an A/B question ("is variant B better")', do: `compute per-variant aggregates first (a pipeline joining '${experimentsModel}'), then experiment({ action: 'analyze' }); run experiment({ action: 'check_split' }) BEFORE trusting any lift.` },

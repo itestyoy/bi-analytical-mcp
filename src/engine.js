@@ -19,6 +19,7 @@ import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
 import { rankFuzzy } from './fuzzy.js';
 import { buildGuide } from './guide.js';
+import { isResearchGuide, researchGuide } from './research-guides.js';
 import { pythonAuthoringGuide } from './python-guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
@@ -508,6 +509,8 @@ export class Engine {
     // ── { guide }: the analyst procedure + routing (workflow, IF/DO triggers, per-task
     // recipes) — the generic skill knowledge served through the MCP, single-sourced. ──
     if (input.guide !== undefined && input.guide !== false) {
+      // research guides: how to run an investigation, and three domains (src/research-guides.js)
+      if (isResearchGuide(input.guide)) return researchGuide(input.guide);
       return buildGuide(this.catalog, this.recipes, {
         task: typeof input.guide === 'string' ? input.guide : undefined,
         // The python authoring guide is a property of the RUNTIME this deployment submits to, so it

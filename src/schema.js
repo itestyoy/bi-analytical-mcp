@@ -843,7 +843,7 @@ function semanticIndexSchema(catalog) {
     run: { type: 'integer', minimum: 1, description: 'Run id, from the status view.' },
     bundle: { type: 'string', description: 'The app/bundle id; the overview lists them.' },
     recipe: { type: 'string', description: 'Recipe id, from the overview.' },
-    guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: 'true for the whole guide, a task family name, or "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation).' },
+    guide: { anyOf: [{ type: 'boolean' }, { type: 'string' }], description: 'true for the whole guide, a task family name, "python" for the authoring guide of this warehouse\'s python runtime (its constraints + a worked example per operation), or "research" for how to run an investigation (sequence, checks, report) — with "research/product", "research/monetization" and "research/ua" for what matters in each domain.' },
   };
 
   const branches = [

@@ -53,17 +53,15 @@ export const warehouseTurns = new Turns();
 
 /**
  * Run `bin args` and collect what it printed. `turn` (a database key) makes it wait for that
- * warehouse's turn first; `as` ({ bin, args }) is the command it stands for when it runs through a
- * wrapper (python/query_tag.py). Never throws: the outcome is { ok, code, killed, signal, cancelled?,
+ * warehouse's turn first. Never throws: the outcome is { ok, code, killed, signal, cancelled?,
  * stdout, stderr, error }.
  */
-export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null, as = null } = {}) {
+export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null } = {}) {
   const signal = currentSignal();
   const asked = Date.now();
   let began = asked;
   const start = () => { began = Date.now(); return spawnOnce(bin, args, { cwd, env, timeout, signal }); };
-  // (`as`: the command it stands for, when it runs through a wrapper — what the timing log names)
-  const done = (r) => { timing(as?.bin || bin, as?.args || args, asked, began, r); return r; };
+  const done = (r) => { timing(bin, args, asked, began, r); return r; };
   if (!turn) return start().then(done);
   return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
 }

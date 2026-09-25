@@ -36,11 +36,6 @@ export const RUNTIME_ASSETS = {
     repoPath: 'src/apps/result-view/dist/mcp-app.html',
     why: 'the MCP Apps view of a query result (ui://betti/result-view.html) — the BUILT single file (npm run build:app); the server reads it, nothing imports it',
   },
-  queryTag: {
-    path: join(ROOT, 'python', 'query_tag.py'),
-    repoPath: 'python/query_tag.py',
-    why: 'puts the call\'s query tag (client, tool, task) in front of every query the dbt / MetricFlow CLI sends — without it they run untagged',
-  },
   mfSidecar: {
     path: join(ROOT, 'python', 'mf_sidecar.py'),
     repoPath: 'python/mf_sidecar.py',

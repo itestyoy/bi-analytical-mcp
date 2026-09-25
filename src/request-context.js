@@ -1,6 +1,4 @@
-// WHAT THE CURRENT TOOL CALL CARRIES DOWN TO THE PROCESSES IT STARTS — its cancellation, and its
-// QUERY TAG: technical facts about where the call came from (the client application, the tool, the
-// task), which every warehouse query it causes carries as a leading SQL comment (src/dbt/query-tag.js).
+// WHAT THE CURRENT TOOL CALL CARRIES DOWN TO THE PROCESSES IT STARTS — today, its cancellation.
 //
 // A tool call can be abandoned: the client cancels it, the caller disconnects, a task is cancelled.
 // The work it started is a dbt process on the warehouse, several layers below the handler, and
@@ -18,23 +16,9 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 
 const storage = new AsyncLocalStorage();
 
-/** Run `fn` with `signal` as the cancellation of everything it starts (what else the call carries stays). */
+/** Run `fn` with `signal` as the cancellation of everything it starts. */
 export function withSignal(signal, fn) {
-  return storage.run({ ...(storage.getStore() || {}), signal }, fn);
-}
-
-/**
- * Run `fn` with `fields` added to the call's query tag — technical facts about where the work came
- * from (client, tool, task, context), not an identity: nothing here is verified.
- */
-export function withTag(fields, fn) {
-  const store = storage.getStore() || {};
-  return storage.run({ ...store, tag: { ...(store.tag || {}), ...fields } }, fn);
-}
-
-/** The query tag of the call this code runs for (a plain object), or null outside one. */
-export function currentTag() {
-  return storage.getStore()?.tag || null;
+  return storage.run({ signal }, fn);
 }
 
 /** The cancellation signal of the call this code runs for, or undefined outside one. */

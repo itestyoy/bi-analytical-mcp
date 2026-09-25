@@ -5,11 +5,9 @@
 
 import { existsSync, readFileSync, mkdtempSync, rmSync, copyFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { inIsolatedTarget } from '../request-context.js';
-import { assetPath } from '../runtime-assets.js';
 import { runProcess } from './process.js';
-import { queryTag } from './query-tag.js';
 import { warehouseOf } from './warehouse.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan } from './output.js';
 
@@ -39,26 +37,8 @@ export class DbtV1 {
     return warehouseOf(projectDir, this.profilesDir);
   }
 
-  /** Whether this dbt's `dbt` is the Python CLI, whose adapter python/query_tag.py can tag (v2's is not). */
-  get tagsDbtQueries() { return true; }
-
-  /**
-   * How to run `bin args` so every query it sends carries the call's query tag (src/dbt/query-tag.js):
-   * a Python CLI of an environment (`dbt` 1.x, `mf`) runs through python/query_tag.py on that
-   * environment's Python. Outside a call — or for a binary that is not one — it runs as it is.
-   */
-  _tagged(bin, args) {
-    const tag = queryTag();
-    const entry = bin === this.mfBin ? 'mf' : bin === this.dbtBin && this.tagsDbtQueries ? 'dbt' : null;
-    const python = entry && join(dirname(bin), 'python');
-    const script = entry && assetPath('queryTag');
-    if (!tag || !script || !existsSync(python)) return { bin, args, env: tag ? { MCP_QUERY_TAG: tag } : {} };
-    return { bin: python, args: [script, entry, ...args], env: { MCP_QUERY_TAG: tag } };
-  }
-
   _proc(bin, projectDir, args, { timeout = this.timeout, env = {} } = {}) {
-    const run = this._tagged(bin, args);
-    return runProcess(run.bin, run.args, { cwd: projectDir, env: { ...this._env(projectDir), ...env, ...run.env }, timeout, turn: this.warehouse(projectDir).turn, as: { bin, args } });
+    return runProcess(bin, args, { cwd: projectDir, env: { ...this._env(projectDir), ...env }, timeout, turn: this.warehouse(projectDir).turn });
   }
 
   /**

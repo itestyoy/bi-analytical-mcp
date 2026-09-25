@@ -27,7 +27,7 @@ import { openStore } from './store.js';
 import { buildProjection, projectionProblems } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
-import { detached, currentSignal, currentTag, isolatedTarget, withSignal, withTag } from './request-context.js';
+import { detached, currentSignal, isolatedTarget, withSignal } from './request-context.js';
 import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
 
 export class Engine {
@@ -2327,9 +2327,6 @@ export class Engine {
     const control = new AbortController();
     this._taskControls ||= new Map();
     this._taskControls.set(id, control);
-    // the work runs detached from the call, but its queries still say where they came from: the
-    // call's tag (client, tool), plus the task and its context (src/dbt/query-tag.js)
-    const tag = { ...(currentTag() || {}), task: id, ...(ctx ? { context: ctx.id } : {}) };
     const keep = (out) => {
       if (this.jobs.get(id)?.status === 'cancelled') return; // what the work did after the cancel is not its result
       this._keepTaskResult(id, { tool, input, out });
@@ -2344,7 +2341,7 @@ export class Engine {
       // failure path (clearing its in-flight marker and its checkpoint).
       if (control.signal.aborted && TASK_SIDE[tool] && tool.startsWith('query_')) return { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: 'cancelled before it started' } };
       // Members of a batch run at the same time on one context: each dbt process gets its own target/.
-      return withSignal(control.signal, () => withTag(tag, () => (batch ? isolatedTarget(() => work(id)) : work(id))));
+      return withSignal(control.signal, () => (batch ? isolatedTarget(() => work(id)) : work(id)));
     }).then(keep, (e) => keep({
       ok: false,
       error: { stage: e?.stage || 'task', message: e?.message || String(e), ...(e?.field ? { field: e.field } : {}), ...(e?.code ? { code: e.code } : {}) },

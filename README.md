@@ -151,11 +151,6 @@ metrics through (dbt's docs: without the dbt platform, "install MetricFlow separ
 `create` or built with other versions than the spec names is refused, and there is no binary to name
 from outside.
 
-Every warehouse query a tool call causes starts with a comment saying where it came from —
-`/* {"app":"dbt-semantic-mcp","client":"claude-ai/1.2","ua":"…","tool":"query_semantic_model","task":"…","context":"…"} */`
-— the client as its request described itself, the tool, and the task (see `src/dbt/query-tag.js`).
-It is technical information for reading the warehouse's query history, not an identity.
-
 What goes into an environment is decided by this repository, not by whoever builds it:
 `src/dbt/environment-specs.js` names the exact version of every package of each, and `create` installs
 exactly those (the image does it at `docker build`). There is no requirements file to pass in:

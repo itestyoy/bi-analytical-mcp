@@ -21,25 +21,9 @@ export function envelopeCapabilities(body, capabilitiesKey) {
   return caps && typeof caps === 'object' ? caps : null;
 }
 
-/**
- * Serve `fn` knowing the capabilities the request's client declared (null: none) and, as technical
- * information, which client it is (`client`: { name, version, userAgent } — the envelope's
- * clientInfo and the User-Agent header; nothing verified).
- */
-export function withClientCapabilities(capabilities, fn, client = null) {
-  return storage.run({ capabilities: capabilities || null, client }, fn);
-}
-
-/** The client application a request came from (a 2026-07-28 envelope's clientInfo), or null. */
-export function envelopeClientInfo(body, clientInfoKey) {
-  const msg = Array.isArray(body) ? body[0] : body;
-  const info = msg?.params?._meta?.[clientInfoKey];
-  return info && typeof info === 'object' ? info : null;
-}
-
-/** Which client the request being served came from: { name?, version?, userAgent? }, or null. */
-export function requestClient() {
-  return storage.getStore()?.client ?? null;
+/** Serve `fn` knowing the capabilities the request's client declared (null: none). */
+export function withClientCapabilities(capabilities, fn) {
+  return storage.run({ capabilities: capabilities || null }, fn);
 }
 
 /** The capabilities the client of the request being served declared, or null. */

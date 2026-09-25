@@ -9,7 +9,6 @@
 // Metric queries still go through MetricFlow's `mf` (a Python install of its own), which reads the
 // semantic_manifest.json v2 writes.
 
-import { tagSql } from './query-tag.js';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DbtV1 } from './v1.js';
@@ -23,14 +22,6 @@ export class DbtV2 extends DbtV1 {
   }
 
   get semanticSpec() { return 'latest'; }
-
-  /** The Rust binary: no Python adapter to hook, so the SQL this client hands it carries the tag itself. */
-  get tagsDbtQueries() { return false; }
-
-  /** `dbt show --inline`, with the call's query tag in front of the SQL (the binary adds none of its own). */
-  show(projectDir, sql, limit, timeout) {
-    return super.show(projectDir, tagSql(sql), limit, timeout);
-  }
 
   pythonModelsOn(adapter) { return !NO_PYTHON_MODELS.has(String(adapter || '').toLowerCase()); }
 

@@ -713,7 +713,7 @@
   color: var(--muted-foreground);
 }
 
-/* ── A/B result: a stat card per variant (shadcn dashboard "section cards") ───────────────── */
+/* ── A/B result: a stat card for one variant, one card with a row per group for several ──── */
 .ab-list {
   display: flex;
   flex-direction: column;
@@ -724,6 +724,125 @@
   container: card / inline-size;
 }
 
+
+/* Several variants: one grid, the rows its subgrids — so the values, the lifts and the intervals
+   line up down the card whatever each cell holds; a narrow card stacks each row instead. */
+.ab-table {
+  display: grid;
+  grid-template-columns: minmax(5rem, 1fr) auto auto minmax(8rem, 2fr) fit-content(12rem);
+  column-gap: calc(var(--space) * 4);
+  font-variant-numeric: tabular-nums;
+}
+
+.ab-row {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-template-areas: "group value lift plot result";
+  row-gap: calc(var(--space) * 1.5);
+  align-items: center;
+  padding: calc(var(--space) * 3) 0;
+  border-top: var(--border-width-regular) solid var(--border);
+}
+
+.ab-head {
+  padding-top: 0;
+  border-top: 0;
+  align-items: end;
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+  color: var(--muted-foreground);
+
+  /* a heading takes the width its column's figures set, and wraps inside it */
+  > .ab-cell {
+    contain: inline-size;
+  }
+}
+
+.ab-foot {
+  padding-top: 0;
+  border-top: 0;
+
+  .ci-axis > * {
+    white-space: nowrap;
+  }
+}
+
+.ab-cell {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 0.5);
+}
+
+.ab-group { grid-area: group; }
+.ab-value { grid-area: value; text-align: right; }
+.ab-lift { grid-area: lift; text-align: right; }
+.ab-plot { grid-area: plot; }
+.ab-result { grid-area: result; align-items: flex-start; }
+
+.ab-result .badge {
+  white-space: nowrap;
+}
+
+.ab-main {
+  font-size: var(--font-text-sm-size);
+  line-height: var(--font-text-sm-line-height);
+  overflow-wrap: anywhere;
+}
+
+.ab-group .ab-main {
+  font-weight: var(--font-weight-medium);
+}
+
+.ab-lift .ab-main {
+  font-size: var(--font-text-md-size);
+  line-height: var(--font-text-md-line-height);
+  font-weight: var(--font-weight-semibold);
+}
+
+.ab-caption {
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+.ab-control {
+  .ab-value .ab-main {
+    font-weight: var(--font-weight-semibold);
+  }
+}
+
+/* a narrow card: each group becomes a block — name and verdict, then value and lift, then the
+   interval across the full width — and the column headings give way to the labels in the cells */
+@container card (max-width: 600px) {
+  .ab-table {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .ab-row {
+    grid-template-areas:
+      "group result"
+      "value lift"
+      "plot plot";
+  }
+
+  .ab-head {
+    display: none;
+  }
+
+  .ab-row:nth-child(2) {
+    border-top: 0;
+    padding-top: 0;
+  }
+
+  .ab-value { text-align: left; }
+  .ab-result { align-items: flex-end; text-align: right; }
+  .ab-control .ab-plot { display: none; }
+  .ab-foot { grid-template-areas: "plot plot"; }
+  .ab-foot > :not(.ab-plot) { display: none; }
+}
 
 /* Interval plot: a range bar, the estimate, the no-effect line — HTML, so it stretches crisply */
 .ci-plot {

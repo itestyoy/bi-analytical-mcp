@@ -1,0 +1,171 @@
+/* The path-analysis card's own pieces, on the result view's theme and components (global.css,
+   mcp-app.css): the graph, the sankey, the heatmap cells and the controls. Every colour is a theme
+   token, so the host's theme (and dark mode) carries through. */
+
+#content {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 4);
+}
+
+.rt-stack {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--space) * 4);
+}
+
+/* ── graph ── */
+.rt-graph {
+  position: relative;
+}
+
+.rt-graph-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 480px;
+}
+
+.rt-edge {
+  fill: none;
+  stroke: color-mix(in oklab, var(--color-series-1) 55%, transparent);
+  stroke-linecap: round;
+  transition: stroke 0.12s;
+
+  &.rt-edge-on {
+    stroke: var(--color-series-1);
+  }
+}
+
+.rt-edge-hit {
+  fill: none;
+  stroke: transparent;
+  stroke-width: 12;
+  cursor: default;
+}
+
+.rt-arrow {
+  fill: color-mix(in oklab, var(--color-series-1) 70%, transparent);
+}
+
+.rt-node {
+  circle {
+    fill: var(--color-series-1);
+    stroke: var(--card);
+    stroke-width: 2;
+  }
+
+  text {
+    font-size: 11px;
+    fill: var(--foreground);
+    paint-order: stroke;
+    stroke: var(--card);
+    stroke-width: 3px;
+    stroke-linejoin: round;
+  }
+
+  &.rt-node-synthetic circle {
+    fill: var(--card);
+    stroke: var(--muted-foreground);
+    stroke-dasharray: 3 2;
+  }
+}
+
+.rt-tooltip {
+  position: absolute;
+  pointer-events: none;
+  min-width: 10rem;
+  z-index: 3;
+}
+
+.rt-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--space) * 4);
+  margin-bottom: calc(var(--space) * 3);
+}
+
+.rt-control {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--space) * 2);
+  font-size: var(--font-text-sm-size);
+  color: var(--muted-foreground);
+}
+
+.rt-select {
+  height: 2rem;
+  padding: 0 calc(var(--space) * 2);
+  border: var(--border-width-regular) solid var(--border);
+  border-radius: var(--border-radius-md);
+  background-color: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.rt-range {
+  accent-color: var(--color-series-1);
+}
+
+.rt-range-value {
+  font-variant-numeric: tabular-nums;
+  color: var(--foreground);
+}
+
+.rt-caption {
+  margin-top: calc(var(--space) * 2);
+}
+
+/* ── heatmap tables (step matrix, overviews) ── */
+.rt-heat {
+  .rt-event {
+    position: sticky;
+    left: 0;
+    max-width: 14rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    background-color: var(--card);
+    font-weight: var(--font-weight-medium);
+  }
+
+  .rt-cell {
+    background-color: color-mix(in oklab, var(--color-series-1) calc(var(--share, 0) * 70%), transparent);
+  }
+
+  .rt-size td {
+    font-weight: var(--font-weight-medium);
+  }
+}
+
+/* ── sankey ── */
+.rt-scroll {
+  overflow-x: auto;
+}
+
+.rt-sankey {
+  display: block;
+  min-width: 100%;
+  height: auto;
+}
+
+.rt-flow {
+  opacity: 0.28;
+  transition: opacity 0.12s;
+
+  &:hover {
+    opacity: 0.55;
+  }
+}
+
+.rt-sankey-label {
+  font-size: 11px;
+  fill: var(--foreground);
+  paint-order: stroke;
+  stroke: var(--card);
+  stroke-width: 3px;
+}
+
+.rt-sankey-step {
+  font-size: 11px;
+  fill: var(--muted-foreground);
+}

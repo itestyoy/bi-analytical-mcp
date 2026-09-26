@@ -29,6 +29,7 @@ RUN set -e; \
     node scripts/dbt-env.mjs create metricflow; \
     node scripts/dbt-env.mjs create dbt-v1; \
     node scripts/dbt-env.mjs create dbt-v2; \
+    node scripts/dbt-env.mjs create retentioneering; \
     # for a shell in the container: `mf` on PATH — only mf; the MetricFlow venv's own `dbt` (dbt-core
     # 1.x) is not the dbt the server runs, so its bin/ is NOT put on PATH
     ln -s "$DBT_ENVS_DIR/metricflow/bin/mf" /usr/local/bin/mf

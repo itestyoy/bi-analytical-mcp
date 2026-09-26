@@ -46,6 +46,7 @@ import {
 import { Flow, SankeyController } from 'chartjs-chart-sankey';
 import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../result-view-model.js';
 import { icon } from './icons.js';
+import { el, badge, card, formatNumber, formatShare, numberFormat, integerFormat } from '../../shared/ui.js';
 import './global.css';
 import './mcp-app.css';
 
@@ -160,18 +161,6 @@ const state = {
 
 // ── formatting ────────────────────────────────────────────────────────────────────────────────
 
-const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
-const integerFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
-
-function formatNumber(value) {
-  if (value === null || value === undefined) return '—';
-  const n = typeof value === 'number' ? value : Number(value);
-  if (!Number.isFinite(n)) return String(value);
-  if (Math.abs(n) >= 1000) return integerFormat.format(n);
-  if (n !== 0 && Math.abs(n) < 0.01) return n.toPrecision(3);
-  return numberFormat.format(n);
-}
-
 const formatPercent = (value) => (value === null || value === undefined ? '—' : `${(value * 100).toFixed(2)}%`);
 const sign = (v) => (v > 0 ? '+' : v < 0 ? '−' : '');
 const formatPoints = (v) => `${sign(v)}${Math.abs(v * 100).toFixed(2)} pp`;
@@ -206,7 +195,6 @@ function timeFormatter(values) {
   return (v) => { const d = parseTime(v); return Number.isNaN(d.getTime()) ? String(v) : fmt.format(d); };
 }
 
-const formatShare = (v) => (v === null || v === undefined ? '—' : `${(v * 100).toFixed(1)}%`);
 const formatSignedNumber = (v) => `${sign(v)}${formatNumber(Math.abs(v))}`;
 const formatP = (p) => (p < 0.001 ? '<0.001' : p.toFixed(3));
 /** One number format for a whole column: the same decimals down it, so the digits line up. */
@@ -242,37 +230,6 @@ const seriesColor = (i) => cssVar(`--color-series-${(i % 6) + 1}`);
 const withAlpha = (rgba, a) => rgba.replace(/[\d.]+\)$/, `${a})`);
 
 // ── building blocks ──────────────────────────────────────────────────────────────────────────
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  if (text !== undefined && text !== null) node.textContent = text; // data goes in as text, never as markup
-  return node;
-}
-
-function badge(text, variant = 'outline', iconName = null) {
-  const node = el('span', `badge badge-${variant}`);
-  if (iconName) node.append(icon(iconName));
-  node.append(document.createTextNode(text));
-  return node;
-}
-
-/** shadcn Card: header (description, title, optional action) and any content blocks. */
-function card({ title, description, action, subline, titleClass = 'card-title' }, ...content) {
-  const node = el('article', 'card');
-  const header = el('div', 'card-header');
-  if (description !== undefined) header.append(el('p', 'card-description', description));
-  header.append(title instanceof Node ? title : el('p', titleClass, title));
-  if (action) {
-    const a = el('div', 'card-action');
-    a.append(action);
-    header.append(a);
-  }
-  if (subline) header.append(el('p', 'card-description card-subline', subline));
-  node.append(header);
-  for (const c of content) if (c) node.append(c);
-  return node;
-}
 
 function payloadOf(result) {
   if (!result) return null;

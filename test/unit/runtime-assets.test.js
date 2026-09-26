@@ -46,6 +46,9 @@ test('no runtime asset directory is excluded by .dockerignore', () => {
   for (const [name, a] of Object.entries(RUNTIME_ASSETS)) {
     const dir = a.repoPath.split('/')[0];
     assert.ok(!patterns.includes(dir) && !patterns.includes(`${dir}/`), `.dockerignore excludes ${dir}/, needed by ${name}`);
+    // …nor the file itself by an extension pattern (`*.json`) that no `!<path>` lets back in
+    const ext = a.repoPath.match(/\.[a-z]+$/)?.[0];
+    if (ext && patterns.includes(`*${ext}`)) assert.ok(patterns.includes(`!${a.repoPath}`), `.dockerignore excludes *${ext}, so ${a.repoPath} (needed by ${name}) needs a !${a.repoPath} line`);
   }
 });
 

@@ -98,7 +98,7 @@ export function buildSkills(engine) {
   const python = catalog.pythonRuntime?.available
     ? pythonAuthoringGuide(frameProfile(catalog.pythonRuntime, engine.pythonModelConfig), recipes?.entriesRequiring('python_models') || [])
     : null;
-  const guide = buildGuide(catalog, recipes, { python });
+  const guide = buildGuide(catalog, recipes, { python, features: engine.features || [] });
   const byFamily = new Map();
   for (const r of visible) { const f = r.task_type || 'other'; if (!byFamily.has(f)) byFamily.set(f, []); byFamily.get(f).push(r); }
   const recipeIndex = [...byFamily.entries()].map(([fam, list]) => `### ${fam}\n\n${list.map((r) => `- [${r.title || r.id}](recipes/${r.id}.md) — ${r.when_to_use || ''}`.trim()).join('\n')}`).join('\n\n');
@@ -160,6 +160,12 @@ export function buildSkills(engine) {
       name: 'python-stage',
       description: 'Authoring guide for a python stage in a build_pipeline_model pipeline on this warehouse\'s python runtime: what belongs in python (only what SQL cannot say, on a table prepared by SQL stages), the frame\'s rules and the forms that raise, the in-engine ML library, and worked recipes per move. Use before writing any python stage.',
     }, pyBody, pyRecipes.map(recipeFile));
+  }
+
+  // ── each feature's skill, rendered from its own guide (src/features.js) ──
+  for (const feature of engine.features || []) {
+    const sk = feature.skill?.(engine);
+    if (sk) addSkill(sk.path, sk.frontmatter, sk.body, sk.references || []);
   }
 
   return {

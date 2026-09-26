@@ -19,6 +19,7 @@ import { frameProfile } from './python-model.js';
 import { ContextManager } from './context-manager.js';
 import { createDbt, DEFAULT_ENV } from './dbt/index.js';
 import { Engine } from './engine.js';
+import { resolveFeatures } from './features.js';
 import { BackgroundIndexer } from './value-index.js';
 import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
@@ -147,7 +148,14 @@ export async function makeEngine(opts = {}) {
   } else {
     console.error(`[mcp] ${new Date().toISOString()} memory: findings live in the shared store at ${dbPath} — set MCP_MEMORY_DB to a persistent volume to retain them across container restarts`);
   }
-  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath });
+  // THE FEATURES THIS DEPLOYMENT TURNS ON (src/features.js) — each off unless its flag says on, and
+  // left out with its reason when it cannot run here; read once, at start, like every other flag
+  const { features, status: featureStatus } = resolveFeatures({
+    env: process.env, catalog, baseProjectDir,
+    profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir,
+    log: (m) => console.error(`[mcp] ${new Date().toISOString()} ${m}`),
+  });
+  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, features, featureStatus });
   // Persistence surfaces as semantic_index({ status }).value_index.persisted. If a DB path was
   // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
   // loudly, because otherwise the index silently rebuilds from scratch on every restart.

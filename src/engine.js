@@ -19,6 +19,7 @@ import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
 import { rankFuzzy } from './fuzzy.js';
 import { buildGuide } from './guide.js';
+import { featureTools } from './features.js';
 import { pythonAuthoringGuide } from './python-guide.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
@@ -31,7 +32,7 @@ import { detached, currentSignal, isolatedTarget, withSignal } from './request-c
 import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, features = [], featureStatus = [] }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -75,6 +76,22 @@ export class Engine {
     // what the installed dbt can run, before the schemas exist (dbt v2 runs no Python models on DuckDB)
     gatePythonRuntime(catalog, runner);
     this.schemas = buildSchemas(catalog);
+    // THE FEATURES THIS DEPLOYMENT RUNS (src/features.js): each adds its tools — a schema here and a
+    // method on this engine — and the task side they start and read. A feature that is off adds
+    // nothing, so its tools are neither listed nor callable.
+    this.features = features;
+    this.featureStatus = featureStatus;
+    this._featureTools = featureTools(features);
+    for (const [name, { tool }] of this._featureTools) {
+      if (Object.prototype.hasOwnProperty.call(this.schemas, name) || typeof this[name] === 'function') throw new Error(`feature tool '${name}' collides with a core tool`);
+      this.schemas[name] = tool.schema(catalog);
+      this[name] = (input) => tool.run(this, input || {});
+    }
+    // which side a task belongs to, and which tool reads that side back — the core's two, and each feature's
+    this._sides = { ...TASK_SIDE };
+    this._readers = { ...SIDE_READER };
+    for (const feature of features) Object.assign(this._readers, feature.sides || {});
+    for (const [name, { tool }] of this._featureTools) if (tool.side) this._sides[name] = tool.side;
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
     // Constrain the recipe view to real ids when recipes are configured.
@@ -515,6 +532,7 @@ export class Engine {
         python: this.catalog.pythonRuntime?.available
           ? pythonAuthoringGuide(frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig), this.recipes?.entriesRequiring('python_models') || [])
           : null,
+        features: this.features,
       });
     }
 
@@ -1018,6 +1036,14 @@ export class Engine {
           note: 'A pipeline may end in a `python` stage (build_pipeline_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.',
         }
         : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
+      // The features this deployment was asked to run (src/features.js): what each offers when on,
+      // and why it is not offered when it cannot run here. A feature nobody asked for is not listed.
+      ...(this.featureStatus.length ? {
+        features: Object.fromEntries(this.featureStatus.map((st) => {
+          const f = this.features.find((x) => x.id === st.id);
+          return [st.id, st.available && f?.overview ? { available: true, ...f.overview(this) } : st.available ? { available: true } : { available: false, reason: st.reason }];
+        })),
+      } : {}),
       // dbt connects with an adapter this server writes no SQL for, so the SQL is rendered in
       // another dialect's syntax against it — true of this deployment, and worth knowing when SQL
       // a pipeline generated is rejected by the engine that runs it.
@@ -2339,7 +2365,7 @@ export class Engine {
       // A query cancelled while it waited never starts. A cancelled BUILD still runs its work —
       // with its signal already aborted, so no dbt process starts and the work goes down its own
       // failure path (clearing its in-flight marker and its checkpoint).
-      if (control.signal.aborted && TASK_SIDE[tool] && tool.startsWith('query_')) return { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: 'cancelled before it started' } };
+      if (control.signal.aborted && this._sides[tool] && tool.startsWith('query_')) return { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: 'cancelled before it started' } };
       // Members of a batch run at the same time on one context: each dbt process gets its own target/.
       return withSignal(control.signal, () => (batch ? isolatedTarget(() => work(id)) : work(id)));
     }).then(keep, (e) => keep({
@@ -2380,7 +2406,7 @@ export class Engine {
       if (this._ctxQueue.get(ctx.id) === all) this._ctxQueue.delete(ctx.id);
     });
     this._ctxQueue.set(ctx.id, all);
-    const reader = SIDE_READER[TASK_SIDE[tool]];
+    const reader = this._readers[this._sides[tool]];
     return {
       task_ids: ids,
       context_id: ctx.id,
@@ -2397,7 +2423,7 @@ export class Engine {
   /** What a tool that started a task answers: the task's id and where to read it — nothing else. */
   _taskStarted(id, extra = {}) {
     const side = this._taskSide(this.jobs.get(id));
-    return { task_id: id, ...extra, ...(side ? { read_with: SIDE_READER[side] } : {}), next: `${this._readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
+    return { task_id: id, ...extra, ...(side ? { read_with: this._readers[side] } : {}), next: `${this._readWith(id)} — it waits for the task (up to ${MAX_WAIT_SECONDS}s per call) and returns its result` };
   }
 
   /** Keep a task's finished response for the query tools to read back — the newest few hundred, for an hour. A stored table outlives it. */
@@ -3484,7 +3510,7 @@ export class Engine {
 
   /** The side a task belongs to (semantic | pipeline), from the tool that started it (persisted with the task). */
   _taskSide(job) {
-    return TASK_SIDE[job?.tool] || null;
+    return this._sides[job?.tool] || null;
   }
 
   /** How to get rows past what a task holds — said in the terms of the tool that ran it. */
@@ -3497,7 +3523,7 @@ export class Engine {
   /** The call that reads a task back: its side's query tool, with the task_id. */
   _readWith(id) {
     const side = this._taskSide(this.jobs.get(id));
-    return side ? `${SIDE_READER[side]}({ task_id: '${id}' })` : `query_semantic_model or query_pipeline_model with { task_id: '${id}' }`;
+    return side ? `${this._readers[side]}({ task_id: '${id}' })` : `query_semantic_model or query_pipeline_model with { task_id: '${id}' }`;
   }
 
   /**
@@ -3529,7 +3555,7 @@ export class Engine {
       if (job.status !== 'running') {
         return { task_id: id, cancelled: false, status: job.status === 'ready' ? 'done' : job.status, note: `already ${job.status === 'ready' ? 'finished' : job.status} — nothing to cancel` };
       }
-      const reason = `cancelled by ${SIDE_READER[side]}({ task_id, cancel: true })`;
+      const reason = `cancelled by ${this._readers[side]}({ task_id, cancel: true })`;
       this._taskControls?.get(id)?.abort(new Error(reason));
       this.jobs.cancel(id, reason);
       this._keepTaskResult(id, { tool: job.tool, input: null, out: { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: reason } } });
@@ -3559,7 +3585,7 @@ export class Engine {
       waited_seconds: waited,
       ...(failed ? { failed } : {}),
       results,
-      ...(running.length ? { next: `${running.length} still running — call ${SIDE_READER[side]}({ task_ids: [${running.map((id) => `'${id}'`).join(', ')}] }) for them; the others are final above` } : {}),
+      ...(running.length ? { next: `${running.length} still running — call ${this._readers[side]}({ task_ids: [${running.map((id) => `'${id}'`).join(', ')}] }) for them; the others are final above` } : {}),
     };
   }
 
@@ -3574,7 +3600,7 @@ export class Engine {
   _taskForSide(id, side) {
     const job = this._knownTask(id);
     const own = this._taskSide(job);
-    if (own && own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${SIDE_READER[own]}({ task_id: '${job.id}' })`, { stage: 'validate', field: 'task_id' });
+    if (own && own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this._readers[own]}({ task_id: '${job.id}' })`, { stage: 'validate', field: 'task_id' });
     return job;
   }
 
@@ -3591,7 +3617,7 @@ export class Engine {
     else if (tool === 'display_model_result') {
       this._knownTask(args.task_id);
       if (this._displayed?.get(args.task_id) === 'drawn' || this.jobs.get(args.task_id)?.drawn) throw new ToolError(`task ${args.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'task_id' });
-    }
+    } else this._featureTools.get(tool)?.tool.precheck?.(this, args);
   }
 
   /** Wait for a task (within the cap) and read what it produced — the one read the query tools and display_model_result share. */

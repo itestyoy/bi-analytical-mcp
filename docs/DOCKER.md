@@ -116,6 +116,45 @@ analytics:
   session table that lived in the process: after a restart, clients got errors for a session id the
   new process had never issued until the connector was re-added by hand.)
 
+## Path analysis: the retentioneering feature (off unless turned on)
+
+`MCP_RETENTIONEERING=on` adds a side of its own — three tools, a view, a guide and a skill — for
+path analysis with [retentioneering](https://github.com/retentioneering/retentioneering-tools) 5.x
+(Apache-2.0). Off (the default), none of it exists: not listed, not callable, not described.
+
+- **`build_retentioneering_model`** — the DATA: the eventstream an analysis reads (events source,
+  time window, events kept / dropped / merged into groups, the most frequent N names with the rest
+  as `other`, user attributes carried as segments through the declared relationship, optional
+  sessions split at a gap, and a user sample by a hash of the key — the same users on every build).
+  It is built in SQL where the data lives and materialized; the call returns a task.
+- **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, analyses: [...] }` runs every
+  listed analysis (transition graph, step matrix, step sankey, funnel, path clusters, segment
+  overview — up to one of each) as ONE dbt Python model: in the dbt process on DuckDB, on the
+  warehouse's Python runtime on BigQuery (Colab Enterprise through `submission_method: bigframes`).
+  One call = one run = one cold start. `{ task_id }` reads it back, summarized for the model.
+- **`display_retentioneering_result`** — the SHOW: one analysis of a finished task drawn as a card
+  (`ui://betti/retentioneering-view.html`), once per analysis. The graph switches between all the
+  transition weights and hides the small arrows on the page itself — no recomputation.
+
+Nothing heavy runs in the server: a call starts a task, the warehouse computes, and a small result
+table comes back. Configuration:
+
+- The feature runs on its own dbt environment, **`retentioneering`** (dbt 1.x, both adapters and
+  the library with its numerical dependencies at exact versions — `src/dbt/environment-specs.js`);
+  the image builds it. `MCP_RETENTIONEERING_ENV` names another environment of the specs.
+- **BigQuery / Colab Enterprise:** dbt installs `retentioneering==<the pinned version>` on the
+  runtime at every run (the model's `packages`). The runtime template dbt creates by itself has **no
+  internet access**, so that install fails there: give a template with access to PyPI (or with the
+  package preinstalled) through `MCP_RETENTIONEERING_MODEL_CONFIG`, a JSON of extra `dbt.config`
+  keys, e.g. `{"notebook_template_id": "<id>", "timeout": 3600}`. The profile supplies `gcs_bucket`
+  and `compute_region` as for any bigframes model.
+- `MCP_RETENTIONEERING_MAX_EVENTS` (default 5,000,000) — the most events one analysis run holds in
+  memory; a bigger eventstream is refused with a hint to sample.
+- The library's telemetry is switched off in every model it runs in (`RETENTIONEERING_NO_TRACK=1`).
+- What the tools offer — the analyses and their parameters, the edge weights, the path metrics,
+  the clustering methods — is generated from the installed library into
+  `config/retentioneering-facts.json` (`scripts/retentioneering-facts.py --write | --check`).
+
 ## Protocol: MCP 2026-07-28 on the official SDK, plus three extensions
 The server is built on the official MCP TypeScript SDK **v2** (`@modelcontextprotocol/server`), the
 stable line that implements protocol revision **2026-07-28**. The same SDK — not a second code path

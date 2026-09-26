@@ -13,4 +13,6 @@ dbt_project
 !package.json
 !package-lock.json
 !config/recipes.json
+!config/bigframes-facts.json
+!config/retentioneering-facts.json
 bq-key.json

@@ -8,6 +8,7 @@ import { MAX_WAIT_SECONDS, MAX_BATCH } from './schema.js';
 import { withSignal } from './request-context.js';
 import { appsSurface, viewMeta, VIEWED_TOOLS, APPS_ONLY_TOOLS, APP_CALLABLE_TOOLS } from './apps.js';
 import { buildViewModel } from './apps/result-view-model.js';
+import { featureTool } from './features.js';
 
 // experiment draws its own card when the call asks for it (`card: true`) — accepted only from a
 // client that renders cards, like a call to display_model_result itself.
@@ -64,7 +65,7 @@ In a host that renders MCP Apps, a result can be drawn for the person as a card.
  * follows is for a client that reads on. Nothing a single call needs lives only here — every tool
  * description stands on its own, and the spec asks instructions not to repeat them.
  */
-function coreInstructions({ apps = false, skillUris = [] } = {}) {
+function coreInstructions({ apps = false, skillUris = [], featureLines = [] } = {}) {
   return [
     'Semantic layer for product analytics over a fixed data catalog: you declare metrics and derived tables and query them by name; the server writes and runs the SQL. Flow: semantic_index (find what exists) → build_semantic_model (reusable named metrics) or build_pipeline_model (a one-off table: funnels, sessions, pivots) → query_semantic_model / query_pipeline_model. Warehouse work returns a task_id at once; read it back with the same side\'s query tool.',
     '',
@@ -73,6 +74,7 @@ function coreInstructions({ apps = false, skillUris = [] } = {}) {
     'Name the events source in every call: sources are independent and never mixed. User attributes live on the users model ({ model: "users", attribute }), not on the events, and joins follow the relationships the catalog declares — you never state join columns.',
     `For ${RESEARCH_SCOPE}, first read ${RESEARCH_ROUTE}.`,
     'Answer as soon as a result answers the question; query again when the numbers look wrong or the question needs another cut, not to re-confirm a result you already have.',
+    ...featureLines,
     ...(apps ? ['Show the result the person should see as a card, once: display_model_result({ task_id, display }) (see RESULT CARDS below).'] : []),
     ...(skillUris.length ? [`The same procedure is served as Agent Skills: ${skillUris.join(', ')}.`] : []),
     '',
@@ -172,17 +174,19 @@ export function buildToolDefs(engine) {
   return Object.entries(engine.schemas)
     .filter(([name]) => !HIDDEN_TOOLS.has(name))
     .map(([name, schema]) => {
-      const title = TOOL_TITLES[name] || titleFromName(name);
-      const meta = viewMeta(name);
+      // a feature's tool carries its own title, description, behaviour and view (src/features.js)
+      const ft = featureTool(engine, name);
+      const title = ft?.tool.title || TOOL_TITLES[name] || titleFromName(name);
+      const meta = viewMeta(name, ft?.tool.draws ? ft.feature.view : null);
       const inputSchema = schema;
       // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
       // read the older annotations location. `name` remains the stable programmatic identifier.
       return {
         name,
         title,
-        description: TOOL_DESCRIPTIONS[name] || name,
+        description: ft?.tool.description || TOOL_DESCRIPTIONS[name] || name,
         inputSchema,
-        annotations: { title, openWorldHint: false, ...(TOOL_BEHAVIOUR[name] || {}) },
+        annotations: { title, openWorldHint: false, ...(ft?.tool.behaviour || TOOL_BEHAVIOUR[name] || {}) },
         ...(meta ? { _meta: meta } : {}),
       };
     });
@@ -222,13 +226,17 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
 /** A tool's return value as an MCP CallToolResult: the JSON as text (what the model reads) and the
  *  same value as `structuredContent` (what a program — the Apps view — reads; the spec asks for
  *  both, and a host that uses the structured copy does not add it to the model's context). */
-export function toCallToolResult(result, name, args) {
+export function toCallToolResult(result, name, args, engine = null) {
   // STRUCTURED OUTPUT ONLY FOR A CARD THAT IS DRAWN: display_model_result's answer when the engine drew
   // it (the task's one card), or experiment's when the call asked for its card (`card: true`) — and
-  // only when the same view model the card runs finds something to draw. Anything else — every
-  // other tool, a refusal, a failure — is the text alone.
+  // only when the same view model the card runs finds something to draw. A feature's drawing tool
+  // follows the same rule with its own view model. Anything else — every other tool, a refusal, a
+  // failure — is the text alone.
   const asked = name === 'experiment' ? args?.card === true : isPlainObject(result) && result.drawn === true;
-  const structured = VIEWED_TOOLS.has(name) && asked && isPlainObject(result) && buildViewModel(name, result, args).kind !== 'none';
+  const ft = featureTool(engine, name);
+  const structured = ft?.tool.draws
+    ? asked && isPlainObject(result) && ft.feature.view.viewModel(result, args).kind !== 'none'
+    : VIEWED_TOOLS.has(name) && asked && isPlainObject(result) && buildViewModel(name, result, args).kind !== 'none';
   return {
     content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
     ...(structured ? { structuredContent: result } : {}),
@@ -260,7 +268,8 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
   // card's own read (drill_result) is the exception: the HOST makes that call on behalf of a card
   // this server drew, and the proof it may read is the drawn task — not the envelope the host puts
   // on a proxied request, which the host decides and this server cannot vouch for.
-  if (!renders && APPS_ONLY_TOOLS.has(name) && !APP_CALLABLE_TOOLS.includes(name)) {
+  const ft = featureTool(engine, name);
+  if (!renders && (APPS_ONLY_TOOLS.has(name) || ft?.tool.draws) && !APP_CALLABLE_TOOLS.includes(name)) {
     logLine(name, '✗ from a client without the Apps extension');
     return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_id })`, 'validate'), raw: null };
   }
@@ -278,11 +287,11 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
     }, progressEveryMs);
   }
   try {
-    let raw = await withSignal(signal, () => (ASYNC_TOOLS.has(name) ? engine[name](args || {}) : Promise.resolve().then(() => engine[name](args || {}))));
+    let raw = await withSignal(signal, () => (ASYNC_TOOLS.has(name) || ft ? engine[name](args || {}) : Promise.resolve().then(() => engine[name](args || {}))));
     // the hint to show a result as a card means nothing to a client that draws none
     if (!renders && isPlainObject(raw) && 'show_to_user' in raw) { const { show_to_user: _hint, ...rest } = raw; raw = rest; }
     logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(raw)}`);
-    return { result: toCallToolResult(raw, name, args), raw };
+    return { result: toCallToolResult(raw, name, args, engine), raw };
   } catch (err) {
     const cancelled = !!signal?.aborted;
     logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} in ${Date.now() - started}ms: ${err?.message || String(err)}${err?.field ? ` (field: ${err.field})` : ''}`);
@@ -308,7 +317,7 @@ export async function runToCompletion(engine, calledAs, args, { signal, renders 
   // the tasks the call reads: one (task_id), or a batch (task_ids) — followed until every one is done
   const ids = typeof args?.task_id === 'string' ? [args.task_id] : Array.isArray(args?.task_ids) ? args.task_ids.filter((id) => typeof id === 'string') : [];
   // (a cancel is answered at once: it never waits for the task it stops)
-  let waits = WAITS_ON_TASK.has(name) && !args?.cancel && ids.length > 0 && ids.every((id) => engine.jobs?.get?.(id));
+  let waits = (WAITS_ON_TASK.has(name) || !!featureTool(engine, name)?.tool.waits) && !args?.cancel && ids.length > 0 && ids.every((id) => engine.jobs?.get?.(id));
   // what the call would refuse — bad arguments, a task of the other side, a card already drawn — is
   // refused NOW, not after sitting through the whole task
   if (waits && typeof engine._precheckWait === 'function') {
@@ -372,7 +381,8 @@ export function errorResult(message, stage, field, code) {
  * a server per request, and every one of them must see the same tasks and the same digests.
  */
 export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs = PROGRESS_EVERY_MS, taskAfterMs = Number(process.env.MCP_TASK_AFTER_MS) || 3000 } = {}) {
-  const apps = appsSurface();
+  const apps = appsSurface(engine.features || []);
+  const featureLines = (engine.features || []).map((f) => f.instructions).filter(Boolean);
   let skills = null;
   try { skills = buildSkills(engine); } catch (e) { logLine('skills', `✗ not served: ${e?.message || e}`); }
   const tasks = new TaskRegistry({
@@ -386,7 +396,7 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     : '';
   // the core block first (within the budget a client may cut to), the detail after it
   const instructionsFor = (offer = {}) => [
-    coreInstructions({ apps: !!offer.apps, skillUris: offer.skills ? skillUris : [] }),
+    coreInstructions({ apps: !!offer.apps, skillUris: offer.skills ? skillUris : [], featureLines }),
     `\n\n${SERVER_DESCRIPTION}`,
     offer.apps ? `\n\n${RESULT_CARDS}` : '',
     offer.skills ? skillPointer : '',

@@ -101,6 +101,8 @@ export class BigQueryDialect extends Dialect {
   jsonColumnStructField(column, field, type = 'string') { return this.jsonColumnField(column, field, type); }
 
   // ── time / scalar / statistical ────────────────────────────────────────────
+  valueBucket(expr, buckets) { return `MOD(ABS(FARM_FINGERPRINT(CAST(${expr} AS STRING))), ${Number(buckets)})`; }
+
   dateDiff(unit, from, to) {
     const u = { day: 'DAY', hour: 'HOUR', minute: 'MINUTE', second: 'SECOND' }[unit];
     if (!u) throw new Error(`dateDiff: bad unit ${unit}`);

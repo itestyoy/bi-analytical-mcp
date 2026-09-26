@@ -75,11 +75,13 @@ const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? [...TOOL_VIS
 
 /**
  * The `_meta` every tool carries: its visibility, and — for a viewed tool — the view, in both
- * spellings registerAppTool writes.
+ * spellings registerAppTool writes. `featureView` is the view of a feature's drawing tool (its own
+ * page, src/features.js); a core viewed tool draws into the result view.
  */
-export function viewMeta(tool) {
-  return VIEWED_TOOLS.has(tool)
-    ? { ui: { resourceUri: RESULT_VIEW_URI, visibility: visibilityOf(tool) }, [RESOURCE_URI_META_KEY]: RESULT_VIEW_URI }
+export function viewMeta(tool, featureView = null) {
+  const uri = featureView?.uri || (VIEWED_TOOLS.has(tool) ? RESULT_VIEW_URI : null);
+  return uri
+    ? { ui: { resourceUri: uri, visibility: visibilityOf(tool) }, [RESOURCE_URI_META_KEY]: uri }
     : { ui: { visibility: visibilityOf(tool) } };
 }
 
@@ -95,16 +97,33 @@ const RESOURCE = {
   _meta: { ui: { prefersBorder: true, csp: VIEW_CSP } },
 };
 
-let html; // read once: the page is static, the data arrives by message
-export const appsSurface = () => ({
-  resources: () => [RESOURCE],
-  read(uri) {
-    if (uri !== RESULT_VIEW_URI) return null;
-    if (html === undefined) {
-      const file = assetPath('resultView');
-      if (!file) throw new Error(missingAssetMessage('resultView'));
-      html = readFileSync(file, 'utf8');
-    }
-    return [{ uri, mimeType: RESOURCE_MIME_TYPE, text: html, _meta: RESOURCE._meta }];
-  },
-});
+const pages = new Map(); // asset → html, read once: a page is static, the data arrives by message
+function page(asset) {
+  if (!pages.has(asset)) {
+    const file = assetPath(asset);
+    if (!file) throw new Error(missingAssetMessage(asset));
+    pages.set(asset, readFileSync(file, 'utf8'));
+  }
+  return pages.get(asset);
+}
+
+/**
+ * The view pages this server serves: the result view, and the view of each feature that draws
+ * (src/features.js) — each its own `ui://` page with the same empty network policy.
+ */
+export const appsSurface = (features = []) => {
+  const views = [
+    { resource: RESOURCE, asset: 'resultView' },
+    ...features.filter((f) => f.view).map((f) => ({
+      resource: { uri: f.view.uri, name: f.view.name, title: f.view.title, description: f.view.description, mimeType: RESOURCE_MIME_TYPE, _meta: RESOURCE._meta },
+      asset: f.view.asset,
+    })),
+  ];
+  return {
+    resources: () => views.map((v) => v.resource),
+    read(uri) {
+      const v = views.find((x) => x.resource.uri === uri);
+      return v ? [{ uri, mimeType: RESOURCE_MIME_TYPE, text: page(v.asset), _meta: v.resource._meta }] : null;
+    },
+  };
+};

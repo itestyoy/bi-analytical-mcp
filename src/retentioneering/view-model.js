@@ -18,6 +18,8 @@ const TITLES = {
   transition_graph: 'Transition graph', step_matrix: 'Step matrix', step_sankey: 'Step sankey',
   funnel: 'Funnel', cluster_analysis: 'Path clusters', segment_overview: 'Segment overview',
 };
+/** A title for any analysis: its own, else its kind in words. */
+const titleOf = (kind) => TITLES[kind] || (kind.charAt(0).toUpperCase() + kind.slice(1)).replace(/_/g, ' ');
 const SYNTHETIC = new Set(['path_start', 'path_end']);
 /** How the library's synthetic events read on a card: where a path begins, and where it has ended. */
 const START_END = { path_start: 'Path start', path_end: 'Path end' };
@@ -32,15 +34,33 @@ const none = (reason) => ({ kind: 'none', reason });
 export function retentioneeringViewModel(drawn, args = {}) {
   if (!isObj(drawn) || drawn.ok === false) return none('error');
   const r = drawn.result;
-  if (!isObj(r) || !TITLES[r.kind]) return none('empty');
-  const head = { kind: r.kind, title: TITLES[r.kind], analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
-  switch (r.kind) {
-    case 'transition_graph': return graph(head, r, args.edge_weight || drawn.edge_weight);
-    case 'step_matrix': return stepMatrix(head, r);
-    case 'step_sankey': return stepSankey(head, r);
-    case 'funnel': return funnel(head, r);
-    default: return overview(head, r);
-  }
+  if (!isObj(r) || typeof r.kind !== 'string') return none('empty');
+  const head = { kind: r.kind, title: titleOf(r.kind), analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
+  // the charted analyses in their own chart; any other result (and any diff) as the tables it returned
+  if (r.kind === 'transition_graph' && r.edges) return graph(head, r, args.edge_weight || drawn.edge_weight);
+  if (r.kind === 'step_matrix' && r.blocks) return stepMatrix(head, r);
+  if (r.kind === 'step_sankey' && r.blocks) return stepSankey(head, r);
+  if (r.kind === 'funnel' && r.steps) return funnel(head, r);
+  if (r.levels) return overview(head, r);
+  return tables(head, r);
+}
+
+/** The tables and values of a result. A table named `diff` holds differences between two groups:
+ *  its numbers are shaded on a diverging scale around zero. */
+function tables(head, r) {
+  const list = (r.tables || []).filter((t) => t.columns?.length).map((t) => ({
+    name: t.name,
+    columns: t.columns,
+    rows: t.rows,
+    numeric: t.columns.map((_, j) => t.rows.length > 0 && t.rows.every((row) => row[j] == null || typeof row[j] === 'number')),
+    diverging: t.name === 'diff',
+  }));
+  // a nested value reads as its own rows ("shape · n_paths"), a list as its items
+  const flat = (name, value) => (isObj(value) ? Object.entries(value).flatMap(([k, v]) => flat(`${name} · ${k}`, v)) : [{ name, value }]);
+  const values = Object.entries(r.values || {}).flatMap(([name, value]) => flat(name, value));
+  if (!list.length && !values.length) return none('empty');
+  const diff = list.some((t) => t.diverging);
+  return { ...head, kind: 'tables', title: diff ? `${head.title} — difference between two groups` : head.title, analysis_kind: r.kind, diff, tables: list, values };
 }
 
 function graph(head, r, weight) {

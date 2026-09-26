@@ -132,6 +132,11 @@
     background-color: color-mix(in oklab, var(--color-series-1) calc(var(--share, 0) * 70%), transparent);
   }
 
+  /* a difference between two groups: one hue above zero, the other below, zero unshaded */
+  .rt-cell.rt-neg {
+    background-color: color-mix(in oklab, var(--color-series-2) calc(var(--share, 0) * 70%), transparent);
+  }
+
   .rt-size td {
     font-weight: var(--font-weight-medium);
   }
@@ -205,5 +210,27 @@
 }
 
 .rt-table-view {
+  margin-top: calc(var(--space) * 3);
+}
+
+/* ── tables of any other result ── */
+.rt-values {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: calc(var(--space) * 1) calc(var(--space) * 4);
+  margin: 0;
+
+  dt {
+    color: var(--muted-foreground);
+  }
+
+  dd {
+    margin: 0;
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+  }
+}
+
+.rt-more {
   margin-top: calc(var(--space) * 3);
 }

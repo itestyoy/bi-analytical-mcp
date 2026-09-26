@@ -1,7 +1,7 @@
 // Tool engine: validates inputs against catalog-derived schemas, compiles
 // declarations, renders YAML, drives dbt/mf within isolated contexts.
 
-import { buildSchemas, MAX_WAIT_SECONDS } from './schema.js';
+import { buildSchemas, transportSchema, MAX_WAIT_SECONDS } from './schema.js';
 import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
@@ -84,7 +84,7 @@ export class Engine {
     this._featureTools = featureTools(features);
     for (const [name, { tool }] of this._featureTools) {
       if (Object.prototype.hasOwnProperty.call(this.schemas, name) || typeof this[name] === 'function') throw new Error(`feature tool '${name}' collides with a core tool`);
-      this.schemas[name] = tool.schema(catalog);
+      this.schemas[name] = transportSchema(tool.schema(catalog));
       this[name] = (input) => tool.run(this, input || {});
     }
     // which side a task belongs to, and which tool reads that side back — the core's two, and each feature's

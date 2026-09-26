@@ -1,14 +1,15 @@
 """The retentioneering feature's analysis step — the body of every dbt Python model the feature
 generates (src/retentioneering/python.js inlines this file and appends `model(dbt, session)`).
 
-It is THIS SERVER's code, never the caller's: the caller declares which analyses to run and with
-which parameters (validated against the tool schema before anything starts), and this file turns an
-eventstream table prepared in SQL into the headless `*_data` results of retentioneering, written as
-one long table — one row per record:
+It is THIS SERVER's code, never the caller's: the caller declares preprocessing steps (the library's own
+op model, applied with retentioneering.ops.apply_ops) and analyses (the library's methods, under their
+own parameter names) — validated against the tool schema before anything starts — and this file turns
+an eventstream table prepared in SQL into their results, written as one long table, one row per record:
 
     analysis  the caller's id for the analysis (unique within the call)
-    kind      transition_graph | step_matrix | step_sankey | funnel | cluster_analysis | segment_overview
-    part      what the record is (node, edge, layout, cell, block, step, overview, silhouette, params)
+    kind      the analysis (transition_graph, step_matrix, …, describe)
+    part      what the record is: for the charted analyses node, edge, layout, cell, block, link, step,
+              overview, metric, silhouette, params; for any other result (and any diff) table, row, value
     seq       its position within (analysis, part) — the order is deterministic
     payload   the record, as JSON
 
@@ -16,6 +17,7 @@ Everything is deterministic: the rows are ordered before the library sees them, 
 the graph layout run with the library's fixed seeds, and records are emitted in a sorted order.
 """
 
+import inspect
 import json
 import math
 import os
@@ -72,16 +74,69 @@ class _Out:
         self.rows.append([analysis, kind, part, n, json.dumps({k: _plain(v) for k, v in record.items()}, sort_keys=True, default=str)])
 
 
-def _path_col(spec, analysis):
-    return spec["columns"]["session"] if analysis.get("path") == "sessions" else spec["columns"]["user"]
+def _default(method, name):
+    """A parameter's default as the library declares it."""
+    p = inspect.signature(method).parameters.get(name)
+    return None if p is None or p.default is inspect.Parameter.empty else p.default
 
 
-# ── the analyses ──────────────────────────────────────────────────────────────────────────────
+# ── any result, as tables and values ──────────────────────────────────────────────────────────
+
+def _deep(value):
+    """A JSON-safe value, all the way down."""
+    if isinstance(value, dict):
+        return {str(k): _deep(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_deep(v) for v in value]
+    if hasattr(value, "tolist") and not isinstance(value, (str, bytes)) and getattr(value, "ndim", 0):
+        return [_deep(v) for v in value.tolist()]
+    return _plain(value)
+
+
+def _label(col):
+    return " / ".join(str(c) for c in col) if isinstance(col, tuple) else str(col)
+
+
+def _table(out, a, name, frame):
+    if isinstance(frame, pd.Series):
+        frame = frame.to_frame(name=frame.name if frame.name is not None else "value")
+    if not isinstance(frame.index, pd.RangeIndex):
+        frame = frame.reset_index()
+    columns = [_label(c) for c in frame.columns]
+    out.add(a["id"], a["kind"], "table", {"table": name, "columns": json.dumps(columns)})
+    for row in frame.itertuples(index=False, name=None):
+        out.add(a["id"], a["kind"], "row", {"table": name, "values": json.dumps([_deep(v) for v in row], default=str)})
+
+
+def _records(value):
+    return isinstance(value, list) and value and all(isinstance(v, dict) for v in value)
+
+
+def _emit(out, a, name, value):
+    """Any result of the library — a frame, a dict of frames and values, a tuple of them — as tables
+    and values, each under the name the library gave it (a tuple's parts by position)."""
+    if isinstance(value, (pd.DataFrame, pd.Series)):
+        _table(out, a, name, value)
+    elif isinstance(value, tuple):
+        names = ["diff", "first", "second"] if a["params"].get("diff") is not None and len(value) == 3 else [f"{name}_{i + 1}" for i in range(len(value))]
+        for n, v in zip(names, value):
+            _emit(out, a, n, v)
+    elif isinstance(value, dict) and any(isinstance(v, (pd.DataFrame, pd.Series, dict, tuple)) or _records(v) for v in value.values()):
+        for k, v in value.items():
+            _emit(out, a, k if name == "result" else f"{name}.{k}", v)
+    elif _records(value):
+        _table(out, a, name, pd.DataFrame(value))
+    else:
+        out.add(a["id"], a["kind"], "value", {"name": name, "value": json.dumps(_deep(value), default=str)})
+
+
+# ── the analyses the card charts ──────────────────────────────────────────────────────────────
 
 def transition_graph(stream, spec, a, out):
-    path_col = _path_col(spec, a)
+    params = {k: v for k, v in a["params"].items() if k != "edge_weight"}
+    path_col = a["path_col"]
     weights = spec["edge_weights"]
-    matrices = {w: stream.transition_graph_data(edge_weight=w, path_col=path_col) for w in weights}
+    matrices = {w: stream.transition_graph_data(edge_weight=w, **params) for w in weights}
     counts = matrices["count"]
     events = [str(e) for e in counts.index]
     n_paths = int(stream.to_dataframe()[path_col].nunique())
@@ -105,13 +160,7 @@ def transition_graph(stream, spec, a, out):
 
 
 def _steps(stream, spec, a, out, kind):
-    path_col = _path_col(spec, a)
-    kwargs = {"max_steps": a.get("max_steps", 10), "path_col": path_col}
-    if a.get("anchor"):
-        kwargs["anchor"] = a["anchor"]
-    elif a.get("path_pattern"):
-        kwargs["path_pattern"] = a["path_pattern"]
-    data = stream.step_sankey_data(**kwargs)
+    data = stream.step_sankey_data(**a["params"])
     blocks = data if isinstance(data, tuple) else (data,)
     for b, block in enumerate(blocks):
         steps = [int(s) if str(s).lstrip("-").isdigit() else str(s) for s in block.columns]
@@ -149,15 +198,20 @@ def step_matrix(stream, spec, a, out):
 def step_sankey(stream, spec, a, out):
     _steps(stream, spec, a, out, "step_sankey")
     # flows exist for the steps from the path start; around an anchor the card shows the columns alone
-    if not a.get("anchor") and not a.get("path_pattern"):
-        for link in _step_links(stream, _path_col(spec, a), a.get("max_steps", 10)):
+    p = a["params"]
+    if not p.get("anchor") and not p.get("path_pattern"):
+        max_steps = p.get("max_steps", _default(stream.step_sankey_data, "max_steps"))
+        for link in _step_links(stream, a["path_col"], max_steps):
             out.add(a["id"], "step_sankey", "link", {"block": 0, **link})
 
 
 def funnel(stream, spec, a, out):
-    data = stream.funnel_data(steps=a["steps"], path_col=_path_col(spec, a))
+    data = stream.funnel_data(**a["params"])
     for i, st in enumerate(data["steps"]):
         out.add(a["id"], "funnel", "step", {"index": i, **st})
+    for k, v in data.items():
+        if k != "steps":
+            _emit(out, a, k, v)
 
 
 def _overview(frame, a, out, kind, level_name, meta):
@@ -175,6 +229,8 @@ def _metric_meta(stream, configs):
     event) and the event it is about; a rolled-up row is named <column>_<agg>."""
     from retentioneering.metrics.metric_builder import MetricConfig
 
+    if not configs:
+        return {}
     events = sorted(str(e) for e in stream.get_event_counts().keys())
     meta = {}
     for parsed in MetricConfig(configs, available_events=events).parsed_configs:
@@ -188,35 +244,29 @@ def _metric_meta(stream, configs):
 
 
 def cluster_analysis(stream, spec, a, out):
-    overview_metrics = a.get("overview_metrics") or [{"metric": "length", "agg": "mean"}, {"metric": "duration", "agg": "median"}, {"metric": "has_event_bulk", "agg": "mean"}]
-    kwargs = {
-        "features": a.get("features") or [{"metric": "event_count_bulk"}],
-        "method": a.get("method", "kmeans"),
-        "path_col": _path_col(spec, a),
-        "overview_metrics": overview_metrics,
-    }
-    if a.get("method_args"):
-        kwargs["method_args"] = a["method_args"]
-    if a.get("scaler"):
-        kwargs["scaler"] = a["scaler"]
-    data = stream.cluster_analysis_data(**kwargs)
+    data = stream.cluster_analysis_data(**a["params"])
     if data.get("overview_df") is not None:
-        _overview(data["overview_df"], a, out, "cluster_analysis", "cluster", _metric_meta(stream, overview_metrics))
+        _overview(data["overview_df"], a, out, "cluster_analysis", "cluster", _metric_meta(stream, a["params"].get("overview_metrics")))
     if data.get("best_params") is not None:
-        out.add(a["id"], "cluster_analysis", "params", {"params": json.dumps(data["best_params"], sort_keys=True, default=str)})
+        out.add(a["id"], "cluster_analysis", "params", {"params": json.dumps(_deep(data["best_params"]), sort_keys=True, default=str)})
     sil = data.get("silhouette")
     if sil:
+        # the point the result describes: the one selected, else the highest silhouette
+        best = sil.get("selected_index") if sil.get("selected_index") is not None else sil.get("best_index")
         for i, (params, score) in enumerate(zip(sil["params"], sil["silhouette"])):
-            out.add(a["id"], "cluster_analysis", "silhouette", {"params": json.dumps(params, sort_keys=True, default=str), "score": score, "best": i == sil.get("best_index")})
+            out.add(a["id"], "cluster_analysis", "silhouette", {"params": json.dumps(_deep(params), sort_keys=True, default=str), "score": score, "best": i == best})
+    # everything else the library returned (each path's cluster, the NMF step) as tables and values
+    for k, v in data.items():
+        if k not in ("overview_df", "best_params", "silhouette") and v is not None:
+            _emit(out, a, k, v)
 
 
 def segment_overview(stream, spec, a, out):
-    metrics = a.get("metrics") or [{"metric": "length", "agg": "mean"}, {"metric": "duration", "agg": "median"}]
-    frame = stream.segment_overview_data(a["segment"], metrics=metrics, path_col=_path_col(spec, a))
-    _overview(frame, a, out, "segment_overview", "level", _metric_meta(stream, metrics))
+    frame = stream.segment_overview_data(**a["params"])
+    _overview(frame, a, out, "segment_overview", "level", _metric_meta(stream, a["params"].get("metrics")))
 
 
-ANALYSES = {
+CHARTED = {
     "transition_graph": transition_graph,
     "step_matrix": step_matrix,
     "step_sankey": step_sankey,
@@ -246,10 +296,19 @@ def run(frame, spec):
         "timestamp_col": cols["time"],
         "segment_cols": list(cols.get("segments") or []),
     })
+    from retentioneering.ops import apply_ops
+
+    base = apply_ops(stream, spec["preprocess"]) if spec.get("preprocess") else stream
     out = _Out()
-    frame_out = stream.to_dataframe()
     for a in spec["analyses"]:
+        s = apply_ops(base, a["preprocess"]) if a.get("preprocess") else base
         # how many paths the analysis reads — what its shares are shares OF, so a card can give counts
-        out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[_path_col(spec, a)].nunique())})
-        ANALYSES[a["kind"]](stream, spec, a, out)
+        frame_out = s.to_dataframe()
+        if a["path_col"] in frame_out.columns:
+            out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[a["path_col"]].nunique())})
+        charted = CHARTED.get(a["kind"])
+        if charted and a["params"].get("diff") is None:
+            charted(s, spec, a, out)
+        else:
+            _emit(out, a, "result", getattr(s, a["method"])(**a["params"]))
     return pd.DataFrame(out.rows, columns=RESULT_COLUMNS)

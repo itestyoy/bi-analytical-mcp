@@ -127,16 +127,23 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   the rest as `other`), user attributes carried as segments through the declared relationship, optional
   sessions split at a gap, and a user sample by a hash of the key — the same users on every build).
   It is built in SQL where the data lives and materialized; the call returns a task.
-- **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, analyses: [...] }` runs every
-  listed analysis (transition graph, step matrix, step sankey, funnel, path clusters, segment
-  overview — up to one of each) as ONE dbt Python model: in the dbt process on DuckDB, on the
-  warehouse's Python runtime on BigQuery (Colab Enterprise through `submission_method: bigframes`).
-  One call = one run = one cold start. `{ task_id }` reads it back, summarized for the model.
+- **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, preprocess?, analyses: [...] }`
+  runs every listed analysis — each a library method with its own parameters under the library's
+  names: transition graph, step matrix, step sankey, funnel, path clusters, segment overview,
+  conversion rate, metric distribution, path metrics, describe, and diff between two segment levels —
+  after the library's own preprocessing steps (`{ type, ...params }`: filter_paths, truncate_paths,
+  collapse_events, split_sessions, add_segment, add_clusters, …), for the whole call or per analysis.
+  It is ONE dbt Python model: in the dbt process on DuckDB, on the warehouse's Python runtime on
+  BigQuery (Colab Enterprise through `submission_method: bigframes`). One call = one run = one cold
+  start. `{ task_id }` reads it back, summarized for the model (`detail: "full"`: every record). The
+  feature sets no limits of its own; what a call cannot carry — a Python callable, a DuckDB statement
+  for the runtime — is not offered.
 - **`display_retentioneering_result`** — the SHOW: one analysis of a finished task drawn as a card
   (`ui://betti/retentioneering-view.html`), once per analysis. The graph opens on each event's
   strongest exits (retentioneering's own default) and switches weights and how many exits it shows
   on the page itself — no recomputation; every card gives its scope (users, period, sample) and
-  counts next to shares, and has a table view of its numbers.
+  counts next to shares, and has a table view of its numbers. Any other analysis, and any diff, is
+  drawn as the tables and values the library returned (a difference shaded above and below zero).
 
 Nothing heavy runs in the server: a call starts a task, the warehouse computes, and a small result
 table comes back. Configuration:
@@ -151,8 +158,9 @@ table comes back. Configuration:
   keys, e.g. `{"notebook_template_id": "<id>", "timeout": 3600}`. The profile supplies `gcs_bucket`
   and `compute_region` as for any bigframes model.
 - The library's telemetry is switched off in every model it runs in (`RETENTIONEERING_NO_TRACK=1`).
-- What the tools offer — the analyses and their parameters, the edge weights, the path metrics,
-  the clustering methods — is generated from the installed library into
+- What the tools offer — the analyses and ops with their parameters and types, each path metric's
+  arguments, the condition grammar, the edge weights, the clustering methods — is generated from the
+  installed library into
   `config/retentioneering-facts.json` (`scripts/retentioneering-facts.py --write | --check`).
 
 ## Protocol: MCP 2026-07-28 on the official SDK, plus three extensions

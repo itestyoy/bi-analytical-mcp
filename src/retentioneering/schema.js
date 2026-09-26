@@ -1,10 +1,18 @@
-// THE RETENTIONEERING FEATURE'S TOOL SCHEMAS. Every choice the library decides — the analyses and
-// their parameters, the edge weights, the path metrics and how each rolls up, the clustering methods
-// and scalers, the anchor occurrences — is rendered from config/retentioneering-facts.json, the
-// sheet scripts/retentioneering-facts.py extracts from the installed library; nothing here restates
-// one from the library's prose. What the CATALOG decides (the events sources, the models a segment
-// can come from) comes from the catalog. Event names are checked against the source at call time,
-// so a schema never carries a source's whole vocabulary.
+// THE RETENTIONEERING FEATURE'S TOOL SCHEMAS — a wrapper over the whole library, typed as far as the
+// library itself says. Every analysis and every preprocessing op the library registers, each with its
+// own parameters under the library's own names, their types, defaults and first docstring paragraph;
+// every path metric with exactly the arguments it takes; the condition grammar; the edge weights,
+// aggregations, clustering methods and scalers — all rendered from config/retentioneering-facts.json,
+// the sheet scripts/retentioneering-facts.py extracts from the installed library. Nothing here restates
+// one from the library's prose. What the CATALOG decides (the events sources, their events, the models
+// a segment can come from and their attributes, the relationships that reach them) comes from the
+// catalog. Names that exist only once an eventstream is built (the events after grouping, the segment
+// columns) are checked at call time against that eventstream.
+//
+// What a call cannot carry is not offered, each for its stated reason (NOT_OFFERED): a Python callable,
+// a DuckDB statement run on the analysis runtime (code, which this server never takes from a call —
+// the data is declared in the build instead, in SQL where it lives), and the two ops the eventstream's
+// shape rules out.
 
 import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
@@ -21,17 +29,30 @@ export function retentioneeringFacts() {
   return factsCache;
 }
 
-/** A parameter's default as the library declares it, from the sheet. */
-export function libraryDefault(fn, param) {
-  return retentioneeringFacts().data_functions[fn]?.find((p) => p.name === param)?.default;
-}
+/** Why a library op or parameter is not offered — the one list; the guide and the schema read it. */
+export const NOT_OFFERED = {
+  ops: {
+    add_start_end_events: 'every analysis adds path_start/path_end itself; adding them again doubles them and shifts every step',
+    urls_to_events: 'the eventstream carries event names, not URLs',
+  },
+  params: {
+    func: 'a Python callable, which a call cannot carry',
+    sql: 'a DuckDB statement run on the analysis runtime — code, which this server never takes from a call; declare the data in build_retentioneering_model instead (events, groups, segments, where)',
+  },
+};
 
-export const ANALYSIS_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel', 'cluster_analysis', 'segment_overview'];
-export const NAME = '^[a-z][a-z0-9_]{0,40}$';
+/** The analyses the library offers, in the sheet's order. */
+export const ANALYSIS_KINDS = Object.keys(retentioneeringFacts().analyses);
+/** The preprocessing ops offered: every op the library registers, but the ones NOT_OFFERED. */
+export const OFFERED_OPS = Object.keys(retentioneeringFacts().ops).filter((op) => !NOT_OFFERED.ops[op]);
+/** The analyses whose result the card draws as its own chart (the rest, and any diff, as tables). */
+export const CHARTED_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel', 'cluster_analysis', 'segment_overview'];
+
+export const NAME = '^[a-z][a-z0-9_]*$';
 const CTX = '^[A-Za-z0-9_-]{1,64}$';
-export const MAX_STEPS = 30;
-/** One call computes every analysis it lists in one run: up to one of each kind. */
-export const MAX_ANALYSES = 6;
+/** The library's per-path column, which this wrapper names `path` (see pathField). */
+const PATH_PARAM = 'path_col';
+export const CONDITION_DEF = 'retentioneering_condition';
 
 const TASK_ID = { type: 'string', minLength: 1, description: 'A task this tool started (its task_id).' };
 
@@ -57,9 +78,35 @@ export function userKeyColumn(catalog, source) {
   return parts && parts.length === 1 ? parts[0].column : null;
 }
 
+/** The relationships the path sources declare toward `model`. */
+function relationshipsTo(catalog, sources, model) {
+  return [...new Set(sources.flatMap((s) => Object.keys(catalog.entitiesOf(s)).filter((name) => catalog.joinTargetFor(name) === model)))].sort();
+}
+
+/** One event name of the path sources: an enum of their vocabularies (each checked against the source
+ *  named at call time), or a free string when a source declares none (the warehouse decides). */
+function eventName(catalog, sources) {
+  const lists = sources.map((s) => catalog.eventNames(s));
+  if (lists.some((l) => !l.length)) return { type: 'string' };
+  return { type: 'string', enum: [...new Set(lists.flat())].sort() };
+}
+
 export function buildSchema(catalog) {
   const sources = pathSources(catalog);
-  const joinable = catalog.joinableModelKeys();
+  const event = eventName(catalog, sources);
+  const events = (description) => ({ type: 'array', minItems: 1, uniqueItems: true, items: event, description });
+  const segmentBranches = catalog.joinableModelKeys().map((model) => {
+    const via = relationshipsTo(catalog, sources, model);
+    return {
+      type: 'object', additionalProperties: false, required: ['model', 'attribute'], title: model,
+      properties: {
+        model: { const: model },
+        attribute: { type: 'string', enum: catalog.modelDimensionColumns(model), description: `A column of ${model}.` },
+        ...(via.length ? { via: { type: 'string', enum: via, description: 'The relationship to reach it by, when the source declares several toward it.' } } : {}),
+        as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the attribute).' },
+      },
+    };
+  }).filter((b) => b.properties.attribute.enum.length);
   return {
     type: 'object', additionalProperties: false, required: ['name', 'source'],
     description: 'The eventstream a path analysis reads — declared, built in SQL where the data lives, and materialized.',
@@ -73,24 +120,16 @@ export function buildSchema(catalog) {
         type: 'object', additionalProperties: false,
         description: 'Which events make up the paths, and under what names.',
         properties: {
-          include: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Keep only these events of the source (omit: every event).' },
-          exclude: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Drop these events (technical noise the paths should not show).' },
-          groups: { type: 'object', additionalProperties: { type: 'array', minItems: 1, items: { type: 'string' } }, description: 'Merge several events under one name: { "<new name>": ["<event>", …] }. A group name replaces its events in every analysis.' },
-          top: { type: 'integer', minimum: 2, description: 'Optional: keep only the N most frequent event names (after grouping) and merge the rest into "other". Omitted, every event keeps its own name.' },
+          include: events('Keep only these events of the source (omit: every event).'),
+          exclude: events('Drop these events (technical noise the paths should not show).'),
+          groups: { type: 'object', propertyNames: { pattern: NAME }, additionalProperties: events('The events merged under this name.'), description: 'Merge several events under one name: { "<new name>": ["<event>", …] }. A group name replaces its events in every analysis.' },
+          top: { type: 'integer', minimum: 1, description: 'Optional: keep only the N most frequent event names (after grouping) and merge the rest into "other". Omitted, every event keeps its own name.' },
         },
       },
       segments: {
-        type: 'array', maxItems: 5,
-        description: 'User attributes to carry on every event as segment columns — what segment_overview splits by. Each comes from a model the source reaches by a declared relationship.',
-        items: {
-          type: 'object', additionalProperties: false, required: ['model', 'attribute'],
-          properties: {
-            model: { type: 'string', enum: joinable, description: 'The model that carries the attribute (e.g. the users model).' },
-            attribute: { type: 'string', description: 'A column of that model (semantic_index({ model }) lists them).' },
-            via: { type: 'string', description: 'The relationship to reach it by, when the source declares several toward that model.' },
-            as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the attribute).' },
-          },
-        },
+        type: 'array', minItems: 1,
+        description: 'User attributes to carry on every event as segment columns — what segment_overview, metric_distribution, diff and in_segment read. Each comes from a model the source reaches by a declared relationship.',
+        items: segmentBranches.length ? { oneOf: segmentBranches, discriminator: { propertyName: 'model' } } : { not: {} },
       },
       where: {
         type: 'array', minItems: 1,
@@ -106,8 +145,8 @@ export function buildSchema(catalog) {
       },
       sessions: {
         type: 'object', additionalProperties: false, required: ['gap_minutes'],
-        description: 'Also split each user\'s path into sessions at gaps longer than gap_minutes, so an analysis can read per-session paths (path: "sessions").',
-        properties: { gap_minutes: { type: 'integer', minimum: 1, maximum: 1440 } },
+        description: 'Also split each user\'s path into sessions at gaps longer than gap_minutes, in SQL, so an analysis can read per-session paths (path: "sessions"). (A split_sessions preprocess step does the same inside an analysis, by other rules.)',
+        properties: { gap_minutes: { type: 'integer', minimum: 1 } },
       },
       sample: {
         type: 'object', additionalProperties: false, required: ['share'],
@@ -118,77 +157,80 @@ export function buildSchema(catalog) {
   };
 }
 
+/** Whose paths: the wrapper's name for the library's path column. */
+const pathField = {
+  anyOf: [
+    { enum: ['users', 'sessions'] },
+    { type: 'string', pattern: NAME, description: 'The session_col of a split_sessions step in preprocess.' },
+  ],
+  description: 'Whose paths: each user\'s whole history (default), each session of the build (sessions), or the session column a split_sessions preprocess step adds.',
+};
+
+/** A library parameter as a schema property: its type, its default, its first docstring paragraph. */
+function param(p) {
+  return { ...p.schema, ...(p.default !== undefined ? { default: p.default } : {}), ...(p.doc ? { description: p.doc } : {}) };
+}
+
+/** The properties and required list of a library callable's parameters — path_col as `path`, the
+ *  parameters a call cannot carry left out. */
+function params(list) {
+  const properties = {};
+  const required = [];
+  for (const p of list) {
+    if (NOT_OFFERED.params[p.name]) continue;
+    if (p.name === PATH_PARAM) { properties.path = pathField; continue; }
+    properties[p.name] = param(p);
+    if (p.required) required.push(p.name);
+  }
+  return { properties, required };
+}
+
+function opSchemas() {
+  const f = retentioneeringFacts();
+  return OFFERED_OPS.map((op) => {
+    const { properties, required } = params(f.ops[op].params);
+    return {
+      type: 'object', additionalProperties: false, title: op, description: f.ops[op].summary,
+      required: ['type', ...required],
+      properties: { type: { const: op }, ...properties },
+    };
+  });
+}
+
+function preprocessField(where) {
+  return {
+    type: 'array', minItems: 1,
+    items: { oneOf: opSchemas(), discriminator: { propertyName: 'type' } },
+    description: `Library preprocessing steps applied in order ${where} — retentioneering's own op model ({ type: <op>, ...its parameters }). Not offered: ${Object.entries(NOT_OFFERED.ops).map(([op, why]) => `${op} (${why})`).join('; ')}.`,
+  };
+}
+
+const METHOD_ARGS_NOTE = 'the method\'s own arguments';
+
 function analysisSchemas() {
   const f = retentioneeringFacts();
-  const path = { enum: ['users', 'sessions'], default: 'users', description: 'Whose paths: each user\'s whole history (default), or each session (needs sessions in the build).' };
   const id = { type: 'string', pattern: NAME, description: 'Your name for this analysis in the result (default: its kind). Unique within the call.' };
-  const metric = {
-    type: 'object', additionalProperties: false, required: ['metric'],
-    properties: {
-      metric: { enum: f.path_metrics, description: 'A per-path metric of the library (length, duration, event_count, has_event, …_bulk for one column per event, time_between, matches_pattern, …).' },
-      metric_args: { type: 'object', description: 'The metric\'s arguments, as the library names them (event, events, start_event/end_event, pattern, …).' },
-    },
-  };
-  const metricAgg = { ...metric, required: ['metric', 'agg'], properties: { ...metric.properties, agg: { enum: f.segment_aggs, description: 'How per-path values roll up across a group.' } } };
-  const steps = (kind, what) => ({
-    type: 'object', additionalProperties: false, required: ['kind'],
-    title: kind,
-    description: what,
-    not: { required: ['anchor', 'path_pattern'] },
-    properties: {
-      kind: { const: kind }, id, path,
-      max_steps: { type: 'integer', minimum: 1, maximum: MAX_STEPS, default: libraryDefault('step_sankey_data', 'max_steps'), description: 'How many steps to compute (on each side of an anchor).' },
-      anchor: {
-        type: 'object', additionalProperties: false, required: ['pattern'],
-        description: 'Centre the steps on one position of each path: the paths where it does not occur are left out.',
-        properties: {
-          pattern: { type: 'string', description: 'An event, or a "->"-separated sequence of events.' },
-          occurrence: { enum: f.anchor_occurrences.filter((o) => o !== 'all'), description: 'Which occurrence in a path (default first).' },
-          offset: { type: 'integer', description: 'Shift the anchor by this many events.' },
-        },
-      },
-      path_pattern: { type: 'string', description: 'Restrict and split the paths on a "->"-separated sequence ("a->.*->b"); each anchor event of the pattern gets its own block.' },
-    },
+  return ANALYSIS_KINDS.map((kind) => {
+    const a = f.analyses[kind];
+    const { properties, required } = params(a.params);
+    // clustering: the keys each method reads, from the library's own table of them
+    if (properties.method_args) {
+      const keys = [...new Set(Object.values(f.cluster_method_args).flat())].sort();
+      properties.method_args = { ...properties.method_args, type: 'object', additionalProperties: false, properties: Object.fromEntries(keys.map((k) => [k, { description: `${METHOD_ARGS_NOTE} (${Object.entries(f.cluster_method_args).filter(([, ks]) => ks.includes(k)).map(([m]) => m).join(', ')})` }])) };
+    }
+    const branch = {
+      type: 'object', additionalProperties: false, title: kind, description: `${a.summary}${CHARTED_KINDS.includes(kind) ? '' : ' (returned, and drawn, as tables)'}`,
+      required: ['kind', ...required],
+      properties: { kind: { const: kind }, id, preprocess: preprocessField('to this analysis alone, after the call\'s own preprocess'), ...properties },
+    };
+    // an anchor and a path pattern are two ways to centre the same steps: one or the other
+    if (properties.anchor && properties.path_pattern) branch.not = { required: ['anchor', 'path_pattern'] };
+    return branch;
   });
-  return [
-    {
-      type: 'object', additionalProperties: false, required: ['kind'], title: 'transition_graph',
-      description: 'Which event follows which: every transition with all its weights at once (count, unique_paths, share_of_total, avg_per_path, proba_in, proba_out, time_median, time_q95), and the library\'s layout of the events.',
-      properties: { kind: { const: 'transition_graph' }, id, path },
-    },
-    steps('step_matrix', 'The share of paths at each event, step by step from the start (or around an anchor) — drawn as a heatmap.'),
-    steps('step_sankey', 'The same per-step shares drawn as flows between steps.'),
-    {
-      type: 'object', additionalProperties: false, required: ['kind', 'steps'], title: 'funnel',
-      description: 'How many paths reach each event of an ordered list, and the conversion step to step.',
-      properties: { kind: { const: 'funnel' }, id, path, steps: { type: 'array', minItems: 2, maxItems: 12, items: { type: 'string' }, description: 'The events, in order.' } },
-    },
-    {
-      type: 'object', additionalProperties: false, required: ['kind'], title: 'cluster_analysis',
-      description: 'Groups of similar paths, from per-path metrics, with each group\'s size and profile.',
-      properties: {
-        kind: { const: 'cluster_analysis' }, id, path,
-        features: { type: 'array', minItems: 1, items: metric, description: 'The per-path metrics paths are clustered on (default: event_count_bulk — how often each event occurs).' },
-        method: { enum: f.cluster_methods, description: 'The clustering method (default kmeans).' },
-        n_clusters: { oneOf: [{ type: 'integer', minimum: 2, maximum: 20 }, { type: 'array', minItems: 2, maxItems: 10, items: { type: 'integer', minimum: 2, maximum: 20 } }], description: 'kmeans: the number of clusters, or several to try — the best silhouette wins (default: the library\'s range).' },
-        min_cluster_size: { type: 'integer', minimum: 2, description: 'hdbscan: the smallest group it forms.' },
-        scaler: { enum: f.cluster_scalers, description: 'How features are scaled before clustering (default minmax).' },
-        overview_metrics: { type: 'array', minItems: 1, items: metricAgg, description: 'What each cluster\'s profile shows (default: length, duration and the share of paths with each event).' },
-      },
-    },
-    {
-      type: 'object', additionalProperties: false, required: ['kind', 'segment'], title: 'segment_overview',
-      description: 'Per-path metrics compared across the levels of a segment column of the eventstream.',
-      properties: {
-        kind: { const: 'segment_overview' }, id, path,
-        segment: { type: 'string', description: 'A segment column the eventstream was built with.' },
-        metrics: { type: 'array', minItems: 1, items: metricAgg, description: 'The metrics to compare (default: length and duration).' },
-      },
-    },
-  ];
 }
 
 export function querySchema() {
+  const f = retentioneeringFacts();
   return {
     type: 'object', additionalProperties: false,
     description: 'Start path analyses over a built eventstream, or read one back.',
@@ -198,12 +240,15 @@ export function querySchema() {
     properties: {
       context_id: { type: 'string', pattern: CTX, description: 'The context the eventstream was built in.' },
       eventstream: { type: 'string', pattern: NAME, description: 'Which eventstream of the context (optional when it holds one).' },
-      analyses: { type: 'array', minItems: 1, maxItems: MAX_ANALYSES, items: { oneOf: analysisSchemas(), discriminator: { propertyName: 'kind' } }, description: `The analyses to run — up to ${MAX_ANALYSES}, computed together in one run.` },
+      preprocess: preprocessField('to the eventstream before every analysis of this call'),
+      analyses: { type: 'array', minItems: 1, items: { oneOf: analysisSchemas(), discriminator: { propertyName: 'kind' } }, description: 'The analyses to run, computed together in one run.' },
       task_id: TASK_ID,
-      task_ids: { type: 'array', minItems: 1, maxItems: 20, items: TASK_ID, description: 'Several tasks, read together.' },
+      task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: TASK_ID, description: 'Several tasks, read together.' },
+      detail: { enum: ['summary', 'full'], default: 'summary', description: 'Reading a task: each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table (summary) — or every record it computed (full).' },
       cancel: { type: 'boolean', description: 'With task_id / task_ids: stop them.' },
       wait_seconds: { type: 'integer', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait for a running task (default and cap ${MAX_WAIT_SECONDS}s).` },
     },
+    $defs: { [CONDITION_DEF]: f.condition_schema },
   };
 }
 

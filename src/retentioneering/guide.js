@@ -4,7 +4,7 @@
 // Method, not data: it names no column or event (the catalog and the eventstream summary say what
 // exists), and every parameter it mentions is one the tool schema offers.
 
-import { retentioneeringFacts } from './schema.js';
+import { retentioneeringFacts, ANALYSIS_KINDS, CHARTED_KINDS, OFFERED_OPS, NOT_OFFERED } from './schema.js';
 
 export const GUIDE_NAME = 'retentioneering';
 
@@ -27,7 +27,8 @@ export function retentioneeringGuide() {
       { step: 'Frame the paths', do: 'Decide whose paths (each user\'s history, or sessions), over which window, and which events matter. Technical noise (heartbeats, screen pings) hides the story: exclude it, or merge near-duplicates into one name with events.groups.' },
       { step: 'Build the eventstream', do: 'build_retentioneering_model({ name, source, time_range, events, segments, sessions?, sample? }). Read its summary with query_retentioneering_model({ task_id }): users, events, the vocabulary after grouping. Every event keeps its name; if a long tail of rare names makes the graph unreadable, events.top merges all but the N most frequent into "other".' },
       { step: 'Size it', do: 'One analysis run holds the whole eventstream in memory on the warehouse runtime. For a very large source, sample: { share } keeps a stable subset of users (a hash of the key), so every later analysis reads the same people.' },
-      { step: 'Run the analyses together', do: 'query_retentioneering_model({ context_id, analyses: [...] }) — list everything the question needs in ONE call: they are computed in one run (one start-up of the warehouse runtime). Read the task with { task_id }.' },
+      { step: 'Shape the paths, if needed', do: 'preprocess: the library\'s own steps ({ type, ...params }), for the whole call or one analysis — filter_paths on a metric condition, truncate_paths between two anchors, collapse_events (loops, groups, bounds), split_sessions by a timeout or separator, add_segment / add_clusters to make a segment the analyses can split by, sample_paths, rename and drop events. What SQL can say (the window, the events, the attributes) belongs in the build.' },
+      { step: 'Run the analyses together', do: 'query_retentioneering_model({ context_id, preprocess?, analyses: [...] }) — list everything the question needs in ONE call: they are computed in one run (one start-up of the warehouse runtime). Each analysis takes the library\'s own parameters. Read the task with { task_id } (a summary; detail: "full" for every record).' },
       { step: 'Show and read', do: 'display_retentioneering_result({ task_id, analysis }) draws one analysis as a card, once. Report what the numbers say — the transitions with their shares, the step where paths split, the cluster sizes and what sets each apart — with the window and any sample.' },
     ],
     analyses: {
@@ -35,9 +36,13 @@ export function retentioneeringGuide() {
       step_matrix: 'The share of paths at each event, step by step from the start; with anchor: { pattern: "<event>" } the steps around that event (before it negative, after it positive) — what leads to it and what follows. path_pattern "a->.*->b" restricts to paths that go from a to b.',
       step_sankey: 'The same shares drawn as flows between consecutive steps — the branching after the start. Around an anchor it shows the columns without flows.',
       funnel: 'How many paths reach each event of an ordered list (in that order), and the conversion step to step. For steps defined by an event property value, build a pipeline funnel instead.',
-      cluster_analysis: `Groups of similar paths from per-path metrics (features; default: how often each event occurs), with ${f.cluster_methods.join(' or ')}; several n_clusters are tried and the best silhouette wins. Each cluster comes back with its size and profile (length, duration, the share of paths with each event).`,
-      segment_overview: 'Per-path metrics compared across the levels of a segment the eventstream carries (a user attribute listed in segments at build time).',
+      cluster_analysis: `Groups of similar paths from per-path metrics (features, e.g. { metric: "event_count_bulk" } — how often each event occurs), with ${f.cluster_methods.join(' or ')}; method_args.n_clusters as a list tries several and the best silhouette wins. overview_metrics say what each cluster's profile shows (length, duration, the share of paths with each event).`,
+      segment_overview: 'Per-path metrics compared across the levels of a segment (segment_col): a user attribute listed in segments at build time, or one an add_segment / add_clusters step made.',
+      ...Object.fromEntries(ANALYSIS_KINDS.filter((k) => !CHARTED_KINDS.includes(k)).map((k) => [k, f.analyses[k].summary])),
     },
+    diff: 'transition_graph, step_matrix, step_sankey and funnel take diff: [segment_col, level_1, level_2] — the same analysis for two levels and their difference, returned (and drawn) as tables.',
+    preprocess: Object.fromEntries(OFFERED_OPS.map((op) => [op, f.ops[op].summary])),
+    not_offered: { ...NOT_OFFERED.ops, ...Object.fromEntries(Object.entries(NOT_OFFERED.params).map(([p, why]) => [`the ${p} parameter`, why])) },
     path_metrics: f.path_metrics,
     metric_aggregations: f.segment_aggs,
     checks: [
@@ -61,6 +66,9 @@ export function retentioneeringSkill() {
     '',
     '## Sequence', '', md(g.sequence),
     '', '## Which analysis answers what', '', md(g.analyses),
+    '', '## Diff', '', g.diff,
+    '', '## Preprocessing steps', '', md(g.preprocess),
+    '', '## Not offered', '', md(g.not_offered),
     '', '## Path metrics (features, overview and segment metrics)', '', md(g.path_metrics), '', `Roll-ups: ${g.metric_aggregations.join(', ')}.`,
     '', '## Checks', '', md(g.checks),
   ].join('\n');
@@ -68,7 +76,7 @@ export function retentioneeringSkill() {
     path: 'betti/retentioneering',
     frontmatter: {
       name: 'retentioneering',
-      description: 'How to run path analysis with this server: build an eventstream (build_retentioneering_model), run the analyses together (query_retentioneering_model — transition graph, step matrix and sankey, funnel, path clusters, segment overview) and draw them (display_retentioneering_result). Use for questions about paths, sequences and drop-off.',
+      description: 'How to run path analysis with this server: build an eventstream (build_retentioneering_model), run retentioneering\'s analyses and preprocessing steps together (query_retentioneering_model — transition graph, step matrix and sankey, funnel, path clusters, segment overview, conversion rate, metric distribution, path metrics, describe, diff) and draw them (display_retentioneering_result). Use for questions about paths, sequences and drop-off.',
     },
     body,
     references: [],

@@ -1,11 +1,14 @@
 // THE RESULT OF A QUERY CALL — the long table the analysis model wrote (analysis, kind, part, seq,
-// payload), read back into one structured result per analysis. The card draws the whole of it; the
-// model reads a summary that fits a conversation (the biggest transitions, the leading events per
-// step, each cluster's profile) and asks for the card when the person should see the rest.
+// payload), read back into one structured result per analysis: the charted analyses in their own
+// shape, and whatever else the library returned (any other analysis, a diff, the per-path cluster
+// labels) as its tables and values. The card draws the whole of it, and a read with detail: "full"
+// returns all of it; the default read is a summary that fits a conversation (the biggest transitions,
+// the leading events per step, each group's profile, the first rows of each table).
 
 const TOP_EDGES = 25;
 const TOP_PER_STEP = 3;
 const TOP_PROFILE = 6;
+const TOP_ROWS = 20;
 
 /** rows → { <analysis id>: { kind, ...data } }, in the order the analyses were asked for. */
 export function parseResultRows(rows, order = []) {
@@ -43,18 +46,33 @@ export function describeMetric(name, meta) {
   return { label: agg && agg !== 'mean' ? `${what} · ${agg}` : what, format: isShare && (!agg || agg === 'mean') ? 'share' : isTime ? 'duration' : 'number' };
 }
 
+/** The tables and values of any result, each under the name the library gave it. */
+function generic(parts) {
+  const rows = new Map();
+  for (const r of parts.row || []) {
+    if (!rows.has(r.table)) rows.set(r.table, []);
+    rows.get(r.table).push(JSON.parse(r.values));
+  }
+  const tables = (parts.table || []).map((t) => ({ name: t.table, columns: JSON.parse(t.columns), rows: rows.get(t.table) || [] }));
+  const values = Object.fromEntries((parts.value || []).map((v) => [v.name, JSON.parse(v.value)]));
+  return { ...(tables.length ? { tables } : {}), ...(Object.keys(values).length ? { values } : {}) };
+}
+
 function shape({ kind, parts }) {
-  if (kind === 'transition_graph') {
+  return { kind, ...charted(kind, parts), ...generic(parts) };
+}
+
+/** The charted analyses' own shape — present when the analysis step wrote it (not for a diff). */
+function charted(kind, parts) {
+  if (kind === 'transition_graph' && parts.edge) {
     const layout = Object.fromEntries((parts.layout || []).map((p) => [p.event, { x: p.x, y: p.y }]));
     return {
-      kind,
       nodes: (parts.node || []).map((n) => ({ event: n.event, count: n.count, ...(layout[n.event] || {}) })),
       edges: (parts.edge || []).map(strip),
     };
   }
-  if (kind === 'step_matrix' || kind === 'step_sankey') {
+  if ((kind === 'step_matrix' || kind === 'step_sankey') && parts.block) {
     return {
-      kind,
       blocks: (parts.block || []).map((b) => ({
         block: b.block,
         steps: JSON.parse(b.steps),
@@ -63,22 +81,21 @@ function shape({ kind, parts }) {
       })),
     };
   }
-  if (kind === 'funnel') return { kind, steps: (parts.step || []).map(strip) };
-  if (kind === 'cluster_analysis' || kind === 'segment_overview') {
+  if (kind === 'funnel' && parts.step) return { steps: parts.step.map(strip) };
+  if ((kind === 'cluster_analysis' || kind === 'segment_overview') && parts.overview) {
     const levelKey = kind === 'cluster_analysis' ? 'cluster' : 'level';
     const levels = [...new Set((parts.overview || []).map((o) => o[levelKey]))];
     const metrics = [...new Set((parts.overview || []).map((o) => o.metric))];
     const value = new Map((parts.overview || []).map((o) => [`${o.metric}\u0000${o[levelKey]}`, o.value]));
     const meta = new Map((parts.metric || []).map((m) => [m.metric, m]));
     return {
-      kind,
       levels,
       metrics: metrics.map((m) => ({ metric: m, ...describeMetric(m, meta.get(m)), values: levels.map((l) => value.get(`${m}\u0000${l}`) ?? null) })),
       ...(parts.params?.length ? { best_params: JSON.parse(parts.params[0].params) } : {}),
       ...(parts.silhouette?.length ? { silhouette: parts.silhouette.map((s) => ({ params: JSON.parse(s.params), score: s.score, best: !!s.best })) } : {}),
     };
   }
-  return { kind, parts };
+  return {};
 }
 
 const round = (x, digits = 4) => (typeof x === 'number' ? Number(x.toFixed(digits)) : x);
@@ -86,7 +103,8 @@ const round = (x, digits = 4) => (typeof x === 'number' ? Number(x.toFixed(digit
 /** What the model reads of one analysis: the numbers that answer, not every cell. */
 export function summarize(result) {
   const { kind } = result;
-  if (kind === 'transition_graph') {
+  const rest = summarizeGeneric(result);
+  if (kind === 'transition_graph' && result.edges) {
     const edges = [...result.edges].sort((a, b) => b.count - a.count || a.source.localeCompare(b.source) || a.target.localeCompare(b.target));
     return {
       kind,
@@ -96,7 +114,7 @@ export function summarize(result) {
       ...(edges.length > TOP_EDGES ? { note: `${edges.length - TOP_EDGES} smaller transitions are in the card.` } : {}),
     };
   }
-  if (kind === 'step_matrix' || kind === 'step_sankey') {
+  if ((kind === 'step_matrix' || kind === 'step_sankey') && result.blocks) {
     return {
       kind,
       blocks: result.blocks.map((b) => ({
@@ -107,8 +125,8 @@ export function summarize(result) {
       })),
     };
   }
-  if (kind === 'funnel') return { kind, steps: result.steps.map((s) => ({ step: s.step, unique_paths: s.unique_paths, conversion_rate: round(s.conversion_rate), step_conversion_rate: round(s.step_conversion_rate) })) };
-  if (kind === 'cluster_analysis' || kind === 'segment_overview') {
+  if (kind === 'funnel' && result.steps) return { kind, steps: result.steps.map((s) => ({ step: s.step, unique_paths: s.unique_paths, conversion_rate: round(s.conversion_rate), step_conversion_rate: round(s.step_conversion_rate) })), ...rest };
+  if ((kind === 'cluster_analysis' || kind === 'segment_overview') && result.levels) {
     const levelKey = kind === 'cluster_analysis' ? 'clusters' : 'levels';
     const size = result.metrics.find((m) => m.metric === 'segment_size');
     const share = result.metrics.find((m) => m.metric === 'segment_share');
@@ -131,7 +149,21 @@ export function summarize(result) {
       })),
       ...(result.best_params ? { best_params: result.best_params } : {}),
       ...(result.silhouette ? { silhouette: result.silhouette.map((s) => ({ ...s.params, score: round(s.score), best: s.best })) } : {}),
+      ...rest,
     };
   }
-  return { kind };
+  return { kind, ...rest };
+}
+
+/** Tables as their first rows (with how many there are), values as they are. */
+function summarizeGeneric(result) {
+  const tables = result.tables?.map((t) => ({
+    name: t.name, columns: t.columns, rows: t.rows.slice(0, TOP_ROWS).map((r) => r.map((v) => round(v))), total_rows: t.rows.length,
+  }));
+  const cut = tables?.some((t) => t.total_rows > TOP_ROWS);
+  return {
+    ...(tables ? { tables } : {}),
+    ...(result.values ? { values: result.values } : {}),
+    ...(cut ? { rows_note: `tables show their first ${TOP_ROWS} rows; read with detail: "full" for every row, or draw the card` } : {}),
+  };
 }

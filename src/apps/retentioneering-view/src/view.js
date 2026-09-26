@@ -12,6 +12,9 @@
  *                      that ended as one block at the bottom of each step
  *   funnel             the steps, their share of all paths and of the previous step, the biggest drop
  *   clusters / segment overview   each group's size, then the metrics that set the groups apart most
+ *   tables             any other analysis (conversion rate, metric distribution, path metrics, describe)
+ *                      and any diff, as the tables and values the library returned; a diff's
+ *                      differences shaded on a diverging scale around zero
  *
  * Every card says what its numbers are about — the users, the period, a sample — and gives counts
  * next to shares. IT DRAWS AND NOTHING ELSE: its input is the result the host hands over
@@ -92,7 +95,7 @@ function render(result) {
   mainEl.hidden = false;
   titleEl.textContent = model.title;
   subtitleEl.replaceChildren(...scopeBadges(model));
-  const draw = { transition_graph: renderGraph, step_matrix: renderStepMatrix, step_sankey: renderSankey, funnel: renderFunnel, cluster_analysis: renderOverview, segment_overview: renderOverview }[model.kind];
+  const draw = { transition_graph: renderGraph, step_matrix: renderStepMatrix, step_sankey: renderSankey, funnel: renderFunnel, cluster_analysis: renderOverview, segment_overview: renderOverview, tables: renderTables }[model.kind];
   contentEl.replaceChildren(draw(model));
 }
 
@@ -494,6 +497,61 @@ function renderOverview(model) {
     title: `${model.levels.length} ${clusters ? 'clusters' : 'levels'}${of}`,
     description: clusters ? 'Groups of similar paths: their size, then the metrics that set them apart most. Shading marks the highest value in a row' : 'Path metrics across the segment, the ones that differ most first. Shading marks the highest value in a row',
   }, content);
+}
+
+// ── tables of any other result ────────────────────────────────────────────────────────────────
+
+/** Rows shown before "show all" — the rest are in the page already, one click away. */
+const FIRST_ROWS = 100;
+
+const formatCell = (v) => (v == null ? '—' : typeof v === 'number' ? formatNumber(v) : Array.isArray(v) ? v.map(formatCell).join(', ') : typeof v === 'object' ? JSON.stringify(v) : String(v));
+
+function tableCard(t) {
+  const table = el('table', 'table rt-heat');
+  const head = el('tr');
+  t.columns.forEach((c, j) => head.append(el('th', t.numeric[j] ? 'num' : null, c)));
+  const thead = el('thead'); thead.append(head);
+  const tbody = el('tbody');
+  // a diff: each number against the largest difference in the table, one hue up and one down
+  const scale = t.diverging ? Math.max(0, ...t.rows.flatMap((r) => r.filter((v, j) => t.numeric[j] && v != null).map((v) => Math.abs(v)))) : 0;
+  const rowOf = (r) => {
+    const tr = el('tr');
+    r.forEach((v, j) => {
+      const td = el('td', t.numeric[j] ? `num${t.diverging ? ' rt-cell' : ''}${t.diverging && v < 0 ? ' rt-neg' : ''}` : (j === 0 ? 'rt-event' : null), formatCell(v));
+      if (t.diverging && t.numeric[j] && v && scale) td.style.setProperty('--share', String(Math.abs(v) / scale));
+      tr.append(td);
+    });
+    return tr;
+  };
+  t.rows.slice(0, FIRST_ROWS).forEach((r) => tbody.append(rowOf(r)));
+  table.append(thead, tbody);
+  const scroll = el('div', 'table-container');
+  scroll.append(table);
+  const content = el('div', 'card-content');
+  content.append(scroll);
+  if (t.rows.length > FIRST_ROWS) {
+    const more = el('button', 'btn btn-outline rt-more', `Show all ${formatNumber(t.rows.length)} rows`);
+    more.type = 'button';
+    more.addEventListener('click', () => { t.rows.slice(FIRST_ROWS).forEach((r) => tbody.append(rowOf(r))); more.remove(); });
+    content.append(more);
+  }
+  return card({
+    title: t.name,
+    description: `${formatNumber(t.rows.length)} rows${t.diverging ? ' — the first group minus the second; shading marks the size of the difference, one colour above zero and another below' : ''}`,
+  }, content);
+}
+
+function renderTables(model) {
+  const wrap = el('div', 'rt-stack');
+  if (model.values.length) {
+    const dl = el('dl', 'rt-values');
+    for (const v of model.values) dl.append(el('dt', null, v.name), el('dd', null, formatCell(v.value)));
+    const content = el('div', 'card-content');
+    content.append(dl);
+    wrap.append(card({ title: 'Values', description: 'What the analysis returned besides its tables' }, content));
+  }
+  model.tables.forEach((t) => wrap.append(tableCard(t)));
+  return wrap;
 }
 
 // ── host wiring (the official MCP Apps template) ─────────────────────────────────────────────

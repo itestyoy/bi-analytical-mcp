@@ -690,7 +690,13 @@ export function buildSchemas(catalog) {
   // choice, so the repetition is folded out HERE, after the schemas are written and before they
   // leave: identical subtrees become one `$defs` entry the sites point at. Authoring is unchanged,
   // validation is unchanged (ajv resolves the ref), and the client is handed each list once.
-  return Object.fromEntries(Object.entries(tools).map(([name, schema]) => [name, foldRepeats(foldVocabularies(schema))]));
+  return Object.fromEntries(Object.entries(tools).map(([name, schema]) => [name, transportSchema(schema)]));
+}
+
+/** A tool schema as it leaves the process: repeated vocabularies and subtrees folded into `$defs`
+ *  (the core's tools here, a feature's in the engine that registers it). */
+export function transportSchema(schema) {
+  return foldRepeats(foldVocabularies(schema));
 }
 
 /**

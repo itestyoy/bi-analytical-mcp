@@ -19,7 +19,7 @@ import { createDbt, formatDbtError } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, ANALYSIS_KINDS } from './schema.js';
+import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, ANALYSIS_KINDS, OFFERED_OPS, NAME } from './schema.js';
 import { renderEventstream, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
 import { parseResultRows, summarize } from './results.js';
@@ -30,12 +30,11 @@ export const SIDE = 'retentioneering';
 const BUILD = 'build_retentioneering_model';
 const QUERY = 'query_retentioneering_model';
 const DISPLAY = 'display_retentioneering_result';
-const MAX_RESULT_ROWS = 200000;
 
 export const TOOL_DESCRIPTIONS = {
   [BUILD]: 'Build the eventstream a path analysis reads: which events source, which time window, which events (kept, dropped, merged into groups), which user attributes to carry as segments, optional sessions and a deterministic user sample. It is built in SQL where the data lives and materialized, and returns a task_id at once; query_retentioneering_model({ task_id }) returns its summary — users, events, the event vocabulary with counts. Use it for questions about paths and sequences: what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are. Then run the analyses with query_retentioneering_model. For a metric over time use build_semantic_model; for a one-off table of numbers, build_pipeline_model.',
-  [QUERY]: 'Run path analyses over a built eventstream, or read a task back. { context_id, analyses: [...] } starts ONE task that computes every listed analysis together in the warehouse (up to 6; one run for all of them, so list what the question needs in one call): transition_graph (which event follows which, all weights at once), step_matrix / step_sankey (the share of paths at each event step by step, optionally around an anchor), funnel (paths reaching each event of an ordered list), cluster_analysis (groups of similar paths and their profiles), segment_overview (path metrics across a segment column). It returns a task_id at once. { task_id } (or task_ids) waits up to 30s and returns each analysis summarized — the biggest transitions, the leading events per step, each cluster\'s profile; { task_id, cancel: true } stops it. Event names are the eventstream\'s own (after grouping).',
-  [DISPLAY]: 'Draw one analysis of a finished query_retentioneering_model task as a card for the person — the transition graph, a step matrix heatmap, a step sankey, a funnel, the clusters or a segment overview — in hosts that render MCP Apps. Once per analysis: a second call for the same one is refused. Read the task first (query_retentioneering_model({ task_id })) to know what it found; draw the analysis the person should see before summarising it.',
+  [QUERY]: 'Run retentioneering over a built eventstream, or read a task back. { context_id, preprocess?, analyses: [...] } starts ONE task that computes every listed analysis together in the warehouse (one run for all of them, so list what the question needs in one call). Each analysis is a library method with its own parameters, under the library\'s names: transition_graph (which event follows which, every weight at once), step_matrix / step_sankey (the share of paths at each event step by step, optionally around an anchor), funnel, cluster_analysis (groups of similar paths), segment_overview, conversion_rate, metric_distribution, path_metrics, describe; diff compares two segment levels. preprocess is the library\'s own op model ({ type, ...params }: filter_paths, collapse_events, truncate_paths, split_sessions, add_segment, add_clusters, …), for the whole call or one analysis. It returns a task_id at once. { task_id } (or task_ids) waits up to 30s and returns each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table — or, with detail: "full", every record; { task_id, cancel: true } stops it. Event names are the eventstream\'s own (after grouping).',
+  [DISPLAY]: 'Draw one analysis of a finished query_retentioneering_model task as a card for the person — the transition graph, a step matrix heatmap, a step sankey, a funnel, the clusters or a segment overview, and for any other analysis or a diff the tables it returned — in hosts that render MCP Apps. Once per analysis: a second call for the same one is refused. Read the task first (query_retentioneering_model({ task_id })) to know what it found; draw the analysis the person should see before summarising it.',
 };
 
 // ── the feature definition (src/features.js) ────────────────────────────────────────────────────
@@ -114,7 +113,7 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {} } = {
       uri: RETENTIONEERING_VIEW_URI,
       name: 'retentioneering-view',
       title: 'Path Analysis',
-      description: 'Card for one path analysis: a transition graph (switch the weight and how many exits per event are shown), a step matrix heatmap, a step sankey, a funnel, the clusters of paths or a segment overview.',
+      description: 'Card for one path analysis: a transition graph (switch the weight and how many exits per event are shown), a step matrix heatmap, a step sankey, a funnel, the clusters of paths, a segment overview — or the tables any other analysis (and any diff) returned.',
       asset: 'retentioneeringView',
       viewModel: (result, args) => retentioneeringViewModel(result, args),
     },
@@ -124,6 +123,7 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {} } = {
     overview: () => ({
       library: `retentioneering ${retentioneeringFacts().version}`,
       analyses: ANALYSIS_KINDS,
+      preprocess: OFFERED_OPS,
       note: `Path analysis: ${BUILD} → ${QUERY} → ${DISPLAY}; semantic_index({ guide: "${GUIDE_NAME}" }) says which analysis answers which question.`,
     }),
   };
@@ -164,7 +164,7 @@ function validateBuild(engine, input) {
   checkEvents(c, source, input.events?.include, 'events.include');
   checkEvents(c, source, input.events?.exclude, 'events.exclude');
   for (const [g, evs] of Object.entries(input.events?.groups || {})) {
-    if (!/^[a-z][a-z0-9_]{0,40}$/.test(g)) throw new ToolError(`group name '${g}' must be lowercase snake_case`, { stage: 'validate', field: 'events.groups' });
+    if (!new RegExp(NAME).test(g)) throw new ToolError(`group name '${g}' must be lowercase snake_case`, { stage: 'validate', field: 'events.groups' });
     checkEvents(c, source, evs, `events.groups.${g}`);
   }
   const reserved = new Set(Object.values(ES_COLUMNS));
@@ -227,7 +227,7 @@ async function build(engine, feature, input) {
     return {
       ok: true, kind: 'eventstream', context_id: ctx.id, eventstream: spec.name, source: spec.source, model: modelName,
       columns: rendered.columns, ...summary,
-      next: `Run the analyses the question needs in ONE call: ${QUERY}({ context_id: '${ctx.id}', analyses: [{ kind: 'transition_graph' }, { kind: 'step_matrix', max_steps: 10 }, …] }).`,
+      next: `Run the analyses the question needs in ONE call: ${QUERY}({ context_id: '${ctx.id}', analyses: [{ kind: 'transition_graph' }, { kind: 'step_matrix' }, …] }).`,
     };
   }, { input });
   engine.jobs.setTable(id, modelName);
@@ -236,9 +236,9 @@ async function build(engine, feature, input) {
 
 async function summarizeEventstream(runner, dir, model, rendered, spec) {
   const ref = `{{ ref('${model}') }}`;
-  const totals = await runner.show(dir, `select count(*) as events, count(distinct ${ES_COLUMNS.user}) as users, min(${ES_COLUMNS.time}) as first_event, max(${ES_COLUMNS.time}) as last_event${spec.sessions ? `, count(distinct ${ES_COLUMNS.session}) as sessions` : ''} from ${ref}`, 1);
+  const totals = await runner.show(dir, `select count(*) as events, count(distinct ${ES_COLUMNS.user}) as users, count(distinct ${ES_COLUMNS.event}) as names, min(${ES_COLUMNS.time}) as first_event, max(${ES_COLUMNS.time}) as last_event${spec.sessions ? `, count(distinct ${ES_COLUMNS.session}) as sessions` : ''} from ${ref}`, 1);
   if (!totals.ok) return { ok: false, error: { stage: 'summary', message: formatDbtError(totals.stdout, totals.stderr) || totals.error } };
-  const vocab = await runner.show(dir, `select ${ES_COLUMNS.event} as event, count(*) as events, count(distinct ${ES_COLUMNS.user}) as users from ${ref} group by ${ES_COLUMNS.event} order by count(*) desc, ${ES_COLUMNS.event}`, 1000);
+  const vocab = await runner.show(dir, `select ${ES_COLUMNS.event} as event, count(*) as events, count(distinct ${ES_COLUMNS.user}) as users from ${ref} group by ${ES_COLUMNS.event} order by count(*) desc, ${ES_COLUMNS.event}`, Math.max(Number(totals.rows[0]?.names) || 0, 1));
   if (!vocab.ok) return { ok: false, error: { stage: 'summary', message: formatDbtError(vocab.stdout, vocab.stderr) || vocab.error } };
   const t = totals.rows[0] || {};
   return {
@@ -266,35 +266,77 @@ function eventstreamOf(ctx, name) {
   return { name, ...all[name] };
 }
 
-function validateAnalyses(es, analyses) {
+/** The library method's parameter names, from the sheet. */
+function methodParams(kind) {
+  return new Set(retentioneeringFacts().analyses[kind].params.map((p) => p.name));
+}
+function opParams(op) {
+  return new Set(retentioneeringFacts().ops[op].params.map((p) => p.name));
+}
+
+/** The session columns split_sessions steps add (the library's own default name when none is given). */
+function sessionColumns(steps) {
+  const f = retentioneeringFacts();
+  const fallback = f.ops.split_sessions?.params.find((p) => p.name === 'session_col')?.default;
+  return (steps || []).filter((s) => s.type === 'split_sessions').map((s) => s.session_col || fallback).filter(Boolean);
+}
+
+/** `path` → the library's path column: the user key, the build's session, or a split_sessions column. */
+function pathColumn(es, path, sessionCols, field) {
+  if (path === undefined || path === 'users') return ES_COLUMNS.user;
+  if (path === 'sessions') {
+    if (!es.sessions) throw new ToolError(`path: "sessions" needs sessions — rebuild eventstream '${es.name}' with sessions: { gap_minutes }, or split them with a split_sessions preprocess step`, { stage: 'validate', field });
+    return ES_COLUMNS.session;
+  }
+  if (!sessionCols.includes(path)) throw new ToolError(`path '${path}' is not a column of the paths — use "users", "sessions", or the session_col of a split_sessions step in preprocess (${sessionCols.join(', ') || 'none here'})`, { stage: 'validate', field });
+  return path;
+}
+
+/** Preprocess steps in the library's own shape: `path` resolved to path_col. */
+function libraryOps(es, steps, sessionCols, field) {
+  return (steps || []).map((step) => {
+    const { path, ...rest } = step;
+    if (path !== undefined && opParams(step.type).has('path_col')) rest.path_col = pathColumn(es, path, sessionCols, field);
+    return rest;
+  });
+}
+
+function validateAnalyses(es, analyses, callSteps) {
+  const f = retentioneeringFacts();
   const vocab = es.summary?.vocabulary?.map((v) => v.event) || null;
-  const known = vocab ? [...vocab, ...retentioneeringFacts().synthetic_events] : null;
+  const known = vocab ? [...vocab, ...f.synthetic_events] : null;
   const event = (n, field) => {
     if (known && !known.includes(n)) throw new ToolError(`'${n}' is not an event of eventstream '${es.name}'${suggest(n, known)} — its names are the ones after grouping${es.spec?.events?.top ? `, with the rarest merged into '${OTHER_EVENT}'` : ''}`, { stage: 'validate', field });
   };
+  const anchorEvents = (spec, field) => {
+    for (const one of Array.isArray(spec) ? spec : [spec]) {
+      const pattern = typeof one === 'string' ? one : one?.event_col ? null : one?.pattern;
+      if (pattern) pattern.split('->').map((t) => t.trim()).filter((t) => t && t !== '.*').forEach((t) => event(t, field));
+    }
+  };
+  const callSessions = sessionColumns(callSteps);
   const ids = new Set();
   return analyses.map((a) => {
-    let id = a.id || a.kind;
-    if (!a.id) for (let n = 2; ids.has(id); n += 1) id = `${a.kind}_${n}`;
+    const { kind, id: given, path, preprocess, ...params } = a;
+    let id = given || kind;
+    if (!given) for (let n = 2; ids.has(id); n += 1) id = `${kind}_${n}`;
     if (ids.has(id)) throw new ToolError(`two analyses are named '${id}' — give each its own id`, { stage: 'validate', field: 'analyses.id' });
     ids.add(id);
-    if (a.path === 'sessions' && !es.sessions) throw new ToolError(`path: "sessions" needs sessions — rebuild eventstream '${es.name}' with sessions: { gap_minutes }`, { stage: 'validate', field: 'analyses.path' });
-    if (a.kind === 'funnel') a.steps.forEach((s) => event(s, 'analyses.steps'));
-    if (a.anchor) a.anchor.pattern.split('->').map((t) => t.trim()).filter((t) => t && t !== '.*').forEach((t) => event(t, 'analyses.anchor.pattern'));
-    if (a.kind === 'segment_overview' && !es.segments.includes(a.segment)) throw new ToolError(`'${a.segment}' is not a segment of eventstream '${es.name}' (${es.segments.join(', ') || 'it was built with none'}) — add it to segments in ${BUILD}`, { stage: 'validate', field: 'analyses.segment' });
-    const out = { ...a, id };
-    // the library's own spelling of the clustering arguments
-    if (a.kind === 'cluster_analysis') {
-      const methodArgs = {};
-      if (a.n_clusters != null) methodArgs.n_clusters = a.n_clusters;
-      if (a.min_cluster_size != null) methodArgs.min_cluster_size = a.min_cluster_size;
-      delete out.n_clusters; delete out.min_cluster_size;
-      if (Object.keys(methodArgs).length) out.method_args = methodArgs;
+    const sessionCols = [...callSessions, ...sessionColumns(preprocess)];
+    const pathCol = pathColumn(es, path, sessionCols, 'analyses.path');
+    // names the eventstream had when it was built — checked here unless a preprocess step may change them
+    if (!callSteps?.length && !preprocess?.length) {
+      if (Array.isArray(params.steps)) params.steps.forEach((s) => event(s, 'analyses.steps'));
+      for (const k of Object.keys(params)) if (/anchor$/.test(k)) anchorEvents(params[k], `analyses.${k}`);
+      const segment = params.segment_col ?? (Array.isArray(params.diff) && params.diff.length === 3 && typeof params.diff[0] === 'string' ? params.diff[0] : undefined);
+      if (segment !== undefined && !es.segments.includes(segment)) throw new ToolError(`'${segment}' is not a segment of eventstream '${es.name}' (${es.segments.join(', ') || 'it was built with none'}) — add it to segments in ${BUILD}, or make it with an add_segment preprocess step`, { stage: 'validate', field: 'analyses.segment_col' });
     }
-    if ((a.kind === 'step_matrix' || a.kind === 'step_sankey') && a.anchor) {
-      out.anchor = { pattern: a.anchor.pattern, ...(a.anchor.occurrence ? { occurrence: a.anchor.occurrence } : {}), ...(a.anchor.offset != null ? { offset: a.anchor.offset } : {}) };
-    }
-    return out;
+    if (methodParams(kind).has('path_col')) params.path_col = pathCol;
+    return {
+      id, kind, method: f.analyses[kind].method, path_col: pathCol,
+      ...(preprocess?.length ? { preprocess: libraryOps(es, preprocess, sessionCols, 'analyses.preprocess') } : {}),
+      params,
+    };
   });
 }
 
@@ -310,13 +352,14 @@ async function query(engine, feature, input) {
   const ctx = engine._ctx(input.context_id);
   if (!ctx.state.retentioneering) throw new ToolError(`context '${input.context_id}' is not a path-analysis context — build an eventstream with ${BUILD} first`, { stage: 'validate', field: 'context_id' });
   const es = eventstreamOf(ctx, input.eventstream);
-  const analyses = validateAnalyses(es, input.analyses);
+  const analyses = validateAnalyses(es, input.analyses, input.preprocess);
   const state = ctx.state.retentioneering;
   state.queries = (state.queries || 0) + 1;
   const modelName = `rete_q${state.queries}_${es.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   const spec = {
     columns: { user: ES_COLUMNS.user, event: ES_COLUMNS.event, time: ES_COLUMNS.time, session: es.sessions ? ES_COLUMNS.session : null, segments: es.segments },
     edge_weights: retentioneeringFacts().edge_weights,
+    preprocess: libraryOps(es, input.preprocess, sessionColumns(input.preprocess), 'preprocess'),
     analyses,
   };
   // which eventstream a result table was computed from — carried, so a later read never takes it apart
@@ -336,23 +379,25 @@ async function query(engine, feature, input) {
 
 /** The stored result table of a query task, read and shaped. */
 async function readResult(feature, dir, model, { context_id, eventstream, order }) {
-  const res = await feature.runner.show(dir, `select analysis, kind, part, seq, payload from {{ ref('${model}') }} order by analysis, part, seq`, MAX_RESULT_ROWS);
+  const n = await feature.runner.show(dir, `select count(*) as n from {{ ref('${model}') }}`, 1);
+  if (!n.ok) return { ok: false, error: { stage: 'fetch', message: formatDbtError(n.stdout, n.stderr) || n.error } };
+  const res = await feature.runner.show(dir, `select analysis, kind, part, seq, payload from {{ ref('${model}') }} order by analysis, part, seq`, Math.max(Number(n.rows[0]?.n) || 0, 1));
   if (!res.ok) return { ok: false, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) || res.error } };
   return { ok: true, kind: 'analyses', context_id, eventstream, analyses: parseResultRows(res.rows, order) };
 }
 
 /** What a read of a finished task answers: the eventstream summary, or each analysis summarized. */
-function answer(engine, id, out) {
+function answer(engine, id, out, detail = 'summary') {
   if (out?.kind !== 'analyses') return out;
   const drawable = Object.keys(out.analyses).filter((a) => !drawnAlready(engine, id, a));
   return {
     ok: true, kind: 'analyses', context_id: out.context_id, eventstream: out.eventstream,
-    analyses: Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, summarize(r)])),
+    analyses: detail === 'full' ? out.analyses : Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, summarize(r)])),
     ...(drawable.length ? { show_to_user: { tool: DISPLAY, arguments: { task_id: id, analysis: drawable[0] }, why: `in a host that renders MCP Apps this draws one analysis as a card (${drawable.join(', ')} can be drawn) — once per analysis, for what the person should see.` } } : {}),
   };
 }
 
-async function readTask(engine, feature, id, { wait_seconds: wait } = {}) {
+async function readTask(engine, feature, id, { wait_seconds: wait, detail } = {}) {
   const job = engine._taskForSide(id, SIDE);
   const seconds = Math.min(Math.max(wait ?? MAX_WAIT_SECONDS, 0), MAX_WAIT_SECONDS);
   const waited = await engine._awaitTask(id, seconds);
@@ -366,7 +411,7 @@ async function readTask(engine, feature, id, { wait_seconds: wait } = {}) {
   const out = await taskOutput(engine, feature, now);
   if (!out) return { ok: false, ...head, status: 'error', error: { stage: 'task', code: RESULT_GONE, message: now.error || 'this task\'s result is gone — run it again' } };
   if (out.ok === false) return { ...head, ...out, status: 'error' };
-  return { ...head, status: 'done', ...answer(engine, id, out) };
+  return { ...head, status: 'done', ...answer(engine, id, out, detail) };
 }
 
 async function readTasks(engine, feature, input) {
@@ -374,7 +419,7 @@ async function readTasks(engine, feature, input) {
   const seconds = Math.min(Math.max(input.wait_seconds ?? MAX_WAIT_SECONDS, 0), MAX_WAIT_SECONDS);
   await engine._awaitTasks(input.task_ids, seconds);
   const results = [];
-  for (const id of input.task_ids) results.push(await readTask(engine, feature, id, { wait_seconds: 0 }));
+  for (const id of input.task_ids) results.push(await readTask(engine, feature, id, { wait_seconds: 0, detail: input.detail }));
   const running = results.filter((r) => r.status === 'running').map((r) => r.task_id);
   return { ok: true, status: running.length ? 'running' : 'done', results, ...(running.length ? { next: `${running.length} still running — call ${QUERY}({ task_ids: [${running.map((i) => `'${i}'`).join(', ')}] }) for them` } : {}) };
 }
@@ -424,7 +469,7 @@ async function display(engine, feature, input) {
   } : null;
   const drawn = { ok: true, task_id: input.task_id, analysis: input.analysis, eventstream: out.eventstream, ...(scope ? { scope } : {}), ...(input.edge_weight ? { edge_weight: input.edge_weight } : {}), result };
   const vm = retentioneeringViewModel(drawn, input);
-  if (vm.kind === 'none') return { ...drawn, drawn: false, note: 'this analysis has nothing to draw (no transitions, steps or groups)' };
+  if (vm.kind === 'none') return { ...drawn, drawn: false, note: 'this analysis has nothing to draw (no transitions, steps, groups or rows)' };
   const ctx = engine.ctxs.get(job.contextId);
   const marks = (ctx.state.retentioneering.drawn ||= {});
   (marks[input.task_id] ||= []).push(input.analysis);

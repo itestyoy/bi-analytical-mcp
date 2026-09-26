@@ -181,6 +181,16 @@
   retentioneering-view/, drawn with the result view's theme and shared pieces, src/apps/shared/). It is
   deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds), and
   every choice it offers comes from `config/retentioneering-facts.json`, generated from the library.
+  IT IS A WRAPPER OVER THE WHOLE LIBRARY, WITH NO LIMITS OF ITS OWN: every analysis and every
+  registered preprocessing op (the library's own `{ type, ...params }` op model, applied with
+  `apply_ops`), each with its own parameters under the library's names, typed as far as the library
+  says — each path metric with exactly its arguments, the condition grammar, where `agg` applies (the
+  sheet PROBES the library for what its prose does not state). No cap on analyses, steps, rows or
+  tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
+  reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
+  the analysis runtime (code — the data is declared in the build instead), and the two ops the
+  eventstream's shape rules out. A charted analysis keeps its own card; anything else (and any diff)
+  comes back, and is drawn, as the tables and values the library returned.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): what speaks to the MODEL — the

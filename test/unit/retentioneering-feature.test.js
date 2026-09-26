@@ -15,7 +15,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { resolveFeatures, flagOn } from '../../src/features.js';
 import { createRetentioneeringFeature, retentioneeringDefinition } from '../../src/retentioneering/index.js';
-import { retentioneeringFacts } from '../../src/retentioneering/schema.js';
+import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED } from '../../src/retentioneering/schema.js';
 import { RETENTIONEERING_VIEW_URI } from '../../src/retentioneering/view-model.js';
 import { buildToolDefs, createServices, runTool, coreInstructions } from '../../src/mcp-surface.js';
 import { RUNTIME_ASSETS } from '../../src/runtime-assets.js';
@@ -86,7 +86,8 @@ test('on: three tools within the budgets, the drawing one pointing at its own vi
   assert.deepEqual(page._meta.ui.csp, { connectDomains: [], resourceDomains: [], frameDomains: [], baseUriDomains: [] });
   // the guide, its routing trigger, the skill, one line of the core instructions
   const g = await e.semantic_index({ guide: 'retentioneering' });
-  assert.deepEqual(Object.keys(g.analyses).sort(), ['cluster_analysis', 'funnel', 'segment_overview', 'step_matrix', 'step_sankey', 'transition_graph']);
+  assert.deepEqual(Object.keys(g.analyses).sort(), [...ANALYSIS_KINDS].sort());
+  assert.deepEqual(Object.keys(g.preprocess), OFFERED_OPS);
   const all = await e.semantic_index({ guide: true });
   assert.ok(all.routing_triggers.some((t) => t.do.includes('build_retentioneering_model')));
   assert.ok(s.skills.list().some((k) => k.frontmatter.name === 'retentioneering'));
@@ -101,14 +102,35 @@ test('on: three tools within the budgets, the drawing one pointing at its own vi
 test('the schemas offer exactly what the library does — every choice from the facts sheet', () => {
   const e = on();
   const f = retentioneeringFacts();
+  // resolve the folded refs, so the checks read the schema as a validator does
+  const q = e.schemas.query_retentioneering_model;
+  const deref = (n) => (n?.$ref ? deref(n.$ref.replace(/^#\//, '').split('/').reduce((x, k) => x[k], q)) : n);
   assert.deepEqual(e.schemas.display_retentioneering_result.properties.edge_weight.enum, f.edge_weights);
-  const branches = e.schemas.query_retentioneering_model.properties.analyses.items.oneOf;
+  // every analysis the library offers, each with the library's parameters under its names (path_col as path)
+  const branches = deref(q.properties.analyses.items).oneOf.map(deref);
+  assert.deepEqual(branches.map((b) => b.title), Object.keys(f.analyses));
+  for (const b of branches) {
+    const lib = f.analyses[b.title].params.map((p) => (p.name === 'path_col' ? 'path' : p.name)).filter((n) => !NOT_OFFERED.params[n]);
+    assert.deepEqual(Object.keys(b.properties).filter((k) => !['kind', 'id', 'preprocess'].includes(k)).sort(), lib.sort(), b.title);
+    assert.deepEqual(b.required.filter((k) => k !== 'kind').sort(), f.analyses[b.title].params.filter((p) => p.required).map((p) => p.name).sort(), `${b.title}: required as the library requires`);
+  }
   const cluster = branches.find((b) => b.title === 'cluster_analysis');
-  assert.deepEqual(cluster.properties.method.enum, f.cluster_methods);
-  assert.deepEqual(cluster.properties.scaler.enum, f.cluster_scalers);
-  assert.deepEqual(cluster.properties.features.items.properties.metric.enum, f.path_metrics);
-  assert.deepEqual(branches.find((b) => b.title === 'segment_overview').properties.metrics.items.properties.agg.enum, f.segment_aggs);
-  assert.equal(branches.find((b) => b.title === 'step_matrix').properties.max_steps.default, f.data_functions.step_sankey_data.find((p) => p.name === 'max_steps').default);
+  assert.deepEqual(deref(cluster.properties.method).enum, f.cluster_methods);
+  assert.deepEqual(deref(cluster.properties.scaler).enum, f.cluster_scalers);
+  assert.equal(branches.find((b) => b.title === 'step_matrix').properties.max_steps.default, f.analyses.step_matrix.params.find((p) => p.name === 'max_steps').default);
+  // a metric config: one branch per metric of the library, each with exactly its own arguments
+  const metric = deref(deref(cluster.properties.features).items);
+  assert.deepEqual(metric.oneOf.map(deref).map((m) => m.properties.metric.const), f.path_metrics);
+  for (const m of metric.oneOf.map(deref)) assert.deepEqual(Object.keys(deref(m.properties.metric_args)?.properties || {}).sort(), Object.keys(f.metric_args[m.properties.metric.const]).sort(), m.title);
+  // every op the library registers, but the ones not offered for their stated reason
+  const ops = deref(deref(q.properties.preprocess).items).oneOf.map(deref);
+  assert.deepEqual(ops.map((o) => o.title), Object.keys(f.ops).filter((op) => !NOT_OFFERED.ops[op]));
+  for (const o of ops) for (const p of Object.keys(NOT_OFFERED.params)) assert.ok(!(p in o.properties), `${o.title} offers no ${p}`);
+  // the build: the source's events and the models' attributes are enums from the catalog
+  const b = e.schemas.build_retentioneering_model;
+  assert.ok(deref(deref(b.properties.events).properties.include).items.enum?.includes('level_started'));
+  const seg = deref(deref(b.properties.segments).items).oneOf.map(deref).find((x) => x.title === 'users');
+  assert.ok(deref(seg.properties.attribute).enum.includes('platform'));
 });
 
 test('the facts sheet is what the installed library says (where the feature\'s environment is built)', (t) => {
@@ -125,11 +147,16 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('build_retentioneering_model', { name: 'x', source: 'nope' }, /invalid input/);
   await refused('build_retentioneering_model', { name: 'Bad Name', source: 'events' }, /invalid input/);
   await refused('build_retentioneering_model', { name: 'x', source: 'events', sample: { share: 0 } }, /invalid input/);
-  await refused('build_retentioneering_model', { name: 'x', source: 'events', events: { include: ['levl_started'] } }, (err) => err.field === 'events.include');
-  await refused('build_retentioneering_model', { name: 'x', source: 'events', segments: [{ model: 'users', attribute: 'no_such' }] }, (err) => err.field === 'segments.attribute');
+  // a typo in an event or an attribute is refused by the schema itself, which lists what exists
+  await refused('build_retentioneering_model', { name: 'x', source: 'events', events: { include: ['levl_started'] } }, /invalid input.*level_started/);
+  await refused('build_retentioneering_model', { name: 'x', source: 'events', segments: [{ model: 'users', attribute: 'no_such' }] }, /invalid input.*platform/);
   await refused('build_retentioneering_model', { name: 'x', source: 'events', where: [{ column: 'country', op: 'eq', value: 'US' }] }, (err) => err.field === 'where.column');
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [] }, /invalid input/);
-  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'funnel', steps: ['a'] }] }, /invalid input/);
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis' }] }, /invalid input/); // features: required by the library
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'path_metrics', metrics: [{ metric: 'has_event', metric_args: { events: ['a'] } }] }] }, /invalid input/);
+  await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'filter_events', sql: 'select * from eventstream' }], analyses: [{ kind: 'describe' }] }, /invalid input/);
+  await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'add_start_end_events' }], analyses: [{ kind: 'describe' }] }, /invalid input/);
+  await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'filter_paths', condition: { op: '>', metric: 'has_event_bulk', value: 1 } }], analyses: [{ kind: 'describe' }] }, /invalid input/);
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'step_matrix', anchor: { pattern: 'a' }, path_pattern: 'a->b' }] }, /invalid input/);
   await refused('display_retentioneering_result', { task_id: 'nope', analysis: 'funnel' }, /unknown task_id/);
   // a card for a client that renders none is refused like display_model_result

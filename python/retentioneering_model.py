@@ -247,6 +247,9 @@ def run(frame, spec):
         "segment_cols": list(cols.get("segments") or []),
     })
     out = _Out()
+    frame_out = stream.to_dataframe()
     for a in spec["analyses"]:
+        # how many paths the analysis reads — what its shares are shares OF, so a card can give counts
+        out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[_path_col(spec, a)].nunique())})
         ANALYSES[a["kind"]](stream, spec, a, out)
     return pd.DataFrame(out.rows, columns=RESULT_COLUMNS)

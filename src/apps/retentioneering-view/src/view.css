@@ -169,3 +169,41 @@
   font-size: 11px;
   fill: var(--muted-foreground);
 }
+
+/* ── focus and dimming: what the pointer is on stays, the rest steps back ── */
+:root {
+  /* the paths that ended: a neutral darker than "other events", so drop-off reads as its own block */
+  --rt-ended: color-mix(in oklab, var(--foreground) 55%, var(--card));
+}
+
+.rt-edge.rt-edge-dim {
+  stroke: color-mix(in oklab, var(--muted-foreground) 25%, transparent);
+}
+
+.rt-node {
+  cursor: default;
+  outline: none;
+  transition: opacity 0.12s;
+
+  &.rt-node-dim {
+    opacity: 0.3;
+  }
+
+  &:focus-visible circle {
+    stroke: var(--ring);
+    stroke-width: 3;
+  }
+}
+
+.rt-flow.rt-flow-dim {
+  opacity: 0.06;
+}
+
+.rt-heat .rt-synthetic .rt-event {
+  font-style: italic;
+  color: var(--muted-foreground);
+}
+
+.rt-table-view {
+  margin-top: calc(var(--space) * 3);
+}

@@ -196,3 +196,23 @@ test('what cannot run is refused before anything starts', opts, async (t) => {
   // a task of another side is read by its own tool
   await assert.rejects(engine.query_pipeline_model({ task_id: analyses.task_id }), /query_retentioneering_model/);
 });
+
+test('every event keeps its name unless a top N is asked for; the card carries its scope and path counts', opts, async (t) => {
+  if (skip(t)) return;
+  const counts = {};
+  for (const r of rows) counts[r.e] = (counts[r.e] || 0) + 1;
+  assert.ok(!built.vocabulary.some((v) => v.event === 'other'), 'no "other" by default');
+  const top3 = Object.entries(counts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 3);
+  const b = await engine.build_retentioneering_model({ name: 'top3', source: 'events', events: { top: 3 } });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  const vocab = Object.fromEntries(r.vocabulary.map((v) => [v.event, v.events]));
+  for (const [e, n] of top3) assert.equal(vocab[e], n);
+  assert.equal(vocab.other, rows.length - top3.reduce((a, [, n]) => a + n, 0));
+  // an analysis knows how many paths it read; the card, who and when
+  assert.equal(analyses.read.analyses.funnel && (await full('funnel')).paths, built.users);
+  const q = await engine.query_retentioneering_model({ context_id: built.context_id, analyses: [{ kind: 'funnel', steps: FUNNEL, path: 'sessions' }] });
+  await engine.query_retentioneering_model({ task_id: q.task_id });
+  const d = await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'funnel' });
+  assert.equal(d.result.paths, built.sessions, 'per-session paths');
+  assert.deepEqual({ users: d.scope.users, events: d.scope.events }, { users: built.users, events: rows.length });
+});

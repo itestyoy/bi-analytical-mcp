@@ -123,8 +123,8 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
 (Apache-2.0). Off (the default), none of it exists: not listed, not callable, not described.
 
 - **`build_retentioneering_model`** — the DATA: the eventstream an analysis reads (events source,
-  time window, events kept / dropped / merged into groups, the most frequent N names with the rest
-  as `other`, user attributes carried as segments through the declared relationship, optional
+  time window, events kept / dropped / merged into groups (optionally the most frequent N names with
+  the rest as `other`), user attributes carried as segments through the declared relationship, optional
   sessions split at a gap, and a user sample by a hash of the key — the same users on every build).
   It is built in SQL where the data lives and materialized; the call returns a task.
 - **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, analyses: [...] }` runs every
@@ -133,8 +133,10 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   warehouse's Python runtime on BigQuery (Colab Enterprise through `submission_method: bigframes`).
   One call = one run = one cold start. `{ task_id }` reads it back, summarized for the model.
 - **`display_retentioneering_result`** — the SHOW: one analysis of a finished task drawn as a card
-  (`ui://betti/retentioneering-view.html`), once per analysis. The graph switches between all the
-  transition weights and hides the small arrows on the page itself — no recomputation.
+  (`ui://betti/retentioneering-view.html`), once per analysis. The graph opens on each event's
+  strongest exits (retentioneering's own default) and switches weights and how many exits it shows
+  on the page itself — no recomputation; every card gives its scope (users, period, sample) and
+  counts next to shares, and has a table view of its numbers.
 
 Nothing heavy runs in the server: a call starts a task, the warehouse computes, and a small result
 table comes back. Configuration:
@@ -148,8 +150,6 @@ table comes back. Configuration:
   package preinstalled) through `MCP_RETENTIONEERING_MODEL_CONFIG`, a JSON of extra `dbt.config`
   keys, e.g. `{"notebook_template_id": "<id>", "timeout": 3600}`. The profile supplies `gcs_bucket`
   and `compute_region` as for any bigframes model.
-- `MCP_RETENTIONEERING_MAX_EVENTS` (default 5,000,000) — the most events one analysis run holds in
-  memory; a bigger eventstream is refused with a hint to sample.
 - The library's telemetry is switched off in every model it runs in (`RETENTIONEERING_NO_TRACK=1`).
 - What the tools offer — the analyses and their parameters, the edge weights, the path metrics,
   the clustering methods — is generated from the installed library into

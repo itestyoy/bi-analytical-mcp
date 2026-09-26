@@ -8,7 +8,7 @@
 // statement shapes the path table:
 //
 //   user_id     the path owner (the source's per-user key, as text)
-//   event       the event name — grouped, and outside the top N merged into "other"
+//   event       the event name — grouped, and (when the caller asks for a top N) the rest merged into "other"
 //   event_time  the event's time
 //   session_id  when sessions are asked for: user_id#n, a new n after each gap longer than asked
 //   <segments>  the declared user attributes
@@ -17,7 +17,7 @@
 
 import { renderPipeline } from '../pipeline.js';
 import { getDialect } from '../dialects/index.js';
-import { userKeyColumn, DEFAULT_TOP_EVENTS } from './schema.js';
+import { userKeyColumn } from './schema.js';
 
 /** The fixed columns of every eventstream (segment columns come after them). */
 export const ES_COLUMNS = { user: 'user_id', event: 'event', time: 'event_time', session: 'session_id' };
@@ -71,7 +71,7 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
   const named = groups.length
     ? `CASE ${groups.map(([g, evs]) => `WHEN ${event} IN (${evs.map((e) => lit(d, e)).join(', ')}) THEN ${lit(d, g)}`).join(' ')} ELSE ${d.castExpr(event, 'string')} END`
     : d.castExpr(event, 'string');
-  const top = spec.events?.top ?? DEFAULT_TOP_EVENTS;
+  const top = spec.events?.top ?? null;
   const sample = spec.sample?.share != null && spec.sample.share < 1
     ? ` AND ${d.valueBucket(user, SAMPLE_BUCKETS)} < ${Math.round(spec.sample.share * SAMPLE_BUCKETS)}`
     : '';
@@ -80,8 +80,13 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
   const ctes = [
     `es_base AS (\n${base.sql}\n)`,
     `es_events AS (SELECT ${d.castExpr(user, 'string')} AS ${ES_COLUMNS.user}, ${named} AS ${ES_COLUMNS.event}, ${time} AS ${ES_COLUMNS.time}${segSel} FROM es_base WHERE ${user} IS NOT NULL AND ${event} IS NOT NULL AND ${time} IS NOT NULL${sample})`,
-    `es_top AS (SELECT ${ES_COLUMNS.event} FROM es_events GROUP BY ${ES_COLUMNS.event} ORDER BY COUNT(*) DESC, ${ES_COLUMNS.event} LIMIT ${Number(top)})`,
-    `es_named AS (SELECT ${ES_COLUMNS.user}, CASE WHEN ${ES_COLUMNS.event} IN (SELECT ${ES_COLUMNS.event} FROM es_top) THEN ${ES_COLUMNS.event} ELSE ${lit(d, OTHER_EVENT)} END AS ${ES_COLUMNS.event}, ${ES_COLUMNS.time}${segNames} FROM es_events)`,
+    // every event keeps its name unless the caller asked for a top N
+    ...(top
+      ? [
+        `es_top AS (SELECT ${ES_COLUMNS.event} FROM es_events GROUP BY ${ES_COLUMNS.event} ORDER BY COUNT(*) DESC, ${ES_COLUMNS.event} LIMIT ${Number(top)})`,
+        `es_named AS (SELECT ${ES_COLUMNS.user}, CASE WHEN ${ES_COLUMNS.event} IN (SELECT ${ES_COLUMNS.event} FROM es_top) THEN ${ES_COLUMNS.event} ELSE ${lit(d, OTHER_EVENT)} END AS ${ES_COLUMNS.event}, ${ES_COLUMNS.time}${segNames} FROM es_events)`,
+      ]
+      : [`es_named AS (SELECT * FROM es_events)`]),
   ];
   let final = `SELECT ${ES_COLUMNS.user}, ${ES_COLUMNS.event}, ${ES_COLUMNS.time}${segNames} FROM es_named`;
   if (spec.sessions?.gap_minutes) {

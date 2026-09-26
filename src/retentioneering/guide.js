@@ -25,8 +25,8 @@ export function retentioneeringGuide() {
     library: `retentioneering ${f.version} (Apache-2.0) — the analyses are its own headless computations, run in the warehouse`,
     sequence: [
       { step: 'Frame the paths', do: 'Decide whose paths (each user\'s history, or sessions), over which window, and which events matter. Technical noise (heartbeats, screen pings) hides the story: exclude it, or merge near-duplicates into one name with events.groups.' },
-      { step: 'Build the eventstream', do: 'build_retentioneering_model({ name, source, time_range, events, segments, sessions?, sample? }). Read its summary with query_retentioneering_model({ task_id }): users, events, the vocabulary after grouping. The rarest names are merged into "other" (events.top) so the graph and the matrix stay readable — raise top if "other" is large.' },
-      { step: 'Size it', do: 'One analysis run holds the whole eventstream in memory on the warehouse runtime. A large source: rebuild with sample: { share } — a stable subset of users (a hash of the key), so every later analysis reads the same people.' },
+      { step: 'Build the eventstream', do: 'build_retentioneering_model({ name, source, time_range, events, segments, sessions?, sample? }). Read its summary with query_retentioneering_model({ task_id }): users, events, the vocabulary after grouping. Every event keeps its name; if a long tail of rare names makes the graph unreadable, events.top merges all but the N most frequent into "other".' },
+      { step: 'Size it', do: 'One analysis run holds the whole eventstream in memory on the warehouse runtime. For a very large source, sample: { share } keeps a stable subset of users (a hash of the key), so every later analysis reads the same people.' },
       { step: 'Run the analyses together', do: 'query_retentioneering_model({ context_id, analyses: [...] }) — list everything the question needs in ONE call: they are computed in one run (one start-up of the warehouse runtime). Read the task with { task_id }.' },
       { step: 'Show and read', do: 'display_retentioneering_result({ task_id, analysis }) draws one analysis as a card, once. Report what the numbers say — the transitions with their shares, the step where paths split, the cluster sizes and what sets each apart — with the window and any sample.' },
     ],
@@ -42,7 +42,7 @@ export function retentioneeringGuide() {
     metric_aggregations: f.segment_aggs,
     checks: [
       'A path is one user\'s (or one session\'s) events in time order, from path_start to path_end: an analysis over a short window sees truncated paths — say so.',
-      '"other" is the merged tail of the vocabulary, not an event: do not read a transition to "other" as a behaviour.',
+      'With events.top, "other" is the merged tail of the vocabulary, not an event: do not read a transition to "other" as a behaviour.',
       'A sample is of users, stable across builds, but still a sample: give it with the numbers.',
       'Clusters are descriptive: name them from their profile, and check that the smallest is not a handful of paths.',
     ],

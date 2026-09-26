@@ -19,6 +19,12 @@ const TITLES = {
   funnel: 'Funnel', cluster_analysis: 'Path clusters', segment_overview: 'Segment overview',
 };
 const SYNTHETIC = new Set(['path_start', 'path_end']);
+/** How the library's synthetic events read on a card: where a path begins, and where it has ended. */
+const START_END = { path_start: 'Path start', path_end: 'Path end' };
+const STEP_START_END = { path_start: 'Path start', path_end: 'Ended' };
+/** retentioneering's own default for the graph: each event keeps its strongest few exits (plus every
+ *  event's strongest arrival), so the first view is a map, not a hairball. */
+export const DEFAULT_EDGES_PER_EVENT = 3;
 
 const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const none = (reason) => ({ kind: 'none', reason });
@@ -27,7 +33,7 @@ export function retentioneeringViewModel(drawn, args = {}) {
   if (!isObj(drawn) || drawn.ok === false) return none('error');
   const r = drawn.result;
   if (!isObj(r) || !TITLES[r.kind]) return none('empty');
-  const head = { kind: r.kind, title: TITLES[r.kind], analysis: drawn.analysis, eventstream: drawn.eventstream || null };
+  const head = { kind: r.kind, title: TITLES[r.kind], analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
   switch (r.kind) {
     case 'transition_graph': return graph(head, r, args.edge_weight || drawn.edge_weight);
     case 'step_matrix': return stepMatrix(head, r);
@@ -43,12 +49,13 @@ function graph(head, r, weight) {
   const weights = Object.keys(WEIGHT_UNITS).filter((w) => edges.some((e) => e[w] != null));
   return {
     ...head,
-    nodes: (r.nodes || []).map((n) => ({ event: n.event, count: n.count, x: n.x ?? null, y: n.y ?? null, synthetic: SYNTHETIC.has(n.event) })),
+    nodes: (r.nodes || []).map((n) => ({ event: n.event, label: START_END[n.event] || n.event, count: n.count, x: n.x ?? null, y: n.y ?? null, synthetic: SYNTHETIC.has(n.event) })),
     edges,
     weights,
     weight: weights.includes(weight) ? weight : weights.includes('proba_out') ? 'proba_out' : weights[0],
     units: WEIGHT_UNITS,
     labels: WEIGHT_LABELS,
+    per_event: DEFAULT_EDGES_PER_EVENT,
   };
 }
 
@@ -69,7 +76,7 @@ function stepMatrix(head, r) {
   const blocks = (r.blocks || []).filter((b) => b.cells?.length).map((b) => {
     const events = eventOrder(b.cells, b.steps);
     const at = new Map(b.cells.map((c) => [`${c.event}\u0000${c.step}`, c.share]));
-    return { steps: b.steps, rows: events.map((e) => ({ event: e, values: b.steps.map((s) => at.get(`${e}\u0000${s}`) ?? 0) })) };
+    return { steps: b.steps, rows: events.map((e) => ({ event: e, label: STEP_START_END[e] || e, synthetic: SYNTHETIC.has(e), values: b.steps.map((s) => at.get(`${e}\u0000${s}`) ?? 0) })) };
   });
   return blocks.length ? { ...head, blocks } : none('empty');
 }
@@ -77,7 +84,8 @@ function stepMatrix(head, r) {
 function stepSankey(head, r) {
   const blocks = (r.blocks || []).filter((b) => b.cells?.length).map((b) => ({
     steps: b.steps,
-    columns: b.steps.map((s) => b.cells.filter((c) => c.step === s).sort((x, y) => y.share - x.share || x.event.localeCompare(y.event)).map((c) => ({ event: c.event, share: c.share }))),
+    // within a step the events by share, the ended paths at the bottom — drop-off in one place
+    columns: b.steps.map((s) => b.cells.filter((c) => c.step === s).sort((x, y) => (x.event === 'path_end') - (y.event === 'path_end') || y.share - x.share || x.event.localeCompare(y.event)).map((c) => ({ event: c.event, label: STEP_START_END[c.event] || c.event, share: c.share }))),
     links: (b.links || []).filter((l) => l.share > 0),
   }));
   return blocks.length ? { ...head, blocks } : none('empty');
@@ -95,10 +103,19 @@ function overview(head, r) {
   if (!r.levels?.length) return none('empty');
   const size = r.metrics.find((m) => m.metric === 'segment_size');
   const share = r.metrics.find((m) => m.metric === 'segment_share');
+  // the metrics that tell the groups apart most come first: the spread across the groups, relative to
+  // the metric's own scale (a share moves in 0..1, a duration in seconds)
+  const spread = (m) => {
+    const v = m.values.filter((x) => x != null);
+    if (v.length < 2) return 0;
+    const hi = Math.max(...v); const lo = Math.min(...v);
+    return (hi - lo) / (Math.max(Math.abs(hi), Math.abs(lo)) || 1);
+  };
+  const clusters = r.kind === 'cluster_analysis';
   return {
     ...head,
-    levels: r.levels.map((l, i) => ({ name: l, size: size?.values[i] ?? null, share: share?.values[i] ?? null })),
-    metrics: r.metrics.filter((m) => m !== size && m !== share),
+    levels: r.levels.map((l, i) => ({ name: l, label: clusters ? `Cluster ${i + 1}` : l, size: size?.values[i] ?? null, share: share?.values[i] ?? null })),
+    metrics: r.metrics.filter((m) => m !== size && m !== share).map((m, i) => ({ ...m, spread: spread(m), order: i })).sort((a, b) => b.spread - a.spread || a.order - b.order),
     ...(r.silhouette ? { silhouette: r.silhouette } : {}),
     ...(r.best_params ? { best_params: r.best_params } : {}),
   };

@@ -31,12 +31,10 @@ const BUILD = 'build_retentioneering_model';
 const QUERY = 'query_retentioneering_model';
 const DISPLAY = 'display_retentioneering_result';
 const MAX_RESULT_ROWS = 200000;
-/** The most events one analysis run holds in memory before the call is refused with a sample hint. */
-const DEFAULT_MAX_EVENTS = 5000000;
 
 export const TOOL_DESCRIPTIONS = {
   [BUILD]: 'Build the eventstream a path analysis reads: which events source, which time window, which events (kept, dropped, merged into groups), which user attributes to carry as segments, optional sessions and a deterministic user sample. It is built in SQL where the data lives and materialized, and returns a task_id at once; query_retentioneering_model({ task_id }) returns its summary — users, events, the event vocabulary with counts. Use it for questions about paths and sequences: what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are. Then run the analyses with query_retentioneering_model. For a metric over time use build_semantic_model; for a one-off table of numbers, build_pipeline_model.',
-  [QUERY]: 'Run path analyses over a built eventstream, or read a task back. { context_id, analyses: [...] } starts ONE task that computes every listed analysis together in the warehouse (up to 6; one run for all of them, so list what the question needs in one call): transition_graph (which event follows which, all weights at once), step_matrix / step_sankey (the share of paths at each event step by step, optionally around an anchor), funnel (paths reaching each event of an ordered list), cluster_analysis (groups of similar paths and their profiles), segment_overview (path metrics across a segment column). It returns a task_id at once. { task_id } (or task_ids) waits up to 30s and returns each analysis summarized — the biggest transitions, the leading events per step, each cluster\'s profile; { task_id, cancel: true } stops it. Event names are the eventstream\'s own (after grouping; "other" holds the rest).',
+  [QUERY]: 'Run path analyses over a built eventstream, or read a task back. { context_id, analyses: [...] } starts ONE task that computes every listed analysis together in the warehouse (up to 6; one run for all of them, so list what the question needs in one call): transition_graph (which event follows which, all weights at once), step_matrix / step_sankey (the share of paths at each event step by step, optionally around an anchor), funnel (paths reaching each event of an ordered list), cluster_analysis (groups of similar paths and their profiles), segment_overview (path metrics across a segment column). It returns a task_id at once. { task_id } (or task_ids) waits up to 30s and returns each analysis summarized — the biggest transitions, the leading events per step, each cluster\'s profile; { task_id, cancel: true } stops it. Event names are the eventstream\'s own (after grouping).',
   [DISPLAY]: 'Draw one analysis of a finished query_retentioneering_model task as a card for the person — the transition graph, a step matrix heatmap, a step sankey, a funnel, the clusters or a segment overview — in hosts that render MCP Apps. Once per analysis: a second call for the same one is refused. Read the task first (query_retentioneering_model({ task_id })) to know what it found; draw the analysis the person should see before summarising it.',
 };
 
@@ -60,8 +58,7 @@ export const retentioneeringDefinition = {
     if (env.MCP_RETENTIONEERING_MODEL_CONFIG) {
       try { operatorConfig = JSON.parse(env.MCP_RETENTIONEERING_MODEL_CONFIG); } catch { return { reason: 'MCP_RETENTIONEERING_MODEL_CONFIG is not valid JSON' }; }
     }
-    const maxEvents = Number(env.MCP_RETENTIONEERING_MAX_EVENTS) || DEFAULT_MAX_EVENTS;
-    return { feature: createRetentioneeringFeature({ runner, operatorConfig, maxEvents }) };
+    return { feature: createRetentioneeringFeature({ runner, operatorConfig }) };
   },
 };
 
@@ -69,13 +66,12 @@ export const retentioneeringDefinition = {
  * The feature over a dbt client of its own. Tests build it directly with their runner; the server
  * resolves it from the environment (retentioneeringDefinition.resolve).
  */
-export function createRetentioneeringFeature({ runner, operatorConfig = {}, maxEvents = DEFAULT_MAX_EVENTS } = {}) {
+export function createRetentioneeringFeature({ runner, operatorConfig = {} } = {}) {
   if (!runner) throw new Error('the retentioneering feature needs its dbt client (the `retentioneering` environment)');
   const feature = {
     id: 'retentioneering',
     runner,
     operatorConfig,
-    maxEvents,
     sides: { [SIDE]: QUERY },
     tools: {
       [BUILD]: {
@@ -118,7 +114,7 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, maxE
       uri: RETENTIONEERING_VIEW_URI,
       name: 'retentioneering-view',
       title: 'Path Analysis',
-      description: 'Card for one path analysis: a transition graph (switch the edge weight and the threshold), a step matrix heatmap, a step sankey, a funnel, the clusters of paths or a segment overview.',
+      description: 'Card for one path analysis: a transition graph (switch the weight and how many exits per event are shown), a step matrix heatmap, a step sankey, a funnel, the clusters of paths or a segment overview.',
       asset: 'retentioneeringView',
       viewModel: (result, args) => retentioneeringViewModel(result, args),
     },
@@ -270,15 +266,12 @@ function eventstreamOf(ctx, name) {
   return { name, ...all[name] };
 }
 
-function validateAnalyses(es, analyses, maxEvents) {
+function validateAnalyses(es, analyses) {
   const vocab = es.summary?.vocabulary?.map((v) => v.event) || null;
   const known = vocab ? [...vocab, ...retentioneeringFacts().synthetic_events] : null;
   const event = (n, field) => {
-    if (known && !known.includes(n)) throw new ToolError(`'${n}' is not an event of eventstream '${es.name}'${suggest(n, known)} — its names are the ones after grouping, and the rarest are merged into '${OTHER_EVENT}'`, { stage: 'validate', field });
+    if (known && !known.includes(n)) throw new ToolError(`'${n}' is not an event of eventstream '${es.name}'${suggest(n, known)} — its names are the ones after grouping${es.spec?.events?.top ? `, with the rarest merged into '${OTHER_EVENT}'` : ''}`, { stage: 'validate', field });
   };
-  if (es.summary && es.summary.events > maxEvents) {
-    throw new ToolError(`eventstream '${es.name}' holds ${es.summary.events} events — more than one analysis run holds in memory (${maxEvents}). Rebuild it with a sample: { share } keeps a stable subset of users, or narrow the time window or the events.`, { stage: 'validate', field: 'analyses' });
-  }
   const ids = new Set();
   return analyses.map((a) => {
     let id = a.id || a.kind;
@@ -317,7 +310,7 @@ async function query(engine, feature, input) {
   const ctx = engine._ctx(input.context_id);
   if (!ctx.state.retentioneering) throw new ToolError(`context '${input.context_id}' is not a path-analysis context — build an eventstream with ${BUILD} first`, { stage: 'validate', field: 'context_id' });
   const es = eventstreamOf(ctx, input.eventstream);
-  const analyses = validateAnalyses(es, input.analyses, feature.maxEvents);
+  const analyses = validateAnalyses(es, input.analyses);
   const state = ctx.state.retentioneering;
   state.queries = (state.queries || 0) + 1;
   const modelName = `rete_q${state.queries}_${es.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
@@ -326,6 +319,8 @@ async function query(engine, feature, input) {
     edge_weights: retentioneeringFacts().edge_weights,
     analyses,
   };
+  // which eventstream a result table was computed from — carried, so a later read never takes it apart
+  (state.results ||= {})[modelName] = es.name;
   engine.ctxs.writeFile(ctx.id, `${modelName}.py`, compileAnalysisModel({ inputModel: es.model, spec, config: analysisModelConfig(engine.catalog, feature.operatorConfig) }));
   engine.ctxs.touch(ctx.id);
   const order = analyses.map((a) => a.id);
@@ -392,7 +387,7 @@ async function taskOutput(engine, feature, job) {
   const ctx = engine.ctxs.get(job.contextId);
   const dir = engine.ctxs.dir(job.contextId);
   if (job.tool === QUERY) {
-    const out = await readResult(feature, dir, job.table, { context_id: job.contextId, eventstream: null, order: [] });
+    const out = await readResult(feature, dir, job.table, { context_id: job.contextId, eventstream: ctx.state.retentioneering?.results?.[job.table] ?? null, order: [] });
     if (out.ok) engine._keepTaskResult(job.id, { tool: job.tool, input: null, out });
     return out;
   }
@@ -420,7 +415,14 @@ async function display(engine, feature, input) {
   if (!out || out.ok === false) throw new ToolError(`task ${input.task_id} has no result to draw${out?.error?.message ? ` (${out.error.message})` : ''}`, { stage: 'validate', field: 'task_id' });
   const result = out.analyses[input.analysis];
   if (!result) throw new ToolError(`task ${input.task_id} has no analysis '${input.analysis}' (it has ${Object.keys(out.analyses).join(', ')})`, { stage: 'validate', field: 'analysis' });
-  const drawn = { ok: true, task_id: input.task_id, analysis: input.analysis, eventstream: out.eventstream, ...(input.edge_weight ? { edge_weight: input.edge_weight } : {}), result };
+  const ctx0 = engine.ctxs.get(job.contextId);
+  const es = Object.entries(ctx0.state.retentioneering?.eventstreams || {}).find(([name]) => name === out.eventstream)?.[1];
+  // what the numbers are about — who, when, how much of it — shown on the card with them
+  const scope = es?.summary ? {
+    users: es.summary.users, events: es.summary.events, ...(es.summary.sessions != null ? { sessions: es.summary.sessions } : {}),
+    period: es.summary.period, ...(es.spec?.sample?.share != null && es.spec.sample.share < 1 ? { sample: es.spec.sample.share } : {}),
+  } : null;
+  const drawn = { ok: true, task_id: input.task_id, analysis: input.analysis, eventstream: out.eventstream, ...(scope ? { scope } : {}), ...(input.edge_weight ? { edge_weight: input.edge_weight } : {}), result };
   const vm = retentioneeringViewModel(drawn, input);
   if (vm.kind === 'none') return { ...drawn, drawn: false, note: 'this analysis has nothing to draw (no transitions, steps or groups)' };
   const ctx = engine.ctxs.get(job.contextId);

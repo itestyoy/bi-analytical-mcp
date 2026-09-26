@@ -18,7 +18,10 @@ export function parseResultRows(rows, order = []) {
   }
   for (const a of by.values()) for (const list of Object.values(a.parts)) list.sort((x, y) => x.seq - y.seq);
   const ids = [...order.filter((id) => by.has(id)), ...[...by.keys()].filter((id) => !order.includes(id))];
-  return Object.fromEntries(ids.map((id) => [id, shape(by.get(id))]));
+  return Object.fromEntries(ids.map((id) => {
+    const a = by.get(id);
+    return [id, { ...shape(a), ...(a.parts.scope?.length ? { paths: a.parts.scope[0].paths } : {}) }];
+  }));
 }
 
 const strip = ({ seq: _seq, ...rest }) => rest;

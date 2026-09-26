@@ -32,8 +32,6 @@ const CTX = '^[A-Za-z0-9_-]{1,64}$';
 export const MAX_STEPS = 30;
 /** One call computes every analysis it lists in one run: up to one of each kind. */
 export const MAX_ANALYSES = 6;
-export const MAX_TOP_EVENTS = 60;
-export const DEFAULT_TOP_EVENTS = 30;
 
 const TASK_ID = { type: 'string', minLength: 1, description: 'A task this tool started (its task_id).' };
 
@@ -78,7 +76,7 @@ export function buildSchema(catalog) {
           include: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Keep only these events of the source (omit: every event).' },
           exclude: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Drop these events (technical noise the paths should not show).' },
           groups: { type: 'object', additionalProperties: { type: 'array', minItems: 1, items: { type: 'string' } }, description: 'Merge several events under one name: { "<new name>": ["<event>", …] }. A group name replaces its events in every analysis.' },
-          top: { type: 'integer', minimum: 2, maximum: MAX_TOP_EVENTS, default: DEFAULT_TOP_EVENTS, description: `Keep the N most frequent event names (after grouping); the rest are merged into "other", so a graph or a step matrix stays readable. Default ${DEFAULT_TOP_EVENTS}.` },
+          top: { type: 'integer', minimum: 2, description: 'Optional: keep only the N most frequent event names (after grouping) and merge the rest into "other". Omitted, every event keeps its own name.' },
         },
       },
       segments: {

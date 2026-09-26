@@ -49,3 +49,11 @@ export function card({ title, description, action, subline, titleClass = 'card-t
   for (const c of content) if (c) node.append(c);
   return node;
 }
+
+/** A key figure of a stat grid (`dl.stat-grid`): its label, its value large, an optional caption. */
+export function stat(label, value, caption) {
+  const node = el('div', 'stat');
+  node.append(el('dt', 'stat-label', label), el('dd', 'stat-value', value));
+  if (caption) node.append(el('dd', 'stat-caption', caption));
+  return node;
+}

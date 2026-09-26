@@ -46,7 +46,7 @@ import {
 import { Flow, SankeyController } from 'chartjs-chart-sankey';
 import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../result-view-model.js';
 import { icon } from './icons.js';
-import { el, badge, card, formatNumber, formatShare, numberFormat, integerFormat } from '../../shared/ui.js';
+import { el, badge, card, formatNumber, formatShare, numberFormat, integerFormat, stat } from '../../shared/ui.js';
 import './global.css';
 import './mcp-app.css';
 
@@ -991,13 +991,6 @@ const VERDICTS = {
   no_difference: { icon: 'minus', text: 'Inconclusive' },
 };
 const OUTCOME_VARIANT = { better: 'success', worse: 'destructive', no_difference: 'outline' };
-
-function stat(label, value, caption) {
-  const node = el('div', 'stat');
-  node.append(el('dt', 'stat-label', label), el('dd', 'stat-value', value));
-  if (caption) node.append(el('dd', 'stat-caption', caption));
-  return node;
-}
 
 /** The axis under an interval: the scale's ends and the no-effect line in the middle. */
 function intervalAxis(scale, unit, fmt) {

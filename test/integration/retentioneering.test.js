@@ -322,3 +322,22 @@ test('a read is a summary by default and every record with detail: "full"', opts
   const all = await engine.query_retentioneering_model({ task_id: q.task_id, detail: 'full' });
   assert.equal(all.analyses.path_metrics.tables[0].rows.length, built.users);
 });
+
+test('a distribution comparison is drawn as one histogram: each level\'s bins hold its paths', opts, async (t) => {
+  if (skip(t)) return;
+  const platformOf = new Map((await wh.query('select player_id_of_internal as u, platform from dim_users')).rows.map((r) => [String(r.u), r.platform]));
+  const [p1, p2] = [...new Set([...paths().keys()].map((u) => platformOf.get(String(u))))].filter(Boolean).sort();
+  const { task_id } = await runFull({ analyses: [{ kind: 'metric_distribution', segment_col: 'platform', metric: { metric: 'length' }, segment_levels: [p1, p2] }] });
+  const d = await engine.display_retentioneering_result({ task_id, analysis: 'metric_distribution' });
+  const vm = retentioneeringViewModel(d, {});
+  assert.equal(vm.comparison.series.length, 2);
+  const lengths = (platform) => [...paths()].filter(([u]) => platformOf.get(String(u)) === platform).map(([, list]) => list.length);
+  for (const [k, platform] of [[0, p1], [1, p2]]) {
+    const ls = lengths(platform);
+    assert.equal(vm.comparison.series[k].values.reduce((a, b) => a + b, 0), ls.length, `${platform}: every path in a bin`);
+    // each path counted in the bin its length falls in
+    const { edges } = vm.comparison;
+    const expected = edges.slice(1).map((hi, i) => ls.filter((x) => x >= edges[i] && (x < hi || (i === edges.length - 2 && x <= hi))).length);
+    assert.deepEqual(vm.comparison.series[k].values, expected, platform);
+  }
+});

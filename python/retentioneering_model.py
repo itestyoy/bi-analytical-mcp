@@ -93,6 +93,48 @@ def _deep(value):
     return _plain(value)
 
 
+def _kind_of(value):
+    """What a single value is, for the card to format it: a duration (sent as seconds), a moment, a
+    number, a flag, text — read from the value's own type, never from its name."""
+    if isinstance(value, (pd.Timedelta,)) or type(value).__name__ == "timedelta64":
+        return "duration"
+    if isinstance(value, pd.Timestamp) or type(value).__name__ in ("datetime", "datetime64"):
+        return "datetime"
+    if isinstance(value, bool) or type(value).__name__ == "bool_":
+        return "boolean"
+    if isinstance(value, int) or type(value).__name__.startswith(("int", "uint")):
+        return "integer"
+    if isinstance(value, float) or type(value).__name__.startswith("float"):
+        return "number"
+    return "text"
+
+
+def _kinds(value):
+    """The same structure as `value`, each leaf replaced by its kind."""
+    if isinstance(value, dict):
+        return {str(k): _kinds(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return "list"
+    return _kind_of(value)
+
+
+def _column_kind(series):
+    """A column's kind from its dtype (an object column: from its first value)."""
+    dtype = series.dtype
+    if pd.api.types.is_timedelta64_dtype(dtype):
+        return "duration"
+    if pd.api.types.is_datetime64_any_dtype(dtype):
+        return "datetime"
+    if pd.api.types.is_bool_dtype(dtype):
+        return "boolean"
+    if pd.api.types.is_integer_dtype(dtype):
+        return "integer"
+    if pd.api.types.is_float_dtype(dtype):
+        return "number"
+    first = series.dropna()
+    return _kind_of(first.iloc[0]) if len(first) else "text"
+
+
 def _label(col):
     return " / ".join(str(c) for c in col) if isinstance(col, tuple) else str(col)
 
@@ -103,7 +145,8 @@ def _table(out, a, name, frame):
     if not isinstance(frame.index, pd.RangeIndex):
         frame = frame.reset_index()
     columns = [_label(c) for c in frame.columns]
-    out.add(a["id"], a["kind"], "table", {"table": name, "columns": json.dumps(columns)})
+    kinds = [_column_kind(frame.iloc[:, j]) for j in range(frame.shape[1])]
+    out.add(a["id"], a["kind"], "table", {"table": name, "columns": json.dumps(columns), "kinds": json.dumps(kinds)})
     for row in frame.itertuples(index=False, name=None):
         out.add(a["id"], a["kind"], "row", {"table": name, "values": json.dumps([_deep(v) for v in row], default=str)})
 
@@ -127,7 +170,7 @@ def _emit(out, a, name, value):
     elif _records(value):
         _table(out, a, name, pd.DataFrame(value))
     else:
-        out.add(a["id"], a["kind"], "value", {"name": name, "value": json.dumps(_deep(value), default=str)})
+        out.add(a["id"], a["kind"], "value", {"name": name, "value": json.dumps(_deep(value), default=str), "kinds": json.dumps(_kinds(value))})
 
 
 # ── the analyses the card charts ──────────────────────────────────────────────────────────────

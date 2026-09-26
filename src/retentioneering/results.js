@@ -53,9 +53,12 @@ function generic(parts) {
     if (!rows.has(r.table)) rows.set(r.table, []);
     rows.get(r.table).push(JSON.parse(r.values));
   }
-  const tables = (parts.table || []).map((t) => ({ name: t.table, columns: JSON.parse(t.columns), rows: rows.get(t.table) || [] }));
+  // each column's and value's kind (a duration, a moment, a number…) as the analysis step read it from
+  // the data's own types, so the card formats it without guessing from a name
+  const tables = (parts.table || []).map((t) => ({ name: t.table, columns: JSON.parse(t.columns), ...(t.kinds ? { kinds: JSON.parse(t.kinds) } : {}), rows: rows.get(t.table) || [] }));
   const values = Object.fromEntries((parts.value || []).map((v) => [v.name, JSON.parse(v.value)]));
-  return { ...(tables.length ? { tables } : {}), ...(Object.keys(values).length ? { values } : {}) };
+  const kinds = Object.fromEntries((parts.value || []).filter((v) => v.kinds).map((v) => [v.name, JSON.parse(v.kinds)]));
+  return { ...(tables.length ? { tables } : {}), ...(Object.keys(values).length ? { values } : {}), ...(Object.keys(kinds).length ? { value_kinds: kinds } : {}) };
 }
 
 function shape({ kind, parts }) {

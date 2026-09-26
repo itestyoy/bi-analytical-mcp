@@ -12,9 +12,10 @@
  *                      that ended as one block at the bottom of each step
  *   funnel             the steps, their share of all paths and of the previous step, the biggest drop
  *   clusters / segment overview   each group's size, then the metrics that set the groups apart most
- *   tables             any other analysis (conversion rate, metric distribution, path metrics, describe)
- *                      and any diff, as the tables and values the library returned; a diff's
- *                      differences shaded on a diverging scale around zero
+ *   any other result   (conversion rate, metric distribution, path metrics, describe, any diff) laid
+ *                      out for what each part is: values as key-figure grids, a histogram as bars (two
+ *                      groups on the same bins in one chart), a few rows as a card each, a longer
+ *                      table with data bars, a diff's matrices as heatmaps (the difference diverging)
  *
  * Every card says what its numbers are about — the users, the period, a sample — and gives counts
  * next to shares. IT DRAWS AND NOTHING ELSE: its input is the result the host hands over
@@ -24,7 +25,7 @@
  */
 import { App, applyDocumentTheme, applyHostFonts, applyHostStyleVariables } from '@modelcontextprotocol/ext-apps';
 import { retentioneeringViewModel } from '../../../retentioneering/view-model.js';
-import { el, badge, card, formatNumber, formatShare } from '../../shared/ui.js';
+import { el, badge, card, stat, formatNumber, formatShare } from '../../shared/ui.js';
 import { icon } from '../../result-view/src/icons.js';
 import '../../result-view/src/global.css';
 import '../../result-view/src/mcp-app.css';
@@ -456,6 +457,27 @@ function renderFunnel(model) {
 
 // ── clusters / segment overview ───────────────────────────────────────────────────────────────
 
+/** How well each tried grouping separates the paths (silhouette, −1..1): a bar per try, the chosen one marked. */
+function silhouetteChart(points) {
+  const wrap = el('div', 'rt-silhouette');
+  const headRow = el('div', 'rt-silhouette-head');
+  headRow.append(el('span', 'rt-silhouette-title', 'Silhouette'), el('span', 'card-description', 'how well the groups separate · higher is better'));
+  wrap.append(headRow);
+  const hi = Math.max(0, ...points.map((p) => p.score ?? 0));
+  for (const p of points) {
+    const row = el('div', `rt-silhouette-row${p.best ? ' rt-best' : ''}`);
+    const label = Object.entries(p.params).map(([k, v]) => `${k.replace(/_/g, ' ')} ${v}`).join(' · ');
+    const track = el('span', 'rt-silhouette-track');
+    const fill = el('span', 'rt-silhouette-fill');
+    fill.style.setProperty('--share', String(hi > 0 ? Math.max(0, p.score ?? 0) / hi : 0));
+    track.append(fill);
+    row.append(el('span', 'rt-silhouette-label', label), track, el('span', 'rt-silhouette-value', p.score == null ? '—' : p.score.toFixed(3)));
+    if (p.best) row.append(badge('chosen', 'secondary'));
+    wrap.append(row);
+  }
+  return wrap;
+}
+
 function renderOverview(model) {
   const clusters = model.kind === 'cluster_analysis';
   const table = el('table', 'table rt-heat');
@@ -478,7 +500,7 @@ function renderOverview(model) {
     m.values.forEach((v, j) => {
       const td = el('td', 'num rt-cell', v == null ? '—' : fmt(v));
       // shaded within the row: where the group stands on this metric among the groups
-      if (v != null && hi > lo) td.style.setProperty('--share', String(((v - lo) / (hi - lo)) * 0.85));
+      if (v != null && hi > lo) td.style.setProperty('--share', String(0.15 + ((v - lo) / (hi - lo)) * 0.45));
       td.title = `${model.levels[j].label || model.levels[j].name} · ${m.label || m.metric}: ${v == null ? '—' : fmt(v)}`;
       tr.append(td);
     });
@@ -489,13 +511,11 @@ function renderOverview(model) {
   scroll.append(table);
   const content = el('div', 'card-content');
   content.append(scroll);
-  if (model.silhouette?.length) {
-    content.append(el('p', 'card-description rt-caption', `Silhouette (how well the groups separate, higher is better): ${model.silhouette.map((s) => `${Object.entries(s.params).map(([k, v]) => `${k}=${v}`).join(', ')} → ${s.score?.toFixed(3)}${s.best ? ' (chosen)' : ''}`).join(' · ')}`));
-  }
+  if (model.silhouette?.length) content.append(silhouetteChart(model.silhouette));
   const of = model.paths ? ` of ${formatNumber(model.paths)} paths` : '';
   return card({
     title: `${model.levels.length} ${clusters ? 'clusters' : 'levels'}${of}`,
-    description: clusters ? 'Groups of similar paths: their size, then the metrics that set them apart most. Shading marks the highest value in a row' : 'Path metrics across the segment, the ones that differ most first. Shading marks the highest value in a row',
+    description: clusters ? 'Size, then what sets each group apart' : 'The metrics that differ most come first',
   }, content);
 }
 
@@ -504,21 +524,76 @@ function renderOverview(model) {
 /** Rows shown before "show all" — the rest are in the page already, one click away. */
 const FIRST_ROWS = 100;
 
-const formatCell = (v) => (v == null ? '—' : typeof v === 'number' ? formatNumber(v) : Array.isArray(v) ? v.map(formatCell).join(', ') : typeof v === 'object' ? JSON.stringify(v) : String(v));
+/** A value as its kind reads: a duration in s/m/h/d, a moment as a date, a number grouped, a flag. */
+function formatValue(v, kind) {
+  if (v == null) return '—';
+  if (Array.isArray(v)) return v.map((x) => formatValue(x, typeof x === 'number' ? 'number' : 'text')).join(', ');
+  if (kind === 'duration' && typeof v === 'number') return formatDuration(v);
+  if (kind === 'datetime') return formatDate(v);
+  if (kind === 'boolean') return v ? 'yes' : 'no';
+  if (typeof v === 'number') return formatNumber(v);
+  return typeof v === 'object' ? JSON.stringify(v) : String(v);
+}
+
+/** Key figures: a grid of stats at the foot of a card. */
+function statGrid(items) {
+  const grid = el('dl', 'stat-grid');
+  for (const it of items) grid.append(stat(it.label, formatValue(it.value, it.kind)));
+  return grid;
+}
+
+/** A card of key figures — a group of values, or a table of one row. */
+function figuresCard({ title, description, items, action }) {
+  return card({ title, description, action }, statGrid(items));
+}
+
+function recordCard(t, row) {
+  const names = t.columns.map((_, j) => j).filter((j) => !t.numeric[j]);
+  const figures = t.columns.map((_, j) => j).filter((j) => t.numeric[j]);
+  // the text columns say what the row is about ("level_started · level_completed"), their names on hover
+  const title = el('p', 'card-title', names.length ? names.map((j) => formatValue(row[j], t.kinds[j])).join(' · ') : t.title);
+  if (names.length) title.title = names.map((j) => `${t.headers[j]}: ${formatValue(row[j], t.kinds[j])}`).join('\n');
+  return card(
+    { title, description: names.length ? t.title : undefined },
+    statGrid(figures.map((j) => ({ label: t.headers[j], value: row[j], kind: t.kinds[j] }))),
+  );
+}
+
+function legend(items) {
+  const node = el('div', 'rt-legend');
+  for (const [cls, text] of items) {
+    const item = el('span', 'rt-legend-item');
+    item.append(el('span', `rt-swatch ${cls}`), el('span', null, text));
+    node.append(item);
+  }
+  return node;
+}
 
 function tableCard(t) {
-  const table = el('table', 'table rt-heat');
+  const table = el('table', `table rt-heat${t.layout === 'table' ? ' rt-data' : ''}`);
   const head = el('tr');
-  t.columns.forEach((c, j) => head.append(el('th', t.numeric[j] ? 'num' : null, c)));
+  t.headers.forEach((h, j) => { const th = el('th', t.numeric[j] ? 'num' : null, h); th.title = t.columns[j]; head.append(th); });
   const thead = el('thead'); thead.append(head);
   const tbody = el('tbody');
-  // a diff: each number against the largest difference in the table, one hue up and one down
-  const scale = t.diverging ? Math.max(0, ...t.rows.flatMap((r) => r.filter((v, j) => t.numeric[j] && v != null).map((v) => Math.abs(v)))) : 0;
   const rowOf = (r) => {
     const tr = el('tr');
     r.forEach((v, j) => {
-      const td = el('td', t.numeric[j] ? `num${t.diverging ? ' rt-cell' : ''}${t.diverging && v < 0 ? ' rt-neg' : ''}` : (j === 0 ? 'rt-event' : null), formatCell(v));
-      if (t.diverging && t.numeric[j] && v && scale) td.style.setProperty('--share', String(Math.abs(v) / scale));
+      const td = el('td', t.numeric[j] ? 'num' : (j === 0 ? 'rt-event' : null));
+      if (t.layout === 'matrix' && t.numeric[j]) {
+        // a heatmap cell: shaded by its size in the whole table — a diff one hue up, another down
+        td.classList.add('rt-cell');
+        if (t.diverging && v < 0) td.classList.add('rt-neg');
+        if (typeof v === 'number' && v && t.scale) td.style.setProperty('--share', String(Math.abs(v) / t.scale));
+        td.textContent = v ? formatValue(v, t.kinds[j]) : '';
+        td.title = `${r[0]} · ${t.columns[j]}: ${formatValue(v, t.kinds[j])}`;
+      } else if (t.column_max[j] && typeof v === 'number') {
+        // a data bar: the value's size within its column, behind the number
+        const bar = el('span', 'rt-bar');
+        bar.style.setProperty('--share', String(v / t.column_max[j]));
+        td.append(bar, el('span', 'rt-bar-value', formatValue(v, t.kinds[j])));
+      } else {
+        td.textContent = formatValue(v, t.kinds[j]);
+      }
       tr.append(td);
     });
     return tr;
@@ -528,6 +603,7 @@ function tableCard(t) {
   const scroll = el('div', 'table-container');
   scroll.append(table);
   const content = el('div', 'card-content');
+  if (t.diverging) content.append(legend([['rt-swatch-pos', 'First group higher'], ['rt-swatch-neg', 'Second group higher']]));
   content.append(scroll);
   if (t.rows.length > FIRST_ROWS) {
     const more = el('button', 'btn btn-outline rt-more', `Show all ${formatNumber(t.rows.length)} rows`);
@@ -536,21 +612,74 @@ function tableCard(t) {
     content.append(more);
   }
   return card({
-    title: t.name,
-    description: `${formatNumber(t.rows.length)} rows${t.diverging ? ' — the first group minus the second; shading marks the size of the difference, one colour above zero and another below' : ''}`,
+    title: t.diverging ? 'Difference' : t.title,
+    description: t.diverging ? 'First group minus second' : undefined,
+    action: badge(`${formatNumber(t.rows.length)} ${t.rows.length === 1 ? 'row' : 'rows'}`, 'secondary'),
   }, content);
+}
+
+/** Bins as bars — several series side by side in each bin, one colour each, a legend when there are two or more. */
+function histogramCard({ title, edges, series, measure, items }) {
+  const W = 640; const H = 220; const PAD = { l: 36, r: 8, t: 8, b: 28 };
+  const bins = edges.length - 1;
+  const hi = Math.max(0, ...series.flatMap((s) => s.values)) || 1;
+  const figure = el('div', 'rt-figure');
+  const chart = svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'rt-hist', role: 'img', 'aria-label': `${title}: ${measure} per bin` });
+  const x = (i) => PAD.l + (i / bins) * (W - PAD.l - PAD.r);
+  const y = (v) => H - PAD.b - (v / hi) * (H - PAD.t - PAD.b);
+  // recessive guides: the zero line and the top value
+  for (const v of [0, hi]) {
+    chart.append(svg('line', { x1: PAD.l, x2: W - PAD.r, y1: y(v), y2: y(v), class: 'rt-hist-grid' }));
+    const t = svg('text', { x: PAD.l - 6, y: y(v) + 4, class: 'rt-hist-tick', 'text-anchor': 'end' }); t.textContent = formatNumber(v); chart.append(t);
+  }
+  const tip = tooltipFor(figure);
+  const gap = 2; const slot = (W - PAD.l - PAD.r) / bins;
+  const bw = Math.max(1, (slot - gap * (series.length + 1)) / series.length);
+  for (let i = 0; i < bins; i += 1) {
+    series.forEach((s, k) => {
+      const v = s.values[i] ?? 0;
+      const h = Math.max(0, y(0) - y(v));
+      const bx = x(i) + gap + k * (bw + gap);
+      const bar = svg('path', { d: roundedTop(bx, y(0) - h, bw, h, Math.min(4, bw / 2, h)), fill: series.length > 1 ? series_(k) : series_(0), class: 'rt-hist-bar' });
+      const hit = svg('rect', { x: x(i), y: PAD.t, width: slot, height: H - PAD.t - PAD.b, fill: 'transparent' });
+      const lines = [`${formatNumber(edges[i])} – ${formatNumber(edges[i + 1])}`, ...series.map((x2) => `${x2.label}: ${formatNumber(x2.values[i])}`)];
+      hit.addEventListener('pointermove', (e) => tip.show(e, lines));
+      hit.addEventListener('pointerleave', () => tip.hide());
+      chart.append(bar);
+      if (k === series.length - 1) chart.append(hit);
+    });
+  }
+  // the bin edges along the axis, thinned to what fits
+  const every = Math.ceil((bins + 1) / 8);
+  edges.forEach((e, i) => {
+    if (i % every && i !== bins) return;
+    const t = svg('text', { x: x(i), y: H - 8, class: 'rt-hist-tick', 'text-anchor': i === 0 ? 'start' : i === bins ? 'end' : 'middle' }); t.textContent = formatNumber(e); chart.append(t);
+  });
+  figure.append(chart);
+  const content = el('div', 'card-content');
+  if (series.length > 1) content.append(legend(series.map((s, k) => [`rt-swatch-s${k + 1}`, s.label])));
+  content.append(figure);
+  return card({ title, description: measure, action: badge(`${formatNumber(bins)} bins`, 'secondary') }, content, items?.length ? statGrid(items) : null);
+}
+
+const series_ = (k) => `var(--color-series-${(k % 6) + 1})`;
+/** A bar with its top corners rounded and its base square on the axis. */
+function roundedTop(x, y, w, h, r) {
+  if (h <= 0) return '';
+  return `M${x},${y + h} V${y + r} Q${x},${y} ${x + r},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${y + h} Z`;
 }
 
 function renderTables(model) {
   const wrap = el('div', 'rt-stack');
-  if (model.values.length) {
-    const dl = el('dl', 'rt-values');
-    for (const v of model.values) dl.append(el('dt', null, v.name), el('dd', null, formatCell(v.value)));
-    const content = el('div', 'card-content');
-    content.append(dl);
-    wrap.append(card({ title: 'Values', description: 'What the analysis returned besides its tables' }, content));
+  for (const g of model.values) {
+    if (g.histogram) wrap.append(histogramCard({ title: g.title, edges: g.histogram.edges, series: g.histogram.series.slice(0, 1), measure: g.histogram.series[0].label, items: g.items }));
+    else wrap.append(figuresCard({ title: g.title, items: g.items }));
   }
-  model.tables.forEach((t) => wrap.append(tableCard(t)));
+  if (model.comparison) wrap.append(histogramCard(model.comparison));
+  for (const t of model.tables) {
+    if (t.layout === 'records') t.rows.forEach((row) => wrap.append(recordCard(t, row)));
+    else wrap.append(tableCard(t));
+  }
   return wrap;
 }
 

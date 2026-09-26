@@ -214,23 +214,149 @@
 }
 
 /* ── tables of any other result ── */
-.rt-values {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: calc(var(--space) * 1) calc(var(--space) * 4);
-  margin: 0;
+.rt-data td.num {
+  position: relative;
+  min-width: 6rem;
+}
 
-  dt {
-    color: var(--muted-foreground);
-  }
+/* a data bar: the value's size within its column, a thin rule under the number */
+.rt-bar {
+  position: absolute;
+  right: calc(var(--space) * 3);
+  bottom: calc(var(--space) * 1.5);
+  width: calc(var(--share, 0) * (100% - var(--space) * 6));
+  height: 3px;
+  border-radius: 999px;
+  background-color: color-mix(in oklab, var(--color-series-1) 70%, transparent);
+}
 
-  dd {
-    margin: 0;
-    font-variant-numeric: tabular-nums;
-    overflow-wrap: anywhere;
-  }
+.rt-bar-value {
+  position: relative;
+}
+
+.rt-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--space) * 4);
+  margin-bottom: calc(var(--space) * 3);
+  font-size: var(--font-text-xs-size);
+  line-height: var(--font-text-xs-line-height);
+  color: var(--muted-foreground);
+}
+
+.rt-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: calc(var(--space) * 1.5);
+}
+
+.rt-swatch {
+  width: 0.75rem;
+  height: 0.75rem;
+  border-radius: 3px;
+}
+
+.rt-swatch-pos {
+  background-color: color-mix(in oklab, var(--color-series-1) 70%, transparent);
+}
+
+.rt-swatch-neg {
+  background-color: color-mix(in oklab, var(--color-series-2) 70%, transparent);
 }
 
 .rt-more {
   margin-top: calc(var(--space) * 3);
+}
+
+/* ── silhouette: a bar per clustering tried ── */
+.rt-silhouette {
+  display: grid;
+  gap: calc(var(--space) * 2);
+  margin-top: calc(var(--space) * 5);
+  padding-top: calc(var(--space) * 4);
+  border-top: var(--border-width-regular) solid var(--border);
+}
+
+.rt-silhouette-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: calc(var(--space) * 2);
+  margin-bottom: calc(var(--space) * 1);
+}
+
+.rt-silhouette-title {
+  font-weight: var(--font-weight-medium);
+}
+
+.rt-silhouette-row {
+  display: grid;
+  grid-template-columns: minmax(6rem, max-content) 1fr 3.5rem auto;
+  align-items: center;
+  gap: calc(var(--space) * 3);
+  font-size: var(--font-text-sm-size, 0.875rem);
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.rt-silhouette-row.rt-best {
+  color: var(--foreground);
+  font-weight: var(--font-weight-medium);
+}
+
+.rt-silhouette-track {
+  height: 0.5rem;
+  border-radius: 999px;
+  background-color: var(--muted);
+  overflow: hidden;
+}
+
+.rt-silhouette-fill {
+  display: block;
+  height: 100%;
+  width: calc(var(--share, 0) * 100%);
+  border-radius: 999px;
+  background-color: color-mix(in oklab, var(--color-series-1) 45%, transparent);
+}
+
+.rt-best .rt-silhouette-fill {
+  background-color: var(--color-series-1);
+}
+
+.rt-silhouette-value {
+  text-align: right;
+}
+
+/* ── histogram ── */
+.rt-figure {
+  position: relative;
+}
+
+.rt-hist {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.rt-hist-grid {
+  stroke: var(--border);
+  stroke-width: 1;
+}
+
+.rt-hist-tick {
+  font-size: 11px;
+  fill: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.rt-swatch-s1 {
+  background-color: var(--color-series-1);
+}
+
+.rt-swatch-s2 {
+  background-color: var(--color-series-2);
+}
+
+.rt-swatch-s3 {
+  background-color: var(--color-series-3);
 }

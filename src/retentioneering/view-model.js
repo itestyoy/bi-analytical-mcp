@@ -45,22 +45,96 @@ export function retentioneeringViewModel(drawn, args = {}) {
   return tables(head, r);
 }
 
-/** The tables and values of a result. A table named `diff` holds differences between two groups:
- *  its numbers are shaded on a diverging scale around zero. */
+/** A library name as a reader reads it: "paths_with_start" → "Paths with start", "path_stats.user_id"
+ *  → "Path stats · user_id" (the part after a dot is a name of the data, kept as it is). */
+export function humanize(name) {
+  const [head, ...rest] = String(name).split('.');
+  const words = head.replace(/_/g, ' ').trim();
+  return [words.charAt(0).toUpperCase() + words.slice(1), ...rest].join(' · ');
+}
+
+const NUMERIC = new Set(['integer', 'number', 'duration']);
+/** Below this many rows a bar compares nothing worth a glance — the numbers are read directly. */
+const MIN_BAR_ROWS = 3;
+/** Up to this many rows, a table of several numbers reads better as a card per row. */
+const MAX_RECORD_ROWS = 4;
+
+/**
+ * The tables and values of a result, each laid out for what it is:
+ *   values   grouped key figures — a nested value is its own group ("Shape": events, paths, …)
+ *   records  a table of a few rows with several numbers: each row a card — its text columns name it,
+ *            its numbers are key figures (read at any width, never scrolled sideways)
+ *   matrix   the tables of a diff (`diff` — two groups' difference — and the two groups it is
+ *            taken from): heatmaps on one scale per table, the difference a diverging one
+ *   table    anything else: numbers right-aligned, with a bar of their size within the column once
+ *            there are enough rows to compare
+ * Every kind (a duration, a moment, a number) is the one the analysis step read from the data's types.
+ */
+/** A histogram inside a group of values, recognised by its shape: an increasing list of k+1 numbers
+ *  (the bin edges) and lists of k numbers (what each bin holds). */
+function histogramOf(items) {
+  const lists = items.filter((it) => Array.isArray(it.value) && it.value.length > 1 && it.value.every((x) => typeof x === 'number'));
+  const edges = lists.find((e) => e.value.every((x, i) => i === 0 || x >= e.value[i - 1]) && lists.some((o) => o.value.length === e.value.length - 1));
+  if (!edges) return null;
+  const series = lists.filter((o) => o.value.length === edges.value.length - 1);
+  return { edges: edges.value, series: series.map((o) => ({ label: o.label, values: o.value })), used: new Set([edges, ...series]) };
+}
+
 function tables(head, r) {
-  const list = (r.tables || []).filter((t) => t.columns?.length).map((t) => ({
-    name: t.name,
-    columns: t.columns,
-    rows: t.rows,
-    numeric: t.columns.map((_, j) => t.rows.length > 0 && t.rows.every((row) => row[j] == null || typeof row[j] === 'number')),
-    diverging: t.name === 'diff',
-  }));
-  // a nested value reads as its own rows ("shape · n_paths"), a list as its items
-  const flat = (name, value) => (isObj(value) ? Object.entries(value).flatMap(([k, v]) => flat(`${name} · ${k}`, v)) : [{ name, value }]);
-  const values = Object.entries(r.values || {}).flatMap(([name, value]) => flat(name, value));
-  if (!list.length && !values.length) return none('empty');
+  const hasDiff = (r.tables || []).some((t) => t.name === 'diff');
+  const list = (r.tables || []).filter((t) => t.columns?.length).map((t) => {
+    const kinds = t.columns.map((_, j) => t.kinds?.[j] || (t.rows.length > 0 && t.rows.every((row) => row[j] == null || typeof row[j] === 'number') ? 'number' : 'text'));
+    const numeric = kinds.map((k) => NUMERIC.has(k));
+    const diverging = t.name === 'diff';
+    const layout = hasDiff ? 'matrix' : t.rows.length <= MAX_RECORD_ROWS && (t.rows.length === 1 || numeric.filter(Boolean).length >= 2) ? 'records' : 'table';
+    // the largest magnitude a shading or a bar is measured against: the whole matrix, or each column
+    const abs = (j) => t.rows.map((row) => row[j]).filter((v) => typeof v === 'number').map(Math.abs);
+    const scale = layout === 'matrix'
+      ? Math.max(0, ...numeric.flatMap((n, j) => (n ? abs(j) : [])))
+      : null;
+    // a bar where it compares something: enough rows, no negatives, more than two distinct values (a 0/1 flag is read as it is)
+    const columnMax = numeric.map((n, j) => (n && t.rows.length >= MIN_BAR_ROWS && t.rows.every((row) => row[j] == null || row[j] >= 0) && new Set(t.rows.map((row) => row[j])).size > 2 ? Math.max(0, ...abs(j)) : null));
+    return {
+      name: t.name, title: humanize(t.name), columns: t.columns, headers: t.columns.map(humanize), kinds, numeric, rows: t.rows,
+      layout, diverging, scale, column_max: columnMax,
+    };
+  });
+  const groups = [];
+  const summary = { name: null, title: 'Summary', items: [] };
+  for (const [name, value] of Object.entries(r.values || {})) {
+    const kind = r.value_kinds?.[name];
+    if (isObj(value)) {
+      const items = [];
+      const walk = (prefix, v, k) => {
+        if (isObj(v)) Object.entries(v).forEach(([key, x]) => walk(prefix ? `${prefix} · ${humanize(key)}` : humanize(key), x, isObj(k) ? k[key] : undefined));
+        else items.push({ label: prefix, value: v, kind: typeof k === 'string' ? k : typeof v === 'number' ? 'number' : 'text' });
+      };
+      walk('', value, kind);
+      const histogram = histogramOf(items);
+      const rest = items.filter((it) => it.value != null && !histogram?.used.has(it));
+      if (rest.length || histogram) groups.push({ name, title: humanize(name), items: rest, ...(histogram ? { histogram: { edges: histogram.edges, series: histogram.series } } : {}) });
+    } else {
+      summary.items.push({ label: humanize(name), value, kind: typeof kind === 'string' ? kind : typeof value === 'number' ? 'number' : 'text' });
+    }
+  }
+  if (summary.items.length) groups.unshift(summary);
+  if (!list.length && !groups.length) return none('empty');
   const diff = list.some((t) => t.diverging);
-  return { ...head, kind: 'tables', title: diff ? `${head.title} — difference between two groups` : head.title, analysis_kind: r.kind, diff, tables: list, values };
+  // groups whose histograms share their bins are one comparison: drawn together, their figures under it
+  const withBins = groups.filter((g) => g.histogram);
+  const shared = withBins.length > 1 && withBins.every((g) => JSON.stringify(g.histogram.edges) === JSON.stringify(withBins[0].histogram.edges));
+  const comparison = shared ? {
+    title: withBins.map((g) => g.title).join(' vs '),
+    edges: withBins[0].histogram.edges,
+    measure: withBins[0].histogram.series[0].label,
+    series: withBins.map((g) => ({ label: g.title, values: g.histogram.series[0].values })),
+    items: withBins.flatMap((g) => g.items.map((it) => ({ ...it, label: `${g.title} · ${it.label}` }))),
+  } : null;
+  return {
+    ...head, kind: 'tables', title: diff ? `${head.title} — difference between two groups` : head.title, analysis_kind: r.kind, diff, tables: list,
+    values: shared ? groups.filter((g) => !g.histogram) : groups,
+    ...(comparison ? { comparison } : {}),
+  };
 }
 
 function graph(head, r, weight) {

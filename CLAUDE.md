@@ -151,7 +151,13 @@
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
   `structuredContent` is carried only by a display_model_result that drew (`drawn: true`) or an
   experiment called with `card: true`, and only when `buildViewModel(...).kind !== 'none'`; every
-  other answer is the text alone. THE EXPERIMENT IS A SEPARATE PROCESS, NOT MIXED WITH display: it is
+  other answer is the text alone. A CARD IS DRAWN ONLY FOR A VISUAL SHAPE (`visualShape` +
+  `CARD_MIN`, src/apps/result-view-model.js — the one rule, which a feature's view model follows too):
+  a trend, a comparison across several groups, a funnel of three steps or more, a flow, a drill-down,
+  an A/B test's intervals. A single number, a row or two, a split verdict or a plan is `none('text')`
+  — the drawing tool answers `drawn: false` with the numbers and `TEXT_NOTE`, the task is not spent,
+  and the model answers in words; an explicit request for a card is answered the same way. The read's
+  `show_to_user` hint is offered only where the rows have a visual shape. THE EXPERIMENT IS A SEPARATE PROCESS, NOT MIXED WITH display: it is
   statistics over numbers the caller brings — no task, no task_id — returned at once, and it draws its
   own card (the test, the split check, the plan) only when asked with `card: true` (a field offered to
   an Apps client alone, refused from any other). A stored result is
@@ -189,8 +195,9 @@
   tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the
-  eventstream's shape rules out. A charted analysis keeps its own card; anything else (and any diff)
-  comes back, and is drawn, as the tables and values the library returned.
+  eventstream's shape rules out. A charted analysis keeps its own card, as does a distribution's
+  histogram and a diff's matrices; anything else (describe, a conversion rate, per-path metrics)
+  comes back as the tables and values the library returned and is answered in words, not drawn.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): what speaks to the MODEL — the

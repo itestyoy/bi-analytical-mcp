@@ -55,8 +55,8 @@ export { RESOURCE_MIME_TYPE, EXTENSION_ID as UI_EXTENSION };
 export const RESULT_VIEW_URI = 'ui://betti/result-view.html';
 export const RESULT_VIEW_FILE = RUNTIME_ASSETS.resultView.path;
 
-// The tools whose result is drawn: display_model_result (a model's rows) and experiment (the test, the
-// split check, the plan). Nothing else carries the view — not a query, not a build, not a query
+// The tools whose result is drawn: display_model_result (a model's rows) and experiment (the A/B test;
+// its split check and plan are answered in words — a card only for a visual shape, buildViewModel). Nothing else carries the view — not a query, not a build, not a query
 // tool's read of a task — so no read, no poll and no intermediate step ever draws.
 export const VIEWED_TOOLS = new Set(['display_model_result', 'experiment']);
 
@@ -92,7 +92,7 @@ const RESOURCE = {
   uri: RESULT_VIEW_URI,
   name: 'result-view',
   title: 'Query Result',
-  description: 'Interactive card for a result: a chart as the caller declares it (line, multi-line, stacked area, grouped/stacked/horizontal bars, a pie of shares, a sankey of flows — drillable where declared: a click opens a mark into a dimension), KPI tiles, a drill-down pivot table (the only table), a funnel (steps, conversion, biggest drop), or the A/B family — the test (lift, interval, verdict per variant), the sample-ratio check and the sample-size plan. Other results get one status line.',
+  description: 'Interactive card for a result: a chart as the caller declares it (line, multi-line, stacked area, grouped/stacked/horizontal bars, a pie of shares, a sankey of flows — drillable where declared: a click opens a mark into a dimension), KPI tiles with a trend, a drill-down pivot table (the only table), a funnel (steps, conversion, biggest drop), or an A/B test (lift, interval, verdict per variant). Drawn only for a visual shape; a single number, a row or two, a verdict or a plan is answered in words, and gets one status line.',
   mimeType: RESOURCE_MIME_TYPE,
   _meta: { ui: { prefersBorder: true, csp: VIEW_CSP } },
 };

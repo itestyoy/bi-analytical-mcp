@@ -142,8 +142,10 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   (`ui://betti/retentioneering-view.html`), once per analysis. The graph opens on each event's
   strongest exits (retentioneering's own default) and switches weights and how many exits it shows
   on the page itself — no recomputation; every card gives its scope (users, period, sample) and
-  counts next to shares, and has a table view of its numbers. Any other analysis, and any diff, is
-  drawn as the tables and values the library returned (a difference shaded above and below zero).
+  counts next to shares, and has a table view of its numbers. A distribution is drawn as a histogram
+  and a diff as heatmaps (the difference shaded above and below zero); an analysis with no visual
+  shape (describe, a conversion rate, per-path metrics) is not drawn — its numbers come back for the
+  model to answer in words.
 
 Nothing heavy runs in the server: a call starts a task, the warehouse computes, and a small result
 table comes back. Configuration:
@@ -230,8 +232,11 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   an alert over the card and withholds every verdict — a significant change coloured
   by what it means for the metric: green an improvement, red a regression; `good: down` on the
   analyze call marks a metric where lower is better, such as crash rate or churn, and the card says
-  "lower is better"), the SAMPLE-RATIO CHECK (the
-  observed split against the intended one) and the SAMPLE-SIZE PLAN. What a result with rows IS is
+  "lower is better"). A card is drawn only for a VISUAL SHAPE — a trend of three points or more,
+  three or more bars or slices, a funnel of three steps or more, a flow, a drill-down, KPI tiles with
+  a trend, the A/B test: a single number, a row or two, the standalone sample-ratio check or the
+  sample-size plan is answered in words (the drawing call says `drawn: false` and returns the numbers;
+  an explicit request is answered the same way). What a result with rows IS is
   declared by the caller: `display` on `display_model_result`, a union of closed
   forms tagged by `kind` — each form's schema says which question it fits and what it needs (required
   fields, bounds, enums, if/then), so nothing about a form lives in prose: `line` (a trend; several

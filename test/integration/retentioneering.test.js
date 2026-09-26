@@ -18,6 +18,7 @@ import { createDbt } from '../../src/dbt/index.js';
 import { Engine } from '../../src/engine.js';
 import { createRetentioneeringFeature } from '../../src/retentioneering/index.js';
 import { retentioneeringViewModel } from '../../src/retentioneering/view-model.js';
+import { TEXT_NOTE } from '../../src/apps/result-view-model.js';
 import { toCallToolResult } from '../../src/mcp-surface.js';
 import { settle } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
@@ -255,7 +256,7 @@ test('preprocess is the library\'s own op model: collapsed loops leave no self-t
 
 test('conversion rate and path metrics are the library\'s tables, and their numbers are the rows\'', opts, async (t) => {
   if (skip(t)) return;
-  const { analyses: a } = await runFull({
+  const { task_id, analyses: a } = await runFull({
     analyses: [
       { kind: 'conversion_rate', start_anchor: 'level_started', end_anchor: 'level_completed' },
       { kind: 'path_metrics', metrics: [{ metric: 'length' }, { metric: 'has_event', metric_args: { event: 'shop_opened' } }] },
@@ -271,6 +272,10 @@ test('conversion rate and path metrics are the library\'s tables, and their numb
   }
   const [row] = table(a.conversion_rate, 'result');
   assert.deepEqual({ paths_with_start: row.paths_with_start, converted: row.converted }, { paths_with_start: withStart, converted });
+  // no visual shape: not offered as a card, and a card asked for is answered in words, the numbers kept
+  assert.equal((await engine.query_retentioneering_model({ task_id })).show_to_user, undefined);
+  const asked = await engine.display_retentioneering_result({ task_id, analysis: 'conversion_rate' });
+  assert.deepEqual([asked.drawn, asked.note, table(asked.result, 'result')[0].converted], [false, TEXT_NOTE, converted]);
   const metrics = table(a.path_metrics, 'result');
   assert.equal(metrics.length, built.users, 'one row per path, all of them');
   for (const [u, list] of paths()) {
@@ -330,14 +335,16 @@ test('a distribution comparison is drawn as one histogram: each level\'s bins ho
   const { task_id } = await runFull({ analyses: [{ kind: 'metric_distribution', segment_col: 'platform', metric: { metric: 'length' }, segment_levels: [p1, p2] }] });
   const d = await engine.display_retentioneering_result({ task_id, analysis: 'metric_distribution' });
   const vm = retentioneeringViewModel(d, {});
-  assert.equal(vm.comparison.series.length, 2);
+  assert.equal(vm.histograms.length, 1, 'two levels on the same bins: one comparison');
+  const [h] = vm.histograms;
+  assert.equal(h.series.length, 2);
   const lengths = (platform) => [...paths()].filter(([u]) => platformOf.get(String(u)) === platform).map(([, list]) => list.length);
   for (const [k, platform] of [[0, p1], [1, p2]]) {
     const ls = lengths(platform);
-    assert.equal(vm.comparison.series[k].values.reduce((a, b) => a + b, 0), ls.length, `${platform}: every path in a bin`);
+    assert.equal(h.series[k].values.reduce((a, b) => a + b, 0), ls.length, `${platform}: every path in a bin`);
     // each path counted in the bin its length falls in
-    const { edges } = vm.comparison;
+    const { edges } = h;
     const expected = edges.slice(1).map((hi, i) => ls.filter((x) => x >= edges[i] && (x < hi || (i === edges.length - 2 && x <= hi))).length);
-    assert.deepEqual(vm.comparison.series[k].values, expected, platform);
+    assert.deepEqual(h.series[k].values, expected, platform);
   }
 });

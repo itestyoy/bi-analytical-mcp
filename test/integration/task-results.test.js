@@ -15,7 +15,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../src/apps/result-view-model.js';
+import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS, TEXT_NOTE } from '../../src/apps/result-view-model.js';
 import { settle, isStartedTask } from '../helpers/settle.js';
 import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
@@ -60,7 +60,9 @@ test('a metric query answers with its task at once; the same tool, given the tas
   assert.ok(done.waited_seconds === undefined, 'a finished task answers with its result, not a wait report');
   assert.equal(done.tool, 'query_semantic_model');
   assert.equal(Number(done.rows[0].mon_revenue), 85);
-  assert.equal(done.show_to_user?.tool, 'display_model_result', 'and says how to show it');
+  assert.equal(done.show_to_user, undefined, 'one number is answered in words: no card is suggested');
+  const perCountry = await q({ group_by: byCountry });
+  assert.equal(perCountry.show_to_user?.tool, 'display_model_result', 'several groups are a picture: it says how to show them');
 });
 
 test('a query task keeps its grouping and the caller-facing column names', opts, async (t) => {
@@ -115,9 +117,9 @@ test('a declaration naming a column the result does not have is refused, with th
     engine.display_model_result({ task_id: done.task_id, display: { kind: 'funnel', steps: [{ column: 'mon_revenue' }, { column: 'no_such_step' }] } }),
     (e) => e.field === 'display' && /mon_revenue/.test(e.message),
   );
-  // refused is not drawn: the task can still be shown, once
+  // refused is not drawn — and one number is answered in words: the answer carries it, no card
   const card = await engine.display_model_result({ task_id: done.task_id, display: { kind: 'kpi', values: [{ column: 'mon_revenue' }] } });
-  assert.equal(card.drawn, true);
+  assert.deepEqual([card.drawn, card.note, Number(card.rows[0].mon_revenue)], [false, TEXT_NOTE, 85]);
 });
 
 test('a declared pie carries each country\'s share of the warehouse total; a pie of a single value is refused', opts, async (t) => {
@@ -135,12 +137,12 @@ test('a declared pie carries each country\'s share of the warehouse total; a pie
   await assert.rejects(engine.display_model_result({ task_id: one.task_id, display: { kind: 'pie', label_column: 'mon_revenue', value_column: 'mon_revenue' } }), (e) => e.field === 'display');
 });
 
-test('a KPI tile over the warehouse total shows its number; over many rows it needs an axis', opts, async (t) => {
+test('a KPI of the warehouse total is one number, answered in words with it; over many rows it needs an axis', opts, async (t) => {
   if (skip(t)) return;
   const done = await q({});
-  const m = buildViewModel('display_model_result', await engine.display_model_result({ task_id: done.task_id, display: { kind: 'kpi', title: 'Revenue', values: [{ column: 'mon_revenue', label: 'IAP revenue', format: 'currency' }] } }));
-  assert.equal(m.kind, 'kpi');
-  assert.deepEqual(m.tiles.map((x) => [x.label, x.value]), [['IAP revenue', 85]]);
+  const one = await engine.display_model_result({ task_id: done.task_id, display: { kind: 'kpi', title: 'Revenue', values: [{ column: 'mon_revenue', label: 'IAP revenue', format: 'currency' }] } });
+  assert.deepEqual(buildViewModel('display_model_result', one), { kind: 'none', reason: 'text' });
+  assert.deepEqual([one.drawn, Number(one.rows[0].mon_revenue)], [false, 85]);
   // a row per country and no axis: refused, and the reply says why
   const many = await q({ group_by: byCountry });
   await assert.rejects(engine.display_model_result({ task_id: many.task_id, display: { kind: 'kpi', values: [{ column: 'mon_revenue' }] } }), (e) => e.field === 'display' && /ONE row/.test(e.message));

@@ -128,7 +128,7 @@ test('a protocol task follows a query tool\'s read while the engine task runs, a
 });
 
 test('display_model_result under a protocol task waits for the task, then draws its ONE card', async () => {
-  const rows = [{ day: '2024-01-01', dau: 42 }, { day: '2024-01-02', dau: 57 }];
+  const rows = [{ day: '2024-01-01', dau: 42 }, { day: '2024-01-02', dau: 57 }, { day: '2024-01-03', dau: 61 }];
   const engine = stubEngine({ rows });
   const { result } = await runToCompletion(engine, 'display_model_result', { task_id: 't1', display: { kind: 'line', x: 'day', y: ['dau'] } });
   assert.deepEqual(result.structuredContent.rows, rows, 'the card is drawn from the finished rows');

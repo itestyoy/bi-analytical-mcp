@@ -1191,7 +1191,7 @@ function experimentSchema() {
   const srm = srmCheckSchema();
   const ss = sampleSizeSchema();
   const properties = {
-    card: { type: 'boolean', description: 'Draw the result as a CARD for the person (the test, the split check or the plan), in hosts that render MCP Apps. Omitted: no card — ask for it only when the person should see this result.' },
+    card: { type: 'boolean', description: 'Draw the A/B test as a card for the person — each variant\'s lift and interval — in hosts that render MCP Apps, when the person should see it. The split check and the plan are a verdict and a number: they are answered in words (card: true on them answers card: "not drawn"). Omitted: no card.' },
     action: { enum: ['plan', 'check_split', 'analyze'], description: 'plan → required sample size / MDE (power planning, BEFORE running); check_split → Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run BEFORE trusting any lift); analyze → the A/B significance test on per-group aggregates.' },
     // union of all three actions' fields (analyze/ab_test wins on shared keys like metric).
     ...ss.properties,

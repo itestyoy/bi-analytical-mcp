@@ -943,37 +943,6 @@
   }
 }
 
-/* Sample-ratio check: the observed split as segments, the intended boundaries as dashed marks */
-.split-bar {
-  position: relative;
-  display: flex;
-  gap: 2px;
-  height: 0.75rem;
-  border-radius: var(--border-radius-full);
-  overflow: hidden;
-  background-color: var(--muted);
-}
-
-.split-segment {
-  flex-basis: 0;
-  min-width: 2px;
-}
-
-.split-marker {
-  position: absolute;
-  top: -2px;
-  bottom: -2px;
-  border-left: 2px dashed var(--foreground);
-  transform: translateX(-1px);
-}
-
-.split-legend {
-  margin-top: calc(var(--space) * 2);
-  font-size: var(--font-text-xs-size);
-  line-height: var(--font-text-xs-line-height);
-  color: var(--muted-foreground);
-}
-
 .stat-label .chart-indicator {
   display: inline-block;
   margin-right: calc(var(--space) * 1.5);

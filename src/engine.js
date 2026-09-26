@@ -29,7 +29,7 @@ import { buildProjection, projectionProblems } from './projection.js';
 import { SUPPORTED_DIALECTS } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 import { detached, currentSignal, isolatedTarget, withSignal } from './request-context.js';
-import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
+import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel, TEXT_NOTE } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, features = [], featureStatus = [] }) {
@@ -2992,13 +2992,13 @@ export class Engine {
   experiment(input) {
     this._validate('experiment', input);
     // `card` asks the MCP server for the result's card (src/mcp-surface.js): not a statistic
-    const { action, card: _card, ...rest } = input;
-    switch (action) {
-      case 'plan': return this.sample_size(rest);
-      case 'check_split': return this.srm_check(rest);
-      case 'analyze': return this.ab_test(rest);
-      default: throw new ToolError(`unknown experiment action '${action}'`, { stage: 'validate', field: 'action' });
-    }
+    const { action, card, ...rest } = input;
+    const run = { plan: () => this.sample_size(rest), check_split: () => this.srm_check(rest), analyze: () => this.ab_test(rest) }[action];
+    if (!run) throw new ToolError(`unknown experiment action '${action}'`, { stage: 'validate', field: 'action' });
+    const out = run();
+    // a card only for a visual shape: a split verdict or a plan's number is answered in words
+    const say = (o) => (card && isPlainObject(o) && o.ok !== false && buildViewModel('experiment', o, input).kind === 'none' ? { ...o, card: TEXT_NOTE } : o);
+    return out && typeof out.then === 'function' ? out.then(say) : say(out);
   }
 
   /**
@@ -3739,9 +3739,11 @@ export class Engine {
 
   /** How a finished result can be shown to the person — named only where there is something to draw, and only once. */
   _showHint(id, tool, out) {
-    const drawable = isPlainObject(out) && Array.isArray(out.rows) && out.rows.length > 0;
+    // offered only where the rows have a visual shape (a trend, several groups, a funnel…): a single
+    // number or a row or two is answered in words, and the person can still ask for a card
+    const drawable = isPlainObject(out) && Array.isArray(out.rows) && out.rows.length > 0 && buildViewModel(tool, out).kind !== 'none';
     if (!drawable || this._displayed?.has(id)) return {};
-    return { show_to_user: { tool: 'display_model_result', arguments: { task_id: id }, why: `in a host that renders MCP Apps this draws the result as a card for the person — add \`display\` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns. Once per result, and only for what the person should SEE — not for the intermediate reads you make to work something out.` } };
+    return { show_to_user: { tool: 'display_model_result', arguments: { task_id: id }, why: `in a host that renders MCP Apps this draws the result as a card for the person — add \`display\` with the kind that fits the question (a chart, KPI tiles with a trend, a funnel, a pivot…), over these columns. Once per result, when the person asks to see it or the picture says more than a sentence — not for the intermediate reads you make to work something out.` } };
   }
 
   /**
@@ -3795,6 +3797,7 @@ export class Engine {
         out.drawn_from = { tool };
       }
       const view = buildViewModel('display_model_result', out, input);
+      if (view.kind === 'none' && view.reason === 'text') return { ...out, drawn: false, note: TEXT_NOTE };
       if (view.kind === 'none') return { ...out, drawn: false, warnings: [...(out.warnings || []), `nothing was drawn (${view.reason}) — declare \`display\` with the kind that fits the rows`] };
       drawn = true;
       return { ...out, drawn: true };

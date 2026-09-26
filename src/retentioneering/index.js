@@ -24,6 +24,7 @@ import { renderEventstream, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
 import { parseResultRows, summarize } from './results.js';
 import { retentioneeringViewModel, RETENTIONEERING_VIEW_URI } from './view-model.js';
+import { TEXT_NOTE } from '../apps/result-view-model.js';
 import { retentioneeringGuide, GUIDE_NAME, ROUTING_TRIGGERS, INSTRUCTIONS_LINE, retentioneeringSkill } from './guide.js';
 
 export const SIDE = 'retentioneering';
@@ -34,7 +35,7 @@ const DISPLAY = 'display_retentioneering_result';
 export const TOOL_DESCRIPTIONS = {
   [BUILD]: 'Build the eventstream a path analysis reads: which events source, which time window, which events (kept, dropped, merged into groups), which user attributes to carry as segments, optional sessions and a deterministic user sample. It is built in SQL where the data lives and materialized, and returns a task_id at once; query_retentioneering_model({ task_id }) returns its summary — users, events, the event vocabulary with counts. Use it for questions about paths and sequences: what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are. Then run the analyses with query_retentioneering_model. For a metric over time use build_semantic_model; for a one-off table of numbers, build_pipeline_model.',
   [QUERY]: 'Run retentioneering over a built eventstream, or read a task back. { context_id, preprocess?, analyses: [...] } starts ONE task that computes every listed analysis together in the warehouse (one run for all of them, so list what the question needs in one call). Each analysis is a library method with its own parameters, under the library\'s names: transition_graph (which event follows which, every weight at once), step_matrix / step_sankey (the share of paths at each event step by step, optionally around an anchor), funnel, cluster_analysis (groups of similar paths), segment_overview, conversion_rate, metric_distribution, path_metrics, describe; diff compares two segment levels. preprocess is the library\'s own op model ({ type, ...params }: filter_paths, collapse_events, truncate_paths, split_sessions, add_segment, add_clusters, …), for the whole call or one analysis. It returns a task_id at once. { task_id } (or task_ids) waits up to 30s and returns each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table — or, with detail: "full", every record; { task_id, cancel: true } stops it. Event names are the eventstream\'s own (after grouping).',
-  [DISPLAY]: 'Draw one analysis of a finished query_retentioneering_model task as a card for the person — the transition graph, a step matrix heatmap, a step sankey, a funnel, the clusters or a segment overview, and for any other analysis or a diff the tables it returned — in hosts that render MCP Apps. Once per analysis: a second call for the same one is refused. Read the task first (query_retentioneering_model({ task_id })) to know what it found; draw the analysis the person should see before summarising it.',
+  [DISPLAY]: 'Draw one analysis of a finished query_retentioneering_model task as a card for the person, in hosts that render MCP Apps — the transition graph, a step matrix heatmap, a step sankey, a funnel, the clusters, a segment overview, a distribution\'s histogram or a diff\'s heatmaps. Use it when the person asks to see an analysis or its shape is visual; an analysis with none (describe, a conversion rate, per-path metrics) answers drawn: false — answer it in words from the numbers the read returned. Once per analysis: a second call for the same one is refused. Read the task first (query_retentioneering_model({ task_id })) to know what it found.',
 };
 
 // ── the feature definition (src/features.js) ────────────────────────────────────────────────────
@@ -113,7 +114,7 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {} } = {
       uri: RETENTIONEERING_VIEW_URI,
       name: 'retentioneering-view',
       title: 'Path Analysis',
-      description: 'Card for one path analysis: a transition graph (switch the weight and how many exits per event are shown), a step matrix heatmap, a step sankey, a funnel, the clusters of paths, a segment overview — or the tables any other analysis (and any diff) returned.',
+      description: 'Card for one path analysis: a transition graph (switch the weight and how many exits per event are shown), a step matrix heatmap, a step sankey, a funnel, the clusters of paths, a segment overview, a distribution\'s histogram or a diff\'s heatmaps.',
       asset: 'retentioneeringView',
       viewModel: (result, args) => retentioneeringViewModel(result, args),
     },
@@ -389,11 +390,12 @@ async function readResult(feature, dir, model, { context_id, eventstream, order 
 /** What a read of a finished task answers: the eventstream summary, or each analysis summarized. */
 function answer(engine, id, out, detail = 'summary') {
   if (out?.kind !== 'analyses') return out;
-  const drawable = Object.keys(out.analyses).filter((a) => !drawnAlready(engine, id, a));
+  // a card is offered only for an analysis with a visual shape; the rest is answered in words
+  const drawable = Object.keys(out.analyses).filter((a) => !drawnAlready(engine, id, a) && retentioneeringViewModel({ ok: true, analysis: a, result: out.analyses[a] }).kind !== 'none');
   return {
     ok: true, kind: 'analyses', context_id: out.context_id, eventstream: out.eventstream,
     analyses: detail === 'full' ? out.analyses : Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, summarize(r)])),
-    ...(drawable.length ? { show_to_user: { tool: DISPLAY, arguments: { task_id: id, analysis: drawable[0] }, why: `in a host that renders MCP Apps this draws one analysis as a card (${drawable.join(', ')} can be drawn) — once per analysis, for what the person should see.` } } : {}),
+    ...(drawable.length ? { show_to_user: { tool: DISPLAY, arguments: { task_id: id, analysis: drawable[0] }, why: `in a host that renders MCP Apps this draws one analysis as a card (${drawable.join(', ')} can be drawn) — once per analysis, when the person asks to see it or the picture says more than a sentence; the others are answered in words.` } } : {}),
   };
 }
 
@@ -469,7 +471,7 @@ async function display(engine, feature, input) {
   } : null;
   const drawn = { ok: true, task_id: input.task_id, analysis: input.analysis, eventstream: out.eventstream, ...(scope ? { scope } : {}), ...(input.edge_weight ? { edge_weight: input.edge_weight } : {}), result };
   const vm = retentioneeringViewModel(drawn, input);
-  if (vm.kind === 'none') return { ...drawn, drawn: false, note: 'this analysis has nothing to draw (no transitions, steps, groups or rows)' };
+  if (vm.kind === 'none') return { ...drawn, drawn: false, note: vm.reason === 'text' ? TEXT_NOTE : 'this analysis has nothing to draw (no transitions, steps, groups or rows)' };
   const ctx = engine.ctxs.get(job.contextId);
   const marks = (ctx.state.retentioneering.drawn ||= {});
   (marks[input.task_id] ||= []).push(input.analysis);

@@ -12,10 +12,12 @@
  *                      that ended as one block at the bottom of each step
  *   funnel             the steps, their share of all paths and of the previous step, the biggest drop
  *   clusters / segment overview   each group's size, then the metrics that set the groups apart most
- *   any other result   (conversion rate, metric distribution, path metrics, describe, any diff) laid
- *                      out for what each part is: values as key-figure grids, a histogram as bars (two
- *                      groups on the same bins in one chart), a few rows as a card each, a longer
- *                      table with data bars, a diff's matrices as heatmaps (the difference diverging)
+ *   histogram          a distribution's bins as bars (two groups on the same bins in one chart), its
+ *                      other values as key figures under it
+ *   diff               the difference and the two groups as heatmaps, the difference diverging
+ *
+ * A result with no visual shape (describe, a conversion rate, per-path metrics) is not drawn: the
+ * view model says `text`, and the model answers in words.
  *
  * Every card says what its numbers are about — the users, the period, a sample — and gives counts
  * next to shares. IT DRAWS AND NOTHING ELSE: its input is the result the host hands over
@@ -91,7 +93,7 @@ function scopeBadges(model) {
 function render(result) {
   loadingEl.hidden = true;
   const model = retentioneeringViewModel(payloadOf(result), state.toolInput || {});
-  if (model.kind === 'none') { showStatus(model.reason === 'error' ? 'The analysis could not be drawn.' : 'Nothing to draw for this analysis.'); return; }
+  if (model.kind === 'none') { showStatus(model.reason === 'error' ? 'The analysis could not be drawn.' : model.reason === 'text' ? 'The answer is in the reply.' : 'Nothing to draw for this analysis.'); return; }
   statusEl.hidden = true;
   mainEl.hidden = false;
   titleEl.textContent = model.title;
@@ -521,9 +523,6 @@ function renderOverview(model) {
 
 // ── tables of any other result ────────────────────────────────────────────────────────────────
 
-/** Rows shown before "show all" — the rest are in the page already, one click away. */
-const FIRST_ROWS = 100;
-
 /** A value as its kind reads: a duration in s/m/h/d, a moment as a date, a number grouped, a flag. */
 function formatValue(v, kind) {
   if (v == null) return '—';
@@ -542,23 +541,6 @@ function statGrid(items) {
   return grid;
 }
 
-/** A card of key figures — a group of values, or a table of one row. */
-function figuresCard({ title, description, items, action }) {
-  return card({ title, description, action }, statGrid(items));
-}
-
-function recordCard(t, row) {
-  const names = t.columns.map((_, j) => j).filter((j) => !t.numeric[j]);
-  const figures = t.columns.map((_, j) => j).filter((j) => t.numeric[j]);
-  // the text columns say what the row is about ("level_started · level_completed"), their names on hover
-  const title = el('p', 'card-title', names.length ? names.map((j) => formatValue(row[j], t.kinds[j])).join(' · ') : t.title);
-  if (names.length) title.title = names.map((j) => `${t.headers[j]}: ${formatValue(row[j], t.kinds[j])}`).join('\n');
-  return card(
-    { title, description: names.length ? t.title : undefined },
-    statGrid(figures.map((j) => ({ label: t.headers[j], value: row[j], kind: t.kinds[j] }))),
-  );
-}
-
 function legend(items) {
   const node = el('div', 'rt-legend');
   for (const [cls, text] of items) {
@@ -569,53 +551,35 @@ function legend(items) {
   return node;
 }
 
-function tableCard(t) {
-  const table = el('table', `table rt-heat${t.layout === 'table' ? ' rt-data' : ''}`);
+/** A diff's matrix as a heatmap: each cell shaded by its size in the whole table — the difference one
+ *  hue above zero and another below, the two groups it is taken from on one hue. */
+function matrixCard(t) {
+  const table = el('table', 'table rt-heat');
   const head = el('tr');
   t.headers.forEach((h, j) => { const th = el('th', t.numeric[j] ? 'num' : null, h); th.title = t.columns[j]; head.append(th); });
   const thead = el('thead'); thead.append(head);
   const tbody = el('tbody');
-  const rowOf = (r) => {
+  for (const r of t.rows) {
     const tr = el('tr');
     r.forEach((v, j) => {
-      const td = el('td', t.numeric[j] ? 'num' : (j === 0 ? 'rt-event' : null));
-      if (t.layout === 'matrix' && t.numeric[j]) {
-        // a heatmap cell: shaded by its size in the whole table — a diff one hue up, another down
-        td.classList.add('rt-cell');
+      const td = el('td', t.numeric[j] ? 'num rt-cell' : (j === 0 ? 'rt-event' : null));
+      if (t.numeric[j]) {
         if (t.diverging && v < 0) td.classList.add('rt-neg');
         if (typeof v === 'number' && v && t.scale) td.style.setProperty('--share', String(Math.abs(v) / t.scale));
         td.textContent = v ? formatValue(v, t.kinds[j]) : '';
         td.title = `${r[0]} · ${t.columns[j]}: ${formatValue(v, t.kinds[j])}`;
-      } else if (t.column_max[j] && typeof v === 'number') {
-        // a data bar: the value's size within its column, behind the number
-        const bar = el('span', 'rt-bar');
-        bar.style.setProperty('--share', String(v / t.column_max[j]));
-        td.append(bar, el('span', 'rt-bar-value', formatValue(v, t.kinds[j])));
-      } else {
-        td.textContent = formatValue(v, t.kinds[j]);
-      }
+      } else td.textContent = formatValue(v, t.kinds[j]);
       tr.append(td);
     });
-    return tr;
-  };
-  t.rows.slice(0, FIRST_ROWS).forEach((r) => tbody.append(rowOf(r)));
+    tbody.append(tr);
+  }
   table.append(thead, tbody);
   const scroll = el('div', 'table-container');
   scroll.append(table);
   const content = el('div', 'card-content');
   if (t.diverging) content.append(legend([['rt-swatch-pos', 'First group higher'], ['rt-swatch-neg', 'Second group higher']]));
   content.append(scroll);
-  if (t.rows.length > FIRST_ROWS) {
-    const more = el('button', 'btn btn-outline rt-more', `Show all ${formatNumber(t.rows.length)} rows`);
-    more.type = 'button';
-    more.addEventListener('click', () => { t.rows.slice(FIRST_ROWS).forEach((r) => tbody.append(rowOf(r))); more.remove(); });
-    content.append(more);
-  }
-  return card({
-    title: t.diverging ? 'Difference' : t.title,
-    description: t.diverging ? 'First group minus second' : undefined,
-    action: badge(`${formatNumber(t.rows.length)} ${t.rows.length === 1 ? 'row' : 'rows'}`, 'secondary'),
-  }, content);
+  return card({ title: t.diverging ? 'Difference' : t.title, description: t.diverging ? 'First group minus second' : undefined }, content);
 }
 
 /** Bins as bars — several series side by side in each bin, one colour each, a legend when there are two or more. */
@@ -671,15 +635,8 @@ function roundedTop(x, y, w, h, r) {
 
 function renderTables(model) {
   const wrap = el('div', 'rt-stack');
-  for (const g of model.values) {
-    if (g.histogram) wrap.append(histogramCard({ title: g.title, edges: g.histogram.edges, series: g.histogram.series.slice(0, 1), measure: g.histogram.series[0].label, items: g.items }));
-    else wrap.append(figuresCard({ title: g.title, items: g.items }));
-  }
-  if (model.comparison) wrap.append(histogramCard(model.comparison));
-  for (const t of model.tables) {
-    if (t.layout === 'records') t.rows.forEach((row) => wrap.append(recordCard(t, row)));
-    else wrap.append(tableCard(t));
-  }
+  for (const h of model.histograms) wrap.append(histogramCard(h));
+  for (const t of model.tables) wrap.append(matrixCard(t));
   return wrap;
 }
 

@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
+import { TEXT_NOTE } from '../../src/apps/result-view-model.js';
 import { isStartedTask, taskResult } from '../helpers/settle.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
@@ -118,7 +119,16 @@ test('display_model_result draws a model\'s rows once — and nothing else; an e
   runner.parses.shift()();
   await taskResult(e, created.task_id);
   await assert.rejects(() => e.display_model_result({ task_id: created.task_id }), /no rows to draw/);
-  const kpi = { kind: 'kpi', values: [{ column: 'task_cnt' }] };
+  // one number is answered in words: nothing is drawn, and the task is not spent on it
+  const one = { kind: 'kpi', values: [{ column: 'task_cnt' }] };
+  const q0 = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
+  await taskResult(e, q0.task_id);
+  const text = await e.display_model_result({ task_id: q0.task_id, display: one });
+  assert.deepEqual([text.drawn, text.note, text.rows], [false, TEXT_NOTE, [{ task_cnt: 3 }]]);
+  assert.equal((await e.display_model_result({ task_id: q0.task_id, display: one })).drawn, false, 'not spent: asking again is not refused');
+  // a trend is a picture: drawn once
+  runner.query = async () => ({ ok: true, columns: [{ name: 'd' }, { name: 'task_cnt' }], rows: [{ d: '2026-09-01', task_cnt: 1 }, { d: '2026-09-02', task_cnt: 2 }, { d: '2026-09-03', task_cnt: 3 }] });
+  const kpi = { kind: 'kpi', x: 'd', values: [{ column: 'task_cnt' }] };
   const q = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
   await taskResult(e, q.task_id);
   const drawn = await e.display_model_result({ task_id: q.task_id, display: kpi });

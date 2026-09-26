@@ -1,9 +1,9 @@
 // THE MODEL OF WHAT THE RESULT VIEW SHOWS — a pure function from a tool result to a view.
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
-// WHAT to render: a CHART (a time series or a breakdown), KPI tiles, a FUNNEL,
-// and the A/B TEST family — the test itself, the sample-ratio check and the sample-size plan, the
-// three steps of one experiment. Anything else — a failure, a build still running, an explained
+// WHAT to render: a CHART (a time series or a breakdown), KPI tiles, a FUNNEL, the A/B TEST — and,
+// for the experiment's other two steps (the sample-ratio check, the sample-size plan), the shapes the
+// visual-shape rule below turns into text. Anything else — a failure, a build still running, an explained
 // query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
 // status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
 // the tool's text result speaks for itself. Rows are drawn as the caller DECLARED them when the
@@ -11,7 +11,18 @@
 // the card inferred from the shape. The view imports it and the unit
 // tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
+// A CARD IS DRAWN ONLY FOR A VISUAL SHAPE — a trend, a comparison across several groups, a funnel,
+// a flow, a drill-down, an A/B test's intervals: what a picture says better than a sentence. A single
+// number, a one-row result, two bars, a verdict (the sample-ratio check) or a plan's one number is
+// `none` with reason `text`: the model reads the numbers and answers in words, and that holds for a
+// card the caller asked for too (visualShape below; CARD_MIN are its thresholds).
+//
 // Everything below is data in, data out: no DOM, no module state.
+
+/** The least a shape needs to be worth a picture: points on a line, bars, slices, funnel steps. */
+export const CARD_MIN = { points: 3, bars: 3, slices: 3, steps: 3 };
+/** What a drawing tool answers for a result with no visual shape — the numbers stay in its answer. */
+export const TEXT_NOTE = 'not drawn — this result reads better as text: answer in words from its numbers';
 
 /** How many rows one drill-down level reads — the top level and every level a row opens into. */
 export const PIVOT_LEVEL_ROWS = 200;
@@ -90,9 +101,39 @@ export function pivotRows(result, display, depth) {
 }
 
 export function buildViewModel(toolName, result, toolInput) {
+  return visualShape(shapeOf(toolName, result, toolInput), result);
+}
+
+/**
+ * Whether a view model is worth a card: a visual shape keeps it, anything a sentence says as well
+ * becomes `none('text')`. A view inside a card already drawn (a drill-down's next level) is never
+ * turned back into text — the card is on screen, and its next level is drawn whatever its size.
+ */
+export function visualShape(view, result) {
+  if (!view || view.kind === 'none') return view;
+  const text = { kind: 'none', reason: 'text' };
+  if (Array.isArray(result?.drill_path) && result.drill_path.length) return view;
+  if (view.kind === 'srm' || view.kind === 'plan') return text;
+  if (view.kind === 'kpi') return view.tiles.some((t) => Array.isArray(t.trend)) ? view : text;
+  if (view.kind === 'funnel') return view.steps.length >= CARD_MIN.steps ? view : text;
+  if (view.kind === 'chart' && !view.chart.drill) {
+    const c = view.chart;
+    if (c.type === 'line') return Math.max(0, ...c.series.map((x) => x.points.length)) >= CARD_MIN.points ? view : text;
+    if (c.type === 'bar') return (c.categories_total ?? c.labels?.length ?? c.bars?.length ?? 0) >= CARD_MIN.bars ? view : text;
+    if (c.type === 'pie') return c.slices.length >= CARD_MIN.slices ? view : text;
+  }
+  return view;
+}
+
+/** The shape the rows have, before the visual-shape rule — what buildViewModel draws when it is worth a card. */
+export function resultShape(toolName, result, toolInput) {
+  return shapeOf(toolName, result, toolInput);
+}
+
+function shapeOf(toolName, result, toolInput) {
   // display_model_result draws the rows another tool produced: the card is that tool's
   if (toolName === 'display_model_result' && result && typeof result === 'object' && result.drawn_from && typeof result.drawn_from === 'object') {
-    return buildViewModel(result.drawn_from.tool || 'result', result, null);
+    return shapeOf(result.drawn_from.tool || 'result', result, null);
   }
   const MAX_SERIES = 6; // lines share one axis; past six the legend stops being readable
   const MAX_BARS = 30; // past thirty categories bars stop being readable, flat or not

@@ -40,7 +40,7 @@ export function retentioneeringGuide() {
       segment_overview: 'Per-path metrics compared across the levels of a segment (segment_col): a user attribute listed in segments at build time, or one an add_segment / add_clusters step made.',
       ...Object.fromEntries(ANALYSIS_KINDS.filter((k) => !CHARTED_KINDS.includes(k)).map((k) => [k, f.analyses[k].summary])),
     },
-    diff: 'transition_graph, step_matrix, step_sankey and funnel take diff: [segment_col, level_1, level_2] — the same analysis for two levels and their difference, returned (and drawn) as tables.',
+    diff: 'transition_graph, step_matrix, step_sankey and funnel take diff: [segment_col, level_1, level_2] — the same analysis for two levels and their difference, returned as tables; the diff of a graph or a step matrix/sankey is drawn as heatmaps, a funnel diff is answered in words.',
     preprocess: Object.fromEntries(OFFERED_OPS.map((op) => [op, f.ops[op].summary])),
     not_offered: { ...NOT_OFFERED.ops, ...Object.fromEntries(Object.entries(NOT_OFFERED.params).map(([p, why]) => [`the ${p} parameter`, why])) },
     path_metrics: f.path_metrics,

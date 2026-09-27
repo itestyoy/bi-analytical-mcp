@@ -18,7 +18,6 @@ import { createDbt } from '../../src/dbt/index.js';
 import { Engine } from '../../src/engine.js';
 import { createRetentioneeringFeature } from '../../src/retentioneering/index.js';
 import { retentioneeringViewModel } from '../../src/retentioneering/view-model.js';
-import { TEXT_NOTE } from '../../src/apps/result-view-model.js';
 import { toCallToolResult } from '../../src/mcp-surface.js';
 import { settle } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
@@ -272,10 +271,9 @@ test('conversion rate and path metrics are the library\'s tables, and their numb
   }
   const [row] = table(a.conversion_rate, 'result');
   assert.deepEqual({ paths_with_start: row.paths_with_start, converted: row.converted }, { paths_with_start: withStart, converted });
-  // no visual shape: not offered as a card, and a card asked for is answered in words, the numbers kept
+  // neither has a card: none is offered, and one asked for is refused — the numbers are in the read
   assert.equal((await engine.query_retentioneering_model({ task_id })).show_to_user, undefined);
-  const asked = await engine.display_retentioneering_result({ task_id, analysis: 'conversion_rate' });
-  assert.deepEqual([asked.drawn, asked.note, table(asked.result, 'result')[0].converted], [false, TEXT_NOTE, converted]);
+  await assert.rejects(engine.display_retentioneering_result({ task_id, analysis: 'conversion_rate' }), (e) => e.field === 'analysis' && /no card/.test(e.message));
   const metrics = table(a.path_metrics, 'result');
   assert.equal(metrics.length, built.users, 'one row per path, all of them');
   for (const [u, list] of paths()) {
@@ -313,7 +311,7 @@ test('diff: the same analysis for two segment levels and their difference — dr
   assert.deepEqual(cells('diff'), diff);
   const d = await engine.display_retentioneering_result({ task_id, analysis: 'transition_graph' });
   const vm = retentioneeringViewModel(d, {});
-  assert.equal(vm.kind, 'tables');
+  assert.equal(vm.kind, 'diff');
   assert.deepEqual(vm.tables.map((x) => [x.name, x.diverging]), [['diff', true], ['first', false], ['second', false]]);
 });
 
@@ -335,6 +333,7 @@ test('a distribution comparison is drawn as one histogram: each level\'s bins ho
   const { task_id } = await runFull({ analyses: [{ kind: 'metric_distribution', segment_col: 'platform', metric: { metric: 'length' }, segment_levels: [p1, p2] }] });
   const d = await engine.display_retentioneering_result({ task_id, analysis: 'metric_distribution' });
   const vm = retentioneeringViewModel(d, {});
+  assert.equal(vm.kind, 'distribution');
   assert.equal(vm.histograms.length, 1, 'two levels on the same bins: one comparison');
   const [h] = vm.histograms;
   assert.equal(h.series.length, 2);

@@ -4,9 +4,8 @@
  * alone, the only table is the pivot; a declared drill lets a click open a mark into a dimension, with
  * a breadcrumb and a back button), KPI TILES (a headline number, its
  * change, a sparkline), a PIVOT (a drill-down table, each level read when its row opens), a FUNNEL
- * (steps, conversion, the biggest drop) and the A/B test (each variant's lift and interval). A card
- * is drawn only for a visual shape (buildViewModel): a single number, a verdict or a plan is answered
- * in words, and any such result gets one status line.
+ * (steps, conversion, the biggest drop) and the A/B test (each variant's lift and interval). Any
+ * other result gets one status line.
  *
  * IT DRAWS, AND READS ONLY ITS OWN RESULT. The input is the display_model_result the host delivers
  * (ontoolresult). The one thing it asks for is more of that same result, through drill_result
@@ -496,8 +495,6 @@ function showStatus(model) {
     // the result this card showed or waited for was deleted or expired since — not an error
     gone: ['clock', 'This result is no longer available'],
     error: ['circle-alert', 'Error'],
-    // a result a sentence says as well as a picture: the reply carries it in words
-    text: ['info', 'The answer is in the reply'],
   };
   const [name, text, cls] = lines[model.reason] || ['info', 'Nothing to chart'];
   statusEl.replaceChildren(icon(name, cls), el('span', null, text));

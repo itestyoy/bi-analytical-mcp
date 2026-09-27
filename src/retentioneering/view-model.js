@@ -3,8 +3,6 @@
 // display_retentioneering_result returned and gives the card its model. Pure data shaping, no DOM,
 // no numbers of its own: every value is one the analysis computed.
 
-import { CARD_MIN } from '../apps/result-view-model.js';
-
 export const RETENTIONEERING_VIEW_URI = 'ui://betti/retentioneering-view.html';
 
 /** How each transition weight reads: a count, a share of 0..1, a plain number, or a duration in seconds. */
@@ -38,13 +36,16 @@ export function retentioneeringViewModel(drawn, args = {}) {
   const r = drawn.result;
   if (!isObj(r) || typeof r.kind !== 'string') return none('empty');
   const head = { kind: r.kind, title: titleOf(r.kind), analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
-  // the charted analyses in their own chart; any other result (and any diff) as the tables it returned
+  // a card per KIND (CARD_KINDS, ./schema.js): the charted analyses in their own chart, a distribution
+  // as its histogram, a diff as its heatmaps; any other analysis has no card and is answered in words
   if (r.kind === 'transition_graph' && r.edges) return graph(head, r, args.edge_weight || drawn.edge_weight);
   if (r.kind === 'step_matrix' && r.blocks) return stepMatrix(head, r);
   if (r.kind === 'step_sankey' && r.blocks) return stepSankey(head, r);
   if (r.kind === 'funnel' && r.steps) return funnel(head, r);
   if (r.levels) return overview(head, r);
-  return tables(head, r);
+  if (r.kind === 'metric_distribution') return distribution(head, r);
+  if ((r.tables || []).some((t) => t.name === 'diff')) return diffMatrices(head, r);
+  return none('no_card');
 }
 
 /** A library name as a reader reads it: "paths_with_start" → "Paths with start", "path_stats.user_id"
@@ -57,8 +58,7 @@ export function humanize(name) {
 
 const NUMERIC = new Set(['integer', 'number', 'duration']);
 
-/** A histogram inside a group of values, recognised by its shape: an increasing list of k+1 numbers
- *  (the bin edges) and lists of k numbers (what each bin holds). */
+/** Bin edges and what each bin holds, read by their shape: an increasing list of k+1 numbers and lists of k. */
 function histogramOf(items) {
   const lists = items.filter((it) => Array.isArray(it.value) && it.value.length > 1 && it.value.every((x) => typeof x === 'number'));
   const edges = lists.find((e) => e.value.every((x, i) => i === 0 || x >= e.value[i - 1]) && lists.some((o) => o.value.length === e.value.length - 1));
@@ -67,44 +67,17 @@ function histogramOf(items) {
   return { edges: edges.value, series: series.map((o) => ({ label: o.label, values: o.value })), used: new Set([edges, ...series]) };
 }
 
-/**
- * The tables and values of a result — drawn only where they have a visual shape (a card is not made
- * for its own sake):
- *   matrix     the tables of a diff (`diff` — two groups' difference — and the two groups it is taken
- *              from): heatmaps on one scale per table, the difference a diverging one
- *   histogram  bin edges and what each bin holds (two groups on the same bins: one comparison),
- *              with the group's other values as key figures under it
- * Anything else — a table of numbers, a record, a summary — is `none('text')`: the model reads it
- * in the result and answers in words. Every kind (a duration, a moment, a number) is the one the
- * analysis step read from the data's types.
- */
-function tables(head, r) {
-  const hasDiff = (r.tables || []).some((t) => t.name === 'diff');
-  const list = hasDiff ? (r.tables || []).filter((t) => t.columns?.length).map((t) => {
-    const kinds = t.columns.map((_, j) => t.kinds?.[j] || (t.rows.length > 0 && t.rows.every((row) => row[j] == null || typeof row[j] === 'number') ? 'number' : 'text'));
-    const numeric = kinds.map((k) => NUMERIC.has(k));
-    // the largest magnitude a cell's shading is measured against: the whole matrix
-    const scale = Math.max(0, ...numeric.flatMap((n, j) => (n ? t.rows.map((row) => row[j]).filter((v) => typeof v === 'number').map(Math.abs) : [])));
-    return { name: t.name, title: humanize(t.name), columns: t.columns, headers: t.columns.map(humanize), kinds, numeric, rows: t.rows, diverging: t.name === 'diff', scale };
-  }) : [];
-  const groups = [];
-  // a number standing alone (the distance between two distributions) goes under the histogram
-  const loose = Object.entries(r.values || {}).filter(([, v]) => typeof v === 'number')
-    .map(([name, value]) => ({ label: humanize(name), value, kind: typeof r.value_kinds?.[name] === 'string' ? r.value_kinds[name] : typeof value === 'number' ? 'number' : 'text' }));
-  for (const [name, value] of Object.entries(r.values || {})) {
-    if (!isObj(value)) continue;
-    const kind = r.value_kinds?.[name];
-    const items = [];
-    const walk = (prefix, v, k) => {
-      if (isObj(v)) Object.entries(v).forEach(([key, x]) => walk(prefix ? `${prefix} · ${humanize(key)}` : humanize(key), x, isObj(k) ? k[key] : undefined));
-      else items.push({ label: prefix, value: v, kind: typeof k === 'string' ? k : typeof v === 'number' ? 'number' : 'text' });
-    };
-    walk('', value, kind);
-    const histogram = histogramOf(items);
-    if (histogram) groups.push({ title: humanize(name), items: items.filter((it) => it.value != null && !histogram.used.has(it) && !Array.isArray(it.value)), edges: histogram.edges, series: histogram.series });
-  }
-  if (!list.length && !groups.length) return none('text');
-  // histograms that share their bins are one comparison: drawn together, their figures under it
+/** metric_distribution: each group's bins as bars — two groups on the same bins in one chart — with
+ *  the groups' own figures (mean, median) and the distance between them under it. */
+function distribution(head, r) {
+  const groups = Object.entries(r.values || {}).filter(([, v]) => isObj(v)).map(([name, v]) => {
+    const kinds = isObj(r.value_kinds?.[name]) ? r.value_kinds[name] : {};
+    const items = Object.entries(v).map(([k, x]) => ({ label: humanize(k), value: x, kind: typeof kinds[k] === 'string' ? kinds[k] : 'number' }));
+    const h = histogramOf(items);
+    return h && { title: humanize(name), edges: h.edges, series: h.series, items: items.filter((it) => typeof it.value === 'number' && !h.used.has(it)) };
+  }).filter(Boolean);
+  if (!groups.length) return none('empty');
+  const loose = Object.entries(r.values || {}).filter(([, v]) => typeof v === 'number').map(([name, value]) => ({ label: humanize(name), value, kind: 'number' }));
   const shared = groups.length > 1 && groups.every((g) => JSON.stringify(g.edges) === JSON.stringify(groups[0].edges));
   const histograms = shared
     ? [{
@@ -115,11 +88,20 @@ function tables(head, r) {
       items: groups.flatMap((g) => g.items.map((it) => ({ ...it, label: `${g.title} · ${it.label}` }))),
     }]
     : groups.map((g) => ({ title: g.title, edges: g.edges, measure: g.series[0].label, series: g.series.slice(0, 1), items: g.items }));
-  if (histograms.length) histograms[0].items = [...histograms[0].items, ...loose];
-  return {
-    ...head, kind: 'tables', title: hasDiff ? `${head.title} — difference between two groups` : head.title, analysis_kind: r.kind, diff: hasDiff,
-    tables: list, histograms,
-  };
+  histograms[0].items = [...histograms[0].items, ...loose];
+  return { ...head, kind: 'distribution', histograms };
+}
+
+/** A diff (of a transition graph, a step matrix or a step sankey): the difference and the two groups
+ *  as heatmaps, each shaded on its own scale, the difference one hue above zero and another below. */
+function diffMatrices(head, r) {
+  const tables = r.tables.filter((t) => t.columns?.length).map((t) => {
+    const kinds = t.columns.map((_, j) => t.kinds?.[j] || (t.rows.length > 0 && t.rows.every((row) => row[j] == null || typeof row[j] === 'number') ? 'number' : 'text'));
+    const numeric = kinds.map((k) => NUMERIC.has(k));
+    const scale = Math.max(0, ...numeric.flatMap((n, j) => (n ? t.rows.map((row) => row[j]).filter((v) => typeof v === 'number').map(Math.abs) : [])));
+    return { name: t.name, title: humanize(t.name), columns: t.columns, headers: t.columns.map(humanize), kinds, numeric, rows: t.rows, diverging: t.name === 'diff', scale };
+  });
+  return { ...head, kind: 'diff', title: `${head.title} — difference between two groups`, tables };
 }
 
 function graph(head, r, weight) {
@@ -173,8 +155,6 @@ function stepSankey(head, r) {
 function funnel(head, r) {
   const steps = (r.steps || []).map((s) => ({ label: s.step, value: s.unique_paths, of_first: s.conversion_rate, of_previous: s.step_conversion_rate }));
   if (!steps.length) return none('empty');
-  // one or two steps are a conversion a sentence states — the same threshold as the result view's funnel
-  if (steps.length < CARD_MIN.steps) return none('text');
   let biggest = null;
   steps.forEach((s, i) => { if (i > 0 && (biggest === null || s.of_previous < steps[biggest].of_previous)) biggest = i; });
   return { ...head, steps, biggest_drop: biggest };

@@ -151,16 +151,13 @@
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
   `structuredContent` is carried only by a display_model_result that drew (`drawn: true`) or an
   experiment called with `card: true`, and only when `buildViewModel(...).kind !== 'none'`; every
-  other answer is the text alone. A CARD IS DRAWN ONLY FOR A VISUAL SHAPE (`visualShape` +
-  `CARD_MIN`, src/apps/result-view-model.js — the one rule, which a feature's view model follows too):
-  a trend, a comparison across several groups, a funnel of three steps or more, a flow, a drill-down,
-  an A/B test's intervals. A single number, a row or two, a split verdict or a plan is `none('text')`
-  — the drawing tool answers `drawn: false` with the numbers and `TEXT_NOTE`, the task is not spent,
-  and the model answers in words; an explicit request for a card is answered the same way. The read's
-  `show_to_user` hint is offered only where the rows have a visual shape. THE EXPERIMENT IS A SEPARATE PROCESS, NOT MIXED WITH display: it is
-  statistics over numbers the caller brings — no task, no task_id — returned at once, and it draws its
-  own card (the test, the split check, the plan) only when asked with `card: true` (a field offered to
-  an Apps client alone, refused from any other). A stored result is
+  other answer is the text alone. A CARD EXISTS PER KIND, never per the size of a result: a kind that
+  fits a picture has its card, a kind that does not has no card code at all (no view-model branch, no
+  renderer, no field asking for it) and is answered in words. THE EXPERIMENT IS A SEPARATE PROCESS,
+  NOT MIXED WITH display: it is statistics over numbers the caller brings — no task, no task_id —
+  returned at once, and it draws its own card (the A/B test; the split check and the plan have none)
+  only when asked with `card: true` on analyze (a field offered to an Apps client alone, refused from
+  any other). A stored result is
   built on by a pipeline started from its task (`build_pipeline_model({ action: 'start', from_task
   })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
   starting call, a reader shared by both sides, a read by table name, or route an experiment
@@ -195,9 +192,10 @@
   tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the
-  eventstream's shape rules out. A charted analysis keeps its own card, as does a distribution's
-  histogram and a diff's matrices; anything else (describe, a conversion rate, per-path metrics)
-  comes back as the tables and values the library returned and is answered in words, not drawn.
+  eventstream's shape rules out. The analyses with a card are CARD_KINDS (the charted ones and a
+  distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps); any other
+  (describe, a conversion rate, per-path metrics) comes back as the tables and values the library
+  returned, has no card, and is answered in words.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): what speaks to the MODEL — the

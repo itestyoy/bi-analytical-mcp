@@ -1,28 +1,17 @@
 // THE MODEL OF WHAT THE RESULT VIEW SHOWS — a pure function from a tool result to a view.
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
-// WHAT to render: a CHART (a time series or a breakdown), KPI tiles, a FUNNEL, the A/B TEST — and,
-// for the experiment's other two steps (the sample-ratio check, the sample-size plan), the shapes the
-// visual-shape rule below turns into text. Anything else — a failure, a build still running, an explained
-// query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
+// WHAT to render: a CHART (a time series or a breakdown), KPI tiles, a FUNNEL, a PIVOT and the A/B
+// TEST. A card exists per KIND: these have one, and nothing else does (the experiment's split check
+// and sample-size plan are answered in words and have no card here). Anything else — a failure, a
+// build still running, an explained query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
 // status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
 // the tool's text result speaks for itself. Rows are drawn as the caller DECLARED them when the
 // result carries `display` (a funnel, KPI tiles, a drill-down pivot, a line, area, bar, pie or sankey chart over named columns); only without one is
 // the card inferred from the shape. The view imports it and the unit
 // tests run it in node on real tool results, so the browser draws exactly what the tests checked.
 //
-// A CARD IS DRAWN ONLY FOR A VISUAL SHAPE — a trend, a comparison across several groups, a funnel,
-// a flow, a drill-down, an A/B test's intervals: what a picture says better than a sentence. A single
-// number, a one-row result, two bars, a verdict (the sample-ratio check) or a plan's one number is
-// `none` with reason `text`: the model reads the numbers and answers in words, and that holds for a
-// card the caller asked for too (visualShape below; CARD_MIN are its thresholds).
-//
 // Everything below is data in, data out: no DOM, no module state.
-
-/** The least a shape needs to be worth a picture: points on a line, bars, slices, funnel steps. */
-export const CARD_MIN = { points: 3, bars: 3, slices: 3, steps: 3 };
-/** What a drawing tool answers for a result with no visual shape — the numbers stay in its answer. */
-export const TEXT_NOTE = 'not drawn — this result reads better as text: answer in words from its numbers';
 
 /** How many rows one drill-down level reads — the top level and every level a row opens into. */
 export const PIVOT_LEVEL_ROWS = 200;
@@ -101,39 +90,9 @@ export function pivotRows(result, display, depth) {
 }
 
 export function buildViewModel(toolName, result, toolInput) {
-  return visualShape(shapeOf(toolName, result, toolInput), result);
-}
-
-/**
- * Whether a view model is worth a card: a visual shape keeps it, anything a sentence says as well
- * becomes `none('text')`. A view inside a card already drawn (a drill-down's next level) is never
- * turned back into text — the card is on screen, and its next level is drawn whatever its size.
- */
-export function visualShape(view, result) {
-  if (!view || view.kind === 'none') return view;
-  const text = { kind: 'none', reason: 'text' };
-  if (Array.isArray(result?.drill_path) && result.drill_path.length) return view;
-  if (view.kind === 'srm' || view.kind === 'plan') return text;
-  if (view.kind === 'kpi') return view.tiles.some((t) => Array.isArray(t.trend)) ? view : text;
-  if (view.kind === 'funnel') return view.steps.length >= CARD_MIN.steps ? view : text;
-  if (view.kind === 'chart' && !view.chart.drill) {
-    const c = view.chart;
-    if (c.type === 'line') return Math.max(0, ...c.series.map((x) => x.points.length)) >= CARD_MIN.points ? view : text;
-    if (c.type === 'bar') return (c.categories_total ?? c.labels?.length ?? c.bars?.length ?? 0) >= CARD_MIN.bars ? view : text;
-    if (c.type === 'pie') return c.slices.length >= CARD_MIN.slices ? view : text;
-  }
-  return view;
-}
-
-/** The shape the rows have, before the visual-shape rule — what buildViewModel draws when it is worth a card. */
-export function resultShape(toolName, result, toolInput) {
-  return shapeOf(toolName, result, toolInput);
-}
-
-function shapeOf(toolName, result, toolInput) {
   // display_model_result draws the rows another tool produced: the card is that tool's
   if (toolName === 'display_model_result' && result && typeof result === 'object' && result.drawn_from && typeof result.drawn_from === 'object') {
-    return shapeOf(result.drawn_from.tool || 'result', result, null);
+    return buildViewModel(result.drawn_from.tool || 'result', result, null);
   }
   const MAX_SERIES = 6; // lines share one axis; past six the legend stops being readable
   const MAX_BARS = 30; // past thirty categories bars stop being readable, flat or not
@@ -231,44 +190,6 @@ function shapeOf(toolName, result, toolInput) {
       good: result.good || 'up',
       scale: nice(extent * 1.1),
       notes: result.recommendations || [],
-    };
-  }
-  // ── A/B: the sample-ratio check — is the observed split the one that was intended? ──
-  if (toolName === 'experiment' && Array.isArray(result.groups) && 'srm_detected' in result) {
-    const groups = result.groups.map((g) => ({ label: String(g.label ?? ''), observed: num(g.observed), expected: num(g.expected) }));
-    const total = groups.reduce((a, g) => a + (g.observed ?? 0), 0);
-    const expectedTotal = groups.reduce((a, g) => a + (g.expected ?? 0), 0);
-    return {
-      kind: 'srm',
-      title: 'Sample ratio check',
-      p_value: num(result.p_value),
-      srm_detected: !!result.srm_detected,
-      total,
-      groups: groups.map((g) => ({
-        ...g,
-        observed_share: total > 0 && g.observed !== null ? g.observed / total : null,
-        expected_share: expectedTotal > 0 && g.expected !== null ? g.expected / expectedTotal : null,
-      })),
-    };
-  }
-  // ── A/B: the sample-size plan — how many users, or the smallest effect a given n can see ──
-  if (toolName === 'experiment' && 'n_per_group' in result) {
-    const metricLabel = { proportion: 'conversion rate', mean: 'mean' }[result.metric] || result.metric || 'metric';
-    return {
-      kind: 'plan',
-      title: `Sample-size plan · ${metricLabel}`,
-      metric: result.metric || null,
-      // which side was solved: a total comes back only when n was the unknown
-      solved: 'total_n' in result ? 'n' : 'mde',
-      n_per_group: num(result.n_per_group),
-      total_n: num(result.total_n),
-      baseline: num(result.baseline),
-      stddev: num(result.stddev),
-      mde: num(result.mde),
-      relative_mde: num(result.relative_mde),
-      power: num(result.power),
-      confidence: num(result.confidence),
-      alternative: result.alternative || null,
     };
   }
   if (toolName === 'experiment') return none('experiment');

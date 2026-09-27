@@ -213,7 +213,7 @@
   margin-top: calc(var(--space) * 3);
 }
 
-/* ── tables of any other result ── */
+/* ── a diff's legend ── */
 .rt-legend {
   display: flex;
   flex-wrap: wrap;

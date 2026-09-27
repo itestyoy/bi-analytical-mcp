@@ -12,12 +12,11 @@
  *                      that ended as one block at the bottom of each step
  *   funnel             the steps, their share of all paths and of the previous step, the biggest drop
  *   clusters / segment overview   each group's size, then the metrics that set the groups apart most
- *   histogram          a distribution's bins as bars (two groups on the same bins in one chart), its
- *                      other values as key figures under it
+ *   distribution       the bins as bars (two groups on the same bins in one chart), their mean,
+ *                      median and the distance between them as key figures under it
  *   diff               the difference and the two groups as heatmaps, the difference diverging
  *
- * A result with no visual shape (describe, a conversion rate, per-path metrics) is not drawn: the
- * view model says `text`, and the model answers in words.
+ * Other analyses (describe, a conversion rate, per-path metrics) have no card.
  *
  * Every card says what its numbers are about — the users, the period, a sample — and gives counts
  * next to shares. IT DRAWS AND NOTHING ELSE: its input is the result the host hands over
@@ -93,12 +92,12 @@ function scopeBadges(model) {
 function render(result) {
   loadingEl.hidden = true;
   const model = retentioneeringViewModel(payloadOf(result), state.toolInput || {});
-  if (model.kind === 'none') { showStatus(model.reason === 'error' ? 'The analysis could not be drawn.' : model.reason === 'text' ? 'The answer is in the reply.' : 'Nothing to draw for this analysis.'); return; }
+  if (model.kind === 'none') { showStatus(model.reason === 'error' ? 'The analysis could not be drawn.' : 'Nothing to draw for this analysis.'); return; }
   statusEl.hidden = true;
   mainEl.hidden = false;
   titleEl.textContent = model.title;
   subtitleEl.replaceChildren(...scopeBadges(model));
-  const draw = { transition_graph: renderGraph, step_matrix: renderStepMatrix, step_sankey: renderSankey, funnel: renderFunnel, cluster_analysis: renderOverview, segment_overview: renderOverview, tables: renderTables }[model.kind];
+  const draw = { transition_graph: renderGraph, step_matrix: renderStepMatrix, step_sankey: renderSankey, funnel: renderFunnel, cluster_analysis: renderOverview, segment_overview: renderOverview, distribution: renderDistribution, diff: renderDiff }[model.kind];
   contentEl.replaceChildren(draw(model));
 }
 
@@ -521,7 +520,7 @@ function renderOverview(model) {
   }, content);
 }
 
-// ── tables of any other result ────────────────────────────────────────────────────────────────
+// ── a distribution and a diff ─────────────────────────────────────────────────────────────────
 
 /** A value as its kind reads: a duration in s/m/h/d, a moment as a date, a number grouped, a flag. */
 function formatValue(v, kind) {
@@ -633,9 +632,14 @@ function roundedTop(x, y, w, h, r) {
   return `M${x},${y + h} V${y + r} Q${x},${y} ${x + r},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${y + h} Z`;
 }
 
-function renderTables(model) {
+function renderDistribution(model) {
   const wrap = el('div', 'rt-stack');
   for (const h of model.histograms) wrap.append(histogramCard(h));
+  return wrap;
+}
+
+function renderDiff(model) {
+  const wrap = el('div', 'rt-stack');
   for (const t of model.tables) wrap.append(matrixCard(t));
   return wrap;
 }

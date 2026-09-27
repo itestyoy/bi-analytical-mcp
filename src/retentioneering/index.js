@@ -19,11 +19,11 @@ import { createDbt, formatDbtError } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, ANALYSIS_KINDS, OFFERED_OPS, CARD_KINDS, NAME } from './schema.js';
+import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, ANALYSIS_KINDS, OFFERED_OPS, NAME } from './schema.js';
 import { renderEventstream, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
 import { parseResultRows, summarize } from './results.js';
-import { retentioneeringViewModel, RETENTIONEERING_VIEW_URI } from './view-model.js';
+import { retentioneeringViewModel, RETENTIONEERING_VIEW_URI, hasCard } from './view-model.js';
 import { retentioneeringGuide, GUIDE_NAME, ROUTING_TRIGGERS, INSTRUCTIONS_LINE, retentioneeringSkill } from './guide.js';
 
 export const SIDE = 'retentioneering';
@@ -389,7 +389,7 @@ async function readResult(feature, dir, model, { context_id, eventstream, order 
 /** What a read of a finished task answers: the eventstream summary, or each analysis summarized. */
 function answer(engine, id, out, detail = 'summary') {
   if (out?.kind !== 'analyses') return out;
-  const drawable = Object.keys(out.analyses).filter((a) => hasCard(out.analyses[a]) && !drawnAlready(engine, id, a));
+  const drawable = Object.keys(out.analyses).filter((a) => hasCard(out.analyses[a].kind, !!out.analyses[a].diff) && !drawnAlready(engine, id, a));
   return {
     ok: true, kind: 'analyses', context_id: out.context_id, eventstream: out.eventstream,
     analyses: detail === 'full' ? out.analyses : Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, summarize(r)])),
@@ -442,11 +442,6 @@ async function taskOutput(engine, feature, job) {
 
 // ── display ───────────────────────────────────────────────────────────────────────────────────
 
-/** Whether an analysis has a card: its kind is one of CARD_KINDS (a diff of one is drawn as heatmaps). */
-function hasCard(result) {
-  return CARD_KINDS.includes(result.kind) && retentioneeringViewModel({ ok: true, result }).kind !== 'none';
-}
-
 function drawnAlready(engine, taskId, analysis) {
   const job = engine.jobs.get(taskId);
   if (!job?.contextId || !engine.ctxs.has(job.contextId)) return false;
@@ -465,7 +460,7 @@ async function display(engine, feature, input) {
   if (!out || out.ok === false) throw new ToolError(`task ${input.task_id} has no result to draw${out?.error?.message ? ` (${out.error.message})` : ''}`, { stage: 'validate', field: 'task_id' });
   const result = out.analyses[input.analysis];
   if (!result) throw new ToolError(`task ${input.task_id} has no analysis '${input.analysis}' (it has ${Object.keys(out.analyses).join(', ')})`, { stage: 'validate', field: 'analysis' });
-  if (!hasCard(result)) throw new ToolError(`'${input.analysis}' is a ${result.kind} — it has no card: answer it in words from the numbers query_retentioneering_model({ task_id }) returned`, { stage: 'validate', field: 'analysis' });
+  if (!hasCard(result.kind, !!result.diff)) throw new ToolError(`'${input.analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers query_retentioneering_model({ task_id }) returned`, { stage: 'validate', field: 'analysis' });
   const ctx0 = engine.ctxs.get(job.contextId);
   const es = Object.entries(ctx0.state.retentioneering?.eventstreams || {}).find(([name]) => name === out.eventstream)?.[1];
   // what the numbers are about — who, when, how much of it — shown on the card with them

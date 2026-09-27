@@ -3721,7 +3721,7 @@ export class Engine {
     if (kept && !paging) {
       const out = kept.out;
       const failed = isPlainObject(out) && out.ok === false;
-      return { ...head, ...(isPlainObject(out) ? out : { result: out }), status: failed ? 'error' : 'done', ...(failed ? {} : this._showHint(id, kept.tool, out)) };
+      return { ...head, ...(isPlainObject(out) ? out : { result: out }), status: failed ? 'error' : 'done', ...(failed ? {} : this._showHint(id, out)) };
     }
     if (job.status === 'ready' && job.table) {
       // a stored table: the rows are read from it (paged), whether or not the response is still held
@@ -3730,18 +3730,19 @@ export class Engine {
       }
       if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
       const page = await this._readTable(this.ctxs.dir(job.contextId), job.table, limit ?? 1000, undefined, {}, offset ?? 0);
-      return { ...head, ...page, status: page.ok === false ? 'error' : 'done', ...(page.ok === false ? {} : this._showHint(id, job.tool, page)) };
+      return { ...head, ...page, status: page.ok === false ? 'error' : 'done', ...(page.ok === false ? {} : this._showHint(id, page)) };
     }
     if (paging) throw new ToolError(`offset/limit page a stored table or a result still held in memory, and this task has neither — ${this._pageHint(job)}`, { stage: 'validate', field: offset != null ? 'offset' : 'limit' });
     if (job.status === 'error') return { ok: false, ...head, status: 'error', error: { stage: 'task', message: job.error } };
     return { ok: false, ...head, status: 'error', error: { stage: 'task', code: RESULT_GONE, message: 'this task\'s result was held in memory and is gone (the server restarted, or it is over an hour old) — run it again; materialize:true keeps a query\'s result as a table that survives restarts.' } };
   }
 
-  /** How a finished result can be shown to the person — named only where there is something to draw, and only once. */
-  _showHint(id, tool, out) {
+  /** How a finished result with rows can be shown to the person — once: the `display` the caller
+   *  declares (a chart, KPI tiles, a funnel, a pivot…) says how the card draws its rows. */
+  _showHint(id, out) {
     const drawable = isPlainObject(out) && Array.isArray(out.rows) && out.rows.length > 0;
     if (!drawable || this._displayed?.has(id)) return {};
-    return { show_to_user: { tool: 'display_model_result', arguments: { task_id: id }, why: `in a host that renders MCP Apps this draws the result as a card for the person — add \`display\` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns. Once per result, and only for what the person should SEE — not for the intermediate reads you make to work something out.` } };
+    return { show_to_user: { tool: 'display_model_result', arguments: { task_id: id }, why: `in a host that renders MCP Apps this draws the result as a card for the person — add \`display\` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns. Once per result, and only for what the person should see — not for the intermediate reads you make to work something out.` } };
   }
 
   /**

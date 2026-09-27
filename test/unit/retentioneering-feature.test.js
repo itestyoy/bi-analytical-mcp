@@ -16,7 +16,7 @@ import { Engine } from '../../src/engine.js';
 import { resolveFeatures, flagOn } from '../../src/features.js';
 import { createRetentioneeringFeature, retentioneeringDefinition } from '../../src/retentioneering/index.js';
 import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED } from '../../src/retentioneering/schema.js';
-import { RETENTIONEERING_VIEW_URI } from '../../src/retentioneering/view-model.js';
+import { RETENTIONEERING_VIEW_URI, retentioneeringViewModel, hasCard, CARD_KINDS, DIFF_CARD_KINDS } from '../../src/retentioneering/view-model.js';
 import { buildToolDefs, createServices, runTool, coreInstructions } from '../../src/mcp-surface.js';
 import { RUNTIME_ASSETS } from '../../src/runtime-assets.js';
 import { settle } from '../helpers/settle.js';
@@ -179,4 +179,13 @@ test('the view draws and nothing else — no server call, no network — and its
   await build({ configFile: new URL('../../src/apps/retentioneering-view/vite.config.js', import.meta.url).pathname, build: { outDir: out, emptyOutDir: true }, logLevel: 'silent' });
   assert.ok(existsSync(RUNTIME_ASSETS.retentioneeringView.path));
   assert.equal(readFileSync(join(out, 'retentioneering-view.html'), 'utf8'), readFileSync(RUNTIME_ASSETS.retentioneeringView.path, 'utf8'), 'rebuild the view: npm run build:app');
+});
+
+test('a card is decided by kind: an analysis of a card kind with nothing in it is empty, one of another kind has no card', () => {
+  for (const kind of CARD_KINDS) assert.equal(hasCard(kind), true, kind);
+  for (const kind of ['describe', 'conversion_rate', 'path_metrics']) assert.equal(hasCard(kind), false, kind);
+  assert.deepEqual(DIFF_CARD_KINDS.map((k) => hasCard(k, true)), DIFF_CARD_KINDS.map(() => true));
+  assert.equal(hasCard('funnel', true), false, 'a funnel diff has no card');
+  assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'transition_graph', nodes: [], edges: [] } }), { kind: 'none', reason: 'empty' });
+  assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'describe', values: {} } }), { kind: 'none', reason: 'no_card' });
 });

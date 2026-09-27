@@ -450,8 +450,10 @@ test('the experiment has a card for its test alone: a split check and a plan hav
   const plan = await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 });
   assert.deepEqual(buildViewModel('experiment', plan), { kind: 'none', reason: 'experiment' });
   for (const args of [{ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: true }, { action: 'check_split', groups: [{ n: 1 }, { n: 1 }], card: true }]) {
-    await assert.rejects(Promise.resolve().then(() => s.engine.experiment(args)), /invalid input/, args.action);
+    await assert.rejects(Promise.resolve().then(() => s.engine.experiment(args)), /`card` must be false/, args.action);
   }
+  // asking for no card is harmless
+  assert.equal((await s.engine.experiment({ action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02, card: false })).n_per_group, 3841);
 });
 
 test('view model: a result with no card is none, with its reason', () => {

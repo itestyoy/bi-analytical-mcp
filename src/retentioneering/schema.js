@@ -17,6 +17,7 @@
 import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
+import { CARD_KINDS } from './view-model.js';
 
 let factsCache;
 /** The facts sheet (read once). */
@@ -45,11 +46,6 @@ export const NOT_OFFERED = {
 export const ANALYSIS_KINDS = Object.keys(retentioneeringFacts().analyses);
 /** The preprocessing ops offered: every op the library registers, but the ones NOT_OFFERED. */
 export const OFFERED_OPS = Object.keys(retentioneeringFacts().ops).filter((op) => !NOT_OFFERED.ops[op]);
-/** The analyses the card draws as a chart of their own. */
-export const CHARTED_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel', 'cluster_analysis', 'segment_overview'];
-/** The analyses that have a card: the charted ones and a distribution (its histogram); a diff of a
- *  graph or a step matrix/sankey is drawn as heatmaps. Any other analysis has none — it is answered in words. */
-export const CARD_KINDS = [...CHARTED_KINDS, 'metric_distribution'];
 
 export const NAME = '^[a-z][a-z0-9_]*$';
 const CTX = '^[A-Za-z0-9_-]{1,64}$';

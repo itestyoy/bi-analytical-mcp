@@ -312,7 +312,37 @@ test('diff: the same analysis for two segment levels and their difference — dr
   const d = await engine.display_retentioneering_result({ task_id, analysis: 'transition_graph' });
   const vm = retentioneeringViewModel(d, {});
   assert.equal(vm.kind, 'diff');
-  assert.deepEqual(vm.tables.map((x) => [x.name, x.diverging]), [['diff', true], ['first', false], ['second', false]]);
+  assert.deepEqual(vm.tables.map((x) => [x.role, x.diverging]), [['diff', true], ['first', false], ['second', false]]);
+});
+
+test('a diff around an anchor is drawn block by block: each difference is its first group minus its second; a funnel diff has no card', opts, async (t) => {
+  if (skip(t)) return;
+  const [p1, p2] = (await wh.query('select distinct platform from dim_users where platform is not null order by 1')).rows.map((r) => r.platform);
+  const { task_id, analyses: a } = await runFull({
+    analyses: [
+      { kind: 'step_matrix', max_steps: 3, diff: ['platform', p1, p2], path_pattern: 'tutorial->.*->level_completed' },
+      { kind: 'funnel', steps: FUNNEL, diff: ['platform', p1, p2] },
+    ],
+  });
+  const m = a.step_matrix;
+  assert.equal(m.diff, true);
+  const blocks = [...new Set(m.tables.filter((x) => x.role === 'diff').map((x) => x.block))];
+  assert.ok(blocks.length >= 1, 'a block per anchor of the pattern');
+  for (const b of blocks) {
+    const part = (role) => m.tables.find((x) => x.role === role && x.block === b);
+    const value = (tb, row, j) => tb.rows.find((r) => r[0] === row)?.[j] ?? 0;
+    const [diff, first, second] = ['diff', 'first', 'second'].map(part);
+    for (const row of diff.rows) diff.columns.slice(1).forEach((_, k) => {
+      assert.ok(Math.abs(row[k + 1] - (value(first, row[0], k + 1) - value(second, row[0], k + 1))) < 1e-9, `block ${b} ${row[0]} step ${diff.columns[k + 1]}`);
+    });
+  }
+  const read = await engine.query_retentioneering_model({ task_id });
+  assert.equal(read.show_to_user?.arguments.analysis, 'step_matrix', 'the anchored diff is offered as a card');
+  const d = await engine.display_retentioneering_result({ task_id, analysis: 'step_matrix' });
+  const vm = retentioneeringViewModel(d, {});
+  assert.equal(vm.kind, 'diff');
+  assert.equal(vm.tables.filter((x) => x.diverging).length, blocks.length);
+  await assert.rejects(engine.display_retentioneering_result({ task_id, analysis: 'funnel' }), (e) => e.field === 'analysis' && /diff of funnel/.test(e.message));
 });
 
 test('a read is a summary by default and every record with detail: "full"', opts, async (t) => {

@@ -578,7 +578,8 @@ function matrixCard(t) {
   const content = el('div', 'card-content');
   if (t.diverging) content.append(legend([['rt-swatch-pos', 'First group higher'], ['rt-swatch-neg', 'Second group higher']]));
   content.append(scroll);
-  return card({ title: t.diverging ? 'Difference' : t.title, description: t.diverging ? 'First group minus second' : undefined }, content);
+  const block = t.block != null ? ` · block ${t.block + 1}` : '';
+  return card({ title: t.diverging ? `Difference${block}` : t.title, description: t.diverging ? 'First group minus second' : undefined }, content);
 }
 
 /** Bins as bars — several series side by side in each bin, one colour each, a legend when there are two or more. */

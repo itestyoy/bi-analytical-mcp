@@ -139,14 +139,17 @@ def _label(col):
     return " / ".join(str(c) for c in col) if isinstance(col, tuple) else str(col)
 
 
-def _table(out, a, name, frame):
+def _table(out, a, name, frame, role=None, block=None):
+    """One frame as a table. A diff's parts carry their `role` (diff | first | second) and, around an
+    anchor or a path pattern, their `block` — so a reader takes them by what they are, not by name."""
     if isinstance(frame, pd.Series):
         frame = frame.to_frame(name=frame.name if frame.name is not None else "value")
     if not isinstance(frame.index, pd.RangeIndex):
         frame = frame.reset_index()
     columns = [_label(c) for c in frame.columns]
     kinds = [_column_kind(frame.iloc[:, j]) for j in range(frame.shape[1])]
-    out.add(a["id"], a["kind"], "table", {"table": name, "columns": json.dumps(columns), "kinds": json.dumps(kinds)})
+    meta = {**({"role": role} if role else {}), **({"block": block} if block is not None else {})}
+    out.add(a["id"], a["kind"], "table", {"table": name, "columns": json.dumps(columns), "kinds": json.dumps(kinds), **meta})
     for row in frame.itertuples(index=False, name=None):
         out.add(a["id"], a["kind"], "row", {"table": name, "values": json.dumps([_deep(v) for v in row], default=str)})
 
@@ -160,10 +163,15 @@ def _emit(out, a, name, value):
     and values, each under the name the library gave it (a tuple's parts by position)."""
     if isinstance(value, (pd.DataFrame, pd.Series)):
         _table(out, a, name, value)
+    elif isinstance(value, tuple) and name == "result" and a["params"].get("diff") is not None and len(value) == 3:
+        # a diff: (difference, first group, second group), each one frame or a tuple of blocks
+        for role, part in zip(("diff", "first", "second"), value):
+            blocks = part if isinstance(part, tuple) else (part,)
+            for b, frame in enumerate(blocks):
+                _table(out, a, role if len(blocks) == 1 else f"{role} {b + 1}", frame, role=role, block=b if len(blocks) > 1 else None)
     elif isinstance(value, tuple):
-        names = ["diff", "first", "second"] if a["params"].get("diff") is not None and len(value) == 3 else [f"{name}_{i + 1}" for i in range(len(value))]
-        for n, v in zip(names, value):
-            _emit(out, a, n, v)
+        for i, v in enumerate(value):
+            _emit(out, a, f"{name}_{i + 1}", v)
     elif isinstance(value, dict) and any(isinstance(v, (pd.DataFrame, pd.Series, dict, tuple)) or _records(v) for v in value.values()):
         for k, v in value.items():
             _emit(out, a, k if name == "result" else f"{name}.{k}", v)
@@ -350,6 +358,8 @@ def run(frame, spec):
         if a["path_col"] in frame_out.columns:
             out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[a["path_col"]].nunique())})
         charted = CHARTED.get(a["kind"])
+        if a["params"].get("diff") is not None:
+            out.add(a["id"], a["kind"], "diff", {"diff": True})
         if charted and a["params"].get("diff") is None:
             charted(s, spec, a, out)
         else:

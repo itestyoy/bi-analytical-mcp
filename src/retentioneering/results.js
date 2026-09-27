@@ -1,8 +1,8 @@
 // THE RESULT OF A QUERY CALL — the long table the analysis model wrote (analysis, kind, part, seq,
 // payload), read back into one structured result per analysis: the charted analyses in their own
 // shape, and whatever else the library returned (any other analysis, a diff, the per-path cluster
-// labels) as its tables and values. The card draws the whole of it, and a read with detail: "full"
-// returns all of it; the default read is a summary that fits a conversation (the biggest transitions,
+// labels) as its tables and values. A read with detail: "full" returns all of it (and a card, for an
+// analysis that has one, draws it); the default read is a summary that fits a conversation (the biggest transitions,
 // the leading events per step, each group's profile, the first rows of each table).
 
 const TOP_EDGES = 25;
@@ -55,14 +55,18 @@ function generic(parts) {
   }
   // each column's and value's kind (a duration, a moment, a number…) as the analysis step read it from
   // the data's own types, so the card formats it without guessing from a name
-  const tables = (parts.table || []).map((t) => ({ name: t.table, columns: JSON.parse(t.columns), ...(t.kinds ? { kinds: JSON.parse(t.kinds) } : {}), rows: rows.get(t.table) || [] }));
+  const tables = (parts.table || []).map((t) => ({
+    name: t.table, columns: JSON.parse(t.columns), ...(t.kinds ? { kinds: JSON.parse(t.kinds) } : {}),
+    ...(t.role ? { role: t.role } : {}), ...(t.block != null ? { block: t.block } : {}), rows: rows.get(t.table) || [],
+  }));
   const values = Object.fromEntries((parts.value || []).map((v) => [v.name, JSON.parse(v.value)]));
   const kinds = Object.fromEntries((parts.value || []).filter((v) => v.kinds).map((v) => [v.name, JSON.parse(v.kinds)]));
   return { ...(tables.length ? { tables } : {}), ...(Object.keys(values).length ? { values } : {}), ...(Object.keys(kinds).length ? { value_kinds: kinds } : {}) };
 }
 
 function shape({ kind, parts }) {
-  return { kind, ...charted(kind, parts), ...generic(parts) };
+  // a diff says so: the analysis step marks it, whatever shape the library gave the comparison
+  return { kind, ...(parts.diff?.length ? { diff: true } : {}), ...charted(kind, parts), ...generic(parts) };
 }
 
 /** The charted analyses' own shape — present when the analysis step wrote it (not for a diff). */
@@ -167,6 +171,6 @@ function summarizeGeneric(result) {
   return {
     ...(tables ? { tables } : {}),
     ...(result.values ? { values: result.values } : {}),
-    ...(cut ? { rows_note: `tables show their first ${TOP_ROWS} rows; read with detail: "full" for every row, or draw the card` } : {}),
+    ...(cut ? { rows_note: `tables show their first ${TOP_ROWS} rows; read with detail: "full" for every row` } : {}),
   };
 }

@@ -555,3 +555,29 @@ test('a path by a column, by a composite key and by an event property: one path 
   assert.equal(r.events, src.filter((x) => x.s >= 1 && x.s <= 2).length);
   await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', path: [{ column: 'no_such' }] }), (e) => e.field === 'path');
 });
+
+// The task of a draft's SECOND build: that table reads the draft's first build (its checkpoint)
+// through a ref — the eventstream and a new pipeline started from it compile only when the models it
+// depends on come along with it.
+test('from the task of a draft\'s rebuild: the eventstream and a pipeline started from it find the table it builds on', opts, async (t) => {
+  if (skip(t)) return;
+  const n = Number((await wh.query("select count(*) as n from fct_analytics_events where event_name <> 'first_launch'")).rows[0].n);
+  const p = await engine.build_pipeline_model({ action: 'start', name: 'two_builds', source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: p.draft_id, stage: { stage: 'where', conditions: [{ column: 'event_name', op: 'neq', value: 'first_launch' }] } });
+  const first = await engine.build_pipeline_model({ action: 'materialize', draft_id: p.draft_id });
+  assert.equal((await engine.query_pipeline_model({ task_id: first.task_id })).status, 'done');
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: p.draft_id, stage: { stage: 'project', columns: ['player_id_of_internal', 'event_name', 'device_time'] } });
+  const second = await engine.build_pipeline_model({ action: 'materialize', draft_id: p.draft_id });
+  const built = await engine.query_pipeline_model({ task_id: second.task_id });
+  assert.equal(built.status, 'done', JSON.stringify(built.error));
+  const b = await engine.build_retentioneering_model({ name: 'from_rebuild', from_task: second.task_id, columns: { path: 'player_id_of_internal', event: 'event_name', time: 'device_time' } });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  assert.equal(r.events, n);
+  const q = await engine.build_pipeline_model({ action: 'start', name: 'on_rebuild', from_task: second.task_id, source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: q.draft_id, stage: { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] } });
+  const m = await engine.build_pipeline_model({ action: 'materialize', draft_id: q.draft_id });
+  const rows = await engine.query_pipeline_model({ task_id: m.task_id });
+  assert.equal(rows.status, 'done', JSON.stringify(rows.error));
+  assert.equal(Number(rows.rows[0].n), n);
+});

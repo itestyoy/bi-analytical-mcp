@@ -154,6 +154,44 @@ test('query_pipeline_model over a built model: count(column) counts NON-NULL onl
   await assert.rejects(() => engine.query_pipeline_model({ context_id: ctxId }), /no built pipeline model/);
 });
 
+// A CONDITIONAL aggregate and a SECOND level over a built model: per player, how many level starts
+// and completes (count … where), then how many players there are and how many completed at least
+// once (the groups counted, a per-group condition) — all read from the stored table, checked against
+// the rows. And a lag over a text column is text in the schema, as its values are.
+test('query_pipeline_model: conditional aggregates and a second level count the groups, as the rows do; a lag of text is text', opts, async (t) => {
+  if (skip(t)) return;
+  const src = (await wh.query('select player_id_of_internal as u, event_name as e from fct_analytics_events')).rows;
+  const per = new Map();
+  for (const r of src) { const p = per.get(r.u) || { s: 0, c: 0 }; if (r.e === 'level_started') p.s += 1; if (r.e === 'level_completed') p.c += 1; per.set(r.u, p); }
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'two_levels', source: 'events' });
+  const step = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, include_columns: true, stage: { stage: 'compute', name: 'prev_event', op: 'window', fn: 'lag', column: 'event_name', partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] } });
+  assert.equal(step.available_columns.find((c) => c.name === 'prev_event')?.type, 'string', 'a lag of event_name is text');
+  const mat = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(mat.build?.ok, true, JSON.stringify(mat.error || mat.build));
+  const prev = await engine.query_pipeline_model({ context_id: s.draft_id, transform: { where: [{ column: 'prev_event', op: 'is_not_null' }], group_by: ['prev_event'], aggregations: [{ fn: 'count', as: 'n' }] } });
+  assert.ok(prev.rows.every((r) => typeof r.prev_event === 'string' && src.some((x) => x.e === r.prev_event)), 'its values are event names');
+  const r = await engine.query_pipeline_model({ context_id: s.draft_id, transform: {
+    group_by: ['player_id_of_internal'],
+    aggregations: [
+      { fn: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_started' }], as: 'starts' },
+      { fn: 'count', where: [{ column: 'event_name', op: 'eq', value: 'level_completed' }], as: 'completes' },
+    ],
+    then: { aggregations: [
+      { fn: 'count', as: 'players' },
+      { fn: 'count', where: [{ column: 'completes', op: 'gt', value: 0 }], as: 'completed_once' },
+      { fn: 'sum', column: 'starts', as: 'starts' },
+    ] },
+  } });
+  assert.equal(r.ok !== false, true, JSON.stringify(r.error));
+  assert.equal(r.rows.length, 1);
+  const row = r.rows[0];
+  assert.equal(num(row.players), per.size);
+  assert.equal(num(row.completed_once), [...per.values()].filter((p) => p.c > 0).length);
+  assert.equal(num(row.starts), [...per.values()].reduce((a, p) => a + p.s, 0));
+  // a second level reads the first's columns only
+  await assert.rejects(() => engine.query_pipeline_model({ context_id: s.draft_id, transform: { group_by: ['player_id_of_internal'], aggregations: [{ fn: 'count', as: 'n' }], then: { aggregations: [{ fn: 'sum', column: 'event_name' }] } } }), /then\.aggregations/);
+});
+
 test('a stored result is paged with query_semantic_model({ task_id }): limit/offset + has_more reconstruct it', opts, async (t) => {
   if (skip(t)) return;
   const m = await engine.query_semantic_model({ context_id: ctxId, metrics: ['mon_revenue'], group_by: [{ model: 'users', attribute: 'country' }], materialize: true });

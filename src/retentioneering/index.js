@@ -21,7 +21,7 @@ import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { rankFuzzy } from '../fuzzy.js';
 import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, sourceColumns, ANALYSIS_KINDS, OFFERED_OPS, NAME, COMPLEX_EVENT_LOGIC } from './schema.js';
-import { renderEventstream, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
+import { renderEventstream, pathColumns, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
 import { parseResultRows, summarize } from './results.js';
 import { retentioneeringViewModel, RETENTIONEERING_VIEW_URI, hasCard } from './view-model.js';
@@ -338,7 +338,11 @@ async function build(engine, feature, input) {
     engine.ctxs.touch(ctx.id);
     return {
       ok: true, kind: 'eventstream', context_id: ctx.id, eventstream: spec.name, ...(found ? { from_task: found.base.task_id } : { source: spec.source }), model: modelName,
-      columns: rendered.columns, ...summary,
+      columns: rendered.columns,
+      // the eventstream's own column names are the library's; which column of the rows each one is
+      columns_from: columnsFrom(engine.catalog, spec),
+      ...summary,
+      ...(pathHint(engine.catalog, spec) ? { path_hint: pathHint(engine.catalog, spec) } : {}),
       next: `Run the analyses the question needs in ONE call: ${QUERY}({ context_id: '${ctx.id}', analyses: [{ kind: 'transition_graph' }, { kind: 'step_matrix' }, …] }).`,
     };
   }, { input });
@@ -364,6 +368,30 @@ async function summarizeEventstream(runner, dir, model, rendered, spec) {
     // a path that is not a user: what one is — its count is under `users` (the library's path owner)
     ...(pathKey(spec) ? { path: pathKey(spec), path_note: `each path is one value of ${pathKey(spec).join(' + ')}: "users" counts paths` } : {}),
   };
+}
+
+/** Which column of the rows each eventstream column is — the eventstream names them as the library
+ *  does (user_id, event, event_time, session_id), whatever the source calls them. */
+function columnsFrom(catalog, spec) {
+  const cols = pathColumns(catalog, spec);
+  const split = (spec.events?.split || []).length;
+  return {
+    [ES_COLUMNS.user]: pathKey(spec) ? pathKey(spec).join(' + ') : cols.user,
+    [ES_COLUMNS.event]: split ? `${cols.event} (events.split applied)` : cols.event,
+    [ES_COLUMNS.time]: cols.time,
+    ...(spec.sessions ? { [ES_COLUMNS.session]: `${ES_COLUMNS.user} + a gap of ${spec.sessions.gap_minutes} min` } : {}),
+  };
+}
+
+/** Segments on a path of a whole user: its transitions cross segment values (an interstitial load
+ *  followed by a banner show) — said once, with the path that keeps them apart. */
+function pathHint(catalog, spec) {
+  if (pathKey(spec) || !(spec.segments || []).length) return null;
+  const user = pathColumns(catalog, spec).user;
+  const seg = spec.segments[0];
+  const ref = seg.column !== undefined ? `{ column: '${seg.column}' }` : seg.property !== undefined ? `{ property: '${seg.property}' }` : null;
+  if (!ref) return null;
+  return `Each path is one user's whole history, so its transitions run across ${spec.segments.map((sg) => sg.name).join(', ')} values (one format's event followed by another's). To follow one ${seg.name} at a time, make it part of the path: path: [{ column: '${user}' }, ${ref}].`;
 }
 
 /** The names of a path key the caller set (null: one path per user). */

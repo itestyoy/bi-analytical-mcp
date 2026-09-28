@@ -59,7 +59,13 @@ const formatDuration = (s) => {
 };
 const formatWeight = (unit, v) => (unit === 'share' ? formatShare(v) : unit === 'duration' ? formatDuration(v) : formatNumber(v));
 const dateFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' });
-const formatDate = (v) => { const d = new Date(String(v).replace(' ', 'T').replace(/(\d)$/, '$1Z')); return Number.isNaN(d.getTime()) ? String(v) : dateFormat.format(d); };
+// a warehouse instant as it comes: '2026-09-16 11:04:09', '2026-09-16T11:04:09+00:00',
+// '…06.808000+00:00' — read as UTC when it carries no zone of its own
+const formatDate = (v) => {
+  const text = String(v).trim().replace(' ', 'T').replace(/(\.\d{3})\d+/, '$1');
+  const d = new Date(/(Z|[+-]\d{2}:?\d{2})$/.test(text) || /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : `${text}Z`);
+  return Number.isNaN(d.getTime()) ? String(v) : dateFormat.format(d);
+};
 /** "33.3% · 4 paths" — a share with the count it stands for, when the number of paths is known. */
 const shareWithCount = (share, paths) => (paths ? `${formatShare(share)} · ${formatNumber(Math.round(share * paths))} paths` : formatShare(share));
 

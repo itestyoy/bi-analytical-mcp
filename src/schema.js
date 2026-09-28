@@ -460,7 +460,7 @@ export function buildSchemas(catalog) {
             { title: 'one row per step', type: 'object', additionalProperties: false, required: ['label_column', 'value_column'], properties: { label_column: { ...resultColumn, description: 'The column naming each step.' }, value_column: { ...resultColumn, description: 'The column with each step\'s count.' }, parent_column: { ...resultColumn, description: 'The column naming each row\'s parent step (a label of a row before it; empty: the step before it) — for a funnel with outcomes.' } } },
           ],
         },
-        series_column: { ...resultColumn, description: 'One funnel per value of this column, side by side on the same steps (a funnel per ad format). Steps as columns: a row per value; steps as rows: the rows of each value.' },
+        series_column: { ...resultColumn, description: 'One funnel per value of this column, side by side (a funnel per ad format). Steps as columns: a row per value, all on the same steps. Steps as rows: each value\'s funnel is its own rows, so one may have steps another lacks (a banner with no load step) — no zeros are drawn for them.' },
       }, ['steps']),
       form('kpi', 'kpi — headline numbers', 'HEADLINE NUMBERS as stat tiles: a big value, its change against a previous value. One row, or with x a series whose last row is shown with its trend. A single number beats any chart.', {
         x: { ...axis, description: 'The axis of a multi-row result: each tile shows the LAST row, its change from the row before, and the trend as a sparkline.' },
@@ -510,17 +510,23 @@ export function buildSchemas(catalog) {
 
   // A read-only projection over a stored table — what query_pipeline_model runs over a built model
   // and what a drill-down card reads one view with. The row cap is the tool's own `limit`.
-  const projection = {
+  const rowFilter = { type: 'array', description: 'Row filters on result columns.', items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Result column to filter.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'is_null', 'is_not_null'], description: 'Comparison operator.' }, value: { description: 'Comparison value (array for in/not_in).' } } } };
+  const onlyWhere = { ...rowFilter, description: 'A CONDITIONAL aggregate: fold only the rows these conditions hold for (sum/count of the loads that succeeded, the distinct cycles that reached a show) — sum(case when …) without writing it.' };
+  const projectionLevel = (withThen) => ({
     type: 'object', additionalProperties: false,
-    description: 'A read-only projection over the stored table: filter rows, group, aggregate, filter the aggregates, sort — nothing upstream is recomputed.',
+    description: withThen
+      ? 'A read-only projection over the stored table: filter rows, group, aggregate (each aggregate optionally over the rows a where holds for), filter the aggregates, sort — nothing upstream is recomputed. `then` aggregates the grouped result once more: count the groups that passed the having, sum a per-group flag.'
+      : 'The second level: the same projection over the first level\'s result — its group_by columns and aggregate aliases are the columns here (count the groups: aggregations: [{ fn: "count" }]).',
     properties: {
-      where: { type: 'array', description: 'Row filters on result columns.', items: { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column: { type: 'string', description: 'Result column to filter.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in', 'is_null', 'is_not_null'], description: 'Comparison operator.' }, value: { description: 'Comparison value (array for in/not_in).' } } } },
+      where: rowFilter,
       group_by: { type: 'array', items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
-      aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function.' }, column: { type: 'string', description: 'Column to aggregate (omit, or \'*\', for a row count).' }, as: { type: 'string', pattern: '^[a-zA-Z_][a-zA-Z0-9_]*$', description: 'Output column alias (default: <fn>_<column>, or the function alone for a row count).' } }, if: { properties: { fn: { not: { const: 'count' } } } }, then: { required: ['column'] } } },
-      having: { type: 'array', description: 'Post-aggregation filters on aggregate values.', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' }, value: { description: 'Threshold value.' } } } },
+      aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function.' }, column: { type: 'string', description: 'Column to aggregate (omit, or \'*\', for a row count).' }, where: onlyWhere, as: { type: 'string', pattern: '^[a-zA-Z_][a-zA-Z0-9_]*$', description: 'Output column alias (default: <fn>_<column>, or the function alone for a row count).' } }, if: { properties: { fn: { not: { const: 'count' } } } }, then: { required: ['column'] } } },
+      having: { type: 'array', description: 'Post-aggregation filters on aggregate values.', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, where: onlyWhere, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' }, value: { description: 'Threshold value.' } } } },
       order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
+      ...(withThen ? { then: projectionLevel(false) } : {}),
     },
-  };
+  });
+  const projection = projectionLevel(true);
   const pipelineQueryFields = {
     transform: projection,
     limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Rows to return (default 1000); with task_id, pages a stored result.' },

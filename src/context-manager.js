@@ -401,9 +401,26 @@ export class ContextManager {
     const src = this.generatedDir(fromId);
     const dst = this.generatedDir(toId);
     mkdirSync(dst, { recursive: true });
-    const files = this.pipelineFiles(fromId, model);
-    for (const f of files) cpSync(join(src, f), join(dst, f));
-    return files;
+    // …and every model of that overlay it refs, all the way up: a rebuild of a draft reads the
+    // table of its earlier build (its checkpoint) through a ref, and dbt resolves a ref only to a
+    // node the project has — the copy that left it out could not compile ("depends on a node named
+    // … which was not found"). Models of the base project are there already and are not copied.
+    const copied = [];
+    const seen = new Set();
+    const todo = [model];
+    while (todo.length) {
+      const m = todo.pop();
+      if (seen.has(m)) continue;
+      seen.add(m);
+      for (const f of this.pipelineFiles(fromId, m)) {
+        cpSync(join(src, f), join(dst, f));
+        copied.push(f);
+        for (const [, ref] of readFileSync(join(src, f), 'utf8').matchAll(/\bref\(\s*['"]([A-Za-z0-9_]+)['"]\s*\)/g)) {
+          if (!seen.has(ref) && this.hasPipelineModel(fromId, ref)) todo.push(ref);
+        }
+      }
+    }
+    return copied;
   }
 
   /** Remove a generated file (model or yaml) from the context overlay. */

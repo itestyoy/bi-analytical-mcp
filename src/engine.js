@@ -2107,7 +2107,7 @@ export class Engine {
    */
   _guardFilterValues(specs) {
     const EQ = new Set(['eq', 'neq', 'in', 'not_in']);
-    const errors = []; const warnings = [];
+    const errors = []; const warnings = []; const unverified = [];
     for (const { at, op, value, where } of specs) {
       if (!EQ.has(op)) continue;
       for (const v of Array.isArray(value) ? value : [value]) {
@@ -2121,12 +2121,15 @@ export class Engine {
         if (r.kind === 'case') errors.push(`${where}: value '${r.value}' is not a real value — the column holds it with different casing.${fix}`);
         else if (r.kind === 'absent') errors.push(`${where}: value '${r.value}' does not occur in this column (its full value set is indexed).${fix || ` Known values: ${(r.suggest || []).map((s) => `'${s}'`).join(', ')}.`}`);
         else if (r.kind === 'typo') warnings.push(`${where}: value '${r.value}' was not found among indexed values; a similar value exists.${fix} Verify the exact value before relying on this filter.`);
-        else if (r.kind === 'unverifiable') warnings.push(`${where}: ${r.note}`);
+        // a value past the indexed top-N is most often real: said only if the query comes back
+        // empty, where it may be the reason (onEmpty) — a filter that matched needs no warning
+        else if (r.kind === 'unverifiable') unverified.push(`${where}: ${r.note}`);
       }
     }
     if (errors.length) {
       throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ source, property }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
     }
+    warnings.onEmpty = unverified;
     return warnings;
   }
 
@@ -3479,7 +3482,7 @@ export class Engine {
           data_freshness: fresh,
           ...(factsRead.length > 1 ? { data_freshness_by_source: freshByFact } : {}),
         },
-        warnings: [...windowWarnings, ...filterWarnings],
+        warnings: [...windowWarnings, ...filterWarnings, ...(pageRows.length ? [] : (filterWarnings.onEmpty || []))],
         recommendations: recs,
       };
       return out;

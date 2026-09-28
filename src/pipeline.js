@@ -419,8 +419,12 @@ const STAGES = {
         const ords = (p.order_by || []).map((o) => `${d.ident(o.key)}${o.direction === 'desc' ? ' DESC' : ''}`);
         let call; let frame = '';
         if (['row_number', 'rank', 'dense_rank'].includes(p.fn)) { call = `${p.fn}()`; type = 'int'; }
-        else if (['lag', 'lead'].includes(p.fn)) { call = `${p.fn}(${col()}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''})`; }
-        else if (['sum', 'avg', 'count', 'min', 'max'].includes(p.fn)) { call = p.fn === 'count' && !p.column ? 'count(*)' : `${p.fn}(${col()})`; frame = frameClause(p.frame); }
+        // the value a lag/lead/min/max returns is the column's own; a count is a whole number
+        else if (['lag', 'lead'].includes(p.fn)) { call = `${p.fn}(${col()}, ${p.offset ?? 1}${p.default !== undefined ? `, ${d.sqlLiteral(p.default)}` : ''})`; type = cols.get(p.column)?.type || 'unknown'; }
+        else if (['sum', 'avg', 'count', 'min', 'max'].includes(p.fn)) {
+          call = p.fn === 'count' && !p.column ? 'count(*)' : `${p.fn}(${col()})`; frame = frameClause(p.frame);
+          type = p.fn === 'count' ? 'int' : ['min', 'max'].includes(p.fn) ? (cols.get(p.column)?.type || 'unknown') : 'numeric';
+        }
         else throw new Error(`window: bad fn ${p.fn}`);
         if (frame && !ords.length) throw new Error('window frame requires order_by');
         const over = `OVER (${[parts.length ? `PARTITION BY ${parts.join(', ')}` : '', ords.length ? `ORDER BY ${ords.join(', ')}` : ''].filter(Boolean).join(' ')}${frame})`;

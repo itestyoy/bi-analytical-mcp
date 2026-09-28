@@ -60,13 +60,14 @@ test('anchor dimension values are verified source-scoped (events.<col>)', async 
 
 // When only the TOP-N is indexed (capped), an unknown value is NOT blocked — it WARNS, so a
 // legitimately-rare value is never rejected on incomplete index data.
-test('a capped (top-N) column warns instead of blocking an unindexed value', async () => {
+test('a capped (top-N) column neither blocks nor warns about an unindexed value — the result says whether it matched', async () => {
   const e = engine();
   e.valueIndex.upsertProperty('events', 'result_of_event_data', { distinctCount: 500, totalCount: 9999, values: [{ value: 'win', freq: 10 }, { value: 'lose', freq: 5 }] });
   const s = await e.build_pipeline_model({ action: 'start', name: 'capped', source: 'events' });
   const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'eq', 'some_rare_status');
   assert.equal(r.action, 'add_step', 'not blocked');
-  assert.ok(r.recommendations.some((x) => /not in the index|more values than are indexed/i.test(x)), JSON.stringify(r.recommendations));
+  // a value past the indexed top-N is most often real: the note is kept for an empty result only
+  assert.ok(!r.recommendations.some((x) => /not in the index|more values than are indexed/i.test(x)), JSON.stringify(r.recommendations));
 });
 
 // HIGH-CARDINALITY guard (the user's concern): a column whose stored values reach the cap
@@ -79,7 +80,7 @@ test('a many-valued column (at the cap) never hard-rejects an unindexed value', 
   const s = await e.build_pipeline_model({ action: 'start', name: 'manyvals', source: 'events' });
   const r = await whereStep(e, s.draft_id, 'result_of_event_data', 'eq', 'v999_not_indexed');
   assert.equal(r.action, 'add_step', 'a value beyond the cap is not blocked');
-  assert.ok(r.recommendations.some((x) => /not in the index|more values than are indexed/i.test(x)));
+  assert.ok(!r.recommendations.some((x) => /not in the index|more values than are indexed/i.test(x)), 'and not warned about: the result says whether it matched');
 });
 
 // A fuzzy NEAR-match is a WARNING, not a block — a distinct sibling value (level_1 vs level_3)

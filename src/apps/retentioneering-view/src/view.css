@@ -336,3 +336,8 @@
 .rt-swatch-s3 {
   background-color: var(--color-series-3);
 }
+
+/* ── Fullscreen (or a host that pins the height): the graph grows into the frame ────────────── */
+.main.fill .rt-graph-svg {
+  max-height: calc(100vh - 14rem);
+}

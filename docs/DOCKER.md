@@ -162,7 +162,8 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   (`ui://betti/retentioneering-view.html`), once per analysis. The graph opens on each event's
   strongest exits (retentioneering's own default) and switches weights and how many exits it shows
   on the page itself — no recomputation; every card gives its scope (users, period, sample) and
-  counts next to shares, and has a table view of its numbers. A distribution is drawn as its
+  counts next to shares, has a table view of its numbers, and opens to the whole screen where the
+  host offers it (the graph grows into the frame). A distribution is drawn as its
   histogram and a diff as heatmaps (the difference shaded above and below zero); describe, a
   conversion rate and per-path metrics have no card — their numbers come back for the answer.
 

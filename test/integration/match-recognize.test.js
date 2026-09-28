@@ -121,6 +121,13 @@ test('a where on the time axis and a funnel window read the same rows with the p
   assert.deepEqual(pruned, plain);
   assert.equal(pruned.byDay.length, 2, 'the window spans two UTC days');
   assert.ok(pruned.funnel.length > 0, 'the funnel window keeps players');
+  // the bound is real: read without the late days, the 5 events of 01-01 10:00 that arrived three
+  // days late (filed under 01-04) fall outside the partitions the window reads
+  const late = model.partition_late_days;
+  let early;
+  try { model.partition_late_days = 0; early = await pipe(byDay); } finally { model.partition_late_days = late; }
+  const n = (rows) => Object.fromEntries(rows.map((r) => [String(r.utc_day).slice(0, 10), Number(r.n)]));
+  assert.deepEqual(n(early.rows), { '2026-01-01': 4, '2026-01-02': 30 });
 });
 
 test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-user rows)', opts, async (t) => {

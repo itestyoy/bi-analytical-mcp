@@ -53,7 +53,7 @@
 //                            Solves: ordered multi-step funnels, conversion, time-between-steps.
 
 import { getDialect } from './dialects/index.js';
-import { partitionDays } from './time-range.js';
+import { partitionConditions } from './time-range.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const NAME_RE = /^[a-z][a-z0-9_]{0,40}$/;
@@ -860,10 +860,7 @@ function boundPartitions(m, stages, cols) {
           : c.op === 'lte' ? { end: v }
             : c.op === 'eq' ? { start: v, end: v }
               : c.op === 'between' && Array.isArray(v) ? { start: v[0], end: v[1] } : null;
-      if (!b) continue;
-      const { from, until } = partitionDays(b);
-      if (from) extra.push({ column: part, op: 'gte', value: from });
-      if (until) extra.push({ column: part, op: 'lt', value: until });
+      if (b) extra.push(...partitionConditions(m, b));
     }
     out.push(extra.length ? { ...st, conditions: [...st.conditions, ...extra] } : st);
   }

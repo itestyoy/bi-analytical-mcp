@@ -9,6 +9,11 @@ import { inertProse } from './jinja-inert.js';
 import { toLatestSpec } from './semantic-latest.js';
 
 const EVENT_TIME_DIM = 'event_time';
+/** The partition column as a dimension of its semantic model — what a metric query bounds, next to
+ *  the window on metric_time, so the warehouse reads only the partitions the window touches. */
+export const PARTITION_DIM = 'partition_day';
+const partitionDim = (m) => (m.partition_column && m.partition_column !== m.time?.column && !(m.dimensions || {})[PARTITION_DIM]
+  ? [{ name: PARTITION_DIM, type: 'categorical', expr: m.partition_column }] : []);
 
 /**
  * The `expr` MetricFlow joins a declared entity on. A single column is emitted as the column
@@ -69,6 +74,7 @@ export function renderBaseModel(catalog, key) {
     sm.entities = Object.entries(m.entities || {}).map(([name, e]) => ({ name, type: e.type, expr: entityExpr(catalog, e) }));
     sm.dimensions = [
       { name: EVENT_TIME_DIM, type: 'time', type_params: { time_granularity: m.time.granularity || 'day' }, expr: m.time.column },
+      ...partitionDim(m),
     ];
     // …and its own declared ATTRIBUTES. A fact is not only a measure carrier: when another
     // source points at it through a declared relationship, these are what that relationship is
@@ -115,7 +121,7 @@ export function renderBaseModel(catalog, key) {
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: entityExpr(catalog, e) });
   }
-  sm.dimensions = [];
+  sm.dimensions = [...partitionDim(m)];
   // A non-events source may still have a TIME AXIS (meta.mcp.is_time) — an install record's
   // install day, a daily spend table's spend day. It is the model's agg_time_dimension, exactly
   // as an events source's event_time is, and it is emitted by the dimension loop below (the

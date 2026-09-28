@@ -6,14 +6,14 @@ import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration } from './compile.js';
-import { renderContext } from './yaml-render.js';
+import { renderContext, PARTITION_DIM } from './yaml-render.js';
 import { gatePythonRuntime } from './catalog.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
-import { renderWhereClauses } from './predicate.js';
+import { renderWhereClauses, renderPredicate } from './predicate.js';
 import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
-import { partitionDays, resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
+import { partitionConditions, resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
@@ -468,9 +468,7 @@ export class Engine {
     // only to be joined to (use_base_models) — even another events source — is a join TARGET
     // here, reached through the relationship a measure source declares towards it.
     const own = c.primaryEntityName(model);
-    const measureSources = Object.entries(ctx.state.additions || {}).filter(([, a]) => (a.measures || []).length).map(([k]) => k);
-    const baseOwners = (ctx.state.metrics || []).flatMap((m) => [m?.type_params?.measure?.name].filter(Boolean)).map((ref) => c.modelOwningMeasure(ref)).filter(Boolean);
-    const sources = [...new Set([...measureSources, ...baseOwners])].filter((k) => ctx.state.usedModels?.includes(k));
+    const sources = this._measureSources(ctx);
     // 2. the attribute of a model whose measures this task reads → under that model's identity
     if (sources.includes(model) && own) return `${own}__${attribute}`;
     // 3. a relationship from a measure source to the model that owns it
@@ -1562,6 +1560,32 @@ export class Engine {
     return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   }
 
+  /** The sources whose MEASURES a semantic context reads (a model loaded only to be joined to is
+   *  not one of them). */
+  _measureSources(ctx) {
+    const c = this.catalog;
+    const measureSources = Object.entries(ctx.state.additions || {}).filter(([, a]) => (a.measures || []).length).map(([k]) => k);
+    const baseOwners = (ctx.state.metrics || []).flatMap((m) => [m?.type_params?.measure?.name].filter(Boolean)).map((ref) => c.modelOwningMeasure(ref)).filter(Boolean);
+    return [...new Set([...measureSources, ...baseOwners])].filter((k) => ctx.state.usedModels?.includes(k));
+  }
+
+  /**
+   * A metric query's window bounds metric_time; a source partitioned by another column is pruned
+   * only by a condition on THAT column, which its semantic model carries as PARTITION_DIM. Added
+   * when the context's measures come from one source: a where applies to every metric of a query,
+   * and a dimension of one source is not reachable from the measures of another.
+   */
+  _semanticPartitionWhere(ctx, bounds) {
+    if (!bounds || !(bounds.start || bounds.end || bounds.endExclusive)) return [];
+    const sources = this._measureSources(ctx);
+    if (sources.length !== 1) return [];
+    const m = this.catalog.getModel(sources[0]);
+    const pe = this.catalog.primaryEntityName(sources[0]);
+    if (!pe || (m.dimensions || {})[PARTITION_DIM]) return [];
+    return partitionConditions(m, { start: bounds.start, endExclusive: bounds.endExclusive, end: bounds.endExclusive ? null : bounds.end })
+      .map((cnd) => renderPredicate({ field: { kind: 'dimension', path: `${pe}__${PARTITION_DIM}` }, op: cnd.op, value: cnd.value }));
+  }
+
   /**
    * WHERE conditions for a pipeline-level time_range on the source's time column.
    * Timezone-aware: with tr.timezone the boundaries are wall-clock in that zone,
@@ -1584,14 +1608,9 @@ export class Engine {
     return conditions.length ? conditions : null;
   }
 
-  /** The conditions on a source's partition column (when it is not the time axis) for a window on
-   *  its time axis: the days the window touches (partitionDays). */
+  /** The conditions on a source's partition column for a window on its time axis. */
   _partitionConditions(source, bounds) {
-    const m = this.catalog.getModel(source);
-    const part = m.partition_column;
-    if (!part || part === m.time?.column) return [];
-    const { from, until } = partitionDays(bounds);
-    return [...(from ? [{ column: part, op: 'gte', value: from }] : []), ...(until ? [{ column: part, op: 'lt', value: until }] : [])];
+    return partitionConditions(this.catalog.getModel(source), bounds);
   }
 
   /** True when some pipeline stage already bounds the source's time/partition column. */
@@ -3376,7 +3395,7 @@ export class Engine {
     const offset = input.offset ?? 0;
     // Over-fetch one extra row so `has_more` is meaningful (H2): without the +1,
     // res.rows is capped at limit+offset and has_more can never be true.
-    const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: limit + offset + 1 };
+    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...this._semanticPartitionWhere(ctx, bounds)], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: limit + offset + 1 };
     const explain = !!(input.dry_run || input.explain);
     // The response is built from the runner's answer in ONE place, whether the query finished
     // inside the call or after it was handed back as a job.

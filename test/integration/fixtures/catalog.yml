@@ -19,8 +19,11 @@ models:
         mcp:
           role: events
           primary_entity: event
-          # the physical partition column, a day next to the event time: a time window prunes on it
+          # the physical partition column, a day next to the event time: a time window prunes on it.
+          # It is the day an event ARRIVED — up to 3 days after its own day here — so a window reads
+          # 3 more partitions after it.
           partition_column: event_date
+          partition_late_days: 3
           # RELATIONSHIPS declared once, here, and used by both the semantic layer and pipeline
           # joins. A key may span SEVERAL columns, and a time column may be lined up at a coarser
           # grain — that is how a per-event source meets a per-day one without fanning out.

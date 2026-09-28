@@ -16,7 +16,7 @@
 // any non-step row, CLASSIFIER/aggregates in MEASURES.
 
 import { jsonExtract, sqlLiteral } from './dialect.js';
-import { partitionDays } from './time-range.js';
+import { partitionConditions } from './time-range.js';
 import { registerStage, prepareColumns } from './pipeline.js';
 import { oneOfOr, strEnum } from './schema-kit.js';
 
@@ -108,9 +108,7 @@ export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = 
   // a source partitioned by the day of its time axis is scanned only on the days the window touches
   if (partitionCol && (f.time_range?.start || f.time_range?.end)) {
     const ex = f.time_range.end ? dateEndExclusive(f.time_range.end) : null;
-    const { from, until } = partitionDays({ start: f.time_range.start || null, endExclusive: ex, end: ex ? null : (f.time_range.end || null) });
-    if (from) clauses.push(`${partitionCol} >= ${sqlLiteral(from)}`);
-    if (until) clauses.push(`${partitionCol} < ${sqlLiteral(until)}`);
+    for (const c of partitionConditions(m, { start: f.time_range.start || null, endExclusive: ex, end: ex ? null : (f.time_range.end || null) })) clauses.push(`${partitionCol} ${c.op === 'gte' ? '>=' : '<'} ${sqlLiteral(c.value)}`);
   }
   if (f.event_name?.length) clauses.push(`${evNameCol} IN (${factEventNames(catalog, source, f.event_name).map(sqlLiteral).join(', ')})`);
   const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));

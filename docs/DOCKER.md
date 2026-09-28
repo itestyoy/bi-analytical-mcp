@@ -130,7 +130,7 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   environment) and its scalar event properties; `events.split` makes events out of an event's
   parameters (by a value, or by conditions), and a group may merge those too. The window bounds the
   partition column as well when the catalog declares one next to the time axis (the days the window
-  touches), and a source whose catalog sets `require_time_range` refuses a build without a window —
+  touches, and `partition_late_days` more for events filed under the day they arrived), and a source whose catalog sets `require_time_range` refuses a build without a window —
   as a pipeline does. `sample` makes it smaller, deterministically: `share` keeps a share of users
   with their whole paths; `events` keeps a share of the rows of the named events (for one that drowns
   the rest), whose counts and surrounding transitions are then approximate.

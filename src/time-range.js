@@ -63,19 +63,34 @@ export function nextDay(dateOnly) {
 
 /**
  * The partition days a window on the time axis touches, for a source partitioned by the DAY of its
- * time axis (a day column next to it): { from, until } as date-only values, `until` exclusive.
+ * time axis (a day column next to it): { from, until } as date-only values, `until` exclusive, and
+ * `lateDays` more after it for a source that files a late event under the day it arrived.
  * Bounds are in the warehouse clock (UTC), as resolveTimeRange returns them or a condition states
  * them: `start` inclusive, `endExclusive` exclusive (at midnight it touches no day of its own),
  * `end` inclusive. A bound that is not a date is left out.
  */
-export function partitionDays({ start = null, endExclusive = null, end = null } = {}) {
+export function partitionDays({ start = null, endExclusive = null, end = null } = {}, lateDays = 0) {
   const day = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null);
   const atMidnight = (v) => v.length === 10 || /^\d{4}-\d{2}-\d{2}[ T]00:00(:00(\.0+)?)?(Z|[+-]00(:?00)?)?$/.test(v);
   const from = day(start);
   let until = null;
   if (day(endExclusive)) until = atMidnight(endExclusive) ? day(endExclusive) : nextDay(day(endExclusive));
   else if (day(end)) until = nextDay(day(end));
+  for (let i = 0; until && i < lateDays; i += 1) until = nextDay(until);
   return { from, until };
+}
+
+/**
+ * The conditions on a model's partition column for a window on its time axis — [] when the model
+ * has none, or when it partitions by the time axis itself (the window already bounds it). An event
+ * lies in the partition of its own day, or up to `partition_late_days` days later.
+ * @returns {{ column, op: 'gte'|'lt', value }[]}
+ */
+export function partitionConditions(model, bounds) {
+  const part = model?.partition_column;
+  if (!part || part === model.time?.column) return [];
+  const { from, until } = partitionDays(bounds, model.partition_late_days || 0);
+  return [...(from ? [{ column: part, op: 'gte', value: from }] : []), ...(until ? [{ column: part, op: 'lt', value: until }] : [])];
 }
 
 /**

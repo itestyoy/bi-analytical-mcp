@@ -231,6 +231,44 @@ test('monetization: revenue by product_id = p1 15 / p2 30 / p3 40; order_by+limi
   assert.equal(num(top.rows[0].mon_revenue), 40);
 });
 
+// The fixture is partitioned by event_date, so a metric query's window also bounds the partition
+// (through the semantic model's partition dimension). A pruning aid only: the numbers are the ones
+// the rows give, and the same as with no partition column declared at all. 2026-01-02 in UTC+14 is
+// [01-01 10:00, 01-02 10:00) UTC — partly on the previous UTC day.
+test('a metric window on a partitioned source: the numbers of the rows, the same with the partition declared as without it', opts, async (t) => {
+  if (skip(t)) return;
+  const decl = (name) => ({
+    name, use_base_models: ['users'],
+    semantic_models: [{ from: 'events', measures: [{ name: 'events', agg: 'count', field: '*' }] }],
+    metrics: [{ name: 'events', type: 'simple', measure: { name: 'events' } }],
+  });
+  const window = { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' };
+  const run = async (name) => {
+    await create(decl(name));
+    const r = await q(name, { metrics: [`${name}_events`], group_by: [{ time: 'metric_time', grain: 'day' }, { model: 'users', attribute: 'platform' }], time_range: window });
+    assert.equal(r.ok, true, JSON.stringify(r.error));
+    return Object.fromEntries(r.rows.map((x) => [`${String(x.metric_time_day).slice(0, 10)}|${x.users_platform}`, num(x[`${name}_events`])]));
+  };
+  const pruned = await run('part_on');
+  const model = engine.catalog.getModel('events');
+  const declared = model.partition_column;
+  let plain;
+  try { model.partition_column = undefined; plain = await run('part_off'); } finally { model.partition_column = declared; }
+  assert.deepEqual(pruned, plain);
+  // at day grain MetricFlow widens the window to the whole days it touches (01-01 and 01-02 UTC) —
+  // so the partition bound must reach the previous UTC day too, or 01-01 would be lost
+  const total = Object.values(pruned).reduce((a, b) => a + b, 0);
+  const fromRows = Number((await wh.query("select count(*) as n from fct_analytics_events where device_time >= timestamp '2026-01-01' and device_time < timestamp '2026-01-03'")).rows[0].n);
+  assert.equal(total, fromRows);
+  assert.equal(total, 75);
+  // the bound is real: read without the late days, the 5 events that arrived three days late
+  // (filed under 01-04) fall outside the partitions the window reads
+  const late = model.partition_late_days;
+  let early;
+  try { model.partition_late_days = 0; early = await run('part_early'); } finally { model.partition_late_days = late; }
+  assert.equal(Object.values(early).reduce((a, b) => a + b, 0), 70);
+});
+
 test('monetization: time_range 2026-01-04..05 (day grain) -> 10+5+20+10 = 45', opts, async (t) => {
   if (skip(t)) return;
   // o5 u7 10 (01-04), o6 u9 5 (01-04), o7 u10 20 (01-05), o8 u11 10 (01-05)

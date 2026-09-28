@@ -19,7 +19,7 @@ import { createDbt, formatDbtError } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, ANALYSIS_KINDS, OFFERED_OPS, NAME } from './schema.js';
+import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, sourceColumns, ANALYSIS_KINDS, OFFERED_OPS, NAME } from './schema.js';
 import { renderEventstream, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
 import { parseResultRows, summarize } from './results.js';
@@ -32,7 +32,7 @@ const QUERY = 'query_retentioneering_model';
 const DISPLAY = 'display_retentioneering_result';
 
 export const TOOL_DESCRIPTIONS = {
-  [BUILD]: 'Build the eventstream a path analysis reads: which events source, which time window, which events (kept, dropped, merged into groups), which user attributes to carry as segments, optional sessions and a deterministic user sample. It is built in SQL where the data lives and materialized, and returns a task_id at once; query_retentioneering_model({ task_id }) returns its summary — users, events, the event vocabulary with counts. Use it for questions about paths and sequences: what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are. Then run the analyses with query_retentioneering_model. For a metric over time use build_semantic_model; for a one-off table of numbers, build_pipeline_model.',
+  [BUILD]: 'Build the eventstream a path analysis reads: which events source, which time window, which events (kept, dropped, merged into groups, or split into new events by a parameter — ad_finished by is_error into ad_finished_failed / ad_finished_success), a filter on the source\'s own columns and event properties (an environment, an app) or on segments, what to carry as segments (a related model\'s attribute, a column of the source, an event property), optional sessions and a deterministic user sample. It is built in SQL where the data lives and materialized, and returns a task_id at once; query_retentioneering_model({ task_id }) returns its summary — users, events, the event vocabulary with counts. Use it for questions about paths and sequences: what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are. Then run the analyses with query_retentioneering_model. For a metric over time use build_semantic_model; for a one-off table of numbers, build_pipeline_model.',
   [QUERY]: 'Run retentioneering over a built eventstream, or read a task back. { context_id, preprocess?, analyses: [...] } starts ONE task that computes every listed analysis together in the warehouse (one run for all of them, so list what the question needs in one call). Each analysis is a library method with its own parameters, under the library\'s names: transition_graph (which event follows which, every weight at once), step_matrix / step_sankey (the share of paths at each event step by step, optionally around an anchor), funnel, cluster_analysis (groups of similar paths), segment_overview, conversion_rate, metric_distribution, path_metrics, describe; diff compares two segment levels. preprocess is the library\'s own op model ({ type, ...params }: filter_paths, collapse_events, truncate_paths, split_sessions, add_segment, add_clusters, …), for the whole call or one analysis. It returns a task_id at once. { task_id } (or task_ids) waits up to 30s and returns each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table — or, with detail: "full", every record; { task_id, cancel: true } stops it. Event names are the eventstream\'s own (after grouping).',
   [DISPLAY]: 'Draw one analysis of a finished query_retentioneering_model task as a card for the person — the transition graph, a step matrix heatmap, a step sankey, a funnel, the clusters, a segment overview, a distribution\'s histogram, or a diff\'s heatmaps — in hosts that render MCP Apps. Other analyses (describe, conversion_rate, path_metrics) have no card: answer them in words from the read. Once per analysis: a second call for the same one is refused. Read the task first (query_retentioneering_model({ task_id })) to know what it found; draw the analysis the person should see before summarising it.',
 };
@@ -157,7 +157,7 @@ function relationshipTo(catalog, source, model, via) {
   return shared[0];
 }
 
-function validateBuild(engine, input) {
+function validateBuild(engine, input, physical = null) {
   const c = engine.catalog;
   const { source } = input;
   if (!userKeyColumn(c, source)) throw new ToolError(`'${source}' names no single user key toward the users model, so its events have no path owner`, { stage: 'validate', field: 'source' });
@@ -168,19 +168,51 @@ function validateBuild(engine, input) {
     checkEvents(c, source, evs, `events.groups.${g}`);
   }
   const reserved = new Set(Object.values(ES_COLUMNS));
+  const own = sourceColumns(c, source, physical);
+  const props = c.scalarEventProps(source);
+  // a parameter or condition names a column of the source or one of its scalar event properties
+  const checkRef = (ref, field) => {
+    if (ref.property !== undefined && !props.includes(ref.property)) throw new ToolError(`'${ref.property}' is not a scalar event property of '${source}'${suggest(ref.property, props)}`, { stage: 'validate', field });
+    if (ref.column !== undefined && !own.includes(ref.column)) throw new ToolError(`'${ref.column}' is not a column of '${source}'${suggest(ref.column, own)}`, { stage: 'validate', field });
+  };
+  (input.events?.split || []).forEach((rule, i) => {
+    checkEvents(c, source, [rule.event], `events.split.${i}.event`);
+    if (rule.by) checkRef(rule.by, `events.split.${i}.by`);
+    for (const cs of rule.cases || []) cs.where.forEach((w) => checkRef(w, `events.split.${i}.cases.where`));
+  });
   const segNames = [];
   const segments = (input.segments || []).map((seg) => {
-    const dims = c.modelDimensionColumns(seg.model);
-    if (!dims.includes(seg.attribute)) throw new ToolError(`'${seg.attribute}' is not an attribute of '${seg.model}'${suggest(seg.attribute, dims)}`, { stage: 'validate', field: 'segments.attribute' });
-    const name = seg.as || seg.attribute;
+    let name;
+    let out;
+    if (seg.column !== undefined) {
+      // a column of the source itself: no join
+      if (!own.includes(seg.column)) throw new ToolError(`'${seg.column}' is not a column of '${source}'${suggest(seg.column, own)} (its columns: ${own.join(', ') || 'none declared'})`, { stage: 'validate', field: 'segments.column' });
+      name = seg.as || seg.column;
+      out = { column: seg.column, name };
+    } else if (seg.property !== undefined) {
+      if (!props.includes(seg.property)) throw new ToolError(`'${seg.property}' is not a scalar event property of '${source}'${suggest(seg.property, props)}`, { stage: 'validate', field: 'segments.property' });
+      name = seg.as || seg.property;
+      out = { property: seg.property, name };
+    } else {
+      const dims = c.modelDimensionColumns(seg.model);
+      if (!dims.includes(seg.attribute)) throw new ToolError(`'${seg.attribute}' is not an attribute of '${seg.model}'${suggest(seg.attribute, dims)}`, { stage: 'validate', field: 'segments.attribute' });
+      name = seg.as || seg.attribute;
+      out = { ...seg, name, via: relationshipTo(c, source, seg.model, seg.via) };
+    }
     if (reserved.has(name) || segNames.includes(name)) throw new ToolError(`segment name '${name}' is taken — give it another with as`, { stage: 'validate', field: 'segments.as' });
     segNames.push(name);
-    return { ...seg, via: relationshipTo(c, source, seg.model, seg.via) };
+    return out;
   });
   for (const w of input.where || []) {
-    if (!segNames.includes(w.column)) throw new ToolError(`where filters on a segment column — '${w.column}' is not one (${segNames.join(', ') || 'none declared'})`, { stage: 'validate', field: 'where.column' });
+    const field = w.property !== undefined ? 'where.property' : 'where.column';
+    if (w.property !== undefined) {
+      if (!props.includes(w.property)) throw new ToolError(`'${w.property}' is not a scalar event property of '${source}'${suggest(w.property, props)}`, { stage: 'validate', field });
+    } else if (!segNames.includes(w.column) && !own.includes(w.column)) {
+      const known = [...own, ...segNames];
+      throw new ToolError(`where filters on a column of '${source}' or a declared segment — '${w.column}' is neither${suggest(w.column, known)} (columns: ${own.join(', ') || 'none'}; segments: ${segNames.join(', ') || 'none'})`, { stage: 'validate', field });
+    }
     const needsValue = !['is_null', 'is_not_null'].includes(w.op);
-    if (needsValue && w.value === undefined) throw new ToolError(`where ${w.op} on '${w.column}' needs a value`, { stage: 'validate', field: 'where.value' });
+    if (needsValue && w.value === undefined) throw new ToolError(`where ${w.op} on '${w.column ?? w.property}' needs a value`, { stage: 'validate', field: 'where.value' });
     if (['in', 'not_in'].includes(w.op) && !Array.isArray(w.value)) throw new ToolError(`where ${w.op} takes an array value`, { stage: 'validate', field: 'where.value' });
   }
   return { ...input, segments };
@@ -199,12 +231,13 @@ function contextFor(engine, input) {
 
 async function build(engine, feature, input) {
   engine._validate(BUILD, input);
-  const spec = validateBuild(engine, input);
+  // the table's real columns, read once: what a segment or a filter on the source itself may name
+  const physicalCols = await engine._physicalCols(input.source);
+  const spec = validateBuild(engine, input, physicalCols);
   const ctx = contextFor(engine, input);
   const state = ctx.state.retentioneering;
   const modelName = `rete_es_${spec.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   const timeConditions = engine._timeRangeConditions(spec.source, spec.time_range);
-  const physicalCols = await engine._physicalCols(spec.source);
   let rendered;
   try {
     rendered = renderEventstream(engine.catalog, spec, { modelName, physicalCols, timeConditions });

@@ -192,7 +192,10 @@
   tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the
-  eventstream's shape rules out. The analyses with a card are CARD_KINDS (the charted ones and a
+  eventstream's shape rules out. The build reaches the source's OWN columns (every real column, the
+  warehouse read like a pipeline reads it) and its scalar event properties — to filter, to carry as a
+  segment, and to make events out of an event's parameters (`events.split`: by a value, or by
+  conditions) — all in SQL through the pipeline's stages. The analyses with a card are CARD_KINDS (the charted ones and a
   distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps); any other
   (describe, a conversion rate, per-path metrics) comes back as the tables and values the library
   returned, has no card, and is answered in words.

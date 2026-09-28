@@ -56,7 +56,8 @@ export function compileAnalysisModel({ inputModel, spec, config }) {
     'def model(dbt, session):',
     `    dbt.config(${cfgArgs})`,
     `    ensure_library(${pyLiteral(libraryRequirement())})`,
-    `    return run(dbt.ref(${pyLiteral(inputModel)}), SPEC)`,
+    `    source = dbt.ref(${pyLiteral(inputModel)})`,
+    '    return to_runtime(run(source, SPEC), source, session)',
     '',
   ].join('\n');
 }

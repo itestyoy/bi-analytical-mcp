@@ -34,6 +34,16 @@ INSTALL_TIMEOUT_SECONDS = 1200
 INSTALL_TAIL_LINES = 60
 
 
+def to_runtime(result, source, session):
+    """The result in the kind of frame the runtime writes. On BigFrames, dbt writes the returned frame
+    with its own to_gbq and then closes that frame's session — a pandas frame has neither, so it is
+    handed back through the session the model ran in. Anywhere else the pandas frame is written as is.
+    """
+    if type(source).__module__.split(".")[0] == "bigframes" and hasattr(session, "read_pandas"):
+        return session.read_pandas(result)
+    return result
+
+
 def ensure_library(requirement):
     """Make `requirement` (name==version) importable before the analysis runs.
 

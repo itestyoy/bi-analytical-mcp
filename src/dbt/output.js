@@ -39,7 +39,20 @@ export function formatDbtError(stdout = '', stderr = '') {
   const di = lines.findIndex((l, i) => i >= start && /\[WARNING\]\[DeprecationsSummary\]|Summary of encountered deprecations/i.test(l));
   if (di > start) end = di;
   const msg = lines.slice(start, end).join('\n').trim();
-  return msg.slice(0, 8000) || 'unknown dbt error';
+  return keepEnds(msg, 8000) || 'unknown dbt error';
+}
+
+/**
+ * A long message cut to `budget` characters: its opening (which says what failed) and its END —
+ * a traceback, a python runtime's last output, pip's reason — which is where the cause is written.
+ * Cutting from the end threw exactly that away.
+ */
+function keepEnds(msg, budget) {
+  if (msg.length <= budget) return msg;
+  const head = msg.slice(0, Math.floor(budget * 0.2));
+  const tail = msg.slice(msg.length - Math.floor(budget * 0.8));
+  const cut = msg.length - head.length - tail.length;
+  return `${head.slice(0, head.lastIndexOf('\n') > 0 ? head.lastIndexOf('\n') : head.length)}\n… ${cut} characters of the log left out …\n${tail.slice(tail.indexOf('\n') + 1 || 0)}`;
 }
 
 export function extractSql(stdout) {

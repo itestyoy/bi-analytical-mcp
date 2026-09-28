@@ -50,3 +50,20 @@ test('the rows of `dbt show --output json` are read from dbt 1.x ({ "show": [...
   assert.deepEqual(parseShowJson('       dbt 2.0.6\n[]\n'), []);
   assert.deepEqual(parseShowJson('no rows here'), []);
 });
+
+test('a log longer than the budget keeps its opening and its END — where a runtime writes the cause', () => {
+  const pip = Array.from({ length: 3000 }, (_, i) => `Collecting package_${i}>=1.0`);
+  const stdout = [
+    'Running with dbt=1.11.11',
+    'Runtime Error in model rete_q1_dev (models/rete_q1_dev.py)',
+    'Colab notebook runtime outputs from GCS:',
+    ...pip,
+    'RuntimeError: installing retentioneering==5.2.3 failed on this runtime (pip exit 1). pip\'s last lines:',
+    'ERROR: Could not find a version that satisfies the requirement gensim>=4.3.3',
+  ].join('\n');
+  const msg = formatDbtError(stdout, '');
+  assert.ok(msg.length <= 8200, `bounded (${msg.length})`);
+  assert.match(msg, /Runtime Error in model rete_q1_dev/, 'what failed is kept');
+  assert.match(msg, /Could not find a version that satisfies the requirement gensim/, 'why it failed — the last line — is kept');
+  assert.match(msg, /characters of the log left out/, 'the cut is said');
+});

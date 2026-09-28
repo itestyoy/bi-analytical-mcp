@@ -172,12 +172,21 @@ table comes back. Configuration:
 - The feature runs on its own dbt environment, **`retentioneering`** (dbt 1.x, both adapters and
   the library with its numerical dependencies at exact versions — `src/dbt/environment-specs.js`);
   the image builds it. `MCP_RETENTIONEERING_ENV` names another environment of the specs.
-- **BigQuery / Colab Enterprise:** dbt installs `retentioneering==<the pinned version>` on the
-  runtime at every run (the model's `packages`). The runtime template dbt creates by itself has **no
-  internet access**, so that install fails there: give a template with access to PyPI (or with the
-  package preinstalled) through `MCP_RETENTIONEERING_MODEL_CONFIG`, a JSON of extra `dbt.config`
-  keys, e.g. `{"notebook_template_id": "<id>", "timeout": 3600}`. The profile supplies `gcs_bucket`
-  and `compute_region` as for any bigframes model.
+- **BigQuery / Colab Enterprise:** the analysis model itself makes `retentioneering==<the pinned
+  version>` importable on the runtime before it runs (`ensure_library` in
+  `python/retentioneering_model.py`): already installed at that version → nothing is done;
+  otherwise `pip install --prefer-binary` of it, and a failure is raised with **pip's last lines**
+  (a resolver conflict, a missing wheel, no route to the index). It is not dbt's `packages`: dbt's
+  installer keeps pip's output to itself when pip fails, so its failure never said why. The library
+  pulls in its own server stack at import (`mcp[cli]`, `posthog`, `sse-starlette`, `uvicorn`) and
+  `gensim` for the transition graph's layout, so these cannot be left out of the install. The
+  runtime template dbt creates by itself has **no internet access**, and a fresh install costs every
+  run its time: the dependable setup is a template with the pinned version **preinstalled** (then the
+  install is skipped), or with access to PyPI, given through `MCP_RETENTIONEERING_MODEL_CONFIG`, a
+  JSON of extra `dbt.config` keys, e.g. `{"notebook_template_id": "<id>", "timeout": 3600}`. The
+  profile supplies `gcs_bucket` and `compute_region` as for any bigframes model.
+- A failed run's message keeps the opening of dbt's log and its **end** — a traceback, the runtime's
+  last output, pip's reason — when the log is longer than the message can carry.
 - The library's telemetry is switched off in every model it runs in (`RETENTIONEERING_NO_TRACK=1`).
 - What the tools offer — the analyses and ops with their parameters and types, each path metric's
   arguments, the condition grammar, the edge weights, the clustering methods — is generated from the

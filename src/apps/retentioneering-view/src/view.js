@@ -84,7 +84,7 @@ function scopeBadges(model) {
   const s = model.scope;
   return [
     ...(model.eventstream ? [badge(model.eventstream, 'secondary')] : []),
-    ...(s?.users != null ? [badge(`${formatNumber(s.users)} users`, 'outline')] : []),
+    ...(s?.users != null ? [badge(s.path ? `${formatNumber(s.users)} paths by ${s.path.join(' + ')}` : `${formatNumber(s.users)} users`, 'outline')] : []),
     ...(s?.period?.first_event && s?.period?.last_event ? [badge(`${formatDate(s.period.first_event)} – ${formatDate(s.period.last_event)}`, 'outline')] : []),
     ...(s?.sample != null ? [badge(`sample · ${formatShare(s.sample)} of users`, 'outline', 'info')] : []),
     ...Object.entries(s?.sampled_events || {}).map(([e, v]) => badge(`sample · ${formatShare(v)} of ${e}`, 'outline', 'info')),

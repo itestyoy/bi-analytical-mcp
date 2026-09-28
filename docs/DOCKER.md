@@ -146,6 +146,13 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   as a pipeline does. `sample` makes it smaller, deterministically: `share` keeps a share of users
   with their whole paths; `events` keeps a share of the rows of the named events (for one that drowns
   the rest), whose counts and surrounding transitions are then approximate.
+  A path is one user's events by default; `path` makes it one value of a column or event property of
+  the source (a bidfloor id, a tracking id, a level) or of several (a composite key: the user and a
+  bidfloor id). For event logic these rules cannot say — events defined by a window (a lag, the n-th
+  fail in a row), a match_recognize, several sources joined, a cohort — the table is built with
+  `build_pipeline_model` and the eventstream starts from its task (`from_task` + `columns: { path,
+  event, time }`), reading that table's columns; its cards are the same transition graph, step
+  matrix and sankey.
   It is built in SQL where the data lives and materialized; the call returns a task.
 - **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, preprocess?, analyses: [...] }`
   runs every listed analysis — each a library method with its own parameters under the library's

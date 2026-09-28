@@ -110,12 +110,20 @@ function tooltipFor(figure) {
   tip.hidden = true;
   figure.append(tip);
   return {
+    // Placed by its REAL size, inside the figure: beside the pointer where it fits, on the other side
+    // where it does not, and never past the figure's edges (a long line wraps to the figure's width).
     show(evt, lines) {
       tip.replaceChildren(...lines.map((l, i) => el(i ? 'div' : 'strong', null, l)));
       tip.hidden = false;
       const box = figure.getBoundingClientRect();
-      tip.style.left = `${Math.max(0, Math.min(evt.clientX - box.left + 12, box.width - 220))}px`;
-      tip.style.top = `${evt.clientY - box.top + 12}px`;
+      const w = tip.offsetWidth; const h = tip.offsetHeight;
+      const px = evt.clientX - box.left; const py = evt.clientY - box.top;
+      const GAP = 12; const EDGE = 4;
+      const within = (v, size, room) => Math.max(EDGE, Math.min(v, room - size - EDGE));
+      const left = px + GAP + w <= box.width - EDGE ? px + GAP : px - GAP - w;
+      const top = py + GAP + h <= box.height - EDGE ? py + GAP : py - GAP - h;
+      tip.style.left = `${within(left, w, box.width)}px`;
+      tip.style.top = `${within(top, h, Math.max(box.height, h + 2 * EDGE))}px`;
     },
     hide() { tip.hidden = true; },
   };

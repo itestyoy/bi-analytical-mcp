@@ -430,3 +430,39 @@ test('events made from an event\'s parameters: split by value (with names of its
   // an unknown parameter is refused before anything runs
   await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', events: { split: [{ event: 'level_completed', by: { property: 'no_such' } }] } }), /invalid input|no_such/);
 });
+
+test('a group merges events the split made — a name it gives and an <event>_<value> — with events of the source', opts, async (t) => {
+  if (skip(t)) return;
+  const src = (await wh.query('select event_name as e, result_of_event_data as r from fct_analytics_events')).rows;
+  const b = await engine.build_retentioneering_model({
+    name: 'grouped', source: 'events',
+    events: {
+      split: [{ event: 'level_completed', by: { property: 'result_of_event_data' }, names: { win: 'level_won' } }],
+      groups: { level_end: ['level_won', 'level_completed_lose', 'shop_opened'] },
+    },
+  });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  const vocab = new Map(r.vocabulary.map((v) => [v.event, v.events]));
+  const n = (f) => src.filter(f).length;
+  assert.equal(vocab.get('level_end'), n((x) => (x.e === 'level_completed' && ['win', 'lose'].includes(x.r)) || x.e === 'shop_opened'));
+  assert.deepEqual([vocab.get('level_won'), vocab.get('level_completed_lose'), vocab.get('shop_opened')], [undefined, undefined, undefined]);
+  // a name neither the source nor the split has is still refused
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', events: { split: [{ event: 'level_completed', cases: [{ name: 'level_lost', where: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }], groups: { g: ['level_lostt'] } } }), (e) => e.field === 'events.groups.g');
+});
+
+test('a time window scopes the eventstream on the partitioned source (in a timezone, across the UTC day), and a source that requires one refuses a build without it', opts, async (t) => {
+  if (skip(t)) return;
+  // 2026-01-02 in UTC+14 = [01-01 10:00, 01-02 10:00) UTC — partly on the previous UTC day
+  const inWindow = Number((await wh.query("select count(*) as n from fct_analytics_events where device_time >= timestamp '2026-01-01 10:00:00' and device_time < timestamp '2026-01-02 10:00:00'")).rows[0].n);
+  const b = await engine.build_retentioneering_model({ name: 'windowed', source: 'events', time_range: { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' } });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  assert.equal(r.events, inWindow);
+  assert.equal(inWindow, 39);
+  const saved = engine.catalog._requireTimeRangeAll;
+  engine.catalog._requireTimeRangeAll = true;
+  try {
+    await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events' }), (e) => e.field === 'time_range');
+  } finally { engine.catalog._requireTimeRangeAll = saved; }
+});

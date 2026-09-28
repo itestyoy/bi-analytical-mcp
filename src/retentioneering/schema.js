@@ -57,7 +57,7 @@ const TASK_ID = { type: 'string', minLength: 1, description: 'A task this tool s
 
 const timeRange = {
   type: 'object', additionalProperties: false,
-  description: 'The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day).',
+  description: 'The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day). A partitioned source is read only within it, and a source whose catalog requires a window refuses a build without one.',
   properties: {
     start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' },
     end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' },
@@ -185,7 +185,7 @@ export function buildSchema(catalog) {
         properties: {
           include: events('Keep only these events of the source (omit: every event).'),
           exclude: events('Drop these events (technical noise the paths should not show).'),
-          groups: { type: 'object', propertyNames: { pattern: NAME }, additionalProperties: events('The events merged under this name.'), description: 'Merge several events under one name: { "<new name>": ["<event>", …] }. A group name replaces its events in every analysis.' },
+          groups: { type: 'object', propertyNames: { pattern: NAME }, additionalProperties: { type: 'array', minItems: 1, uniqueItems: true, items: { anyOf: [event, { type: 'string', pattern: NAME, description: 'An event events.split makes: a name in its names, cases or else, or <event>_<value> of a split by value.' }] }, description: 'The events merged under this name — events of the source, or events events.split makes.' }, description: 'Merge several events under one name: { "<new name>": ["<event>", …] }. A group name replaces its events in every analysis.' },
           split,
           top: { type: 'integer', minimum: 1, description: 'Optional: keep only the N most frequent event names (after grouping) and merge the rest into "other". Omitted, every event keeps its own name.' },
         },

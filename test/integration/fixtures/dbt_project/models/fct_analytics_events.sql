@@ -10,6 +10,9 @@ select
     event_name,
     bundle_id,
     device_time,
+    -- the day the row is partitioned by, next to the event time (the production shape: the
+    -- warehouse prunes on this column, not on device_time)
+    cast(device_time as date)                              as event_date,
     event_data,
     (event_data->>'level_id')::int                         as level_id_of_event_data,
     (event_data->>'result')                                as result_of_event_data,

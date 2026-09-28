@@ -13,7 +13,7 @@ import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
-import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
+import { shiftDay, resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
@@ -1578,6 +1578,16 @@ export class Engine {
     if (r.start) conditions.push({ column: timeCol, op: 'gte', value: r.start });
     if (r.endExclusive) conditions.push({ column: timeCol, op: 'lt', value: r.endExclusive });
     else if (r.end) conditions.push({ column: timeCol, op: 'lte', value: r.end });
+    // A source partitioned by ANOTHER column (a day column next to the event time) is pruned only by
+    // a condition on that column: the same window on it, a day wider on each side so no event near
+    // midnight (or across a timezone) is cut — the time axis above stays the exact bound.
+    const part = this.catalog.getModel(source).partition_column;
+    if (part && part !== timeCol) {
+      const day = (v, delta) => shiftDay(String(v).slice(0, 10), delta);
+      if (r.start) conditions.push({ column: part, op: 'gte', value: day(r.start, -1) });
+      const last = r.endExclusive || r.end;
+      if (last) conditions.push({ column: part, op: 'lt', value: day(last, +2) });
+    }
     return conditions.length ? conditions : null;
   }
 
@@ -2731,15 +2741,12 @@ export class Engine {
     const base = this.ctxs.baseProjectDir;
     if (!this.runner || !base) return null;
     const m = this.catalog.getModel(sourceKey);
-    const tcol = m.time?.column;
     let where = '';
-    if (tr && (tr.start || tr.end) && tcol) {
-      const r = resolveTimeRange(tr); // timezone-aware (same window the pipeline applies)
-      const cl = [];
-      if (r.start) cl.push(`${tcol} >= ${sqlLiteral(r.start)}`);
-      if (r.endExclusive) cl.push(`${tcol} < ${sqlLiteral(r.endExclusive)}`);
-      else if (r.end) cl.push(`${tcol} <= ${sqlLiteral(r.end)}`);
-      if (cl.length) where = ` WHERE ${cl.join(' AND ')}`;
+    // the same window the pipeline applies — the time axis, and the partition column that prunes
+    const conditions = tr && (tr.start || tr.end) ? this._timeRangeConditions(sourceKey, tr) : null;
+    if (conditions) {
+      const OP = { gte: '>=', lt: '<', lte: '<=' };
+      where = ` WHERE ${conditions.map((c) => `${c.column} ${OP[c.op]} ${sqlLiteral(c.value)}`).join(' AND ')}`;
     }
     return this._bestEffort(`rows:${sourceKey}:${where}`, async () => {
       try {

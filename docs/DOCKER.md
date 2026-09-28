@@ -126,6 +126,12 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   time window, events kept / dropped / merged into groups (optionally the most frequent N names with
   the rest as `other`), user attributes carried as segments through the declared relationship, optional
   sessions split at a gap, and a user sample by a hash of the key — the same users on every build).
+  A `where` or a segment may also name the source's own columns (any real column, e.g. an
+  environment) and its scalar event properties; `events.split` makes events out of an event's
+  parameters (by a value, or by conditions), and a group may merge those too. The window bounds the
+  partition column as well when the catalog declares one next to the time axis (a day wider on each
+  side, so no event near midnight or across a timezone is cut), and a source whose catalog sets
+  `require_time_range` refuses a build without a window — as a pipeline does.
   It is built in SQL where the data lives and materialized; the call returns a task.
 - **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, preprocess?, analyses: [...] }`
   runs every listed analysis — each a library method with its own parameters under the library's

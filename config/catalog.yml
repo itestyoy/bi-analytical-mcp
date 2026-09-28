@@ -128,6 +128,17 @@ models:
             - wheel_spin
     columns:
       # ---- role columns ---------------------------------------------------
+      - name: environment
+        data_type: string
+        description: >
+          Which event stream the row belongs to: 'prod' (real players of the production apps) or
+          'dev' (test builds, internal testers, QA devices). Present on every event. Filter to
+          exactly one value in every query — dev rows are not players, revenue or retention, and
+          mixing the two contaminates any figure.
+        config:
+          meta:
+            mcp:
+              dimension: {}   # groupable and filterable on every event, in a pipeline and in path analysis
       - name: player_id_of_internal
         data_type: integer
         description: >

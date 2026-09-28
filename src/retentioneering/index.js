@@ -163,9 +163,15 @@ function validateBuild(engine, input, physical = null) {
   if (!userKeyColumn(c, source)) throw new ToolError(`'${source}' names no single user key toward the users model, so its events have no path owner`, { stage: 'validate', field: 'source' });
   checkEvents(c, source, input.events?.include, 'events.include');
   checkEvents(c, source, input.events?.exclude, 'events.exclude');
+  // a group merges events of the source, or events events.split makes: the names it gives, and for
+  // a split by value, <event>_<value> (the value is known only from the data)
+  const rules = input.events?.split || [];
+  const splitNames = new Set(rules.flatMap((rule) => [...Object.values(rule.names || {}), ...(rule.cases || []).map((cs) => cs.name), ...(rule.else ? [rule.else] : [])]));
+  const byValue = rules.filter((rule) => rule.by).map((rule) => `${rule.event}_`);
+  const madeBySplit = (e) => splitNames.has(e) || byValue.some((p) => e.startsWith(p));
   for (const [g, evs] of Object.entries(input.events?.groups || {})) {
     if (!new RegExp(NAME).test(g)) throw new ToolError(`group name '${g}' must be lowercase snake_case`, { stage: 'validate', field: 'events.groups' });
-    checkEvents(c, source, evs, `events.groups.${g}`);
+    checkEvents(c, source, evs.filter((e) => !madeBySplit(e)), `events.groups.${g}`);
   }
   const reserved = new Set(Object.values(ES_COLUMNS));
   const own = sourceColumns(c, source, physical);
@@ -238,6 +244,11 @@ async function build(engine, feature, input) {
   const state = ctx.state.retentioneering;
   const modelName = `rete_es_${spec.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   const timeConditions = engine._timeRangeConditions(spec.source, spec.time_range);
+  // the catalog's cost guardrail, as a pipeline applies it: an eventstream over the whole history
+  // of a source that requires a window would scan every partition
+  if (!timeConditions && engine.catalog.requireTimeRangeFor(spec.source)) {
+    throw new ToolError(`source '${spec.source}' requires a bounded time window (require_time_range): pass time_range { start, end } — the eventstream is scanned only within it`, { stage: 'validate', field: 'time_range' });
+  }
   let rendered;
   try {
     rendered = renderEventstream(engine.catalog, spec, { modelName, physicalCols, timeConditions });

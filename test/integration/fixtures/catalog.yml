@@ -19,6 +19,8 @@ models:
         mcp:
           role: events
           primary_entity: event
+          # the physical partition column, a day next to the event time: a time window prunes on it
+          partition_column: event_date
           # RELATIONSHIPS declared once, here, and used by both the semantic layer and pipeline
           # joins. A key may span SEVERAL columns, and a time column may be lined up at a coarser
           # grain — that is how a per-event source meets a per-day one without fanning out.
@@ -84,6 +86,13 @@ models:
           meta:
             mcp:
               is_time: true
+      - name: event_date
+        data_type: date
+        description: "The day of device_time — the partition column; a time window bounds it too."
+        config:
+          meta:
+            mcp:
+              dimension: false   # partitioning only; device_time is the time axis
       - name: event_name
         data_type: string
         description: "Event type (one of known_events)."

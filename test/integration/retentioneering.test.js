@@ -488,3 +488,70 @@ test('a time window scopes the eventstream on the partitioned source (in a timez
     await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events' }), (e) => e.field === 'time_range');
   } finally { engine.catalog._requireTimeRangeAll = saved; }
 });
+
+// A FROM-TASK eventstream: an event only a window can define — a level started again right after a
+// start (the previous event of the same player is also a start) — made in a pipeline, and read by the
+// path analysis from that build's stored table, the columns named by the caller.
+test('an eventstream from a pipeline build: events a window defined, the table\'s columns as path, event, time and segment', opts, async (t) => {
+  if (skip(t)) return;
+  const src = (await wh.query('select event_id as id, player_id_of_internal as u, event_name as e, device_time as t, bundle_id as b from fct_analytics_events')).rows;
+  // the same rule, counted here from the rows: previous event of the player, by time then event id
+  const byUser = new Map();
+  for (const r of src) (byUser.get(r.u) || byUser.set(r.u, []).get(r.u)).push(r);
+  const expected = new Map();
+  for (const list of byUser.values()) {
+    list.sort((a, b) => (String(a.t) < String(b.t) ? -1 : String(a.t) > String(b.t) ? 1 : String(a.id).localeCompare(String(b.id))));
+    list.forEach((r, i) => {
+      const name = r.e === 'level_started' && list[i - 1]?.e === 'level_started' ? 'level_restarted' : r.e;
+      expected.set(name, (expected.get(name) || 0) + 1);
+    });
+  }
+  assert.ok(expected.get('level_restarted') > 0, 'the fixture has restarts to find');
+  const p = await engine.build_pipeline_model({ action: 'start', name: 'restarts', source: 'events' });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: p.draft_id, stages: [
+    { stage: 'compute', name: 'prev', op: 'window', fn: 'lag', column: 'event_name', partition_by: ['player_id_of_internal'], order_by: [{ key: 'device_time' }, { key: 'event_id' }] },
+    { stage: 'compute', name: 'ev', op: 'case', type: 'string', cases: [{ when: [{ column: 'event_name', op: 'eq', value: 'level_started' }, { column: 'prev', op: 'eq', value: 'level_started' }], then: { value: 'level_restarted' } }], else: { column: 'event_name' } },
+    { stage: 'project', columns: ['player_id_of_internal', 'ev', 'device_time', 'bundle_id'] },
+  ] });
+  const m = await engine.build_pipeline_model({ action: 'materialize', draft_id: p.draft_id });
+  const built = await engine.query_pipeline_model({ task_id: m.task_id });
+  assert.equal(built.status, 'done', JSON.stringify(built.error));
+  const b = await engine.build_retentioneering_model({ name: 'from_pipe', from_task: m.task_id, columns: { path: 'player_id_of_internal', event: 'ev', time: 'device_time' }, segments: [{ column: 'bundle_id', as: 'app' }] });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected);
+  assert.equal(r.users, byUser.size);
+  // the analyses read it like any eventstream
+  const q = await engine.query_retentioneering_model({ context_id: r.context_id, eventstream: 'from_pipe', analyses: [{ kind: 'transition_graph' }] });
+  const g = await engine.query_retentioneering_model({ task_id: q.task_id, detail: 'full' });
+  assert.equal(new Map(g.analyses.transition_graph.nodes.map((n) => [n.event, n.count])).get('level_restarted'), expected.get('level_restarted'));
+  // what the table cannot say is refused before anything runs, with where it belongs
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, columns: { path: 'player_id_of_internal', event: 'ev', time: 'device_time' }, where: [{ property: 'result_of_event_data', op: 'eq', value: 'win' }] }), (e) => e.field === 'where.property' && /pipeline/.test(e.message));
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', from_task: m.task_id, columns: { path: 'no_such', event: 'ev', time: 'device_time' } }), (e) => e.field === 'columns.path' && /ev/.test(e.message));
+});
+
+// A PATH that is not the user: one path per value of a column, of a composite key, or of an event property.
+test('a path by a column, by a composite key and by an event property: one path per value, events without it left out', opts, async (t) => {
+  if (skip(t)) return;
+  const src = (await wh.query('select player_id_of_internal as u, session_number as s, level_id_of_event_data as l from fct_analytics_events')).rows;
+  const distinct = (f) => new Set(src.filter((x) => f(x) != null && !String(f(x)).includes('null')).map(f)).size;
+  const read = async (name, path) => {
+    const b = await engine.build_retentioneering_model({ name, source: 'events', path });
+    const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+    assert.equal(r.status, 'done', JSON.stringify(r.error));
+    return r;
+  };
+  const bySession = await read('by_session_number', [{ column: 'session_number' }]);
+  assert.equal(bySession.users, distinct((x) => x.s));
+  assert.deepEqual(bySession.path, ['session_number']);
+  const composite = await read('by_player_session', [{ column: 'player_id_of_internal' }, { column: 'session_number' }]);
+  assert.equal(composite.users, distinct((x) => (x.u == null || x.s == null ? null : `${x.u}|${x.s}`)));
+  const byLevel = await read('by_level', [{ property: 'level_id_of_event_data' }]);
+  assert.equal(byLevel.users, distinct((x) => x.l));
+  assert.equal(byLevel.events, src.filter((x) => x.l != null).length, 'events without the key are left out');
+  // between: both ends included
+  const b = await engine.build_retentioneering_model({ name: 'sessions_1_2', source: 'events', where: [{ column: 'session_number', op: 'between', value: [1, 2] }] });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(r.events, src.filter((x) => x.s >= 1 && x.s <= 2).length);
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', path: [{ column: 'no_such' }] }), (e) => e.field === 'path');
+});

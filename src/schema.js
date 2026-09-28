@@ -452,14 +452,15 @@ export function buildSchemas(catalog) {
         value_column: { ...resultColumn, description: 'The column with each slice\'s amount (non-negative).' },
         drill,
       }, ['label_column', 'value_column']),
-      form('funnel', 'funnel — ordered steps', 'ORDERED STEPS and how many reach each, with the conversion between them.', {
+      form('funnel', 'funnel — ordered steps', 'ORDERED STEPS and how many reach each, with the conversion between them — a straight funnel, one with OUTCOMES (a step split into what became of it: a successful and a failed load, both of the attempts; each step a share of its parent), and one funnel per segment side by side (series_column).', {
         steps: {
           description: 'The steps, in order — as COLUMNS of a one-row result, or as ROWS (one per step).',
           oneOf: [
-            { title: 'steps are columns of one row', type: 'array', minItems: 2, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 60, description: 'How the step reads to the person (default: the column name).' } } } },
-            { title: 'one row per step', type: 'object', additionalProperties: false, required: ['label_column', 'value_column'], properties: { label_column: { ...resultColumn, description: 'The column naming each step.' }, value_column: { ...resultColumn, description: 'The column with each step\'s count.' } } },
+            { title: 'steps are columns of one row', type: 'array', minItems: 2, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['column'], properties: { column: resultColumn, label: { type: 'string', maxLength: 60, description: 'How the step reads to the person (default: the column name).' }, parent: { ...resultColumn, description: 'The step (the column of one listed before it) this step is a share of — its outcome: loads_ok and loads_failed both with parent attempts, shows with parent loads_ok. Omitted: the step before it.' } } } },
+            { title: 'one row per step', type: 'object', additionalProperties: false, required: ['label_column', 'value_column'], properties: { label_column: { ...resultColumn, description: 'The column naming each step.' }, value_column: { ...resultColumn, description: 'The column with each step\'s count.' }, parent_column: { ...resultColumn, description: 'The column naming each row\'s parent step (a label of a row before it; empty: the step before it) — for a funnel with outcomes.' } } },
           ],
         },
+        series_column: { ...resultColumn, description: 'One funnel per value of this column, side by side on the same steps (a funnel per ad format). Steps as columns: a row per value; steps as rows: the rows of each value.' },
       }, ['steps']),
       form('kpi', 'kpi — headline numbers', 'HEADLINE NUMBERS as stat tiles: a big value, its change against a previous value. One row, or with x a series whose last row is shown with its trend. A single number beats any chart.', {
         x: { ...axis, description: 'The axis of a multi-row result: each tile shows the LAST row, its change from the row before, and the trend as a sparkline.' },

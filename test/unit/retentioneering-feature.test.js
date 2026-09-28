@@ -128,7 +128,7 @@ test('the schemas offer exactly what the library does — every choice from the 
   for (const o of ops) for (const p of Object.keys(NOT_OFFERED.params)) assert.ok(!(p in o.properties), `${o.title} offers no ${p}`);
   // the build: the source's events and the models' attributes are enums from the catalog
   const b = e.schemas.build_retentioneering_model;
-  assert.ok(deref(deref(b.properties.events).properties.include).items.enum?.includes('level_started'));
+  assert.ok(deref(deref(b.anyOf[0].properties.events).properties.include).items.enum?.includes('level_started'), 'an events source: its events, as an enum');
   const seg = deref(deref(b.properties.segments).items).oneOf.map(deref).find((x) => x.title === 'users');
   assert.ok(deref(seg.properties.attribute).enum.includes('platform'));
 });

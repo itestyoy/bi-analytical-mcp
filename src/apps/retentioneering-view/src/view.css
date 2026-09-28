@@ -75,6 +75,11 @@
   position: absolute;
   pointer-events: none;
   min-width: 10rem;
+
+  /* a long list of transitions wraps inside the figure instead of running past the card */
+  max-width: min(24rem, calc(100% - 8px));
+  white-space: normal;
+  overflow-wrap: anywhere;
   z-index: 3;
 }
 
@@ -335,4 +340,9 @@
 
 .rt-swatch-s3 {
   background-color: var(--color-series-3);
+}
+
+/* ── Fullscreen (or a host that pins the height): the graph grows into the frame ────────────── */
+.main.fill .rt-graph-svg {
+  max-height: calc(100vh - 14rem);
 }

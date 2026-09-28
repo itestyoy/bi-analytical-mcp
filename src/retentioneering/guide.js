@@ -4,19 +4,19 @@
 // Method, not data: it names no column or event (the catalog and the eventstream summary say what
 // exists), and every parameter it mentions is one the tool schema offers.
 
-import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED } from './schema.js';
+import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED, COMPLEX_EVENT_LOGIC } from './schema.js';
 import { CHARTED_KINDS, DIFF_CARD_KINDS } from './view-model.js';
 
 export const GUIDE_NAME = 'retentioneering';
 
 export const ROUTING_TRIGGERS = [
   {
-    if: 'a question about paths and sequences — what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are',
-    do: `path analysis: build_retentioneering_model (the eventstream: source, window, events, segments), then query_retentioneering_model with every analysis the question needs in one call, then display_retentioneering_result for the card. semantic_index({ guide: "${GUIDE_NAME}" }) says which analysis answers which question. An ordered funnel with exact step definitions (event + property value) stays a build_pipeline_model funnel.`,
+    if: 'a question about paths and sequences — what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are — or about transitions between states or outcomes a pipeline computed (one attempt, cycle or load → the next)',
+    do: `path analysis: build_retentioneering_model (the eventstream: source, window, events, segments — or from_task, a pipeline build's table, for states and outcomes computed there), then query_retentioneering_model with every analysis the question needs in one call, then display_retentioneering_result for the card: its transition graph, step matrix and sankey are the standard pictures of paths, so there is no need to draw a diagram of your own. semantic_index({ guide: "${GUIDE_NAME}" }) says which analysis answers which question. An ordered funnel with exact step definitions (event + property value) stays a build_pipeline_model funnel.`,
   },
 ];
 
-export const INSTRUCTIONS_LINE = `For paths and sequences (what users do after an event, where they drop off, kinds of paths), use build_retentioneering_model → query_retentioneering_model; semantic_index({ guide: "${GUIDE_NAME}" }) explains the analyses.`;
+export const INSTRUCTIONS_LINE = `For paths and sequences, and transitions between states a pipeline computed (from_task), use build_retentioneering_model → query_retentioneering_model; its cards are the picture of them. semantic_index({ guide: "${GUIDE_NAME}" }) explains the analyses.`;
 
 export function retentioneeringGuide() {
   const f = retentioneeringFacts();
@@ -25,7 +25,7 @@ export function retentioneeringGuide() {
     title: 'Path analysis with retentioneering',
     library: `retentioneering ${f.version} (Apache-2.0) — the analyses are its own headless computations, run in the warehouse`,
     sequence: [
-      { step: 'Frame the paths', do: 'Decide whose paths (each user\'s history, or sessions), over which window, and which events matter. Technical noise (heartbeats, screen pings) hides the story: exclude it, or merge near-duplicates into one name with events.groups. An event whose meaning lies in a parameter becomes several with events.split (by a property\'s value, or by conditions). A slice of the data — one environment, one app — is a where on the source\'s own column or event property.' },
+      { step: 'Frame the paths', do: `Decide whose paths (each user\'s history, or sessions), over which window, and which events matter. Technical noise (heartbeats, screen pings) hides the story: exclude it, or merge near-duplicates into one name with events.groups. An event whose meaning lies in a parameter becomes several with events.split (by a property\'s value, or by conditions). A slice of the data — one environment, one app — is a where on the source\'s own column or event property. ${COMPLEX_EVENT_LOGIC} Then name that table\'s user, event and time columns in columns.` },
       { step: 'Build the eventstream', do: 'build_retentioneering_model({ name, source, time_range, events, segments, sessions?, sample? }). Read its summary with query_retentioneering_model({ task_id }): users, events, the vocabulary after grouping. Every event keeps its name; if a long tail of rare names makes the graph unreadable, events.top merges all but the N most frequent into "other". Too large to analyze: sample.share keeps a share of users with their whole paths (every analysis stays exact for them); when one event drowns the rest, sample.events keeps a share of its rows only — its counts and the transitions around it are then approximate, so say so.' },
       { step: 'Size it', do: 'One analysis run holds the whole eventstream in memory on the warehouse runtime. For a very large source, sample: { share } keeps a stable subset of users (a hash of the key), so every later analysis reads the same people.' },
       { step: 'Shape the paths, if needed', do: 'preprocess: the library\'s own steps ({ type, ...params }), for the whole call or one analysis — filter_paths on a metric condition, truncate_paths between two anchors, collapse_events (loops, groups, bounds), split_sessions by a timeout or separator, add_segment / add_clusters to make a segment the analyses can split by, sample_paths, rename and drop events. What SQL can say (the window, the events, the attributes) belongs in the build.' },

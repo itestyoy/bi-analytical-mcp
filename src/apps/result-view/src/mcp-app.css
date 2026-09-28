@@ -659,6 +659,23 @@
   }
 }
 
+/* an outcome of a step sits under it; a single continuation stays on its parent's level */
+.funnel-step {
+  padding-left: calc(var(--funnel-depth, 0) * 1.25rem);
+}
+
+.funnel-step-outcome .funnel-index {
+  background-color: transparent;
+  border: var(--border-width-regular) solid var(--border);
+}
+
+/* one funnel per segment, side by side on the same steps */
+.ab-list.funnel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  align-items: start;
+}
+
 /* ── Collapsible notes (shadcn Accordion item) ─────────────────────────────────────────────── */
 /* the notes are the last thing on the page: no rule under them, the host's frame ends it */
 .collapsible {

@@ -99,8 +99,14 @@ function eventName(catalog, sources) {
   return { type: 'string', enum: [...new Set(lists.flat())].sort() };
 }
 
+/** When events need logic the build's own rules cannot say — the one sentence every description that
+ *  offers from_task carries. */
+export const COMPLEX_EVENT_LOGIC = 'For event logic the build cannot say itself — events defined by a window (a lag, a gap, the n-th occurrence), by a match_recognize sequence, from several sources joined, over a cohort chosen by what users did — build that table with build_pipeline_model first and start the eventstream from its task (from_task).';
+
 export function buildSchema(catalog) {
   const sources = pathSources(catalog);
+  // an event of the source (the catalog's names, as an enum); a build from a task's table reads the
+  // names that table holds instead — the same fields, with that one constraint lifted (see the end)
   const event = eventName(catalog, sources);
   const events = (description) => ({ type: 'array', minItems: 1, uniqueItems: true, items: event, description });
   const segmentBranches = catalog.joinableModelKeys().map((model) => {
@@ -131,8 +137,8 @@ export function buildSchema(catalog) {
     type: 'object', additionalProperties: false, required: ['property'], title: 'event property',
     properties: { property: own('property', ownProps, 'A scalar event_data property'), as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the property).' } },
   });
-  const OPS = { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'is_null', 'is_not_null'] };
-  const VALUE = { description: 'The constant (an array for in/not_in; none for is_null/is_not_null).' };
+  const OPS = { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'between', 'is_null', 'is_not_null'] };
+  const VALUE = { description: 'The constant (an array for in/not_in; [low, high] for between, both included; none for is_null/is_not_null).' };
   // one condition on the source's own column or on a scalar event property — the filter's and a split case's
   const condition = {
     oneOf: [
@@ -170,15 +176,42 @@ export function buildSchema(catalog) {
       ],
     },
   };
-  return {
-    type: 'object', additionalProperties: false, required: ['name', 'source'],
-    description: 'The eventstream a path analysis reads — declared, built in SQL where the data lives, and materialized.',
+  return withTaskEvents(event, {
+    type: 'object', additionalProperties: false, required: ['name'],
+    anyOf: [
+      { required: ['source'], not: { required: ['from_task'] }, title: 'from an events source' },
+      { required: ['from_task', 'columns'], title: 'from a task\'s table' },
+    ],
+    description: 'The eventstream a path analysis reads — declared, built in SQL where the data lives, and materialized. Its rows come from an events source of the catalog (source), or from the stored table of a task (from_task + columns).',
     properties: {
       name: { type: 'string', pattern: NAME, description: 'Name of this eventstream (lowercase snake_case). A context may hold several; a later build of the same name replaces it.' },
-      source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model.' },
+      source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model. With from_task: the source that table was built from, when the task does not say it.' },
+      from_task: {
+        type: 'string', pattern: '^[a-f0-9]{12}$',
+        description: `${COMPLEX_EVENT_LOGIC} The task of a finished build_pipeline_model materialize (or of a query run with materialize: true) whose stored table holds one row per event; the paths are read from it, not recomputed. Name its columns in columns. There, where / segments / events.split name the table's columns (payload properties and joined attributes are brought in by the pipeline), and the time window is the pipeline's.`,
+      },
+      columns: {
+        type: 'object', additionalProperties: false, required: ['path', 'event', 'time'],
+        description: 'With from_task: which columns of that table say which path an event is on, which event, and when.',
+        properties: {
+          path: {
+            anyOf: [
+              { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$' },
+              { type: 'array', minItems: 1, maxItems: 4, uniqueItems: true, items: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$' } },
+            ],
+            description: 'The path key: one column (a user, a bidfloor_id, a tracking_id) — one path per value — or several (a user and a bidfloor_id: one path per player per cycle).',
+          },
+          event: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$', description: 'The column of the event name.' },
+          time: { type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$', description: 'The column of the event time (a timestamp or a date) — the paths\' order.' },
+        },
+      },
       context_id: { type: 'string', pattern: CTX, description: 'Build into this context (it keeps its other eventstreams). Omit to start a new one.' },
       description: { type: 'string', description: 'What this eventstream is for, in your words — kept with the context.' },
       time_range: timeRange,
+      path: {
+        type: 'array', minItems: 1, maxItems: 4, items: parameter,
+        description: `What one path is, when it is not the user (${[...new Set(sources.map((src) => userKeyColumn(catalog, src)))].join(', ')}): a column or scalar event property of the source — one path per value (a bidfloor id: one path per search cycle; a tracking id; a level) — or several, a composite key (the user column and a bidfloor id: one path per player per cycle). Events without every part are left out. Omit for one path per user.`,
+      },
       events: {
         type: 'object', additionalProperties: false,
         description: 'Which events make up the paths, and under what names.',
@@ -224,7 +257,23 @@ export function buildSchema(catalog) {
         },
       },
     },
-  };
+  });
+}
+
+/**
+ * The event fields hold the source's own names (an enum) when the rows come from an events source,
+ * and the names a task's table holds when they come from one — a pipeline can compute event names
+ * the catalog does not know. So the fields at the top take any name, and the events-source branch
+ * restates events and sample with the catalog's enum: a typo there is still refused by the schema.
+ */
+function withTaskEvents(event, schema) {
+  if (!event.enum) return schema;
+  const free = { type: 'string', minLength: 1, description: 'An event name: of the source, or one the from_task table holds.' };
+  const relax = (node) => (node === event ? free : Array.isArray(node) ? node.map(relax) : node && typeof node === 'object' ? Object.fromEntries(Object.entries(node).map(([k, v]) => [k, relax(v)])) : node);
+  const strict = { events: schema.properties.events, sample: schema.properties.sample };
+  const out = relax(schema);
+  out.anyOf[0] = { ...out.anyOf[0], properties: strict };
+  return out;
 }
 
 /** Whose paths: the wrapper's name for the library's path column. */

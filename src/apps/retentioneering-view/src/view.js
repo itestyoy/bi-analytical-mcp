@@ -19,7 +19,8 @@
  * Other analyses (describe, a conversion rate, per-path metrics) have no card.
  *
  * Every card says what its numbers are about — the users, the period, a sample — and gives counts
- * next to shares. IT DRAWS AND NOTHING ELSE: its input is the result the host hands over
+ * next to shares, and opens to the whole screen where the host offers it (the host's display mode —
+ * a request to the host, not to the server). IT DRAWS AND NOTHING ELSE: its input is the result the host hands over
  * (ontoolresult); no server call, no resource, no link, and the page's CSP forbids any network. WHAT
  * to show is decided by retentioneeringViewModel (src/retentioneering/view-model.js), the function the
  * server runs too; this file only draws it, with the result view's shadcn pieces and theme.
@@ -38,6 +39,7 @@ const subtitleEl = document.getElementById('subtitle');
 const contentEl = document.getElementById('content');
 const loadingEl = document.getElementById('loading');
 const statusEl = document.getElementById('status');
+const fullscreenBtn = document.getElementById('fullscreen-btn');
 document.getElementById('loading-icon').append(icon('loader-circle', 'icon spin'));
 
 const SVG = 'http://www.w3.org/2000/svg';
@@ -61,7 +63,7 @@ const formatDate = (v) => { const d = new Date(String(v).replace(' ', 'T').repla
 /** "33.3% · 4 paths" — a share with the count it stands for, when the number of paths is known. */
 const shareWithCount = (share, paths) => (paths ? `${formatShare(share)} · ${formatNumber(Math.round(share * paths))} paths` : formatShare(share));
 
-const state = { toolInput: null };
+const state = { toolInput: null, displayMode: 'inline' };
 
 function payloadOf(result) {
   if (!result) return null;
@@ -82,7 +84,7 @@ function scopeBadges(model) {
   const s = model.scope;
   return [
     ...(model.eventstream ? [badge(model.eventstream, 'secondary')] : []),
-    ...(s?.users != null ? [badge(`${formatNumber(s.users)} users`, 'outline')] : []),
+    ...(s?.users != null ? [badge(s.path ? `${formatNumber(s.users)} paths by ${s.path.join(' + ')}` : `${formatNumber(s.users)} users`, 'outline')] : []),
     ...(s?.period?.first_event && s?.period?.last_event ? [badge(`${formatDate(s.period.first_event)} – ${formatDate(s.period.last_event)}`, 'outline')] : []),
     ...(s?.sample != null ? [badge(`sample · ${formatShare(s.sample)} of users`, 'outline', 'info')] : []),
     ...Object.entries(s?.sampled_events || {}).map(([e, v]) => badge(`sample · ${formatShare(v)} of ${e}`, 'outline', 'info')),
@@ -108,12 +110,20 @@ function tooltipFor(figure) {
   tip.hidden = true;
   figure.append(tip);
   return {
+    // Placed by its REAL size, inside the figure: beside the pointer where it fits, on the other side
+    // where it does not, and never past the figure's edges (a long line wraps to the figure's width).
     show(evt, lines) {
       tip.replaceChildren(...lines.map((l, i) => el(i ? 'div' : 'strong', null, l)));
       tip.hidden = false;
       const box = figure.getBoundingClientRect();
-      tip.style.left = `${Math.max(0, Math.min(evt.clientX - box.left + 12, box.width - 220))}px`;
-      tip.style.top = `${evt.clientY - box.top + 12}px`;
+      const w = tip.offsetWidth; const h = tip.offsetHeight;
+      const px = evt.clientX - box.left; const py = evt.clientY - box.top;
+      const GAP = 12; const EDGE = 4;
+      const within = (v, size, room) => Math.max(EDGE, Math.min(v, room - size - EDGE));
+      const left = px + GAP + w <= box.width - EDGE ? px + GAP : px - GAP - w;
+      const top = py + GAP + h <= box.height - EDGE ? py + GAP : py - GAP - h;
+      tip.style.left = `${within(left, w, box.width)}px`;
+      tip.style.top = `${within(top, h, Math.max(box.height, h + 2 * EDGE))}px`;
     },
     hide() { tip.hidden = true; },
   };
@@ -646,6 +656,49 @@ function renderDiff(model) {
   return wrap;
 }
 
+// ── display mode — the card opened to the whole screen, where the host offers it ─────────────
+
+/**
+ * A FIXED height (fullscreen, or a host that pins it) switches to the fill layout — the view takes
+ * the frame, the charts grow into it and the cards scroll inside it; a flexible height lets the
+ * content size the frame. The same rule as the result view.
+ */
+function applyContainer(ctx) {
+  const dims = ctx.containerDimensions;
+  const fixedHeight = !!(dims && 'height' in dims && typeof dims.height === 'number');
+  mainEl.classList.toggle('fill', state.displayMode === 'fullscreen' || fixedHeight);
+  document.documentElement.style.maxHeight = dims && 'maxHeight' in dims && dims.maxHeight ? `${dims.maxHeight}px` : '';
+}
+
+function updateFullscreenButton() {
+  const modes = app.getHostContext()?.availableDisplayModes ?? [];
+  const isFullscreen = state.displayMode === 'fullscreen';
+  // offered only where the host can do it
+  fullscreenBtn.hidden = !modes.includes(isFullscreen ? 'inline' : 'fullscreen');
+  fullscreenBtn.replaceChildren(icon(isFullscreen ? 'minimize-2' : 'maximize-2'));
+  const label = isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen';
+  fullscreenBtn.title = label;
+  fullscreenBtn.setAttribute('aria-label', label);
+}
+
+async function toggleFullscreen() {
+  const mode = state.displayMode === 'fullscreen' ? 'inline' : 'fullscreen';
+  if (!app.getHostContext()?.availableDisplayModes?.includes(mode)) return;
+  try {
+    // the host answers with the mode it actually applied
+    const result = await app.requestDisplayMode({ mode });
+    handleHostContextChanged({ displayMode: result.mode });
+  } catch { /* the host kept its mode */ }
+}
+
+fullscreenBtn.addEventListener('click', toggleFullscreen);
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && state.displayMode === 'fullscreen') {
+    e.preventDefault();
+    void toggleFullscreen();
+  }
+});
+
 // ── host wiring (the official MCP Apps template) ─────────────────────────────────────────────
 
 function handleHostContextChanged(ctx) {
@@ -656,6 +709,9 @@ function handleHostContextChanged(ctx) {
     const root = document.documentElement.style;
     for (const side of ['top', 'right', 'bottom', 'left']) root.setProperty(`--safe-${side}`, `${Number(ctx.safeAreaInsets[side]) || 0}px`);
   }
+  if (ctx.displayMode) state.displayMode = ctx.displayMode;
+  if (ctx.displayMode || ctx.containerDimensions) applyContainer({ ...app.getHostContext(), ...ctx });
+  if (ctx.displayMode || ctx.availableDisplayModes) updateFullscreenButton();
 }
 
 const app = new App({ name: 'Path Analysis', version: '1.0.0' });

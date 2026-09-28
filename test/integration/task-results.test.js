@@ -103,9 +103,9 @@ test('a declared funnel follows the declared steps, not the column names', opts,
   const card = await engine.display_model_result({ task_id: done.task_id, display: { kind: 'funnel', steps: { label_column: 'users_country', value_column: 'mon_revenue' } } });
   const m = buildViewModel('display_model_result', card);
   assert.equal(m.kind, 'funnel');
-  assert.deepEqual(m.steps.map((x) => x.label), card.rows.map((r) => String(r.users_country)));
-  assert.deepEqual(m.steps.map((x) => x.value), [35, 25, 25]);
-  assert.equal(m.overall, 25 / 35);
+  assert.deepEqual(m.funnels[0].steps.map((x) => x.label), card.rows.map((r) => String(r.users_country)));
+  assert.deepEqual(m.funnels[0].steps.map((x) => x.value), [35, 25, 25]);
+  assert.equal(m.funnels[0].overall, 25 / 35);
 });
 
 test('a declaration naming a column the result does not have is refused, with the columns it has — and nothing is drawn', opts, async (t) => {

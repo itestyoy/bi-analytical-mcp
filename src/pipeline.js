@@ -53,6 +53,7 @@
 //                            Solves: ordered multi-step funnels, conversion, time-between-steps.
 
 import { getDialect } from './dialects/index.js';
+import { partitionDays } from './time-range.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const NAME_RE = /^[a-z][a-z0-9_]{0,40}$/;
@@ -831,6 +832,44 @@ export function columnMap(columns) {
   return new Map((columns || []).map((c) => [c.name, { type: c.type || 'unknown' }]));
 }
 
+// The stages that keep the source's rows and columns as they are — a `where` among them still reads
+// the source's own time axis and partition column.
+const ROW_PRESERVING = new Set(['where', 'derive', 'compute', 'join', 'sample']);
+
+/**
+ * A source partitioned by the DAY of its time axis (`partition_column` next to it) is pruned only by
+ * a condition on that column. A `where` that bounds the time axis while the rows are still the
+ * source's — however the bound got there, a time_range or a condition the caller wrote — gets the
+ * same bound on the partition column (the days it touches), unless it states one itself. The time
+ * axis stays the exact bound; the new condition only lets the warehouse skip the other days.
+ */
+function boundPartitions(m, stages, cols) {
+  const time = m.time?.column; const part = m.partition_column;
+  if (!time || !part || part === time || !cols.has(part)) return stages;
+  const out = [];
+  let leading = true;
+  for (const st of stages) {
+    if (leading && !ROW_PRESERVING.has(st.stage)) leading = false;
+    if (!leading || st.stage !== 'where' || (st.conditions || []).some((c) => (c.column ?? c.left?.column) === part)) { out.push(st); continue; }
+    const extra = [];
+    for (const c of st.conditions || []) {
+      if (c.column !== time || c.value === undefined || c.value === null) continue;
+      const v = c.value;
+      const b = c.op === 'gte' || c.op === 'gt' ? { start: v }
+        : c.op === 'lt' ? { endExclusive: v }
+          : c.op === 'lte' ? { end: v }
+            : c.op === 'eq' ? { start: v, end: v }
+              : c.op === 'between' && Array.isArray(v) ? { start: v[0], end: v[1] } : null;
+      if (!b) continue;
+      const { from, until } = partitionDays(b);
+      if (from) extra.push({ column: part, op: 'gte', value: from });
+      if (until) extra.push({ column: part, op: 'lt', value: until });
+    }
+    out.push(extra.length ? { ...st, conditions: [...st.conditions, ...extra] } : st);
+  }
+  return out;
+}
+
 /**
  * Render a full pipeline over a catalog `source` as a CHAIN of dbt models. Stages run in one SQL
  * model until a `python` stage: that stage is a dbt Python model of its own, the SQL stages after
@@ -853,6 +892,7 @@ export function columnMap(columns) {
 export function renderPipeline(catalog, dialectName, source, stages = [], { physicalCols = null, modelName = 'pipe', from = null } = {}) {
   const d = getDialect(dialectName);
   const m = catalog.getModel(source);
+  if (!from) stages = boundPartitions(m, stages, sourceColumns(catalog, source, physicalCols));
   // Cut the stage list at every python stage.
   const segments = []; let cur = [];
   for (const st of stages) {

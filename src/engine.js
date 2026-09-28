@@ -13,7 +13,7 @@ import { renderWhereClauses } from './predicate.js';
 import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
-import { shiftDay, resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
+import { partitionDays, resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
@@ -1578,17 +1578,20 @@ export class Engine {
     if (r.start) conditions.push({ column: timeCol, op: 'gte', value: r.start });
     if (r.endExclusive) conditions.push({ column: timeCol, op: 'lt', value: r.endExclusive });
     else if (r.end) conditions.push({ column: timeCol, op: 'lte', value: r.end });
-    // A source partitioned by ANOTHER column (a day column next to the event time) is pruned only by
-    // a condition on that column: the same window on it, a day wider on each side so no event near
-    // midnight (or across a timezone) is cut — the time axis above stays the exact bound.
-    const part = this.catalog.getModel(source).partition_column;
-    if (part && part !== timeCol) {
-      const day = (v, delta) => shiftDay(String(v).slice(0, 10), delta);
-      if (r.start) conditions.push({ column: part, op: 'gte', value: day(r.start, -1) });
-      const last = r.endExclusive || r.end;
-      if (last) conditions.push({ column: part, op: 'lt', value: day(last, +2) });
-    }
+    // A source partitioned by ANOTHER column — the day of the event time, next to it — is pruned only
+    // by a condition on that column; the time axis above stays the exact bound.
+    conditions.push(...this._partitionConditions(source, { start: r.start, endExclusive: r.endExclusive, end: r.endExclusive ? null : r.end }));
     return conditions.length ? conditions : null;
+  }
+
+  /** The conditions on a source's partition column (when it is not the time axis) for a window on
+   *  its time axis: the days the window touches (partitionDays). */
+  _partitionConditions(source, bounds) {
+    const m = this.catalog.getModel(source);
+    const part = m.partition_column;
+    if (!part || part === m.time?.column) return [];
+    const { from, until } = partitionDays(bounds);
+    return [...(from ? [{ column: part, op: 'gte', value: from }] : []), ...(until ? [{ column: part, op: 'lt', value: until }] : [])];
   }
 
   /** True when some pipeline stage already bounds the source's time/partition column. */

@@ -211,9 +211,17 @@ export function buildSchema(catalog) {
         properties: { gap_minutes: { type: 'integer', minimum: 1 } },
       },
       sample: {
-        type: 'object', additionalProperties: false, required: ['share'],
-        description: 'Keep a share of USERS (all of each kept user\'s events), chosen by a hash of the user key: the same users on every build. Use it to keep a large source within what one analysis run holds in memory.',
-        properties: { share: { type: 'number', exclusiveMinimum: 0, maximum: 1 } },
+        type: 'object', additionalProperties: false, anyOf: [{ required: ['share'] }, { required: ['events'] }],
+        description: 'Make the eventstream smaller, in SQL, before it is materialized — deterministic (a hash, not a random draw), so every build keeps the same rows. `share` keeps that share of USERS with all their events: the paths stay whole, so every analysis stays exact for the users kept. `events` keeps only a share of the rows of the named events ({ "ad_finished": 0.05 }), each row chosen by a hash of its user, time and name, and every other event whole: for an event so frequent it drowns the rest. A sampled event is under-counted by its share and drops out between its neighbours in the rest of the path, so transitions into and out of it (and counts, funnels and metrics over it) are no longer exact — use it when that event is context rather than the question. Both may be given.',
+        properties: {
+          share: { type: 'number', exclusiveMinimum: 0, maximum: 1, description: 'The share of users kept (0 < share ≤ 1).' },
+          events: {
+            type: 'object', minProperties: 1,
+            propertyNames: { anyOf: [event, { type: 'string', pattern: NAME }] },
+            additionalProperties: { type: 'number', exclusiveMinimum: 0, maximum: 1 },
+            description: 'The share of rows kept per event: { "<event>": share }. An event of the source or one events.split makes; groups apply after.',
+          },
+        },
       },
     },
   };

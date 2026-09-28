@@ -14,7 +14,8 @@
 //   <segments>  the declared segments: a related model's attribute, a column of the source itself,
 //               or a scalar event property
 //
-// Deterministic: a sample keeps users by a hash of their key, and every ordering carries a tiebreak.
+// Deterministic: a sample keeps users by a hash of their key (or rows of the named events by a hash
+// of the row), and every ordering carries a tiebreak.
 
 import { renderPipeline } from '../pipeline.js';
 import { getDialect } from '../dialects/index.js';
@@ -139,11 +140,18 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
   const sample = spec.sample?.share != null && spec.sample.share < 1
     ? ` AND ${d.valueBucket(user, SAMPLE_BUCKETS)} < ${Math.round(spec.sample.share * SAMPLE_BUCKETS)}`
     : '';
+  // a share of the rows of the named events (by the name before grouping), each row by a hash of
+  // its user, time and name — its own hash, independent of the user sample
+  const eventShares = Object.entries(spec.sample?.events || {}).filter(([, v]) => v < 1);
+  const rowKey = `concat(${d.castExpr(user, 'string')}, '|', ${d.castExpr(time, 'string')}, '|', ${d.castExpr(event, 'string')})`;
+  const eventSample = eventShares.length
+    ? ` AND (CASE ${eventShares.map(([e, v]) => `WHEN ${event} = ${lit(d, e)} THEN ${d.valueBucket(rowKey, SAMPLE_BUCKETS)} < ${Math.round(v * SAMPLE_BUCKETS)}`).join(' ')} ELSE TRUE END)`
+    : '';
   const segSel = segments.map((sg) => (sg.expr === sg.name ? `, ${q(sg.expr)}` : `, ${q(sg.expr)} AS ${sg.name}`)).join('');
   const segNames = segs.map((s) => `, ${s}`).join('');
   const ctes = [
     `es_base AS (\n${base.sql}\n)`,
-    `es_events AS (SELECT ${d.castExpr(user, 'string')} AS ${ES_COLUMNS.user}, ${named} AS ${ES_COLUMNS.event}, ${time} AS ${ES_COLUMNS.time}${segSel} FROM es_base WHERE ${user} IS NOT NULL AND ${event} IS NOT NULL AND ${time} IS NOT NULL${sample})`,
+    `es_events AS (SELECT ${d.castExpr(user, 'string')} AS ${ES_COLUMNS.user}, ${named} AS ${ES_COLUMNS.event}, ${time} AS ${ES_COLUMNS.time}${segSel} FROM es_base WHERE ${user} IS NOT NULL AND ${event} IS NOT NULL AND ${time} IS NOT NULL${sample}${eventSample})`,
     // every event keeps its name unless the caller asked for a top N
     ...(top
       ? [

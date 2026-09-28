@@ -98,6 +98,31 @@ test('time_range with a timezone keeps the events on the other UTC day of a part
   assert.deepEqual(byDay, { '2026-01-01': 9, '2026-01-02': 30 });
 });
 
+// The partition bound is a pruning aid, never a filter of its own: whatever bounds the time axis —
+// a where the caller wrote, a funnel's own window — the rows are exactly the ones the source gives
+// when it declares no partition column at all.
+test('a where on the time axis and a funnel window read the same rows with the partition column declared as without it', opts, async (t) => {
+  if (skip(t)) return;
+  const model = engine.catalog.getModel('events');
+  const declared = model.partition_column;
+  const rowsOf = async (stages) => (await pipe(stages)).rows.map((r) => JSON.stringify(r)).sort();
+  const byDay = [
+    { stage: 'where', conditions: [{ column: 'device_time', op: 'gte', value: '2026-01-01 10:00:00' }, { column: 'device_time', op: 'lt', value: '2026-01-02 10:00:00' }] },
+    { stage: 'compute', name: 'utc_day', op: 'date_trunc', column: 'device_time', granularity: 'day' },
+    { stage: 'aggregate', group_by: ['utc_day'], measures: [{ name: 'n', fn: 'count' }] },
+  ];
+  const funnel = [matchActivation({ filter: { time_range: { start: '2026-01-01 09:30:00', end: '2026-01-02' } }, steps: activationSteps.slice(0, 2) })];
+  const pruned = { byDay: await rowsOf(byDay), funnel: await rowsOf(funnel) };
+  let plain;
+  try {
+    model.partition_column = undefined;
+    plain = { byDay: await rowsOf(byDay), funnel: await rowsOf(funnel) };
+  } finally { model.partition_column = declared; }
+  assert.deepEqual(pruned, plain);
+  assert.equal(pruned.byDay.length, 2, 'the window spans two UTC days');
+  assert.ok(pruned.funnel.length > 0, 'the funnel window keeps players');
+});
+
 test('funnel: reached per step = 12 / 8 / 5 / 3 (match_recognize stage → per-user rows)', opts, async (t) => {
   if (skip(t)) return;
   const out = await pipe([matchActivation()]);

@@ -451,6 +451,28 @@ test('a group merges events the split made — a name it gives and an <event>_<v
   await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', events: { split: [{ event: 'level_completed', cases: [{ name: 'level_lost', where: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }], groups: { g: ['level_lostt'] } } }), (e) => e.field === 'events.groups.g');
 });
 
+test('a sample of an event keeps a share of its rows, the same rows on every build, and every other event whole', opts, async (t) => {
+  if (skip(t)) return;
+  const src = (await wh.query('select event_name as e from fct_analytics_events')).rows;
+  const total = (name) => src.filter((x) => x.e === name).length;
+  const build = async (name) => {
+    const b = await engine.build_retentioneering_model({ name, source: 'events', sample: { events: { level_started: 0.5, first_launch: 1 } } });
+    const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+    assert.equal(r.status, 'done', JSON.stringify(r.error));
+    return r;
+  };
+  const [a, b] = [await build('ev_sample_a'), await build('ev_sample_b')];
+  const vocab = (r) => new Map(r.vocabulary.map((v) => [v.event, v.events]));
+  const kept = vocab(a).get('level_started');
+  assert.ok(kept > 0 && kept < total('level_started'), `a share of level_started is kept (${kept} of ${total('level_started')})`);
+  assert.equal(vocab(b).get('level_started'), kept, 'the same rows on a second build');
+  for (const [e, n] of vocab(a)) if (e !== 'level_started') assert.equal(n, total(e), `${e} is whole`);
+  assert.equal(a.events, src.length - total('level_started') + kept);
+  assert.deepEqual(a.sample.events, { level_started: 0.5 }, 'the summary says what was sampled (a share of 1 is no sample)');
+  // an event the source does not have is refused before anything runs
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', sample: { events: { no_such_event: 0.5 } } }), /no_such_event|invalid input/);
+});
+
 test('a time window scopes the eventstream on the partitioned source (in a timezone, across the UTC day), and a source that requires one refuses a build without it', opts, async (t) => {
   if (skip(t)) return;
   // 2026-01-02 in UTC+14 = [01-01 10:00, 01-02 10:00) UTC — partly on the previous UTC day

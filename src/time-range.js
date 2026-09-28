@@ -55,17 +55,27 @@ export function localToUtc(value, tz) {
 export const isDateOnly = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v);
 
 /** The next calendar day of a date-only string (exclusive upper bound helper). */
-/** A date-only value moved by `delta` days (UTC calendar arithmetic). */
-export function shiftDay(dateOnly, delta) {
-  const d = new Date(`${dateOnly}T00:00:00Z`);
-  d.setUTCDate(d.getUTCDate() + delta);
-  return d.toISOString().slice(0, 10);
-}
-
 export function nextDay(dateOnly) {
   const d = new Date(`${dateOnly}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + 1);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * The partition days a window on the time axis touches, for a source partitioned by the DAY of its
+ * time axis (a day column next to it): { from, until } as date-only values, `until` exclusive.
+ * Bounds are in the warehouse clock (UTC), as resolveTimeRange returns them or a condition states
+ * them: `start` inclusive, `endExclusive` exclusive (at midnight it touches no day of its own),
+ * `end` inclusive. A bound that is not a date is left out.
+ */
+export function partitionDays({ start = null, endExclusive = null, end = null } = {}) {
+  const day = (v) => (typeof v === 'string' && /^\d{4}-\d{2}-\d{2}/.test(v) ? v.slice(0, 10) : null);
+  const atMidnight = (v) => v.length === 10 || /^\d{4}-\d{2}-\d{2}[ T]00:00(:00(\.0+)?)?(Z|[+-]00(:?00)?)?$/.test(v);
+  const from = day(start);
+  let until = null;
+  if (day(endExclusive)) until = atMidnight(endExclusive) ? day(endExclusive) : nextDay(day(endExclusive));
+  else if (day(end)) until = nextDay(day(end));
+  return { from, until };
 }
 
 /**

@@ -1,10 +1,10 @@
 // THE MODEL OF WHAT THE RESULT VIEW SHOWS — a pure function from a tool result to a view.
 //
 // The MCP App (src/apps.js) renders it inside the host's sandboxed iframe; this function decides
-// WHAT to render: a CHART (a time series or a breakdown), KPI tiles, a FUNNEL,
-// and the A/B TEST family — the test itself, the sample-ratio check and the sample-size plan, the
-// three steps of one experiment. Anything else — a failure, a build still running, an explained
-// query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
+// WHAT to render: a CHART (a time series or a breakdown), KPI tiles, a FUNNEL, a PIVOT and the A/B
+// TEST. A card exists per KIND: these have one, and nothing else does (the experiment's split check
+// and sample-size plan are answered in words and have no card here). Anything else — a failure, a
+// build still running, an explained query's SQL, rows with no chart shape — is `none` with its `reason`: the view shows one quiet
 // status line (the host keeps a minimum frame, so drawing nothing would leave an empty box) and
 // the tool's text result speaks for itself. Rows are drawn as the caller DECLARED them when the
 // result carries `display` (a funnel, KPI tiles, a drill-down pivot, a line, area, bar, pie or sankey chart over named columns); only without one is
@@ -190,44 +190,6 @@ export function buildViewModel(toolName, result, toolInput) {
       good: result.good || 'up',
       scale: nice(extent * 1.1),
       notes: result.recommendations || [],
-    };
-  }
-  // ── A/B: the sample-ratio check — is the observed split the one that was intended? ──
-  if (toolName === 'experiment' && Array.isArray(result.groups) && 'srm_detected' in result) {
-    const groups = result.groups.map((g) => ({ label: String(g.label ?? ''), observed: num(g.observed), expected: num(g.expected) }));
-    const total = groups.reduce((a, g) => a + (g.observed ?? 0), 0);
-    const expectedTotal = groups.reduce((a, g) => a + (g.expected ?? 0), 0);
-    return {
-      kind: 'srm',
-      title: 'Sample ratio check',
-      p_value: num(result.p_value),
-      srm_detected: !!result.srm_detected,
-      total,
-      groups: groups.map((g) => ({
-        ...g,
-        observed_share: total > 0 && g.observed !== null ? g.observed / total : null,
-        expected_share: expectedTotal > 0 && g.expected !== null ? g.expected / expectedTotal : null,
-      })),
-    };
-  }
-  // ── A/B: the sample-size plan — how many users, or the smallest effect a given n can see ──
-  if (toolName === 'experiment' && 'n_per_group' in result) {
-    const metricLabel = { proportion: 'conversion rate', mean: 'mean' }[result.metric] || result.metric || 'metric';
-    return {
-      kind: 'plan',
-      title: `Sample-size plan · ${metricLabel}`,
-      metric: result.metric || null,
-      // which side was solved: a total comes back only when n was the unknown
-      solved: 'total_n' in result ? 'n' : 'mde',
-      n_per_group: num(result.n_per_group),
-      total_n: num(result.total_n),
-      baseline: num(result.baseline),
-      stddev: num(result.stddev),
-      mde: num(result.mde),
-      relative_mde: num(result.relative_mde),
-      power: num(result.power),
-      confidence: num(result.confidence),
-      alternative: result.alternative || null,
     };
   }
   if (toolName === 'experiment') return none('experiment');

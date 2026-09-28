@@ -112,6 +112,8 @@ export class DuckDBDialect extends Dialect {
   // ── time / scalar / statistical ────────────────────────────────────────────
   _epoch(expr) { return `epoch(CAST(${expr} AS TIMESTAMP))`; }
 
+  valueBucket(expr, buckets) { return `(hash(CAST(${expr} AS VARCHAR)) % ${Number(buckets)})`; }
+
   dateDiff(unit, from, to) {
     switch (unit) {
       case 'day': return `date_diff('day', CAST(${from} AS DATE), CAST(${to} AS DATE))`;

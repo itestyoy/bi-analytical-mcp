@@ -116,6 +116,54 @@ analytics:
   session table that lived in the process: after a restart, clients got errors for a session id the
   new process had never issued until the connector was re-added by hand.)
 
+## Path analysis: the retentioneering feature (off unless turned on)
+
+`MCP_RETENTIONEERING=on` adds a side of its own — three tools, a view, a guide and a skill — for
+path analysis with [retentioneering](https://github.com/retentioneering/retentioneering-tools) 5.x
+(Apache-2.0). Off (the default), none of it exists: not listed, not callable, not described.
+
+- **`build_retentioneering_model`** — the DATA: the eventstream an analysis reads (events source,
+  time window, events kept / dropped / merged into groups (optionally the most frequent N names with
+  the rest as `other`), user attributes carried as segments through the declared relationship, optional
+  sessions split at a gap, and a user sample by a hash of the key — the same users on every build).
+  It is built in SQL where the data lives and materialized; the call returns a task.
+- **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, preprocess?, analyses: [...] }`
+  runs every listed analysis — each a library method with its own parameters under the library's
+  names: transition graph, step matrix, step sankey, funnel, path clusters, segment overview,
+  conversion rate, metric distribution, path metrics, describe, and diff between two segment levels —
+  after the library's own preprocessing steps (`{ type, ...params }`: filter_paths, truncate_paths,
+  collapse_events, split_sessions, add_segment, add_clusters, …), for the whole call or per analysis.
+  It is ONE dbt Python model: in the dbt process on DuckDB, on the warehouse's Python runtime on
+  BigQuery (Colab Enterprise through `submission_method: bigframes`). One call = one run = one cold
+  start. `{ task_id }` reads it back, summarized for the model (`detail: "full"`: every record). The
+  feature sets no limits of its own; what a call cannot carry — a Python callable, a DuckDB statement
+  for the runtime — is not offered.
+- **`display_retentioneering_result`** — the SHOW: one analysis of a finished task drawn as a card
+  (`ui://betti/retentioneering-view.html`), once per analysis. The graph opens on each event's
+  strongest exits (retentioneering's own default) and switches weights and how many exits it shows
+  on the page itself — no recomputation; every card gives its scope (users, period, sample) and
+  counts next to shares, and has a table view of its numbers. A distribution is drawn as its
+  histogram and a diff as heatmaps (the difference shaded above and below zero); describe, a
+  conversion rate and per-path metrics have no card — their numbers come back for the answer.
+
+Nothing heavy runs in the server: a call starts a task, the warehouse computes, and a small result
+table comes back. Configuration:
+
+- The feature runs on its own dbt environment, **`retentioneering`** (dbt 1.x, both adapters and
+  the library with its numerical dependencies at exact versions — `src/dbt/environment-specs.js`);
+  the image builds it. `MCP_RETENTIONEERING_ENV` names another environment of the specs.
+- **BigQuery / Colab Enterprise:** dbt installs `retentioneering==<the pinned version>` on the
+  runtime at every run (the model's `packages`). The runtime template dbt creates by itself has **no
+  internet access**, so that install fails there: give a template with access to PyPI (or with the
+  package preinstalled) through `MCP_RETENTIONEERING_MODEL_CONFIG`, a JSON of extra `dbt.config`
+  keys, e.g. `{"notebook_template_id": "<id>", "timeout": 3600}`. The profile supplies `gcs_bucket`
+  and `compute_region` as for any bigframes model.
+- The library's telemetry is switched off in every model it runs in (`RETENTIONEERING_NO_TRACK=1`).
+- What the tools offer — the analyses and ops with their parameters and types, each path metric's
+  arguments, the condition grammar, the edge weights, the clustering methods — is generated from the
+  installed library into
+  `config/retentioneering-facts.json` (`scripts/retentioneering-facts.py --write | --check`).
+
 ## Protocol: MCP 2026-07-28 on the official SDK, plus three extensions
 The server is built on the official MCP TypeScript SDK **v2** (`@modelcontextprotocol/server`), the
 stable line that implements protocol revision **2026-07-28**. The same SDK — not a second code path
@@ -183,8 +231,8 @@ offered none of them (src/client-extensions.js). The listings that differ by cli
   an alert over the card and withholds every verdict — a significant change coloured
   by what it means for the metric: green an improvement, red a regression; `good: down` on the
   analyze call marks a metric where lower is better, such as crash rate or churn, and the card says
-  "lower is better"), the SAMPLE-RATIO CHECK (the
-  observed split against the intended one) and the SAMPLE-SIZE PLAN. What a result with rows IS is
+  "lower is better"). The split check and the sample-size plan have no card: they are answered in
+  words. What a result with rows IS is
   declared by the caller: `display` on `display_model_result`, a union of closed
   forms tagged by `kind` — each form's schema says which question it fits and what it needs (required
   fields, bounds, enums, if/then), so nothing about a form lives in prose: `line` (a trend; several

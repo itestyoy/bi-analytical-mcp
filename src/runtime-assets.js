@@ -31,10 +31,25 @@ export const RUNTIME_ASSETS = {
     repoPath: 'config/bigframes-facts.json',
     why: 'the facts the python-stage guide states about the BigFrames runtime, EXTRACTED from that library (scripts/bigframes-facts.py) instead of written from its prose — which method raises without an index, which without an ordering, and what the signatures actually take. Without it the guide still renders, minus those lists.',
   },
+  retentioneeringFacts: {
+    path: join(ROOT, 'config', 'retentioneering-facts.json'),
+    repoPath: 'config/retentioneering-facts.json',
+    why: 'what the retentioneering feature offers — its analyses, their parameters, the edge weights, path metrics and clustering methods — EXTRACTED from the installed library (scripts/retentioneering-facts.py); the feature\'s tool schemas are built from it',
+  },
+  retentioneeringModel: {
+    path: join(ROOT, 'python', 'retentioneering_model.py'),
+    repoPath: 'python/retentioneering_model.py',
+    why: 'the analysis step the retentioneering feature inlines into every dbt Python model it generates — without it no analysis can run',
+  },
   resultView: {
     path: join(ROOT, 'src', 'apps', 'result-view', 'dist', 'mcp-app.html'),
     repoPath: 'src/apps/result-view/dist/mcp-app.html',
     why: 'the MCP Apps view of a query result (ui://betti/result-view.html) — the BUILT single file (npm run build:app); the server reads it, nothing imports it',
+  },
+  retentioneeringView: {
+    path: join(ROOT, 'src', 'apps', 'retentioneering-view', 'dist', 'retentioneering-view.html'),
+    repoPath: 'src/apps/retentioneering-view/dist/retentioneering-view.html',
+    why: 'the MCP Apps view of a path analysis (ui://betti/retentioneering-view.html) — the BUILT single file (npm run build:app); served only while the retentioneering feature is on',
   },
   mfSidecar: {
     path: join(ROOT, 'python', 'mf_sidecar.py'),

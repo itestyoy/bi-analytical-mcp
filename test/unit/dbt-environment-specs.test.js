@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { ENVIRONMENT_SPECS, INSTALLER, environmentPackages } from '../../src/dbt/environment-specs.js';
 
 test('an environment the specs do not define is refused, naming what is defined', () => {
-  assert.throws(() => environmentPackages('my-own-dbt'), /no dbt environment 'my-own-dbt'.*dbt-v2, dbt-v1, metricflow/);
+  assert.throws(() => environmentPackages('my-own-dbt'), /no dbt environment 'my-own-dbt'.*dbt-v2, dbt-v1, retentioneering, metricflow/);
 });
 
 test('every package is named at an exact version', () => {
@@ -16,7 +16,7 @@ test('every package is named at an exact version', () => {
 });
 
 test('the Python dbt environments carry the adapters of both warehouses', () => {
-  for (const name of ['dbt-v1', 'metricflow']) {
+  for (const name of ['dbt-v1', 'retentioneering', 'metricflow']) {
     const names = environmentPackages(name).map((p) => p.split('==')[0]);
     assert.ok(names.includes('dbt-duckdb') && names.includes('dbt-bigquery'), `${name}: ${names.join(', ')}`);
   }

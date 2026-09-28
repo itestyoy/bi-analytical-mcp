@@ -100,7 +100,7 @@ test('dbt runs in a named environment (`dbt-v2` unless named); MetricFlow is an 
   chmodSync(join(dir, 'my-dbt', 'bin', 'dbt'), 0o755);
   assert.throws(() => resolveEnvironment('my-dbt', { dir, env: {} }), /refused: 'my-dbt' is not an environment this tool defines/);
   // …and each serves only as what it is: the MetricFlow venv has a `dbt` too, but is not a dbt environment
-  assert.throws(() => resolveEnvironment('metricflow', { dir, env: {} }), /refused: 'metricflow' is a metricflow environment, not a dbt one \(dbt environments: dbt-v2, dbt-v1\)/);
+  assert.throws(() => resolveEnvironment('metricflow', { dir, env: {} }), /refused: 'metricflow' is a metricflow environment, not a dbt one \(dbt environments: dbt-v2, dbt-v1, retentioneering\)/);
   assert.throws(() => resolveEnvironment('dbt-v2', { dir, env: { MF_ENV: 'dbt-v1' } }), /MetricFlow environment 'dbt-v1' not found/);
   // the same packages in another order are the same build; another pip is not
   writeFileSync(join(dir, 'dbt-v1', 'mcp-env.json'), JSON.stringify({ name: 'dbt-v1', ...environmentBuild('dbt-v1'), packages: [...environmentBuild('dbt-v1').packages].reverse() }));

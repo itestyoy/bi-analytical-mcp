@@ -55,8 +55,8 @@ export { RESOURCE_MIME_TYPE, EXTENSION_ID as UI_EXTENSION };
 export const RESULT_VIEW_URI = 'ui://betti/result-view.html';
 export const RESULT_VIEW_FILE = RUNTIME_ASSETS.resultView.path;
 
-// The tools whose result is drawn: display_model_result (a model's rows) and experiment (the test, the
-// split check, the plan). Nothing else carries the view — not a query, not a build, not a query
+// The tools whose result is drawn: display_model_result (a model's rows) and experiment (the A/B test;
+// the split check and the plan have no card). Nothing else carries the view — not a query, not a build, not a query
 // tool's read of a task — so no read, no poll and no intermediate step ever draws.
 export const VIEWED_TOOLS = new Set(['display_model_result', 'experiment']);
 
@@ -75,11 +75,13 @@ const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? [...TOOL_VIS
 
 /**
  * The `_meta` every tool carries: its visibility, and — for a viewed tool — the view, in both
- * spellings registerAppTool writes.
+ * spellings registerAppTool writes. `featureView` is the view of a feature's drawing tool (its own
+ * page, src/features.js); a core viewed tool draws into the result view.
  */
-export function viewMeta(tool) {
-  return VIEWED_TOOLS.has(tool)
-    ? { ui: { resourceUri: RESULT_VIEW_URI, visibility: visibilityOf(tool) }, [RESOURCE_URI_META_KEY]: RESULT_VIEW_URI }
+export function viewMeta(tool, featureView = null) {
+  const uri = featureView?.uri || (VIEWED_TOOLS.has(tool) ? RESULT_VIEW_URI : null);
+  return uri
+    ? { ui: { resourceUri: uri, visibility: visibilityOf(tool) }, [RESOURCE_URI_META_KEY]: uri }
     : { ui: { visibility: visibilityOf(tool) } };
 }
 
@@ -90,21 +92,38 @@ const RESOURCE = {
   uri: RESULT_VIEW_URI,
   name: 'result-view',
   title: 'Query Result',
-  description: 'Interactive card for a result: a chart as the caller declares it (line, multi-line, stacked area, grouped/stacked/horizontal bars, a pie of shares, a sankey of flows — drillable where declared: a click opens a mark into a dimension), KPI tiles, a drill-down pivot table (the only table), a funnel (steps, conversion, biggest drop), or the A/B family — the test (lift, interval, verdict per variant), the sample-ratio check and the sample-size plan. Other results get one status line.',
+  description: 'Interactive card for a result: a chart as the caller declares it (line, multi-line, stacked area, grouped/stacked/horizontal bars, a pie of shares, a sankey of flows — drillable where declared: a click opens a mark into a dimension), KPI tiles, a drill-down pivot table (the only table), a funnel (steps, conversion, biggest drop), or the A/B test (lift, interval, verdict per variant). Other results get one status line.',
   mimeType: RESOURCE_MIME_TYPE,
   _meta: { ui: { prefersBorder: true, csp: VIEW_CSP } },
 };
 
-let html; // read once: the page is static, the data arrives by message
-export const appsSurface = () => ({
-  resources: () => [RESOURCE],
-  read(uri) {
-    if (uri !== RESULT_VIEW_URI) return null;
-    if (html === undefined) {
-      const file = assetPath('resultView');
-      if (!file) throw new Error(missingAssetMessage('resultView'));
-      html = readFileSync(file, 'utf8');
-    }
-    return [{ uri, mimeType: RESOURCE_MIME_TYPE, text: html, _meta: RESOURCE._meta }];
-  },
-});
+const pages = new Map(); // asset → html, read once: a page is static, the data arrives by message
+function page(asset) {
+  if (!pages.has(asset)) {
+    const file = assetPath(asset);
+    if (!file) throw new Error(missingAssetMessage(asset));
+    pages.set(asset, readFileSync(file, 'utf8'));
+  }
+  return pages.get(asset);
+}
+
+/**
+ * The view pages this server serves: the result view, and the view of each feature that draws
+ * (src/features.js) — each its own `ui://` page with the same empty network policy.
+ */
+export const appsSurface = (features = []) => {
+  const views = [
+    { resource: RESOURCE, asset: 'resultView' },
+    ...features.filter((f) => f.view).map((f) => ({
+      resource: { uri: f.view.uri, name: f.view.name, title: f.view.title, description: f.view.description, mimeType: RESOURCE_MIME_TYPE, _meta: RESOURCE._meta },
+      asset: f.view.asset,
+    })),
+  ];
+  return {
+    resources: () => views.map((v) => v.resource),
+    read(uri) {
+      const v = views.find((x) => x.resource.uri === uri);
+      return v ? [{ uri, mimeType: RESOURCE_MIME_TYPE, text: page(v.asset), _meta: v.resource._meta }] : null;
+    },
+  };
+};

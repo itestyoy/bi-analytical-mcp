@@ -151,14 +151,51 @@
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
   `structuredContent` is carried only by a display_model_result that drew (`drawn: true`) or an
   experiment called with `card: true`, and only when `buildViewModel(...).kind !== 'none'`; every
-  other answer is the text alone. THE EXPERIMENT IS A SEPARATE PROCESS, NOT MIXED WITH display: it is
-  statistics over numbers the caller brings — no task, no task_id — returned at once, and it draws its
-  own card (the test, the split check, the plan) only when asked with `card: true` (a field offered to
-  an Apps client alone, refused from any other). A stored result is
+  other answer is the text alone. A CARD EXISTS PER KIND, never per the size of a result: a kind that
+  fits a picture has its card, a kind that does not has no card code at all (no view-model branch, no
+  renderer, no field asking for it) and is answered in words. THE EXPERIMENT IS A SEPARATE PROCESS,
+  NOT MIXED WITH display: it is statistics over numbers the caller brings — no task, no task_id —
+  returned at once, and it draws its own card (the A/B test; the split check and the plan have none)
+  only when asked with `card: true` on analyze (a field offered to an Apps client alone, refused from
+  any other). A stored result is
   built on by a pipeline started from its task (`build_pipeline_model({ action: 'start', from_task
   })`); `time` is a pure timer. Do NOT add a second tool that draws, a tool that waits inside a
   starting call, a reader shared by both sides, a read by table name, or route an experiment
-  through tasks or display_model_result.
+  through tasks or display_model_result. The one sanctioned exception is a FEATURE's side (below):
+  it has the same three roles — its builder, its query tool that starts AND reads back its own tasks
+  (its side registered with the engine, a task of another side refused), and its OWN drawing tool,
+  which draws only that side's finished tasks, each analysis at most once; display_model_result stays
+  the only tool that draws a semantic or pipeline result.
+- A FEATURE IS SWITCHED ON AS A WHOLE, OR IS NOT THERE (src/features.js). A part of the server that a
+  deployment may not want — today only retentioneering — is a feature: off unless its flag says on
+  (`MCP_RETENTIONEERING=on`), and left out WITH ITS REASON (in the overview) when asked for where it
+  cannot run. Off, nothing of it exists: no schema (so neither listed nor callable), no view page, no
+  guide name, no routing trigger, no skill, no line of the instructions — the surface is exactly what
+  it is without it. The core never names a feature: engine, surface, apps, guide, skills and
+  overview each walk `engine.features` at ONE point (a tool's schema/method/side/description/view,
+  a guide name + triggers, a skill, an instructions line, an overview entry). Do NOT add an
+  `if (feature)` branch in the core, and do NOT let a feature reach into another side's tools.
+- RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA — an eventstream
+  declared by the caller and rendered in SQL through the pipeline's own stages (scope, the declared
+  relationship for segments, point-in-time for a slowly-changing model), materialized; query = the
+  COMPUTATION — every analysis of one call in ONE dbt Python model (python/retentioneering_model.py,
+  THIS server's code inlined; the caller's input is data, never code), on its own dbt environment
+  (`retentioneering`); show = its own view (`ui://betti/retentioneering-view.html`, src/apps/
+  retentioneering-view/, drawn with the result view's theme and shared pieces, src/apps/shared/). It is
+  deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds), and
+  every choice it offers comes from `config/retentioneering-facts.json`, generated from the library.
+  IT IS A WRAPPER OVER THE WHOLE LIBRARY, WITH NO LIMITS OF ITS OWN: every analysis and every
+  registered preprocessing op (the library's own `{ type, ...params }` op model, applied with
+  `apply_ops`), each with its own parameters under the library's names, typed as far as the library
+  says — each path metric with exactly its arguments, the condition grammar, where `agg` applies (the
+  sheet PROBES the library for what its prose does not state). No cap on analyses, steps, rows or
+  tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
+  reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
+  the analysis runtime (code — the data is declared in the build instead), and the two ops the
+  eventstream's shape rules out. The analyses with a card are CARD_KINDS (the charted ones and a
+  distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps); any other
+  (describe, a conversion rate, per-path metrics) comes back as the tables and values the library
+  returned, has no card, and is answered in words.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its
   envelope's capabilities carry `extensions[<id>]` (src/client-extensions.js, the one source):
   * Apps (`io.modelcontextprotocol/ui`, with the view's MIME type): what speaks to the MODEL — the
@@ -249,6 +286,10 @@
   environment fails the test run instead of skipping it).
   Do NOT add a requirements file, a `pip install <pkg>` in the Dockerfile, or an option to hand the
   tool packages, versions or a dbt of one's own: a version change is a spec change, reviewed as code.
+- The retentioneering feature has an environment of its own, `retentioneering` (dbt 1.x, both
+  adapters, the library and the numerical packages that decide its results, all pinned), and a dbt
+  client of its own over it, so turning the feature on changes nothing the core runs; its test file
+  (test/integration/retentioneering.test.js) runs on it and skips when it is not built.
 - Tests run on the `dbt-v2` environment; the python stage's file runs on `dbt-v1` (dbt 1.x),
   since v2 runs no Python models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 

@@ -690,7 +690,13 @@ export function buildSchemas(catalog) {
   // choice, so the repetition is folded out HERE, after the schemas are written and before they
   // leave: identical subtrees become one `$defs` entry the sites point at. Authoring is unchanged,
   // validation is unchanged (ajv resolves the ref), and the client is handed each list once.
-  return Object.fromEntries(Object.entries(tools).map(([name, schema]) => [name, foldRepeats(foldVocabularies(schema))]));
+  return Object.fromEntries(Object.entries(tools).map(([name, schema]) => [name, transportSchema(schema)]));
+}
+
+/** A tool schema as it leaves the process: repeated vocabularies and subtrees folded into `$defs`
+ *  (the core's tools here, a feature's in the engine that registers it). */
+export function transportSchema(schema) {
+  return foldRepeats(foldVocabularies(schema));
 }
 
 /**
@@ -1185,7 +1191,7 @@ function experimentSchema() {
   const srm = srmCheckSchema();
   const ss = sampleSizeSchema();
   const properties = {
-    card: { type: 'boolean', description: 'Draw the result as a CARD for the person (the test, the split check or the plan), in hosts that render MCP Apps. Omitted: no card — ask for it only when the person should see this result.' },
+    card: { type: 'boolean', description: 'analyze: draw the A/B test as a card for the person (each variant\'s lift, interval and verdict), in hosts that render MCP Apps. Omitted: no card — ask for it only when the person should see this result. The split check and the plan have no card (card: true is refused there): answer them in words.' },
     action: { enum: ['plan', 'check_split', 'analyze'], description: 'plan → required sample size / MDE (power planning, BEFORE running); check_split → Sample-Ratio-Mismatch χ² guardrail that the observed split is valid (run BEFORE trusting any lift); analyze → the A/B significance test on per-group aggregates.' },
     // union of all three actions' fields (analyze/ab_test wins on shared keys like metric).
     ...ss.properties,
@@ -1199,6 +1205,8 @@ function experimentSchema() {
       { if: { properties: { action: { const: 'plan' } }, required: ['action'] }, then: { required: ['metric'], properties: { metric: { enum: ['proportion', 'mean'] } } } },
       { if: { properties: { action: { const: 'check_split' } }, required: ['action'] }, then: { required: ['groups'] } },
       { if: { properties: { action: { const: 'analyze' } }, required: ['action'] }, then: { required: ['metric', 'control', 'variants'] } },
+      // a card exists for the test alone: card: true elsewhere is refused by name (false is harmless)
+      { if: { properties: { action: { enum: ['plan', 'check_split'] } }, required: ['action'] }, then: { properties: { card: { const: false, description: 'The split check and the plan have no card.' } } } },
     ],
     properties,
   };

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="color-scheme" content="light dark">
+  <!-- The view only draws: no network of any kind — the same policy as the result view. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; font-src data: https:; connect-src 'none'; frame-src 'none'; worker-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Path Analysis</title>
+</head>
+<body>
+  <div id="loading" class="loading" role="status" aria-live="polite">
+    <span id="loading-icon" class="loading-icon"></span>
+    <span class="loading-text">Computing…</span>
+  </div>
+  <div id="status" class="status-line" role="status" hidden></div>
+  <main class="main" hidden>
+    <header class="page-header">
+      <div class="page-header-text">
+        <h1 id="title" class="page-title">Path Analysis</h1>
+        <div id="subtitle" class="page-description"></div>
+      </div>
+    </header>
+    <section id="content"></section>
+  </main>
+  <script type="module" src="./src/view.js"></script>
+</body>
+</html>

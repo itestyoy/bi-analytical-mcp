@@ -131,6 +131,9 @@ export class Dialect {
   // ── Abstract time / scalar / statistical primitives (per-dialect) ──────────
   /** Difference toExpr - fromExpr expressed in `unit` (day|hour|minute|second). */
   dateDiff(_unit, _fromExpr, _toExpr) { throw new Error('abstract dateDiff'); }
+  /** A stable bucket in [0, buckets) for a value — the same value always lands in the same bucket,
+   *  on every run: a deterministic sample of users is `bucket < share * buckets`. */
+  valueBucket(_expr, _buckets) { throw new Error('abstract valueBucket'); }
   /** Whole 24-HOUR days between two timestamps (retention-day: floor of the span in 24h buckets,
    *  NOT calendar days). Signed; the caller clamps negatives / coalesces NULLs. */
   fullDaysBetween(_fromExpr, _toExpr) { throw new Error('abstract fullDaysBetween'); }

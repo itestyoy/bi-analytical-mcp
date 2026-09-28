@@ -10,7 +10,7 @@
 
 import { RESEARCH_GUIDES, RESEARCH_ROUTE, RESEARCH_SCOPE, isResearchGuide, researchGuide } from './research-guides.js';
 
-export function buildGuide(catalog, recipes, { task, python = null } = {}) {
+export function buildGuide(catalog, recipes, { task, python = null, features = [] } = {}) {
   const usersModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'users') || 'users';
   const experimentsModel = catalog.modelKeys().find((k) => catalog.getModel(k).role === 'experiments') || 'experiments';
   // A catalog may carry SEVERAL events sources (e.g. analytics events + crash reports). They are
@@ -40,6 +40,8 @@ export function buildGuide(catalog, recipes, { task, python = null } = {}) {
 
   const routing_triggers = [
     { if: RESEARCH_SCOPE, do: `read ${RESEARCH_ROUTE} before the first query, then follow it with these tools.` },
+    // what each feature this deployment runs adds to the routing (src/features.js)
+    ...features.flatMap((f) => f.guide?.triggers || []),
     { if: 'a named KPI / rate / cumulative metric', do: 'governed metric: build_semantic_model + query_semantic_model — NOT a hand-rolled pipeline.' },
     { if: 'an ordered multi-step funnel / path / time-between-steps', do: 'a build_pipeline_model pipeline with a match_recognize stage (funnels are events-only).' },
     { if: 'an A/B question ("is variant B better")', do: `compute per-variant aggregates first (a pipeline joining '${experimentsModel}'), then experiment({ action: 'analyze', expected_ratio }) — the designed split, control first, so the readout carries its own sample-ratio check (or run check_split before trusting any lift).` },
@@ -89,6 +91,9 @@ export function buildGuide(catalog, recipes, { task, python = null } = {}) {
   // Reserved too: 'research' and 'research/<domain>' are the research guides (src/research-guides.js)
   // — method for an open question, not a recipe family.
   if (isResearchGuide(task)) return researchGuide(task);
+  // a feature's own guide: a reserved name while the feature is on
+  const featureGuide = features.find((f) => f.guide?.name && f.guide.name === task);
+  if (featureGuide) return featureGuide.guide.build(catalog);
   if (task === 'python') {
     return python || { task: 'python', note: 'This deployment runs no python models (no warehouse runtime for them), so there is no python authoring guide. The overview reports python_models.' };
   }
@@ -96,7 +101,7 @@ export function buildGuide(catalog, recipes, { task, python = null } = {}) {
     const list = tasks[task];
     return list
       ? { task, workflow, routing_triggers, recipes: list, next: `Fetch a recipe in full with semantic_index({ recipe: '${list[0].id}' }).` }
-      : { task, workflow, routing_triggers, recipes: [], note: `No recipes for task family '${task}'. Known families: ${Object.keys(tasks).join(', ') || '(none configured)'}. Guides: ${[...Object.keys(RESEARCH_GUIDES), ...(python ? ['python'] : [])].join(', ')}.` };
+      : { task, workflow, routing_triggers, recipes: [], note: `No recipes for task family '${task}'. Known families: ${Object.keys(tasks).join(', ') || '(none configured)'}. Guides: ${[...Object.keys(RESEARCH_GUIDES), ...(python ? ['python'] : []), ...features.map((f) => f.guide?.name).filter(Boolean)].join(', ')}.` };
   }
 
   return {

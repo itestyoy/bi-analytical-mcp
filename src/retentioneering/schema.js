@@ -57,7 +57,7 @@ const TASK_ID = { type: 'string', minLength: 1, description: 'A task this tool s
 
 const timeRange = {
   type: 'object', additionalProperties: false,
-  description: 'The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day).',
+  description: 'The time window on the source\'s own time axis, applied before anything else (ISO dates; a date-only end is the whole day). A partitioned source is read only within it, and a source whose catalog requires a window refuses a build without one.',
   properties: {
     start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' },
     end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the whole day).' },
@@ -75,6 +75,15 @@ export function userKeyColumn(catalog, source) {
   const rel = catalog.entityTowardRole(source, 'users');
   const parts = rel ? catalog.entityKey(source, rel) : null;
   return parts && parts.length === 1 ? parts[0].column : null;
+}
+
+/** A source's own columns a path can be segmented or filtered by: every real column of it — what the
+ *  catalog declares, and, when the warehouse was read, what the table holds (the same columns a
+ *  pipeline can filter on) — without the event name, which the eventstream already is. */
+export function sourceColumns(catalog, source, physical = null) {
+  const eventCol = catalog.eventNameColumn(source);
+  const declared = [...catalog.modelDimensionColumns(source), ...catalog.modelColumns(source).map((c) => c.name)];
+  return [...new Set([...declared, ...(physical ? [...physical] : [])])].filter((c) => c && c !== eventCol).sort();
 }
 
 /** The relationships the path sources declare toward `model`. */
@@ -106,6 +115,61 @@ export function buildSchema(catalog) {
       },
     };
   }).filter((b) => b.properties.attribute.enum.length);
+  // the source's OWN columns (its declared dimensions — an environment, an app, a platform) and its
+  // scalar event properties: carried or filtered on without any join
+  const ownColumns = [...new Set(sources.flatMap((src) => sourceColumns(catalog, src)))].sort();
+  // a real column of the source — checked against the warehouse's table at call time, so a column the
+  // catalog does not declare (an environment flag) is reachable exactly as a pipeline reaches it
+  const column = (what) => ({ type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$', description: `${what}${ownColumns.length ? ` (declared: ${ownColumns.slice(0, 12).join(', ')}${ownColumns.length > 12 ? ', …' : ''})` : ''}; any other column of the table is checked against the warehouse.` });
+  const ownProps = [...new Set(sources.flatMap((src) => catalog.scalarEventProps(src)))].sort();
+  const own = (key, list, what) => ({ type: 'string', enum: list, description: `${what} of the source (each is checked against the source you name).` });
+  segmentBranches.push({
+    type: 'object', additionalProperties: false, required: ['column'], title: 'source column',
+    properties: { column: column('A column of the source itself'), as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the column).' } },
+  });
+  if (ownProps.length) segmentBranches.push({
+    type: 'object', additionalProperties: false, required: ['property'], title: 'event property',
+    properties: { property: own('property', ownProps, 'A scalar event_data property'), as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the property).' } },
+  });
+  const OPS = { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'is_null', 'is_not_null'] };
+  const VALUE = { description: 'The constant (an array for in/not_in; none for is_null/is_not_null).' };
+  // one condition on the source's own column or on a scalar event property — the filter's and a split case's
+  const condition = {
+    oneOf: [
+      { type: 'object', additionalProperties: false, required: ['column', 'op'], title: 'column', properties: { column: column('A column of the source'), op: OPS, value: VALUE } },
+      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property', 'op'], title: 'event property', properties: { property: own('property', ownProps, 'A scalar event_data property'), op: OPS, value: VALUE } }] : []),
+    ],
+  };
+  const parameter = {
+    oneOf: [
+      { type: 'object', additionalProperties: false, required: ['column'], title: 'column', properties: { column: column('A column of the source') } },
+      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property'], title: 'event property', properties: { property: own('property', ownProps, 'A scalar event_data property') } }] : []),
+    ],
+  };
+  const split = {
+    type: 'array', minItems: 1,
+    description: 'Make events out of an event\'s parameters, in SQL, before the paths are built: each rule renames the rows of one event. `by` splits it by the value of a property or column (ad_finished by is_error → ad_finished_true / ad_finished_false; `names` gives values their own names: { "true": "ad_finished_failed", "false": "ad_finished_success" }); `cases` names it by conditions, the first that holds (and `else` the rest). Rows of the event without the parameter keep its name. The new names are what every analysis reads; groups and top apply after.',
+    items: {
+      oneOf: [
+        {
+          type: 'object', additionalProperties: false, required: ['event', 'by'], title: 'by value',
+          properties: {
+            event,
+            by: parameter,
+            names: { type: 'object', additionalProperties: { type: 'string', pattern: NAME }, description: 'Your name for a value ({ "<value>": "<event name>" }); any other value becomes <event>_<value>.' },
+          },
+        },
+        {
+          type: 'object', additionalProperties: false, required: ['event', 'cases'], title: 'by conditions',
+          properties: {
+            event,
+            cases: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'where'], properties: { name: { type: 'string', pattern: NAME, description: 'The new event\'s name.' }, where: { type: 'array', minItems: 1, items: condition, description: 'Conditions that all hold.' } } }, description: 'The first case whose conditions hold names the row.' },
+            else: { type: 'string', pattern: NAME, description: 'The name for the event\'s other rows (omit: they keep the event\'s name).' },
+          },
+        },
+      ],
+    },
+  };
   return {
     type: 'object', additionalProperties: false, required: ['name', 'source'],
     description: 'The eventstream a path analysis reads — declared, built in SQL where the data lives, and materialized.',
@@ -121,25 +185,24 @@ export function buildSchema(catalog) {
         properties: {
           include: events('Keep only these events of the source (omit: every event).'),
           exclude: events('Drop these events (technical noise the paths should not show).'),
-          groups: { type: 'object', propertyNames: { pattern: NAME }, additionalProperties: events('The events merged under this name.'), description: 'Merge several events under one name: { "<new name>": ["<event>", …] }. A group name replaces its events in every analysis.' },
+          groups: { type: 'object', propertyNames: { pattern: NAME }, additionalProperties: { type: 'array', minItems: 1, uniqueItems: true, items: { anyOf: [event, { type: 'string', pattern: NAME, description: 'An event events.split makes: a name in its names, cases or else, or <event>_<value> of a split by value.' }] }, description: 'The events merged under this name — events of the source, or events events.split makes.' }, description: 'Merge several events under one name: { "<new name>": ["<event>", …] }. A group name replaces its events in every analysis.' },
+          split,
           top: { type: 'integer', minimum: 1, description: 'Optional: keep only the N most frequent event names (after grouping) and merge the rest into "other". Omitted, every event keeps its own name.' },
         },
       },
       segments: {
         type: 'array', minItems: 1,
-        description: 'User attributes to carry on every event as segment columns — what segment_overview, metric_distribution, diff and in_segment read. Each comes from a model the source reaches by a declared relationship.',
-        items: segmentBranches.length ? { oneOf: segmentBranches, discriminator: { propertyName: 'model' } } : { not: {} },
+        description: 'Columns to carry on every event as segments — what segment_overview, metric_distribution, diff and in_segment read: an attribute of a model the source reaches by a declared relationship ({ model, attribute }), a column of the source itself ({ column }), or a scalar event property ({ property }).',
+        items: segmentBranches.length ? { oneOf: segmentBranches } : { not: {} },
       },
       where: {
         type: 'array', minItems: 1,
-        description: 'Keep only the events of users matching every condition, on the segment columns declared above.',
+        description: 'Keep only the events matching every condition — on a column of the source itself or a segment declared above ({ column }), or on a scalar event property ({ property }). Applied in SQL before the paths are built.',
         items: {
-          type: 'object', additionalProperties: false, required: ['column', 'op'],
-          properties: {
-            column: { type: 'string', description: 'A segment column (its `as` or attribute name).' },
-            op: { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'is_null', 'is_not_null'] },
-            value: { description: 'The constant (an array for in/not_in; none for is_null/is_not_null).' },
-          },
+          oneOf: [
+            { ...condition.oneOf[0], properties: { ...condition.oneOf[0].properties, column: column('A column of the source (an environment or app column, say) or a segment declared above (its `as` or attribute name)') } },
+            ...condition.oneOf.slice(1),
+          ],
         },
       },
       sessions: {
@@ -148,9 +211,17 @@ export function buildSchema(catalog) {
         properties: { gap_minutes: { type: 'integer', minimum: 1 } },
       },
       sample: {
-        type: 'object', additionalProperties: false, required: ['share'],
-        description: 'Keep a share of USERS (all of each kept user\'s events), chosen by a hash of the user key: the same users on every build. Use it to keep a large source within what one analysis run holds in memory.',
-        properties: { share: { type: 'number', exclusiveMinimum: 0, maximum: 1 } },
+        type: 'object', additionalProperties: false, anyOf: [{ required: ['share'] }, { required: ['events'] }],
+        description: 'Make the eventstream smaller, in SQL, before it is materialized — deterministic (a hash, not a random draw), so every build keeps the same rows. `share` keeps that share of USERS with all their events: the paths stay whole, so every analysis stays exact for the users kept. `events` keeps only a share of the rows of the named events ({ "ad_finished": 0.05 }), each row chosen by a hash of its user, time and name, and every other event whole: for an event so frequent it drowns the rest. A sampled event is under-counted by its share and drops out between its neighbours in the rest of the path, so transitions into and out of it (and counts, funnels and metrics over it) are no longer exact — use it when that event is context rather than the question. Both may be given.',
+        properties: {
+          share: { type: 'number', exclusiveMinimum: 0, maximum: 1, description: 'The share of users kept (0 < share ≤ 1).' },
+          events: {
+            type: 'object', minProperties: 1,
+            propertyNames: { anyOf: [event, { type: 'string', pattern: NAME }] },
+            additionalProperties: { type: 'number', exclusiveMinimum: 0, maximum: 1 },
+            description: 'The share of rows kept per event: { "<event>": share }. An event of the source or one events.split makes; groups apply after.',
+          },
+        },
       },
     },
   };

@@ -101,6 +101,15 @@ export class BigQueryDialect extends Dialect {
   jsonColumnStructField(column, field, type = 'string') { return this.jsonColumnField(column, field, type); }
 
   // ── time / scalar / statistical ────────────────────────────────────────────
+  // A SQL model takes the adapter's own option. A python model writes its table through BigFrames,
+  // which leaves the option unapplied, so its expiry is set once the table is written — a post-hook,
+  // which carries Jinja and so goes in the model's YAML (a python file may hold none).
+  expiryConfig(days, language) {
+    if (!days) return {};
+    return language === 'python'
+      ? { post_hook: [`alter table {{ this }} set options (expiration_timestamp = timestamp_add(current_timestamp(), interval ${Number(days)} day))`] }
+      : { hours_to_expiration: Number(days) * 24 };
+  }
   valueBucket(expr, buckets) { return `MOD(ABS(FARM_FINGERPRINT(CAST(${expr} AS STRING))), ${Number(buckets)})`; }
 
   dateDiff(unit, from, to) {

@@ -11,9 +11,11 @@
 //   event       the event name — grouped, and (when the caller asks for a top N) the rest merged into "other"
 //   event_time  the event's time
 //   session_id  when sessions are asked for: user_id#n, a new n after each gap longer than asked
-//   <segments>  the declared user attributes
+//   <segments>  the declared segments: a related model's attribute, a column of the source itself,
+//               or a scalar event property
 //
-// Deterministic: a sample keeps users by a hash of their key, and every ordering carries a tiebreak.
+// Deterministic: a sample keeps users by a hash of their key (or rows of the named events by a hash
+// of the row), and every ordering carries a tiebreak.
 
 import { renderPipeline } from '../pipeline.js';
 import { getDialect } from '../dialects/index.js';
@@ -38,9 +40,66 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
   const ev = spec.events || {};
   if (ev.include?.length) stages.push({ stage: 'where', conditions: [{ column: eventCol, op: 'in', value: ev.include }] });
   if (ev.exclude?.length) stages.push({ stage: 'where', conditions: [{ column: eventCol, op: 'not_in', value: ev.exclude }] });
+  // the source's own columns and event properties are read before any join: a filter on them scopes
+  // the rows the joins then carry, and a property is surfaced by the pipeline's own `derive` stage
+  const segNames = new Set((spec.segments || []).map((seg) => seg.name));
+  const early = [];
+  (spec.where || []).forEach((c, i) => {
+    const cond = (column) => ({ column, op: c.op, ...(c.value !== undefined ? { value: c.value } : {}) });
+    if (c.property !== undefined) {
+      const col = `es_w${i}`;
+      stages.push({ stage: 'derive', name: col, op: 'extract', source: c.property });
+      early.push(cond(col));
+    } else if (!segNames.has(c.column)) early.push(cond(c.column));
+  });
+  if (early.length) stages.push({ stage: 'where', conditions: early });
+  // events made from an event's parameters (events.split): each rule renames the rows of one event —
+  // by the value of a property/column, or by the first case whose conditions hold — in one CASE
+  // column the eventstream then reads as its event name. Everything is the pipeline's own stages.
+  const splits = spec.events?.split || [];
+  let splitCol = null;
+  if (splits.length) {
+    const read = new Map();
+    const colOf = (ref) => {
+      if (ref.column !== undefined) return ref.column;
+      if (!read.has(ref.property)) {
+        const col = `es_p${read.size}`;
+        stages.push({ stage: 'derive', name: col, op: 'extract', source: ref.property, type: 'string' });
+        read.set(ref.property, col);
+      }
+      return read.get(ref.property);
+    };
+    const isEvent = (e) => ({ column: eventCol, op: 'eq', value: e });
+    const cond = (c) => ({ column: colOf(c), op: c.op, ...(c.value !== undefined ? { value: c.value } : {}) });
+    const cases = [];
+    splits.forEach((rule, i) => {
+      if (rule.cases) {
+        for (const cs of rule.cases) cases.push({ when: [isEvent(rule.event), ...cs.where.map(cond)], then: { value: cs.name } });
+        if (rule.else) cases.push({ when: [isEvent(rule.event)], then: { value: rule.else } });
+        return;
+      }
+      const by = colOf(rule.by);
+      const text = `es_v${i}`;
+      stages.push({ stage: 'compute', name: text, op: 'cast', column: by, type: 'string' });
+      for (const [value, name] of Object.entries(rule.names || {})) cases.push({ when: [isEvent(rule.event), { column: text, op: 'eq', value }], then: { value: name } });
+      // any other value: <event>_<value>; an event without the parameter keeps its name
+      const named = `es_n${i}`;
+      stages.push({ stage: 'compute', name: named, op: 'concat', parts: [{ value: `${rule.event}_` }, { column: text }] });
+      cases.push({ when: [isEvent(rule.event), { column: text, op: 'is_not_null' }], then: { column: named } });
+    });
+    splitCol = 'es_event';
+    stages.push({ stage: 'compute', name: splitCol, op: 'case', cases, else: { column: eventCol }, type: 'string' });
+  }
   const segments = [];
   for (const seg of spec.segments || []) {
-    const name = seg.as || seg.attribute;
+    const name = seg.name || seg.as || seg.attribute;
+    if (seg.column !== undefined) { segments.push({ name, expr: seg.column }); continue; }
+    if (seg.property !== undefined) {
+      const col = `es_s_${name}`;
+      stages.push({ stage: 'derive', name: col, op: 'extract', source: seg.property });
+      segments.push({ name, expr: col });
+      continue;
+    }
     const join = { stage: 'join', with: seg.model, via: seg.via, attrs: [{ column: seg.attribute, as: name }] };
     // a slowly-changing model is joined point in time — at the event's own time (as a pipeline must state it)
     const m = catalog.getModel(seg.model);
@@ -50,22 +109,28 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
       if (from && to) join.between = { value: src.time.column, from, to };
     }
     stages.push(join);
-    segments.push(name);
+    segments.push({ name, expr: name });
   }
-  if (spec.where?.length) stages.push({ stage: 'where', conditions: spec.where.map((c) => ({ column: c.column, op: c.op, ...(c.value !== undefined ? { value: c.value } : {}) })) });
-  return { stages, segments };
+  // a condition on a segment is applied once the segments are there
+  const late = (spec.where || []).filter((c) => c.property === undefined && segNames.has(c.column));
+  if (late.length) {
+    const exprOf = new Map(segments.map((sg) => [sg.name, sg.expr]));
+    stages.push({ stage: 'where', conditions: late.map((c) => ({ column: exprOf.get(c.column), op: c.op, ...(c.value !== undefined ? { value: c.value } : {}) })) });
+  }
+  return { stages, segments, eventColumn: splitCol };
 }
 
 /** The whole eventstream model's SQL, in the catalog's dialect. */
 export function renderEventstream(catalog, spec, { modelName, physicalCols = null, timeConditions = null } = {}) {
   const d = getDialect(catalog.dialect);
-  const { stages, segments } = eventstreamStages(catalog, spec, { timeConditions });
+  const { stages, segments, eventColumn } = eventstreamStages(catalog, spec, { timeConditions });
   const base = renderPipeline(catalog, catalog.dialect, spec.source, stages, { physicalCols, modelName });
   const q = (c) => c; // catalog column names are plain identifiers, as the pipeline renders them
   const user = q(userKeyColumn(catalog, spec.source));
-  const event = q(catalog.eventNameColumn(spec.source));
+  // the event name as the paths read it: the source's own, or the one events.split made from parameters
+  const event = q(eventColumn || catalog.eventNameColumn(spec.source));
   const time = q(catalog.getModel(spec.source).time.column);
-  const segs = segments.map(q);
+  const segs = segments.map((sg) => sg.name);
   // an event named by a group takes the group's name
   const groups = Object.entries(spec.events?.groups || {});
   const named = groups.length
@@ -75,11 +140,18 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
   const sample = spec.sample?.share != null && spec.sample.share < 1
     ? ` AND ${d.valueBucket(user, SAMPLE_BUCKETS)} < ${Math.round(spec.sample.share * SAMPLE_BUCKETS)}`
     : '';
-  const segSel = segs.map((s) => `, ${s}`).join('');
+  // a share of the rows of the named events (by the name before grouping), each row by a hash of
+  // its user, time and name — its own hash, independent of the user sample
+  const eventShares = Object.entries(spec.sample?.events || {}).filter(([, v]) => v < 1);
+  const rowKey = `concat(${d.castExpr(user, 'string')}, '|', ${d.castExpr(time, 'string')}, '|', ${d.castExpr(event, 'string')})`;
+  const eventSample = eventShares.length
+    ? ` AND (CASE ${eventShares.map(([e, v]) => `WHEN ${event} = ${lit(d, e)} THEN ${d.valueBucket(rowKey, SAMPLE_BUCKETS)} < ${Math.round(v * SAMPLE_BUCKETS)}`).join(' ')} ELSE TRUE END)`
+    : '';
+  const segSel = segments.map((sg) => (sg.expr === sg.name ? `, ${q(sg.expr)}` : `, ${q(sg.expr)} AS ${sg.name}`)).join('');
   const segNames = segs.map((s) => `, ${s}`).join('');
   const ctes = [
     `es_base AS (\n${base.sql}\n)`,
-    `es_events AS (SELECT ${d.castExpr(user, 'string')} AS ${ES_COLUMNS.user}, ${named} AS ${ES_COLUMNS.event}, ${time} AS ${ES_COLUMNS.time}${segSel} FROM es_base WHERE ${user} IS NOT NULL AND ${event} IS NOT NULL AND ${time} IS NOT NULL${sample})`,
+    `es_events AS (SELECT ${d.castExpr(user, 'string')} AS ${ES_COLUMNS.user}, ${named} AS ${ES_COLUMNS.event}, ${time} AS ${ES_COLUMNS.time}${segSel} FROM es_base WHERE ${user} IS NOT NULL AND ${event} IS NOT NULL AND ${time} IS NOT NULL${sample}${eventSample})`,
     // every event keeps its name unless the caller asked for a top N
     ...(top
       ? [
@@ -97,7 +169,7 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
   }
   return {
     sql: `WITH ${ctes.join(',\n')}\n${final}`,
-    segments,
-    columns: [ES_COLUMNS.user, ES_COLUMNS.event, ES_COLUMNS.time, ...segments, ...(spec.sessions?.gap_minutes ? [ES_COLUMNS.session] : [])],
+    segments: segs,
+    columns: [ES_COLUMNS.user, ES_COLUMNS.event, ES_COLUMNS.time, ...segs, ...(spec.sessions?.gap_minutes ? [ES_COLUMNS.session] : [])],
   };
 }

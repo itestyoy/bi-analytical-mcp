@@ -225,11 +225,12 @@ function importLine(spec, i, allow) {
 /**
  * Compile the python stage into the dbt Python model file + YAML sidecar.
  *   stage — { stage: 'python', imports?, functions, steps, output?, description? }
- *   opts  — { modelName, prepModel, allow (Map), config? (operator's literal dbt.config extras), pipeline? (for the header) }
+ *   opts  — { modelName, prepModel, allow (Map), config? (operator's literal dbt.config extras), ymlConfig? (config keys
+ *           that carry Jinja — a hook — and so live in the YAML sidecar: a python file may hold none), pipeline? (for the header) }
  * Returns { code, yml, packages, functions + bindings (for the gate), outputColumns, config }. Throws on a
  * structural problem (imports, names, arguments) — the static gate over the bodies is separate.
  */
-export function compilePythonStage(stage, { modelName, inputModel, allow, config = {}, pipeline = null, profile = frameProfile(null), submission = null }) {
+export function compilePythonStage(stage, { modelName, inputModel, allow, config = {}, ymlConfig = {}, pipeline = null, profile = frameProfile(null), submission = null }) {
   const importLines = [];
   const packages = new Set();
   const bound = new Set();
@@ -324,6 +325,7 @@ export function compilePythonStage(stage, { modelName, inputModel, allow, config
       name: modelName,
       // dbt renders a YAML description as Jinja: the caller's text goes in inert
       description: inertText(stage.description) || `Python stage of pipeline '${pipeline?.name || modelName}': ${steps.map((s) => s.call).join(' → ')} over ${inputModel}.`,
+      ...(Object.keys(ymlConfig).length ? { config: ymlConfig } : {}),
       ...(outCols ? { columns: outCols.map((c) => ({ name: c })) } : {}),
     }],
   }, { lineWidth: 100, noRefs: true });

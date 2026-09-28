@@ -16,6 +16,7 @@
 // any non-step row, CLASSIFIER/aggregates in MEASURES.
 
 import { jsonExtract, sqlLiteral } from './dialect.js';
+import { partitionConditions } from './time-range.js';
 import { registerStage, prepareColumns } from './pipeline.js';
 import { oneOfOr, strEnum } from './schema-kit.js';
 
@@ -95,7 +96,7 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
  * and a payload property is rendered by `catalog.propertyExpr`, which has no qualifier of its own —
  * so a qualifier here would reach half the clauses and silently skip the rest.
  */
-export function buildPrefilter(catalog, spec, dialect, source) {
+export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = null } = {}) {
   const f = spec.filter;
   if (!f) return '';
   const m = catalog.getModel(source);
@@ -104,6 +105,11 @@ export function buildPrefilter(catalog, spec, dialect, source) {
   const clauses = [];
   if (f.time_range?.start) clauses.push(`${timeCol} >= ${sqlLiteral(f.time_range.start)}`);
   if (f.time_range?.end) { const ex = dateEndExclusive(f.time_range.end); clauses.push(ex ? `${timeCol} < ${sqlLiteral(ex)}` : `${timeCol} <= ${sqlLiteral(f.time_range.end)}`); }
+  // a source partitioned by the day of its time axis is scanned only on the days the window touches
+  if (partitionCol && (f.time_range?.start || f.time_range?.end)) {
+    const ex = f.time_range.end ? dateEndExclusive(f.time_range.end) : null;
+    for (const c of partitionConditions(m, { start: f.time_range.start || null, endExclusive: ex, end: ex ? null : (f.time_range.end || null) })) clauses.push(`${partitionCol} ${c.op === 'gte' ? '>=' : '<'} ${sqlLiteral(c.value)}`);
+  }
   if (f.event_name?.length) clauses.push(`${evNameCol} IN (${factEventNames(catalog, source, f.event_name).map(sqlLiteral).join(', ')})`);
   const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
   for (const c of f.where || []) {
@@ -244,7 +250,9 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
 
   const stepPreds = (d) => spec.steps.map((s) => stepPredicate(catalog, s, d, prepCols, source));
   const rows = spec.rows || 'one_per_partition';
-  return { m, fact: source, partCols, timeCol, mode, betweenSteps, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
+  // the source's day partition column, when the rows here still carry it: the prefilter's window bounds it too
+  const partitionCol = m.partition_column && m.partition_column !== timeCol && (!availableCols || availableCols.has(m.partition_column)) ? m.partition_column : null;
+  return { m, fact: source, partCols, timeCol, partitionCol, mode, betweenSteps, steps, rows, metrics: resolved, propCaptures, prepCols, stepPreds };
 }
 
 // gapMode: false (strict, no filler), 'single' (one GAP = "not any step" between every
@@ -405,7 +413,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
     ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `secs_${m.name}`),
     ...r.propCaptures.map((c) => c.id),
   ];
-  const pre = buildPrefilter(catalog, spec, 'bigquery', r.fact);
+  const pre = buildPrefilter(catalog, spec, 'bigquery', r.fact, { partitionCol: r.partitionCol });
   const lines = [];
   if (pre) lines.push(`|> WHERE ${pre}`);
   lines.push(`|> MATCH_RECOGNIZE (
@@ -499,7 +507,7 @@ registerStage('match_recognize', {
         // SELECT (render), which the dialect places as one CTE of its chain.
         bqPipe: d.name === 'bigquery' ? matchStepBigQueryPipe(r, spec, catalog) : null,
         render: (prev, dn) => {
-          const pre = buildPrefilter(catalog, spec, dn, r.fact);
+          const pre = buildPrefilter(catalog, spec, dn, r.fact, { partitionCol: r.partitionCol });
           const fromRel = pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev;
           return dn === 'bigquery' ? matchStepBigQuery(r, fromRel, catalog) : matchStepCte(r, fromRel, catalog, dn);
         },

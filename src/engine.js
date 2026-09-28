@@ -6,14 +6,14 @@ import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration } from './compile.js';
-import { renderContext } from './yaml-render.js';
+import { renderContext, PARTITION_DIM } from './yaml-render.js';
 import { gatePythonRuntime } from './catalog.js';
 import { ContextManager, mergeCompiled } from './context-manager.js';
-import { renderWhereClauses } from './predicate.js';
+import { renderWhereClauses, renderPredicate } from './predicate.js';
 import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
-import { resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
+import { partitionConditions, resolveTimeRange, timeRangeWarnings, isValidTimezone } from './time-range.js';
 import { sqlLiteral } from './dialect.js';
 import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
@@ -26,13 +26,13 @@ import { ValueIndex } from './value-index.js';
 import { MemoryStore, targetKey, targetWords } from './memory.js';
 import { openStore } from './store.js';
 import { buildProjection, projectionProblems } from './projection.js';
-import { SUPPORTED_DIALECTS } from './dialects/index.js';
+import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 import { detached, currentSignal, isolatedTarget, withSignal } from './request-context.js';
 import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, features = [], featureStatus = [] }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [] }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -68,6 +68,11 @@ export class Engine {
     // describe the same runtime.
     if (pythonModelConfig) catalog.pythonRuntime = { ...catalog.pythonRuntime, config: pythonModelConfig };
     this.pythonModelConfig = catalog.pythonRuntime?.config || {};
+    // Every table this server materializes for a task (a pipeline's models, a stored query result,
+    // an eventstream, a python model) expires this many days after it is built, so what nobody
+    // reads again does not pile up in the warehouse; 0 keeps them. Where the warehouse has no
+    // expiry (DuckDB) nothing is set.
+    this.tableExpirationDays = tableExpirationDays;
     // The python stage description INDEXES the worked recipes this deployment ships for it (id +
     // which move each one covers) instead of spelling every form out in prose: a compiling payload
     // per move is worth more than any amount of description text, and the caller has to know the
@@ -468,9 +473,7 @@ export class Engine {
     // only to be joined to (use_base_models) — even another events source — is a join TARGET
     // here, reached through the relationship a measure source declares towards it.
     const own = c.primaryEntityName(model);
-    const measureSources = Object.entries(ctx.state.additions || {}).filter(([, a]) => (a.measures || []).length).map(([k]) => k);
-    const baseOwners = (ctx.state.metrics || []).flatMap((m) => [m?.type_params?.measure?.name].filter(Boolean)).map((ref) => c.modelOwningMeasure(ref)).filter(Boolean);
-    const sources = [...new Set([...measureSources, ...baseOwners])].filter((k) => ctx.state.usedModels?.includes(k));
+    const sources = this._measureSources(ctx);
     // 2. the attribute of a model whose measures this task reads → under that model's identity
     if (sources.includes(model) && own) return `${own}__${attribute}`;
     // 3. a relationship from a measure source to the model that owns it
@@ -1562,6 +1565,43 @@ export class Engine {
     return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   }
 
+  /** The dbt config keys that make a table built for a task expire (see tableExpirationDays). */
+  _expiryConfig(language = 'sql') {
+    return getDialect(this.catalog.dialect).expiryConfig(this.tableExpirationDays, language);
+  }
+
+  /** The `{{ config(...) }}` line of a SQL model built for a task: how it is materialized, and when it expires. */
+  _modelConfigLine(materialized = 'table') {
+    const cfg = { materialized, ...this._expiryConfig('sql') };
+    return `{{ config(${Object.entries(cfg).map(([k, v]) => `${k}=${typeof v === 'number' ? v : `'${String(v).replace(/'/g, "\\'")}'`}`).join(', ')}) }}`;
+  }
+
+  /** The sources whose MEASURES a semantic context reads (a model loaded only to be joined to is
+   *  not one of them). */
+  _measureSources(ctx) {
+    const c = this.catalog;
+    const measureSources = Object.entries(ctx.state.additions || {}).filter(([, a]) => (a.measures || []).length).map(([k]) => k);
+    const baseOwners = (ctx.state.metrics || []).flatMap((m) => [m?.type_params?.measure?.name].filter(Boolean)).map((ref) => c.modelOwningMeasure(ref)).filter(Boolean);
+    return [...new Set([...measureSources, ...baseOwners])].filter((k) => ctx.state.usedModels?.includes(k));
+  }
+
+  /**
+   * A metric query's window bounds metric_time; a source partitioned by another column is pruned
+   * only by a condition on THAT column, which its semantic model carries as PARTITION_DIM. Added
+   * when the context's measures come from one source: a where applies to every metric of a query,
+   * and a dimension of one source is not reachable from the measures of another.
+   */
+  _semanticPartitionWhere(ctx, bounds) {
+    if (!bounds || !(bounds.start || bounds.end || bounds.endExclusive)) return [];
+    const sources = this._measureSources(ctx);
+    if (sources.length !== 1) return [];
+    const m = this.catalog.getModel(sources[0]);
+    const pe = this.catalog.primaryEntityName(sources[0]);
+    if (!pe || (m.dimensions || {})[PARTITION_DIM]) return [];
+    return partitionConditions(m, { start: bounds.start, endExclusive: bounds.endExclusive, end: bounds.endExclusive ? null : bounds.end })
+      .map((cnd) => renderPredicate({ field: { kind: 'dimension', path: `${pe}__${PARTITION_DIM}` }, op: cnd.op, value: cnd.value }));
+  }
+
   /**
    * WHERE conditions for a pipeline-level time_range on the source's time column.
    * Timezone-aware: with tr.timezone the boundaries are wall-clock in that zone,
@@ -1578,7 +1618,15 @@ export class Engine {
     if (r.start) conditions.push({ column: timeCol, op: 'gte', value: r.start });
     if (r.endExclusive) conditions.push({ column: timeCol, op: 'lt', value: r.endExclusive });
     else if (r.end) conditions.push({ column: timeCol, op: 'lte', value: r.end });
+    // A source partitioned by ANOTHER column — the day of the event time, next to it — is pruned only
+    // by a condition on that column; the time axis above stays the exact bound.
+    conditions.push(...this._partitionConditions(source, { start: r.start, endExclusive: r.endExclusive, end: r.endExclusive ? null : r.end }));
     return conditions.length ? conditions : null;
+  }
+
+  /** The conditions on a source's partition column for a window on its time axis. */
+  _partitionConditions(source, bounds) {
+    return partitionConditions(this.catalog.getModel(source), bounds);
   }
 
   /** True when some pipeline stage already bounds the source's time/partition column. */
@@ -2289,7 +2337,7 @@ export class Engine {
   _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
-      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, pipeline, profile, submission: this.catalog.pythonRuntime?.method || null });
+      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, ymlConfig: this._expiryConfig('python'), pipeline, profile, submission: this.catalog.pythonRuntime?.method || null });
     } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
   }
 
@@ -2635,7 +2683,7 @@ export class Engine {
     // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
     this.ctxs.removePipelineFiles(ctx.id, modelName);
     for (const m of models) {
-      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `{{ config(materialized='${m === last ? materialized : 'table'}') }}\n${header}${m.sql}\n`);
+      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `${this._modelConfigLine(m === last ? materialized : 'table')}\n${header}${m.sql}\n`);
       else { this.ctxs.writeFile(ctx.id, `${m.model}.py`, m.code); this.ctxs.writeFile(ctx.id, `${m.model}.yml`, m.yml); }
     }
     const pyInfo = hasPython ? models.filter((m) => m.kind === 'python').map(({ yml, functions, bindings, ...m }) => m) : null;
@@ -2731,15 +2779,12 @@ export class Engine {
     const base = this.ctxs.baseProjectDir;
     if (!this.runner || !base) return null;
     const m = this.catalog.getModel(sourceKey);
-    const tcol = m.time?.column;
     let where = '';
-    if (tr && (tr.start || tr.end) && tcol) {
-      const r = resolveTimeRange(tr); // timezone-aware (same window the pipeline applies)
-      const cl = [];
-      if (r.start) cl.push(`${tcol} >= ${sqlLiteral(r.start)}`);
-      if (r.endExclusive) cl.push(`${tcol} < ${sqlLiteral(r.endExclusive)}`);
-      else if (r.end) cl.push(`${tcol} <= ${sqlLiteral(r.end)}`);
-      if (cl.length) where = ` WHERE ${cl.join(' AND ')}`;
+    // the same window the pipeline applies — the time axis, and the partition column that prunes
+    const conditions = tr && (tr.start || tr.end) ? this._timeRangeConditions(sourceKey, tr) : null;
+    if (conditions) {
+      const OP = { gte: '>=', lt: '<', lte: '<=' };
+      where = ` WHERE ${conditions.map((c) => `${c.column} ${OP[c.op]} ${sqlLiteral(c.value)}`).join(' AND ')}`;
     }
     return this._bestEffort(`rows:${sourceKey}:${where}`, async () => {
       try {
@@ -3366,7 +3411,7 @@ export class Engine {
     const offset = input.offset ?? 0;
     // Over-fetch one extra row so `has_more` is meaningful (H2): without the +1,
     // res.rows is capped at limit+offset and has_more can never be true.
-    const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: limit + offset + 1 };
+    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...this._semanticPartitionWhere(ctx, bounds)], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: limit + offset + 1 };
     const explain = !!(input.dry_run || input.explain);
     // The response is built from the runner's answer in ONE place, whether the query finished
     // inside the call or after it was handed back as a job.
@@ -3474,7 +3519,7 @@ export class Engine {
     const table = `qr_${id}`;
     this.jobs.setTable(id, table);
     const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, order_by: input.order_by, time_range: input.time_range });
-    this.ctxs.writeModel(ctx.id, table, `{{ config(materialized='table') }}\n${header}${projected}\n`);
+    this.ctxs.writeModel(ctx.id, table, `${this._modelConfigLine('table')}\n${header}${projected}\n`);
     const r = await this.runner.run(dir, table);
     if (!r.ok) return { ok: false, table, error: { stage: 'materialize', message: this._sqlRunMessage(r.stdout, r.stderr) } };
     return this._readTable(dir, table, input.limit ?? 1000, undefined, {}, input.offset ?? 0);

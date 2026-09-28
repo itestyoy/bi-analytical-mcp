@@ -377,3 +377,114 @@ test('a distribution comparison is drawn as one histogram: each level\'s bins ho
     assert.deepEqual(h.series[k].values, expected, platform);
   }
 });
+
+test('the source\'s own columns and event properties filter the paths and carry as segments — no join needed', opts, async (t) => {
+  if (skip(t)) return;
+  const own = (await wh.query('select player_id_of_internal as u, event_name as e, bundle_id as b, level_id_of_event_data as l from fct_analytics_events')).rows;
+  const b = await engine.build_retentioneering_model({
+    name: 'one_app', source: 'events',
+    where: [{ column: 'bundle_id', op: 'eq', value: 'com.omg.colorfit' }],
+    segments: [{ column: 'bundle_id', as: 'app' }, { property: 'level_id_of_event_data', as: 'level' }],
+  });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  const kept = own.filter((x) => x.b === 'com.omg.colorfit');
+  assert.equal(r.events, kept.length, 'only that app\'s events');
+  assert.equal(r.users, new Set(kept.map((x) => x.u)).size);
+  const es = (await wh.query(`select app, level, count(*) as n from ${r.model} group by 1, 2`)).rows;
+  assert.deepEqual([...new Set(es.map((x) => x.app))], ['com.omg.colorfit'], 'the column carried as a segment');
+  const byLevel = (rows, key) => rows.reduce((m, x) => m.set(String(x[key] ?? ''), (m.get(String(x[key] ?? '')) || 0) + Number(x.n ?? 1)), new Map());
+  assert.deepEqual(byLevel(es, 'level'), byLevel(kept.map((x) => ({ level: x.l })), 'level'), 'the property carried as a segment, value by value');
+  // a column the table does not have is refused before anything runs, with the ones it has
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', where: [{ column: 'no_such', op: 'eq', value: 1 }] }), (e) => e.field === 'where.column' && /bundle_id/.test(e.message));
+});
+
+test('events made from an event\'s parameters: split by value (with names of its own) and by conditions, counted from the rows', opts, async (t) => {
+  if (skip(t)) return;
+  const src = (await wh.query('select player_id_of_internal as u, event_name as e, result_of_event_data as r, device_time as t from fct_analytics_events')).rows;
+  const counts = (list) => list.reduce((m, x) => m.set(x, (m.get(x) || 0) + 1), new Map());
+  // by value: win → level_won (its own name), any other value → level_completed_<value>
+  const b = await engine.build_retentioneering_model({
+    name: 'by_result', source: 'events',
+    events: { split: [{ event: 'level_completed', by: { property: 'result_of_event_data' }, names: { win: 'level_won' } }] },
+  });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  const expected = counts(src.map((x) => (x.e !== 'level_completed' || x.r == null ? x.e : x.r === 'win' ? 'level_won' : `level_completed_${x.r}`)));
+  assert.deepEqual(new Map(r.vocabulary.map((v) => [v.event, v.events])), expected);
+  assert.equal(r.events, src.length, 'no event lost');
+  // by conditions: the first case that holds; the rest take `else`
+  const c = await engine.build_retentioneering_model({
+    name: 'by_case', source: 'events',
+    events: { split: [{ event: 'level_completed', cases: [{ name: 'level_lost', where: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }], else: 'level_passed' }] },
+  });
+  const rc = await engine.query_retentioneering_model({ task_id: c.task_id });
+  const lost = src.filter((x) => x.e === 'level_completed' && x.r === 'lose').length;
+  const vocab = new Map(rc.vocabulary.map((v) => [v.event, v.events]));
+  assert.deepEqual([vocab.get('level_lost'), vocab.get('level_passed'), vocab.get('level_completed')], [lost, src.filter((x) => x.e === 'level_completed').length - lost, undefined]);
+  // the new names are what an analysis reads
+  const q = await engine.query_retentioneering_model({ context_id: rc.context_id, eventstream: 'by_case', analyses: [{ kind: 'transition_graph' }] });
+  const g = await engine.query_retentioneering_model({ task_id: q.task_id, detail: 'full' });
+  const nodes = new Map(g.analyses.transition_graph.nodes.map((n) => [n.event, n.count]));
+  assert.equal(nodes.get('level_lost'), lost);
+  // an unknown parameter is refused before anything runs
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', events: { split: [{ event: 'level_completed', by: { property: 'no_such' } }] } }), /invalid input|no_such/);
+});
+
+test('a group merges events the split made — a name it gives and an <event>_<value> — with events of the source', opts, async (t) => {
+  if (skip(t)) return;
+  const src = (await wh.query('select event_name as e, result_of_event_data as r from fct_analytics_events')).rows;
+  const b = await engine.build_retentioneering_model({
+    name: 'grouped', source: 'events',
+    events: {
+      split: [{ event: 'level_completed', by: { property: 'result_of_event_data' }, names: { win: 'level_won' } }],
+      groups: { level_end: ['level_won', 'level_completed_lose', 'shop_opened'] },
+    },
+  });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  const vocab = new Map(r.vocabulary.map((v) => [v.event, v.events]));
+  const n = (f) => src.filter(f).length;
+  assert.equal(vocab.get('level_end'), n((x) => (x.e === 'level_completed' && ['win', 'lose'].includes(x.r)) || x.e === 'shop_opened'));
+  assert.deepEqual([vocab.get('level_won'), vocab.get('level_completed_lose'), vocab.get('shop_opened')], [undefined, undefined, undefined]);
+  // a name neither the source nor the split has is still refused
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', events: { split: [{ event: 'level_completed', cases: [{ name: 'level_lost', where: [{ property: 'result_of_event_data', op: 'eq', value: 'lose' }] }] }], groups: { g: ['level_lostt'] } } }), (e) => e.field === 'events.groups.g');
+});
+
+test('a sample of an event keeps a share of its rows, the same rows on every build, and every other event whole', opts, async (t) => {
+  if (skip(t)) return;
+  const src = (await wh.query('select event_name as e from fct_analytics_events')).rows;
+  const total = (name) => src.filter((x) => x.e === name).length;
+  const build = async (name) => {
+    const b = await engine.build_retentioneering_model({ name, source: 'events', sample: { events: { level_started: 0.5, first_launch: 1 } } });
+    const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+    assert.equal(r.status, 'done', JSON.stringify(r.error));
+    return r;
+  };
+  const [a, b] = [await build('ev_sample_a'), await build('ev_sample_b')];
+  const vocab = (r) => new Map(r.vocabulary.map((v) => [v.event, v.events]));
+  const kept = vocab(a).get('level_started');
+  assert.ok(kept > 0 && kept < total('level_started'), `a share of level_started is kept (${kept} of ${total('level_started')})`);
+  assert.equal(vocab(b).get('level_started'), kept, 'the same rows on a second build');
+  for (const [e, n] of vocab(a)) if (e !== 'level_started') assert.equal(n, total(e), `${e} is whole`);
+  assert.equal(a.events, src.length - total('level_started') + kept);
+  assert.deepEqual(a.sample.events, { level_started: 0.5 }, 'the summary says what was sampled (a share of 1 is no sample)');
+  // an event the source does not have is refused before anything runs
+  await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events', sample: { events: { no_such_event: 0.5 } } }), /no_such_event|invalid input/);
+});
+
+test('a time window scopes the eventstream on the partitioned source (in a timezone, across the UTC day), and a source that requires one refuses a build without it', opts, async (t) => {
+  if (skip(t)) return;
+  // 2026-01-02 in UTC+14 = [01-01 10:00, 01-02 10:00) UTC — partly on the previous UTC day
+  const inWindow = Number((await wh.query("select count(*) as n from fct_analytics_events where device_time >= timestamp '2026-01-01 10:00:00' and device_time < timestamp '2026-01-02 10:00:00'")).rows[0].n);
+  const b = await engine.build_retentioneering_model({ name: 'windowed', source: 'events', time_range: { start: '2026-01-02', end: '2026-01-02', timezone: 'Pacific/Kiritimati' } });
+  const r = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  assert.equal(r.events, inWindow);
+  assert.equal(inWindow, 39);
+  const saved = engine.catalog._requireTimeRangeAll;
+  engine.catalog._requireTimeRangeAll = true;
+  try {
+    await assert.rejects(engine.build_retentioneering_model({ name: 'x', source: 'events' }), (e) => e.field === 'time_range');
+  } finally { engine.catalog._requireTimeRangeAll = saved; }
+});

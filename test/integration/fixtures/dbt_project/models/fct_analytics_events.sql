@@ -10,6 +10,13 @@ select
     event_name,
     bundle_id,
     device_time,
+    -- the day the row is partitioned by, next to the event time (the production shape: the
+    -- warehouse prunes on this column, not on device_time). Partitioned by ARRIVAL: an event is
+    -- filed under the day it reached the warehouse, and the 01-01 10:00 hour of the shop arrived
+    -- three days late (sent without a connection) — the catalog's partition_late_days covers it.
+    cast(device_time as date)
+      + case when device_time >= timestamp '2026-01-01 10:00:00' and device_time < timestamp '2026-01-01 11:00:00' then 3 else 0 end
+                                                           as event_date,
     event_data,
     (event_data->>'level_id')::int                         as level_id_of_event_data,
     (event_data->>'result')                                as result_of_event_data,

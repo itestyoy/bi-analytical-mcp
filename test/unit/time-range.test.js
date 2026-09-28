@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { localToUtc, resolveTimeRange, timeRangeWarnings, isValidTimezone } from '../../src/time-range.js';
@@ -81,4 +81,16 @@ test('without require_time_range an unbounded pipeline is not rejected', async (
   await e.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'aggregate', group_by: ['event_name'], measures: [{ name: 'n', fn: 'count' }] } });
   const out = await e.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(out.kind, 'pipeline');
+});
+
+// Guard (input validation): partition_late_days is a whole number of days, next to a partition column.
+test('partition_late_days: a whole number of days is accepted, anything else is refused at catalog load', () => {
+  const CATALOG = new URL('../integration/fixtures/catalog.yml', import.meta.url).pathname;
+  const text = readFileSync(CATALOG, 'utf8');
+  const dir = mkdtempSync(join(tmpdir(), 'late-'));
+  const load = (value) => { const p = join(dir, `c${Math.random().toString(36).slice(2)}.yml`); writeFileSync(p, text.replace('partition_late_days: 3', `partition_late_days: ${value}`)); return loadCatalog(p); };
+  assert.equal(load(30).getModel('events').partition_late_days, 30);
+  assert.throws(() => load(-1), /partition_late_days/);
+  assert.throws(() => load(1.5), /partition_late_days/);
+  assert.throws(() => load('"thirty"'), /partition_late_days/);
 });

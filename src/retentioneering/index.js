@@ -15,11 +15,12 @@
 // untouched by it. Everything is deterministic: a hashed user sample, ordered rows, the library's
 // fixed seeds.
 
+import yaml from 'js-yaml';
 import { createDbt, formatDbtError } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, ANALYSIS_KINDS, OFFERED_OPS, NAME } from './schema.js';
+import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, sourceColumns, ANALYSIS_KINDS, OFFERED_OPS, NAME } from './schema.js';
 import { renderEventstream, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
 import { parseResultRows, summarize } from './results.js';
@@ -32,7 +33,7 @@ const QUERY = 'query_retentioneering_model';
 const DISPLAY = 'display_retentioneering_result';
 
 export const TOOL_DESCRIPTIONS = {
-  [BUILD]: 'Build the eventstream a path analysis reads: which events source, which time window, which events (kept, dropped, merged into groups), which user attributes to carry as segments, optional sessions and a deterministic user sample. It is built in SQL where the data lives and materialized, and returns a task_id at once; query_retentioneering_model({ task_id }) returns its summary — users, events, the event vocabulary with counts. Use it for questions about paths and sequences: what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are. Then run the analyses with query_retentioneering_model. For a metric over time use build_semantic_model; for a one-off table of numbers, build_pipeline_model.',
+  [BUILD]: 'Build the eventstream a path analysis reads: which events source, which time window, which events (kept, dropped, merged into groups, or split into new events by a parameter — ad_finished by is_error into ad_finished_failed / ad_finished_success), a filter on the source\'s own columns and event properties (an environment, an app) or on segments, what to carry as segments (a related model\'s attribute, a column of the source, an event property), optional sessions, and a deterministic sample — of users with all their events, or of the rows of an event so frequent it drowns the rest. It is built in SQL where the data lives and materialized, and returns a task_id at once; query_retentioneering_model({ task_id }) returns its summary — users, events, the event vocabulary with counts. Use it for questions about paths and sequences: what users do after an event, where they drop off, which transitions dominate, what kinds of paths there are. Then run the analyses with query_retentioneering_model. For a metric over time use build_semantic_model; for a one-off table of numbers, build_pipeline_model.',
   [QUERY]: 'Run retentioneering over a built eventstream, or read a task back. { context_id, preprocess?, analyses: [...] } starts ONE task that computes every listed analysis together in the warehouse (one run for all of them, so list what the question needs in one call). Each analysis is a library method with its own parameters, under the library\'s names: transition_graph (which event follows which, every weight at once), step_matrix / step_sankey (the share of paths at each event step by step, optionally around an anchor), funnel, cluster_analysis (groups of similar paths), segment_overview, conversion_rate, metric_distribution, path_metrics, describe; diff compares two segment levels. preprocess is the library\'s own op model ({ type, ...params }: filter_paths, collapse_events, truncate_paths, split_sessions, add_segment, add_clusters, …), for the whole call or one analysis. It returns a task_id at once. { task_id } (or task_ids) waits up to 30s and returns each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table — or, with detail: "full", every record; { task_id, cancel: true } stops it. Event names are the eventstream\'s own (after grouping).',
   [DISPLAY]: 'Draw one analysis of a finished query_retentioneering_model task as a card for the person — the transition graph, a step matrix heatmap, a step sankey, a funnel, the clusters, a segment overview, a distribution\'s histogram, or a diff\'s heatmaps — in hosts that render MCP Apps. Other analyses (describe, conversion_rate, path_metrics) have no card: answer them in words from the read. Once per analysis: a second call for the same one is refused. Read the task first (query_retentioneering_model({ task_id })) to know what it found; draw the analysis the person should see before summarising it.',
 };
@@ -157,30 +158,69 @@ function relationshipTo(catalog, source, model, via) {
   return shared[0];
 }
 
-function validateBuild(engine, input) {
+function validateBuild(engine, input, physical = null) {
   const c = engine.catalog;
   const { source } = input;
   if (!userKeyColumn(c, source)) throw new ToolError(`'${source}' names no single user key toward the users model, so its events have no path owner`, { stage: 'validate', field: 'source' });
   checkEvents(c, source, input.events?.include, 'events.include');
   checkEvents(c, source, input.events?.exclude, 'events.exclude');
+  // a group merges events of the source, or events events.split makes: the names it gives, and for
+  // a split by value, <event>_<value> (the value is known only from the data)
+  const rules = input.events?.split || [];
+  const splitNames = new Set(rules.flatMap((rule) => [...Object.values(rule.names || {}), ...(rule.cases || []).map((cs) => cs.name), ...(rule.else ? [rule.else] : [])]));
+  const byValue = rules.filter((rule) => rule.by).map((rule) => `${rule.event}_`);
+  const madeBySplit = (e) => splitNames.has(e) || byValue.some((p) => e.startsWith(p));
   for (const [g, evs] of Object.entries(input.events?.groups || {})) {
     if (!new RegExp(NAME).test(g)) throw new ToolError(`group name '${g}' must be lowercase snake_case`, { stage: 'validate', field: 'events.groups' });
-    checkEvents(c, source, evs, `events.groups.${g}`);
+    checkEvents(c, source, evs.filter((e) => !madeBySplit(e)), `events.groups.${g}`);
   }
+  checkEvents(c, source, Object.keys(input.sample?.events || {}).filter((e) => !madeBySplit(e)), 'sample.events');
   const reserved = new Set(Object.values(ES_COLUMNS));
+  const own = sourceColumns(c, source, physical);
+  const props = c.scalarEventProps(source);
+  // a parameter or condition names a column of the source or one of its scalar event properties
+  const checkRef = (ref, field) => {
+    if (ref.property !== undefined && !props.includes(ref.property)) throw new ToolError(`'${ref.property}' is not a scalar event property of '${source}'${suggest(ref.property, props)}`, { stage: 'validate', field });
+    if (ref.column !== undefined && !own.includes(ref.column)) throw new ToolError(`'${ref.column}' is not a column of '${source}'${suggest(ref.column, own)}`, { stage: 'validate', field });
+  };
+  (input.events?.split || []).forEach((rule, i) => {
+    checkEvents(c, source, [rule.event], `events.split.${i}.event`);
+    if (rule.by) checkRef(rule.by, `events.split.${i}.by`);
+    for (const cs of rule.cases || []) cs.where.forEach((w) => checkRef(w, `events.split.${i}.cases.where`));
+  });
   const segNames = [];
   const segments = (input.segments || []).map((seg) => {
-    const dims = c.modelDimensionColumns(seg.model);
-    if (!dims.includes(seg.attribute)) throw new ToolError(`'${seg.attribute}' is not an attribute of '${seg.model}'${suggest(seg.attribute, dims)}`, { stage: 'validate', field: 'segments.attribute' });
-    const name = seg.as || seg.attribute;
+    let name;
+    let out;
+    if (seg.column !== undefined) {
+      // a column of the source itself: no join
+      if (!own.includes(seg.column)) throw new ToolError(`'${seg.column}' is not a column of '${source}'${suggest(seg.column, own)} (its columns: ${own.join(', ') || 'none declared'})`, { stage: 'validate', field: 'segments.column' });
+      name = seg.as || seg.column;
+      out = { column: seg.column, name };
+    } else if (seg.property !== undefined) {
+      if (!props.includes(seg.property)) throw new ToolError(`'${seg.property}' is not a scalar event property of '${source}'${suggest(seg.property, props)}`, { stage: 'validate', field: 'segments.property' });
+      name = seg.as || seg.property;
+      out = { property: seg.property, name };
+    } else {
+      const dims = c.modelDimensionColumns(seg.model);
+      if (!dims.includes(seg.attribute)) throw new ToolError(`'${seg.attribute}' is not an attribute of '${seg.model}'${suggest(seg.attribute, dims)}`, { stage: 'validate', field: 'segments.attribute' });
+      name = seg.as || seg.attribute;
+      out = { ...seg, name, via: relationshipTo(c, source, seg.model, seg.via) };
+    }
     if (reserved.has(name) || segNames.includes(name)) throw new ToolError(`segment name '${name}' is taken — give it another with as`, { stage: 'validate', field: 'segments.as' });
     segNames.push(name);
-    return { ...seg, via: relationshipTo(c, source, seg.model, seg.via) };
+    return out;
   });
   for (const w of input.where || []) {
-    if (!segNames.includes(w.column)) throw new ToolError(`where filters on a segment column — '${w.column}' is not one (${segNames.join(', ') || 'none declared'})`, { stage: 'validate', field: 'where.column' });
+    const field = w.property !== undefined ? 'where.property' : 'where.column';
+    if (w.property !== undefined) {
+      if (!props.includes(w.property)) throw new ToolError(`'${w.property}' is not a scalar event property of '${source}'${suggest(w.property, props)}`, { stage: 'validate', field });
+    } else if (!segNames.includes(w.column) && !own.includes(w.column)) {
+      const known = [...own, ...segNames];
+      throw new ToolError(`where filters on a column of '${source}' or a declared segment — '${w.column}' is neither${suggest(w.column, known)} (columns: ${own.join(', ') || 'none'}; segments: ${segNames.join(', ') || 'none'})`, { stage: 'validate', field });
+    }
     const needsValue = !['is_null', 'is_not_null'].includes(w.op);
-    if (needsValue && w.value === undefined) throw new ToolError(`where ${w.op} on '${w.column}' needs a value`, { stage: 'validate', field: 'where.value' });
+    if (needsValue && w.value === undefined) throw new ToolError(`where ${w.op} on '${w.column ?? w.property}' needs a value`, { stage: 'validate', field: 'where.value' });
     if (['in', 'not_in'].includes(w.op) && !Array.isArray(w.value)) throw new ToolError(`where ${w.op} takes an array value`, { stage: 'validate', field: 'where.value' });
   }
   return { ...input, segments };
@@ -199,12 +239,18 @@ function contextFor(engine, input) {
 
 async function build(engine, feature, input) {
   engine._validate(BUILD, input);
-  const spec = validateBuild(engine, input);
+  // the table's real columns, read once: what a segment or a filter on the source itself may name
+  const physicalCols = await engine._physicalCols(input.source);
+  const spec = validateBuild(engine, input, physicalCols);
   const ctx = contextFor(engine, input);
   const state = ctx.state.retentioneering;
   const modelName = `rete_es_${spec.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   const timeConditions = engine._timeRangeConditions(spec.source, spec.time_range);
-  const physicalCols = await engine._physicalCols(spec.source);
+  // the catalog's cost guardrail, as a pipeline applies it: an eventstream over the whole history
+  // of a source that requires a window would scan every partition
+  if (!timeConditions && engine.catalog.requireTimeRangeFor(spec.source)) {
+    throw new ToolError(`source '${spec.source}' requires a bounded time window (require_time_range): pass time_range { start, end } — the eventstream is scanned only within it`, { stage: 'validate', field: 'time_range' });
+  }
   let rendered;
   try {
     rendered = renderEventstream(engine.catalog, spec, { modelName, physicalCols, timeConditions });
@@ -213,7 +259,7 @@ async function build(engine, feature, input) {
   }
   state.eventstreams[spec.name] = { model: modelName, source: spec.source, spec: input, columns: rendered.columns, segments: rendered.segments, sessions: !!spec.sessions, summary: null };
   if (input.description) state.description = input.description;
-  engine.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='table') }}\n${rendered.sql}\n`);
+  engine.ctxs.writeModel(ctx.id, modelName, `${engine._modelConfigLine('table')}\n${rendered.sql}\n`);
   engine.ctxs.touch(ctx.id);
   const id = engine._startTask(ctx, BUILD, async () => {
     const dir = engine.ctxs.dir(ctx.id);
@@ -248,7 +294,28 @@ async function summarizeEventstream(runner, dir, model, rendered, spec) {
     period: { first_event: t.first_event ?? null, last_event: t.last_event ?? null },
     segments: rendered.segments,
     vocabulary: vocab.rows.map((r) => ({ event: r.event, events: Number(r.events), users: Number(r.users) })),
-    ...(spec.sample?.share != null && spec.sample.share < 1 ? { sample: { share: spec.sample.share, note: 'users kept by a hash of their key — the same users on every build' } } : {}),
+    ...(sampleOf(spec) ? { sample: sampleOf(spec) } : {}),
+  };
+}
+
+/** The events kept at a share of their rows (a share of 1 keeps them whole, so it is not a sample). */
+function sampledEvents(spec) {
+  const kept = Object.entries(spec?.sample?.events || {}).filter(([, v]) => v < 1);
+  return kept.length ? Object.fromEntries(kept) : null;
+}
+
+/** What the build's sample kept, said where the counts are read. */
+function sampleOf(spec) {
+  const users = spec.sample?.share != null && spec.sample.share < 1 ? spec.sample.share : null;
+  const events = sampledEvents(spec);
+  if (users == null && !events) return null;
+  return {
+    ...(users != null ? { share: users } : {}),
+    ...(events ? { events } : {}),
+    note: [
+      users != null ? 'users kept by a hash of their key, with all their events — the same users on every build' : null,
+      events ? `rows of ${Object.keys(events).join(', ')} kept at the share given, by a hash of the row: their counts here are that share of the real ones, and transitions into and out of them are not exact` : null,
+    ].filter(Boolean).join('; '),
   };
 }
 
@@ -365,6 +432,8 @@ async function query(engine, feature, input) {
   // which eventstream a result table was computed from — carried, so a later read never takes it apart
   (state.results ||= {})[modelName] = es.name;
   engine.ctxs.writeFile(ctx.id, `${modelName}.py`, compileAnalysisModel({ inputModel: es.model, spec, config: analysisModelConfig(engine.catalog, feature.operatorConfig) }));
+  const expiry = engine._expiryConfig('python');
+  if (Object.keys(expiry).length) engine.ctxs.writeFile(ctx.id, `${modelName}.yml`, yaml.dump({ version: 2, models: [{ name: modelName, config: expiry }] }, { lineWidth: 200, noRefs: true }));
   engine.ctxs.touch(ctx.id);
   const order = analyses.map((a) => a.id);
   const id = engine._startTask(ctx, QUERY, async () => {
@@ -466,7 +535,9 @@ async function display(engine, feature, input) {
   // what the numbers are about — who, when, how much of it — shown on the card with them
   const scope = es?.summary ? {
     users: es.summary.users, events: es.summary.events, ...(es.summary.sessions != null ? { sessions: es.summary.sessions } : {}),
-    period: es.summary.period, ...(es.spec?.sample?.share != null && es.spec.sample.share < 1 ? { sample: es.spec.sample.share } : {}),
+    period: es.summary.period,
+    ...(es.spec?.sample?.share != null && es.spec.sample.share < 1 ? { sample: es.spec.sample.share } : {}),
+    ...(sampledEvents(es.spec) ? { sampled_events: sampledEvents(es.spec) } : {}),
   } : null;
   const drawn = { ok: true, task_id: input.task_id, analysis: input.analysis, eventstream: out.eventstream, ...(scope ? { scope } : {}), ...(input.edge_weight ? { edge_weight: input.edge_weight } : {}), result };
   const vm = retentioneeringViewModel(drawn, input);

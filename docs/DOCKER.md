@@ -116,6 +116,18 @@ analytics:
   session table that lived in the process: after a restart, clients got errors for a session id the
   new process had never issued until the connector was re-added by hand.)
 
+## Table expiration on BigQuery
+
+Every table the server builds for a task — a pipeline's models, a stored query result (`qr_*`), a
+path-analysis eventstream and its analyses, a python model — expires `MCP_TABLE_EXPIRATION_DAYS`
+days after it is (re)built (default **30**; `0` keeps them), so the tables nobody reads again do not
+pile up in the dataset. A SQL model carries dbt-bigquery's `hours_to_expiration`; a python model
+writes its table through BigFrames, which does not apply that option, so its YAML carries a
+`post_hook` that sets `expiration_timestamp` after the write. Each build is a `create or replace`, so
+the clock restarts on every rebuild. Reading a task whose table has expired fails with the
+warehouse's "not found" — run the task again. The shared `metricflow_time_spine` is not given an expiry: it is rewritten in place,
+not per task. DuckDB has no table expiry, so nothing is set there.
+
 ## Path analysis: the retentioneering feature (off unless turned on)
 
 `MCP_RETENTIONEERING=on` adds a side of its own — three tools, a view, a guide and a skill — for
@@ -126,6 +138,14 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   time window, events kept / dropped / merged into groups (optionally the most frequent N names with
   the rest as `other`), user attributes carried as segments through the declared relationship, optional
   sessions split at a gap, and a user sample by a hash of the key — the same users on every build).
+  A `where` or a segment may also name the source's own columns (any real column, e.g. an
+  environment) and its scalar event properties; `events.split` makes events out of an event's
+  parameters (by a value, or by conditions), and a group may merge those too. The window bounds the
+  partition column as well when the catalog declares one next to the time axis (the days the window
+  touches, and `partition_late_days` more for events filed under the day they arrived), and a source whose catalog sets `require_time_range` refuses a build without a window —
+  as a pipeline does. `sample` makes it smaller, deterministically: `share` keeps a share of users
+  with their whole paths; `events` keeps a share of the rows of the named events (for one that drowns
+  the rest), whose counts and surrounding transitions are then approximate.
   It is built in SQL where the data lives and materialized; the call returns a task.
 - **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, preprocess?, analyses: [...] }`
   runs every listed analysis — each a library method with its own parameters under the library's

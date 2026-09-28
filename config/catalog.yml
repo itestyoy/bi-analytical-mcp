@@ -72,6 +72,12 @@ models:
           # The physical partition column — queries MUST constrain it (or device_time)
           # or the warehouse scans the whole fact. Surfaced as a static cost hint.
           partition_column: event_date
+          # event_date is the day the event ARRIVED (the day of event_timestamp), while device_time
+          # is when it happened on the device: the device clock, unless it is more than 30 days
+          # before arrival (then the arrival time), and never after arrival or now. An event is
+          # therefore filed up to 31 days after its own day, so a window on device_time reads the
+          # partitions of its days and the 31 after them.
+          partition_late_days: 31
           # Business meaning of the key events — which event marks an install, a return
           # visit, a purchase — so retention/conversion metrics anchor on the RIGHT events.
           event_semantics:
@@ -128,6 +134,17 @@ models:
             - wheel_spin
     columns:
       # ---- role columns ---------------------------------------------------
+      - name: environment
+        data_type: string
+        description: >
+          Which event stream the row belongs to: 'prod' (real players of the production apps) or
+          'dev' (test builds, internal testers, QA devices). Present on every event. Filter to
+          exactly one value in every query — dev rows are not players, revenue or retention, and
+          mixing the two contaminates any figure.
+        config:
+          meta:
+            mcp:
+              dimension: {}   # groupable and filterable on every event, in a pipeline and in path analysis
       - name: player_id_of_internal
         data_type: integer
         description: >

@@ -155,7 +155,12 @@ export async function makeEngine(opts = {}) {
     profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir,
     log: (m) => console.error(`[mcp] ${new Date().toISOString()} ${m}`),
   });
-  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, features, featureStatus });
+  // MCP_TABLE_EXPIRATION_DAYS: the tables built for tasks expire this many days after they are built
+  // (default 30; 0 keeps them) — the warehouse does not collect what nobody reads again
+  const rawExpiry = process.env.MCP_TABLE_EXPIRATION_DAYS;
+  const tableExpirationDays = rawExpiry == null || rawExpiry === '' ? 30 : Number(rawExpiry);
+  if (!Number.isInteger(tableExpirationDays) || tableExpirationDays < 0) throw new Error(`MCP_TABLE_EXPIRATION_DAYS must be a whole number of days (0 keeps the tables), got '${rawExpiry}'`);
+  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, tableExpirationDays, features, featureStatus });
   // Persistence surfaces as semantic_index({ status }).value_index.persisted. If a DB path was
   // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
   // loudly, because otherwise the index silently rebuilds from scratch on every restart.

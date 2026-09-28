@@ -251,18 +251,18 @@ test('view model: a funnel from a row per step carries each step\'s share of the
   const m = buildViewModel('build_pipeline_model', { status: 'ready', table: 'pipe_tutorial', columns: [{ name: 'step' }, { name: 'users' }], rows });
   assert.equal(m.kind, 'funnel');
   assert.equal(m.measure, 'users');
-  assert.deepEqual(m.steps.map((x) => [x.label, x.value]), rows.map((r) => [r.step, r.users]));
-  assert.deepEqual(m.steps.map((x) => x.of_first), [1, 0.74, 0.51, 0.39]);
-  assert.deepEqual(m.steps.map((x) => x.of_previous), [null, 0.74, 5100 / 7400, 3900 / 5100]);
-  assert.equal(m.overall, 0.39);
-  assert.equal(m.biggest_drop, 2, '7400 → 5100 keeps the smallest share');
+  assert.deepEqual(m.funnels[0].steps.map((x) => [x.label, x.value]), rows.map((r) => [r.step, r.users]));
+  assert.deepEqual(m.funnels[0].steps.map((x) => x.of_first), [1, 0.74, 0.51, 0.39]);
+  assert.deepEqual(m.funnels[0].steps.map((x) => x.of_parent), [null, 0.74, 5100 / 7400, 3900 / 5100]);
+  assert.equal(m.funnels[0].overall, 0.39);
+  assert.equal(m.funnels[0].biggest_drop, 2, '7400 → 5100 keeps the smallest share');
 });
 
 test('view model: a funnel from one row of step counts keeps the metrics\' names and skips the ratios', () => {
   const m = buildViewModel('query_semantic_model', { columns: [{ name: 'tut_funnel_step1' }, { name: 'tut_funnel_step2' }, { name: 'tut_funnel_step3' }, { name: 'tut_funnel_conv_1_2' }], rows: [{ tut_funnel_step1: 1000, tut_funnel_step2: 700, tut_funnel_step3: 420, tut_funnel_conv_1_2: 0.7 }] });
   assert.equal(m.kind, 'funnel');
-  assert.deepEqual(m.steps.map((x) => [x.label, x.value]), [['tut_funnel_step1', 1000], ['tut_funnel_step2', 700], ['tut_funnel_step3', 420]]);
-  assert.equal(m.overall, 0.42);
+  assert.deepEqual(m.funnels[0].steps.map((x) => [x.label, x.value]), [['tut_funnel_step1', 1000], ['tut_funnel_step2', 700], ['tut_funnel_step3', 420]]);
+  assert.equal(m.funnels[0].overall, 0.42);
 });
 
 test('view model: counts that merely decrease, or steps that grow, are not a funnel', () => {
@@ -277,8 +277,8 @@ test('view model: a DECLARED funnel draws the declared steps with their labels, 
   const m = buildViewModel('build_pipeline_model', { columns: Object.keys(row).map((name) => ({ name })), rows: [row], display: { kind: 'funnel', title: 'Onboarding', steps: [{ column: 'installs', label: 'Install' }, { column: 'first_level', label: 'Level 1' }, { column: 'day2' }] } });
   assert.equal(m.kind, 'funnel');
   assert.equal(m.title, 'Onboarding');
-  assert.deepEqual(m.steps.map((x) => [x.label, x.value]), [['Install', 1000], ['Level 1', 640], ['day2', 380]]);
-  assert.equal(m.overall, 0.38);
+  assert.deepEqual(m.funnels[0].steps.map((x) => [x.label, x.value]), [['Install', 1000], ['Level 1', 640], ['day2', 380]]);
+  assert.equal(m.funnels[0].overall, 0.38);
 });
 
 test('view model: a DECLARED line over a non-time axis keeps the row order; series_column splits one value into lines', () => {
@@ -467,4 +467,26 @@ test('view model: a result with no card is none, with its reason', () => {
     assert.equal(m.kind, 'none', JSON.stringify(result).slice(0, 80));
     assert.equal(m.reason, reason);
   }
+});
+
+// A funnel with OUTCOMES, one per segment: each step a share of its parent, outcomes of a step under
+// it, the drop looked for among continuations, the overall along the main line.
+test('a funnel with outcomes, one per ad format: shares of the parent, the main line, the drop among continuations', () => {
+  const steps = [['attempts', null], ['loaded', 'attempts'], ['load_failed', 'attempts'], ['started', 'loaded'], ['shown', 'started'], ['show_failed', 'started']];
+  const counts = { interstitial: [918, 441, 477, 65, 52, 13], rewarded: [68, 42, 26, 20, 11, 9] };
+  const rows = Object.entries(counts).flatMap(([format, ns]) => steps.map(([step, parent], i) => ({ format, step, parent, n: ns[i] })));
+  const display = { kind: 'funnel', series_column: 'format', steps: { label_column: 'step', value_column: 'n', parent_column: 'parent' } };
+  const m = buildViewModel('build_pipeline_model', { columns: [{ name: 'format' }, { name: 'step' }, { name: 'parent' }, { name: 'n' }], rows, display });
+  assert.equal(m.kind, 'funnel');
+  assert.deepEqual(m.funnels.map((f) => f.series), ['interstitial', 'rewarded']);
+  const [inter] = m.funnels;
+  assert.deepEqual(inter.steps.map((st) => st.of_parent), [null, 441 / 918, 477 / 918, 65 / 441, 52 / 65, 13 / 65]);
+  assert.deepEqual(inter.steps.map((st) => st.depth), [0, 1, 1, 1, 2, 2], 'outcomes under their step; a single continuation on its level');
+  assert.deepEqual(inter.steps.map((st) => st.outcome), [false, true, true, false, true, true]);
+  assert.equal(inter.biggest_drop, 3, 'loaded → started is the continuation that lost the most (a failed load is an outcome, not a drop)');
+  assert.equal(inter.overall, 52 / 918, 'the main line: attempts → loaded → started → shown');
+  // a parent that is not a step before it is refused
+  assert.equal(s.engine._displayProblems({ kind: 'funnel', steps: [{ column: 'a' }, { column: 'b', parent: 'c' }, { column: 'c' }] }, ['a', 'b', 'c'], [{ a: 3, b: 2, c: 1 }]).length, 1);
+  assert.equal(s.engine._displayProblems(display, ['format', 'step', 'parent', 'n'], [...rows, { format: 'banner', step: 'shown', parent: 'nope', n: 1 }]).length, 1);
+  assert.equal(s.engine._displayProblems(display, ['format', 'step', 'parent', 'n'], rows).length, 0);
 });

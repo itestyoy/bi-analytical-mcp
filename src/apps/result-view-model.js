@@ -222,19 +222,39 @@ export function buildViewModel(toolName, result, toolInput) {
     // row per step (a pipeline's step × users).
     const STEP_NAME = /step|stage|funnel|reached|level/i;
     const nonIncreasing = (vs) => vs.length >= 2 && vs[0] > 0 && vs.every((v, i) => v !== null && v >= 0 && (i === 0 || v <= vs[i - 1]));
-    const funnelOf = (labels, values, measure) => {
+    // ONE funnel: its steps in order, each a share of its PARENT step — the one before it, or the one
+    // declared (an outcome of an earlier step: a successful and a failed load, both of the attempts).
+    // Outcomes of one step sit under it; a single continuation stays on its parent's level. The
+    // biggest drop is looked for among continuations (a failed outcome is an outcome, not a drop), and
+    // the overall conversion follows the main line: the first step, then each step's first child.
+    const funnelSteps = (labels, values, parents = null) => {
       const first = values[0];
-      const steps = labels.map((label, i) => ({
-        label,
-        value: values[i],
-        of_first: values[i] / first,
-        of_previous: i === 0 ? null : values[i - 1] > 0 ? values[i] / values[i - 1] : null,
-      }));
-      // the step that loses the largest share of the users who reached the one before it
+      const parentOf = labels.map((_, i) => (i === 0 ? null : Number.isInteger(parents?.[i]) ? parents[i] : i - 1));
+      const children = labels.map((_, i) => parentOf.filter((p) => p === i).length);
+      const depth = [];
+      const steps = labels.map((label, i) => {
+        const p = parentOf[i];
+        depth[i] = p === null ? 0 : depth[p] + (children[p] > 1 ? 1 : 0);
+        return {
+          label,
+          value: values[i],
+          of_first: values[i] / first,
+          parent: p,
+          of_parent: p === null ? null : values[p] > 0 ? values[i] / values[p] : null,
+          depth: depth[i],
+          outcome: p !== null && children[p] > 1,
+        };
+      });
       let worst = null;
-      for (let i = 1; i < steps.length; i++) if (steps[i].of_previous !== null && (worst === null || steps[i].of_previous < steps[worst].of_previous)) worst = i;
-      return { kind: 'funnel', title: 'Funnel', measure, steps, overall: values[values.length - 1] / first, biggest_drop: worst };
+      for (let i = 1; i < steps.length; i++) {
+        const st = steps[i];
+        if (!st.outcome && st.of_parent !== null && (worst === null || st.of_parent < steps[worst].of_parent)) worst = i;
+      }
+      let end = 0;
+      for (let next = parentOf.indexOf(end); next > 0; next = parentOf.indexOf(end)) end = next;
+      return { steps, overall: values[end] / first, overall_to: end, biggest_drop: worst };
     };
+    const funnelOf = (funnels, measure) => ({ kind: 'funnel', title: 'Funnel', measure, funnels });
     const page = isObj(result.page) ? { limit: num(result.page.limit), offset: num(result.page.offset) ?? 0, has_more: !!result.page.has_more } : null;
     // what a chart leaves out is said by numbers the card only prints: how many series it kept and
     // how many it did not draw (by size, or by column order), how many categories there were
@@ -282,13 +302,33 @@ export function buildViewModel(toolName, result, toolInput) {
     if (d && rows.length) {
       const declaredTitle = typeof d.title === 'string' && d.title.trim() ? d.title.trim() : null;
       if (d.kind === 'funnel') {
-        // steps as COLUMNS of one row, or as ROWS ({ label_column, value_column })
+        // steps as COLUMNS of one row (a row per series), or as ROWS ({ label_column, value_column });
+        // with series_column, one funnel per value of it, side by side, on the same steps
         const steps = Array.isArray(d.steps) ? d.steps.filter((st) => isObj(st) && at(st.column) >= 0) : null;
         const byRow = isObj(d.steps) && at(d.steps.label_column) >= 0 && at(d.steps.value_column) >= 0 ? d.steps : null;
-        const labels = steps ? steps.map((st) => (typeof st.label === 'string' && st.label ? st.label : st.column)) : byRow ? rows.map((r) => label(r[at(byRow.label_column)])) : [];
-        const values = steps ? steps.map((st) => num(rows[0][at(st.column)])) : byRow ? rows.map((r) => num(r[at(byRow.value_column)])) : [];
-        const drawable = labels.length >= 2 && values[0] > 0 && values.every((v) => v !== null && v >= 0);
-        if (drawable) return { ...funnelOf(labels, values, byRow ? byRow.value_column : null), ...(declaredTitle ? { title: declaredTitle } : {}) };
+        const si = d.series_column ? at(d.series_column) : -1;
+        const groups = [];
+        if (si >= 0) {
+          const by = new Map();
+          for (const r of rows) { const k = label(r[si]); if (!by.has(k)) { by.set(k, []); groups.push([k, by.get(k)]); } by.get(k).push(r); }
+        } else groups.push([null, rows]);
+        const funnels = [];
+        for (const [series, part] of groups) {
+          let labels = []; let values = []; let parents = null;
+          if (steps) {
+            labels = steps.map((st) => (typeof st.label === 'string' && st.label ? st.label : st.column));
+            values = steps.map((st) => num(part[0][at(st.column)]));
+            parents = steps.map((st) => (typeof st.parent === 'string' ? steps.findIndex((x) => x.column === st.parent) : null)).map((p, i) => (p >= 0 && p < i ? p : null));
+          } else if (byRow) {
+            labels = part.map((r) => label(r[at(byRow.label_column)]));
+            values = part.map((r) => num(r[at(byRow.value_column)]));
+            const pi = byRow.parent_column ? at(byRow.parent_column) : -1;
+            if (pi >= 0) parents = part.map((r, i) => { const p = r[pi] === null ? -1 : labels.indexOf(label(r[pi])); return p >= 0 && p < i ? p : null; });
+          }
+          const drawable = labels.length >= 2 && values[0] > 0 && values.every((v) => v !== null && v >= 0);
+          if (drawable) funnels.push({ series, ...funnelSteps(labels, values, parents) });
+        }
+        if (funnels.length) return { ...funnelOf(funnels, byRow ? byRow.value_column : null), ...(si >= 0 ? { series_column: d.series_column } : {}), ...(declaredTitle ? { title: declaredTitle } : {}) };
       }
       if ((d.kind === 'line' || d.kind === 'area') && at(d.x) >= 0 && Array.isArray(d.y) && d.y.length && d.y.every((y) => at(y) >= 0)) {
         const xi = at(d.x);
@@ -461,13 +501,13 @@ export function buildViewModel(toolName, result, toolInput) {
       // the column names are the steps' names, shown as they are (they are the caller's metrics)
       const stepLike = counts.length >= 2 && counts.every((i) => STEP_NAME.test(names[i]));
       const values = counts.map((i) => num(rows[0][i]));
-      if (stepLike && nonIncreasing(values)) return funnelOf(counts.map((i) => names[i]), values, null);
+      if (stepLike && nonIncreasing(values)) return funnelOf([{ series: null, ...funnelSteps(counts.map((i) => names[i]), values) }], null);
     }
     if (timeIdx < 0 && catIdx.length === 1 && numIdx.length >= 1 && rows.length >= 2 && rows.length <= 20) {
       const labels = rows.map((r) => (r[catIdx[0]] === null ? '∅' : String(r[catIdx[0]])));
       const values = rows.map((r) => num(r[numIdx[0]]));
       const stepLike = STEP_NAME.test(names[catIdx[0]]) || /funnel/i.test(String(result.table || '')) || labels.every((l) => /^\s*\d+\s*[._:)\-\s]/.test(l));
-      if (stepLike && nonIncreasing(values)) return funnelOf(labels, values, names[numIdx[0]]);
+      if (stepLike && nonIncreasing(values)) return funnelOf([{ series: null, ...funnelSteps(labels, values) }], names[numIdx[0]]);
     }
 
     let chart = null;

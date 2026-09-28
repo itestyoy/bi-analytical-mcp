@@ -3886,7 +3886,7 @@ export class Engine {
     const ys = display.y === undefined ? [] : [].concat(display.y);
     const stepColumns = Array.isArray(display.steps); // steps as columns of one row, or { label_column, value_column } over a row per step
     const named = display.kind === 'funnel'
-      ? (stepColumns ? display.steps.map((st) => st.column) : [display.steps?.label_column, display.steps?.value_column])
+      ? [...(stepColumns ? display.steps.flatMap((st) => [st.column, st.parent]) : [display.steps?.label_column, display.steps?.value_column, display.steps?.parent_column]), display.series_column]
       : display.kind === 'pie' ? [display.label_column, display.value_column]
         : display.kind === 'kpi' ? [display.x, ...(display.values || []).flatMap((v) => [v.column, v.previous_column])]
           : display.kind === 'sankey' ? [display.source_column, display.target_column, display.value_column]
@@ -3896,7 +3896,35 @@ export class Engine {
     named.push(...drillLevels);
     const problems = [...new Set(named.filter((c) => c && !have.has(c)))].map((c) => `'${c}' is not a column of this result`);
     if (display.kind === 'funnel' && stepColumns && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
-    if (display.kind === 'funnel' && stepColumns && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, or declare steps: { label_column, value_column } for a row per step`);
+    if (display.kind === 'funnel' && stepColumns && !display.series_column && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, give series_column for a funnel per row, or declare steps: { label_column, value_column } for a row per step`);
+    if (display.kind === 'funnel' && stepColumns) {
+      // a step's parent is a step listed BEFORE it
+      display.steps.forEach((st, i) => {
+        if (st.parent === undefined) return;
+        const p = display.steps.findIndex((x) => x.column === st.parent);
+        if (p < 0 || p >= i) problems.push(`the parent of step '${st.column}' is '${st.parent}', which is not a step listed before it`);
+      });
+    }
+    const pc = display.kind === 'funnel' && !stepColumns ? display.steps?.parent_column : null;
+    if (pc && Array.isArray(rows) && have.has(pc) && have.has(display.steps.label_column)) {
+      // each row's parent names a step (a row) before it, within its own funnel
+      const seen = new Map();
+      for (const r of rows) {
+        const key = display.series_column ? String(r?.[display.series_column]) : '';
+        const before = seen.get(key) || new Set();
+        const parent = r?.[pc];
+        if (parent !== null && parent !== undefined && parent !== '' && !before.has(String(parent))) {
+          problems.push(`the parent of step '${r?.[display.steps.label_column]}' is '${parent}', which is not a step before it${display.series_column ? ` in its funnel (${key})` : ''}`);
+          break;
+        }
+        before.add(String(r?.[display.steps.label_column]));
+        seen.set(key, before);
+      }
+    }
+    if (display.kind === 'funnel' && display.series_column && Array.isArray(rows) && have.has(display.series_column)) {
+      const series = new Set(rows.map((r) => String(r?.[display.series_column])));
+      if (series.size > 8) problems.push(`${series.size} funnels side by side are too many to compare — keep the 8 that matter in the query (the rest as "Other")`);
+    }
     if (display.series_column && ys.length > 1) problems.push(`series_column splits ONE y column into a ${display.kind === 'bar' ? 'bar' : display.kind === 'area' ? 'band' : 'line'} per value — declare a single y with it`);
     if (display.kind === 'pivot' && new Set((display.levels || []).map((l) => l.column)).size !== (display.levels || []).length) problems.push('a level is listed twice');
     // a drill level is a dimension the chart does not already draw

@@ -1209,24 +1209,27 @@ function experimentTable({ model, confidenceLabel, verdictBadge, value, size, fm
 
 // ── funnel ────────────────────────────────────────────────────────────────────────────────────
 //
-// One card: the overall conversion as the headline, then the steps in order — each with its count,
-// its share of the first step and a bar of that share; between two steps, the share that carried
-// on, and the step that lost the most is marked.
+// A card per funnel (one, or one per segment side by side on the same steps): the overall
+// conversion along its main line as the headline, then the steps in order — each with its count,
+// its share of the first step and a bar of that share. Between a step and its parent, the share of
+// the parent it holds: "continued" for the next step of the line, "of <parent>" for an outcome,
+// which sits under its parent; the continuation that lost the most is marked.
 
-function renderFunnel(model) {
-  const n = model.steps.length;
-  const first = model.steps[0];
-  const last = model.steps[n - 1];
-  setDescription(badge(`${n} steps`, 'secondary'), model.measure ? badge(model.measure, 'outline') : null);
-
+function funnelCard(model, f) {
+  const n = f.steps.length;
+  const first = f.steps[0];
+  const end = f.steps[f.overall_to];
   const list = el('ol', 'funnel');
-  model.steps.forEach((step, i) => {
-    const worst = i === model.biggest_drop;
-    const item = el('li', `funnel-step${worst ? ' funnel-step-worst' : ''}`);
-    if (i > 0) {
+  f.steps.forEach((step, i) => {
+    const worst = i === f.biggest_drop;
+    const item = el('li', `funnel-step${worst ? ' funnel-step-worst' : ''}${step.outcome ? ' funnel-step-outcome' : ''}`);
+    item.style.setProperty('--funnel-depth', String(Math.min(step.depth, 4)));
+    if (step.parent !== null) {
       const link = el('div', 'funnel-link');
-      link.append(icon('arrow-down'), el('span', null, `${formatShare(step.of_previous)} continued`));
-      if (worst) link.append(badge(`Biggest drop · −${formatShare(1 - step.of_previous)}`, 'destructive'));
+      const parent = f.steps[step.parent];
+      const share = formatShare(step.of_parent);
+      link.append(icon(step.outcome ? 'corner-down-right' : 'arrow-down'), el('span', null, step.outcome || step.parent !== i - 1 ? `${share} of ${parent.label}` : `${share} continued`));
+      if (worst) link.append(badge(`Biggest drop · −${formatShare(1 - step.of_parent)}`, 'destructive'));
       item.append(link);
     }
     const head = el('div', 'funnel-head');
@@ -1245,16 +1248,25 @@ function renderFunnel(model) {
     item.append(head, track);
     list.append(item);
   });
-
   const content = el('div', 'card-content');
   content.append(list);
-  cardsSection.className = 'ab-list';
-  cardsSection.append(card({
-    description: 'Overall conversion',
-    title: formatShare(model.overall),
+  return card({
+    description: f.series !== null && f.series !== undefined ? `${f.series} · overall conversion` : 'Overall conversion',
+    title: formatShare(f.overall),
     titleClass: 'card-title card-title-stat',
-    subline: `${formatNumber(first.value)} → ${formatNumber(last.value)} · ${first.label} → ${last.label}`,
-  }, content));
+    subline: `${formatNumber(first.value)} → ${formatNumber(end.value)} · ${first.label} → ${end.label} · ${n} steps`,
+  }, content);
+}
+
+function renderFunnel(model) {
+  const funnels = model.funnels;
+  setDescription(
+    badge(funnels.length > 1 ? `${funnels.length} funnels` : `${funnels[0].steps.length} steps`, 'secondary'),
+    model.series_column ? badge(`by ${model.series_column}`, 'outline') : null,
+    model.measure ? badge(model.measure, 'outline') : null,
+  );
+  cardsSection.className = funnels.length > 1 ? 'ab-list funnel-grid' : 'ab-list';
+  for (const f of funnels) cardsSection.append(funnelCard(model, f));
   cardsSection.hidden = false;
 }
 

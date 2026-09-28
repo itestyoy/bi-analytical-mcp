@@ -28,6 +28,46 @@ import pandas as pd  # noqa: E402
 
 RESULT_COLUMNS = ["analysis", "kind", "part", "seq", "payload"]
 
+# How long the library's installation on a warehouse runtime may take, and how much of pip's own
+# output a failure carries back — its last lines are where pip says why.
+INSTALL_TIMEOUT_SECONDS = 1200
+INSTALL_TAIL_LINES = 60
+
+
+def ensure_library(requirement):
+    """Make `requirement` (name==version) importable before the analysis runs.
+
+    Already there at that version (this server's own environment, or a runtime template that has it
+    preinstalled) → nothing is done. Otherwise it is installed with pip in the runtime — with binary
+    wheels preferred, so nothing is compiled there — and a failure is raised with the last lines
+    pip printed, which say why (a resolver conflict, a missing wheel, no route to the index). The
+    install is this code's, rather than dbt's `packages`, for exactly that reason: dbt's installer
+    keeps pip's output to itself when pip fails.
+    """
+    import importlib.metadata
+    import subprocess
+    import sys
+
+    name, _, version = requirement.partition("==")
+    try:
+        if importlib.metadata.version(name) == version:
+            return
+    except importlib.metadata.PackageNotFoundError:
+        pass
+    command = [sys.executable, "-m", "pip", "install", "--prefer-binary", "--disable-pip-version-check",
+               "--no-input", "--progress-bar", "off", requirement]
+    print(f"installing {requirement} on this runtime")
+    try:
+        done = subprocess.run(command, capture_output=True, text=True, timeout=INSTALL_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired as e:
+        said = ((e.stdout or "") + "\n" + (e.stderr or "")) if isinstance(e.stdout, str) else ""
+        tail = "\n".join(said.strip().splitlines()[-INSTALL_TAIL_LINES:])
+        raise RuntimeError(f"installing {requirement} did not finish in {INSTALL_TIMEOUT_SECONDS}s on this runtime. pip's last lines:\n{tail}")
+    if done.returncode != 0:
+        tail = "\n".join((done.stdout + "\n" + done.stderr).strip().splitlines()[-INSTALL_TAIL_LINES:])
+        raise RuntimeError(f"installing {requirement} failed on this runtime (pip exit {done.returncode}). pip's last lines:\n{tail}")
+    print(f"installed {requirement}")
+
 
 def _to_pandas(frame):
     """The input relation as a pandas DataFrame, whatever the runtime handed over."""

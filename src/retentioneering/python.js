@@ -23,9 +23,11 @@ function moduleBody() {
 /**
  * The dbt.config of an analysis model on this warehouse. DuckDB runs it in the dbt process itself
  * (the feature's dbt environment has the library). A warehouse runtime (bigframes → Colab
- * Enterprise, Dataproc) gets the library installed by dbt at run time, at the version this server
- * pins, plus whatever the operator pins (MCP_RETENTIONEERING_MODEL_CONFIG — a runtime template, a
- * timeout); the operator's keys win.
+ * Enterprise, Dataproc) gets the library at the version this server pins from the model itself
+ * (ensure_library, python/retentioneering_model.py) rather than from dbt's `packages`: dbt's
+ * installer keeps pip's output to itself when pip fails, so its failure said nothing. Whatever the
+ * operator pins (MCP_RETENTIONEERING_MODEL_CONFIG — a runtime template, a timeout) is added; the
+ * operator's keys win.
  */
 export function analysisModelConfig(catalog, operatorConfig = {}) {
   const method = catalog.pythonRuntime?.method || null;
@@ -33,10 +35,12 @@ export function analysisModelConfig(catalog, operatorConfig = {}) {
   return {
     materialized: 'table',
     ...(remote && method ? { submission_method: method } : {}),
-    ...(remote ? { packages: [`retentioneering==${retentioneeringFacts().version}`] } : {}),
     ...operatorConfig,
   };
 }
+
+/** The library as this server pins it — what ensure_library makes importable on the runtime. */
+export const libraryRequirement = () => `retentioneering==${retentioneeringFacts().version}`;
 
 /** The Python source of the analysis model over `inputModel`. */
 export function compileAnalysisModel({ inputModel, spec, config }) {
@@ -51,6 +55,7 @@ export function compileAnalysisModel({ inputModel, spec, config }) {
     '',
     'def model(dbt, session):',
     `    dbt.config(${cfgArgs})`,
+    `    ensure_library(${pyLiteral(libraryRequirement())})`,
     `    return run(dbt.ref(${pyLiteral(inputModel)}), SPEC)`,
     '',
   ].join('\n');

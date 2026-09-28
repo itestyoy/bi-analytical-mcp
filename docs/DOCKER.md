@@ -116,6 +116,18 @@ analytics:
   session table that lived in the process: after a restart, clients got errors for a session id the
   new process had never issued until the connector was re-added by hand.)
 
+## Table expiration on BigQuery
+
+Every table the server builds for a task — a pipeline's models, a stored query result (`qr_*`), a
+path-analysis eventstream and its analyses, a python model — expires `MCP_TABLE_EXPIRATION_DAYS`
+days after it is (re)built (default **30**; `0` keeps them), so the tables nobody reads again do not
+pile up in the dataset. A SQL model carries dbt-bigquery's `hours_to_expiration`; a python model
+writes its table through BigFrames, which does not apply that option, so its YAML carries a
+`post_hook` that sets `expiration_timestamp` after the write. Each build is a `create or replace`, so
+the clock restarts on every rebuild. Reading a task whose table has expired fails with the
+warehouse's "not found" — run the task again. The shared `metricflow_time_spine` is not given an expiry: it is rewritten in place,
+not per task. DuckDB has no table expiry, so nothing is set there.
+
 ## Path analysis: the retentioneering feature (off unless turned on)
 
 `MCP_RETENTIONEERING=on` adds a side of its own — three tools, a view, a guide and a skill — for

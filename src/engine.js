@@ -26,13 +26,13 @@ import { ValueIndex } from './value-index.js';
 import { MemoryStore, targetKey, targetWords } from './memory.js';
 import { openStore } from './store.js';
 import { buildProjection, projectionProblems } from './projection.js';
-import { SUPPORTED_DIALECTS } from './dialects/index.js';
+import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
 import { detached, currentSignal, isolatedTarget, withSignal } from './request-context.js';
 import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, features = [], featureStatus = [] }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [] }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -68,6 +68,11 @@ export class Engine {
     // describe the same runtime.
     if (pythonModelConfig) catalog.pythonRuntime = { ...catalog.pythonRuntime, config: pythonModelConfig };
     this.pythonModelConfig = catalog.pythonRuntime?.config || {};
+    // Every table this server materializes for a task (a pipeline's models, a stored query result,
+    // an eventstream, a python model) expires this many days after it is built, so what nobody
+    // reads again does not pile up in the warehouse; 0 keeps them. Where the warehouse has no
+    // expiry (DuckDB) nothing is set.
+    this.tableExpirationDays = tableExpirationDays;
     // The python stage description INDEXES the worked recipes this deployment ships for it (id +
     // which move each one covers) instead of spelling every form out in prose: a compiling payload
     // per move is worth more than any amount of description text, and the caller has to know the
@@ -1560,6 +1565,17 @@ export class Engine {
     return [...columns].map(([name, c]) => ({ name, type: c?.type || 'unknown' }));
   }
 
+  /** The dbt config keys that make a table built for a task expire (see tableExpirationDays). */
+  _expiryConfig(language = 'sql') {
+    return getDialect(this.catalog.dialect).expiryConfig(this.tableExpirationDays, language);
+  }
+
+  /** The `{{ config(...) }}` line of a SQL model built for a task: how it is materialized, and when it expires. */
+  _modelConfigLine(materialized = 'table') {
+    const cfg = { materialized, ...this._expiryConfig('sql') };
+    return `{{ config(${Object.entries(cfg).map(([k, v]) => `${k}=${typeof v === 'number' ? v : `'${String(v).replace(/'/g, "\\'")}'`}`).join(', ')}) }}`;
+  }
+
   /** The sources whose MEASURES a semantic context reads (a model loaded only to be joined to is
    *  not one of them). */
   _measureSources(ctx) {
@@ -2321,7 +2337,7 @@ export class Engine {
   _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
-      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, pipeline, profile, submission: this.catalog.pythonRuntime?.method || null });
+      return compilePythonStage(stage, { modelName, inputModel, allow: importAllowlist(this.catalog.pythonRuntime || process.env, profile), config: this.pythonModelConfig, ymlConfig: this._expiryConfig('python'), pipeline, profile, submission: this.catalog.pythonRuntime?.method || null });
     } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'stage' }); }
   }
 
@@ -2667,7 +2683,7 @@ export class Engine {
     // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
     this.ctxs.removePipelineFiles(ctx.id, modelName);
     for (const m of models) {
-      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `{{ config(materialized='${m === last ? materialized : 'table'}') }}\n${header}${m.sql}\n`);
+      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `${this._modelConfigLine(m === last ? materialized : 'table')}\n${header}${m.sql}\n`);
       else { this.ctxs.writeFile(ctx.id, `${m.model}.py`, m.code); this.ctxs.writeFile(ctx.id, `${m.model}.yml`, m.yml); }
     }
     const pyInfo = hasPython ? models.filter((m) => m.kind === 'python').map(({ yml, functions, bindings, ...m }) => m) : null;
@@ -3503,7 +3519,7 @@ export class Engine {
     const table = `qr_${id}`;
     this.jobs.setTable(id, table);
     const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, order_by: input.order_by, time_range: input.time_range });
-    this.ctxs.writeModel(ctx.id, table, `{{ config(materialized='table') }}\n${header}${projected}\n`);
+    this.ctxs.writeModel(ctx.id, table, `${this._modelConfigLine('table')}\n${header}${projected}\n`);
     const r = await this.runner.run(dir, table);
     if (!r.ok) return { ok: false, table, error: { stage: 'materialize', message: this._sqlRunMessage(r.stdout, r.stderr) } };
     return this._readTable(dir, table, input.limit ?? 1000, undefined, {}, input.offset ?? 0);

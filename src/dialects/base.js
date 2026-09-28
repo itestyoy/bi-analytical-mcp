@@ -155,6 +155,10 @@ export class Dialect {
   roundExpr(_expr, _places) { throw new Error('abstract roundExpr'); }
   /** Cast expr to a logical type. */
   castExpr(_expr, _type) { throw new Error('abstract castExpr'); }
+  /** The dbt config keys that make a table this server builds expire `days` after it is (re)built,
+   *  for a model in `language` ('sql': its config() line | 'python': its YAML config): {} where the
+   *  warehouse keeps no expiry. */
+  expiryConfig(_days, _language) { return {}; }
   /** Substring of a string expr (1-based start, optional length). */
   substringExpr(_expr, _start, _len) { throw new Error('abstract substringExpr'); }
   /** Integer day number (days since 1970-01-01) of a date/timestamp expr — the

@@ -15,6 +15,7 @@
 // untouched by it. Everything is deterministic: a hashed user sample, ordered rows, the library's
 // fixed seeds.
 
+import yaml from 'js-yaml';
 import { createDbt, formatDbtError } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
@@ -258,7 +259,7 @@ async function build(engine, feature, input) {
   }
   state.eventstreams[spec.name] = { model: modelName, source: spec.source, spec: input, columns: rendered.columns, segments: rendered.segments, sessions: !!spec.sessions, summary: null };
   if (input.description) state.description = input.description;
-  engine.ctxs.writeModel(ctx.id, modelName, `{{ config(materialized='table') }}\n${rendered.sql}\n`);
+  engine.ctxs.writeModel(ctx.id, modelName, `${engine._modelConfigLine('table')}\n${rendered.sql}\n`);
   engine.ctxs.touch(ctx.id);
   const id = engine._startTask(ctx, BUILD, async () => {
     const dir = engine.ctxs.dir(ctx.id);
@@ -431,6 +432,8 @@ async function query(engine, feature, input) {
   // which eventstream a result table was computed from — carried, so a later read never takes it apart
   (state.results ||= {})[modelName] = es.name;
   engine.ctxs.writeFile(ctx.id, `${modelName}.py`, compileAnalysisModel({ inputModel: es.model, spec, config: analysisModelConfig(engine.catalog, feature.operatorConfig) }));
+  const expiry = engine._expiryConfig('python');
+  if (Object.keys(expiry).length) engine.ctxs.writeFile(ctx.id, `${modelName}.yml`, yaml.dump({ version: 2, models: [{ name: modelName, config: expiry }] }, { lineWidth: 200, noRefs: true }));
   engine.ctxs.touch(ctx.id);
   const order = analyses.map((a) => a.id);
   const id = engine._startTask(ctx, QUERY, async () => {

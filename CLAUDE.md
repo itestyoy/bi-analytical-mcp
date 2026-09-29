@@ -155,6 +155,11 @@
   mistakes; with `validate` it starts a semantic task instead (read with query_semantic_model), in
   which MetricFlow compiles each metric and, over a time_range, the warehouse runs each metric and
   each semantic model's dimensions, one by one where all at once fails, to name what fails.
+  NOTHING HANDED BACK SPELLS METRICFLOW'S `entity__dimension__grain`: a query names what and where
+  ({ model, attribute }, { dimension }, { entity }, metric_time) and the server resolves it; result
+  columns are the caller's names, and an explained query's SQL and plan and every failure message go
+  through `Engine._callerSpelling` (the query's tokens → its result-column names, any other internal
+  `a__b` → `a_b`), which renames each occurrence alike — the SQL as shown runs to the same rows.
   `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
   query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.

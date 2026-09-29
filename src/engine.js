@@ -3490,7 +3490,17 @@ export class Engine {
     const names = scope.metrics.map((m) => m.name);
     const bounds = input.time_range ? resolveTimeRange(input.time_range) || {} : null;
     const window = bounds ? { startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined } : {};
-    const message = (r) => formatDbtError(r.stdout, r.stderr) || r.error || 'failed';
+    // the tokens this validation groups by, in the caller's spelling (see _callerSpelling)
+    const spelled = new Map();
+    for (const sm of layer.semantic_models) {
+      if (!sm.entity) continue;
+      for (const d of sm.dimensions) {
+        spelled.set(`${sm.entity}__${d.name}`, `${sm.name}_${d.name}`);
+        if (d.type === 'time') spelled.set(`${sm.entity}__${d.name}__${d.grain || 'day'}`, `${sm.name}_${d.name}_${d.grain || 'day'}`);
+      }
+    }
+    const speak = this._callerSpelling(spelled);
+    const message = (r) => speak(formatDbtError(r.stdout, r.stderr) || r.error || 'failed');
     const signalled = () => currentSignal()?.aborted;
     /** Run `opts` for a list at once; when that fails, one by one, to name each that fails. */
     const eachOrAll = async (items, opts) => {
@@ -3541,6 +3551,28 @@ export class Engine {
     result.valid = !failures;
     result.summary = `${result.compiled.filter((c) => c.ok).length}/${names.length} metric(s) compile${result.ran ? `; ${result.ran.metrics.filter((c) => c.ok).length}/${result.ran.metrics.length} run over the window; ${result.ran.semantic_models.filter((d) => d.ok).length}/${result.ran.semantic_models.filter((d) => d.checked).length} semantic model(s) whose dimensions all run` : ' (no time_range: nothing was run in the warehouse)'}`;
     return result;
+  }
+
+  /**
+   * MetricFlow's names, in the caller's spelling. A query is addressed by WHAT and WHERE — { model,
+   * attribute }, { dimension }, { entity }, metric_time — and the server resolves that to MetricFlow's
+   * `entity__dimension__grain` tokens; nothing it hands back carries them. `names` maps each token this
+   * query used to the name the caller sees (its result column), longest first; any other internal
+   * `a__b` MetricFlow writes (a partition filter, a spine column) reads with a single `_`, and its
+   * `__metric` aliases without the prefix. Applied to
+   * an explained query's SQL and plan and to every failure message that may quote them; it renames
+   * each occurrence alike, so SQL keeps its meaning.
+   */
+  _callerSpelling(names = new Map()) {
+    const pairs = [...names].filter(([tok, name]) => tok.includes('__') && tok !== name).sort((a, b) => b[0].length - a[0].length);
+    const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const one = (text) => {
+      let out = text;
+      for (const [tok, name] of pairs) out = out.replace(new RegExp(`\\b${esc(tok)}\\b`, 'g'), name);
+      return out.replace(/(^|[^A-Za-z0-9_])_{2,}(?=[A-Za-z0-9])/g, '$1').replace(/([A-Za-z0-9])_{2,}(?=[A-Za-z0-9])/g, '$1_');
+    };
+    const speak = (v) => (typeof v === 'string' ? one(v) : Array.isArray(v) ? v.map(speak) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [speak(k), speak(x)])) : v);
+    return speak;
   }
 
   /** The metrics a context of the project's layer offers: every metric that reads its semantic model. */
@@ -3648,12 +3680,17 @@ export class Engine {
       tokenOf.set(dimKey(d), tok);
     }
     let where = [];
+    // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
+    const whereNames = new Map();
     if (input.where) {
       const translated = clone(input.where);
       walkPredicates(translated, (p) => {
         if (p.field?.kind === 'entity') { p.field = { kind: 'entity', name: resolveEntity(p.field, 'where') }; return; }
         if (p.field?.kind !== 'dimension') return;
         const d = resolve(p.field, 'where');
+        const friendly = `${d.semantic_model}_${d.dimension}`;
+        whereNames.set(d.path, friendly);
+        if (d.type === 'time') whereNames.set(`${d.path}__${d.grain || 'day'}`, `${friendly}_${d.grain || 'day'}`);
         p.field = d.type === 'time' ? { kind: 'time_dimension', path: d.path, grain: d.grain || 'day' } : { kind: 'dimension', path: d.path };
       });
       where = renderWhereClauses(translated);
@@ -3680,10 +3717,11 @@ export class Engine {
     const offset = input.offset ?? 0;
     const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: limit + offset + 1 };
     const explain = !!(input.dry_run || input.explain);
+    const speak = this._callerSpelling(new Map([...rename, ...whereNames]));
     const respond = (raw) => {
       this.ctxs.touch(ctx.id);
-      if (!raw.ok) return { ok: false, command: raw.command, error: { stage: 'query', message: formatDbtError(raw.stdout, raw.stderr) } };
-      if (explain) return { ok: true, command: raw.command, sql: raw.sql, ...(input.dry_run ? { dry_run: true } : {}), ...(input.explain ? { explain: true, plan: raw.plan } : {}) };
+      if (!raw.ok) return { ok: false, command: raw.command, error: { stage: 'query', message: speak(formatDbtError(raw.stdout, raw.stderr)) } };
+      if (explain) return { ok: true, command: raw.command, sql: speak(raw.sql), ...(input.dry_run ? { dry_run: true } : {}), ...(input.explain ? { explain: true, plan: speak(raw.plan) } : {}) };
       const columns = (raw.columns || []).map((c) => (rename.has(c.name) ? { ...c, name: rename.get(c.name) } : c));
       const rows = (raw.rows || []).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [rename.get(k) || k, v])));
       const pageRows = rows.slice(offset, offset + limit);
@@ -3701,7 +3739,7 @@ export class Engine {
     };
     return async (id) => {
       if (!explain) await this._ensureTimeSpineBuilt(ctx.id);
-      if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id);
+      if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id, speak);
       return respond(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain }));
     };
   }
@@ -3742,6 +3780,8 @@ export class Engine {
     });
     let where = [];
     let filterWarnings = [];
+    // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
+    const whereNames = new Map();
     if (input.where) {
       const translated = clone(input.where);
       const specs = [];
@@ -3755,6 +3795,7 @@ export class Engine {
           // sources happen to share.
           const at = this._valueKeyForColumn(p.field.model, p.field.attribute);
           p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
+          whereNames.set(p.field.path, `${refModel}_${refAttr}`);
           delete p.field.model; delete p.field.attribute; delete p.field.via;
           if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'where' });
           this._checkModelLoaded(ctx, { model: refModel, attribute: refAttr });
@@ -3811,15 +3852,16 @@ export class Engine {
     const explain = !!(input.dry_run || input.explain);
     // The response is built from the runner's answer in ONE place, whether the query finished
     // inside the call or after it was handed back as a job.
+    const speak = this._callerSpelling(new Map([...rename, ...whereNames]));
     const respond = async (raw) => {
       this.ctxs.touch(ctx.id);
       const res = raw.ok && !explain ? { ...raw, ...friendlyResult(raw.columns, raw.rows) } : raw;
 
-      if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
+      if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: speak(formatDbtError(res.stdout, res.stderr)) } };
       if (explain) {
-        const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: orderableKeys };
+        const out = { ok: true, command: res.command, sql: speak(res.sql), orderable_keys: speak(orderableKeys) };
         if (input.dry_run) out.dry_run = true;
-        if (input.explain) { out.explain = true; out.plan = res.plan; }
+        if (input.explain) { out.explain = true; out.plan = speak(res.plan); }
         if (filterWarnings.length) out.warnings = filterWarnings;
         return out;
       }
@@ -3888,7 +3930,7 @@ export class Engine {
       // Build the time-spine table before a REAL query (not needed for dry_run/explain, which only
       // generate SQL). MetricFlow requires the spine materialized for metric_time / SCD joins.
       if (!explain) await this._ensureTimeSpineBuilt(ctx.id);
-      if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id);
+      if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id, speak);
       return respond(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain }));
     };
   }
@@ -3899,14 +3941,14 @@ export class Engine {
    * first page back. The table is the durable result: query_semantic_model({ task_id }) pages it after the in-memory
    * response is gone, a card drills into it, and a pipeline can start from it (from_task).
    */
-  async _materialize(ctx, qopts, input, rename, id) {
+  async _materialize(ctx, qopts, input, rename, id, speak = this._callerSpelling(rename)) {
     const dir = this.ctxs.dir(ctx.id);
     // The TABLE is the deliverable here, so it holds the whole result. `limit` is the caller's page
     // size for reading rows back below; baking it into the query would persist one page and let
     // every later total be read off it as if it were the full answer.
     const { limit: _page, ...full } = qopts;
     const explain = await this.runner.query(dir, { ...full, explain: true });
-    if (!explain.ok) return { ok: false, error: { stage: 'query', message: formatDbtError(explain.stdout, explain.stderr) } };
+    if (!explain.ok) return { ok: false, error: { stage: 'query', message: speak(formatDbtError(explain.stdout, explain.stderr)) } };
     // The stored table's columns get the caller-facing names (`<model>_<attribute>`,
     // `metric_time_<grain>`), never `__` — they are what a card and a pipeline address.
     const projected = rename.size
@@ -3917,7 +3959,7 @@ export class Engine {
     const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, order_by: input.order_by, time_range: input.time_range });
     this.ctxs.writeModel(ctx.id, table, `${this._modelConfigLine('table')}\n${header}${projected}\n`);
     const r = await this.runner.run(dir, table);
-    if (!r.ok) return { ok: false, table, error: { stage: 'materialize', message: this._sqlRunMessage(r.stdout, r.stderr) } };
+    if (!r.ok) return { ok: false, table, error: { stage: 'materialize', message: speak(this._sqlRunMessage(r.stdout, r.stderr)) } };
     return this._readTable(dir, table, input.limit ?? 1000, undefined, {}, input.offset ?? 0);
   }
 

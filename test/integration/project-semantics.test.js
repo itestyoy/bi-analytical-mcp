@@ -442,3 +442,28 @@ test('nothing is keyed on a name: files moved and renamed, a semantic model and 
   // the old names are nobody's now
   await assert.rejects(Promise.resolve().then(() => engine3.raw.query_semantic_model({ context_id: ACQ, metrics: ['project_cost'] })), /unknown context_id/);
 });
+
+test('a query is addressed by what and where, and nothing handed back spells MetricFlow\'s entity__dimension: an explained query\'s SQL, run as shown, is the query\'s own numbers', opts, async (t) => {
+  if (skip(t)) return;
+  const raw = engine.raw || engine;
+  const noInternal = (v, what) => assert.doesNotMatch(JSON.stringify(v), /[A-Za-z0-9]__[A-Za-z0-9]|[^A-Za-z0-9_]__[A-Za-z0-9]/, what);
+  // the project's layer: by a dimension, a time dimension at a grain, and a where on a dimension
+  const project = { context_id: EV, metrics: ['project_events_total'], group_by: [{ dimension: 'event_name' }, { dimension: 'event_at', grain: 'week' }], where: { op: 'and', conditions: [{ field: { kind: 'dimension', dimension: 'event_name' }, op: 'neq', value: 'x' }] }, time_range: WINDOW };
+  // a task's context: an attribute through a join, metric_time, and a where through the join
+  const built = await engine.build_semantic_model({ name: 'spelled', use_base_models: ['users'], semantic_models: [{ from: 'events', event_scope: { event_name: ['tutorial'] }, measures: [{ name: 'tutorials', agg: 'count', field: '*' }] }], metrics: [{ name: 'tutorials', type: 'simple', measure: { name: 'tutorials' } }] });
+  const task = { context_id: built.context_id, metrics: ['spelled_tutorials'], group_by: [{ model: 'users', attribute: 'country' }, { time: 'metric_time', grain: 'week' }], where: { op: 'and', conditions: [{ field: { kind: 'dimension', model: 'users', attribute: 'platform' }, op: 'eq', value: 'ios' }] }, time_range: WINDOW };
+  for (const input of [project, task]) {
+    const rows = rowsOf(await engine.query_semantic_model(input));
+    const explained = await taskResult(raw, (await raw.query_semantic_model({ ...input, explain: true })).task_id);
+    assert.equal(explained.ok, true, JSON.stringify(explained.error));
+    noInternal(explained, 'the explained query');
+    // the SQL as shown is the query: run it, and it gives the same rows under the same column names
+    const shown = (await wh.query(explained.sql)).rows;
+    const key = (r) => JSON.stringify(Object.keys(rows[0]).map((k) => (k.startsWith('metric_time') || /_week$/.test(k) ? String(r[k]).slice(0, 10) : typeof r[k] === 'bigint' || typeof r[k] === 'number' ? Number(r[k]) : r[k])));
+    assert.deepEqual(shown.map(key).sort(), rows.map(key).sort(), input.context_id);
+  }
+  // what a refusal and a failed run say names things the same way
+  const failed = await taskResult(raw, (await raw.query_semantic_model({ ...project, where: { op: 'and', conditions: [{ field: { kind: 'dimension', dimension: 'event_at' }, op: 'eq', value: 'not a date' }] } })).task_id);
+  assert.equal(failed.ok, false, JSON.stringify(failed));
+  noInternal(failed, 'a failed query');
+});

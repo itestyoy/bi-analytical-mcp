@@ -22,14 +22,18 @@ export const PROJECT_STORE = '_project';
 /**
  * Copy the project into PROJECT_STORE (anew on every start: the project may have changed), parse it
  * through the dbt client, read its semantic layer, and register one context per semantic model.
- * → { layer, contexts, skipped? } when the project declares metrics, { error } when it cannot be parsed
- * (said in the overview), null when there is nothing to serve.
+ * → { layer, contexts, skipped?, dimension_only? } when the project declares metrics, { error } when it
+ * cannot be parsed (said in the overview), null when there is nothing to serve. A start that serves
+ * nothing keeps the store while it holds results earlier starts stored.
  */
 export async function loadProjectSemantics({ runner, contextManager }) {
   if (!runner?.parse || !runner.semanticManifest || !contextManager?.baseProjectDir) return null;
   // the results earlier queries stored (materialize) outlive a restart as any context's do: their
   // models are carried into the fresh copy, so a stored task is still paged, drilled and built on
   const stored = contextManager.has(PROJECT_STORE) ? contextManager.resultModels(PROJECT_STORE) : [];
+  // …and who reads them: the pipelines started from a stored result are recorded on the context that
+  // owns it, which is registered anew below
+  const consumersOf = new Map(contextManager.sharing(PROJECT_STORE).map((id) => [id, contextManager.get(id).state.checkpoint_consumers]).filter(([, c]) => c && Object.keys(c).length));
   for (const id of contextManager.sharing(PROJECT_STORE)) contextManager.drop(id);
   if (contextManager.has(PROJECT_STORE)) contextManager.drop(PROJECT_STORE);
   const store = contextManager.create(PROJECT_STORE, { projectSemantics: true });
@@ -40,32 +44,35 @@ export async function loadProjectSemantics({ runner, contextManager }) {
     try { utimesSync(file, new Date(m.mtimeMs), new Date(m.mtimeMs)); } catch { /* the age restarts */ }
   }
   try { contextManager.ensureTimeSpine?.(store.id); } catch { /* the parse says what is missing */ }
-  const r = await runner.parse(dir);
-  if (!r.ok) {
-    contextManager.drop(store.id);
-    return { error: formatDbtError(r.stdout, r.stderr) || 'the project did not parse' };
-  }
-  const layer = manifestLayer(runner.semanticManifest(dir));
-  if (!layer.metrics.length) {
-    contextManager.drop(store.id);
-    return null;
-  }
-  // the copy is served as long as the server runs: never reclaimed for being idle, never built on,
-  // and nobody's to address — its semantic models are
+  // the copy is kept as long as the server runs: never reclaimed for being idle, never built on, and
+  // nobody's to address — its semantic models are
   store.state = { ...store.state, engine: 'project-store', pinned: true, internal: true };
+  // a start that serves nothing still keeps the results earlier ones stored, for the next start that
+  // does — only a store with none is let go
+  const serveNothing = (out) => { if (!stored.length) contextManager.drop(store.id); else contextManager.touch(store.id); return out; };
+  const r = await runner.parse(dir);
+  if (!r.ok) return serveNothing({ error: formatDbtError(r.stdout, r.stderr) || 'the project did not parse' });
+  const layer = manifestLayer(runner.semanticManifest(dir));
+  if (!layer.metrics.length) return serveNothing(null);
   const contexts = [];
   const skipped = [];
+  const dimensionOnly = [];
   for (const sm of layer.semantic_models) {
+    // a semantic model no metric reads has nothing to query in a context of its own: its dimensions
+    // are reached from the contexts of the models whose metrics reach it
+    const metrics = layer.metrics.filter((m) => m.semantic_models.includes(sm.name));
+    if (!metrics.length) { dimensionOnly.push(sm.name); continue; }
     // a context a task built under the same id keeps it (context ids of tasks are generated, so this
     // is a name the project would have to pick on purpose)
     if (!new RegExp(CONTEXT_ID).test(sm.name)) { skipped.push({ semantic_model: sm.name, reason: `its name is not a context id (${CONTEXT_ID})` }); continue; }
     if (contextManager.has(sm.name)) { skipped.push({ semantic_model: sm.name, reason: `a context '${sm.name}' already exists` }); continue; }
     contextManager.createShared(sm.name, PROJECT_STORE, {
       engine: 'project', pinned: true, semantic_model: sm.name,
-      metrics: layer.metrics.filter((m) => m.semantic_models.includes(sm.name)).map((m) => ({ name: m.name, type: m.type })),
+      metrics: metrics.map((m) => ({ name: m.name, type: m.type })),
+      ...(consumersOf.has(sm.name) ? { checkpoint_consumers: consumersOf.get(sm.name) } : {}),
     });
     contexts.push(sm.name);
   }
   contextManager.touch(store.id);
-  return { layer, contexts, ...(skipped.length ? { skipped } : {}) };
+  return { layer, contexts, ...(skipped.length ? { skipped } : {}), ...(dimensionOnly.length ? { dimension_only: dimensionOnly } : {}) };
 }

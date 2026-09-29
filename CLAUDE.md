@@ -327,8 +327,13 @@
   `{ semantic_model, dimension, via? }` of one it reaches, and `{ entity }` (a key the project
   declares only as an entity) in group_by / where / order_by,
   checked against the manifest before anything runs (one hop through a primary entity), the
-  project's names kept. Their queries run side by side (nothing writes to them); their stored results
-  are carried over a restart and retired by CONTEXT_TTL_MS by age. A GENERATED context holds its OWN
+  project's names kept, and the catalog's require_time_range holding on a semantic model over a dbt
+  model the catalog requires a window for. Their queries run side by side (nothing writes to them)
+  in the SAME shell as a task's (`_metricOrderBy` / `_metricWindow` / `_metricPaging` /
+  `_metricEarlyAnswer` / `_metricTask` — only how a reference resolves differs); their stored
+  results are carried over a restart (a start that parses nothing keeps them for the next) and
+  retired by CONTEXT_TTL_MS by age unless a live pipeline reads them. A semantic model no metric
+  reads is no context (`dimension_only` in the overview). A GENERATED context holds its OWN
   layer only: its copy of the project leaves the project's semantic keys out
   (`withoutSemanticLayer`, src/context-manager.js) — the latest spec allows one semantic model per
   dbt model, and a name of one layer could shadow the other's. The overview

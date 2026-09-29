@@ -486,9 +486,12 @@ export class ContextManager {
    * results. The table stays in the warehouse like a dropped context's; the task reads as gone.
    */
   pruneResultModels(id, maxAgeMs) {
-    if (!(maxAgeMs > 0) || !this.has(id) || [id, ...this.sharing(id)].some((c) => this.leases.get(c))) return [];
+    const owners = [id, ...this.sharing(id)];
+    if (!(maxAgeMs > 0) || !this.has(id) || owners.some((c) => this.leases.get(c))) return [];
+    // a result a live context reads (a pipeline started from it) is held, as gc holds such an owner
+    const held = new Set(owners.flatMap((c) => this.checkpointConsumers(c).map((x) => x.model)));
     const now = Date.now();
-    const old = this.resultModels(id).filter((m) => now - m.mtimeMs > maxAgeMs).map((m) => m.name);
+    const old = this.resultModels(id).filter((m) => now - m.mtimeMs > maxAgeMs && !held.has(m.name)).map((m) => m.name);
     for (const name of old) rmSync(join(this.generatedDir(id), `${name}.sql`), { force: true });
     return old;
   }

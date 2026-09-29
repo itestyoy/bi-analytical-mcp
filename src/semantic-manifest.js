@@ -10,15 +10,28 @@
 // What MetricFlow compiles and the warehouse runs is checked by running them (Engine, preview_semantic_model
 // with validate) — this is only what the declaration itself says.
 
-const IDENTITY = new Set(['primary', 'unique', 'natural']);
+// the entity types a semantic model is unique on (what another model joins onto), in the order its own
+// dimensions are addressed by: a primary entity before a unique one before a natural one
+const IDENTITY = ['primary', 'unique', 'natural'];
 
 const hasMeta = (meta) => !!meta && typeof meta === 'object' && Object.keys(meta).length > 0;
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 const compact = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null && !(Array.isArray(v) && !v.length)));
 
-/** A semantic model's own entity (what its dimensions are addressed through), or null. */
+/** A semantic model's own entity (what its dimensions are addressed through), or null: the declared
+ *  primary_entity, else its primary entity, else a unique one, else a natural one. */
 function primaryEntity(sm) {
-  return sm.primary_entity || (sm.entities || []).find((e) => IDENTITY.has(e.type))?.name || null;
+  if (sm.primary_entity) return sm.primary_entity;
+  for (const type of IDENTITY) {
+    const e = (sm.entities || []).find((x) => x.type === type);
+    if (e) return e.name;
+  }
+  return null;
+}
+
+/** Every entity a semantic model is unique on — what another model's entity of that name joins onto. */
+function identityEntities(sm) {
+  return [...new Set([...(sm.primary_entity ? [sm.primary_entity] : []), ...(sm.entities || []).filter((e) => IDENTITY.includes(e.type)).map((e) => e.name)])];
 }
 
 /** A metric's where filter as the templates it holds (the manifest keeps them as { where_filters }). */
@@ -49,6 +62,7 @@ function inputOf(ref) {
  *     what EVERY input reaches (MetricFlow cuts a ratio or a derived metric by what its inputs share);
  *   * `entities(metric)`: the entities it can be grouped by, by name, on the same rule;
  *   * `definition(metric)`: how it is computed, in one shape for both YAML specs;
+ *   * `timeAxis(metric)`: what metric_time reads for it — { dimension?, grain } — or null;
  *   * `issues()`: what the declaration itself gets wrong, [{ severity, semantic_model?, metric?, message }].
  */
 export function manifestLayer(manifest) {
@@ -58,6 +72,7 @@ export function manifestLayer(manifest) {
     ...(sm.description ? { description: sm.description } : {}),
     table: sm.node_relation?.alias || sm.node_relation?.relation_name || null,
     entity: primaryEntity(sm),
+    identities: identityEntities(sm),
     ...(sm.defaults?.agg_time_dimension ? { agg_time_dimension: sm.defaults.agg_time_dimension } : {}),
     entities: (sm.entities || []).map((e) => compact({ name: e.name, type: e.type, expr: e.expr ?? e.name, description: e.description || undefined })),
     ...(hasMeta(sm.config?.meta) ? { meta: sm.config.meta } : {}),
@@ -152,7 +167,9 @@ export function manifestLayer(manifest) {
     const seen = new Set();
     const add = (list) => { for (const d of list) if (!seen.has(dimKey(d))) { seen.add(dimKey(d)); out.push(d); } };
     if (sm.entity) add(dimsOf(sm, sm.entity));
-    for (const e of sm.entities) for (const other of models) if (other !== sm && other.entity === e.name) add(dimsOf(other, e.name));
+    // one hop: through an entity of this model onto another model that is unique on it — any of its
+    // identity entities, not only the one its own dimensions are addressed by
+    for (const e of sm.entities) for (const other of models) if (other !== sm && other.identities.includes(e.name)) add(dimsOf(other, e.name));
     return out;
   };
   /** The semantic models a metric is CUT through: a direct aggregation's own; a conversion's base. */
@@ -182,6 +199,35 @@ export function manifestLayer(manifest) {
   const cuts = (name) => { if (!cutsOf.has(name)) cutsOf.set(name, cutBy(name)); return cutsOf.get(name); };
   const reach = (name) => cuts(name).dims;
   const entities = (name) => [...new Set(cuts(name).entities)].sort();
+
+  // a metric's TIME AXIS — what metric_time reads for it: a direct aggregation's own agg_time_dimension
+  // (at that dimension's grain); a metric made of metrics has one when every input does, at the
+  // coarsest of their grains (named when they all read one dimension of that name)
+  const GRAINS = ['nanosecond', 'microsecond', 'millisecond', 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'];
+  const axisOf = new Map();
+  const timeAxis = (name, seen = new Set()) => {
+    if (axisOf.has(name)) return axisOf.get(name);
+    if (seen.has(name)) return null;
+    seen.add(name);
+    const m = raw.get(name);
+    let axis = null;
+    const direct = m && aggregationOf(m);
+    if (direct?.agg_time_dimension) {
+      const grain = modelNamed.get(direct.semantic_model)?.dimensions.find((d) => d.name === direct.agg_time_dimension)?.grain || 'day';
+      axis = { dimension: direct.agg_time_dimension, grain };
+    } else if (m && !direct) {
+      const tp = m.type_params || {};
+      const parts = m.type === 'conversion' ? [tp.conversion_type_params?.base_metric].filter((x) => x?.name) : inputsOf(m);
+      const axes = parts.map((p) => timeAxis(p.name, new Set(seen)));
+      if (axes.length && axes.every(Boolean)) {
+        const grain = axes.map((a) => a.grain).reduce((a, b) => (GRAINS.indexOf(b) > GRAINS.indexOf(a) ? b : a));
+        const dims = new Set(axes.map((a) => a.dimension).filter(Boolean));
+        axis = { ...(dims.size === 1 ? { dimension: [...dims][0] } : {}), grain };
+      }
+    }
+    axisOf.set(name, axis);
+    return axis;
+  };
 
   /** How a metric is computed, in one shape for both specs. */
   const definition = (name) => {
@@ -248,5 +294,5 @@ export function manifestLayer(manifest) {
     return out;
   };
 
-  return { semantic_models: models, metrics, reach, entities, definition, issues };
+  return { semantic_models: models, metrics, reach, entities, definition, issues, timeAxis };
 }

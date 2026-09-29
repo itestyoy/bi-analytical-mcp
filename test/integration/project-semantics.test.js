@@ -279,8 +279,8 @@ test('a preview of a project metric lists every cut it takes — and each one, q
   const [m] = p.metrics;
   assert.equal(m.name, 'project_cost');
   const [{ total }] = (await wh.query('select sum(cost) as total from fct_player_acquisition')).rows;
-  const cuts = [...m.cut_by.dimensions, ...m.cut_by.entities];
-  assert.ok(cuts.length >= 3, JSON.stringify(m.cut_by));
+  const cuts = [...m.group_by.dimensions, ...m.group_by.entities];
+  assert.ok(cuts.length >= 3, JSON.stringify(m.group_by));
   for (const cut of cuts) {
     // every cut, spelled as the preview gives it, is taken by the query and sums to the total
     const rows = rowsOf(await q(ACQ, { metrics: ['project_cost'], group_by: [cut] }));
@@ -293,8 +293,8 @@ test('a metric of two semantic models is cut only by what both carry: the previe
   if (skip(t)) return;
   const p = await preview({ context_id: ACQ, metric: 'project_events_per_click' });
   const m = p.metrics.find((x) => x.name === 'project_events_per_click');
-  assert.deepEqual(m.cut_by.dimensions, []);
-  assert.deepEqual(m.cut_by.entities, [{ entity: 'player' }]);
+  assert.deepEqual(m.group_by.dimensions, []);
+  assert.deepEqual(m.group_by.entities, [{ entity: 'player' }]);
   // the metrics it is made of come with it
   assert.deepEqual(p.metrics.map((x) => x.name).sort(), ['project_clicks', 'project_events_per_click', 'project_events_total']);
   // a cut only one input has is refused in the call
@@ -377,9 +377,14 @@ test('a context a task built is previewed and validated the same way: its defini
   assert.equal(p.status.valid, true, JSON.stringify(p.status.issues));
   assert.deepEqual(p.metrics.map((m) => m.name).sort(), ['pvw_per_player', 'pvw_players', 'pvw_tutorials']);
   assert.deepEqual(p.metrics.find((m) => m.name === 'pvw_per_player').definition, { numerator: { metric: 'pvw_tutorials' }, denominator: { metric: 'pvw_players' } });
+  // one metric of it: its group_by names the context's attributes in full, and its time axis
+  const one = await preview({ context_id: out.context_id, metric: 'pvw_tutorials' });
+  const tut = one.metrics.find((m) => m.name === 'pvw_tutorials');
+  assert.deepEqual(tut.group_by.attributes, p.groupable);
+  assert.ok(tut.group_by.metric_time, JSON.stringify(tut.group_by));
   // each cut the preview offers, queried, gives back the whole count
   const [{ n }] = (await wh.query("select count(*) as n from fct_analytics_events where event_name = 'tutorial'")).rows;
-  for (const cut of p.group_by.slice(0, 3)) {
+  for (const cut of p.groupable.slice(0, 3)) {
     const rows = rowsOf(await engine.query_semantic_model({ context_id: out.context_id, metrics: ['pvw_tutorials'], group_by: [cut], time_range: WINDOW }));
     assert.equal(rows.reduce((a, r) => a + num(r.pvw_tutorials ?? 0), 0), num(n), JSON.stringify(cut));
   }

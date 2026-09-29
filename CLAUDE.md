@@ -149,7 +149,8 @@
   `preview_semantic_model` is the semantic side's INSPECTOR, for the project's own layer (no build
   to report it) and a task's context alike: it reads the context's PARSED manifest
   (`src/semantic-manifest.js`, one reader for both YAML specs) and answers in the call — semantic
-  models, each metric's definition and the cuts it takes in the form that context's query names them
+  models, each metric's definition and its `group_by` — what it can be grouped by, spelled as that
+  context's query takes it
   (a metric of several semantic models only what every input reaches), the declaration's own
   mistakes; with `validate` it starts a semantic task instead (read with query_semantic_model), in
   which MetricFlow compiles each metric and, over a time_range, the warehouse runs each metric and
@@ -329,7 +330,7 @@
   (`semantic_index().project_semantic_layer.contexts`) lists each context with its dimensions and its
   metrics, each with its meta (the project's notes on reading it) and the semantic models whose
   dimensions cut it; preview_semantic_model({ context_id, metric }) gives one metric's definition
-  and every cut.
+  and its full group_by.
 - dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
   DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v2`
   (used unless DBT_ENV names another), `dbt-v1`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own

@@ -3442,11 +3442,16 @@ export class Engine {
         const reach = layer.reach(m.name);
         const via = (d) => (reach.filter((x) => x.semantic_model === d.semantic_model && x.dimension === d.dimension).length > 1 ? { via: d.entity } : {});
         cut = input.metric
-          // one metric: every cut, spelled as the query takes it
+          // one metric: everything it is grouped by, spelled as the query takes it
           ? { dimensions: reach.map((d) => ({ ...cutRef(d), ...via(d) })), entities: layer.entities(m.name).map((entity) => ({ entity })), ...time }
           : { dimensions_from: [...new Set(reach.map((d) => d.semantic_model))], entities: layer.entities(m.name), ...time };
-      } else cut = time;
-      return { ...m, definition: def, cut_by: cut };
+      } else {
+        // a task's context: its attributes are the context's (one list, under groupable), named in full
+        // for one metric
+        cut = { ...(input.metric ? { attributes: groupable } : {}), ...time };
+      }
+      // what this metric's query takes in group_by (and where / order_by), spelled as it takes it
+      return { ...m, definition: def, group_by: cut };
     });
     const first = scope.metrics[0];
     const firstCut = first && (project ? (layer.reach(first.name)[0] ? cutRef(layer.reach(first.name)[0]) : layer.entities(first.name)[0] ? { entity: layer.entities(first.name)[0] } : null) : groupable?.[0] || null);
@@ -3464,7 +3469,7 @@ export class Engine {
       semantic_models: scope.semanticModels.map(({ measures, ...sm }) => ({ ...sm, ...(measures?.length ? { measures } : {}) })),
       metrics,
       // what a query of THIS context names a cut by
-      ...(project ? {} : { group_by: groupable }),
+      ...(project ? {} : { groupable }),
       ...(first ? { query_with: `query_semantic_model(${JSON.stringify({ context_id: ctx.id, metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }], time_range: { start: '<date>', end: '<date>' } })})` } : {}),
       validate_with: `preview_semantic_model(${JSON.stringify({ context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } })})`,
     };
@@ -3569,7 +3574,7 @@ export class Engine {
     };
     if (only) return one(only);
     return {
-      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_semantic_model({ context_id: '<semantic model>', metrics: [...], group_by: [{ dimension }, { entity }, { time: 'metric_time', grain }] }) — a dimension of the context's own model by its name, one of another model it reaches as { semantic_model, dimension }. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ context_id, metric }) shows a metric's definition and every cut it takes; with validate: true it runs them.`,
+      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_semantic_model({ context_id: '<semantic model>', metrics: [...], group_by: [{ dimension }, { entity }, { time: 'metric_time', grain }] }) — a dimension of the context's own model by its name, one of another model it reaches as { semantic_model, dimension }. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ context_id, metric }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
       contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map(one),
       ...(this.project.skipped?.length ? { not_served: this.project.skipped } : {}),
     };

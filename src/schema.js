@@ -733,7 +733,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       properties: {
         context_id: contextId(`The context whose semantic layer to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name, or ' : ''}a context build_semantic_model returned.`),
         semantic_model: { type: 'string', description: 'Show only this semantic model of the context and the metrics that read it.' },
-        metric: { type: 'string', description: 'Show only this metric — with the metrics it is made of, and every cut it takes in the form a query names it.' },
+        metric: { type: 'string', description: 'Show only this metric — with the metrics it is made of, and everything it can be grouped by, spelled as query_semantic_model\'s group_by takes it.' },
         validate: { type: 'boolean', description: 'Also check it by running it: MetricFlow compiles every metric shown; with time_range, each metric and each semantic model\'s dimensions are also run in the warehouse over that window (a value per metric). Starts a task: the call returns { task_id }, read with query_semantic_model({ task_id }).' },
         time_range: { ...METRIC_TIME_RANGE, description: 'With validate: the window the metrics and dimensions are run over in the warehouse. Without it, validate compiles only (nothing is read).' },
       },

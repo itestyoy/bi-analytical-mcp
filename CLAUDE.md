@@ -175,12 +175,18 @@
   overview each walk `engine.features` at ONE point (a tool's schema/method/side/description/view,
   a guide name + triggers, a skill, an instructions line, an overview entry). Do NOT add an
   `if (feature)` branch in the core, and do NOT let a feature reach into another side's tools.
-- RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA — an eventstream
-  declared by the caller and rendered in SQL through the pipeline's own stages (scope, the declared
-  relationship for segments, point-in-time for a slowly-changing model), materialized; query = the
-  COMPUTATION — every analysis of one call in ONE dbt Python model (python/retentioneering_model.py,
-  THIS server's code inlined; the caller's input is data, never code), on its own dbt environment
-  (`retentioneering`); show = its own view (`ui://betti/retentioneering-view.html`, src/apps/
+- RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA, SHAPED STEP BY STEP LIKE A
+  PIPELINE — `start` declares the eventstream, rendered in SQL through the pipeline's own stages (scope,
+  the declared relationship for segments, point-in-time for a slowly-changing model), materialized, its
+  summary carrying the vocabulary and every segment's levels; then the library's own steps
+  (`add_step` / `add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /
+  `preview`, the pipeline builder's own words), each CHECKED BY THE LIBRARY ITSELF as it is added
+  (below) and answered at once with what it changed; `materialize` runs the steps not yet materialized
+  in one dbt Python model and stores the eventstream after them (its columns' roles and each event's
+  order carried in the table), a checkpoint an edit at or before it retires; query = the COMPUTATION —
+  every analysis of one call over the eventstream AS MATERIALIZED (a query takes no steps of its own:
+  a variant is a fork), in ONE dbt Python model (python/retentioneering_model.py, THIS server's code
+  inlined; the caller's input is data, never code), on its own dbt environment (`retentioneering`); show = its own view (`ui://betti/retentioneering-view.html`, src/apps/
   retentioneering-view/, drawn with the result view's theme and shared pieces, src/apps/shared/). It is
   deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds), and
   every choice it offers comes from `config/retentioneering-facts.json`, generated from the library.
@@ -194,12 +200,15 @@
   constant is typed by what the metric's value is (probed: kind and unit). A parameter the library
   pastes into SQL is reshaped the same way, into constants this tool quotes (`add_segment.rules` as
   `{ cases, else }`, the operator from the library's condition grammar) — the caller's input stays data.
-  WHAT THE LIBRARY REFUSES, THE LIBRARY SAYS BEFORE THE RUN: a query call runs its steps and analyses
-  through the library itself on the feature's environment (python/retentioneering_check.py), over two
-  stand-in eventstreams with the eventstream's real event names and columns, and refuses what both
-  raise alike as a configuration error — in seconds, with the library's own message, instead of minutes
-  into the warehouse run. It does not restate the library's checks in JS; a check that cannot run
-  refuses nothing. No cap on analyses, steps, rows or
+  WHAT THE LIBRARY REFUSES, THE LIBRARY SAYS BEFORE THE RUN: every step as it is added, and every
+  analysis of a query, is run by the library itself on the feature's environment — one warm process
+  (python/retentioneering_check.py --serve, src/retentioneering/checker.js) — over two stand-in
+  eventstreams of the SHAPE the eventstream has at that point (its event names, path columns, segments
+  with their levels, custom columns); what both raise alike as a configuration error is refused in a
+  fraction of a second with the library's own message, instead of minutes into the warehouse run, and a
+  step that passes returns the shape it leaves, read off the stand-ins by the library's own schema — what
+  the next step is checked against, as a pipeline stage is checked against the columns before it. It
+  does not restate the library's checks in JS; a check that cannot run refuses nothing. No cap on analyses, steps, rows or
   tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the

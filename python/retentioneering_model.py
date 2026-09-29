@@ -1,10 +1,11 @@
 """The retentioneering feature's analysis step — the body of every dbt Python model the feature
 generates (src/retentioneering/python.js inlines this file and appends `model(dbt, session)`).
 
-It is THIS SERVER's code, never the caller's: the caller declares preprocessing steps (the library's own
-op model, applied with retentioneering.ops.apply_ops) and analyses (the library's methods, under their
-own parameter names) — validated against the tool schema before anything starts — and this file turns
-an eventstream table prepared in SQL into their results, written as one long table, one row per record:
+It is THIS SERVER's code, never the caller's: the caller declares an eventstream's steps (the library's
+own op model, applied with retentioneering.ops.apply_ops — `apply_steps` stores the eventstream after
+them as a table) and analyses (the library's methods, under their own parameter names) — each checked
+by the library itself before anything starts — and `run` turns an eventstream table into their
+results, written as one long table, one row per record:
 
     analysis  the caller's id for the analysis (unique within the call)
     kind      the analysis (transition_graph, step_matrix, …, describe)
@@ -378,7 +379,13 @@ CHARTED = {
 
 
 def _stream(frame, spec):
-    """The library's Eventstream over `frame`, ordered and typed the way every analysis reads it."""
+    """The library's Eventstream over `frame`, ordered and typed the way every analysis reads it.
+
+    `spec["columns"]`: the path owner (`user`, the first path column), the event, its time, the other
+    path columns (`paths` — a session of the build, a split_sessions column of a materialized step),
+    the segments, the custom columns a step kept, and `order`: the position of each event within its
+    path, when the rows are a materialized step's — the library's own order, synthetic events included,
+    which a sort by time and name would not restore."""
     from retentioneering import Eventstream
 
     cols = spec["columns"]
@@ -387,42 +394,78 @@ def _stream(frame, spec):
     ts = pd.to_datetime(pdf[cols["time"]], utc=True)
     pdf[cols["time"]] = ts.dt.tz_convert(None)
     pdf[cols["event"]] = pdf[cols["event"]].astype(str)
-    path_cols = [cols["user"]] + ([cols["session"]] if cols.get("session") else [])
+    path_cols = [cols["user"]] + [c for c in (cols.get("paths") or []) if c != cols["user"]]
     for c in path_cols:
         pdf[c] = pdf[c].astype(str)
     # a segment's levels as text, and a path with no value left without one (the library's <MISSING>),
     # never a level spelled "None" or "nan"
     for c in cols.get("segments") or []:
         pdf[c] = pdf[c].astype(object).where(pdf[c].isna(), pdf[c].astype(str))
-    pdf = pdf.sort_values(path_cols[:1] + [cols["time"], cols["event"]], kind="mergesort").reset_index(drop=True)
+    order = cols.get("order")
+    keys = [cols["user"], order] if order and order in pdf.columns else [cols["user"], cols["time"], cols["event"]]
+    pdf = pdf.sort_values(keys, kind="mergesort").reset_index(drop=True)
+    # what a materialized step carries besides the events: their order, and its columns' roles
+    pdf = pdf.drop(columns=[c for c in (order, cols.get("roles")) if c and c in pdf.columns])
+    custom = [c for c in (cols.get("custom") or []) if c in pdf.columns]
     stream = Eventstream(pdf, schema={
         "path_cols": path_cols,
         "event_col": cols["event"],
         "timestamp_col": cols["time"],
         "segment_cols": list(cols.get("segments") or []),
+        **({"custom_cols": custom} if custom else {}),
     })
     return stream
 
 
-def run(frame, spec):
-    """The analyses `spec` names, over the eventstream `frame` → the long result table."""
+def stream_columns(stream):
+    """What an eventstream holds, by the library's own schema: its path columns (the owner first), its
+    segments and the custom columns a step added."""
+    schema = stream.schema
+    return {
+        "paths": list(schema.path_cols),
+        "segments": list(schema.segment_cols),
+        "custom": list(schema.custom_cols or []),
+    }
+
+
+def apply_steps(frame, spec):
+    """The eventstream `frame` after the library steps `spec["steps"]` (its own op model, applied with
+    apply_ops) — as rows again: the path columns, the event, its time, the segments, the custom
+    columns; `out.order`, each event's position in its path (the library's order, kept); and
+    `out.roles`, on the first row only, the columns' roles as the library's schema has them (which
+    are paths, segments, custom) — so the table says what it is, whatever the steps made."""
     from retentioneering.ops import apply_ops
 
+    stream = apply_ops(_stream(frame, spec), spec["steps"])
+    df = stream.to_dataframe()
+    held = stream_columns(stream)
+    schema = stream.schema
+    keep = held["paths"] + [schema.event_col, schema.timestamp_col] + held["segments"] + held["custom"]
+    out = df[keep].copy().reset_index(drop=True)
+    out[spec["out"]["order"]] = out.groupby(held["paths"][0], sort=False).cumcount()
+    for c in held["segments"]:
+        out[c] = out[c].astype(object).where(out[c].isna(), out[c].astype(str))
+    roles = [None] * len(out)
+    if roles:
+        roles[0] = json.dumps(held)
+    out[spec["out"]["roles"]] = pd.Series(roles, dtype=object)
+    return out
+
+
+def run(frame, spec):
+    """The analyses `spec` names, over the eventstream `frame` → the long result table."""
     stream = _stream(frame, spec)
-    base = apply_ops(stream, spec["preprocess"]) if spec.get("preprocess") else stream
     out = _Out()
     for a in spec["analyses"]:
-        s = apply_ops(base, a["preprocess"]) if a.get("preprocess") else base
         # how many paths the analysis reads — what its shares are shares OF, so a card can give counts
-        frame_out = s.to_dataframe()
+        frame_out = stream.to_dataframe()
         if a["path_col"] in frame_out.columns:
             out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[a["path_col"]].nunique())})
         charted = CHARTED.get(a["kind"])
         if a["params"].get("diff") is not None:
             out.add(a["id"], a["kind"], "diff", {"diff": True})
         if charted and a["params"].get("diff") is None:
-            charted(s, spec, a, out)
+            charted(stream, spec, a, out)
         else:
-            _emit(out, a, "result", getattr(s, a["method"])(**a["params"]))
+            _emit(out, a, "result", getattr(stream, a["method"])(**a["params"]))
     return pd.DataFrame(out.rows, columns=RESULT_COLUMNS)
-

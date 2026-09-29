@@ -44,7 +44,7 @@ export const RUNTIME_ASSETS = {
   retentioneeringCheck: {
     path: join(ROOT, 'python', 'retentioneering_check.py'),
     repoPath: 'python/retentioneering_check.py',
-    why: 'the library\'s own check of a path-analysis call, run on the feature\'s environment before the warehouse runtime is started — without it a parameter the library refuses surfaces only minutes into the run',
+    why: 'the library\'s own check of every path-analysis step and analysis — a warm process on the feature\'s environment that runs them on stand-ins of the eventstream\'s shape before the warehouse runtime is started; without it a parameter the library refuses surfaces only minutes into the run',
   },
   resultView: {
     path: join(ROOT, 'src', 'apps', 'result-view', 'dist', 'mcp-app.html'),

@@ -11,8 +11,8 @@
 //   event       the event name — grouped, and (when the caller asks for a top N) the rest merged into "other"
 //   event_time  the event's time
 //   session_id  when sessions are asked for: user_id#n, a new n after each gap longer than asked
-//   <segments>  the declared segments: a related model's attribute, a column of the source itself,
-//               or a scalar event property
+//   <segments>  the declared segments, as text: a related model's attribute, a column of the source
+//               itself, or a scalar event property
 //
 // Deterministic: a sample keeps users by a hash of their key (or rows of the named events by a hash
 // of the row), and every ordering carries a tiebreak.
@@ -190,7 +190,9 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
   const eventSample = eventShares.length
     ? ` AND (CASE ${eventShares.map(([e, v]) => `WHEN ${event} = ${lit(d, e)} THEN ${d.valueBucket(rowKey, SAMPLE_BUCKETS)} < ${Math.round(v * SAMPLE_BUCKETS)}`).join(' ')} ELSE TRUE END)`
     : '';
-  const segSel = segments.map((sg) => (sg.expr === sg.name ? `, ${q(sg.expr)}` : `, ${q(sg.expr)} AS ${sg.name}`)).join('');
+  // a segment's values as text: what the library compares a level with, the same spelling in the
+  // summary, the library's own check and every analysis
+  const segSel = segments.map((sg) => `, ${d.castExpr(q(sg.expr), 'string')} AS ${sg.name}`).join('');
   const segNames = segs.map((s) => `, ${s}`).join('');
   const ctes = [
     `es_base AS (\n${base.sql}\n)`,

@@ -177,15 +177,19 @@ export function buildSchema(catalog) {
       ],
     },
   };
+  const f = retentioneeringFacts();
+  const index = { type: 'integer', minimum: 1, description: 'edit_step / insert_step / delete_step: which step (1-based; insert_step puts the new one before it, or at the end with steps + 1).' };
   return withTaskEvents(event, {
-    type: 'object', additionalProperties: false, required: ['name'],
-    anyOf: [
-      { required: ['source'], not: { required: ['from_task'] }, title: 'from an events source' },
-      { required: ['from_task', 'columns'], title: 'from a task\'s table' },
-    ],
-    description: 'The eventstream a path analysis reads — declared, built in SQL where the data lives, and materialized. Its rows come from an events source of the catalog (source), or from the stored table of a task (from_task + columns).',
+    type: 'object', additionalProperties: false,
+    description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized. Its rows come from an events source of the catalog (source), or from the stored table of a task (from_task + columns).',
     properties: {
-      name: { type: 'string', pattern: NAME, description: 'Name of this eventstream (lowercase snake_case). A context may hold several; a later build of the same name replaces it.' },
+      action: { enum: BUILD_ACTIONS, default: 'start', description: `start (the default) declares the eventstream and builds it in SQL (a task); add_step appends one library step and returns what the eventstream holds after it — its events, path columns, segments and their levels — checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs); add_steps appends several, all or none; edit_step replaces step \`index\`, insert_step inserts one before it, delete_step removes it, truncate keeps steps 1..\`after\` — each re-checks every step after it and names the first one it breaks; fork copies steps 1..\`after\` into a new eventstream (\`name\`), to try a variant without touching this one; preview lists the steps with what each changed; materialize runs the steps not yet materialized on the warehouse (a task) — the analyses read the eventstream as materialized. Steps: ${OFFERED_OPS.join(', ')}. Not offered: ${NOT_OFFERED_OPS()}.` },
+      eventstream: { type: 'string', pattern: NAME, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
+      step: { ...stepSchema(), description: 'add_step / edit_step / insert_step: one of the library\'s own steps — { type: <op>, ...its parameters under the library\'s names }.' },
+      steps: { type: 'array', minItems: 1, items: stepSchema(), description: 'add_steps: several steps, applied in order.' },
+      index,
+      after: { type: 'integer', minimum: 0, description: 'truncate: keep steps 1..after (0: none). fork: copy steps 1..after (default: all).' },
+      name: { type: 'string', pattern: NAME, description: 'start: name of this eventstream (lowercase snake_case; a context may hold several, and a later start of the same name replaces it). fork: the new eventstream\'s name.' },
       source: { type: 'string', enum: sources, description: 'The events source the paths are read from. Each path is one user\'s events, in time order; the user key is the one the source declares toward the users model. With from_task: the source that table was built from, when the task does not say it.' },
       from_task: {
         type: 'string', pattern: '^[a-f0-9]{12}$',
@@ -241,7 +245,7 @@ export function buildSchema(catalog) {
       },
       sessions: {
         type: 'object', additionalProperties: false, required: ['gap_minutes'],
-        description: 'Also split each user\'s path into sessions at gaps longer than gap_minutes, in SQL, so an analysis can read per-session paths (path: "sessions"). (A split_sessions preprocess step does the same inside an analysis, by other rules.)',
+        description: 'Also split each user\'s path into sessions at gaps longer than gap_minutes, in SQL, so an analysis can read per-session paths (path: "sessions"). (A split_sessions step splits them by other rules: a timeout, a separator event, bounds.)',
         properties: { gap_minutes: { type: 'integer', minimum: 1 } },
       },
       sample: {
@@ -258,7 +262,32 @@ export function buildSchema(catalog) {
         },
       },
     },
+    $defs: { [CONDITION_DEF]: f.condition_schema },
   });
+}
+
+/** The build's actions, the pipeline builder's own words for the same moves. */
+export const BUILD_ACTIONS = ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize'];
+
+/** The fields of a start — the declaration of the rows. */
+const START_FIELDS = ['source', 'from_task', 'columns', 'time_range', 'path', 'events', 'segments', 'where', 'sessions', 'sample'];
+
+/** What each action takes: exactly its own fields, so a stray one is refused rather than ignored. */
+function actionRules(startBranches) {
+  const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
+  const is = (...actions) => ({ properties: { action: actions.length === 1 ? { const: actions[0] } : { enum: actions } }, required: ['action'] });
+  const stepFields = ['eventstream', 'step', 'steps', 'index', 'after'];
+  const others = (keep) => [...START_FIELDS, 'name', 'description', ...stepFields].filter((k) => !keep.includes(k));
+  return [
+    { if: { anyOf: [{ not: { required: ['action'] } }, is('start')] }, then: { required: ['name'], anyOf: startBranches, ...forbid(stepFields) } },
+    { if: is('add_step'), then: { required: ['context_id', 'step'], ...forbid(others(['eventstream', 'step'])) } },
+    { if: is('add_steps'), then: { required: ['context_id', 'steps'], ...forbid(others(['eventstream', 'steps'])) } },
+    { if: is('edit_step', 'insert_step'), then: { required: ['context_id', 'index', 'step'], ...forbid(others(['eventstream', 'index', 'step'])) } },
+    { if: is('delete_step'), then: { required: ['context_id', 'index'], ...forbid(others(['eventstream', 'index'])) } },
+    { if: is('truncate'), then: { required: ['context_id', 'after'], ...forbid(others(['eventstream', 'after'])) } },
+    { if: is('fork'), then: { required: ['context_id', 'name'], ...forbid(others(['eventstream', 'name', 'after', 'description'])) } },
+    { if: is('preview', 'materialize'), then: { required: ['context_id'], ...forbid(others(['eventstream'])) } },
+  ];
 }
 
 /**
@@ -268,22 +297,27 @@ export function buildSchema(catalog) {
  * restates events and sample with the catalog's enum: a typo there is still refused by the schema.
  */
 function withTaskEvents(event, schema) {
-  if (!event.enum) return schema;
+  const branches = [
+    { required: ['source'], not: { required: ['from_task'] }, title: 'from an events source' },
+    { required: ['from_task', 'columns'], title: 'from a task\'s table' },
+  ];
+  if (!event.enum) return { ...schema, allOf: actionRules(branches) };
   const free = { type: 'string', minLength: 1, description: 'An event name: of the source, or one the from_task table holds.' };
   const relax = (node) => (node === event ? free : Array.isArray(node) ? node.map(relax) : node && typeof node === 'object' ? Object.fromEntries(Object.entries(node).map(([k, v]) => [k, relax(v)])) : node);
   const strict = { events: schema.properties.events, sample: schema.properties.sample };
-  const out = relax(schema);
-  out.anyOf[0] = { ...out.anyOf[0], properties: strict };
-  return out;
+  const { $defs, ...rest } = schema;
+  const out = relax(rest);
+  branches[0] = { ...branches[0], properties: strict };
+  return { ...out, allOf: actionRules(branches), $defs };
 }
 
 /** Whose paths: the wrapper's name for the library's path column. */
 const pathField = {
   anyOf: [
     { enum: ['users', 'sessions'] },
-    { type: 'string', pattern: NAME, description: 'The session_col of a split_sessions step in preprocess.' },
+    { type: 'string', pattern: NAME, description: 'A path column a split_sessions step made (its session_col).' },
   ],
-  description: 'Whose paths: each user\'s whole history (default), each session of the build (sessions), or the session column a split_sessions preprocess step adds.',
+  description: 'Whose paths: each user\'s whole history (default), each session of the build (sessions), or the session column a split_sessions step made — a step of this eventstream before this one, or one materialized.',
 };
 
 /** A library parameter as a schema property: its type, its default, its first docstring paragraph. */
@@ -421,13 +455,13 @@ function opSchemas() {
   });
 }
 
-function preprocessField(where) {
-  return {
-    type: 'array', minItems: 1,
-    items: { oneOf: opSchemas(), discriminator: { propertyName: 'type' } },
-    description: `Library preprocessing steps applied in order ${where} — retentioneering's own op model ({ type: <op>, ...its parameters }). Not offered: ${Object.entries(NOT_OFFERED.ops).map(([op, why]) => `${op} (${why})`).join('; ')}.`,
-  };
+/** One of the library's own steps ({ type: <op>, ...its parameters }) — an eventstream's step. */
+function stepSchema() {
+  return { oneOf: opSchemas(), discriminator: { propertyName: 'type' } };
 }
+
+/** The ops left out, each with its reason — said wherever steps are offered. */
+const NOT_OFFERED_OPS = () => Object.entries(NOT_OFFERED.ops).map(([op, why]) => `${op} (${why})`).join('; ');
 
 const METHOD_ARGS_NOTE = 'the method\'s own arguments';
 
@@ -441,7 +475,7 @@ function analysisSchemas() {
       ...(allOf.length ? { allOf } : {}),
       type: 'object', additionalProperties: false, title: kind, description: `${a.summary}${CARD_KINDS.includes(kind) ? '' : ' (returned as tables, answered in words: it has no card)'}`,
       required: ['kind', ...required],
-      properties: { kind: { const: kind }, id, preprocess: preprocessField('to this analysis alone, after the call\'s own preprocess'), ...properties },
+      properties: { kind: { const: kind }, id, ...properties },
     };
     // an anchor and a path pattern are two ways to centre the same steps: one or the other
     if (properties.anchor && properties.path_pattern) branch.not = { required: ['anchor', 'path_pattern'] };
@@ -453,14 +487,13 @@ export function querySchema() {
   const f = retentioneeringFacts();
   return {
     type: 'object', additionalProperties: false,
-    description: 'Start path analyses over a built eventstream, or read one back.',
+    description: 'Start path analyses over a built eventstream (its materialized steps included), or read one back.',
     allOf: [
       { if: { required: ['analyses'] }, then: { required: ['context_id'] } },
     ],
     properties: {
       context_id: { type: 'string', pattern: CTX, description: 'The context the eventstream was built in.' },
       eventstream: { type: 'string', pattern: NAME, description: 'Which eventstream of the context (optional when it holds one).' },
-      preprocess: preprocessField('to the eventstream before every analysis of this call'),
       analyses: { type: 'array', minItems: 1, items: { oneOf: analysisSchemas(), discriminator: { propertyName: 'kind' } }, description: 'The analyses to run, computed together in one run.' },
       task_id: TASK_ID,
       task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: TASK_ID, description: 'Several tasks, read together.' },

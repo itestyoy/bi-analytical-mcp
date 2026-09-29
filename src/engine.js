@@ -3467,7 +3467,7 @@ export class Engine {
       const time = t ? { metric_time: { grain: t.grain || 'day' } } : {};
       let cut;
       if (project) {
-        const refs = items.filter((i) => i !== t).map((i) => ({ item: i, ref: refOf(i, own) }));
+        const refs = items.filter((i) => i !== t).map((i) => ({ item: i, ref: refOf(i, own, items) }));
         const dims = refs.filter((r) => r.item.kind === 'dimension');
         const ents = uniqueRefs(refs.filter((r) => r.item.kind === 'entity').map((r) => r.ref));
         cut = input.metric
@@ -3485,7 +3485,7 @@ export class Engine {
     });
     const first = scope.metrics[0];
     const firstItem = first && project ? (groupBys?.[first.name] || []).find((i) => i.name !== 'metric_time') : null;
-    const firstCut = first && (project ? (firstItem ? refOf(firstItem, own) : null) : groupable?.[0] || null);
+    const firstCut = first && (project ? (firstItem ? refOf(firstItem, own, groupBys[first.name]) : null) : groupable?.[0] || null);
     const errors = shown.filter((i) => i.severity === 'error').length;
     return {
       context_id: ctx.id,
@@ -3669,7 +3669,7 @@ export class Engine {
           return {
             ...m,
             dimensions_from: [...new Set(items.filter((i) => i.kind === 'dimension' && i.semantic_model).map((i) => i.semantic_model))],
-            entities: uniqueRefs(items.filter((i) => i.kind === 'entity').map((i) => refOf(i, id))),
+            entities: uniqueRefs(items.filter((i) => i.kind === 'entity').map((i) => refOf(i, id, items))),
             ...(time ? { metric_time: { grain: time.grain } } : {}),
           };
         }),
@@ -3718,16 +3718,16 @@ export class Engine {
     const groupByResolved = {};
     // the item each group_by named, by its key — carried, so an order_by naming the same item gets its token
     const tokenByItem = new Map();
-    const itemKey = (item) => JSON.stringify(refOf(item, own));
+    const itemKey = (item) => `${item.kind}\u0000${item.semantic_model || ''}\u0000${tokenOf(item)}`;
     for (const g of input.group_by || []) {
       const item = g && g.time === 'metric_time' ? items.find((i) => i.name === 'metric_time' && !i.semantic_model) : pick(g, 'group_by');
       if (!item) throw new ToolError(`group_by: ${input.metrics.join(', ')} ${input.metrics.length > 1 ? 'share' : 'has'} no time axis to group by`, { stage: 'validate', field: 'group_by' });
       const grain = item.type === 'time' ? g.grain || item.grain || 'day' : null;
       const tok = tokenOf(item, grain);
       const column = columnOf(item, grain);
-      if (input.metrics.includes(column) || [...rename.values()].includes(column)) throw new ToolError(`group_by: ${labelOf(item, own)} would make a result column '${column}' that another column of this query already has`, { stage: 'validate', field: 'group_by' });
+      if (input.metrics.includes(column) || [...rename.values()].includes(column)) throw new ToolError(`group_by: ${labelOf(item, own, items)} would make a result column '${column}' that another column of this query already has`, { stage: 'validate', field: 'group_by' });
       groupBy.push(tok); rename.set(tok, column);
-      if (!(g && g.time === 'metric_time')) groupByResolved[labelOf(item, own)] = column;
+      if (!(g && g.time === 'metric_time')) groupByResolved[labelOf(item, own, items)] = column;
       tokenByItem.set(itemKey(item), tok);
     }
     let where = [];

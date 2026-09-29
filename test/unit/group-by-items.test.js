@@ -1,5 +1,6 @@
-// What a metric can be grouped by is MetricFlow's list (src/group-by-items.js): a reference names one
-// item of it exactly, or is refused naming what there is — nothing is chosen for the caller.
+// What a metric can be grouped by is MetricFlow's list (src/group-by-items.js): a caller names an item by
+// what it is and where it lives, and MetricFlow's name for it is found there — a path (via) is asked for
+// only where MetricFlow lists several.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -17,32 +18,37 @@ const spendItems = [
   { kind: 'dimension', name: 'metric_time', dunder_name: 'metric_time__day', semantic_model: null, entity_links: [], type: 'time', grain: 'day' },
 ];
 
-test('a dimension of the context\'s own model is { dimension }; any other names its semantic model and the entity path to it', () => {
-  assert.deepEqual(refOf(spendItems[0], own), { dimension: 'campaign' });
-  assert.deepEqual(refOf(spendItems[1], own), { dimension: 'day', grain: 'day' });
-  assert.deepEqual(refOf(spendItems[2], own), { semantic_model: 'devices', dimension: 'model', via: 'device' });
-  assert.deepEqual(refOf(spendItems[3], own), { semantic_model: 'devices', dimension: 'model', via: ['user', 'device'] });
-  assert.deepEqual(refOf(spendItems[4], own), { entity: 'device' });
-  assert.deepEqual(refOf(spendItems[5], own), { time: 'metric_time', grain: 'day' });
+test('an item is named by what it is and where it lives; via only where MetricFlow lists several paths to it', () => {
+  const ref = (i) => refOf(spendItems[i], own, spendItems);
+  assert.deepEqual(ref(0), { dimension: 'campaign' });
+  assert.deepEqual(ref(1), { dimension: 'day', grain: 'day' });
+  // devices.model is listed through two paths: each is named with its own
+  assert.deepEqual(ref(2), { semantic_model: 'devices', dimension: 'model', via: 'device' });
+  assert.deepEqual(ref(3), { semantic_model: 'devices', dimension: 'model', via: ['user', 'device'] });
+  assert.deepEqual(ref(4), { entity: 'device' });
+  assert.deepEqual(ref(5), { time: 'metric_time', grain: 'day' });
+  // with one path listed, the same dimension needs none
+  assert.deepEqual(refOf(spendItems[2], own, spendItems.filter((i) => i !== spendItems[3])), { semantic_model: 'devices', dimension: 'model' });
 });
 
-test('each reference resolves to exactly the item it names, and to MetricFlow\'s token and the caller\'s column', () => {
-  const one = (ref) => resolveRef(spendItems, ref, own).item;
+test('each reference resolves to the item MetricFlow lists for it, with MetricFlow\'s token and the caller\'s column', () => {
+  const one = (ref, items = spendItems) => resolveRef(items, ref, own).item;
   assert.equal(tokenOf(one({ dimension: 'campaign' })), 'spend_row__campaign');
   assert.equal(tokenOf(one({ dimension: 'day' }), 'week'), 'spend_row__day__week');
   assert.equal(columnOf(one({ dimension: 'day' }), 'week'), 'spend_day_week');
   assert.equal(tokenOf(one({ semantic_model: 'devices', dimension: 'model', via: 'device' })), 'device__model');
   assert.equal(tokenOf(one({ semantic_model: 'devices', dimension: 'model', via: ['user', 'device'] })), 'user__device__model');
+  // one path listed: MetricFlow's name for it is found without via
+  assert.equal(tokenOf(one({ semantic_model: 'devices', dimension: 'model' }, spendItems.filter((i) => i !== spendItems[3]))), 'device__model');
   assert.equal(tokenOf(one({ entity: 'device' })), 'device');
 });
 
-test('what does not name one item is refused with the ways it can be named — no path is chosen for the caller', () => {
-  // another model's dimension without the path to it
-  assert.match(resolveRef(spendItems, { semantic_model: 'devices', dimension: 'model' }, own).error, /via: "device".*via: \["user","device"\]/);
-  // a path MetricFlow does not list
-  assert.match(resolveRef(spendItems, { semantic_model: 'devices', dimension: 'model', via: 'user' }, own).error, /named/);
-  // a dimension of another model named as if it were the context's own
-  assert.match(resolveRef(spendItems, { dimension: 'model' }, own).error, /semantic_model: "devices"/);
+test('what does not name one item is refused with the ways it can be named', () => {
+  // two paths listed, none given: MetricFlow would not choose either
+  assert.match(resolveRef(spendItems, { semantic_model: 'devices', dimension: 'model' }, own).error, /several paths.*via: "device".*via: \["user","device"\]/);
+  assert.match(resolveRef(spendItems, { semantic_model: 'devices', dimension: 'model', via: 'user' }, own).error, /not through that via/);
+  // another model's dimension named as the context's own: where it does live is said
+  assert.match(resolveRef(spendItems, { dimension: 'model' }, own).error, /not a dimension of spend; it is .*semantic_model: "devices"/);
   assert.match(resolveRef(spendItems, { dimension: 'nope' }, own).error, /not a dimension this can be grouped by/);
 });
 
@@ -53,5 +59,5 @@ test('several metrics are grouped by what MetricFlow lists for every one of them
     { kind: 'dimension', name: 'metric_time', dunder_name: 'metric_time__day', semantic_model: null, entity_links: [], type: 'time', grain: 'day' },
   ];
   const shared = commonItems({ cost: spendItems, clicks }, ['cost', 'clicks']);
-  assert.deepEqual(shared.map((i) => refOf(i, own)), [{ dimension: 'campaign' }, { entity: 'device' }, { time: 'metric_time', grain: 'day' }]);
+  assert.deepEqual(shared.map((i) => refOf(i, own, shared)), [{ dimension: 'campaign' }, { entity: 'device' }, { time: 'metric_time', grain: 'day' }]);
 });

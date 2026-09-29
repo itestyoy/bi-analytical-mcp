@@ -327,14 +327,16 @@
   the pattern any built context's id matches (`anyOf`). A context offers the metrics that read its
   semantic model (a metric of several models is in each of theirs), queried with
   query_semantic_model({ context_id: "<semantic model>" }) — `{ dimension, grain? }` of its own model,
-  `{ semantic_model, dimension, via }` of any other, and `{ entity }` in group_by / where / order_by.
-  WHAT A METRIC CAN BE GROUPED BY IS METRICFLOW'S WORD, NEVER WORKED OUT HERE (HARD RULE): at start
-  the server asks MetricFlow (`groupBys`, its `list_group_bys`) for every metric's items — each
-  dimension with its semantic model and the ENTITY PATH to it, each entity, metric_time with its
-  grain — and a reference must name one of them exactly (src/group-by-items.js): `via` is that
-  path, always given for another model's dimension; no join, path, primary entity or grain is chosen
-  for the caller, and what does not name one item is refused with the ways it can be named. Do NOT
-  re-derive joins from the manifest. Checked before anything runs, the
+  `{ semantic_model, dimension }` of another, and `{ entity }` in group_by / where / order_by: what a
+  dimension is and where it lives. MetricFlow makes every join; what it needs is its own name for the
+  item, which always carries the entity path (`media_source__label` — it takes no bare `label`, even
+  with one path). WHAT A METRIC CAN BE GROUPED BY IS METRICFLOW'S WORD, NEVER WORKED OUT HERE (HARD
+  RULE): at start the server asks MetricFlow (`groupBys`, its `list_group_bys`) for every metric's
+  items — each dimension with its semantic model and entity path, each entity, metric_time with its
+  grain — and finds the item a reference names in that list (src/group-by-items.js). `via` (the
+  path) is asked for ONLY where MetricFlow lists several paths to the same dimension, the case it
+  does not choose either; anything else not naming one listed item is refused with the ways it can
+  be named. Do NOT re-derive joins from the manifest. Checked before anything runs, the
   project's names kept, and the catalog's require_time_range holding on a semantic model over a dbt
   model the catalog requires a window for (the dbt model dbt itself records the semantic model reads —
   manifest.json depends_on, `semanticModelSources` in the dbt client). Their queries run side by side (nothing writes to them)

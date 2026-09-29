@@ -336,23 +336,23 @@ test('a ratio has the time axis of its inputs: the preview offers metric_time fo
   }
 });
 
-test('a dimension of another semantic model is named with the entity path MetricFlow lists — never chosen for the caller — and is the warehouse\'s own join', opts, async (t) => {
+test('a dimension of another semantic model is named by where it lives — MetricFlow makes the join — and is the warehouse\'s own join', opts, async (t) => {
   if (skip(t)) return;
   const raw = engine.raw || engine;
-  // the preview lists it exactly as the query takes it
+  // the preview lists it as the query takes it: what and where, no path (MetricFlow lists one)
   const p = await preview({ context_id: ACQ, metric: 'project_cost' });
-  const joined = { semantic_model: 'project_media_sources', dimension: 'label', via: 'media_source' };
+  const joined = { semantic_model: 'project_media_sources', dimension: 'label' };
   assert.ok(p.metrics[0].group_by.dimensions.some((d) => JSON.stringify(d) === JSON.stringify(joined)), JSON.stringify(p.metrics[0].group_by));
-  // without the path it is refused, naming the one there is
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: ACQ, metrics: ['project_cost'], group_by: [{ semantic_model: 'project_media_sources', dimension: 'label' }] })), /via: "media_source"/);
-  // …and named as another model's dimension would be, if it were the context's own
-  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: ACQ, metrics: ['project_cost'], group_by: [{ dimension: 'label' }] })), /semantic_model: "project_media_sources"/);
-  // with it, the numbers of the same join made by hand
+  // named as if it were the context's own, it is refused saying where it lives
+  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: ACQ, metrics: ['project_cost'], group_by: [{ dimension: 'label' }] })), /not a dimension of project_acquisition; it is .*semantic_model: "project_media_sources"/);
+  // the numbers of the same join made by hand — and the same with the path spelled out
   const want = Object.fromEntries((await wh.query('select upper(a.media_source) as label, sum(a.cost) as cost from fct_player_acquisition a group by 1')).rows.map((r) => [r.label, num(r.cost)]));
-  const got = rowsOf(await q(ACQ, { metrics: ['project_cost'], group_by: [joined] }));
-  assert.deepEqual(Object.keys(got[0]).sort(), ['project_cost', 'project_media_sources_label']);
-  for (const [label, cost] of Object.entries(want)) assert.ok(Math.abs(num(got.find((r) => r.project_media_sources_label === label).project_cost) - cost) < 1e-9, label);
-  // a where through the same path
+  for (const ref of [joined, { ...joined, via: 'media_source' }]) {
+    const got = rowsOf(await q(ACQ, { metrics: ['project_cost'], group_by: [ref] }));
+    assert.deepEqual(Object.keys(got[0]).sort(), ['project_cost', 'project_media_sources_label']);
+    for (const [label, cost] of Object.entries(want)) assert.ok(Math.abs(num(got.find((r) => r.project_media_sources_label === label).project_cost) - cost) < 1e-9, label);
+  }
+  // a where on it
   const [{ meta }] = (await wh.query("select sum(cost) as meta from fct_player_acquisition where upper(media_source) = 'META'")).rows;
   const filtered = rowsOf(await q(ACQ, { metrics: ['project_cost'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', ...joined }, op: 'eq', value: 'META' }] } }));
   assert.ok(Math.abs(num(filtered[0].project_cost) - num(meta)) < 1e-9);

@@ -158,8 +158,11 @@
   NOTHING HANDED BACK SPELLS METRICFLOW'S `entity__dimension__grain`: a query names what and where
   ({ model, attribute }, { dimension }, { entity }, metric_time) and the server resolves it; result
   columns are the caller's names, and an explained query's SQL and plan and every failure message go
-  through `Engine._callerSpelling` (the query's tokens → its result-column names, any other internal
-  `a__b` → `a_b`), which renames each occurrence alike — the SQL as shown runs to the same rows.
+  through `Engine._callerSpelling`, which rewrites EXACT tokens only — each MetricFlow item's token
+  for the query's metrics, the query's own references, `__<metric>` aliases, metric_time grains, the
+  declared time dimensions' `<dimension>__<grain>` — never a pattern: a project's own columns may be
+  named with `__` (measure__…), and SQL with them renamed would not run. Each occurrence is renamed
+  alike, so the SQL as shown runs to the same rows.
   `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
   query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
@@ -302,7 +305,7 @@
   there (side by side on BigQuery).
 - dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
   the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
-  / semanticSpec / semanticManifest / pythonModelsOn) over the installed dbt, each major version its own implementation
+  / semanticSpec / semanticManifest / semanticModelSources / pythonModelsOn) over the installed dbt, each major version its own implementation
   — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
   and do NOT branch on the dbt version outside `src/dbt/`.
 - ONE SEMANTIC LAYER, TWO YAML SPECS: the context is rendered once (`src/yaml-render.js`, legacy
@@ -324,11 +327,17 @@
   the pattern any built context's id matches (`anyOf`). A context offers the metrics that read its
   semantic model (a metric of several models is in each of theirs), queried with
   query_semantic_model({ context_id: "<semantic model>" }) — `{ dimension, grain? }` of its own model,
-  `{ semantic_model, dimension, via? }` of one it reaches, and `{ entity }` (a key the project
-  declares only as an entity) in group_by / where / order_by,
-  checked against the manifest before anything runs (one hop through a primary entity), the
+  `{ semantic_model, dimension, via }` of any other, and `{ entity }` in group_by / where / order_by.
+  WHAT A METRIC CAN BE GROUPED BY IS METRICFLOW'S WORD, NEVER WORKED OUT HERE (HARD RULE): at start
+  the server asks MetricFlow (`groupBys`, its `list_group_bys`) for every metric's items — each
+  dimension with its semantic model and the ENTITY PATH to it, each entity, metric_time with its
+  grain — and a reference must name one of them exactly (src/group-by-items.js): `via` is that
+  path, always given for another model's dimension; no join, path, primary entity or grain is chosen
+  for the caller, and what does not name one item is refused with the ways it can be named. Do NOT
+  re-derive joins from the manifest. Checked before anything runs, the
   project's names kept, and the catalog's require_time_range holding on a semantic model over a dbt
-  model the catalog requires a window for. Their queries run side by side (nothing writes to them)
+  model the catalog requires a window for (the dbt model dbt itself records the semantic model reads —
+  manifest.json depends_on, `semanticModelSources` in the dbt client). Their queries run side by side (nothing writes to them)
   in the SAME shell as a task's (`_metricOrderBy` / `_metricWindow` / `_metricPaging` /
   `_metricEarlyAnswer` / `_metricTask` — only how a reference resolves differs); their stored
   results are carried over a restart (a start that parses nothing keeps them for the next) and

@@ -238,6 +238,9 @@ function metricSchema() {
   };
 }
 
+/** `via`: an entity path as MetricFlow lists it — one entity, or several in order. */
+const viaSchema = (entities, description) => ({ description, oneOf: [{ enum: entities }, { type: 'array', minItems: 1, items: { enum: entities } }] });
+
 /** A dimension of the dbt project's OWN semantic layer (src/project-semantics.js), addressed by the
  *  semantic model that carries it — what a query of a context of the project's own semantic models names. */
 function projectRef(project, catalog, { withKind = false } = {}) {
@@ -245,13 +248,13 @@ function projectRef(project, catalog, { withKind = false } = {}) {
   const entities = [...new Set(project.semantic_models.flatMap((m) => m.entities.map((e) => e.name)))].sort();
   return {
     type: 'object', additionalProperties: false, required: [...(withKind ? ['kind'] : []), 'dimension'],
-    description: `A dimension of one of the dbt project's own semantic models, used in that model's context (context_id: the semantic model's name). { dimension } alone is a dimension of the context's own semantic model; add semantic_model for one of another semantic model the metrics reach through an entity, and via when they reach it through several. ${withKind ? 'The condition compares that dimension\'s values.' : 'Its result column is <semantic_model>_<dimension>, with _<grain> for a time dimension.'} preview_semantic_model({ context_id, metric }) lists every dimension a metric takes, spelled as here, under its group_by.dimensions.`,
+    description: `A dimension of one of the dbt project's own semantic models, used in that model's context (context_id: the semantic model's name), named exactly as MetricFlow lists it: { dimension } alone is a dimension of the context's own semantic model; any other is { semantic_model, dimension, via }, via being the entity path to it — the server chooses no join, so the path is always given. ${withKind ? 'The condition compares that dimension\'s values.' : 'Its result column is <semantic_model>_<dimension>, with _<grain> for a time dimension.'} preview_semantic_model({ context_id, metric }) lists every dimension a metric takes, spelled as here, under its group_by.dimensions.`,
     properties: {
       ...(withKind ? { kind: { enum: ['dimension'], description: 'Filter on a dimension.' } } : {}),
       semantic_model: { enum: names, description: 'The semantic model that carries the dimension. Omit it for the context\'s own semantic model.' },
       dimension: { type: 'string', description: 'The dimension\'s name, as the project declares it.' },
       ...(withKind ? {} : { grain: { enum: catalog.timeGranularities(), description: 'Only for a time dimension: the bucket rows are grouped into (default: the dimension\'s own granularity).' } }),
-      ...(entities.length ? { via: { enum: entities, description: 'The entity to reach semantic_model through, needed only when the metrics reach it through several (the preview shows via on such a dimension).' } } : {}),
+      ...(entities.length ? { via: viaSchema(entities, 'The entity path to semantic_model — one entity, or several in order for a path of several joins — exactly as preview_semantic_model lists it. Required for a dimension of any semantic model but the context\'s own.') } : {}),
     },
   };
 }
@@ -268,6 +271,7 @@ function projectEntityRef(project, { withKind = false } = {}) {
     properties: {
       ...(withKind ? { kind: { enum: ['entity'], description: 'Filter on an entity.' } } : {}),
       entity: { enum: entities, description: 'The entity\'s name, as the project declares it.' },
+      via: viaSchema(entities, 'Only for an entity MetricFlow reaches through others: that entity path, as preview_semantic_model lists it.'),
     },
   }];
 }
@@ -605,7 +609,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ context_id }) lists them)' : ''}.` },
       group_by: {
         type: 'array',
-        description: `How to break the metrics down: one item per column of the result, in the order given. { time: "metric_time", grain } works in every context — the metrics' time axis at a grain, result column metric_time_<grain>. In a task's context an attribute is { model, attribute }, addressed by where it lives: the join path comes from the schema (add via: "<relationship>" when several lead to that model), and its model must be in use_base_models; result column <model>_<attribute>.${project ? ' In a context of one of the dbt project\'s own semantic models (context_id: its name) the project\'s own names are used instead: { dimension, grain? } for a dimension of that model, { semantic_model, dimension } for one of another model the metrics reach, and { entity } for a key the project declares as an entity; preview_semantic_model({ context_id, metric }) lists, under the metric\'s group_by, exactly the items it accepts.' : ''} No path strings.`,
+        description: `How to break the metrics down: one item per column of the result, in the order given. { time: "metric_time", grain } works in every context — the metrics' time axis at a grain, result column metric_time_<grain>. In a task's context an attribute is { model, attribute }, addressed by where it lives: the join path comes from the schema (add via: "<relationship>" when several lead to that model), and its model must be in use_base_models; result column <model>_<attribute>.${project ? ' In a context of one of the dbt project\'s own semantic models (context_id: its name) the project\'s own names are used instead: { dimension, grain? } for a dimension of that model, { semantic_model, dimension, via } for one of another model — via is the entity path MetricFlow joins through, always given, since the server chooses no join — and { entity } for a key the project declares as an entity; preview_semantic_model({ context_id, metric }) lists, under the metric\'s group_by, exactly the items MetricFlow accepts, each spelled as here.' : ''} No path strings.`,
         items: {
           oneOf: [
             { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },

@@ -4,7 +4,9 @@
 //
 // At start the server copies the project into ONE internal context (PROJECT_STORE, never addressed by a
 // caller), parses it through the dbt client, and reads the semantic manifest dbt wrote into the LAYER
-// (src/semantic-manifest.js). Each of the project's semantic models is then a context of its OWN,
+// (src/semantic-manifest.js), and asks MetricFlow what each metric can be grouped by (src/group-by-items.js)
+// — the joins, entity paths and grains are MetricFlow's, never worked out here. Each of the project's
+// semantic models is then a context of its OWN,
 // addressed by its name as the project declares it (context_id: "<semantic model>") — its metrics (and every metric made of
 // metrics that read it), its dimensions — all of them working in that one parsed copy, so nothing is
 // copied or parsed per model. A query is checked against the layer before anything runs, and
@@ -54,6 +56,14 @@ export async function loadProjectSemantics({ runner, contextManager }) {
   if (!r.ok) return serveNothing({ error: formatDbtError(r.stdout, r.stderr) || 'the project did not parse' });
   const layer = manifestLayer(runner.semanticManifest(dir));
   if (!layer.metrics.length) return serveNothing(null);
+  // what each metric can be grouped by, as MetricFlow itself resolves it over this copy — every join,
+  // entity path and grain is MetricFlow's word, never a rule this server applies on its own
+  if (!runner.groupBys) return serveNothing({ error: 'the query engine cannot list what the metrics can be grouped by (MetricFlow)' });
+  const listed = await runner.groupBys(dir, layer.metrics.map((m) => m.name));
+  if (!listed.ok) return serveNothing({ error: `MetricFlow could not list what the project's metrics can be grouped by: ${listed.error}` });
+  layer.groupBys = listed.group_bys;
+  // the dbt model each semantic model reads, as dbt recorded it (the cost guardrail's key)
+  layer.sources = runner.semanticModelSources ? runner.semanticModelSources(dir) : {};
   const contexts = [];
   const skipped = [];
   const dimensionOnly = [];

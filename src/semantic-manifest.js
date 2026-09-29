@@ -5,33 +5,23 @@
 // aggregation on the metric in the latest spec, on a measure in the legacy one) are read here, once.
 //
 // From it: the semantic models (entities, dimensions, measures), every metric with what it reads and
-// its DEFINITION in one shape for both specs, what each metric can be CUT by, and the checks a manifest
-// can be held to without running anything (an input that is missing, a time axis that is not one).
-// What MetricFlow compiles and the warehouse runs is checked by running them (Engine, preview_semantic_model
-// with validate) — this is only what the declaration itself says.
+// its DEFINITION in one shape for both specs, and the checks a manifest can be held to without running
+// anything (an input that is missing, a time axis that is not one). It does NOT work out what a
+// metric can be grouped by — which joins MetricFlow makes, through which entity, at which grain:
+// MetricFlow says that itself (src/group-by-items.js), and a second copy of its rules here would be
+// one that can disagree with it. What MetricFlow compiles and the warehouse runs is checked by running
+// them (preview_semantic_model with validate) — this is only what the declaration itself says.
 
-// the entity types a semantic model is unique on (what another model joins onto), in the order its own
-// dimensions are addressed by: a primary entity before a unique one before a natural one
-const IDENTITY = ['primary', 'unique', 'natural'];
+
 
 const hasMeta = (meta) => !!meta && typeof meta === 'object' && Object.keys(meta).length > 0;
 const byName = (a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
 const compact = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined && v !== null && !(Array.isArray(v) && !v.length)));
 
-/** A semantic model's own entity (what its dimensions are addressed through), or null: the declared
- *  primary_entity, else its primary entity, else a unique one, else a natural one. */
+/** A semantic model's primary entity as it declares it — `primary_entity`, or its entity of type
+ *  primary — or null. Shown, and checked (a model with dimensions and none cannot be grouped by). */
 function primaryEntity(sm) {
-  if (sm.primary_entity) return sm.primary_entity;
-  for (const type of IDENTITY) {
-    const e = (sm.entities || []).find((x) => x.type === type);
-    if (e) return e.name;
-  }
-  return null;
-}
-
-/** Every entity a semantic model is unique on — what another model's entity of that name joins onto. */
-function identityEntities(sm) {
-  return [...new Set([...(sm.primary_entity ? [sm.primary_entity] : []), ...(sm.entities || []).filter((e) => IDENTITY.includes(e.type)).map((e) => e.name)])];
+  return sm.primary_entity || (sm.entities || []).find((e) => e.type === 'primary')?.name || null;
 }
 
 /** A metric's where filter as the templates it holds (the manifest keeps them as { where_filters }). */
@@ -55,14 +45,9 @@ function inputOf(ref) {
 }
 
 /**
- * The layer a semantic manifest describes: { semantic_models, metrics, reach, entities, definition, issues }.
- *   * `reach(metric)`: the dimensions it can be grouped and filtered by, each { semantic_model, dimension,
- *     type, grain?, entity, path } (path: MetricFlow's `<entity>__<dimension>`) — a simple metric's own
- *     semantic model's and one hop through an entity another model owns; a metric made of others only
- *     what EVERY input reaches (MetricFlow cuts a ratio or a derived metric by what its inputs share);
- *   * `entities(metric)`: the entities it can be grouped by, by name, on the same rule;
+ * The layer a semantic manifest describes: { semantic_models, metrics, definition, issues } — every
+ * metric with the semantic models it reads (its own aggregation's, and its inputs');
  *   * `definition(metric)`: how it is computed, in one shape for both YAML specs;
- *   * `timeAxis(metric)`: what metric_time reads for it — { dimension?, grain } — or null;
  *   * `issues()`: what the declaration itself gets wrong, [{ severity, semantic_model?, metric?, message }].
  */
 export function manifestLayer(manifest) {
@@ -72,7 +57,6 @@ export function manifestLayer(manifest) {
     ...(sm.description ? { description: sm.description } : {}),
     table: sm.node_relation?.alias || sm.node_relation?.relation_name || null,
     entity: primaryEntity(sm),
-    identities: identityEntities(sm),
     ...(sm.defaults?.agg_time_dimension ? { agg_time_dimension: sm.defaults.agg_time_dimension } : {}),
     entities: (sm.entities || []).map((e) => compact({ name: e.name, type: e.type, expr: e.expr ?? e.name, description: e.description || undefined })),
     ...(hasMeta(sm.config?.meta) ? { meta: sm.config.meta } : {}),
@@ -156,78 +140,6 @@ export function manifestLayer(manifest) {
     return out;
   };
 
-  // one semantic model's dimensions, addressed through `entity`
-  const dimsOf = (sm, entity) => sm.dimensions.map((d) => ({ semantic_model: sm.name, dimension: d.name, type: d.type, ...(d.grain ? { grain: d.grain } : {}), entity, path: `${entity}__${d.name}` }));
-  const dimKey = (d) => `${d.semantic_model}\u0000${d.dimension}\u0000${d.entity}`;
-  /** What ONE semantic model's rows can be cut by: its own dimensions, and one hop through an entity. */
-  const modelReach = (smName) => {
-    const sm = modelNamed.get(smName);
-    if (!sm) return [];
-    const out = [];
-    const seen = new Set();
-    const add = (list) => { for (const d of list) if (!seen.has(dimKey(d))) { seen.add(dimKey(d)); out.push(d); } };
-    if (sm.entity) add(dimsOf(sm, sm.entity));
-    // one hop: through an entity of this model onto another model that is unique on it — any of its
-    // identity entities, not only the one its own dimensions are addressed by
-    for (const e of sm.entities) for (const other of models) if (other !== sm && other.identities.includes(e.name)) add(dimsOf(other, e.name));
-    return out;
-  };
-  /** The semantic models a metric is CUT through: a direct aggregation's own; a conversion's base. */
-  const cutBy = (name, seen = new Set()) => {
-    if (seen.has(name)) return { dims: [], entities: [] };
-    seen.add(name);
-    const m = raw.get(name);
-    if (!m) return { dims: [], entities: [] };
-    const direct = aggregationOf(m);
-    if (direct) {
-      const sm = modelNamed.get(direct.semantic_model);
-      return { dims: modelReach(direct.semantic_model), entities: (sm?.entities || []).map((e) => e.name) };
-    }
-    const tp = m.type_params || {};
-    const parts = m.type === 'conversion' ? [tp.conversion_type_params?.base_metric].filter((x) => x?.name) : inputsOf(m);
-    if (!parts.length) return { dims: [], entities: [] };
-    const each = parts.map((p) => cutBy(p.name, new Set(seen)));
-    // what every input reaches — MetricFlow joins the inputs on the cuts, so a cut one lacks is refused
-    const keys = each.slice(1).map((c) => new Set(c.dims.map(dimKey)));
-    const ents = each.slice(1).map((c) => new Set(c.entities));
-    return {
-      dims: each[0].dims.filter((d) => keys.every((k) => k.has(dimKey(d)))),
-      entities: each[0].entities.filter((e) => ents.every((s) => s.has(e))),
-    };
-  };
-  const cutsOf = new Map();
-  const cuts = (name) => { if (!cutsOf.has(name)) cutsOf.set(name, cutBy(name)); return cutsOf.get(name); };
-  const reach = (name) => cuts(name).dims;
-  const entities = (name) => [...new Set(cuts(name).entities)].sort();
-
-  // a metric's TIME AXIS — what metric_time reads for it: a direct aggregation's own agg_time_dimension
-  // (at that dimension's grain); a metric made of metrics has one when every input does, at the
-  // coarsest of their grains (named when they all read one dimension of that name)
-  const GRAINS = ['nanosecond', 'microsecond', 'millisecond', 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year'];
-  const axisOf = new Map();
-  const timeAxis = (name, seen = new Set()) => {
-    if (axisOf.has(name)) return axisOf.get(name);
-    if (seen.has(name)) return null;
-    seen.add(name);
-    const m = raw.get(name);
-    let axis = null;
-    const direct = m && aggregationOf(m);
-    if (direct?.agg_time_dimension) {
-      const grain = modelNamed.get(direct.semantic_model)?.dimensions.find((d) => d.name === direct.agg_time_dimension)?.grain || 'day';
-      axis = { dimension: direct.agg_time_dimension, grain };
-    } else if (m && !direct) {
-      const tp = m.type_params || {};
-      const parts = m.type === 'conversion' ? [tp.conversion_type_params?.base_metric].filter((x) => x?.name) : inputsOf(m);
-      const axes = parts.map((p) => timeAxis(p.name, new Set(seen)));
-      if (axes.length && axes.every(Boolean)) {
-        const grain = axes.map((a) => a.grain).reduce((a, b) => (GRAINS.indexOf(b) > GRAINS.indexOf(a) ? b : a));
-        const dims = new Set(axes.map((a) => a.dimension).filter(Boolean));
-        axis = { ...(dims.size === 1 ? { dimension: [...dims][0] } : {}), grain };
-      }
-    }
-    axisOf.set(name, axis);
-    return axis;
-  };
 
   /** How a metric is computed, in one shape for both specs. */
   const definition = (name) => {
@@ -287,12 +199,8 @@ export function manifestLayer(manifest) {
       if (agg.agg_time_dimension && !times.has(agg.agg_time_dimension)) out.push({ severity: 'error', metric: m.name, message: `its time axis '${agg.agg_time_dimension}' is not a time dimension of ${sm.name} (time dimensions: ${[...times].join(', ') || 'none'})` });
       if (agg.non_additive_dimension && !times.has(agg.non_additive_dimension.dimension)) out.push({ severity: 'error', metric: m.name, message: `its non_additive_dimension '${agg.non_additive_dimension.dimension}' is not a time dimension of ${sm.name}` });
     }
-    for (const m of raw.values()) {
-      if (aggregationOf(m) || !inputsOf(m).length) continue;
-      if (!reach(m.name).length && !entities(m.name).length) out.push({ severity: 'note', metric: m.name, message: `its inputs (${inputsOf(m).map((i) => i.name).join(', ')}) share no dimension or entity: it can be cut by metric_time only` });
-    }
     return out;
   };
 
-  return { semantic_models: models, metrics, reach, entities, definition, issues, timeAxis };
+  return { semantic_models: models, metrics, definition, issues };
 }

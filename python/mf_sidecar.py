@@ -16,6 +16,10 @@ Protocol (newline-delimited JSON):
   response: {"id","ok":true,"columns":[...],"rows":[[...]]}        # query
             {"id","ok":true,"sql":"...","plan":{...}?}            # explain (plan if requested)
             {"id","ok":false,"error":"..."}
+  request : {"id","op":"group_bys","project_dir","profiles_dir","metrics":[...]}
+  response: {"id","ok":true,"group_bys":{"<metric>":[item, ...]}}  # what each metric can be grouped by,
+            as MetricFlow resolves it: a dimension {kind, name, semantic_model, entity_links, type,
+            grain, dunder_name}, or an entity {kind, name, semantic_model, entity_links}
 """
 import json
 import os
@@ -75,8 +79,38 @@ def _handle(req):
         _release(cfg)
 
 
+def _group_by_item(item):
+    """One group-by item MetricFlow offers, as plain data."""
+    from metricflow.engine.models import Dimension
+
+    sm = getattr(item, "semantic_model_reference", None)
+    links = [e.element_name for e in (getattr(item, "entity_links", None) or ())]
+    if isinstance(item, Dimension):
+        tp = item.type_params
+        grain = getattr(tp, "time_granularity", None) if tp else None
+        return {
+            "kind": "dimension",
+            "name": item.name,
+            "dunder_name": item.dunder_name,
+            "semantic_model": sm.semantic_model_name if sm else None,
+            "entity_links": links,
+            "type": str(getattr(item.type, "value", item.type)).lower(),
+            "grain": str(getattr(grain, "value", grain)).lower() if grain else None,
+        }
+    return {
+        "kind": "entity",
+        "name": item.name,
+        "semantic_model": sm.semantic_model_name if sm else None,
+        "entity_links": links,
+    }
+
+
 def _answer(cfg, req):
     from metricflow.engine.metricflow_engine import MetricFlowQueryRequest
+
+    if req.get("op") == "group_bys":
+        # asked of MetricFlow itself, one metric at a time: what each can be grouped by
+        return {"ok": True, "group_bys": {m: [_group_by_item(i) for i in cfg.mf.list_group_bys(metric_names=[m])] for m in req.get("metrics") or []}}
 
     mf_request = MetricFlowQueryRequest.create(
         metric_names=req.get("metrics") or None,

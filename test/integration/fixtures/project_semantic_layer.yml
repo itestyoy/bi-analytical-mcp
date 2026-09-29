@@ -48,7 +48,7 @@ models:
         label: Impressions
         type: simple
         agg: sum
-        expr: impressions
+        expr: measure__impressions
         config: {meta: {channel: paid}}
       - name: project_clicks
         label: Clicks
@@ -88,6 +88,22 @@ models:
           name: spend_date
           window_agg: max
         config: {meta: {additive: false}}
+
+  - name: fct_project_media_sources
+    description: One row per media source (a thin view) — what a spend row's media_source joins onto.
+    semantic_model:
+      enabled: true
+      name: project_media_sources
+    columns:
+      - name: media_source
+        entity:
+          type: primary
+          name: media_source
+      - name: source_label
+        dimension:
+          type: categorical
+          name: label
+          description: The source's display label
 
   - name: fct_analytics_events
     description: One row per product-analytics event.

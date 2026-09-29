@@ -13,12 +13,13 @@
 // with the ways it can be named.
 //
 // A reference, in a context of one semantic model (`own`):
-//   { dimension, grain? }                                  — a dimension of `own`;
-//   { semantic_model: 'X', dimension, grain? }             — of X, joined to directly;
+//   { semantic_model: [own], dimension, grain? }           — a dimension of the context's own model;
+//   { semantic_model: ['X'], dimension, grain? }           — of X, joined to directly;
 //   { semantic_model: ['A', 'X'], dimension, grain? }      — of X, through A (the chain of joins);
 //   … plus via: the entity                                 — only for a role (one chain, several keys);
 //   { entity } (+ via for a path)                          — an entity;
 //   { time: 'metric_time', grain }                         — the time axis.
+// semantic_model is always the chain, one model or several, matched as written: one spelling per item.
 
 const sameLinks = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
 /** `via` as the caller writes it (one entity, or a path) → the entity path. */
@@ -65,9 +66,9 @@ export function annotateChains(groupBys, models) {
   return groupBys;
 }
 
-/** Where a dimension lives, as a reference writes it: its model, or the chain of models for a link of
- *  several joins; the model alone where the chain cannot be named. */
-const whereOf = (item) => (item.chain && item.chain.length > 1 ? item.chain : item.semantic_model);
+/** Where a dimension lives, as a reference writes it: the chain of models it is reached through — its
+ *  own model alone for a direct join; the model alone (and via) where a hop cannot be named. */
+const whereOf = (item) => item.chain || [item.semantic_model];
 /** The time axis among a metric's items (metric_time, with the finest grain MetricFlow allows), or null. */
 export const timeItem = (items) => items.find(isTime) || null;
 
@@ -87,7 +88,6 @@ export function refOf(item, own, items = [item]) {
   const grain = item.type === 'time' && item.grain ? { grain: item.grain } : {};
   const via = samesOf(items, item).length > 1 ? { via: viaOf(links) } : {};
   if (item.kind === 'entity') return { entity: item.name, ...via };
-  if (whereOf(item) === own) return { dimension: item.name, ...via, ...grain };
   return { semantic_model: whereOf(item), dimension: item.name, ...via, ...grain };
 }
 
@@ -109,11 +109,10 @@ export function columnOf(item, grain) {
 export const labelOf = (item, own, items) => JSON.stringify(refOf(item, own, items)).replace(/"(\w+)":/g, '$1: ');
 
 /**
- * The ONE item a reference names among `items` → { item } | { error }. Where the reference says the
- * dimension lives: a model (the context's own when semantic_model is left out) — the item joined to it
- * directly, or, when there is none, the one chain MetricFlow lists that ends there — or a chain of
- * models, matched exactly; `via` picks a role where one chain is joined through several keys, and must
- * then be given. No match, or several, is an error naming the ways it can be named.
+ * The ONE item a reference names among `items` → { item } | { error }. semantic_model is the chain of
+ * models the dimension is reached through, matched as written (one model: its direct join); `via` picks
+ * a role where one chain is joined through several keys, and must then be given. No match, or several,
+ * is an error naming the ways it can be named.
  */
 export function resolveRef(items, ref, own, subject = 'this') {
   const show = (list) => list.slice(0, 30).map((i) => labelOf(i, own, items)).join(', ') || '(none but metric_time)';
@@ -129,16 +128,11 @@ export function resolveRef(items, ref, own, subject = 'this') {
     return { error: named.length ? `the entity '${ref.entity}' is reached as ${show(paths)}` : `the entity '${ref.entity}' is not one ${subject} can be grouped by. It can: ${show(items.filter((i) => i.kind === 'entity'))}` };
   }
   const dims = items.filter((i) => i.kind === 'dimension' && !isTime(i));
-  const where = ref.semantic_model ?? own;
-  const chain = Array.isArray(where) ? where : null;
-  const model = chain ? chain[chain.length - 1] : where;
-  const label = chain ? `${chain.join(' → ')}.${ref.dimension}` : `${model}.${ref.dimension}`;
+  const chain = Array.isArray(ref.semantic_model) ? ref.semantic_model : [ref.semantic_model];
+  const model = chain[chain.length - 1];
+  const label = `${chain.join(' → ')}.${ref.dimension}`;
   const named = dims.filter((i) => i.name === ref.dimension && i.semantic_model === model);
-  // a chain is matched as written; a model, by its direct join first — else the one chain there is
-  const direct = named.filter((i) => (i.entity_links || []).length === 1);
-  // (an explicit via names its path among all of them)
-  const candidates = chain ? named.filter((i) => JSON.stringify(i.chain) === JSON.stringify(chain)) : via || !direct.length ? named : direct;
-  const hits = byPath(candidates);
+  const hits = byPath(named.filter((i) => JSON.stringify(whereOf(i)) === JSON.stringify(chain)));
   if (hits.length === 1) return { item: hits[0] };
   if (hits.length > 1) return { error: `'${label}' is reached several ways: ${show(hits)} — name the one you mean` };
   if (named.length) return { error: `'${label}' is reached as ${show(named)}` };

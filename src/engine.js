@@ -475,7 +475,7 @@ export class Engine {
       throw new ToolError(`${where}: the entity '${ref.entity}' is one of the dbt project's own semantic layer — group by it in the context of one of its semantic models (context_id: the semantic model's name; semantic_index() lists them), with that model's metrics; here attributes are { model, attribute }.`, { stage: 'validate', field: where });
     }
     if (ref && typeof ref === 'object' && 'dimension' in ref && !('attribute' in ref)) {
-      throw new ToolError(`${where}: ${ref.semantic_model ? `'${ref.semantic_model}.${ref.dimension}'` : `'${ref.dimension}'`} is named as a dimension of the dbt project's own semantic layer — query it in the context of its semantic model (${ref.semantic_model ? `context_id: '${ref.semantic_model}'` : 'context_id: the semantic model\'s name'}) with that model's metrics; here attributes are { model, attribute }.`, { stage: 'validate', field: where });
+      throw new ToolError(`${where}: '${[].concat(ref.semantic_model || []).join(' → ')}${ref.semantic_model ? '.' : ''}${ref.dimension}' is named as a dimension of the dbt project's own semantic layer — query it in the context of the semantic model whose metrics you want (context_id: its name; semantic_index() lists them); here attributes are { model, attribute }.`, { stage: 'validate', field: where });
     }
     if (ref == null || typeof ref !== 'object' || !('attribute' in ref)) return ref;
     const c = this.catalog;
@@ -3587,7 +3587,7 @@ export class Engine {
 
   /**
    * MetricFlow's names, in the caller's spelling. A query is addressed by WHAT and WHERE — { model,
-   * attribute }, { dimension }, { entity }, metric_time — and the server resolves that to MetricFlow's
+   * attribute }, { semantic_model, dimension }, { entity }, metric_time — and the server resolves that to MetricFlow's
    * `entity__dimension__grain` tokens. `names` maps each token the query used to the name the caller
    * sees (its result column), longest first — and ONLY those: a text is never rewritten by a pattern,
    * since a project's own columns may carry `__` in their names (measure__…), and SQL that renamed them
@@ -3677,7 +3677,7 @@ export class Engine {
     };
     if (only) return one(only);
     return {
-      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_semantic_model({ context_id: '<semantic model>', metrics: [...], group_by: [{ dimension }, { entity }, { time: 'metric_time', grain }] }) — a dimension of the context's own model by its name, one of another model it reaches as { semantic_model, dimension }. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ context_id, metric }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
+      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_semantic_model({ context_id: '<semantic model>', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ context_id, metric }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
       contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map(one),
       ...(this.project.skipped?.length ? { not_served: this.project.skipped } : {}),
       // semantic models no metric reads: no context of their own; their dimensions are reached from
@@ -3708,7 +3708,7 @@ export class Engine {
     // a reference names one of these items exactly — nothing here chooses a join, a path or a grain
     const items = commonItems(layer.groupBys, input.metrics);
     const pick = (ref, field) => {
-      if (ref && typeof ref === 'object' && 'model' in ref) throw new ToolError(`${field}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { dimension }, one of another semantic model { semantic_model, dimension, via }, and an entity { entity } — the project's own names, not the catalog's { model, attribute }. preview_semantic_model({ context_id: '${ctx.id}', metric }) lists each exactly.`, { stage: 'validate', field });
+      if (ref && typeof ref === 'object' && 'model' in ref) throw new ToolError(`${field}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { semantic_model: [the chain of models it is reached through], dimension } and an entity { entity } — the project's own names, not the catalog's { model, attribute }. preview_semantic_model({ context_id: '${ctx.id}', metric }) lists each exactly.`, { stage: 'validate', field });
       const r = resolveRef(items, ref, own, input.metrics.join(' and '));
       if (r.error) throw new ToolError(`${field}: ${r.error}`, { stage: 'validate', field });
       return r.item;
@@ -3749,7 +3749,7 @@ export class Engine {
       });
       where = renderWhereClauses(translated);
     }
-    // order_by: a requested metric, a result column name, `metric_time`, { dimension } or { entity }
+    // order_by: a requested metric, a result column name, `metric_time`, { semantic_model, dimension } or { entity }
     const { orderBy } = this._metricOrderBy(input, {
       groupBy, rename,
       resolveKey: (key) => {
@@ -3757,7 +3757,7 @@ export class Engine {
         return tokenByItem.get(itemKey(item)) || tokenOf(item);
       },
       label: (key) => JSON.stringify(key),
-      refusePath: (key) => { throw new ToolError(`order_by: a dimension is named as in group_by ({ dimension }, { semantic_model, dimension, via }, { entity }) or by its result column, not by a path string: '${key}'`, { stage: 'validate', field: 'order_by' }); },
+      refusePath: (key) => { throw new ToolError(`order_by: a dimension is named as in group_by ({ semantic_model: [...], dimension }, { entity }) or by its result column, not by a path string: '${key}'`, { stage: 'validate', field: 'order_by' }); },
     });
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     // the guardrail, as a task's query has it: a semantic model over a dbt model the catalog requires a

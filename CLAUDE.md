@@ -156,7 +156,7 @@
   which MetricFlow compiles each metric and, over a time_range, the warehouse runs each metric and
   each semantic model's dimensions, one by one where all at once fails, to name what fails.
   NOTHING HANDED BACK SPELLS METRICFLOW'S `entity__dimension__grain`: a query names what and where
-  ({ model, attribute }, { dimension }, { entity }, metric_time) and the server resolves it; result
+  ({ model, attribute }, { semantic_model, dimension }, { entity }, metric_time) and the server resolves it; result
   columns are the caller's names, and an explained query's SQL and plan and every failure message go
   through `Engine._callerSpelling`, which rewrites EXACT tokens only — each MetricFlow item's token
   for the query's metrics, the query's own references, `__<metric>` aliases, metric_time grains, the
@@ -326,10 +326,11 @@
   (query_semantic_model, preview_semantic_model, context), the schema offers them as an enum next to
   the pattern any built context's id matches (`anyOf`). A context offers the metrics that read its
   semantic model (a metric of several models is in each of theirs), queried with
-  query_semantic_model({ context_id: "<semantic model>" }) — `{ dimension, grain? }` of its own model,
-  `{ semantic_model, dimension }` of another joined to directly, `semantic_model` as a LIST of models
-  (`["A", "X"]`) for one reached through a chain of joins, and `{ entity }` in group_by / where /
-  order_by: what a dimension is and where it lives. MetricFlow makes every join; what it needs is its own name for the
+  query_semantic_model({ context_id: "<semantic model>" }) — `{ semantic_model, dimension, grain? }`,
+  `semantic_model` ALWAYS a list: the chain of models the dimension is reached through (`["<own>"]` for
+  the context's own model, `["X"]` for one joined to directly, `["A", "X"]` through a chain of joins),
+  one spelling per item — and `{ entity }` in group_by / where / order_by: what a dimension is and
+  where it lives. MetricFlow makes every join; what it needs is its own name for the
   item, which always carries the entity path (`media_source__label` — it takes no bare `label`, even
   with one path). WHAT A METRIC CAN BE GROUPED BY IS METRICFLOW'S WORD, NEVER WORKED OUT HERE (HARD
   RULE): at start the server asks MetricFlow (`groupBys`, its `list_group_bys`) for every metric's

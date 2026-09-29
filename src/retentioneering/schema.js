@@ -334,10 +334,49 @@ function metricBinsToLibrary({ metric, bins }, field) {
   return { metric, [key === 'from' ? 'edges' : 'quantiles']: sorted.map((x) => x[key]), segment_levels: [lowest.level, ...sorted.map((x) => x.level)] };
 }
 
+/** add_segment's rules as cases the tool writes the SQL of. The library takes `[column, op, value,
+ *  level]` entries and a final `[else_level]` and pastes `op` — and, for `in`, the value — into the
+ *  CASE it runs on the analysis runtime, which is code taken from a call (NOT_OFFERED.params.sql says
+ *  why this server takes none). So the operator is one of the library's own condition grammar, and
+ *  every value is a constant the tool quotes itself; the shape also leaves no else entry to misplace. */
+function rulesSchema() {
+  const g = retentioneeringFacts().condition;
+  const scalar = [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }];
+  const level = { type: 'string', minLength: 1 };
+  const kase = (op, value) => ({ type: 'object', additionalProperties: false, required: ['column', 'op', 'value', 'level'], properties: { column: { type: 'string', minLength: 1, description: 'A column of the eventstream (a segment, the event, a path column).' }, op, value, level: { ...level, description: 'The segment level of the paths this case matches.' } } });
+  return {
+    type: 'object', additionalProperties: false, required: ['cases', 'else'],
+    description: 'Segment levels by conditions on the eventstream\'s columns, the first case that matches deciding: each case a column, an operator and a constant (a list of them for \'in\'), and `else` for what no case matches.',
+    properties: {
+      cases: { type: 'array', minItems: 1, items: { oneOf: [kase({ enum: g.compare }, { anyOf: scalar }), kase({ const: g.membership }, { type: 'array', minItems: 1, items: { anyOf: scalar } })] } },
+      else: { ...level, description: 'The level of every row no case matches.' },
+    },
+  };
+}
+
+/** A constant as a DuckDB literal: a string quoted (its quotes doubled), a number as itself. */
+const literal = (v) => (typeof v === 'string' ? `'${v.replace(/'/g, "''")}'` : typeof v === 'boolean' ? (v ? 'TRUE' : 'FALSE') : String(v));
+
+/** rules as the library takes them: `[column, op, value, level]` per case, then `[else]`. A value is
+ *  handed over as the library quotes it (a string, a number, a flag) — and a list for `in` as the
+ *  tuple of literals this tool writes. */
+function rulesToLibrary({ cases, else: otherwise }, field) {
+  const g = retentioneeringFacts().condition;
+  return [
+    ...cases.map((c) => {
+      if (c.op === g.membership) return [c.column, c.op, `(${c.value.map(literal).join(', ')})`, c.level];
+      if (typeof c.value === 'number' && !Number.isFinite(c.value)) throw new ToolError(`case on '${c.column}': ${c.value} is not a number a comparison can take`, { stage: 'validate', field });
+      return [c.column, c.op, c.value, c.level];
+    }),
+    [otherwise],
+  ];
+}
+
 /** Library parameters the tool asks for in another shape, each with its translation back — the one
  *  table; the schema reads `schema`, the call's ops go through `toLibrary`. */
 export const RESHAPED = {
   metric_bins: { schema: metricBinsSchema, toLibrary: metricBinsToLibrary },
+  rules: { schema: rulesSchema, toLibrary: rulesToLibrary },
 };
 
 /** The properties and required list of a library callable's parameters — path_col as `path`, the
@@ -351,14 +390,30 @@ function params(list) {
     properties[p.name] = RESHAPED[p.name] ? RESHAPED[p.name].schema() : param(p);
     if (p.required) required.push(p.name);
   }
-  return { properties, required };
+  return { properties, required, allOf: methodArgs(list, properties) };
+}
+
+/** A clustering's method_args: the keys each method reads, from the library's own table of them —
+ *  all of them described, and for the method chosen (its default when none is) only its own. */
+function methodArgs(list, properties) {
+  if (!properties.method_args || !properties.method) return [];
+  const f = retentioneeringFacts();
+  const table = f.cluster_method_args;
+  const keys = [...new Set(Object.values(table).flat())].sort();
+  properties.method_args = { ...properties.method_args, type: 'object', additionalProperties: false, properties: Object.fromEntries(keys.map((k) => [k, { description: `${METHOD_ARGS_NOTE} (${Object.entries(table).filter(([, ks]) => ks.includes(k)).map(([m]) => m).join(', ')})` }])) };
+  const fallback = list.find((p) => p.name === 'method')?.default;
+  return Object.entries(table).map(([m, ks]) => ({
+    if: m === fallback ? { anyOf: [{ not: { required: ['method'] } }, { properties: { method: { const: m } }, required: ['method'] }] } : { properties: { method: { const: m } }, required: ['method'] },
+    then: { properties: { method_args: { propertyNames: { enum: ks } } } },
+  }));
 }
 
 function opSchemas() {
   const f = retentioneeringFacts();
   return OFFERED_OPS.map((op) => {
-    const { properties, required } = params(f.ops[op].params);
+    const { properties, required, allOf } = params(f.ops[op].params);
     return {
+      ...(allOf.length ? { allOf } : {}),
       type: 'object', additionalProperties: false, title: op, description: f.ops[op].summary,
       required: ['type', ...required],
       properties: { type: { const: op }, ...properties },
@@ -381,13 +436,9 @@ function analysisSchemas() {
   const id = { type: 'string', pattern: NAME, description: 'Your name for this analysis in the result (default: its kind). Unique within the call.' };
   return ANALYSIS_KINDS.map((kind) => {
     const a = f.analyses[kind];
-    const { properties, required } = params(a.params);
-    // clustering: the keys each method reads, from the library's own table of them
-    if (properties.method_args) {
-      const keys = [...new Set(Object.values(f.cluster_method_args).flat())].sort();
-      properties.method_args = { ...properties.method_args, type: 'object', additionalProperties: false, properties: Object.fromEntries(keys.map((k) => [k, { description: `${METHOD_ARGS_NOTE} (${Object.entries(f.cluster_method_args).filter(([, ks]) => ks.includes(k)).map(([m]) => m).join(', ')})` }])) };
-    }
+    const { properties, required, allOf } = params(a.params);
     const branch = {
+      ...(allOf.length ? { allOf } : {}),
       type: 'object', additionalProperties: false, title: kind, description: `${a.summary}${CARD_KINDS.includes(kind) ? '' : ' (returned as tables, answered in words: it has no card)'}`,
       required: ['kind', ...required],
       properties: { kind: { const: kind }, id, preprocess: preprocessField('to this analysis alone, after the call\'s own preprocess'), ...properties },

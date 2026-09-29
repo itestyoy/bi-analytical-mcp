@@ -173,12 +173,27 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from_quantile: 1 }] }), /invalid input/);
   await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: retentioneeringFacts().metric_bins.undefined_level, from: 3 }] }), /invalid input/);
   await refused('query_retentioneering_model', segment({ metric: { metric: 'event_count_bulk' }, bins: [{ level: 'a' }, { level: 'b' }] }), /invalid input/); // a value per event, not per path
+  // 'in' takes a list, a comparison one constant
+  const cond = (condition) => ({ context_id: 'abc', preprocess: [{ type: 'filter_paths', condition }], analyses: [{ kind: 'describe' }] });
+  await refused('query_retentioneering_model', cond({ op: 'in', metric: 'length', value: 3 }), /invalid input/);
+  await refused('query_retentioneering_model', cond({ op: '=', metric: 'length', value: [3] }), /invalid input/);
+  // a clustering's method_args are the chosen method's own (kmeans is the default)
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method: 'hdbscan', method_args: { n_clusters: 3 } }] }, /invalid input/);
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method_args: { min_cluster_size: 3 } }] }, /invalid input/);
+  // rules are cases the tool quotes: no operator or value becomes SQL of the call's own
+  const rules = (r) => ({ context_id: 'abc', preprocess: [{ type: 'add_segment', name: 'store', rules: r }], analyses: [{ kind: 'describe' }] });
+  await refused('query_retentioneering_model', rules([['platform', "= 'a' OR 1=1 OR platform =", "'q'", 'hit'], ['other']]), /invalid input/);
+  await refused('query_retentioneering_model', rules({ cases: [{ column: 'platform', op: "= 'a' OR 1=1 --", value: 'x', level: 'hit' }], else: 'other' }), /invalid input/);
+  await refused('query_retentioneering_model', rules({ cases: [{ column: 'platform', op: 'in', value: "('a') OR 1=1", level: 'hit' }], else: 'other' }), /invalid input/);
   // ...while each written form passes the schema (and stops only at the context, which does not exist)
   const pastSchema = (err) => !/invalid input/.test(err.message) && /abc/.test(err.message);
   for (const bins of [[{ level: 'short' }, { level: 'long', from: 6 }, { level: 'mid', from: 3 }], [{ level: 'low' }, { level: 'top', from_quantile: 0.9 }], [{ level: 'q1' }, { level: 'q2' }, { level: 'q3' }]]) {
     await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, bins }), pastSchema);
   }
   await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'filter_paths', condition: { op: '<', metric: 'first_event_time', value: 1790380800 } }], analyses: [{ kind: 'describe' }] }, pastSchema);
+  await refused('query_retentioneering_model', cond({ op: 'in', metric: 'length', value: [3, 4] }), pastSchema);
+  await refused('query_retentioneering_model', rules({ cases: [{ column: 'platform', op: 'in', value: ['ios', "it's"], level: 'apple' }, { column: 'platform', op: '=', value: 'web', level: 'web' }], else: 'other' }), pastSchema);
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method: 'hdbscan', method_args: { min_cluster_size: 3 } }] }, pastSchema);
   await refused('display_retentioneering_result', { task_id: 'nope', analysis: 'funnel' }, /unknown task_id/);
   // a card for a client that renders none is refused like display_model_result
   const r = await runTool(e, 'display_retentioneering_result', { task_id: 'x', analysis: 'funnel' }, { renders: false });

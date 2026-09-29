@@ -191,7 +191,15 @@
   sheet PROBES the library for what its prose does not state). A parameter the library takes as PARALLEL LISTS whose lengths must
   agree is asked for as ONE list of items and translated back (`RESHAPED`, src/retentioneering/schema.js —
   today `add_segment.metric_bins` as `bins`), so a count that disagrees cannot be written; a condition's
-  constant is typed by what the metric's value is (probed: kind and unit). No cap on analyses, steps, rows or
+  constant is typed by what the metric's value is (probed: kind and unit). A parameter the library
+  pastes into SQL is reshaped the same way, into constants this tool quotes (`add_segment.rules` as
+  `{ cases, else }`, the operator from the library's condition grammar) — the caller's input stays data.
+  WHAT THE LIBRARY REFUSES, THE LIBRARY SAYS BEFORE THE RUN: a query call runs its steps and analyses
+  through the library itself on the feature's environment (python/retentioneering_check.py), over two
+  stand-in eventstreams with the eventstream's real event names and columns, and refuses what both
+  raise alike as a configuration error — in seconds, with the library's own message, instead of minutes
+  into the warehouse run. It does not restate the library's checks in JS; a check that cannot run
+  refuses nothing. No cap on analyses, steps, rows or
   tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the

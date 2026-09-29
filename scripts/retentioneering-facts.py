@@ -109,6 +109,13 @@ def from_hint(t):
         if any(p == {} for p in parts):
             return {}
         return parts[0] if len(parts) == 1 else {"anyOf": parts}
+    if origin is tuple and args and args[-1] is not Ellipsis:
+        # a fixed tuple: exactly its members, each of its own type
+        parts = [from_hint(a) or {} for a in args]
+        return {"type": "array", "prefixItems": parts, "minItems": len(parts), "maxItems": len(parts)}
+    if origin is tuple and args:
+        item = from_hint(args[0])
+        return {"type": "array", **({"items": item} if item else {})}
     if origin in (list, tuple, set, typing.Collection) or (origin is not None and getattr(origin, "__name__", "") in ("Collection", "Sequence", "Iterable")):
         item = from_hint(args[0]) if args else None
         return {"type": "array", **({"items": item} if item else {})}
@@ -405,6 +412,10 @@ def condition_schema(grammar):
         }
         if args:
             leaf["properties"]["metric_args"] = {"type": "object", "additionalProperties": False, **({"required": required} if required else {}), "properties": {k: a["schema"] for k, a in sorted(args.items())}}
+        # membership takes a list of constants, a comparison one constant
+        leaf["if"] = {"properties": {"op": {"const": grammar["membership"]}}}
+        leaf["then"] = {"properties": {"value": {"type": "array"}}}
+        leaf["else"] = {"properties": {"value": {"not": {"type": "array"}}}}
         leaves.append(leaf)
     node = {"$ref": CONDITION_REF}
     return {"oneOf": [
@@ -583,6 +594,8 @@ def metric_bins_facts():
 # What the library narrows only by its own constants, not in the signature: the clustering method and
 # scaler of cluster_analysis_data (typed there as plain str) are the same Literals add_clusters declares.
 CONSTANT_OVERRIDES = {
+    # Eventstream.funnel_data leaves diff untyped and hands it to the Funnel tool, which declares it
+    ("funnel_data", "diff"): lambda: from_hint(typing.get_type_hints(__import__("retentioneering.tools.funnel", fromlist=["Funnel"]).Funnel.fit)["diff"]),
     ("cluster_analysis_data", "method"): lambda: {"enum": list(typing.get_args(cluster_analysis.T_ClusteringMethod))},
     ("cluster_analysis_data", "scaler"): lambda: {"enum": list(typing.get_args(typing.get_args(cluster_analysis.T_Scaler)[0]))},
 }

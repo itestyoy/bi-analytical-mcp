@@ -15,11 +15,15 @@
 // untouched by it. Everything is deterministic: a hashed user sample, ordered rows, the library's
 // fixed seeds.
 
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { createDbt, formatDbtError } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { rankFuzzy } from '../fuzzy.js';
+import { assetPath } from '../runtime-assets.js';
 import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, sourceColumns, ANALYSIS_KINDS, OFFERED_OPS, NAME, COMPLEX_EVENT_LOGIC, RESHAPED } from './schema.js';
 import { renderEventstream, pathColumns, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { compileAnalysisModel, analysisModelConfig } from './python.js';
@@ -72,6 +76,9 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {} } = {
     id: 'retentioneering',
     runner,
     operatorConfig,
+    // the environment's own interpreter, which has the library the check runs (the client's
+    // pythonBin is MetricFlow's)
+    libraryPython: runner.environment?.dir ? join(runner.environment.dir, 'bin', 'python') : null,
     sides: { [SIDE]: QUERY },
     tools: {
       [BUILD]: {
@@ -461,11 +468,12 @@ function pathColumn(es, path, sessionCols, field) {
   return path;
 }
 
-/** Preprocess steps in the library's own shape: `path` resolved to path_col. */
-function libraryOps(es, steps, sessionCols, field) {
-  return (steps || []).map((step) => {
+/** Preprocess steps in the library's own shape: `path` resolved to path_col — among the session
+ *  columns of what came before (`before`) and of the earlier steps of this list, never a later one. */
+function libraryOps(es, steps, before, field) {
+  return (steps || []).map((step, i) => {
     const { path, ...rest } = step;
-    if (path !== undefined && opParams(step.type).has('path_col')) rest.path_col = pathColumn(es, path, sessionCols, field);
+    if (path !== undefined && opParams(step.type).has('path_col')) rest.path_col = pathColumn(es, path, [...before, ...sessionColumns(steps.slice(0, i))], field);
     for (const [name, r] of Object.entries(RESHAPED)) if (rest[name] != null) rest[name] = r.toLibrary(rest[name], `${field}.${name}`);
     return rest;
   });
@@ -474,15 +482,8 @@ function libraryOps(es, steps, sessionCols, field) {
 function validateAnalyses(es, analyses, callSteps) {
   const f = retentioneeringFacts();
   const vocab = es.summary?.vocabulary?.map((v) => v.event) || null;
-  const known = vocab ? [...vocab, ...f.synthetic_events] : null;
   const event = (n, field) => {
-    if (known && !known.includes(n)) throw new ToolError(`'${n}' is not an event of eventstream '${es.name}'${suggest(n, known)} — its names are the ones after grouping${es.spec?.events?.top ? `, with the rarest merged into '${OTHER_EVENT}'` : ''}`, { stage: 'validate', field });
-  };
-  const anchorEvents = (spec, field) => {
-    for (const one of Array.isArray(spec) ? spec : [spec]) {
-      const pattern = typeof one === 'string' ? one : one?.event_col ? null : one?.pattern;
-      if (pattern) pattern.split('->').map((t) => t.trim()).filter((t) => t && t !== '.*').forEach((t) => event(t, field));
-    }
+    if (vocab && !vocab.includes(n)) throw new ToolError(`'${n}' is not an event of eventstream '${es.name}'${suggest(n, vocab)} — its names are the ones after grouping${es.spec?.events?.top ? `, with the rarest merged into '${OTHER_EVENT}'` : ''}`, { stage: 'validate', field });
   };
   const callSessions = sessionColumns(callSteps);
   const ids = new Set();
@@ -496,15 +497,16 @@ function validateAnalyses(es, analyses, callSteps) {
     const pathCol = pathColumn(es, path, sessionCols, 'analyses.path');
     // names the eventstream had when it was built — checked here unless a preprocess step may change them
     if (!callSteps?.length && !preprocess?.length) {
+      // a funnel's steps are events of the stream (its path_start / path_end are not steps); an
+      // anchor or a path pattern is the library's grammar, which its own check reads (libraryCheck)
       if (Array.isArray(params.steps)) params.steps.forEach((s) => event(s, 'analyses.steps'));
-      for (const k of Object.keys(params)) if (/anchor$/.test(k)) anchorEvents(params[k], `analyses.${k}`);
       const segment = params.segment_col ?? (Array.isArray(params.diff) && params.diff.length === 3 && typeof params.diff[0] === 'string' ? params.diff[0] : undefined);
       if (segment !== undefined && !es.segments.includes(segment)) throw new ToolError(`'${segment}' is not a segment of eventstream '${es.name}' (${es.segments.join(', ') || 'it was built with none'}) — add it to segments in ${BUILD}, or make it with an add_segment preprocess step`, { stage: 'validate', field: 'analyses.segment_col' });
     }
     if (methodParams(kind).has('path_col')) params.path_col = pathCol;
     return {
       id, kind, method: f.analyses[kind].method, path_col: pathCol,
-      ...(preprocess?.length ? { preprocess: libraryOps(es, preprocess, sessionCols, 'analyses.preprocess') } : {}),
+      ...(preprocess?.length ? { preprocess: libraryOps(es, preprocess, callSessions, 'analyses.preprocess') } : {}),
       params,
     };
   });
@@ -523,15 +525,20 @@ async function query(engine, feature, input) {
   if (!ctx.state.retentioneering) throw new ToolError(`context '${input.context_id}' is not a path-analysis context — build an eventstream with ${BUILD} first`, { stage: 'validate', field: 'context_id' });
   const es = eventstreamOf(ctx, input.eventstream);
   const analyses = validateAnalyses(es, input.analyses, input.preprocess);
-  const state = ctx.state.retentioneering;
-  state.queries = (state.queries || 0) + 1;
-  const modelName = `rete_q${state.queries}_${es.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   const spec = {
     columns: { user: ES_COLUMNS.user, event: ES_COLUMNS.event, time: ES_COLUMNS.time, session: es.sessions ? ES_COLUMNS.session : null, segments: es.segments },
     edge_weights: retentioneeringFacts().edge_weights,
-    preprocess: libraryOps(es, input.preprocess, sessionColumns(input.preprocess), 'preprocess'),
+    preprocess: libraryOps(es, input.preprocess, [], 'preprocess'),
     analyses,
   };
+  const problems = await libraryCheck(feature, spec, es);
+  if (problems.length) {
+    const [first, ...rest] = problems;
+    throw new ToolError(`the library refuses ${first.where}: ${first.message}${rest.length ? ` — and ${rest.map((p) => `${p.where}: ${p.message}`).join('; ')}` : ''} (checked by the library itself on this eventstream's events and columns before anything started; nothing ran)`, { stage: 'validate', field: first.where });
+  }
+  const state = ctx.state.retentioneering;
+  state.queries = (state.queries || 0) + 1;
+  const modelName = `rete_q${state.queries}_${es.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   // which eventstream a result table was computed from — carried, so a later read never takes it apart
   (state.results ||= {})[modelName] = es.name;
   engine.ctxs.writeFile(ctx.id, `${modelName}.py`, compileAnalysisModel({ inputModel: es.model, spec, config: analysisModelConfig(engine.catalog, feature.operatorConfig) }));
@@ -547,6 +554,35 @@ async function query(engine, feature, input) {
   }, { input });
   engine.jobs.setTable(id, modelName);
   return engine._taskStarted(id, { context_id: ctx.id, eventstream: es.name, analyses: order });
+}
+
+/** How long the library's own check of a call may take before the call goes ahead without it. */
+const CHECK_TIMEOUT_MS = 90000;
+
+/** The library's own check of the call (python/retentioneering_check.py): its steps and analyses
+ *  run on the feature's environment over stand-in eventstreams with this eventstream's event names
+ *  and columns → the configuration errors it raises, which refuse the call in seconds instead of
+ *  minutes into the warehouse run. A check that cannot run (no environment, a crash, the timeout)
+ *  refuses nothing: the run itself is still the judge. */
+function libraryCheck(feature, spec, es) {
+  const script = assetPath('retentioneeringCheck');
+  const python = feature.libraryPython;
+  const events = es.summary?.vocabulary?.map((v) => v.event);
+  if (!script || !python || !existsSync(python) || !events?.length) return Promise.resolve([]);
+  return new Promise((resolve) => {
+    const proc = spawn(python, [script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    const timer = setTimeout(() => { proc.kill(); resolve([]); }, CHECK_TIMEOUT_MS);
+    proc.stdout.on('data', (d) => { out += d; });
+    proc.stderr.on('data', () => {});
+    proc.on('error', () => { clearTimeout(timer); resolve([]); });
+    proc.on('close', () => {
+      clearTimeout(timer);
+      try { resolve(JSON.parse(out).problems || []); } catch { resolve([]); }
+    });
+    proc.stdin.on('error', () => {});
+    proc.stdin.end(JSON.stringify({ spec, events }));
+  });
 }
 
 /** The stored result table of a query task, read and shaped. */

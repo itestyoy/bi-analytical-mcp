@@ -388,8 +388,12 @@ def _stream(frame, spec):
     pdf[cols["time"]] = ts.dt.tz_convert(None)
     pdf[cols["event"]] = pdf[cols["event"]].astype(str)
     path_cols = [cols["user"]] + ([cols["session"]] if cols.get("session") else [])
-    for c in path_cols + list(cols.get("segments") or []):
+    for c in path_cols:
         pdf[c] = pdf[c].astype(str)
+    # a segment's levels as text, and a path with no value left without one (the library's <MISSING>),
+    # never a level spelled "None" or "nan"
+    for c in cols.get("segments") or []:
+        pdf[c] = pdf[c].astype(object).where(pdf[c].isna(), pdf[c].astype(str))
     pdf = pdf.sort_values(path_cols[:1] + [cols["time"], cols["event"]], kind="mergesort").reset_index(drop=True)
     stream = Eventstream(pdf, schema={
         "path_cols": path_cols,

@@ -224,6 +224,13 @@ const runFull = async (input) => {
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   return { task_id: q.task_id, analyses: r.analyses };
 };
+/** The analyses of a call as a read summarizes them (a segment's levels with their sizes). */
+const runRead = async (input) => {
+  const q = await engine.query_retentioneering_model({ context_id: built.context_id, ...input });
+  const r = await engine.query_retentioneering_model({ task_id: q.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  return { task_id: q.task_id, analyses: r.analyses };
+};
 const table = (result, name) => {
   const t = result.tables.find((x) => x.name === name);
   assert.ok(t, `a table '${name}' (has ${result.tables.map((x) => x.name).join(', ')})`);
@@ -260,7 +267,7 @@ test('metric bins: each bin holds the paths whose metric falls in it — by valu
   const sorted = [...lengths].sort((a, b) => a - b);
   const quantile = (q) => { const p = (sorted.length - 1) * q; const lo = Math.floor(p); return sorted[lo] + (sorted[Math.ceil(p)] - sorted[lo]) * (p - lo); };
   const median = quantile(0.5);
-  const { analyses: a } = await runFull({
+  const { analyses: a } = await runRead({
     analyses: [
       // the bins in any order after the lowest: each keeps its own level
       { kind: 'segment_overview', id: 'by_value', segment_col: 'length_band', metrics: [{ metric: 'length', agg: 'mean' }],
@@ -276,6 +283,31 @@ test('metric bins: each bin holds the paths whose metric falls in it — by valu
   const bins = (list) => engine.query_retentioneering_model({ context_id: built.context_id, preprocess: [{ type: 'add_segment', name: 'x', metric_bins: { metric: { metric: 'length' }, bins: list } }], analyses: [{ kind: 'describe' }] });
   await assert.rejects(bins([{ level: 'a' }, { level: 'a', from: 3 }]), (e) => e.field === 'preprocess.metric_bins' && /two bins are named 'a'/.test(e.message));
   await assert.rejects(bins([{ level: 'a' }, { level: 'b', from: 3 }, { level: 'c', from: 3 }]), (e) => e.field === 'preprocess.metric_bins' && /two bins start/.test(e.message));
+});
+
+test('rules are cases the tool writes: each path gets the level of the first case its row matches, the rest the else level', opts, async (t) => {
+  if (skip(t)) return;
+  const perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform order by platform')).rows;
+  const [first] = perPlatform;
+  const { analyses: a } = await runRead({
+    analyses: [{ kind: 'segment_overview', segment_col: 'store', metrics: [{ metric: 'length', agg: 'mean' }],
+      preprocess: [{ type: 'add_segment', name: 'store', rules: { cases: [{ column: 'platform', op: 'in', value: [first.platform, "it's not a level"], level: 'first_store' }], else: 'other_store' } }] }],
+  });
+  const rest = perPlatform.slice(1).reduce((n, r) => n + Number(r.n), 0);
+  assert.deepEqual(Object.fromEntries(a.segment_overview.levels.map((l) => [l.name, l.size])), Object.fromEntries(Object.entries({ first_store: Number(first.n), other_store: rest }).filter(([, n]) => n)));
+});
+
+test('what the library refuses is refused by the library itself before the run — its own message, in seconds', opts, async (t) => {
+  if (skip(t)) return;
+  const started = Date.now();
+  const refused = (input, field, re) => assert.rejects(engine.query_retentioneering_model({ context_id: built.context_id, ...input }), (e) => e.field === field && re.test(e.message) && /nothing ran/.test(e.message));
+  // a new event name the library cannot hold (its path delimiter in it)
+  await refused({ preprocess: [{ type: 'collapse_events', loops: true, name: 'x->y' }], analyses: [{ kind: 'describe' }] }, 'preprocess', /->/);
+  // an anchor token the library reads with its spacing, an event a metric names, a segment made by no step
+  await refused({ analyses: [{ kind: 'step_matrix', anchor: { pattern: 'level_started -> shop_opened' } }] }, 'analyses.step_matrix', /level_started /);
+  await refused({ analyses: [{ kind: 'segment_overview', segment_col: 'platform', metrics: [{ metric: 'has_event', metric_args: { event: 'no_such_event' }, agg: 'mean' }] }] }, 'analyses.segment_overview', /no_such_event/);
+  await refused({ preprocess: [{ type: 'drop_segment', name: 'platform' }], analyses: [{ kind: 'segment_overview', segment_col: 'platform', metrics: [{ metric: 'length', agg: 'mean' }] }] }, 'analyses.segment_overview', /platform/);
+  assert.ok(Date.now() - started < 120000, 'refused without a run');
 });
 
 test('a condition on a time metric compares seconds since the epoch: the paths that started before a moment', opts, async (t) => {

@@ -16,6 +16,7 @@ import { MfEngineBackend } from '../../src/backends/mf-engine.js';
 import { Engine } from '../../src/engine.js';
 import { loadProjectSemantics, PROJECT_STORE } from '../../src/project-semantics.js';
 import { mergeModelEntry } from '../../src/semantic-latest.js';
+import { createDbt, DEFAULT_ENV } from '../../src/dbt/index.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, taskResult, isStartedTask } from '../helpers/settle.js';
 import { DBT_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
@@ -125,6 +126,21 @@ test('each of the project\'s semantic models is read at start as a context named
   // the parsed copy they share is nobody's to address, nor listed
   await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_semantic_model({ context_id: PROJECT_STORE, metrics: ['project_cost'] })), /context_id/);
   assert.equal((await engine.context({ action: 'list' })).contexts?.some?.((c) => c.context_id === PROJECT_STORE) ?? false, false);
+});
+
+test('the dbt client the server runs on (createDbt, the `mf` CLI) reads the same layer — MetricFlow\'s group-bys included — and answers with the warehouse\'s numbers', opts, async (t) => {
+  if (skip(t)) return;
+  const client = createDbt({ environment: process.env.DBT_ENV || DEFAULT_ENV, profilesDir: BASE });
+  const cm = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem-client-')), timeSpineDialect: 'duckdb' });
+  const viaClient = await loadProjectSemantics({ runner: client, contextManager: cm });
+  assert.ok(viaClient?.layer, JSON.stringify(viaClient));
+  assert.deepEqual(viaClient.contexts.sort(), loaded.contexts.sort());
+  const tokens = (l) => Object.fromEntries(Object.entries(l.layer.groupBys).map(([m, items]) => [m, items.map((i) => `${i.kind}:${i.dunder_name || i.name}`).sort()]));
+  assert.deepEqual(tokens(viaClient), tokens(loaded));
+  const eng = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: cm, runner: client, project: viaClient }));
+  const want = Object.fromEntries((await wh.query('select upper(media_source) as label, sum(cost) as cost from fct_player_acquisition group by 1')).rows.map((r) => [r.label, num(r.cost)]));
+  const got = rowsOf(await eng.query_semantic_model({ context_id: ACQ, metrics: ['project_cost'], group_by: [{ semantic_model: ['project_media_sources'], dimension: 'label' }], time_range: WINDOW }));
+  for (const [label, cost] of Object.entries(want)) assert.ok(Math.abs(num(got.find((r) => r.project_media_sources_label === label).project_cost) - cost) < 1e-9, label);
 });
 
 test('a query of the project\'s metric by one of its dimensions is the warehouse\'s own count', opts, async (t) => {

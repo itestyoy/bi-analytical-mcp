@@ -37,6 +37,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   context: 'Manage the isolated contexts that build_semantic_model and build_pipeline_model create. action: list (all contexts) | describe (one context\'s tasks, models, metrics and group-by paths) | drop (tear the whole context down) | delete_model (remove just the pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, with the metrics that depend on them). drop and the deletes cannot be undone.',
   memory: 'Durable analyst memory: record what you found out, so it comes back through semantic_index next time. Use it after you resolve something non-obvious — a vague request tracked down to a real field, a gotcha, a useful source. action:"record" takes `note` (the finding); `question` (the original business question it answers, in the stakeholder\'s words — it is embedded with the note, so a later question with the same meaning retrieves it); `targets` (the catalog entities it is about, each { source, name } — a property, attribute or event of that source, e.g. { source: "events", name: "ad_type_of_event_data" }, { source: "users", name: "country" } — or { source } for a model); `aliases` (the words the user actually used, e.g. "ad format", in the original language and in English so search works across languages); `links` (any sources). The note then appears on the linked semantic_index views ({ model } / { source, event } / { source, property }) and in semantic_index({ search }). Keep one finding per note: when studying a topic or a document, split it into several small notes, each with its own targets and aliases — small notes link precisely and are retrieved far better, while an over-long note matches poorly and may fail to index. Other actions: list (all, or one { target }) | search (by word — typo-tolerant, and by meaning when embeddings are enabled) | forget (by id).',
   experiment: 'The A/B experiment lifecycle in one tool, by action: plan → check_split → analyze. It is statistics over numbers you bring: compute the per-group aggregates first with a pipeline. action:"plan" — power / sample size (the users required, or the MDE at a given n), before the test runs. action:"check_split" — the sample-ratio-mismatch χ² guardrail; p < 0.001 means randomization or logging is broken and the result is invalid, so run it before trusting any lift. action:"analyze" — the significance test on pre-aggregated per-group stats (metric: proportion → two-proportion z-test; mean → Welch t-test; ratio → delta method; cuped → variance reduction), returning lift (with a relative-lift CI), p-value, CI, significance and a multiplicity-adjusted p per variant; sequential:true adds an always-valid p for peeking at a live test. Field names are exact: `baseline` (not baseline_rate) and `confidence` (not alpha); there is no `allocation` field (use check_split.expected_ratio). For proportion, each group needs `conversions` between 0 and n. Examples — plan: {action:"plan",metric:"proportion",baseline:0.1,mde:0.02}; check_split: {action:"check_split",groups:[{label:"control",n:5000},{label:"variant_b",n:5020}]}; analyze: {action:"analyze",metric:"proportion",control:{n:5000,conversions:500},variants:[{label:"variant_b",n:5020,conversions:580}],correction:"holm"}.',
+  explore_errors: 'Read the failures this server kept, to find out why something did not work: a tool call that was refused or failed (with the arguments it was called with), a task that ended in an error (what dbt or the warehouse said), and what the last start could not serve (the dbt project\'s semantic layer, a join it leaves out, a feature that cannot run here). Use it when a result was an error you cannot explain from its message, when a task failed earlier in the conversation, or when something the overview lists as unavailable needs its reason. With no arguments it gives the newest 20 and a summary by source, tool and stage; since / until, source, severity, tool, stage, context_id, task_id and text narrow them, and { id } gives one in full. It reads the log only and changes nothing.',
   time: `Wait for \`seconds\` (capped at ${MAX_WAIT_SECONDS}), then return — a timer that touches no data and follows no task. To wait for a task, call its query tool with { task_id } instead (query_semantic_model or query_pipeline_model): it returns the moment the task is done.`,
 };
 
@@ -55,6 +56,7 @@ const TOOL_TITLES = {
   context: 'Manage Contexts',
   memory: 'Use Memory',
   experiment: 'A/B Experiment Toolkit',
+  explore_errors: 'Explore Errors',
   time: 'Timer',
 };
 
@@ -148,6 +150,8 @@ const TOOL_BEHAVIOUR = {
   drill_result: { readOnlyHint: true, idempotentHint: true },
   experiment: { readOnlyHint: true, idempotentHint: true },
   time: { readOnlyHint: true, idempotentHint: true },
+  // reads the error log; writes nothing
+  explore_errors: { readOnlyHint: true, idempotentHint: true },
   // every call starts a task; materialize:true persists the result into the context — a write, never a removal
   query_semantic_model: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
   // reads a parsed layer; validate starts a task that compiles and runs metrics, writing nothing
@@ -268,8 +272,11 @@ const PROGRESS_EVERY_MS = Number(process.env.MCP_PROGRESS_INTERVAL_MS) || 5000;
 export async function runTool(engine, calledAs, args, { signal, onProgress, progressEveryMs = PROGRESS_EVERY_MS, renders = true } = {}) {
   const started = Date.now();
   logLine(calledAs, `▶ call ${summarizeArgs(args)}`);
+  // every failure of a call is kept in the error log (src/error-log.js), with the call's arguments
+  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof args?.context_id === 'string' ? args.context_id : null, task_id: typeof args?.task_id === 'string' ? args.task_id : null });
   if (!isCallableTool(engine, calledAs)) {
     logLine(calledAs, '✗ unknown tool');
+    failed(calledAs, unknownToolMessage(calledAs), { stage: 'validate' });
     return { result: errorResult(unknownToolMessage(calledAs), 'validate'), raw: null, unknown: true };
   }
   const name = canonicalTool(calledAs);
@@ -280,11 +287,13 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
   const ft = featureTool(engine, name);
   if (!renders && (APPS_ONLY_TOOLS.has(name) || ft?.tool.draws) && !APP_CALLABLE_TOOLS.includes(name)) {
     logLine(name, '✗ from a client without the Apps extension');
+    failed(name, `${name} is not available: this client does not declare the MCP Apps extension`, { stage: 'validate' });
     return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_id })`, 'validate'), raw: null };
   }
   const cardField = CARD_FIELD[name];
   if (!renders && cardField && args?.[cardField] !== undefined) {
     logLine(name, `✗ ${cardField} from a client without the Apps extension`);
+    failed(name, `${cardField} is not available: this client does not declare the MCP Apps extension`, { stage: 'validate', field: cardField });
     return { result: errorResult(`${cardField} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so no card is drawn — drop the ${cardField} field`, 'validate', cardField), raw: null };
   }
   let beat;
@@ -300,10 +309,14 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
     // the hint to show a result as a card means nothing to a client that draws none
     if (!renders && isPlainObject(raw) && 'show_to_user' in raw) { const { show_to_user: _hint, ...rest } = raw; raw = rest; }
     logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(raw)}`);
+    // a failure the engine RETURNED ({ ok: false }) is kept too — except a read of a task that failed,
+    // whose failure the task itself recorded when it ended
+    if (isPlainObject(raw) && raw.ok === false && !raw.task_id && !raw.task_ids) failed(name, raw.error?.message || (typeof raw.error === 'string' ? raw.error : 'the call failed'), { stage: raw.error?.stage, field: raw.error?.field, code: raw.error?.code, detail: raw.error });
     return { result: toCallToolResult(raw, name, args, engine), raw };
   } catch (err) {
     const cancelled = !!signal?.aborted;
     logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} in ${Date.now() - started}ms: ${err?.message || String(err)}${err?.field ? ` (field: ${err.field})` : ''}`);
+    if (!cancelled) failed(name, err?.message || String(err), { stage: err?.stage, field: err?.field, code: err?.code, detail: err?.name === 'ToolError' ? null : err?.stack });
     return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : err?.stage, err?.field, cancelled ? undefined : err?.code), raw: null };
   } finally {
     if (beat) clearInterval(beat);
@@ -344,6 +357,7 @@ export async function runToCompletion(engine, calledAs, args, { signal, renders 
     } catch (err) {
       const cancelled = !!signal?.aborted;
       logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} while waiting for task ${ids.join(', ')}: ${err?.message || String(err)}`);
+      if (!cancelled) engine?.errors?.record?.({ source: 'tool', tool: name, stage: err?.stage || 'task', message: `while waiting for task ${ids.join(', ')}: ${err?.message || String(err)}`, args, task_id: ids[0] ?? null });
       return { result: errorResult(cancelled ? `cancelled: ${err?.message || 'the call was cancelled'}` : (err?.message || String(err)), cancelled ? 'cancelled' : (err?.stage || 'task'), err?.field, cancelled ? undefined : err?.code), raw: null };
     }
   }

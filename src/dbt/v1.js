@@ -7,14 +7,16 @@ import { existsSync, readFileSync, mkdtempSync, rmSync, copyFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { inIsolatedTarget } from '../request-context.js';
-import { runProcess } from './process.js';
+import { runProcess, runWithInput } from './process.js';
+import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { warehouseOf } from './warehouse.js';
 import { parseShowJson, parseCsv, extractSql, extractPlan } from './output.js';
 
 export class DbtV1 {
-  constructor({ dbtBin, mfBin, profilesDir, timeout = 600000 } = {}) {
+  constructor({ dbtBin, mfBin, pythonBin, profilesDir, timeout = 600000 } = {}) {
     this.dbtBin = dbtBin;
     this.mfBin = mfBin;
+    this.pythonBin = pythonBin;
     this.profilesDir = profilesDir;
     this.timeout = timeout;
     this.major = 1;
@@ -89,6 +91,27 @@ export class DbtV1 {
       }
       return out;
     } catch { return {}; }
+  }
+
+  /**
+   * What each of `metrics` can be grouped by, as MetricFlow itself lists it over `projectDir`'s parsed
+   * semantic manifest (its `list_group_bys`: each dimension with its semantic model and entity path,
+   * each entity, metric_time with its grain) — asked of MetricFlow's Python once, through the sidecar
+   * script (python/mf_sidecar.py), in the MetricFlow environment. The `mf` CLI prints only names.
+   * → { ok, group_bys: { <metric>: [item] } } | { ok: false, error }
+   */
+  async groupBys(projectDir, metrics) {
+    const python = this.pythonBin || this.environment?.pythonBin;
+    if (!python) return { ok: false, error: 'no MetricFlow Python to ask: the dbt environment names no MetricFlow environment (MF_ENV)' };
+    const sidecar = assetPath('mfSidecar');
+    if (!sidecar) return { ok: false, error: missingAssetMessage('mfSidecar') };
+    const request = { id: 'group_bys', op: 'group_bys', project_dir: projectDir, profiles_dir: this.profilesDir, metrics };
+    const r = await runWithInput(python, [sidecar], `${JSON.stringify(request)}\n`, { cwd: projectDir, env: this._env(projectDir), timeout: this.timeout, turn: this.warehouse(projectDir).turn });
+    const line = (r.stdout || '').split('\n').find((l) => l.trim().startsWith('{'));
+    let out = null;
+    try { out = line ? JSON.parse(line) : null; } catch { /* said below */ }
+    if (out?.ok) return { ok: true, group_bys: out.group_bys || {} };
+    return { ok: false, error: out?.error || r.error || (r.stderr || '').trim().split('\n').slice(-3).join(' ') || 'MetricFlow could not list the group-by items' };
   }
 
   /** Build models (a generated pipeline model, a stored query result) via `dbt run --select`. */

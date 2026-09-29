@@ -5,6 +5,7 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
+import { ERROR_SOURCES } from './error-log.js';
 import { RESEARCH_DOMAINS } from './research-guides.js';
 import { pipelineStageSchema, stageDefs } from './pipeline.js';
 import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
@@ -744,6 +745,25 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       properties: {
         seconds: { type: 'number', minimum: 0, maximum: 86400, description: `Seconds to wait; the actual wait is capped at ${MAX_WAIT_SECONDS} (larger values are clamped, with clamped:true and cap_seconds in the result).` },
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
+      },
+    },
+    explore_errors: {
+      type: 'object', additionalProperties: false,
+      description: 'Read the failures the server kept. { id } → one in full; otherwise a page of them, newest first, narrowed by the fields given.',
+      properties: {
+        id: { type: 'integer', minimum: 1, description: 'One error in full: the call\'s arguments (a task\'s input) and everything that was said about it.' },
+        since: { type: 'string', description: 'Only errors at or after this moment (ISO 8601 date or date-time, e.g. "2026-09-29" or "2026-09-29T10:00:00Z").' },
+        until: { type: 'string', description: 'Only errors at or before this moment (ISO 8601; a date alone means the whole of that day).' },
+        source: { enum: ERROR_SOURCES, description: 'Where it happened: tool — a call refused or failed; task — warehouse work that ended in an error; startup — what a start could not serve.' },
+        severity: { enum: ['error', 'warning'], description: 'error — something failed; warning — something was left out and served without it (a join the project declares that no reference can name, a feature that cannot run here).' },
+        tool: { type: 'string', description: 'Only the errors of this tool (for a task: the tool that started it).' },
+        stage: { type: 'string', description: 'Only this stage (validate, query, build, task, …).' },
+        context_id: { type: 'string', description: 'Only the errors on this context.' },
+        task_id: { type: 'string', description: 'Only this task\'s errors.' },
+        text: { type: 'string', minLength: 1, description: 'Only errors whose message contains this text (any case).' },
+        detail: { type: 'boolean', description: 'Give each error of the page in full (arguments and detail), not only its message.' },
+        limit: { type: 'integer', minimum: 1, maximum: 200, description: 'How many to return (default 20).' },
+        offset: { type: 'integer', minimum: 0, description: 'Skip this many of the newest first (next_offset of the previous page).' },
       },
     },
     experiment: experimentSchema(),

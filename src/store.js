@@ -37,6 +37,11 @@
 //   memory.vectorPut(id, vec, model)  (store/mirror a note's embedding for semantic search)
 //   memory.vectorIds(model)           -> Set<id> (notes already embedded for this model)
 //   memory.vectorSearch(qvec, { limit, model }) -> [{ id, score }] (cosine; KNN via sqlite-vec)
+//   errors.add({ at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail }) -> id
+//   errors.list({ since, until, source, severity, tool, stage, context_id, task_id, text, limit, offset }) -> { total, rows[] } (newest first)
+//   errors.get(id)                    -> row | null   (args and detail in full)
+//   errors.summary(filter)            -> [{ source, tool, stage, count, last_at }] (the same filter, grouped)
+//   errors.prune({ before, keep })    -> removed count (older than `before`, beyond the newest `keep`)
 //   close()
 
 import { createRequire } from 'node:module';
@@ -205,6 +210,38 @@ export class MemoryBackend {
         .slice(0, limit),
     };
 
+    // The error log (src/error-log.js): what failed, where — kept for debugging, newest first.
+    const errors = [];
+    let errorSeq = 0;
+    const errorMatch = (f = {}) => (e) => (f.since == null || e.at >= f.since) && (f.until == null || e.at <= f.until)
+      && ['source', 'severity', 'tool', 'stage', 'context_id', 'task_id'].every((k) => f[k] == null || e[k] === f[k])
+      && (f.text == null || `${e.message || ''} ${e.detail || ''}`.toLowerCase().includes(String(f.text).toLowerCase()));
+    this.errors = {
+      add: (e) => { const id = ++errorSeq; errors.push({ id, ...e }); return id; },
+      list: ({ limit = 20, offset = 0, ...f } = {}) => {
+        const hit = errors.filter(errorMatch(f)).sort((a, b) => b.id - a.id);
+        return { total: hit.length, rows: hit.slice(offset, offset + limit).map((e) => ({ ...e })) };
+      },
+      get: (id) => { const e = errors.find((x) => x.id === Number(id)); return e ? { ...e } : null; },
+      summary: (f = {}) => {
+        const by = new Map();
+        for (const e of errors.filter(errorMatch(f))) {
+          const k = `${e.source}\u0000${e.tool}\u0000${e.stage}`;
+          const g = by.get(k) || { source: e.source, tool: e.tool ?? null, stage: e.stage ?? null, count: 0, last_at: 0 };
+          g.count += 1; g.last_at = Math.max(g.last_at, e.at);
+          by.set(k, g);
+        }
+        return [...by.values()].sort((a, b) => b.count - a.count || b.last_at - a.last_at);
+      },
+      prune: ({ before = null, keep = null } = {}) => {
+        const n = errors.length;
+        const newest = [...errors].sort((a, b) => b.id - a.id);
+        const kept = new Set(newest.filter((e, i) => (before == null || e.at >= before) && (keep == null || i < keep)).map((e) => e.id));
+        for (let i = errors.length - 1; i >= 0; i -= 1) if (!kept.has(errors[i].id)) errors.splice(i, 1);
+        return n - errors.length;
+      },
+    };
+
     // Wipe state (used by MCP_DB_RESET on startup). Memory is curated knowledge that is
     // NOT re-derivable (unlike the value index, which the background indexer repopulates),
     // so a routine clean-slate reset deliberately PRESERVES it.
@@ -298,11 +335,47 @@ export class SqliteBackend {
     // Track the vec0 table's fixed dimensionality/model; a change rebuilds it.
     db.exec('CREATE TABLE IF NOT EXISTS memory_vec_meta (only_row INTEGER PRIMARY KEY CHECK (only_row = 1), dims INTEGER, model TEXT)');
     db.exec('CREATE TABLE IF NOT EXISTS server_meta (key TEXT PRIMARY KEY, value TEXT)');
+    db.exec('CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, severity TEXT, tool TEXT, stage TEXT, field TEXT, code TEXT, context_id TEXT, task_id TEXT, message TEXT, args TEXT, detail TEXT)');
+    db.exec('CREATE INDEX IF NOT EXISTS errors_at ON errors (at)');
     const s = this;
 
     this.meta = {
       get(key) { return s._all('SELECT value FROM server_meta WHERE key = ?', key)[0]?.value ?? null; },
       set(key, value) { s._run('INSERT INTO server_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value', key, String(value)); },
+    };
+
+    // The error log (src/error-log.js). A filter is built from fixed column names only; every value
+    // is a bound parameter.
+    const ERROR_COLS = ['source', 'severity', 'tool', 'stage', 'context_id', 'task_id'];
+    const errorWhere = (f = {}) => {
+      const w = []; const p = [];
+      if (f.since != null) { w.push('at >= ?'); p.push(f.since); }
+      if (f.until != null) { w.push('at <= ?'); p.push(f.until); }
+      for (const k of ERROR_COLS) if (f[k] != null) { w.push(`${k} = ?`); p.push(f[k]); }
+      if (f.text != null) { w.push("lower(coalesce(message, '') || ' ' || coalesce(detail, '')) LIKE ? ESCAPE '\\'"); p.push(`%${String(f.text).toLowerCase().replace(/[\\%_]/g, (c) => `\\${c}`)}%`); }
+      return { sql: w.length ? ` WHERE ${w.join(' AND ')}` : '', params: p };
+    };
+    this.errors = {
+      add(e) {
+        return Number(s._run('INSERT INTO errors (at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          e.at, e.source ?? null, e.severity ?? null, e.tool ?? null, e.stage ?? null, e.field ?? null, e.code ?? null, e.context_id ?? null, e.task_id ?? null, e.message ?? null, e.args ?? null, e.detail ?? null).lastInsertRowid);
+      },
+      list({ limit = 20, offset = 0, ...f } = {}) {
+        const { sql, params } = errorWhere(f);
+        const total = Number(s._get(`SELECT count(*) AS n FROM errors${sql}`, ...params).n);
+        return { total, rows: s._all(`SELECT * FROM errors${sql} ORDER BY id DESC LIMIT ? OFFSET ?`, ...params, limit, offset) };
+      },
+      get(id) { return s._get('SELECT * FROM errors WHERE id = ?', Number(id)) || null; },
+      summary(f = {}) {
+        const { sql, params } = errorWhere(f);
+        return s._all(`SELECT source, tool, stage, count(*) AS count, max(at) AS last_at FROM errors${sql} GROUP BY source, tool, stage ORDER BY count DESC, last_at DESC`, ...params).map((r) => ({ ...r, count: Number(r.count) }));
+      },
+      prune({ before = null, keep = null } = {}) {
+        let n = 0;
+        if (before != null) n += Number(s._run('DELETE FROM errors WHERE at < ?', before).changes);
+        if (keep != null) n += Number(s._run('DELETE FROM errors WHERE id NOT IN (SELECT id FROM errors ORDER BY id DESC LIMIT ?)', keep).changes);
+        return n;
+      },
     };
 
     this.jobs = {

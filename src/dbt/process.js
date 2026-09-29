@@ -10,7 +10,7 @@
 //     value index — fail. Such a warehouse gets one FIFO turn per database, shared by every client
 //     on it (a context's queries, the indexer, the MetricFlow sidecar), and a process waits for it.
 
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { currentSignal } from '../request-context.js';
@@ -61,6 +61,39 @@ export function runProcess(bin, args, { cwd, env, timeout = 600000, turn = null 
   const asked = Date.now();
   let began = asked;
   const start = () => { began = Date.now(); return spawnOnce(bin, args, { cwd, env, timeout, signal }); };
+  const done = (r) => { timing(bin, args, asked, began, r); return r; };
+  if (!turn) return start().then(done);
+  return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);
+}
+
+/**
+ * Run `bin args` with `input` written to its stdin (then closed), and collect what it printed — for a
+ * process that takes its request on stdin (the MetricFlow sidecar, asked once). Waits for `turn` like
+ * runProcess, stops with the call's cancellation, and never throws: { ok, code, cancelled?, stdout,
+ * stderr, error? }.
+ */
+export function runWithInput(bin, args, input, { cwd, env, timeout = 600000, turn = null } = {}) {
+  const signal = currentSignal();
+  const asked = Date.now();
+  let began = asked;
+  const start = () => new Promise((resolve) => {
+    began = Date.now();
+    if (signal?.aborted) return resolve(cancelledResult('not started — the call was cancelled'));
+    const child = spawn(bin, args, { cwd, env: { ...process.env, ...env }, stdio: ['pipe', 'pipe', 'pipe'], ...(signal ? { signal } : {}) });
+    let stdout = '';
+    let stderr = '';
+    const timer = setTimeout(() => child.kill('SIGTERM'), timeout);
+    child.stdout.on('data', (d) => { stdout += d; });
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', (e) => { clearTimeout(timer); resolve(signal?.aborted ? cancelledResult('the call was cancelled') : { ok: false, code: null, stdout, stderr, error: e.message }); });
+    child.on('close', (code, sig) => {
+      clearTimeout(timer);
+      if (signal?.aborted) return resolve(cancelledResult('the call was cancelled'));
+      resolve({ ok: code === 0, code, killed: !!sig, signal: sig, stdout, stderr, ...(code === 0 ? {} : { error: sig ? `killed (${sig}) — it ran past ${Math.round(timeout / 1000)}s` : `exited with code ${code}` }) });
+    });
+    child.stdin.on('error', () => { /* the process may exit before reading */ });
+    child.stdin.end(input);
+  });
   const done = (r) => { timing(bin, args, asked, began, r); return r; };
   if (!turn) return start().then(done);
   return warehouseTurns.run(turn, start, signal).catch((e) => cancelledResult(e?.message || 'cancelled')).then(done);

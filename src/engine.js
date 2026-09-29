@@ -28,6 +28,7 @@ import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { MemoryStore, targetKey, targetWords } from './memory.js';
 import { openStore } from './store.js';
+import { ErrorLog } from './error-log.js';
 import { buildProjection, projectionProblems } from './projection.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
@@ -87,6 +88,13 @@ export class Engine {
     // queried in a context of their own per semantic model (its name), and the schema names them
     this.project = project?.layer ? project : null;
     this.projectError = project?.error || null;
+    // THE ERROR LOG (src/error-log.js): every failure, kept in the store for explore_errors — and what
+    // this start could not serve is the first of them
+    this.errors = new ErrorLog({ store: this.store });
+    if (this.projectError) this.errors.record({ source: 'startup', stage: 'project_semantic_layer', message: `the dbt project's own semantic models could not be read: ${this.projectError}` });
+    for (const x of project?.skipped || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `the semantic model '${x.semantic_model}' is not served: ${x.reason}` });
+    for (const b of this.project?.layer.blocked || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `${b.message}: not served. To serve it, ${b.fix}.`, detail: b });
+    for (const st of featureStatus || []) if (st.available === false) this.errors.record({ source: 'startup', severity: 'warning', stage: 'feature', message: `the feature '${st.id}' is not offered: ${st.reason}` });
     this.schemas = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [] });
     // THE FEATURES THIS DEPLOYMENT RUNS (src/features.js): each adds its tools — a schema here and a
     // method on this engine — and the task side they start and read. A feature that is off adds
@@ -2437,8 +2445,10 @@ export class Engine {
     const keep = (out) => {
       if (this.jobs.get(id)?.status === 'cancelled') return; // what the work did after the cancel is not its result
       this._keepTaskResult(id, { tool, input, out });
-      if (isPlainObject(out) && out.ok === false) this.jobs.fail(id, out.error?.message || `the ${tool} task failed`);
-      else this.jobs.ready(id);
+      if (isPlainObject(out) && out.ok === false) {
+        this.jobs.fail(id, out.error?.message || `the ${tool} task failed`);
+        if (out.error?.stage !== 'cancelled') this._recordTaskError(id, tool, ctx, input, out.error);
+      } else this.jobs.ready(id);
     };
     const settled = detached(async () => {
       await null; // the caller records what it needs about the task before any of the work runs
@@ -2452,7 +2462,7 @@ export class Engine {
     }).then(keep, (e) => keep({
       ok: false,
       error: { stage: e?.stage || 'task', message: e?.message || String(e), ...(e?.field ? { field: e.field } : {}), ...(e?.code ? { code: e.code } : {}) },
-    })).catch((e) => this.jobs.fail(id, e?.message || String(e))).finally(() => {
+    })).catch((e) => { this.jobs.fail(id, e?.message || String(e)); this._recordTaskError(id, tool, ctx, input, { stage: 'task', message: e?.message || String(e), detail: e?.stack }); }).finally(() => {
       this._taskRuns.delete(id);
       this._taskControls.delete(id);
       if (!ctx) return;
@@ -2462,6 +2472,15 @@ export class Engine {
     if (ctx && !batch) this._ctxQueue.set(ctx.id, settled);
     this._taskRuns.set(id, settled);
     return id;
+  }
+
+  /** A task that ended in an error, into the error log: what failed, on which context, with its input. */
+  _recordTaskError(id, tool, ctx, input, error = {}) {
+    const { message, stage, field, code, detail, ...rest } = isPlainObject(error) ? error : { message: String(error) };
+    this.errors.record({
+      source: 'task', tool, task_id: id, context_id: ctx?.id ?? null, stage: stage || 'task', field, code,
+      message: message || `the ${tool} task failed`, args: input, detail: detail ?? (Object.keys(rest).length ? rest : null),
+    });
   }
 
   /**
@@ -3257,6 +3276,53 @@ export class Engine {
     });
     const waited = cancelled ? Math.round((Date.now() - Date.parse(startedAt)) / 100) / 10 : seconds;
     return { ok: true, waited_seconds: waited, requested_seconds: requested, cap_seconds: MAX_WAIT_SECONDS, clamped: requested > MAX_WAIT_SECONDS, ...(cancelled ? { cancelled: true } : {}), started_at: startedAt, finished_at: new Date().toISOString(), ...(input.reason ? { reason: input.reason } : {}) };
+  }
+
+  /**
+   * THE ERROR LOG, read (src/error-log.js): the failures kept in the store, newest first — a tool
+   * call refused or failed (with its arguments), a task that ended in an error (what dbt or the
+   * warehouse said), what start could not serve. { id } → one in full; otherwise a page of them,
+   * filtered, with a summary of where they come from.
+   */
+  explore_errors(input = {}) {
+    this._validate('explore_errors', input);
+    const iso = (ms) => (ms == null ? null : new Date(Number(ms)).toISOString());
+    const parsed = (text) => { if (text == null) return null; try { return JSON.parse(text); } catch { return text; } };
+    const shown = (r, full) => ({
+      id: Number(r.id), at: iso(r.at), source: r.source, severity: r.severity,
+      ...Object.fromEntries(['tool', 'stage', 'field', 'code', 'context_id', 'task_id'].filter((k) => r[k] != null).map((k) => [k, r[k]])),
+      message: full || !r.message || r.message.length <= 600 ? r.message : `${r.message.slice(0, 600)}… (explore_errors({ id: ${Number(r.id)} }) for all of it)`,
+      ...(full ? { ...(r.args != null ? { args: parsed(r.args) } : {}), ...(r.detail != null ? { detail: parsed(r.detail) } : {}) } : {}),
+    });
+    if (input.id != null) {
+      const row = this.errors.get(input.id);
+      if (!row) throw new ToolError(`no error with id ${input.id} is kept (they are kept ${this.errors.retentionMs / 86400000} days, the newest ${this.errors.maxRows})`, { stage: 'validate', field: 'id' });
+      return { ok: true, error: shown(row, true) };
+    }
+    const at = (v, field) => {
+      if (v == null) return null;
+      const t = Date.parse(v);
+      if (Number.isNaN(t)) throw new ToolError(`${field}: '${v}' is not a date or date-time (ISO 8601, e.g. 2026-09-29 or 2026-09-29T10:00:00Z)`, { stage: 'validate', field });
+      return t;
+    };
+    // a date-only until means the whole of that day
+    const untilAt = at(input.until, 'until');
+    const filter = {
+      since: at(input.since, 'since'), until: untilAt != null && /^\d{4}-\d{2}-\d{2}$/.test(input.until) ? untilAt + 86399999 : untilAt,
+      ...Object.fromEntries(['source', 'severity', 'tool', 'stage', 'context_id', 'task_id', 'text'].filter((k) => input[k] != null).map((k) => [k, input[k]])),
+    };
+    const limit = input.limit ?? 20;
+    const offset = input.offset ?? 0;
+    const { total, rows } = this.errors.list({ ...filter, limit, offset });
+    return {
+      ok: true,
+      total,
+      shown: rows.length,
+      ...(offset + rows.length < total ? { next_offset: offset + rows.length } : {}),
+      errors: rows.map((r) => shown(r, input.detail === true)),
+      by_source: this.errors.summary(filter).map((g) => ({ ...g, last_at: iso(g.last_at) })),
+      note: `Newest first. explore_errors({ id }) gives one in full — the call's arguments and everything the warehouse said. Kept ${this.errors.retentionMs / 86400000} days, the newest ${this.errors.maxRows}.`,
+    };
   }
 
   async describe_context(input) {

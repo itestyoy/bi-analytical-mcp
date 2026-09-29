@@ -122,10 +122,18 @@
 }
 
 /* ── heatmap tables (step matrix, overviews) ── */
+/* the first column stays while the steps scroll sideways, the header stays while the events scroll
+   down, and their corner stays for both — over everything that passes under it */
 .rt-heat {
+  thead th:first-child {
+    left: 0;
+    z-index: 3;
+  }
+
   .rt-event {
     position: sticky;
     left: 0;
+    z-index: 2;
     max-width: 14rem;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -191,9 +199,15 @@
 }
 
 .rt-node {
-  cursor: default;
+  cursor: pointer;
   outline: none;
   transition: opacity 0.12s;
+
+  /* the pinned event: its arrivals and exits stay shown until it is clicked again */
+  &.rt-node-pinned circle {
+    stroke: var(--foreground);
+    stroke-width: 3;
+  }
 
   &.rt-node-dim {
     opacity: 0.3;

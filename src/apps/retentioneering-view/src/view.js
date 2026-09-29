@@ -186,7 +186,10 @@ function renderGraph(model) {
   const radius = new Map(nodes.map((n) => [n.event, 6 + 14 * Math.sqrt((n.count || 0) / maxCount)]));
   const labelOf = new Map(nodes.map((n) => [n.event, n.label || n.event]));
 
-  const view = { weight: model.weight, per: model.per_event, focus: null };
+  // the event whose arrivals and exits are shown alone: the one clicked (pinned) until it is clicked
+  // again or another one is, else the one under the pointer
+  const view = { weight: model.weight, per: model.per_event, pinned: null, hover: null };
+  const focusOf = () => view.pinned || view.hover;
   const figure = el('div', 'rt-graph');
   const root = svg('svg', { viewBox: `0 0 ${W} ${H}`, class: 'rt-graph-svg', role: 'img', 'aria-label': 'Transition graph — the transitions are also listed in the table below' });
   const defs = svg('defs');
@@ -223,12 +226,13 @@ function renderGraph(model) {
   const draw = () => {
     edgeLayer.replaceChildren();
     const shown = visibleEdges(model.edges, view.weight, rankBy(), view.per);
+    const focus = focusOf();
     const max = Math.max(...shown.map((e) => e[view.weight] ?? 0), 0) || 1;
     const touched = new Set(shown.flatMap((e) => [e.source, e.target]));
     for (const e of shown) {
       const d = edgePath(e);
-      const onFocus = view.focus && (e.source === view.focus || e.target === view.focus);
-      const path = svg('path', { d, class: `rt-edge${view.focus ? (onFocus ? ' rt-edge-on' : ' rt-edge-dim') : ''}`, 'stroke-width': (1 + 6 * ((e[view.weight] ?? 0) / max)).toFixed(2), 'marker-end': 'url(#rt-arrow)' });
+      const onFocus = focus && (e.source === focus || e.target === focus);
+      const path = svg('path', { d, class: `rt-edge${focus ? (onFocus ? ' rt-edge-on' : ' rt-edge-dim') : ''}`, 'stroke-width': (1 + 6 * ((e[view.weight] ?? 0) / max)).toFixed(2), 'marker-end': 'url(#rt-arrow)' });
       const hit = svg('path', { d, class: 'rt-edge-hit' });
       const lines = [`${labelOf.get(e.source)} → ${labelOf.get(e.target)}`, `${model.labels[view.weight]}: ${formatWeight(unit(), e[view.weight])}`, `${formatNumber(e.count)} transitions · ${formatNumber(e.unique_paths)} paths`, `median time ${formatDuration(e.time_median)}`];
       hit.addEventListener('pointermove', (evt) => { path.classList.add('rt-edge-on'); tip.show(evt, lines); });
@@ -236,10 +240,12 @@ function renderGraph(model) {
       edgeLayer.append(path, hit);
     }
     for (const [event, g] of nodeEls) {
-      const related = !view.focus || event === view.focus || shown.some((e) => (e.source === view.focus && e.target === event) || (e.target === view.focus && e.source === event));
+      const related = !focus || event === focus || shown.some((e) => (e.source === focus && e.target === event) || (e.target === focus && e.source === event));
       g.classList.toggle('rt-node-dim', !touched.has(event) || !related);
+      g.classList.toggle('rt-node-pinned', event === view.pinned);
+      g.setAttribute('aria-pressed', String(event === view.pinned));
     }
-    caption.textContent = `Circle size = occurrences · arrow width = ${model.labels[view.weight].toLowerCase()} · ${shown.length} of ${model.edges.length} transitions shown${view.per ? ` (the ${view.per} strongest exits of each event, plus each event's strongest arrival)` : ''}. Hover an event to see only its arrivals and exits.`;
+    caption.textContent = `Circle size = occurrences · arrow width = ${model.labels[view.weight].toLowerCase()} · ${shown.length} of ${model.edges.length} transitions shown${view.per ? ` (the ${view.per} strongest exits of each event, plus each event's strongest arrival)` : ''}. ${view.pinned ? ` Showing only ${labelOf.get(view.pinned)}'s arrivals and exits — click it again to show all, or click another event.` : ' Hover an event to see only its arrivals and exits; click it to keep them.'}`;
     const sorted = [...shown].sort((a, b) => (b[rankBy()] ?? 0) - (a[rankBy()] ?? 0));
     tableSlot.replaceChildren(tableView(`The ${shown.length} transitions shown, as a table`, [['From'], ['To'], [model.labels[view.weight], true], ['Transitions', true], ['Paths', true], ['Median time', true]],
       sorted.map((e) => [labelOf.get(e.source), labelOf.get(e.target), formatWeight(unit(), e[view.weight]), formatNumber(e.count), formatNumber(e.unique_paths), formatDuration(e.time_median)])));
@@ -267,7 +273,7 @@ function renderGraph(model) {
 
   for (const n of nodes) {
     const p = pos.get(n.event);
-    const g = svg('g', { class: `rt-node${n.synthetic ? ' rt-node-synthetic' : ''}`, transform: `translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})`, tabindex: 0, role: 'button', 'aria-label': `${n.label}: ${n.count} occurrences — show only its transitions` });
+    const g = svg('g', { class: `rt-node${n.synthetic ? ' rt-node-synthetic' : ''}`, transform: `translate(${p.x.toFixed(1)} ${p.y.toFixed(1)})`, tabindex: 0, role: 'button', 'aria-label': `${n.label}: ${n.count} occurrences — click to keep only its transitions, again to show all` });
     g.append(svg('circle', { r: radius.get(n.event).toFixed(1) }));
     const at = labelAt.get(n.event);
     const label = svg('text', { x: at.dx.toFixed(1), y: at.dy.toFixed(1), 'text-anchor': at.anchor });
@@ -275,16 +281,19 @@ function renderGraph(model) {
     g.append(label);
     const exits = () => model.edges.filter((e) => e.source === n.event).sort((a, b) => (b.proba_out ?? 0) - (a.proba_out ?? 0)).slice(0, 3);
     const arrivals = () => model.edges.filter((e) => e.target === n.event).sort((a, b) => (b.proba_in ?? 0) - (a.proba_in ?? 0)).slice(0, 3);
-    const focusOn = (evt) => {
-      view.focus = n.event; draw();
-      tip.show(evt, [n.label, `${formatNumber(n.count)} occurrences`,
-        ...(exits().length ? [`next: ${exits().map((e) => `${labelOf.get(e.target)} ${formatShare(e.proba_out)}`).join(', ')}`] : []),
-        ...(arrivals().length ? [`from: ${arrivals().map((e) => `${labelOf.get(e.source)} ${formatShare(e.proba_in)}`).join(', ')}`] : [])]);
-    };
-    g.addEventListener('pointerenter', focusOn);
-    g.addEventListener('focus', () => { view.focus = n.event; draw(); });
-    g.addEventListener('pointerleave', () => { view.focus = null; draw(); tip.hide(); });
-    g.addEventListener('blur', () => { view.focus = null; draw(); });
+    const tipLines = () => [n.label, `${formatNumber(n.count)} occurrences`,
+      ...(exits().length ? [`next: ${exits().map((e) => `${labelOf.get(e.target)} ${formatShare(e.proba_out)}`).join(', ')}`] : []),
+      ...(arrivals().length ? [`from: ${arrivals().map((e) => `${labelOf.get(e.source)} ${formatShare(e.proba_in)}`).join(', ')}`] : [])];
+    // hovering previews an event while none is pinned; a click keeps it (again: lets it go)
+    const hoverOn = () => { if (view.hover === n.event) return; view.hover = n.event; if (!view.pinned) draw(); };
+    const hoverOff = () => { view.hover = null; if (!view.pinned) draw(); };
+    const togglePin = () => { view.pinned = view.pinned === n.event ? null : n.event; draw(); };
+    g.addEventListener('pointerenter', (evt) => { hoverOn(); tip.show(evt, tipLines()); });
+    g.addEventListener('pointerleave', () => { hoverOff(); tip.hide(); });
+    g.addEventListener('click', togglePin);
+    g.addEventListener('keydown', (evt) => { if (evt.key === 'Enter' || evt.key === ' ') { evt.preventDefault(); togglePin(); } });
+    g.addEventListener('focus', hoverOn);
+    g.addEventListener('blur', hoverOff);
     nodeEls.set(n.event, g);
     nodeLayer.append(g);
   }

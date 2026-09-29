@@ -5,7 +5,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -17,7 +17,7 @@ import { Engine } from '../../src/engine.js';
 import { loadProjectSemantics, PROJECT_CONTEXT } from '../../src/project-semantics.js';
 import { mergeModelEntry } from '../../src/semantic-latest.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { settle, taskResult } from '../helpers/settle.js';
+import { settle, taskResult, isStartedTask } from '../helpers/settle.js';
 import { DBT_BIN, PY_BIN, HAS_DBT } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
@@ -82,7 +82,7 @@ test('the project\'s own metrics are read at start and listed — each with what
   assert.equal(o.context_id, PROJECT_CONTEXT);
   assert.deepEqual(o.metrics.map((m) => m.name), [
     'project_active_players', 'project_clicks', 'project_cost', 'project_cost_avg', 'project_cost_max', 'project_cost_per_touch', 'project_ctr',
-    'project_events_per_player', 'project_events_total', 'project_impressions', 'project_impressions_last_day', 'project_paid_rows', 'project_touches',
+    'project_events_per_click', 'project_events_per_player', 'project_events_total', 'project_impressions', 'project_impressions_last_day', 'project_paid_rows', 'project_touches',
   ]);
   const of = (name) => o.metrics.find((m) => m.name === name);
   assert.deepEqual(of('project_events_total').semantic_models, ['project_events']);
@@ -243,4 +243,133 @@ test('a stored result of the project\'s layer outlives a restart, and ages out l
   const gone = await raw.query_semantic_model({ task_id: stored.task_id });
   assert.equal(gone.ok, false);
   assert.equal(gone.error.code, 'result_gone');
+});
+
+// ---- preview_semantic_model: a context's layer as dbt parsed it, and checked by running it ----
+
+const preview = (input) => (engine.raw || engine).preview_semantic_model(input);
+
+test('a preview of a project metric lists every cut it takes — and each one, queried, is the warehouse\'s own number', opts, async (t) => {
+  if (skip(t)) return;
+  const p = await preview({ context_id: PROJECT_CONTEXT, metric: 'project_cost' });
+  assert.equal(p.status.valid, true, JSON.stringify(p.status.issues));
+  const [m] = p.metrics;
+  assert.equal(m.name, 'project_cost');
+  const [{ total }] = (await wh.query('select sum(cost) as total from fct_player_acquisition')).rows;
+  const cuts = [...m.cut_by.dimensions, ...m.cut_by.entities];
+  assert.ok(cuts.length >= 3, JSON.stringify(m.cut_by));
+  for (const cut of cuts) {
+    // every cut, spelled as the preview gives it, is taken by the query and sums to the total
+    const rows = rowsOf(await q({ metrics: ['project_cost'], group_by: [cut] }));
+    const sum = rows.reduce((a, r) => a + num(r.project_cost ?? 0), 0);
+    assert.ok(Math.abs(sum - num(total)) < 1e-9, `${JSON.stringify(cut)}: ${sum} vs ${total}`);
+  }
+});
+
+test('a metric of two semantic models is cut only by what both carry: the preview says so, and the query agrees with the rows', opts, async (t) => {
+  if (skip(t)) return;
+  const p = await preview({ context_id: PROJECT_CONTEXT, metric: 'project_events_per_click' });
+  const m = p.metrics.find((x) => x.name === 'project_events_per_click');
+  assert.deepEqual(m.cut_by.dimensions, []);
+  assert.deepEqual(m.cut_by.entities, [{ entity: 'player' }]);
+  // the metrics it is made of come with it
+  assert.deepEqual(p.metrics.map((x) => x.name).sort(), ['project_clicks', 'project_events_per_click', 'project_events_total']);
+  // a cut only one input has is refused in the call
+  await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_semantic_model({ context_id: PROJECT_CONTEXT, metrics: ['project_events_per_click'], group_by: [{ semantic_model: 'project_acquisition', dimension: 'campaign' }] })), /not a dimension project_events_per_click can be grouped by/);
+  // the one they share, on data: per player, events / clicks
+  const ev = new Map((await wh.query('select player_id_of_internal as p, count(event_id) as n from fct_analytics_events group by 1')).rows.map((r) => [r.p, num(r.n)]));
+  const cl = new Map((await wh.query('select player_id_of_internal as p, sum(clicks) as n from fct_player_acquisition group by 1')).rows.map((r) => [r.p, num(r.n)]));
+  const got = rowsOf(await q({ metrics: ['project_events_per_click'], group_by: [{ entity: 'player' }] }));
+  let compared = 0;
+  for (const r of got) {
+    const want = ev.has(r.player) && cl.get(r.player) ? ev.get(r.player) / cl.get(r.player) : null;
+    if (want == null) { assert.equal(r.project_events_per_click, null, r.player); continue; }
+    assert.ok(Math.abs(num(r.project_events_per_click) - want) < 1e-9, `${r.player}: ${r.project_events_per_click} vs ${want}`);
+    compared += 1;
+  }
+  assert.ok(compared > 0, 'some players have both events and clicks');
+});
+
+test('validate runs the project\'s metrics over a window — each value the warehouse\'s own — and its semantic models\' dimensions', opts, async (t) => {
+  if (skip(t)) return;
+  const started = await preview({ context_id: PROJECT_CONTEXT, semantic_model: 'project_acquisition', validate: true, time_range: { start: '2026-01-02', end: '2026-01-04' } });
+  assert.ok(isStartedTask(started), JSON.stringify(started));
+  const v = await taskResult(engine.raw || engine, started.task_id);
+  assert.equal(v.ok, true, JSON.stringify(v.error));
+  assert.equal(v.valid, true, JSON.stringify(v));
+  assert.ok(v.compiled.every((c) => c.ok), JSON.stringify(v.compiled));
+  const [w] = (await wh.query("select sum(cost) as cost, sum(clicks) as clicks, sum(impressions) as impressions from fct_player_acquisition where spend_date between date '2026-01-02' and date '2026-01-04'")).rows;
+  const value = (name) => num(v.ran.metrics.find((x) => x.metric === name).value);
+  assert.ok(Math.abs(value('project_cost') - num(w.cost)) < 1e-9);
+  assert.equal(value('project_clicks'), num(w.clicks));
+  assert.equal(value('project_touches'), num(w.clicks) + num(w.impressions));
+  const sm = v.ran.semantic_models.find((x) => x.semantic_model === 'project_acquisition');
+  assert.equal(sm.ok, true, JSON.stringify(sm));
+  assert.deepEqual(sm.dimensions.sort(), ['campaign', 'spend_date']);
+});
+
+test('validate names the metric and the dimension whose column the warehouse does not have — and runs the rest', opts, async (t) => {
+  if (skip(t)) return;
+  // a copy of the project with one metric and one dimension over a column that is not there: dbt
+  // parses it (the expression is the warehouse's to judge), MetricFlow compiles it, the run fails
+  const broken = join(mkdtempSync(join(tmpdir(), 'projsem-broken-')), 'project');
+  cpSync(BASE, broken, { recursive: true, filter: (src) => !/\/(target|logs)(\/|$)/.test(src) });
+  const file = join(broken, 'models', 'core', 'project_semantic_models.yml');
+  const doc = yaml.load(readFileSync(file, 'utf8'));
+  const acq = doc.models.find((m) => m.name === 'fct_project_acquisition');
+  acq.metrics.push({ name: 'project_broken_amount', type: 'simple', agg: 'sum', expr: 'no_such_amount' });
+  acq.derived_semantics = { dimensions: [{ name: 'broken_dim', type: 'categorical', expr: 'no_such_column' }] };
+  writeFileSync(file, yaml.dump(doc, { lineWidth: 120, noRefs: true }));
+  const ctxs2 = new ContextManager({ baseProjectDir: broken, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem2-')), timeSpineDialect: 'duckdb' });
+  const loaded2 = await loadProjectSemantics({ runner: backend, contextManager: ctxs2 });
+  assert.ok(loaded2?.layer, JSON.stringify(loaded2));
+  const engine2 = new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs2, runner: backend, project: loaded2 });
+  const started = await engine2.preview_semantic_model({ context_id: PROJECT_CONTEXT, semantic_model: 'project_acquisition', validate: true, time_range: WINDOW });
+  const v = await taskResult(engine2, started.task_id);
+  assert.equal(v.ok, true, JSON.stringify(v.error));
+  assert.equal(v.valid, false);
+  const failedMetrics = v.ran.metrics.filter((x) => !x.ok).map((x) => x.metric);
+  assert.deepEqual(failedMetrics, ['project_broken_amount']);
+  // the others still ran, each with the warehouse's own number
+  const [{ cost }] = (await wh.query('select sum(cost) as cost from fct_player_acquisition')).rows;
+  assert.ok(Math.abs(num(v.ran.metrics.find((x) => x.metric === 'project_cost').value) - num(cost)) < 1e-9);
+  const sm = v.ran.semantic_models.find((x) => x.semantic_model === 'project_acquisition');
+  assert.equal(sm.ok, false);
+  assert.deepEqual(sm.failed.map((f) => f.dimension || f.entity), ['broken_dim']);
+});
+
+test('a context a task built is previewed and validated the same way: its definitions, what it is cut by, and its values', opts, async (t) => {
+  if (skip(t)) return;
+  const out = await engine.build_semantic_model({
+    name: 'pvw', use_base_models: ['users'],
+    semantic_models: [{ from: 'events', event_scope: { event_name: ['tutorial'] }, measures: [{ name: 'tutorials', agg: 'count', field: '*' }, { name: 'players', agg: 'count_distinct', field: 'player_id_of_internal' }] }],
+    metrics: [{ name: 'tutorials', type: 'simple', measure: { name: 'tutorials' } }, { name: 'players', type: 'simple', measure: { name: 'players' } }, { name: 'per_player', type: 'ratio', numerator: { name: 'tutorials' }, denominator: { name: 'players' } }],
+  });
+  assert.equal(out.parse.ok, true, JSON.stringify(out.parse));
+  const p = await preview({ context_id: out.context_id });
+  assert.equal(p.layer, 'task');
+  assert.equal(p.status.valid, true, JSON.stringify(p.status.issues));
+  assert.deepEqual(p.metrics.map((m) => m.name).sort(), ['pvw_per_player', 'pvw_players', 'pvw_tutorials']);
+  assert.deepEqual(p.metrics.find((m) => m.name === 'pvw_per_player').definition, { numerator: { metric: 'pvw_tutorials' }, denominator: { metric: 'pvw_players' } });
+  // each cut the preview offers, queried, gives back the whole count
+  const [{ n }] = (await wh.query("select count(*) as n from fct_analytics_events where event_name = 'tutorial'")).rows;
+  for (const cut of p.group_by.slice(0, 3)) {
+    const rows = rowsOf(await engine.query_semantic_model({ context_id: out.context_id, metrics: ['pvw_tutorials'], group_by: [cut], time_range: WINDOW }));
+    assert.equal(rows.reduce((a, r) => a + num(r.pvw_tutorials ?? 0), 0), num(n), JSON.stringify(cut));
+  }
+  const started = await preview({ context_id: out.context_id, validate: true, time_range: WINDOW });
+  const v = await taskResult(engine.raw || engine, started.task_id);
+  assert.equal(v.valid, true, JSON.stringify(v));
+  const [{ players }] = (await wh.query("select count(distinct player_id_of_internal) as players from fct_analytics_events where event_name = 'tutorial'")).rows;
+  const value = (name) => num(v.ran.metrics.find((x) => x.metric === name).value);
+  assert.equal(value('pvw_tutorials'), num(n));
+  assert.equal(value('pvw_players'), num(players));
+  assert.ok(Math.abs(value('pvw_per_player') - num(n) / num(players)) < 1e-9);
+});
+
+test('a preview refuses what the context does not have, naming what it does', opts, async (t) => {
+  if (skip(t)) return;
+  await assert.rejects(Promise.resolve().then(() => preview({ context_id: PROJECT_CONTEXT, metric: 'project_cots' })), /not a metric of context 'project'.*project_cost/);
+  await assert.rejects(Promise.resolve().then(() => preview({ context_id: PROJECT_CONTEXT, semantic_model: 'nope' })), /not a semantic model of context 'project'.*project_acquisition/);
+  await assert.rejects(Promise.resolve().then(() => preview({ context_id: PROJECT_CONTEXT, time_range: WINDOW })), /pass validate: true/);
 });

@@ -146,6 +146,14 @@
   dbt process; its work still runs down its failure path, so a build clears its in-flight marker); it
   refuses a task of the other side — before any wait — and it never draws. The side is
   the tool that started the task, persisted with it (the jobs table's `tool`), never guessed.
+  `preview_semantic_model` is the semantic side's INSPECTOR, for the project's own layer (no build
+  to report it) and a task's context alike: it reads the context's PARSED manifest
+  (`src/semantic-manifest.js`, one reader for both YAML specs) and answers in the call — semantic
+  models, each metric's definition and the cuts it takes in the form that context's query names them
+  (a metric of several semantic models only what every input reaches), the declaration's own
+  mistakes; with `validate` it starts a semantic task instead (read with query_semantic_model), in
+  which MetricFlow compiles each metric and, over a time_range, the warehouse runs each metric and
+  each semantic model's dimensions, one by one where all at once fails, to name what fails.
   `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
   query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
@@ -312,7 +320,8 @@
   (`withoutSemanticLayer`, src/context-manager.js) — the latest spec allows one semantic model per
   dbt model, and a name of one layer could shadow the other's. The overview
   (`semantic_index().project_semantic_layer`) lists each metric with its meta (the project's notes on
-  reading it) and the semantic models whose dimensions cut it, each model's dimensions once.
+  reading it) and the semantic models whose dimensions cut it, each model's dimensions once;
+  preview_semantic_model({ context_id: "project", metric }) gives one metric's definition and every cut.
 - dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
   DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v2`
   (used unless DBT_ENV names another), `dbt-v1`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own

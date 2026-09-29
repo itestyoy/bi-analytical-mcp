@@ -11,6 +11,7 @@ import { gatePythonRuntime } from './catalog.js';
 import { ContextManager, mergeCompiled, RESULT_MODEL_PREFIX } from './context-manager.js';
 import { renderWhereClauses, renderPredicate } from './predicate.js';
 import { PROJECT_CONTEXT } from './project-semantics.js';
+import { manifestLayer } from './semantic-manifest.js';
 import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
@@ -3346,13 +3347,199 @@ export class Engine {
     return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), project ? { batch: { before: null } } : {}), { context_id: ctx.id });
   }
 
+  /**
+   * A context's SEMANTIC LAYER AS dbt PARSED IT — the project's own (PROJECT_CONTEXT, which has no build
+   * step to report it) or one a task built — read from its semantic manifest (src/semantic-manifest.js):
+   * each semantic model with its entities and dimensions, each metric with its definition (in one shape
+   * for both YAML specs) and what it can be cut by, in the form a query of that context names it, and
+   * what the declaration itself gets wrong. Answered in the call: nothing runs. With `validate` it
+   * STARTS a task instead (the call returns { task_id }): MetricFlow compiles every metric shown, and
+   * with a time_range each metric, and each semantic model's dimensions, is run in the warehouse over it.
+   */
+  async preview_semantic_model(input) {
+    this._validate('preview_semantic_model', input);
+    if (input.context_id === PROJECT_CONTEXT && !this.project) {
+      throw new ToolError(this.projectError ? `the dbt project's own semantic layer could not be read: ${this.projectError}` : 'the dbt project declares no semantic models or metrics of its own — there is no context "project"', { stage: 'validate', field: 'context_id' });
+    }
+    const ctx = this._ctx(input.context_id);
+    if (ctx.state.engine === 'pipeline') throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), which has no semantic layer — context({ action: 'describe', context_id: '${ctx.id}' }) lists its columns`, { stage: 'validate', field: 'context_id' });
+    if (input.time_range && !input.validate) throw new ToolError('time_range is the window validate runs the metrics over — pass validate: true with it', { stage: 'validate', field: 'time_range' });
+    if (input.time_range?.timezone && !isValidTimezone(input.time_range.timezone)) throw new ToolError(`unknown timezone '${input.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
+    const project = ctx.state.engine === 'project';
+    // the names asked for are checked in the call, against what the context declares
+    const declared = this._previewLayer(ctx);
+    const scope = this._previewScope(ctx, declared.layer, input);
+    if (input.validate) {
+      if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
+      const work = (id) => this._previewValidateWork(ctx, input, id);
+      return this._taskStarted(this._startTask(ctx, 'preview_semantic_model', work, project ? { batch: { before: null } } : {}), { context_id: ctx.id });
+    }
+    return this._previewAnswer(ctx, declared, scope, input);
+  }
+
+  /** The layer a context's last parse left (its manifest), and what its state declares on top. */
+  _previewLayer(ctx) {
+    const project = ctx.state.engine === 'project';
+    if (project && this.project) return { layer: this.project.layer, parsed: true };
+    const manifest = this.runner?.semanticManifest ? this.runner.semanticManifest(this.ctxs.dir(ctx.id)) : null;
+    return { layer: manifestLayer(manifest), parsed: !!manifest };
+  }
+
+  /** The metrics and semantic models a preview is about: all, one semantic model's, or one metric
+   *  with the metrics it is made of. Names that are not there are refused, naming what is. */
+  _previewScope(ctx, layer, input) {
+    const metricNames = new Set([...layer.metrics.map((m) => m.name), ...(ctx.state.engine === 'project' ? [] : (ctx.state.metrics || []).map((m) => m.name))]);
+    const smNames = new Set([...layer.semantic_models.map((m) => m.name), ...(ctx.state.engine === 'project' ? [] : Object.keys(ctx.state.additions || {}))]);
+    const list = (set) => [...set].sort().join(', ') || '(none)';
+    if (input.metric && !metricNames.has(input.metric)) throw new ToolError(`'${input.metric}' is not a metric of context '${ctx.id}'. It has: ${list(metricNames)}`, { stage: 'validate', field: 'metric' });
+    if (input.semantic_model && !smNames.has(input.semantic_model)) throw new ToolError(`'${input.semantic_model}' is not a semantic model of context '${ctx.id}'. It has: ${list(smNames)}`, { stage: 'validate', field: 'semantic_model' });
+    const byName = new Map(layer.metrics.map((m) => [m.name, m]));
+    let metrics = layer.metrics;
+    if (input.metric) {
+      // the metric and what it is made of, so the whole computation is on the page
+      const want = new Set();
+      const walk = (n) => {
+        if (want.has(n)) return;
+        want.add(n);
+        const d = layer.definition(n) || {};
+        for (const i of [d.numerator, d.denominator, ...(d.inputs || []), d.input, d.base, d.conversion]) if (i?.metric) walk(i.metric);
+      };
+      walk(input.metric);
+      metrics = layer.metrics.filter((m) => want.has(m.name));
+    } else if (input.semantic_model) metrics = layer.metrics.filter((m) => m.semantic_models.includes(input.semantic_model));
+    const reads = new Set(metrics.flatMap((m) => m.semantic_models));
+    const semanticModels = layer.semantic_models.filter((sm) => (input.semantic_model ? sm.name === input.semantic_model : input.metric ? reads.has(sm.name) : true));
+    return { metrics: metrics.filter((m) => byName.has(m.name)), semanticModels, metricNames };
+  }
+
+  /** The preview answered in the call: definitions, cuts, and the checks that need nothing run. */
+  _previewAnswer(ctx, { layer, parsed }, scope, input) {
+    const project = ctx.state.engine === 'project';
+    const issues = parsed ? layer.issues() : [];
+    const inScope = (i) => (i.metric ? scope.metrics.some((m) => m.name === i.metric) : scope.semanticModels.some((sm) => sm.name === i.semantic_model));
+    const shown = issues.filter(inScope);
+    // a task's metric that its last parse did not take: the build failed, or is still running
+    const running = this._ctxQueue?.get(ctx.id);
+    const inManifest = new Set(layer.metrics.map((m) => m.name));
+    if (!project) {
+      for (const m of ctx.state.metrics || []) {
+        if (!inManifest.has(m.name) && (!input.metric || input.metric === m.name)) shown.push({ severity: 'error', metric: m.name, message: `declared in this context but not in its parsed manifest — ${running ? 'its build is still running: preview again once it is done' : 'its last parse did not take it: read the build task (query_semantic_model({ task_id })) for the parse error'}` });
+      }
+    }
+    if (!parsed) shown.unshift({ severity: 'error', message: running ? 'the context has not been parsed yet — its build is running' : 'the context has no parsed semantic manifest — its build did not parse' });
+    const groupable = project ? null : this._groupableRefs(ctx);
+    const cutRef = (d) => ({ semantic_model: d.semantic_model, dimension: d.dimension, ...(d.type === 'time' ? { grain: d.grain || 'day' } : {}) });
+    const metrics = scope.metrics.map((m) => {
+      const def = layer.definition(m.name) || {};
+      const time = def.agg_time_dimension ? { metric_time: { dimension: def.agg_time_dimension, grain: layer.semantic_models.find((sm) => sm.name === def.semantic_model)?.dimensions.find((d) => d.name === def.agg_time_dimension)?.grain || 'day' } } : {};
+      let cut;
+      if (project) {
+        const reach = layer.reach(m.name);
+        const via = (d) => (reach.filter((x) => x.semantic_model === d.semantic_model && x.dimension === d.dimension).length > 1 ? { via: d.entity } : {});
+        cut = input.metric
+          // one metric: every cut, spelled as the query takes it
+          ? { dimensions: reach.map((d) => ({ ...cutRef(d), ...via(d) })), entities: layer.entities(m.name).map((entity) => ({ entity })), ...time }
+          : { dimensions_from: [...new Set(reach.map((d) => d.semantic_model))], entities: layer.entities(m.name), ...time };
+      } else cut = time;
+      return { ...m, definition: def, cut_by: cut };
+    });
+    const first = scope.metrics[0];
+    const firstCut = first && (project ? (layer.reach(first.name)[0] ? cutRef(layer.reach(first.name)[0]) : layer.entities(first.name)[0] ? { entity: layer.entities(first.name)[0] } : null) : groupable?.[0] || null);
+    const errors = shown.filter((i) => i.severity === 'error').length;
+    return {
+      context_id: ctx.id,
+      layer: project ? 'project' : 'task',
+      status: {
+        parsed,
+        valid: parsed && !errors,
+        ...(running ? { building: true } : {}),
+        issues: shown,
+        note: 'valid says what the declaration and its parse show; validate: true (with a time_range) compiles every metric in MetricFlow and runs it, and each semantic model\'s dimensions, in the warehouse.',
+      },
+      semantic_models: scope.semanticModels.map(({ measures, ...sm }) => ({ ...sm, ...(measures?.length ? { measures } : {}) })),
+      metrics,
+      // what a query of THIS context names a cut by
+      ...(project ? {} : { group_by: groupable }),
+      ...(first ? { query_with: `query_semantic_model(${JSON.stringify({ context_id: ctx.id, metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }], time_range: { start: '<date>', end: '<date>' } })})` } : {}),
+      validate_with: `preview_semantic_model(${JSON.stringify({ context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } })})`,
+    };
+  }
+
+  /**
+   * The validation a preview's `validate` starts, as a task: MetricFlow compiles every metric in scope
+   * (all at once; one by one to name the ones that fail), and with a time_range the warehouse runs
+   * them over it (a value each) and runs each semantic model's dimensions and entities — grouped by
+   * all of them through one of its own metrics, one by one again to name a column that fails. What
+   * the context declares is read when the task runs, after any build queued before it.
+   */
+  async _previewValidateWork(ctx, input, id) {
+    const dir = this.ctxs.dir(ctx.id);
+    const { layer, parsed } = this._previewLayer(ctx);
+    if (!parsed) return { ok: false, error: { stage: 'parse', message: 'the context has no parsed semantic manifest — its build did not parse' } };
+    const scope = this._previewScope(ctx, layer, input);
+    const names = scope.metrics.map((m) => m.name);
+    const bounds = input.time_range ? resolveTimeRange(input.time_range) || {} : null;
+    const window = bounds ? { startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined } : {};
+    const message = (r) => formatDbtError(r.stdout, r.stderr) || r.error || 'failed';
+    const signalled = () => currentSignal()?.aborted;
+    /** Run `opts` for a list at once; when that fails, one by one, to name each that fails. */
+    const eachOrAll = async (items, opts) => {
+      if (!items.length) return [];
+      const all = await this.runner.query(dir, opts(items));
+      if (all.ok) return items.map((it) => ({ item: it, ok: true, raw: all }));
+      if (items.length === 1) return [{ item: items[0], ok: false, error: message(all) }];
+      const out = [];
+      for (const it of items) {
+        if (signalled()) break;
+        const r = await this.runner.query(dir, opts([it]));
+        out.push(r.ok ? { item: it, ok: true, raw: r } : { item: it, ok: false, error: message(r) });
+      }
+      return out;
+    };
+    const compiled = await eachOrAll(names, (ms) => ({ metrics: ms, explain: true }));
+    const result = {
+      ok: true, context_id: ctx.id, layer: ctx.state.engine === 'project' ? 'project' : 'task',
+      compiled: compiled.map((c) => ({ metric: c.item, ok: c.ok, ...(c.ok ? {} : { error: c.error }) })),
+    };
+    if (bounds) {
+      await this._ensureTimeSpineBuilt(ctx.id);
+      const good = compiled.filter((c) => c.ok).map((c) => c.item);
+      const ran = await eachOrAll(good, (ms) => ({ metrics: ms, ...window, limit: 1 }));
+      const valueOf = (c) => (c.raw?.rows?.[0] ? c.raw.rows[0][c.item] ?? null : null);
+      const dims = [];
+      for (const sm of scope.semanticModels) {
+        if (signalled()) break;
+        // one of its own metrics that ran carries the cut (so a failure is the cut's); a model no
+        // such metric reads directly is not run
+        const via = ran.filter((c) => c.ok).map((c) => c.item).find((n) => layer.definition(n)?.semantic_model === sm.name);
+        const own = sm.entity ? sm.dimensions.map((d) => ({ name: d.name, token: d.type === 'time' ? `${sm.entity}__${d.name}__${d.grain || 'day'}` : `${sm.entity}__${d.name}` })) : [];
+        const keys = sm.entities.map((e) => ({ name: e.name, token: e.name, entity: true }));
+        const cuts = [...own, ...keys];
+        if (!via) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no metric of it in view ran over the window — nothing to cut its rows with' }); continue; }
+        if (!cuts.length) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no dimension or entity to cut by' }); continue; }
+        const r = await eachOrAll(cuts, (cs) => ({ metrics: [via], groupBy: cs.map((c) => c.token), ...window, limit: 1 }));
+        const failed = r.filter((x) => !x.ok).map((x) => ({ [x.item.entity ? 'entity' : 'dimension']: x.item.name, error: x.error }));
+        dims.push({ semantic_model: sm.name, checked: true, through: via, ok: !failed.length, dimensions: own.map((c) => c.name), entities: keys.map((c) => c.name), ...(failed.length ? { failed } : {}) });
+      }
+      result.window = input.time_range;
+      result.ran = {
+        metrics: ran.map((c) => ({ metric: c.item, ok: c.ok, ...(c.ok ? { value: valueOf(c) } : { error: c.error }) })),
+        semantic_models: dims,
+      };
+    }
+    const failures = [...result.compiled, ...(result.ran?.metrics || []), ...(result.ran?.semantic_models || [])].filter((x) => x.ok === false).length;
+    result.valid = !failures;
+    result.summary = `${result.compiled.filter((c) => c.ok).length}/${names.length} metric(s) compile${result.ran ? `; ${result.ran.metrics.filter((c) => c.ok).length}/${result.ran.metrics.length} run over the window; ${result.ran.semantic_models.filter((d) => d.ok).length}/${result.ran.semantic_models.filter((d) => d.checked).length} semantic model(s) whose dimensions all run` : ' (no time_range: nothing was run in the warehouse)'}`;
+    return result;
+  }
+
   /** What the dbt project's own semantic layer offers: each metric with what it can be grouped by, and
    *  each semantic model with its dimensions — the names a query of PROJECT_CONTEXT takes. */
   _projectOverview() {
     const layer = this.project.layer;
     return {
       context_id: PROJECT_CONTEXT,
-      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build): query_semantic_model({ context_id: '${PROJECT_CONTEXT}', metrics: [...], group_by: [{ semantic_model, dimension }, { entity }, { time: 'metric_time', grain }] }). A metric is cut by the dimensions of the semantic models it names under dimensions_from, and by its entities — a key such as an app or a country the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it.`,
+      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build): query_semantic_model({ context_id: '${PROJECT_CONTEXT}', metrics: [...], group_by: [{ semantic_model, dimension }, { entity }, { time: 'metric_time', grain }] }). A metric is cut by the dimensions of the semantic models it names under dimensions_from, and by its entities — a key such as an app or a country the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ context_id: '${PROJECT_CONTEXT}', metric }) shows a metric's definition and every cut it takes; with validate: true it runs them.`,
       metrics: layer.metrics.map((m) => {
         const reach = layer.reach(m.name);
         // a semantic model reached through several entities is named with each (the via a query gives)
@@ -4236,7 +4423,7 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
 // task (a build, a query over a built model) with query_pipeline_model({ task_id }). An experiment
 // is no task at all: its statistics come back with its call.
 const TASK_SIDE = {
-  build_semantic_model: 'semantic', update_semantic_model: 'semantic', query_semantic_model: 'semantic',
+  build_semantic_model: 'semantic', update_semantic_model: 'semantic', query_semantic_model: 'semantic', preview_semantic_model: 'semantic',
   build_pipeline_model: 'pipeline', register_native_model: 'pipeline', query_pipeline_model: 'pipeline',
 };
 const SIDE_READER = { semantic: 'query_semantic_model', pipeline: 'query_pipeline_model' };

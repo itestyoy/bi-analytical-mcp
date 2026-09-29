@@ -25,6 +25,7 @@ empty). An answer: {"steps": [{"ok": true, "shape": {...}} | {"ok": false, "prob
 
 import json
 import os
+import re
 import sys
 
 os.environ.setdefault("RETENTIONEERING_NO_TRACK", "1")
@@ -51,6 +52,8 @@ CONFIG_ERRORS = {
 # The library's own checks that raise a plain Python error (a segment column that is not there is a
 # ValueError): counted when the library itself raised it — its frame, not sklearn's, pandas' or ours.
 PLAIN_ERRORS = {"ValueError", "KeyError", "TypeError"}
+# A column name a table in either warehouse takes as it is
+IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 # The fixed column names of an eventstream (src/retentioneering/eventstream.js ES_COLUMNS)
 COLUMNS = {"user": "user_id", "event": "event", "time": "event_time"}
 # How many events one stand-in path carries at most: every event is still on some path, since there are
@@ -189,7 +192,18 @@ def check_steps(shape, steps, constants):
             out.append({"ok": None, "note": "not checked in full: the stand-ins could not carry it" + (f" ({reasons[0]})" if reasons else "")})
             streams = []
             continue
-        after = shape_after(shape, alive, constants)
+        after, err = _attempt(lambda: shape_after(shape, alive, constants))
+        if after is None:
+            out.append({"ok": None, "note": "not checked in full: what the step left could not be read" + (f" ({err})" if err else "")})
+            streams = []
+            continue
+        # a column a step makes is stored in the warehouse's table when the steps are materialized: its
+        # name is an identifier there (what BigQuery and DuckDB both take unquoted)
+        made = [c for c in after["paths"] + list(after["segments"]) + after["columns"] if c not in shape["paths"] + list(shape["segments"]) + (shape.get("columns") or [])]
+        bad = [c for c in made if not IDENT.match(c)]
+        if bad:
+            out.append({"ok": False, "problem": f"'{bad[0]}' cannot be a column of the eventstream: a column name is letters, digits and underscores, starting with a letter or an underscore — the warehouse stores the eventstream after its steps as a table"})
+            break
         out.append({"ok": True, "shape": after})
         shape, streams = after, alive
     return out
@@ -228,11 +242,13 @@ def serve():
     for line in sys.stdin:
         if not line.strip():
             continue
+        request = None
         try:
             request = json.loads(line)
             reply = {"id": request.get("id"), **answer(request)}
-        except Exception as e:  # noqa: BLE001 — a request the check cannot read is answered, not fatal
-            reply = {"id": None, "error": f"{type(e).__name__}: {e}"}
+        except Exception as e:  # noqa: BLE001 — a request the check cannot carry is answered, not fatal
+            # answered under its own id, so the caller gets it now (as no check) instead of at its timeout
+            reply = {"id": request.get("id") if isinstance(request, dict) else None, "error": f"{type(e).__name__}: {e}"}
         sys.stdout.write(json.dumps(reply) + "\n")
         sys.stdout.flush()
 

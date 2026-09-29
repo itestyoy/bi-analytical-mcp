@@ -5,6 +5,10 @@
 
 export const RETENTIONEERING_VIEW_URI = 'ui://betti/retentioneering-view.html';
 
+/** Two names in code-point order — the same on every machine, whatever its locale (a locale-aware
+ *  comparison orders mixed case and punctuation differently from one deployment to the next). */
+export const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
 /** The analyses the card draws as a chart of their own. */
 export const CHARTED_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel', 'cluster_analysis', 'segment_overview'];
 /** WHICH ANALYSES HAVE A CARD — the one list: the charted ones and a distribution (its histogram). */
@@ -150,7 +154,7 @@ function eventOrder(cells, steps) {
   }
   return [...peak.entries()]
     // path_start first and path_end last, the events between them by where they peak
-    .sort(([a, x], [b, y]) => (b === 'path_start') - (a === 'path_start') || (a === 'path_end') - (b === 'path_end') || x.step - y.step || y.share - x.share || a.localeCompare(b))
+    .sort(([a, x], [b, y]) => (b === 'path_start') - (a === 'path_start') || (a === 'path_end') - (b === 'path_end') || x.step - y.step || y.share - x.share || byText(a, b))
     .map(([e]) => e);
 }
 
@@ -167,7 +171,7 @@ function stepSankey(head, r) {
   const blocks = (r.blocks || []).filter((b) => b.cells?.length).map((b) => ({
     steps: b.steps,
     // within a step the events by share, the ended paths at the bottom — drop-off in one place
-    columns: b.steps.map((s) => b.cells.filter((c) => c.step === s).sort((x, y) => (x.event === 'path_end') - (y.event === 'path_end') || y.share - x.share || x.event.localeCompare(y.event)).map((c) => ({ event: c.event, label: STEP_START_END[c.event] || c.event, share: c.share }))),
+    columns: b.steps.map((s) => b.cells.filter((c) => c.step === s).sort((x, y) => (x.event === 'path_end') - (y.event === 'path_end') || y.share - x.share || byText(x.event, y.event)).map((c) => ({ event: c.event, label: STEP_START_END[c.event] || c.event, share: c.share }))),
     links: (b.links || []).filter((l) => l.share > 0),
   }));
   return blocks.length ? { ...head, blocks } : none('empty');

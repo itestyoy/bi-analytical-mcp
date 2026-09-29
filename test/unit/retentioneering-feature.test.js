@@ -243,3 +243,28 @@ test('a card is decided by kind: an analysis of a card kind with nothing in it i
   assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'transition_graph', nodes: [], edges: [] } }), { kind: 'none', reason: 'empty' });
   assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'describe', values: {} } }), { kind: 'none', reason: 'no_card' });
 });
+
+test('a request the library\'s check cannot carry is answered at once, under its own id — not at the timeout', async (t) => {
+  const env = dbtEnv('retentioneering');
+  if (!env) { t.skip('dbt environment retentioneering not installed'); return; }
+  const { LibraryChecker } = await import('../../src/retentioneering/checker.js');
+  const checker = new LibraryChecker(join(env.dir, 'bin', 'python'));
+  try {
+    const started = Date.now();
+    // a shape with no path columns: the stand-in cannot be built
+    assert.equal(await checker.check({ shape: { events: ['a'], segments: {} }, steps: [{ type: 'collapse_events', loops: true }] }), null);
+    assert.ok(Date.now() - started < 30000, 'answered, not waited out');
+    // and the same process answers the next request
+    const ok = await checker.check({ shape: { events: ['a', 'b'], paths: ['user_id'], segments: {}, columns: [] }, steps: [{ type: 'collapse_events', loops: true }] });
+    assert.equal(ok.steps[0].ok, true);
+  } finally {
+    checker.close();
+  }
+});
+
+test('ties are ordered by code point, the same on every machine — not by the locale', async () => {
+  const { summarize } = await import('../../src/retentioneering/results.js');
+  const edge = (source) => ({ source, target: 'x', count: 1, unique_paths: 1, proba_out: 1, proba_in: 1, time_median: 0 });
+  const s = summarize({ kind: 'transition_graph', nodes: [], edges: [edge('a'), edge('B'), edge('_c')] });
+  assert.deepEqual(s.top_transitions.map((e) => e.from), ['B', '_c', 'a']);
+});

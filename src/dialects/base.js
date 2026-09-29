@@ -38,6 +38,11 @@ export class Dialect {
     return name;
   }
 
+  /** A validated identifier, quoted — a column a caller named may be a keyword (group, order). */
+  quoteIdent(name) {
+    return `"${this.ident(name)}"`;
+  }
+
   /**
    * SQL for one part of a join key: the column, qualified for the side it belongs to, TRUNCATED to
    * the part's declared grain when it has one — so the two sides are compared at the unit the

@@ -26,7 +26,7 @@
  * server runs too; this file only draws it, with the result view's shadcn pieces and theme.
  */
 import { App, applyDocumentTheme, applyHostFonts, applyHostStyleVariables } from '@modelcontextprotocol/ext-apps';
-import { retentioneeringViewModel } from '../../../retentioneering/view-model.js';
+import { retentioneeringViewModel, byText } from '../../../retentioneering/view-model.js';
 import { el, badge, card, stat, formatNumber, formatShare } from '../../shared/ui.js';
 import { icon } from '../../result-view/src/icons.js';
 import '../../result-view/src/global.css';
@@ -380,7 +380,7 @@ function renderSankey(model) {
     const totals = new Map();
     const BOUNDARY = new Set(['path_start', 'path_end']);
     for (const col of b.columns) for (const n of col) if (!BOUNDARY.has(n.event)) totals.set(n.event, (totals.get(n.event) || 0) + n.share);
-    const ranked = [...totals.entries()].sort((a, z) => z[1] - a[1] || a[0].localeCompare(z[0])).map(([e]) => e);
+    const ranked = [...totals.entries()].sort((a, z) => z[1] - a[1] || byText(a[0], z[0])).map(([e]) => e);
     // where a path begins and where it has ended are boundaries, not behaviour: one neutral for both
     const color = (e) => (BOUNDARY.has(e) ? 'var(--rt-ended)' : ranked.indexOf(e) < 6 ? series(ranked.indexOf(e)) : 'var(--muted-foreground)');
     const labelOf = new Map(b.columns.flat().map((n) => [n.event, n.label || n.event]));

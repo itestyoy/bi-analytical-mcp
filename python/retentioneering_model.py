@@ -11,7 +11,8 @@ results, written as one long table, one row per record:
     kind      the analysis (transition_graph, step_matrix, …, describe)
     part      what the record is: for the charted analyses node, edge, layout, cell, block, link, step,
               overview, metric, silhouette, params; for any other result (and any diff) table, row, value
-    seq       its position within (analysis, part) — the order is deterministic
+    seq       its position within (analysis, part) — within its table, for a table's rows; the order
+              is deterministic
     payload   the record, as JSON
 
 Everything is deterministic: the rows are ordered before the library sees them, the clustering and
@@ -119,7 +120,8 @@ class _Out:
         self.seq = {}
 
     def add(self, analysis, kind, part, record):
-        key = (analysis, part)
+        # a table's rows are numbered within their table, so a reader can take the first rows of each
+        key = (analysis, part, record["table"]) if part == "row" else (analysis, part)
         n = self.seq.get(key, 0)
         self.seq[key] = n + 1
         self.rows.append([analysis, kind, part, n, json.dumps({k: _plain(v) for k, v in record.items()}, sort_keys=True, default=str)])
@@ -200,7 +202,7 @@ def _table(out, a, name, frame, role=None, block=None):
     columns = [_label(c) for c in frame.columns]
     kinds = [_column_kind(frame.iloc[:, j]) for j in range(frame.shape[1])]
     meta = {**({"role": role} if role else {}), **({"block": block} if block is not None else {})}
-    out.add(a["id"], a["kind"], "table", {"table": name, "columns": json.dumps(columns), "kinds": json.dumps(kinds), **meta})
+    out.add(a["id"], a["kind"], "table", {"table": name, "columns": json.dumps(columns), "kinds": json.dumps(kinds), "rows": int(frame.shape[0]), **meta})
     for row in frame.itertuples(index=False, name=None):
         out.add(a["id"], a["kind"], "row", {"table": name, "values": json.dumps([_deep(v) for v in row], default=str)})
 

@@ -5,6 +5,7 @@
 // analysis that has one, draws it); the default read is a summary that fits a conversation (the biggest transitions,
 // the leading events per step, each group's profile, the first rows of each table).
 
+import { byText } from './view-model.js';
 const TOP_EDGES = 25;
 const TOP_PER_STEP = 3;
 const TOP_PROFILE = 6;
@@ -55,10 +56,16 @@ function generic(parts) {
   }
   // each column's and value's kind (a duration, a moment, a number…) as the analysis step read it from
   // the data's own types, so the card formats it without guessing from a name
-  const tables = (parts.table || []).map((t) => ({
-    name: t.table, columns: JSON.parse(t.columns), ...(t.kinds ? { kinds: JSON.parse(t.kinds) } : {}),
-    ...(t.role ? { role: t.role } : {}), ...(t.block != null ? { block: t.block } : {}), rows: rows.get(t.table) || [],
-  }));
+  // how many rows a table has (the analysis step counts them), which a read that kept its first rows says
+  const tables = (parts.table || []).map((t) => {
+    const held = rows.get(t.table) || [];
+    const total = t.rows != null ? Number(t.rows) : held.length;
+    return {
+      name: t.table, columns: JSON.parse(t.columns), ...(t.kinds ? { kinds: JSON.parse(t.kinds) } : {}),
+      ...(t.role ? { role: t.role } : {}), ...(t.block != null ? { block: t.block } : {}), rows: held,
+      total_rows: total, ...(held.length < total ? { truncated: true } : {}),
+    };
+  });
   const values = Object.fromEntries((parts.value || []).map((v) => [v.name, JSON.parse(v.value)]));
   const kinds = Object.fromEntries((parts.value || []).filter((v) => v.kinds).map((v) => [v.name, JSON.parse(v.kinds)]));
   return { ...(tables.length ? { tables } : {}), ...(Object.keys(values).length ? { values } : {}), ...(Object.keys(kinds).length ? { value_kinds: kinds } : {}) };
@@ -110,9 +117,9 @@ const round = (x, digits = 4) => (typeof x === 'number' ? Number(x.toFixed(digit
 /** What the model reads of one analysis: the numbers that answer, not every cell. */
 export function summarize(result) {
   const { kind } = result;
-  const rest = summarizeGeneric(result);
+  const generic = summarizeGeneric(result);
   if (kind === 'transition_graph' && result.edges) {
-    const edges = [...result.edges].sort((a, b) => b.count - a.count || a.source.localeCompare(b.source) || a.target.localeCompare(b.target));
+    const edges = [...result.edges].sort((a, b) => b.count - a.count || byText(a.source, b.source) || byText(a.target, b.target));
     return {
       kind,
       events: result.nodes.map((n) => ({ event: n.event, count: n.count })),
@@ -127,17 +134,17 @@ export function summarize(result) {
       blocks: result.blocks.map((b) => ({
         steps: b.steps.map((step) => ({
           step,
-          top: b.cells.filter((c) => c.step === step).sort((x, y) => y.share - x.share || x.event.localeCompare(y.event)).slice(0, TOP_PER_STEP).map((c) => ({ event: c.event, share: round(c.share) })),
+          top: b.cells.filter((c) => c.step === step).sort((x, y) => y.share - x.share || byText(x.event, y.event)).slice(0, TOP_PER_STEP).map((c) => ({ event: c.event, share: round(c.share) })),
         })),
       })),
     };
   }
-  if (kind === 'funnel' && result.steps) return { kind, steps: result.steps.map((s) => ({ step: s.step, unique_paths: s.unique_paths, conversion_rate: round(s.conversion_rate), step_conversion_rate: round(s.step_conversion_rate) })), ...rest };
+  if (kind === 'funnel' && result.steps) return { kind, steps: result.steps.map((s) => ({ step: s.step, unique_paths: s.unique_paths, conversion_rate: round(s.conversion_rate), step_conversion_rate: round(s.step_conversion_rate) })), ...generic };
   if ((kind === 'cluster_analysis' || kind === 'segment_overview') && result.levels) {
     const levelKey = kind === 'cluster_analysis' ? 'clusters' : 'levels';
     const size = result.metrics.find((m) => m.metric === 'segment_size');
     const share = result.metrics.find((m) => m.metric === 'segment_share');
-    const rest = result.metrics.filter((m) => m !== size && m !== share);
+    const profiled = result.metrics.filter((m) => m !== size && m !== share);
     return {
       kind,
       [levelKey]: result.levels.map((l, i) => ({
@@ -145,7 +152,7 @@ export function summarize(result) {
         ...(size ? { size: size.values[i] } : {}),
         ...(share ? { share: round(share.values[i]) } : {}),
         // the metrics this group stands out on most, against the average of the others
-        profile: rest
+        profile: profiled
           .map((m) => {
             const others = m.values.filter((_, j) => j !== i && m.values[j] != null);
             const base = others.length ? others.reduce((a, b) => a + b, 0) / others.length : null;
@@ -156,16 +163,21 @@ export function summarize(result) {
       })),
       ...(result.best_params ? { best_params: result.best_params } : {}),
       ...(result.silhouette ? { silhouette: result.silhouette.map((s) => ({ ...s.params, score: round(s.score), best: s.best })) } : {}),
-      ...rest,
+      ...generic,
     };
   }
-  return { kind, ...rest };
+  return { kind, ...generic };
+}
+
+/** Whether a result holds only the first rows of one of its tables (the rest is in the stored table). */
+export function truncatedTables(result) {
+  return !!result?.tables?.some((t) => t.truncated);
 }
 
 /** Tables as their first rows (with how many there are), values as they are. */
 function summarizeGeneric(result) {
   const tables = result.tables?.map((t) => ({
-    name: t.name, columns: t.columns, rows: t.rows.slice(0, TOP_ROWS).map((r) => r.map((v) => round(v))), total_rows: t.rows.length,
+    name: t.name, columns: t.columns, rows: t.rows.slice(0, TOP_ROWS).map((r) => r.map((v) => round(v))), total_rows: t.total_rows ?? t.rows.length,
   }));
   const cut = tables?.some((t) => t.total_rows > TOP_ROWS);
   return {

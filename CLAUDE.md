@@ -183,12 +183,17 @@
   `preview`, the pipeline builder's own words), each CHECKED BY THE LIBRARY ITSELF as it is added
   (below) and answered at once with what it changed; `materialize` runs the steps not yet materialized
   in one dbt Python model and stores the eventstream after them (its columns' roles and each event's
-  order carried in the table), a checkpoint an edit at or before it retires; query = the COMPUTATION —
+  order carried in the table), a checkpoint an edit at or before it retires. Every start builds a table
+  of its own (a fork of an earlier one keeps reading its rows), one build action at a time runs on a
+  context, and a column a step makes must be an identifier the warehouse stores (quoted wherever SQL
+  names it); query = the COMPUTATION —
   every analysis of one call over the eventstream AS MATERIALIZED (a query takes no steps of its own:
-  a variant is a fork), in ONE dbt Python model (python/retentioneering_model.py, THIS server's code
+  a variant is a fork), read back with a table's first rows kept (the whole of it on detail: "full" or
+  for the card that draws it) and its card's scope from the table it read, in ONE dbt Python model (python/retentioneering_model.py, THIS server's code
   inlined; the caller's input is data, never code), on its own dbt environment (`retentioneering`); show = its own view (`ui://betti/retentioneering-view.html`, src/apps/
   retentioneering-view/, drawn with the result view's theme and shared pieces, src/apps/shared/). It is
-  deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds), and
+  deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds and a fixed
+  one for a draw the caller left unseeded, ties in code-point order — never the locale's), and
   every choice it offers comes from `config/retentioneering-facts.json`, generated from the library.
   IT IS A WRAPPER OVER THE WHOLE LIBRARY, WITH NO LIMITS OF ITS OWN: every analysis and every
   registered preprocessing op (the library's own `{ type, ...params }` op model, applied with

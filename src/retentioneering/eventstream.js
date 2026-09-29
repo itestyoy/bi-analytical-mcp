@@ -139,7 +139,10 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
       segments.push({ name, expr: col });
       continue;
     }
-    const join = { stage: 'join', with: seg.model, via: seg.via, attrs: [{ column: seg.attribute, as: name }] };
+    // joined under a name of the eventstream's own (the segment's may be a keyword: group, order), named
+    // as the segment in the final select
+    const col = `es_j${segments.length}`;
+    const join = { stage: 'join', with: seg.model, via: seg.via, attrs: [{ column: seg.attribute, as: col }] };
     // a slowly-changing model is joined point in time — at the event's own time (as a pipeline must state it)
     const m = catalog.getModel(seg.model);
     if (m?.scd) {
@@ -148,7 +151,7 @@ export function eventstreamStages(catalog, spec, { timeConditions = null } = {})
       if (from && to) join.between = { value: cols.time, from, to };
     }
     stages.push(join);
-    segments.push({ name, expr: name });
+    segments.push({ name, expr: col });
   }
   // a condition on a segment is applied once the segments are there
   const late = (spec.where || []).filter((c) => c.property === undefined && segNames.has(c.column));
@@ -192,8 +195,8 @@ export function renderEventstream(catalog, spec, { modelName, physicalCols = nul
     : '';
   // a segment's values as text: what the library compares a level with, the same spelling in the
   // summary, the library's own check and every analysis
-  const segSel = segments.map((sg) => `, ${d.castExpr(q(sg.expr), 'string')} AS ${sg.name}`).join('');
-  const segNames = segs.map((s) => `, ${s}`).join('');
+  const segSel = segments.map((sg) => `, ${d.castExpr(q(sg.expr), 'string')} AS ${d.quoteIdent(sg.name)}`).join('');
+  const segNames = segs.map((s) => `, ${d.quoteIdent(s)}`).join('');
   const ctes = [
     `es_base AS (\n${base.sql}\n)`,
     `es_events AS (SELECT ${d.castExpr(user, 'string')} AS ${ES_COLUMNS.user}, ${named} AS ${ES_COLUMNS.event}, ${time} AS ${ES_COLUMNS.time}${segSel} FROM es_base WHERE ${user} IS NOT NULL AND ${event} IS NOT NULL AND ${time} IS NOT NULL${sample}${eventSample})`,

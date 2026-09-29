@@ -377,8 +377,8 @@ CHARTED = {
 }
 
 
-def run(frame, spec):
-    """The analyses `spec` names, over the eventstream `frame` → the long result table."""
+def _stream(frame, spec):
+    """The library's Eventstream over `frame`, ordered and typed the way every analysis reads it."""
     from retentioneering import Eventstream
 
     cols = spec["columns"]
@@ -397,8 +397,14 @@ def run(frame, spec):
         "timestamp_col": cols["time"],
         "segment_cols": list(cols.get("segments") or []),
     })
+    return stream
+
+
+def run(frame, spec):
+    """The analyses `spec` names, over the eventstream `frame` → the long result table."""
     from retentioneering.ops import apply_ops
 
+    stream = _stream(frame, spec)
     base = apply_ops(stream, spec["preprocess"]) if spec.get("preprocess") else stream
     out = _Out()
     for a in spec["analyses"]:
@@ -415,3 +421,4 @@ def run(frame, spec):
         else:
             _emit(out, a, "result", getattr(s, a["method"])(**a["params"]))
     return pd.DataFrame(out.rows, columns=RESULT_COLUMNS)
+

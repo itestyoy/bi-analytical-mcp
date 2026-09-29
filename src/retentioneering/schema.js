@@ -17,6 +17,7 @@
 import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
+import { ToolError } from '../validate.js';
 import { CARD_KINDS } from './view-model.js';
 
 let factsCache;
@@ -290,15 +291,64 @@ function param(p) {
   return { ...p.schema, ...(p.default !== undefined ? { default: p.default } : {}), ...(p.doc ? { description: p.doc } : {}) };
 }
 
+/** add_segment's metric_bins as ONE list of bins, each with its own level name. The library takes
+ *  cut points and level names as two lists whose lengths must agree (N cut points → N + 1 bins, and
+ *  `quantiles: q` → q); two lists a schema cannot tie together are a mistake waiting to be written,
+ *  so the tool asks for the bins themselves and a count that disagrees cannot be written at all.
+ *  What the library allows in each (the metrics that give one value per path, the fewest equal
+ *  quantiles, the open interval of a cut quantile, the reserved level) comes from the sheet. */
+function metricBinsSchema() {
+  const b = retentioneeringFacts().metric_bins;
+  const level = { type: 'string', minLength: 1, not: { const: b.undefined_level }, description: `This bin's segment level (unique within the split; '${b.undefined_level}' is the level of paths the metric has no value for).` };
+  const lowest = { type: 'object', additionalProperties: false, required: ['level'], properties: { level } };
+  const bounded = (key, schema) => ({ type: 'object', additionalProperties: false, required: ['level', key], properties: { level, [key]: schema } });
+  return {
+    type: 'object', additionalProperties: false, required: ['metric', 'bins'],
+    description: `Split paths into segment levels by a per-path metric: one entry per bin, lowest first. The first bin has no lower bound; each next one starts at \`from\` (a value of the metric) or \`from_quantile\` (a share of paths, between 0 and 1) and runs up to the next one's start; bins with no bound at all are ${b.min_quantile_bins} or more equal-sized quantiles. Paths the metric has no value for get the level '${b.undefined_level}'.`,
+    properties: {
+      metric: { ...b.metric_schema, description: 'The per-path metric binned (one value per path).' },
+      bins: {
+        oneOf: [
+          { title: 'by value', type: 'array', minItems: 2, prefixItems: [lowest], items: bounded('from', { type: 'number', description: 'Where this bin starts (inclusive), in the metric\'s units.' }) },
+          { title: 'by quantile', type: 'array', minItems: 2, prefixItems: [lowest], items: bounded('from_quantile', { type: 'number', ...b.quantile_bounds, description: 'Where this bin starts, as the share of paths below it.' }) },
+          { title: 'equal quantiles', type: 'array', minItems: b.min_quantile_bins, items: lowest },
+        ],
+      },
+    },
+  };
+}
+
+/** metric_bins as the library takes it (its own keys): the bins' starts sorted, each level kept
+ *  with its bin. What a schema cannot say — two bins of one name, two starting at one point — is
+ *  refused here, in the call. */
+function metricBinsToLibrary({ metric, bins }, field) {
+  const levels = bins.map((x) => x.level);
+  const twice = levels.find((l, i) => levels.indexOf(l) !== i);
+  if (twice !== undefined) throw new ToolError(`two bins are named '${twice}' — each bin needs its own level`, { stage: 'validate', field });
+  const [lowest, ...rest] = bins;
+  const key = rest.length && 'from' in rest[0] ? 'from' : rest.length && 'from_quantile' in rest[0] ? 'from_quantile' : null;
+  if (!key) return { metric, quantiles: bins.length, segment_levels: levels };
+  const sorted = [...rest].sort((x, y) => x[key] - y[key]);
+  const same = sorted.find((x, i) => i && x[key] === sorted[i - 1][key]);
+  if (same) throw new ToolError(`two bins start at ${key} ${same[key]} — each bin starts where the one before it ends`, { stage: 'validate', field });
+  return { metric, [key === 'from' ? 'edges' : 'quantiles']: sorted.map((x) => x[key]), segment_levels: [lowest.level, ...sorted.map((x) => x.level)] };
+}
+
+/** Library parameters the tool asks for in another shape, each with its translation back — the one
+ *  table; the schema reads `schema`, the call's ops go through `toLibrary`. */
+export const RESHAPED = {
+  metric_bins: { schema: metricBinsSchema, toLibrary: metricBinsToLibrary },
+};
+
 /** The properties and required list of a library callable's parameters — path_col as `path`, the
- *  parameters a call cannot carry left out. */
+ *  parameters a call cannot carry left out, the reshaped ones in their own shape. */
 function params(list) {
   const properties = {};
   const required = [];
   for (const p of list) {
     if (NOT_OFFERED.params[p.name]) continue;
     if (p.name === PATH_PARAM) { properties.path = pathField; continue; }
-    properties[p.name] = param(p);
+    properties[p.name] = RESHAPED[p.name] ? RESHAPED[p.name].schema() : param(p);
     if (p.required) required.push(p.name);
   }
   return { properties, required };

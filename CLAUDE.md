@@ -188,7 +188,10 @@
   registered preprocessing op (the library's own `{ type, ...params }` op model, applied with
   `apply_ops`), each with its own parameters under the library's names, typed as far as the library
   says — each path metric with exactly its arguments, the condition grammar, where `agg` applies (the
-  sheet PROBES the library for what its prose does not state). No cap on analyses, steps, rows or
+  sheet PROBES the library for what its prose does not state). A parameter the library takes as PARALLEL LISTS whose lengths must
+  agree is asked for as ONE list of items and translated back (`RESHAPED`, src/retentioneering/schema.js —
+  today `add_segment.metric_bins` as `bins`), so a count that disagrees cannot be written; a condition's
+  constant is typed by what the metric's value is (probed: kind and unit). No cap on analyses, steps, rows or
   tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the

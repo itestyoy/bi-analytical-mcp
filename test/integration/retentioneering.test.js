@@ -253,6 +253,41 @@ test('preprocess is the library\'s own op model: collapsed loops leave no self-t
   assert.equal(a.long_paths.paths, long);
 });
 
+test('metric bins: each bin holds the paths whose metric falls in it — by value, by quantile — and two bins of one name are refused in the call', opts, async (t) => {
+  if (skip(t)) return;
+  const lengths = [...paths().values()].map((list) => list.length);
+  // pandas' linear quantile, which the library cuts at
+  const sorted = [...lengths].sort((a, b) => a - b);
+  const quantile = (q) => { const p = (sorted.length - 1) * q; const lo = Math.floor(p); return sorted[lo] + (sorted[Math.ceil(p)] - sorted[lo]) * (p - lo); };
+  const median = quantile(0.5);
+  const { analyses: a } = await runFull({
+    analyses: [
+      // the bins in any order after the lowest: each keeps its own level
+      { kind: 'segment_overview', id: 'by_value', segment_col: 'length_band', metrics: [{ metric: 'length', agg: 'mean' }],
+        preprocess: [{ type: 'add_segment', name: 'length_band', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from: 10 }, { level: 'mid', from: 5 }] } }] },
+      { kind: 'segment_overview', id: 'by_quantile', segment_col: 'half', metrics: [{ metric: 'length', agg: 'mean' }],
+        preprocess: [{ type: 'add_segment', name: 'half', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'lower' }, { level: 'upper', from_quantile: 0.5 }] } }] },
+    ],
+  });
+  const sizes = (s) => Object.fromEntries(s.levels.map((l) => [l.name, l.size]));
+  const count = (f) => lengths.filter(f).length;
+  assert.deepEqual(sizes(a.by_value), Object.fromEntries(Object.entries({ short: count((n) => n < 5), mid: count((n) => n >= 5 && n < 10), long: count((n) => n >= 10) }).filter(([, n]) => n)));
+  assert.deepEqual(sizes(a.by_quantile), Object.fromEntries(Object.entries({ lower: count((n) => n < median), upper: count((n) => n >= median) }).filter(([, n]) => n)));
+  const bins = (list) => engine.query_retentioneering_model({ context_id: built.context_id, preprocess: [{ type: 'add_segment', name: 'x', metric_bins: { metric: { metric: 'length' }, bins: list } }], analyses: [{ kind: 'describe' }] });
+  await assert.rejects(bins([{ level: 'a' }, { level: 'a', from: 3 }]), (e) => e.field === 'preprocess.metric_bins' && /two bins are named 'a'/.test(e.message));
+  await assert.rejects(bins([{ level: 'a' }, { level: 'b', from: 3 }, { level: 'c', from: 3 }]), (e) => e.field === 'preprocess.metric_bins' && /two bins start/.test(e.message));
+});
+
+test('a condition on a time metric compares seconds since the epoch: the paths that started before a moment', opts, async (t) => {
+  if (skip(t)) return;
+  const firsts = (await wh.query('select epoch(min(device_time)) as s from fct_analytics_events group by player_id_of_internal order by 1')).rows.map((r) => Number(r.s));
+  const moment = firsts[Math.floor(firsts.length / 2)];
+  const { analyses: a } = await runFull({
+    analyses: [{ kind: 'describe', id: 'early', preprocess: [{ type: 'filter_paths', condition: { op: '<', metric: 'first_event_time', value: moment } }] }],
+  });
+  assert.equal(a.early.paths, firsts.filter((s) => s < moment).length);
+});
+
 test('conversion rate and path metrics are the library\'s tables, and their numbers are the rows\'', opts, async (t) => {
   if (skip(t)) return;
   const { task_id, analyses: a } = await runFull({

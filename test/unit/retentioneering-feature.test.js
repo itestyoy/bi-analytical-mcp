@@ -126,6 +126,10 @@ test('the schemas offer exactly what the library does — every choice from the 
   const ops = deref(deref(q.properties.preprocess).items).oneOf.map(deref);
   assert.deepEqual(ops.map((o) => o.title), Object.keys(f.ops).filter((op) => !NOT_OFFERED.ops[op]));
   for (const o of ops) for (const p of Object.keys(NOT_OFFERED.params)) assert.ok(!(p in o.properties), `${o.title} offers no ${p}`);
+  // metric_bins: the metrics that give one value per path, and the fewest equal quantiles, as the library has them
+  const bins = deref(ops.find((o) => o.title === 'add_segment').properties.metric_bins);
+  assert.deepEqual(deref(bins.properties.metric).oneOf.map(deref).map((m) => m.properties.metric.const), f.metric_bins.metrics);
+  assert.equal(deref(bins.properties.bins).oneOf.find((x) => x.title === 'equal quantiles').minItems, f.metric_bins.min_quantile_bins);
   // the build: the source's events and the models' attributes are enums from the catalog
   const b = e.schemas.build_retentioneering_model;
   assert.ok(deref(deref(b.anyOf[0].properties.events).properties.include).items.enum?.includes('level_started'), 'an events source: its events, as an enum');
@@ -158,6 +162,23 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'add_start_end_events' }], analyses: [{ kind: 'describe' }] }, /invalid input/);
   await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'filter_paths', condition: { op: '>', metric: 'has_event_bulk', value: 1 } }], analyses: [{ kind: 'describe' }] }, /invalid input/);
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'step_matrix', anchor: { pattern: 'a' }, path_pattern: 'a->b' }] }, /invalid input/);
+  // a condition compares a metric with a constant of the metric's own kind: a date is not a time metric's value
+  await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'filter_paths', condition: { op: '<', metric: 'first_event_time', value: '2026-09-26' } }], analyses: [{ kind: 'describe' }] }, /invalid input/);
+  // metric_bins is one list of bins, so a level count that disagrees with the cut points cannot be written
+  const segment = (metric_bins) => ({ context_id: 'abc', preprocess: [{ type: 'add_segment', name: 'by_length', metric_bins }], analyses: [{ kind: 'describe' }] });
+  await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, edges: [3, 6, 10], segment_levels: ['short', 'long'] }), /invalid input/);
+  await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short', from: 0 }, { level: 'long', from: 6 }] }), /invalid input/); // the lowest bin has no start
+  await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'mid', from: 3 }, { level: 'long', from_quantile: 0.9 }] }), /invalid input/); // values or quantiles, not both
+  await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'all' }] }), /invalid input/);
+  await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from_quantile: 1 }] }), /invalid input/);
+  await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: retentioneeringFacts().metric_bins.undefined_level, from: 3 }] }), /invalid input/);
+  await refused('query_retentioneering_model', segment({ metric: { metric: 'event_count_bulk' }, bins: [{ level: 'a' }, { level: 'b' }] }), /invalid input/); // a value per event, not per path
+  // ...while each written form passes the schema (and stops only at the context, which does not exist)
+  const pastSchema = (err) => !/invalid input/.test(err.message) && /abc/.test(err.message);
+  for (const bins of [[{ level: 'short' }, { level: 'long', from: 6 }, { level: 'mid', from: 3 }], [{ level: 'low' }, { level: 'top', from_quantile: 0.9 }], [{ level: 'q1' }, { level: 'q2' }, { level: 'q3' }]]) {
+    await refused('query_retentioneering_model', segment({ metric: { metric: 'length' }, bins }), pastSchema);
+  }
+  await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'filter_paths', condition: { op: '<', metric: 'first_event_time', value: 1790380800 } }], analyses: [{ kind: 'describe' }] }, pastSchema);
   await refused('display_retentioneering_result', { task_id: 'nope', analysis: 'funnel' }, /unknown task_id/);
   // a card for a client that renders none is refused like display_model_result
   const r = await runTool(e, 'display_retentioneering_result', { task_id: 'x', analysis: 'funnel' }, { renders: false });

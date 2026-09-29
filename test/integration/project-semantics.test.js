@@ -351,13 +351,13 @@ test('a dimension of another semantic model is named by where it lives — Metri
   assert.ok(p.metrics[0].group_by.dimensions.some((d) => JSON.stringify(d) === JSON.stringify(joined)), JSON.stringify(p.metrics[0].group_by));
   // named as if it were the context's own, it is refused saying where it lives
   await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: ACQ, metrics: ['project_cost'], group_by: [{ semantic_model: [ACQ], dimension: 'label' }] })), /not a dimension of project_acquisition; it is .*semantic_model: \["project_media_sources"\]/);
-  // the numbers of the same join made by hand — and the same with the path spelled out
+  // the numbers of the same join made by hand
   const want = Object.fromEntries((await wh.query('select upper(a.media_source) as label, sum(a.cost) as cost from fct_player_acquisition a group by 1')).rows.map((r) => [r.label, num(r.cost)]));
-  for (const ref of [joined, { ...joined, via: 'media_source' }]) {
-    const got = rowsOf(await q(ACQ, { metrics: ['project_cost'], group_by: [ref] }));
-    assert.deepEqual(Object.keys(got[0]).sort(), ['project_cost', 'project_media_sources_label']);
-    for (const [label, cost] of Object.entries(want)) assert.ok(Math.abs(num(got.find((r) => r.project_media_sources_label === label).project_cost) - cost) < 1e-9, label);
-  }
+  const got = rowsOf(await q(ACQ, { metrics: ['project_cost'], group_by: [joined] }));
+  assert.deepEqual(Object.keys(got[0]).sort(), ['project_cost', 'project_media_sources_label']);
+  for (const [label, cost] of Object.entries(want)) assert.ok(Math.abs(num(got.find((r) => r.project_media_sources_label === label).project_cost) - cost) < 1e-9, label);
+  // a path is not a thing to spell: only the chain of models
+  await assert.rejects(Promise.resolve().then(() => raw.query_semantic_model({ context_id: ACQ, metrics: ['project_cost'], group_by: [{ ...joined, via: 'media_source' }] })), /via/);
   // a where on it
   const [{ meta }] = (await wh.query("select sum(cost) as meta from fct_player_acquisition where upper(media_source) = 'META'")).rows;
   const filtered = rowsOf(await q(ACQ, { metrics: ['project_cost'], where: { op: 'and', conditions: [{ field: { kind: 'dimension', ...joined }, op: 'eq', value: 'META' }] } }));
@@ -600,4 +600,99 @@ test('the cost guardrail holds on the project\'s layer: a semantic model over a 
   const [{ cost }] = (await wh.query('select sum(cost) as cost from fct_player_acquisition')).rows;
   const open = rowsOf(await guarded.query_semantic_model({ context_id: ACQ, metrics: ['project_cost'] }));
   assert.ok(Math.abs(num(open[0].project_cost) - num(cost)) < 1e-9);
+});
+
+// ---- a model joined through several keys (a role) is not served; declared one semantic model per key, it is ----
+
+/** A copy of the project with `extra` models (name → { sql, entry }) added under models/roles. */
+function projectWith(extra) {
+  const dir = join(mkdtempSync(join(tmpdir(), 'projsem-roles-')), 'project');
+  cpSync(BASE, dir, { recursive: true, filter: (src) => !/\/(target|logs)(\/|$)/.test(src) });
+  const roles = join(dir, 'models', 'roles');
+  mkdirSync(roles, { recursive: true });
+  for (const [name, { sql }] of Object.entries(extra)) writeFileSync(join(roles, `${name}.sql`), `{{ config(materialized='view') }}\n${sql}\n`);
+  writeFileSync(join(roles, 'roles.yml'), yaml.dump({ models: Object.entries(extra).map(([name, { entry }]) => ({ name, ...entry })) }, { lineWidth: 120, noRefs: true }));
+  return dir;
+}
+
+// spend with two keys into the channels: the one a row is booked under, and its media source's
+const ROLE_SPEND = {
+  fct_role_spend: {
+    sql: `select *, ${CHANNEL_OF_ROW} as booked_channel, ${CHANNEL_OF_SOURCE} as source_channel from {{ ref('fct_player_acquisition') }}`,
+    entry: {
+      agg_time_dimension: 'spend_date', primary_entity: 'role_spend_row',
+      semantic_model: { enabled: true, name: 'role_spend' },
+      columns: [
+        { name: 'booked_channel', entity: { type: 'foreign', name: 'booked_channel' } },
+        { name: 'source_channel', entity: { type: 'foreign', name: 'source_channel' } },
+        { name: 'spend_date', granularity: 'day', dimension: { type: 'time', name: 'spend_date' } },
+      ],
+      metrics: [{ name: 'role_cost', type: 'simple', agg: 'sum', expr: 'cost' }],
+    },
+  },
+};
+const channelsKeyedBy = (keys) => ({
+  sql: `select ${keys.map((k) => `channel as ${k}`).join(', ')}, upper(channel) as channel_kind from (select 'paid' as channel union all select 'organic')`,
+  entry: (name) => ({
+    semantic_model: { enabled: true, name },
+    columns: [
+      ...keys.map((k, i) => ({ name: k, entity: { type: i ? 'unique' : 'primary', name: k } })),
+      { name: 'channel_kind', dimension: { type: 'categorical', name: 'kind' } },
+    ],
+  }),
+});
+/** Build `models` of a copy into the warehouse (new names only: the shared views are left alone). */
+const runModels = (dir, models) => execFileP(DBT_BIN, ['run', '--select', ...models], { cwd: dir, env: { ...process.env, DBT_PROFILES_DIR: dir, DBT_PROJECT_DIR: dir, DUCKDB_PATH: wh.path }, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+async function loadedFrom(dir) {
+  const cm = new ContextManager({ baseProjectDir: dir, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem-roles-ws-')), timeSpineDialect: 'duckdb' });
+  const out = await loadProjectSemantics({ runner: backend, contextManager: cm });
+  assert.ok(out?.layer, JSON.stringify(out));
+  const eng = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: cm, runner: backend, project: out }));
+  return { out, eng };
+}
+
+test('a semantic model joined onto through several keys is not served — said at start, in the preview and in the refusal, with how to declare it', opts, async (t) => {
+  if (skip(t)) return;
+  const roles = channelsKeyedBy(['booked_channel', 'source_channel']);
+  const dir = projectWith({ ...ROLE_SPEND, fct_role_channels: { sql: roles.sql, entry: roles.entry('role_channels') } });
+  const { out, eng } = await loadedFrom(dir);
+  const [b] = out.layer.blocked;
+  assert.deepEqual([b.semantic_model, b.keys, b.dimensions, b.metrics], ['role_channels', ['booked_channel', 'source_channel'], ['role_channels.kind'], ['role_cost']]);
+  // the fix names the dbt model each role is built over
+  assert.match(b.fix, /one semantic model per key.*ref\('fct_role_channels'\)/);
+  assert.deepEqual((await eng.semantic_index({})).project_semantic_layer.joins_not_served.map((x) => x.semantic_model), ['role_channels']);
+  // the preview does not offer it, and says why as an error of the declaration
+  const p = await eng.raw.preview_semantic_model({ context_id: 'role_spend', metric: 'role_cost' });
+  assert.deepEqual(p.metrics[0].group_by.dimensions.filter((d) => d.dimension === 'kind'), []);
+  assert.equal(p.status.valid, false);
+  assert.ok(p.status.issues.some((i) => i.severity === 'error' && i.semantic_model === 'role_channels' && /several keys/.test(i.message)), JSON.stringify(p.status.issues));
+  // …and a query naming it is refused in the call, in group_by and in where alike
+  const ref = { semantic_model: ['role_channels'], dimension: 'kind' };
+  await assert.rejects(Promise.resolve().then(() => eng.raw.query_semantic_model({ context_id: 'role_spend', metrics: ['role_cost'], group_by: [ref], time_range: WINDOW })), /joined onto through several keys.*not served.*one semantic model per key/);
+  await assert.rejects(Promise.resolve().then(() => eng.raw.query_semantic_model({ context_id: 'role_spend', metrics: ['role_cost'], time_range: WINDOW, where: { op: 'and', conditions: [{ field: { kind: 'dimension', ...ref }, op: 'eq', value: 'PAID' }] } })), /several keys/);
+  // the rest of the layer is served as before
+  await runModels(dir, ['fct_role_spend']);
+  const [{ cost }] = (await wh.query('select sum(cost) as cost from fct_player_acquisition')).rows;
+  const total = rowsOf(await eng.query_semantic_model({ context_id: 'role_spend', metrics: ['role_cost'], time_range: WINDOW }));
+  assert.ok(Math.abs(num(total[0].role_cost) - num(cost)) < 1e-9);
+});
+
+test('declared as the fix says — one semantic model per key — each role is a semantic model of its own, both in one query, each the warehouse\'s own join', opts, async (t) => {
+  if (skip(t)) return;
+  const booked = channelsKeyedBy(['booked_channel']);
+  const source = channelsKeyedBy(['source_channel']);
+  const dir = projectWith({ ...ROLE_SPEND, fct_booked_channels: { sql: booked.sql, entry: booked.entry('booked_channels') }, fct_source_channels: { sql: source.sql, entry: source.entry('source_channels') } });
+  await runModels(dir, ['fct_role_spend', 'fct_booked_channels', 'fct_source_channels']);
+  const { out, eng } = await loadedFrom(dir);
+  assert.deepEqual(out.layer.blocked, []);
+  const refs = [{ semantic_model: ['booked_channels'], dimension: 'kind' }, { semantic_model: ['source_channels'], dimension: 'kind' }];
+  const listed = (await eng.raw.preview_semantic_model({ context_id: 'role_spend', metric: 'role_cost' })).metrics[0].group_by.dimensions.map((d) => JSON.stringify(d));
+  for (const r of refs) assert.ok(listed.includes(JSON.stringify(r)), `${JSON.stringify(r)} in ${listed}`);
+  const want = (await wh.query(`select upper(${CHANNEL_OF_ROW}) as booked, upper(${CHANNEL_OF_SOURCE}) as src, sum(cost) as cost from fct_player_acquisition group by 1, 2`)).rows;
+  const got = rowsOf(await eng.query_semantic_model({ context_id: 'role_spend', metrics: ['role_cost'], group_by: refs, time_range: WINDOW }));
+  assert.equal(got.length, want.length);
+  for (const w of want) {
+    const r = got.find((x) => x.booked_channels_kind === w.booked && x.source_channels_kind === w.src);
+    assert.ok(r && Math.abs(num(r.role_cost) - num(w.cost)) < 1e-9, `${w.booked}/${w.src}`);
+  }
 });

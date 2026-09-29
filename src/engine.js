@@ -3446,6 +3446,14 @@ export class Engine {
     const issues = parsed ? layer.issues() : [];
     const inScope = (i) => (i.metric ? scope.metrics.some((m) => m.name === i.metric) : scope.semanticModels.some((sm) => sm.name === i.semantic_model));
     const shown = issues.filter(inScope);
+    // a join of the project's that no reference could name is not served: said as an error of the
+    // declaration, with how to declare it (src/group-by-items.js servable)
+    if (project) {
+      for (const b of layer.blocked || []) {
+        if (!b.metrics.some((m) => scope.metrics.some((x) => x.name === m))) continue;
+        shown.push({ severity: 'error', ...(typeof b.semantic_model === 'string' ? { semantic_model: b.semantic_model } : {}), message: `${b.message}: ${b.dimensions.length ? `its dimensions that way (${b.dimensions.join(', ')}) are` : 'it is'} not served. To serve it, ${b.fix}.` });
+      }
+    }
     // a task's metric that its last parse did not take: the build failed, or is still running
     const running = listed.building ?? this._building(ctx);
     const inManifest = new Set(layer.metrics.map((m) => m.name));
@@ -3467,7 +3475,7 @@ export class Engine {
       const time = t ? { metric_time: { grain: t.grain || 'day' } } : {};
       let cut;
       if (project) {
-        const refs = items.filter((i) => i !== t).map((i) => ({ item: i, ref: refOf(i, own, items) }));
+        const refs = items.filter((i) => i !== t).map((i) => ({ item: i, ref: refOf(i) }));
         const dims = refs.filter((r) => r.item.kind === 'dimension');
         const ents = uniqueRefs(refs.filter((r) => r.item.kind === 'entity').map((r) => r.ref));
         cut = input.metric
@@ -3485,7 +3493,7 @@ export class Engine {
     });
     const first = scope.metrics[0];
     const firstItem = first && project ? (groupBys?.[first.name] || []).find((i) => i.name !== 'metric_time') : null;
-    const firstCut = first && (project ? (firstItem ? refOf(firstItem, own, groupBys[first.name]) : null) : groupable?.[0] || null);
+    const firstCut = first && (project ? (firstItem ? refOf(firstItem) : null) : groupable?.[0] || null);
     const errors = shown.filter((i) => i.severity === 'error').length;
     return {
       context_id: ctx.id,
@@ -3669,7 +3677,7 @@ export class Engine {
           return {
             ...m,
             dimensions_from: [...new Set(items.filter((i) => i.kind === 'dimension' && i.semantic_model).map((i) => i.semantic_model))],
-            entities: uniqueRefs(items.filter((i) => i.kind === 'entity').map((i) => refOf(i, id, items))),
+            entities: uniqueRefs(items.filter((i) => i.kind === 'entity').map((i) => refOf(i))),
             ...(time ? { metric_time: { grain: time.grain } } : {}),
           };
         }),
@@ -3680,6 +3688,9 @@ export class Engine {
       note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_semantic_model({ context_id: '<semantic model>', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ context_id, metric }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
       contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map(one),
       ...(this.project.skipped?.length ? { not_served: this.project.skipped } : {}),
+      // joins the project declares that no reference could name — a model joined through several keys,
+      // a hop onto no single model: left out, each with how to declare it so it is served
+      ...(layer.blocked?.length ? { joins_not_served: layer.blocked.map(({ metrics, ...b }) => b) } : {}),
       // semantic models no metric reads: no context of their own; their dimensions are reached from
       // the contexts whose metrics reach them (each metric's dimensions_from names them)
       ...(this.project.dimension_only?.length ? { dimension_only: this.project.dimension_only } : {}),
@@ -3709,7 +3720,7 @@ export class Engine {
     const items = commonItems(layer.groupBys, input.metrics);
     const pick = (ref, field) => {
       if (ref && typeof ref === 'object' && 'model' in ref) throw new ToolError(`${field}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { semantic_model: [the chain of models it is reached through], dimension } and an entity { entity } — the project's own names, not the catalog's { model, attribute }. preview_semantic_model({ context_id: '${ctx.id}', metric }) lists each exactly.`, { stage: 'validate', field });
-      const r = resolveRef(items, ref, own, input.metrics.join(' and '));
+      const r = resolveRef(items, ref, input.metrics.join(' and '), layer.blocked || []);
       if (r.error) throw new ToolError(`${field}: ${r.error}`, { stage: 'validate', field });
       return r.item;
     };
@@ -3725,9 +3736,9 @@ export class Engine {
       const grain = item.type === 'time' ? g.grain || item.grain || 'day' : null;
       const tok = tokenOf(item, grain);
       const column = columnOf(item, grain);
-      if (input.metrics.includes(column) || [...rename.values()].includes(column)) throw new ToolError(`group_by: ${labelOf(item, own, items)} would make a result column '${column}' that another column of this query already has`, { stage: 'validate', field: 'group_by' });
+      if (input.metrics.includes(column) || [...rename.values()].includes(column)) throw new ToolError(`group_by: ${labelOf(item)} would make a result column '${column}' that another column of this query already has`, { stage: 'validate', field: 'group_by' });
       groupBy.push(tok); rename.set(tok, column);
-      if (!(g && g.time === 'metric_time')) groupByResolved[labelOf(item, own, items)] = column;
+      if (!(g && g.time === 'metric_time')) groupByResolved[labelOf(item)] = column;
       tokenByItem.set(itemKey(item), tok);
     }
     let where = [];

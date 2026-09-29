@@ -16,6 +16,7 @@
 import { utimesSync } from 'node:fs';
 import { formatDbtError } from './dbt/output.js';
 import { manifestLayer } from './semantic-manifest.js';
+import { annotateChains } from './group-by-items.js';
 import { CONTEXT_ID } from './context-manager.js';
 
 /** The internal context holding the parsed copy of the project that the per-model contexts share. */
@@ -61,7 +62,8 @@ export async function loadProjectSemantics({ runner, contextManager }) {
   if (!runner.groupBys) return serveNothing({ error: 'the query engine cannot list what the metrics can be grouped by (MetricFlow)' });
   const listed = await runner.groupBys(dir, layer.metrics.map((m) => m.name));
   if (!listed.ok) return serveNothing({ error: `MetricFlow could not list what the project's metrics can be grouped by: ${listed.error}` });
-  layer.groupBys = listed.group_bys;
+  // …each hop of an entity path named by the model it joins onto, as a caller names a chain
+  layer.groupBys = annotateChains(listed.group_bys, layer.semantic_models);
   // the dbt model each semantic model reads, as dbt recorded it (the cost guardrail's key)
   layer.sources = runner.semanticModelSources ? runner.semanticModelSources(dir) : {};
   const contexts = [];

@@ -33,6 +33,11 @@ models:
           type: foreign
           name: media_source
           description: Network the spend went to (organic rows carry no spend)
+      - name: channel
+        entity:
+          type: foreign
+          name: channel
+          description: The channel the row was booked under (paid or organic)
       - name: spend_date
         granularity: day
         dimension:
@@ -104,6 +109,26 @@ models:
           type: categorical
           name: label
           description: The source's display label
+      - name: channel
+        entity:
+          type: foreign
+          name: channel
+
+  - name: fct_project_channels
+    description: One row per channel (a thin view) — reached from a spend row directly, and through its media source.
+    semantic_model:
+      enabled: true
+      name: project_channels
+    columns:
+      - name: channel
+        entity:
+          type: primary
+          name: channel
+      - name: channel_kind
+        dimension:
+          type: categorical
+          name: kind
+          description: The channel's kind
 
   - name: fct_analytics_events
     description: One row per product-analytics event.

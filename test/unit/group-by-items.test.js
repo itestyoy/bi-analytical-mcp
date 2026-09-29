@@ -4,7 +4,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { commonItems, resolveRef, refOf, tokenOf, columnOf } from '../../src/group-by-items.js';
+import { commonItems, resolveRef, refOf, tokenOf, columnOf, annotateChains } from '../../src/group-by-items.js';
 
 // what MetricFlow lists for a spend metric: its own dimensions, a device model's two ways (a path of
 // one join, and of two), an entity, and the time axis
@@ -44,9 +44,9 @@ test('each reference resolves to the item MetricFlow lists for it, with MetricFl
 });
 
 test('what does not name one item is refused with the ways it can be named', () => {
-  // two paths listed, none given: MetricFlow would not choose either
-  assert.match(resolveRef(spendItems, { semantic_model: 'devices', dimension: 'model' }, own).error, /several paths.*via: "device".*via: \["user","device"\]/);
-  assert.match(resolveRef(spendItems, { semantic_model: 'devices', dimension: 'model', via: 'user' }, own).error, /not through that via/);
+  // a model named alone is its direct join; a path MetricFlow does not list is refused
+  assert.equal(tokenOf(resolveRef(spendItems, { semantic_model: 'devices', dimension: 'model' }, own).item), 'device__model');
+  assert.match(resolveRef(spendItems, { semantic_model: 'devices', dimension: 'model', via: 'user' }, own).error, /is reached as/);
   // another model's dimension named as the context's own: where it does live is said
   assert.match(resolveRef(spendItems, { dimension: 'model' }, own).error, /not a dimension of spend; it is .*semantic_model: "devices"/);
   assert.match(resolveRef(spendItems, { dimension: 'nope' }, own).error, /not a dimension this can be grouped by/);
@@ -60,4 +60,29 @@ test('several metrics are grouped by what MetricFlow lists for every one of them
   ];
   const shared = commonItems({ cost: spendItems, clicks }, ['cost', 'clicks']);
   assert.deepEqual(shared.map((i) => refOf(i, own, shared)), [{ dimension: 'campaign' }, { entity: 'device' }, { time: 'metric_time', grain: 'day' }]);
+});
+
+test('a hop of MetricFlow\'s entity path is named by the model it joins onto: a link of several joins is a chain of models, and via is left for a role', () => {
+  const models = [
+    { name: 'spend', entity: 'spend_row', entities: [{ name: 'user', type: 'foreign' }, { name: 'device', type: 'foreign' }] },
+    { name: 'devices', entity: 'device', entities: [{ name: 'device', type: 'primary' }, { name: 'user', type: 'foreign' }] },
+    { name: 'users', entity: 'user', entities: [{ name: 'user', type: 'primary' }, { name: 'buyer', type: 'unique' }, { name: 'seller', type: 'unique' }] },
+  ];
+  const items = [
+    { kind: 'dimension', name: 'country', dunder_name: 'user__country', semantic_model: 'users', entity_links: ['user'], type: 'categorical' },
+    { kind: 'dimension', name: 'country', dunder_name: 'device__user__country', semantic_model: 'users', entity_links: ['device', 'user'], type: 'categorical' },
+    { kind: 'dimension', name: 'country', dunder_name: 'buyer__country', semantic_model: 'users', entity_links: ['buyer'], type: 'categorical' },
+  ];
+  annotateChains({ cost: items }, models);
+  assert.deepEqual(items.map((i) => i.chain), [['users'], ['devices', 'users'], ['users']]);
+  // the direct join and the chain are told apart by the chain; the two direct ones (a role) by via
+  assert.deepEqual(items.map((i) => refOf(i, 'spend', items)), [
+    { semantic_model: 'users', dimension: 'country', via: 'user' },
+    { semantic_model: ['devices', 'users'], dimension: 'country' },
+    { semantic_model: 'users', dimension: 'country', via: 'buyer' },
+  ]);
+  assert.equal(tokenOf(resolveRef(items, { semantic_model: ['devices', 'users'], dimension: 'country' }, 'spend').item), 'device__user__country');
+  assert.equal(tokenOf(resolveRef(items, { semantic_model: 'users', dimension: 'country', via: 'buyer' }, 'spend').item), 'buyer__country');
+  // two direct joins, no role named: MetricFlow would not choose either
+  assert.match(resolveRef(items, { semantic_model: 'users', dimension: 'country' }, 'spend').error, /several ways.*via: "user".*via: "buyer"/);
 });

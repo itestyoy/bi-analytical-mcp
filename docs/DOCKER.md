@@ -66,6 +66,7 @@ file instead? Mount it and set `CATALOG_PATH=/config/catalog.yml`.
 - `PORT` — published port (default 3000). The container always binds `0.0.0.0`.
 - `WAREHOUSE_DIALECT` — `duckdb` | `bigquery`.
 - `DBT_PROJECT_DIR` — host path to your dbt project (mounted at `/dbt_project`; used as both `DBT_BASE_PROJECT` and `DBT_PROFILES_DIR`; the catalog is discovered from its model YAMLs).
+  Semantic models and metrics the project declares itself (e.g. `models/core/aso_semantic_models.yml` + `aso_metrics.yml`, in either YAML spec) are read at start — a `dbt parse` of a copy, logged as `project semantic layer:` — and queried with `query_semantic_model({ context_id: "project", metrics, group_by: [{ semantic_model, dimension }, { entity }] })`; nothing is built. Their dbt models must already exist in the warehouse (`dbt run` them as the project does). A project that does not parse is logged and said in `semantic_index()`; the rest of the server runs as without it.
 - `CONFIG_DIR` — host path mounted read-only at `/config` for optional `recipes.json` (and a standalone `catalog.yml` if you set `CATALOG_PATH`).
 - `CATALOG_PATH` — optional; set to a standalone catalog file instead of project discovery.
 - `QUERY_TIMEOUT_SECONDS` — how long a WAREHOUSE READ that merely enriches an answer may hold the

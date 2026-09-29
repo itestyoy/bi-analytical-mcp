@@ -1,0 +1,154 @@
+# A dbt project's OWN semantic layer, in dbt's latest spec (v2 / Fusion) and in the shape a real
+# project writes it: semantic models declared on their `models:` entries, simple metrics inside the
+# semantic model, ratio / derived metrics at the top level (a file of their own in a project).
+# test/integration/project-semantics.test.js lays it out as a project does (models/core/): a model the
+# project already describes gets its semantic model merged into that entry (dbt allows one entry per
+# model); a model that exists only for the layer — a thin view, like fct_project_acquisition — has its
+# only entry in the layer's own file; `metrics` is a file of its own. The server reads the layer at
+# start and serves it as the context "project" — no build step.
+#
+# Like a store-report cube: `primary_entity` is declared on the model with no column behind it, and a
+# key the reports are cut by (the media source, the player) is declared ONLY as a foreign entity —
+# no model owns it, and it is grouped by as an entity. A 0 amount means "no value" and is turned
+# back into NULL with nullif() before a max or an average.
+models:
+  - name: fct_project_acquisition
+    description: Paid acquisition, one row per player x day (a thin view over fct_player_acquisition).
+    agg_time_dimension: spend_date
+    primary_entity: acquisition_observation
+    semantic_model:
+      enabled: true
+      name: project_acquisition
+      config:
+        meta:
+          owner: ua
+    columns:
+      - name: player_id_of_internal
+        entity:
+          type: foreign
+          name: player
+          description: The player the spend is attributed to
+      - name: media_source
+        entity:
+          type: foreign
+          name: media_source
+          description: Network the spend went to (organic rows carry no spend)
+      - name: spend_date
+        granularity: day
+        dimension:
+          type: time
+          name: spend_date
+          label: Date
+      - name: campaign
+        dimension:
+          type: categorical
+          description: Campaign name
+    metrics:
+      - name: project_impressions
+        label: Impressions
+        type: simple
+        agg: sum
+        expr: impressions
+        config: {meta: {channel: paid}}
+      - name: project_clicks
+        label: Clicks
+        type: simple
+        agg: sum
+        expr: clicks
+      - name: project_cost
+        label: Cost
+        type: simple
+        agg: sum
+        expr: cost
+      - name: project_cost_max
+        label: Highest daily cost
+        description: 0 means no spend and is not a value
+        type: simple
+        agg: max
+        expr: nullif(cost, 0)
+        config: {meta: {additive: false}}
+      - name: project_cost_avg
+        label: Average daily cost
+        type: simple
+        agg: average
+        expr: nullif(cost, 0)
+        config: {meta: {additive: false}}
+      - name: project_paid_rows
+        label: Paid player-days
+        type: simple
+        agg: sum_boolean
+        expr: cost > 0
+      - name: project_impressions_last_day
+        label: Impressions on the last day of the period
+        description: A snapshot — across days the last day of the period is taken
+        type: simple
+        agg: sum
+        expr: impressions
+        non_additive_dimension:
+          name: spend_date
+          window_agg: max
+        config: {meta: {additive: false}}
+
+  - name: fct_analytics_events
+    description: One row per product-analytics event.
+    agg_time_dimension: event_at
+    primary_entity: project_event
+    semantic_model:
+      enabled: true
+      name: project_events
+    columns:
+      - name: player_id_of_internal
+        entity:
+          type: foreign
+          name: player
+      - name: event_name
+        dimension:
+          type: categorical
+      - name: bundle_id
+        dimension:
+          type: categorical
+      - name: device_time
+        granularity: day
+        dimension:
+          type: time
+          name: event_at
+    metrics:
+      - name: project_events_total
+        label: Events
+        description: Every event.
+        type: simple
+        agg: count
+        expr: event_id
+      - name: project_active_players
+        label: Active players
+        type: simple
+        agg: count_distinct
+        expr: player_id_of_internal
+
+metrics:
+  - name: project_touches
+    label: Touches
+    description: impressions + clicks
+    type: derived
+    expr: views + taps
+    input_metrics:
+      - name: project_impressions
+        alias: views
+      - name: project_clicks
+        alias: taps
+  - name: project_ctr
+    label: Click-through rate
+    description: clicks / impressions (a ratio of sums, not a mean of daily rates)
+    type: ratio
+    numerator: project_clicks
+    denominator: project_impressions
+  - name: project_cost_per_touch
+    label: Cost per touch
+    type: ratio
+    numerator: project_cost
+    denominator: project_touches
+  - name: project_events_per_player
+    label: Events per player
+    type: ratio
+    numerator: project_events_total
+    denominator: project_active_players

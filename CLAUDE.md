@@ -288,7 +288,7 @@
   there (side by side on BigQuery).
 - dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
   the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
-  / semanticSpec / pythonModelsOn) over the installed dbt, each major version its own implementation
+  / semanticSpec / semanticManifest / pythonModelsOn) over the installed dbt, each major version its own implementation
   — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
   and do NOT branch on the dbt version outside `src/dbt/`.
 - ONE SEMANTIC LAYER, TWO YAML SPECS: the context is rendered once (`src/yaml-render.js`, legacy
@@ -298,6 +298,21 @@
   do not change. What v2 writes differently into the manifest is corrected in its client (a
   percentile is always approximate there: `config.meta.mcp_percentile` puts the request back).
   Metric queries go through MetricFlow's `mf` on either version.
+- THE PROJECT'S OWN SEMANTIC LAYER IS READ AT START, NEVER BUILT (`src/project-semantics.js`): the
+  semantic models and metrics DBT_BASE_PROJECT declares itself (either spec, any file layout — e.g. a
+  `models/core/*_semantic_models.yml` whose entries are the only ones of their thin-view models, and a
+  `*_metrics.yml` of ratio / derived metrics) are parsed once, before the tools are served, into the
+  pinned context `project` (never gc'd, built on or dropped; re-read on every start), and queried
+  with query_semantic_model({ context_id: "project" }) — `{ semantic_model, dimension, grain?, via? }`
+  and `{ entity }` (a key the project declares only as an entity) in group_by / where / order_by,
+  checked against the manifest before anything runs (one hop through a primary entity), the
+  project's names kept. Its queries run side by side (nothing writes to it); its stored results
+  are carried over a restart and retired by CONTEXT_TTL_MS by age. A GENERATED context holds its OWN
+  layer only: its copy of the project leaves the project's semantic keys out
+  (`withoutSemanticLayer`, src/context-manager.js) — the latest spec allows one semantic model per
+  dbt model, and a name of one layer could shadow the other's. The overview
+  (`semantic_index().project_semantic_layer`) lists each metric with its meta (the project's notes on
+  reading it) and the semantic models whose dimensions cut it, each model's dimensions once.
 - dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
   DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v2`
   (used unless DBT_ENV names another), `dbt-v1`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own

@@ -8,8 +8,9 @@ import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adj
 import { compileDeclaration } from './compile.js';
 import { renderContext, PARTITION_DIM } from './yaml-render.js';
 import { gatePythonRuntime } from './catalog.js';
-import { ContextManager, mergeCompiled } from './context-manager.js';
+import { ContextManager, mergeCompiled, RESULT_MODEL_PREFIX } from './context-manager.js';
 import { renderWhereClauses, renderPredicate } from './predicate.js';
+import { PROJECT_CONTEXT } from './project-semantics.js';
 import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
@@ -32,7 +33,7 @@ import { detached, currentSignal, isolatedTarget, withSignal } from './request-c
 import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [] }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -80,7 +81,11 @@ export class Engine {
     if (recipes) catalog.pythonRecipes = recipes.entriesRequiring('python_models');
     // what the installed dbt can run, before the schemas exist (dbt v2 runs no Python models on DuckDB)
     gatePythonRuntime(catalog, runner);
-    this.schemas = buildSchemas(catalog);
+    // THE PROJECT'S OWN SEMANTIC LAYER (src/project-semantics.js), read at start: its metrics are
+    // queried in the context PROJECT_CONTEXT, and the schema names its semantic models
+    this.project = project?.layer ? project : null;
+    this.projectError = project?.error || null;
+    this.schemas = buildSchemas(catalog, { project: this.project?.layer || null });
     // THE FEATURES THIS DEPLOYMENT RUNS (src/features.js): each adds its tools — a schema here and a
     // method on this engine — and the task side they start and read. A feature that is off adds
     // nothing, so its tools are neither listed nor callable.
@@ -351,6 +356,16 @@ export class Engine {
    * of them — reported here with the grounding reason, not as a bare 'Unknown model' thrown from
    * inside the renderer.
    */
+  /**
+   * A context a call is about to CHANGE. The project's own semantic layer (a pinned context) is read
+   * from the project as it is: nothing is built on it, changed in it or deleted from it.
+   */
+  _ctxToWrite(id, field = 'context_id') {
+    const ctx = this._ctx(id);
+    if (ctx.state.pinned) throw new ToolError(`context '${id}' is the dbt project's own semantic layer, read from the project as it is — nothing is built on, changed in or deleted from it. Query its metrics with query_semantic_model({ context_id: '${id}', metrics }); a task of your own is built in a context of its own (omit ${field})`, { stage: 'validate', field });
+    return ctx;
+  }
+
   _ctx(id) {
     let ctx;
     try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'context_id' }); }
@@ -450,6 +465,12 @@ export class Engine {
   _normalizeRef(ctx, ref, where = 'group_by') {
     if (typeof ref === 'string') {
       throw new ToolError(`${where}: an attribute is addressed by where it lives — { model, attribute } (plus via when several relationships lead there) — never by a path string. '${ref}' → ${this._suggestRef(ctx, ref)}.`, { stage: 'validate', field: where });
+    }
+    if (ref && typeof ref === 'object' && 'entity' in ref && !('attribute' in ref)) {
+      throw new ToolError(`${where}: the entity '${ref.entity}' is one of the dbt project's own semantic layer — group by it in the context '${PROJECT_CONTEXT}' with that layer's metrics; here attributes are { model, attribute }.`, { stage: 'validate', field: where });
+    }
+    if (ref && typeof ref === 'object' && 'semantic_model' in ref) {
+      throw new ToolError(`${where}: '${ref.semantic_model}.${ref.dimension}' is a dimension of the dbt project's own semantic layer — query it in the context '${PROJECT_CONTEXT}' with that layer's metrics; here attributes are { model, attribute }.`, { stage: 'validate', field: where });
     }
     if (ref == null || typeof ref !== 'object' || !('attribute' in ref)) return ref;
     const c = this.catalog;
@@ -1039,6 +1060,10 @@ export class Engine {
           note: 'A pipeline may end in a `python` stage (build_pipeline_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.',
         }
         : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
+      // The dbt project's own semantic layer: its metrics, queried in their context without a build —
+      // or why it could not be read (the project did not parse)
+      ...(this.project ? { project_semantic_layer: this._projectOverview() } : {}),
+      ...(this.projectError ? { project_semantic_layer: { available: false, reason: `the dbt project's own semantic models could not be read: ${this.projectError}` } } : {}),
       // The features this deployment was asked to run (src/features.js): what each offers when on,
       // and why it is not offered when it cannot run here. A feature nobody asked for is not listed.
       ...(this.featureStatus.length ? {
@@ -1309,7 +1334,7 @@ export class Engine {
   async register_native_model(input) {
     this._validate('register_native_model', input);
     // a build is a task: the id now, the rows from query_pipeline_model({ task_id })
-    const existing = input.context_id ? this._ctx(input.context_id) : null;
+    const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
     const taskId = this._startTask(existing, 'register_native_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }));
     return this._taskStarted(taskId, { context_id: ctxId });
@@ -1687,7 +1712,7 @@ export class Engine {
   async _draftStart(input) {
     const found = input.from_task ? this._taskBase(input) : null;
     const base = found ? found.base : null;
-    const ctx = input.draft_id ? this._ctx(input.draft_id) : this.ctxs.create();
+    const ctx = input.draft_id ? this._ctxToWrite(input.draft_id, 'draft_id') : this.ctxs.create();
     const source = found ? found.source : input.source;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: base ? null : (input.time_range || null), stages: [], checkpoints: [], ...(base ? { base } : {}), ...(input.description ? { description: input.description } : {}) };
     if (base) this._holdTaskBase(ctx, base);
@@ -2663,7 +2688,7 @@ export class Engine {
     // leaves nothing behind. The context id is CHOSEN first (a new one is not created yet), so the
     // chain is laid out ONCE, under its final names, and its python bodies are gated on that very
     // layout — one render, one compile per python stage.
-    const existing = input.context_id ? this._ctx(input.context_id) : null;
+    const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : (presetCtxId || this.ctxs.newId());
     // The caller may pass the name: every build of a draft gets its own (`_c2`, `_c3`, …), because
     // a rebuild must never overwrite the table it reads as its checkpoint, nor one a fork
@@ -2818,7 +2843,7 @@ export class Engine {
   /** Delete a registered native model: remove its files + state and re-parse. */
   async delete_native_model(input) {
     this._validate('delete_native_model', input);
-    const ctx = this._ctx(input.context_id);
+    const ctx = this._ctxToWrite(input.context_id);
     if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native (pipeline) model registered in this context' };
     const model = ctx.state.model;
     // a pipeline is a CHAIN of files (.sql / .py / .yml, plus `_sN` steps) — all of them go, and so
@@ -2862,7 +2887,7 @@ export class Engine {
     // The declaration is taken IN THE CALL — compiled, merged, written — so a query issued right
     // after it validates against these metrics; parsing it (dbt) is the task, and a query on this
     // context waits for it (tasks on one context run in order).
-    const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
+    const ctx = input.context_id ? this._ctxToWrite(input.context_id) : this.ctxs.create();
     mergeCompiled(ctx.state, compiled);
     const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
     const file = this.ctxs.writeSemanticYaml(ctx.id, render);
@@ -2916,7 +2941,7 @@ export class Engine {
   }
 
   async _updateSemanticModel(input) {
-    const ctx = this._ctx(input.context_id);
+    const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
     // dry_run must NOT mutate the context (state or files): work on a clone.
     const state = input.dry_run ? clone(ctx.state) : ctx.state;
@@ -2976,7 +3001,7 @@ export class Engine {
 
   async delete_semantic_model(input) {
     this._validate('delete_semantic_model', input);
-    const ctx = this._ctx(input.context_id);
+    const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
     const add = ctx.state.additions[modelKey];
     if (!add) return { context_id: ctx.id, removed: false, reason: 'no task additions for this model' };
@@ -2996,6 +3021,7 @@ export class Engine {
 
   drop_context(input) {
     this._validate('drop_context', input);
+    if (input.context_id === PROJECT_CONTEXT && this.project) throw new ToolError(`context '${PROJECT_CONTEXT}' serves the dbt project's own semantic layer for as long as the server runs — it is read from the project at start, not built here, so there is nothing to drop`, { stage: 'validate', field: 'context_id' });
     // A context whose materialized prefix another draft READS cannot just vanish: the fork's
     // `{{ ref() }}` would resolve to a relation that no longer exists. Name the consumers and let
     // the operator decide (drop them first, or force).
@@ -3228,6 +3254,7 @@ export class Engine {
   async describe_context(input) {
     this._validate('describe_context', input);
     const ctx = this._ctx(input.context_id);
+    if (ctx.state.engine === 'project' && this.project) return { context_id: ctx.id, engine: 'project', ...this._projectOverview() };
     // A pipeline-registered model is a normal dbt model whose rows are the result.
     // Report its model name and the output columns you can read — its rows come from its build's
     // task. The columns are grounded to the real relation below.
@@ -3307,10 +3334,158 @@ export class Engine {
       const built = ctx.state.native?.task_id;
       throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ task_id: '${built}' }), filter or regroup them with query_pipeline_model({ context_id: '${ctx.id}', transform }), or build on them with build_pipeline_model({ action: 'start', name, from_task: '${built}' })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
     }
+    // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
+    const project = ctx.state.engine === 'project';
+    const work = project ? (q) => this._projectQueryWork(ctx, q) : (q) => this._semanticQueryWork(ctx, q);
     // A BATCH (queries: up to MAX_BATCH): every query is validated before any starts, and they run
     // side by side — one task each, read together with { task_ids }.
-    if (input.queries) return this._startBatch(ctx, 'query_semantic_model', input.queries, (q) => this._semanticQueryWork(ctx, { ...q, context_id: ctx.id }));
-    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', this._semanticQueryWork(ctx, input)), { context_id: ctx.id });
+    if (input.queries) return this._startBatch(ctx, 'query_semantic_model', input.queries, (q) => work({ ...q, context_id: ctx.id }));
+    // The project's context is never written after start (nothing is built on it) and every
+    // conversation queries it: its queries run side by side, like a batch's members, instead of
+    // each waiting for the one before it.
+    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), project ? { batch: { before: null } } : {}), { context_id: ctx.id });
+  }
+
+  /** What the dbt project's own semantic layer offers: each metric with what it can be grouped by, and
+   *  each semantic model with its dimensions — the names a query of PROJECT_CONTEXT takes. */
+  _projectOverview() {
+    const layer = this.project.layer;
+    return {
+      context_id: PROJECT_CONTEXT,
+      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build): query_semantic_model({ context_id: '${PROJECT_CONTEXT}', metrics: [...], group_by: [{ semantic_model, dimension }, { entity }, { time: 'metric_time', grain }] }). A metric is cut by the dimensions of the semantic models it names under dimensions_from, and by its entities — a key such as an app or a country the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it.`,
+      metrics: layer.metrics.map((m) => {
+        const reach = layer.reach(m.name);
+        // a semantic model reached through several entities is named with each (the via a query gives)
+        const from = [...new Set(reach.map((d) => d.semantic_model))].map((sm) => {
+          const through = [...new Set(reach.filter((d) => d.semantic_model === sm).map((d) => d.entity))];
+          return through.length > 1 ? { semantic_model: sm, via: through } : sm;
+        });
+        return { ...m, dimensions_from: from, entities: layer.entities(m.name) };
+      }),
+      semantic_models: layer.semantic_models.map((sm) => ({
+        name: sm.name, ...(sm.description ? { description: sm.description } : {}), ...(sm.table ? { table: sm.table } : {}), ...(sm.meta ? { meta: sm.meta } : {}),
+        dimensions: sm.dimensions.map((d) => ({ name: d.name, ...(d.type === 'time' ? { time: true, grain: d.grain } : {}), ...(d.description ? { description: d.description } : {}) })),
+        entities: sm.entities.map((e) => e.name),
+      })),
+    };
+  }
+
+  /**
+   * One metric query of the dbt project's OWN semantic layer (the context PROJECT_CONTEXT), checked
+   * here against that layer — its metrics, and the dimensions each can be grouped and filtered by —
+   * and run by MetricFlow over the project as the project defines it. What is returned is the work
+   * its task runs, the same task, read and result shape as any metric query.
+   */
+  _projectQueryWork(ctx, input) {
+    const layer = this.project.layer;
+    const known = new Map(layer.metrics.map((m) => [m.name, m]));
+    const list = () => layer.metrics.map((m) => m.name).join(', ');
+    if (!input.metrics?.length) throw new ToolError(`metrics is required. The project defines: ${list()}`, { stage: 'validate', field: 'metrics' });
+    for (const m of input.metrics) if (!known.has(m)) throw new ToolError(`'${m}' is not a metric of the project's semantic layer. It defines: ${list()}`, { stage: 'validate', field: 'metrics' });
+    const reach = input.metrics.map((m) => layer.reach(m));
+    const show = (ds) => ds.slice(0, 30).map((d) => `${d.semantic_model}.${d.dimension}${d.type === 'time' ? ' (time)' : ''}`).join(', ') || '(none but metric_time)';
+    /** A { semantic_model, dimension, via? } → the dimension every requested metric reaches it by. */
+    const resolve = (ref, field) => {
+      if (ref && typeof ref === 'object' && 'model' in ref) throw new ToolError(`${field}: in the context '${PROJECT_CONTEXT}' a dimension is { semantic_model, dimension } — the project's own names, not the catalog's { model, attribute }. ${input.metrics[0]} can be grouped by: ${show(reach[0])}`, { stage: 'validate', field });
+      const hits = reach[0].filter((d) => d.semantic_model === ref.semantic_model && d.dimension === ref.dimension && (!ref.via || d.entity === ref.via));
+      if (!hits.length) throw new ToolError(`${field}: '${ref.semantic_model}.${ref.dimension}'${ref.via ? ` (via ${ref.via})` : ''} is not a dimension ${input.metrics[0]} can be grouped by. It can: ${show(reach[0])}`, { stage: 'validate', field });
+      if (hits.length > 1) throw new ToolError(`${field}: ${input.metrics[0]} reaches '${ref.semantic_model}' through several entities (${hits.map((d) => d.entity).join(', ')}) — name the one you mean with via`, { stage: 'validate', field });
+      const [d] = hits;
+      input.metrics.forEach((m, i) => {
+        if (i && !reach[i].some((x) => x.path === d.path)) throw new ToolError(`${field}: '${ref.semantic_model}.${ref.dimension}' is not a dimension ${m} can be grouped by — query them apart, or group by what both reach. ${m} can: ${show(reach[i])}`, { stage: 'validate', field });
+      });
+      return d;
+    };
+    /** An { entity } → its name, when every requested metric reads a semantic model that carries it. */
+    const resolveEntity = (ref, field) => {
+      input.metrics.forEach((m) => {
+        const own = layer.entities(m);
+        if (!own.includes(ref.entity)) throw new ToolError(`${field}: the entity '${ref.entity}' is not one ${m} can be grouped by — its semantic models carry: ${own.join(', ') || '(none)'}`, { stage: 'validate', field });
+      });
+      return ref.entity;
+    };
+    const groupBy = [];
+    const rename = new Map();
+    const groupByResolved = {};
+    // the group-by token each dimension of this query got — carried, so an order_by names it exactly
+    const tokenOf = new Map();
+    const dimKey = (d) => `${d.semantic_model}\u0000${d.dimension}\u0000${d.entity}`;
+    for (const g of input.group_by || []) {
+      if (g && g.time === 'metric_time') {
+        const tok = `metric_time__${g.grain || 'day'}`;
+        groupBy.push(tok); rename.set(tok, `metric_time_${g.grain || 'day'}`); continue;
+      }
+      if (g && 'entity' in g) {
+        const tok = resolveEntity(g, 'group_by');
+        if (input.metrics.includes(tok) || [...rename.values()].includes(tok)) throw new ToolError(`group_by: the entity '${tok}' would make a result column that another column of this query already has`, { stage: 'validate', field: 'group_by' });
+        groupBy.push(tok); rename.set(tok, tok); groupByResolved[tok] = tok;
+        continue;
+      }
+      const d = resolve(g, 'group_by');
+      const grain = d.type === 'time' ? g.grain || d.grain || 'day' : null;
+      const tok = grain ? `${d.path}__${grain}` : d.path;
+      const friendly = `${d.semantic_model}_${d.dimension}${grain ? `_${grain}` : ''}`;
+      if (input.metrics.includes(friendly) || [...rename.values()].includes(friendly)) throw new ToolError(`group_by: '${d.semantic_model}.${d.dimension}' would make a result column '${friendly}' that another column of this query already has`, { stage: 'validate', field: 'group_by' });
+      groupBy.push(tok); rename.set(tok, friendly); groupByResolved[`${d.semantic_model}.${d.dimension}`] = friendly;
+      tokenOf.set(dimKey(d), tok);
+    }
+    let where = [];
+    if (input.where) {
+      const translated = clone(input.where);
+      walkPredicates(translated, (p) => {
+        if (p.field?.kind === 'entity') { p.field = { kind: 'entity', name: resolveEntity(p.field, 'where') }; return; }
+        if (p.field?.kind !== 'dimension') return;
+        const d = resolve(p.field, 'where');
+        p.field = d.type === 'time' ? { kind: 'time_dimension', path: d.path, grain: d.grain || 'day' } : { kind: 'dimension', path: d.path };
+      });
+      where = renderWhereClauses(translated);
+    }
+    const orderable = new Set([...input.metrics, ...groupBy]);
+    const byFriendly = new Map([...rename].map(([tok, friendly]) => [friendly, tok]));
+    const metricTimeTok = groupBy.find((g) => g.startsWith('metric_time__'));
+    const orderBy = (input.order_by || []).map((o) => {
+      let key = o.key;
+      if (key && typeof key === 'object' && 'entity' in key) key = resolveEntity(key, 'order_by');
+      else if (key && typeof key === 'object') {
+        const d = resolve(key, 'order_by');
+        key = tokenOf.get(dimKey(d)) || d.path;
+      } else if (key === 'metric_time' && metricTimeTok) key = metricTimeTok;
+      else if (typeof key === 'string' && byFriendly.has(key)) key = byFriendly.get(key);
+      if (!orderable.has(key)) throw new ToolError(`order_by key '${typeof o.key === 'object' ? (o.key.entity || `${o.key.semantic_model}.${o.key.dimension}`) : o.key}' is not a requested metric or group_by column. Orderable: ${[...orderable].map((k) => rename.get(k) || k).join(', ')}`, { stage: 'validate', field: 'order_by' });
+      return `${o.direction === 'desc' ? '-' : ''}${key}`;
+    });
+    if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
+    if (input.time_range?.timezone && !isValidTimezone(input.time_range.timezone)) throw new ToolError(`unknown timezone '${input.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
+    const bounds = resolveTimeRange(input.time_range) || {};
+    const windowWarnings = timeRangeWarnings(input.time_range);
+    const limit = input.limit ?? 1000;
+    const offset = input.offset ?? 0;
+    const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: limit + offset + 1 };
+    const explain = !!(input.dry_run || input.explain);
+    const respond = (raw) => {
+      this.ctxs.touch(ctx.id);
+      if (!raw.ok) return { ok: false, command: raw.command, error: { stage: 'query', message: formatDbtError(raw.stdout, raw.stderr) } };
+      if (explain) return { ok: true, command: raw.command, sql: raw.sql, ...(input.dry_run ? { dry_run: true } : {}), ...(input.explain ? { explain: true, plan: raw.plan } : {}) };
+      const columns = (raw.columns || []).map((c) => (rename.has(c.name) ? { ...c, name: rename.get(c.name) } : c));
+      const rows = (raw.rows || []).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [rename.get(k) || k, v])));
+      const pageRows = rows.slice(offset, offset + limit);
+      const page = { limit, offset, has_more: rows.length > offset + limit };
+      const recs = [];
+      if (!pageRows.length) recs.push('0 rows — a where that matches nothing, or a window with no data: widen time_range or re-check the filter.');
+      if (page.has_more) recs.push(`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`);
+      return {
+        ok: true, command: raw.command, columns, rows: pageRows, row_count: pageRows.length, page,
+        ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
+        provenance: { tier: 'project_metric', metrics: input.metrics, semantic_models: [...new Set(input.metrics.flatMap((m) => known.get(m).semantic_models))] },
+        warnings: windowWarnings,
+        recommendations: recs,
+      };
+    };
+    return async (id) => {
+      if (!explain) await this._ensureTimeSpineBuilt(ctx.id);
+      if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id);
+      return respond(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain }));
+    };
   }
 
   /**
@@ -3519,7 +3694,7 @@ export class Engine {
     const projected = rename.size
       ? `select ${[...(full.groupBy || []).map((g) => (rename.has(g) ? `${g} as ${rename.get(g)}` : g)), ...full.metrics].join(', ')} from (\n${explain.sql}\n) _q`
       : explain.sql;
-    const table = `qr_${id}`;
+    const table = `${RESULT_MODEL_PREFIX}${id}`;
     this.jobs.setTable(id, table);
     const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, order_by: input.order_by, time_range: input.time_range });
     this.ctxs.writeModel(ctx.id, table, `${this._modelConfigLine('table')}\n${header}${projected}\n`);
@@ -3978,6 +4153,8 @@ export class Engine {
 
   /** Reclaim idle, lease-free contexts (bounds workspace growth). */
   gc(maxIdleMs) {
+    // the project's context is never reclaimed; its stored results age out as any context's do
+    if (this.project) this.ctxs.pruneResultModels(PROJECT_CONTEXT, maxIdleMs);
     return this.ctxs.gc(maxIdleMs);
   }
 

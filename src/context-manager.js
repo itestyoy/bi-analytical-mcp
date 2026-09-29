@@ -36,6 +36,47 @@ const TIME_SPINE_YML = `models:
         granularity: day
 `;
 
+// What makes a property file part of a SEMANTIC LAYER, in either YAML spec: the legacy top-level
+// `semantic_models:` / `metrics:` / `saved_queries:`, and the latest spec's keys on a model entry and
+// on its columns. A column's `granularity` stays on a time spine, which is configuration, not a layer.
+const SEMANTIC_TOP_KEYS = ['semantic_models', 'metrics', 'saved_queries'];
+const SEMANTIC_MODEL_KEYS = ['semantic_model', 'metrics', 'derived_semantics', 'primary_entity', 'agg_time_dimension'];
+const SEMANTIC_COLUMN_KEYS = ['entity', 'dimension', 'granularity'];
+
+/**
+ * A property document with the project's own semantic layer taken out → { doc, changed }. A
+ * generated context declares its own layer, and the project's is served from a context of its own
+ * (src/project-semantics.js): two layers in one project collide — the latest spec allows ONE
+ * semantic model per dbt model — and a name of one could shadow a name of the other.
+ */
+export function withoutSemanticLayer(doc) {
+  if (!doc || typeof doc !== 'object') return { doc, changed: false };
+  let changed = false;
+  const out = { ...doc };
+  for (const k of SEMANTIC_TOP_KEYS) if (k in out) { delete out[k]; changed = true; }
+  if (Array.isArray(out.models)) {
+    out.models = out.models.map((m) => {
+      if (!m || typeof m !== 'object') return m;
+      const entry = { ...m };
+      for (const k of SEMANTIC_MODEL_KEYS) if (k in entry) { delete entry[k]; changed = true; }
+      if (!entry.time_spine && Array.isArray(entry.columns)) {
+        entry.columns = entry.columns.map((c) => {
+          if (!c || typeof c !== 'object' || !SEMANTIC_COLUMN_KEYS.some((k) => k in c)) return c;
+          changed = true;
+          const col = { ...c };
+          for (const k of SEMANTIC_COLUMN_KEYS) delete col[k];
+          return col;
+        });
+      }
+      return entry;
+    });
+  }
+  return { doc: out, changed };
+}
+
+/** A property document as YAML — empty when nothing but `version:` is left in it. */
+const dumpProperties = (doc) => (Object.keys(doc || {}).some((k) => k !== 'version') ? yaml.dump(doc, { lineWidth: 120, noRefs: true }) : '');
+
 /** The files ONE pipeline model is: `<model>.sql|.py|.yml` and its chain steps `<model>_sN.*`. */
 function pipelineModelMatcher(model) {
   const re = new RegExp(`^${model}(_s\\d+)?\\.(sql|py|yml)$`);
@@ -51,6 +92,9 @@ function pipelineFamilyMatcher(model) {
   const re = new RegExp(`^${model}(_c\\d+)?(_s\\d+)?\\.(sql|py|yml)$`);
   return (f) => re.test(f);
 }
+
+/** The dbt model a materialized query result is stored as: `<prefix><task_id>` (Engine._materialize). */
+export const RESULT_MODEL_PREFIX = 'qr_';
 
 export function newContextId() {
   return randomBytes(6).toString('hex'); // 12 hex chars
@@ -195,8 +239,12 @@ export class ContextManager {
   /**
    * Create a context. `id` lets a caller pick it IN ADVANCE (newId) — to lay out and check what it
    * will write under its final names before anything touches the disk.
+   *
+   * The copy leaves out the project's OWN semantic layer (withoutSemanticLayer): what a context
+   * queries is what it declares. `{ projectSemantics: true }` keeps it — the one context that serves
+   * the project's layer (src/project-semantics.js).
    */
-  create(id = newContextId()) {
+  create(id = newContextId(), { projectSemantics = false } = {}) {
     const dir = this.dir(id);
     mkdirSync(dir, { recursive: true });
     if (this.baseProjectDir && existsSync(this.baseProjectDir)) {
@@ -215,6 +263,12 @@ export class ContextManager {
         recursive: true,
         filter: (src) => !/(\/logs(\/|$)|\/\.mcp(\/|$)|\/target\/partial_parse\.msgpack$|\/target\/semantic_manifest\.json$)/.test(src),
       });
+      if (!projectSemantics) {
+        for (const rel of this._baseYamlFiles()) {
+          const own = this._ownProperties(rel);
+          if (own?.changed) writeFileSync(join(dir, rel), dumpProperties(own.doc));
+        }
+      }
     }
     mkdirSync(this.generatedDir(id), { recursive: true });
     this.ensureTimeSpine(id);
@@ -298,21 +352,30 @@ export class ContextManager {
       for (const rel of this._baseYamlFiles()) {
         const basePath = join(this.baseProjectDir, rel);
         const overlayPath = join(this.dir(id), rel);
-        let doc;
-        try { doc = yaml.load(readFileSync(basePath, 'utf8')); } catch { continue; }
+        const own = this._ownProperties(rel);
+        if (!own) continue;
+        const { doc } = own;
         const entries = Array.isArray(doc?.models) ? doc.models : [];
         const taken = entries.filter((m) => m && ours.has(m.name));
-        if (!taken.length) { cpSync(basePath, overlayPath); continue; } // the project's own file, as it is
+        if (!taken.length) { // the project's own file, as it is (less its own semantic layer)
+          if (own.changed) writeFileSync(overlayPath, dumpProperties(doc)); else cpSync(basePath, overlayPath);
+          continue;
+        }
         for (const m of taken) merged.set(m.name, m);
         const rest = { ...doc, models: entries.filter((m) => !(m && ours.has(m.name))) };
         if (!rest.models.length) delete rest.models;
         // (a file left holding only `version:` is written empty: nothing in it describes anything)
-        writeFileSync(overlayPath, Object.keys(rest).some((k) => k !== 'version') ? yaml.dump(rest, { lineWidth: 120, noRefs: true }) : '');
+        writeFileSync(overlayPath, dumpProperties(rest));
       }
     }
     const models = render.latest.models.map((m) => mergeModelEntry(merged.get(m.name), m));
     const doc = render.latest.metrics.length ? { models, metrics: render.latest.metrics } : { models };
     return this.writeYaml(id, yaml.dump(doc, { lineWidth: 120, noRefs: true, quotingType: '"' }));
+  }
+
+  /** A base property file, parsed, with the project's own semantic layer taken out; null if unreadable. */
+  _ownProperties(rel) {
+    try { return withoutSemanticLayer(yaml.load(readFileSync(join(this.baseProjectDir, rel), 'utf8'))); } catch { return null; }
   }
 
   /** The base project's property files (YAML under its model-paths, outside generated/), relative to it. */
@@ -381,6 +444,28 @@ export class ContextManager {
     const d = this.generatedDir(id);
     if (!existsSync(d)) return [];
     return readdirSync(d).filter(pipelineModelMatcher(model));
+  }
+
+  /** The stored query results of a context (RESULT_MODEL_PREFIX models): [{ name, sql, mtimeMs }]. */
+  resultModels(id) {
+    const d = this.generatedDir(id);
+    if (!existsSync(d)) return [];
+    return readdirSync(d)
+      .filter((f) => f.startsWith(RESULT_MODEL_PREFIX) && f.endsWith('.sql'))
+      .map((f) => ({ name: f.slice(0, -4), sql: readFileSync(join(d, f), 'utf8'), mtimeMs: statSync(join(d, f)).mtimeMs }));
+  }
+
+  /**
+   * Retire the stored results of a context older than maxAgeMs — for a context served for as long as
+   * the server runs (gc never drops it), the retention CONTEXT_TTL_MS gives every other context's
+   * results. The table stays in the warehouse like a dropped context's; the task reads as gone.
+   */
+  pruneResultModels(id, maxAgeMs) {
+    if (!(maxAgeMs > 0) || !this.has(id) || this.leases.get(id)) return [];
+    const now = Date.now();
+    const old = this.resultModels(id).filter((m) => now - m.mtimeMs > maxAgeMs).map((m) => m.name);
+    for (const name of old) rmSync(join(this.generatedDir(id), `${name}.sql`), { force: true });
+    return old;
   }
 
   /** True when a pipeline model's definition is still in this overlay (its table may exist). */
@@ -456,6 +541,7 @@ export class ContextManager {
     const dropped = [];
     for (const c of [...this.contexts.values()]) {
       if (this.leases.get(c.id)) continue; // never reclaim a context with a live build
+      if (c.state?.pinned) continue; // …nor one served for as long as the server runs (the project's own semantic layer)
       // …nor one whose materialized prefix another (live) context reads: dropping it would take
       // that table with it, which is exactly what context({ action: 'drop' }) refuses to do
       // without force. A consumer in use keeps this one's lastUsedAt fresh, so an owner is only

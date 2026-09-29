@@ -71,6 +71,10 @@ export class MfEngineBackend {
     return this._dbt.parse(projectDir);
   }
 
+  semanticManifest(projectDir) {
+    return this._dbt.semanticManifest(projectDir);
+  }
+
   async run(projectDir, select) {
     return this._dbt.run(projectDir, select);
   }

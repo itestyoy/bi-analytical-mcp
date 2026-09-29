@@ -65,6 +65,13 @@ export class DbtV1 {
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, 'target', 'semantic_manifest.json')) };
   }
 
+  /** The semantic manifest the last parse of `projectDir` wrote (what MetricFlow reads), or null. */
+  semanticManifest(projectDir) {
+    const file = join(projectDir, 'target', 'semantic_manifest.json');
+    if (!existsSync(file)) return null;
+    try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
+  }
+
   /** Build models (a generated pipeline model, a stored query result) via `dbt run --select`. */
   async run(projectDir, select) {
     const args = ['run'];

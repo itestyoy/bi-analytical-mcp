@@ -146,6 +146,23 @@
   dbt process; its work still runs down its failure path, so a build clears its in-flight marker); it
   refuses a task of the other side — before any wait — and it never draws. The side is
   the tool that started the task, persisted with it (the jobs table's `tool`), never guessed.
+  `preview_semantic_model` is the semantic side's INSPECTOR, for the project's own layer (no build
+  to report it) and a task's context alike: it reads the context's PARSED manifest
+  (`src/semantic-manifest.js`, one reader for both YAML specs) and answers in the call — semantic
+  models, each metric's definition and its `group_by` — what it can be grouped by, spelled as that
+  context's query takes it
+  (a metric of several semantic models only what every input reaches), the declaration's own
+  mistakes; with `validate` it starts a semantic task instead (read with query_semantic_model), in
+  which MetricFlow compiles each metric and, over a time_range, the warehouse runs each metric and
+  each semantic model's dimensions, one by one where all at once fails, to name what fails.
+  NOTHING HANDED BACK SPELLS METRICFLOW'S `entity__dimension__grain`: a query names what and where
+  ({ model, attribute }, { semantic_model, dimension }, { entity }, metric_time) and the server resolves it; result
+  columns are the caller's names, and an explained query's SQL and plan and every failure message go
+  through `Engine._callerSpelling`, which rewrites EXACT tokens only — each MetricFlow item's token
+  for the query's metrics, the query's own references, `__<metric>` aliases, metric_time grains, the
+  declared time dimensions' `<dimension>__<grain>` — never a pattern: a project's own columns may be
+  named with `__` (measure__…), and SQL with them renamed would not run. Each occurrence is renamed
+  alike, so the SQL as shown runs to the same rows.
   `display_model_result` is the ONLY tool that draws a MODEL result, for either side: it reads the task the way the
   query tools do (`_awaitRead`), validates `display` against the result's columns, and draws each
   task AT MOST ONCE (a second call is refused) — so one question gets one card by construction.
@@ -288,7 +305,7 @@
   there (side by side on BigQuery).
 - dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
   the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
-  / semanticSpec / pythonModelsOn) over the installed dbt, each major version its own implementation
+  / semanticSpec / semanticManifest / semanticModelSources / pythonModelsOn) over the installed dbt, each major version its own implementation
   — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
   and do NOT branch on the dbt version outside `src/dbt/`.
 - ONE SEMANTIC LAYER, TWO YAML SPECS: the context is rendered once (`src/yaml-render.js`, legacy
@@ -298,6 +315,47 @@
   do not change. What v2 writes differently into the manifest is corrected in its client (a
   percentile is always approximate there: `config.meta.mcp_percentile` puts the request back).
   Metric queries go through MetricFlow's `mf` on either version.
+- THE PROJECT'S OWN SEMANTIC LAYER IS READ AT START, NEVER BUILT (`src/project-semantics.js`): the
+  semantic models and metrics DBT_BASE_PROJECT declares itself (either spec, any file names and
+  layout under its model-paths — a model's only entry may be the one that carries its semantic model;
+  NOTHING is keyed on a name: every name is read from the manifest dbt writes) are parsed once, before the tools are served, into ONE
+  internal copy (`PROJECT_STORE`, never addressed or listed; re-read on every start), and EACH
+  SEMANTIC MODEL IS A CONTEXT OF ITS OWN, ADDRESSED BY ITS NAME (context_id: "<semantic model>";
+  `ContextManager.createShared` — no copy or parse per model; pinned: never gc'd, built on or
+  dropped). There is no context for the layer as a whole. Where one of them is a valid context_id
+  (query_semantic_model, preview_semantic_model, context), the schema offers them as an enum next to
+  the pattern any built context's id matches (`anyOf`). A context offers the metrics that read its
+  semantic model (a metric of several models is in each of theirs), queried with
+  query_semantic_model({ context_id: "<semantic model>" }) — `{ semantic_model, dimension, grain? }`,
+  `semantic_model` ALWAYS a list: the chain of models the dimension is reached through (`["<own>"]` for
+  the context's own model, `["X"]` for one joined to directly, `["A", "X"]` through a chain of joins),
+  one spelling per item — and `{ entity }` in group_by / where / order_by: what a dimension is and
+  where it lives. MetricFlow makes every join; what it needs is its own name for the
+  item, which always carries the entity path (`media_source__label` — it takes no bare `label`, even
+  with one path). WHAT A METRIC CAN BE GROUPED BY IS METRICFLOW'S WORD, NEVER WORKED OUT HERE (HARD
+  RULE): at start the server asks MetricFlow (`groupBys`, its `list_group_bys`) for every metric's
+  items — each dimension with its semantic model and entity path, each entity, metric_time with its
+  grain — and finds the item a reference names in that list (src/group-by-items.js); each hop of
+  MetricFlow's entity path is named by the model it joins onto (the one model unique on that entity
+  carrying the next — `annotateChains`), so a chain is written in models. `via` (the entity) is asked
+  for ONLY for a role — one chain joined through different keys, a buyer's and a seller's country —
+  the case MetricFlow does not choose either; anything else not naming one listed item is refused
+  with the ways it can be named. Do NOT re-derive joins from the manifest. Checked before anything runs, the
+  project's names kept, and the catalog's require_time_range holding on a semantic model over a dbt
+  model the catalog requires a window for (the dbt model dbt itself records the semantic model reads —
+  manifest.json depends_on, `semanticModelSources` in the dbt client). Their queries run side by side (nothing writes to them)
+  in the SAME shell as a task's (`_metricOrderBy` / `_metricWindow` / `_metricPaging` /
+  `_metricEarlyAnswer` / `_metricTask` — only how a reference resolves differs); their stored
+  results are carried over a restart (a start that parses nothing keeps them for the next) and
+  retired by CONTEXT_TTL_MS by age unless a live pipeline reads them. A semantic model no metric
+  reads is no context (`dimension_only` in the overview). A GENERATED context holds its OWN
+  layer only: its copy of the project leaves the project's semantic keys out
+  (`withoutSemanticLayer`, src/context-manager.js) — the latest spec allows one semantic model per
+  dbt model, and a name of one layer could shadow the other's. The overview
+  (`semantic_index().project_semantic_layer.contexts`) lists each context with its dimensions and its
+  metrics, each with its meta (the project's notes on reading it) and the semantic models whose
+  dimensions cut it; preview_semantic_model({ context_id, metric }) gives one metric's definition
+  and its full group_by.
 - dbt RUNS IN NAMED ENVIRONMENTS (`src/dbt/environments.js`): a virtualenv per environment under
   DBT_ENVS_DIR (`.venvs` locally, `/opt/dbt-envs` in the image), named for what is in it — `dbt-v2`
   (used unless DBT_ENV names another), `dbt-v1`, `metricflow`; `createDbt({ environment })` takes its binaries. MetricFlow is an environment of its own

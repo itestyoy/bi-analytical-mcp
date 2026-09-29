@@ -1169,6 +1169,15 @@ export class Catalog {
   }
 
   /**
+   * The same guardrail for a query that reads a dbt model by its NAME rather than as a source — a
+   * semantic model the dbt project declares itself, over a table the catalog may also serve: the
+   * deployment-wide setting, or the flag of the catalog model over that dbt model.
+   */
+  requireTimeRangeForDbtModel(dbtModel) {
+    return !!(this._requireTimeRangeAll ?? Object.values(this.models).some((m) => m.dbt_model === dbtModel && m.require_time_range));
+  }
+
+  /**
    * Resolve the SOURCE an event accessor is asked about. The source is ALWAYS a separate argument
    * and is always passed: there is no "default" fact to fall back to, in any catalog, and silently
    * reading one source's vocabulary for another is exactly the mix-up the per-source design exists

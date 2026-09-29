@@ -65,6 +65,32 @@ export class DbtV1 {
     return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, 'target', 'semantic_manifest.json')) };
   }
 
+  /** The semantic manifest the last parse of `projectDir` wrote (what MetricFlow reads), or null. */
+  semanticManifest(projectDir) {
+    const file = join(projectDir, 'target', 'semantic_manifest.json');
+    if (!existsSync(file)) return null;
+    try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
+  }
+
+  /**
+   * The dbt model each semantic model reads, as dbt recorded it when it parsed `projectDir`
+   * (target/manifest.json: a semantic model's depends_on) → { <semantic model>: <dbt model> }; {}
+   * when the manifest cannot be read.
+   */
+  semanticModelSources(projectDir) {
+    const file = join(projectDir, 'target', 'manifest.json');
+    if (!existsSync(file)) return {};
+    try {
+      const m = JSON.parse(readFileSync(file, 'utf8'));
+      const out = {};
+      for (const sm of Object.values(m.semantic_models || {})) {
+        const model = (sm.depends_on?.nodes || []).map((id) => m.nodes?.[id]).find((n) => n?.resource_type === 'model');
+        if (sm.name && model?.name) out[sm.name] = model.name;
+      }
+      return out;
+    } catch { return {}; }
+  }
+
   /** Build models (a generated pipeline model, a stored query result) via `dbt run --select`. */
   async run(projectDir, select) {
     const args = ['run'];

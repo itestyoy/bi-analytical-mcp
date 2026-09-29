@@ -8,8 +8,11 @@ import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adj
 import { compileDeclaration } from './compile.js';
 import { renderContext, PARTITION_DIM } from './yaml-render.js';
 import { gatePythonRuntime } from './catalog.js';
-import { ContextManager, mergeCompiled } from './context-manager.js';
+import { ContextManager, mergeCompiled, RESULT_MODEL_PREFIX } from './context-manager.js';
 import { renderWhereClauses, renderPredicate } from './predicate.js';
+import { PROJECT_STORE } from './project-semantics.js';
+import { manifestLayer } from './semantic-manifest.js';
+import { commonItems, resolveRef, refOf, tokenOf, columnOf, labelOf, timeItem } from './group-by-items.js';
 import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
@@ -32,7 +35,7 @@ import { detached, currentSignal, isolatedTarget, withSignal } from './request-c
 import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
 
 export class Engine {
-  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [] }) {
+  constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
     this.catalog = catalog;
     this.recipes = recipes; // optional Recipes instance
     this.sqlRunner = sqlRunner; // optional async (sql) => { columns, rows } — for match_recognize
@@ -80,7 +83,11 @@ export class Engine {
     if (recipes) catalog.pythonRecipes = recipes.entriesRequiring('python_models');
     // what the installed dbt can run, before the schemas exist (dbt v2 runs no Python models on DuckDB)
     gatePythonRuntime(catalog, runner);
-    this.schemas = buildSchemas(catalog);
+    // THE PROJECT'S OWN SEMANTIC LAYER (src/project-semantics.js), read at start: its metrics are
+    // queried in a context of their own per semantic model (its name), and the schema names them
+    this.project = project?.layer ? project : null;
+    this.projectError = project?.error || null;
+    this.schemas = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [] });
     // THE FEATURES THIS DEPLOYMENT RUNS (src/features.js): each adds its tools — a schema here and a
     // method on this engine — and the task side they start and read. A feature that is off adds
     // nothing, so its tools are neither listed nor callable.
@@ -351,9 +358,22 @@ export class Engine {
    * of them — reported here with the grounding reason, not as a bare 'Unknown model' thrown from
    * inside the renderer.
    */
+  /**
+   * A context a call is about to CHANGE. The project's own semantic layer (a pinned context) is read
+   * from the project as it is: nothing is built on it, changed in it or deleted from it.
+   */
+  _ctxToWrite(id, field = 'context_id') {
+    const ctx = this._ctx(id);
+    if (ctx.state.pinned) throw new ToolError(`context '${id}' is the dbt project's own semantic layer, read from the project as it is — nothing is built on, changed in or deleted from it. Query its metrics with query_semantic_model({ context_id: '${id}', metrics }); a task of your own is built in a context of its own (omit ${field})`, { stage: 'validate', field });
+    return ctx;
+  }
+
   _ctx(id) {
     let ctx;
-    try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(e.message, { stage: 'validate', field: 'context_id' }); }
+    // the parsed copy the project's own contexts share is internal: its semantic models are the contexts
+    const hint = this.projectError ? ` (the dbt project's own semantic models could not be read, so none of them is a context: ${this.projectError})` : '';
+    try { ctx = this.ctxs.get(id); } catch (e) { throw new ToolError(`${e.message}${hint}`, { stage: 'validate', field: 'context_id' }); }
+    if (ctx.state?.internal) throw new ToolError(`unknown context_id: ${id}${this.project ? ` — the dbt project's own semantic models are contexts of their own, named after them: ${this.project.contexts.join(', ')}` : ''}`, { stage: 'validate', field: 'context_id' });
     const gone = [...new Set([...(ctx.state.usedModels || []), ...Object.keys(ctx.state.additions || {})])].filter((k) => !this.catalog.models[k]);
     if (gone.length) {
       throw new ToolError(`context '${id}' was built over ${gone.map((k) => `'${k}'`).join(', ')}, which the catalog no longer serves${this.catalog.unavailableHint(gone[0])} Start a new context over the sources that are available (semantic_index() lists them).`, { stage: 'validate', field: 'context_id' });
@@ -450,6 +470,12 @@ export class Engine {
   _normalizeRef(ctx, ref, where = 'group_by') {
     if (typeof ref === 'string') {
       throw new ToolError(`${where}: an attribute is addressed by where it lives — { model, attribute } (plus via when several relationships lead there) — never by a path string. '${ref}' → ${this._suggestRef(ctx, ref)}.`, { stage: 'validate', field: where });
+    }
+    if (ref && typeof ref === 'object' && 'entity' in ref && !('attribute' in ref)) {
+      throw new ToolError(`${where}: the entity '${ref.entity}' is one of the dbt project's own semantic layer — group by it in the context of one of its semantic models (context_id: the semantic model's name; semantic_index() lists them), with that model's metrics; here attributes are { model, attribute }.`, { stage: 'validate', field: where });
+    }
+    if (ref && typeof ref === 'object' && 'dimension' in ref && !('attribute' in ref)) {
+      throw new ToolError(`${where}: '${[].concat(ref.semantic_model || []).join(' → ')}${ref.semantic_model ? '.' : ''}${ref.dimension}' is named as a dimension of the dbt project's own semantic layer — query it in the context of the semantic model whose metrics you want (context_id: its name; semantic_index() lists them); here attributes are { model, attribute }.`, { stage: 'validate', field: where });
     }
     if (ref == null || typeof ref !== 'object' || !('attribute' in ref)) return ref;
     const c = this.catalog;
@@ -1039,6 +1065,10 @@ export class Engine {
           note: 'A pipeline may end in a `python` stage (build_pipeline_model add_step { stage: "python", … }): dbt runs it as a Python model on the warehouse runtime.',
         }
         : { available: false, reason: c.pythonRuntime?.reason, note: 'No `python` pipeline stage on this warehouse — pipelines are SQL only.' },
+      // The dbt project's own semantic layer: its metrics, queried in their context without a build —
+      // or why it could not be read (the project did not parse)
+      ...(this.project ? { project_semantic_layer: this._projectOverview() } : {}),
+      ...(this.projectError ? { project_semantic_layer: { available: false, reason: `the dbt project's own semantic models could not be read: ${this.projectError}` } } : {}),
       // The features this deployment was asked to run (src/features.js): what each offers when on,
       // and why it is not offered when it cannot run here. A feature nobody asked for is not listed.
       ...(this.featureStatus.length ? {
@@ -1309,7 +1339,7 @@ export class Engine {
   async register_native_model(input) {
     this._validate('register_native_model', input);
     // a build is a task: the id now, the rows from query_pipeline_model({ task_id })
-    const existing = input.context_id ? this._ctx(input.context_id) : null;
+    const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
     const taskId = this._startTask(existing, 'register_native_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }));
     return this._taskStarted(taskId, { context_id: ctxId });
@@ -1687,7 +1717,7 @@ export class Engine {
   async _draftStart(input) {
     const found = input.from_task ? this._taskBase(input) : null;
     const base = found ? found.base : null;
-    const ctx = input.draft_id ? this._ctx(input.draft_id) : this.ctxs.create();
+    const ctx = input.draft_id ? this._ctxToWrite(input.draft_id, 'draft_id') : this.ctxs.create();
     const source = found ? found.source : input.source;
     ctx.state.draft = { name: input.name, source, materialized: input.materialized || 'table', time_range: base ? null : (input.time_range || null), stages: [], checkpoints: [], ...(base ? { base } : {}), ...(input.description ? { description: input.description } : {}) };
     if (base) this._holdTaskBase(ctx, base);
@@ -2663,7 +2693,7 @@ export class Engine {
     // leaves nothing behind. The context id is CHOSEN first (a new one is not created yet), so the
     // chain is laid out ONCE, under its final names, and its python bodies are gated on that very
     // layout — one render, one compile per python stage.
-    const existing = input.context_id ? this._ctx(input.context_id) : null;
+    const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : (presetCtxId || this.ctxs.newId());
     // The caller may pass the name: every build of a draft gets its own (`_c2`, `_c3`, …), because
     // a rebuild must never overwrite the table it reads as its checkpoint, nor one a fork
@@ -2818,7 +2848,7 @@ export class Engine {
   /** Delete a registered native model: remove its files + state and re-parse. */
   async delete_native_model(input) {
     this._validate('delete_native_model', input);
-    const ctx = this._ctx(input.context_id);
+    const ctx = this._ctxToWrite(input.context_id);
     if (ctx.state.engine !== 'pipeline') return { context_id: ctx.id, removed: false, reason: 'no native (pipeline) model registered in this context' };
     const model = ctx.state.model;
     // a pipeline is a CHAIN of files (.sql / .py / .yml, plus `_sN` steps) — all of them go, and so
@@ -2841,6 +2871,9 @@ export class Engine {
 
   async build_semantic_model(input) {
     this._validate('build_semantic_model', input);
+    // a context that is read as it is (the project's own semantic models) is refused in every mode —
+    // an update, a dry run, a declaration — before anything reads it
+    if (input.context_id && this.ctxs.has(input.context_id)) this._ctxToWrite(input.context_id);
     // Two modes, one tool: declaring a task from scratch, and adding to / removing from the task
     // already in a context. They share this schema (and therefore its vocabularies, which is the
     // whole reason they are one tool) but not their bodies.
@@ -2862,7 +2895,7 @@ export class Engine {
     // The declaration is taken IN THE CALL — compiled, merged, written — so a query issued right
     // after it validates against these metrics; parsing it (dbt) is the task, and a query on this
     // context waits for it (tasks on one context run in order).
-    const ctx = input.context_id ? this._ctx(input.context_id) : this.ctxs.create();
+    const ctx = input.context_id ? this._ctxToWrite(input.context_id) : this.ctxs.create();
     mergeCompiled(ctx.state, compiled);
     const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
     const file = this.ctxs.writeSemanticYaml(ctx.id, render);
@@ -2916,7 +2949,7 @@ export class Engine {
   }
 
   async _updateSemanticModel(input) {
-    const ctx = this._ctx(input.context_id);
+    const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
     // dry_run must NOT mutate the context (state or files): work on a clone.
     const state = input.dry_run ? clone(ctx.state) : ctx.state;
@@ -2976,7 +3009,7 @@ export class Engine {
 
   async delete_semantic_model(input) {
     this._validate('delete_semantic_model', input);
-    const ctx = this._ctx(input.context_id);
+    const ctx = this._ctxToWrite(input.context_id);
     const modelKey = input.semantic_model;
     const add = ctx.state.additions[modelKey];
     if (!add) return { context_id: ctx.id, removed: false, reason: 'no task additions for this model' };
@@ -2996,6 +3029,7 @@ export class Engine {
 
   drop_context(input) {
     this._validate('drop_context', input);
+    if (this.ctxs.has(input.context_id) && this.ctxs.get(input.context_id).state?.pinned) throw new ToolError(`context '${input.context_id}' serves a semantic model of the dbt project's own layer for as long as the server runs — it is read from the project at start, not built here, so there is nothing to drop`, { stage: 'validate', field: 'context_id' });
     // A context whose materialized prefix another draft READS cannot just vanish: the fork's
     // `{{ ref() }}` would resolve to a relation that no longer exists. Name the consumers and let
     // the operator decide (drop them first, or force).
@@ -3228,6 +3262,7 @@ export class Engine {
   async describe_context(input) {
     this._validate('describe_context', input);
     const ctx = this._ctx(input.context_id);
+    if (ctx.state.engine === 'project' && this.project) return { engine: 'project', ...this._projectOverview(ctx.id) };
     // A pipeline-registered model is a normal dbt model whose rows are the result.
     // Report its model name and the output columns you can read — its rows come from its build's
     // task. The columns are grounded to the real relation below.
@@ -3307,16 +3342,524 @@ export class Engine {
       const built = ctx.state.native?.task_id;
       throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ task_id: '${built}' }), filter or regroup them with query_pipeline_model({ context_id: '${ctx.id}', transform }), or build on them with build_pipeline_model({ action: 'start', name, from_task: '${built}' })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
     }
+    // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
+    const project = ctx.state.engine === 'project';
+    const work = project ? (q) => this._projectQueryWork(ctx, q) : (q) => this._semanticQueryWork(ctx, q);
     // A BATCH (queries: up to MAX_BATCH): every query is validated before any starts, and they run
     // side by side — one task each, read together with { task_ids }.
-    if (input.queries) return this._startBatch(ctx, 'query_semantic_model', input.queries, (q) => this._semanticQueryWork(ctx, { ...q, context_id: ctx.id }));
-    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', this._semanticQueryWork(ctx, input)), { context_id: ctx.id });
+    if (input.queries) return this._startBatch(ctx, 'query_semantic_model', input.queries, (q) => work({ ...q, context_id: ctx.id }));
+    // The project's context is never written after start (nothing is built on it) and every
+    // conversation queries it: its queries run side by side, like a batch's members, instead of
+    // each waiting for the one before it.
+    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), project ? { batch: { before: null } } : {}), { context_id: ctx.id });
+  }
+
+  /**
+   * A context's SEMANTIC LAYER AS dbt PARSED IT — one of the project's own semantic models (which has
+   * no build step to report it) or one a task built — read from its semantic manifest (src/semantic-manifest.js):
+   * each semantic model with its entities and dimensions, each metric with its definition (in one shape
+   * for both YAML specs) and what it can be cut by, in the form a query of that context names it, and
+   * what the declaration itself gets wrong. Answered in the call: nothing runs. With `validate` it
+   * STARTS a task instead (the call returns { task_id }): MetricFlow compiles every metric shown, and
+   * with a time_range each metric, and each semantic model's dimensions, is run in the warehouse over it.
+   */
+  async preview_semantic_model(input) {
+    this._validate('preview_semantic_model', input);
+    const ctx = this._ctx(input.context_id);
+    if (ctx.state.engine === 'pipeline') throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), which has no semantic layer — context({ action: 'describe', context_id: '${ctx.id}' }) lists its columns`, { stage: 'validate', field: 'context_id' });
+    if (input.time_range && !input.validate) throw new ToolError('time_range is the window validate runs the metrics over — pass validate: true with it', { stage: 'validate', field: 'time_range' });
+    if (input.time_range?.timezone && !isValidTimezone(input.time_range.timezone)) throw new ToolError(`unknown timezone '${input.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
+    const project = ctx.state.engine === 'project';
+    // the names asked for are checked in the call, against what the context declares
+    const declared = this._previewLayer(ctx);
+    const scope = this._previewScope(ctx, declared.layer, input);
+    if (input.validate) {
+      if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
+      const work = (id) => this._previewValidateWork(ctx, input, id);
+      return this._taskStarted(this._startTask(ctx, 'preview_semantic_model', work, project ? { batch: { before: null } } : {}), { context_id: ctx.id });
+    }
+    // whether a build is running is read now, before MetricFlow is asked (the build may end meanwhile)
+    const building = this._building(ctx);
+    return this._previewAnswer(ctx, declared, scope, input, { ...(await this._listedGroupBys(ctx, declared.parsed ? scope.metrics.map((m) => m.name) : [])), building });
+  }
+
+  /**
+   * What each of `metrics` can be grouped by, as MetricFlow lists it over the context: the project's
+   * layer read it at start; a task's context is asked now (a local listing — nothing is read in the
+   * warehouse). → { groupBys } | { groupBys: null, error }
+   */
+  async _listedGroupBys(ctx, metrics) {
+    if (ctx.state.engine === 'project' && this.project) return { groupBys: this.project.layer.groupBys };
+    if (!metrics.length) return { groupBys: {} };
+    if (!this.runner?.groupBys) return { groupBys: null, error: 'the query engine cannot list them' };
+    const r = await this.runner.groupBys(this.ctxs.dir(ctx.id), metrics);
+    return r.ok ? { groupBys: r.group_bys } : { groupBys: null, error: r.error };
+  }
+
+  /** Whether a BUILD of this context is running (a query queued on it is not one — it changes no manifest). */
+  _building(ctx) {
+    return this.jobs.list().some((j) => j.context_id === ctx.id && j.status === 'running' && SEMANTIC_BUILDS.has(j.tool) && this.jobs.isLive(j.task_id));
+  }
+
+  /** The layer a context's last parse left (its manifest), and what its state declares on top. */
+  _previewLayer(ctx) {
+    const project = ctx.state.engine === 'project';
+    if (project && this.project) return { layer: this.project.layer, parsed: true };
+    const manifest = this.runner?.semanticManifest ? this.runner.semanticManifest(this.ctxs.dir(ctx.id)) : null;
+    return { layer: manifestLayer(manifest), parsed: !!manifest };
+  }
+
+  /** The metrics and semantic models a preview is about: all, one semantic model's, or one metric
+   *  with the metrics it is made of. Names that are not there are refused, naming what is. */
+  _previewScope(ctx, layer, input) {
+    // a context of the project's layer is ONE semantic model: its metrics, and the models they read
+    const project = ctx.state.engine === 'project';
+    const base = project ? this._projectMetricsOf(ctx) : layer.metrics;
+    const baseModels = project ? new Set([ctx.state.semantic_model, ...base.flatMap((m) => m.semantic_models)]) : null;
+    const metricNames = new Set([...base.map((m) => m.name), ...(project ? [] : (ctx.state.metrics || []).map((m) => m.name))]);
+    const smNames = project ? baseModels : new Set([...layer.semantic_models.map((m) => m.name), ...Object.keys(ctx.state.additions || {})]);
+    const list = (set) => [...set].sort().join(', ') || '(none)';
+    if (input.metric && !metricNames.has(input.metric)) throw new ToolError(`'${input.metric}' is not a metric of context '${ctx.id}'. It has: ${list(metricNames)}`, { stage: 'validate', field: 'metric' });
+    if (input.semantic_model && !smNames.has(input.semantic_model)) throw new ToolError(`'${input.semantic_model}' is not a semantic model of context '${ctx.id}'. It has: ${list(smNames)}`, { stage: 'validate', field: 'semantic_model' });
+    const byName = new Map(layer.metrics.map((m) => [m.name, m]));
+    let metrics = base;
+    if (input.metric) {
+      // the metric and what it is made of, so the whole computation is on the page
+      const want = new Set();
+      const walk = (n) => {
+        if (want.has(n)) return;
+        want.add(n);
+        const d = layer.definition(n) || {};
+        for (const i of [d.numerator, d.denominator, ...(d.inputs || []), d.input, d.base, d.conversion]) if (i?.metric) walk(i.metric);
+      };
+      walk(input.metric);
+      metrics = layer.metrics.filter((m) => want.has(m.name));
+    } else if (input.semantic_model) metrics = base.filter((m) => m.semantic_models.includes(input.semantic_model));
+    const reads = new Set(metrics.flatMap((m) => m.semantic_models));
+    const semanticModels = layer.semantic_models.filter((sm) => (input.semantic_model ? sm.name === input.semantic_model : input.metric ? reads.has(sm.name) : project ? baseModels.has(sm.name) : true));
+    return { metrics: metrics.filter((m) => byName.has(m.name)), semanticModels, metricNames };
+  }
+
+  /** The preview answered in the call: definitions, cuts, and the checks that need nothing run. */
+  _previewAnswer(ctx, { layer, parsed }, scope, input, listed = { groupBys: null }) {
+    const project = ctx.state.engine === 'project';
+    const issues = parsed ? layer.issues() : [];
+    const inScope = (i) => (i.metric ? scope.metrics.some((m) => m.name === i.metric) : scope.semanticModels.some((sm) => sm.name === i.semantic_model));
+    const shown = issues.filter(inScope);
+    // a task's metric that its last parse did not take: the build failed, or is still running
+    const running = listed.building ?? this._building(ctx);
+    const inManifest = new Set(layer.metrics.map((m) => m.name));
+    if (!project) {
+      for (const m of ctx.state.metrics || []) {
+        if (!inManifest.has(m.name) && (!input.metric || input.metric === m.name)) shown.push({ severity: 'error', metric: m.name, message: `declared in this context but not in its parsed manifest — ${running ? 'its build is still running: preview again once it is done' : 'its last parse did not take it: read the build task (query_semantic_model({ task_id })) for the parse error'}` });
+      }
+    }
+    if (!parsed) shown.unshift({ severity: 'error', message: running ? 'the context has not been parsed yet — its build is running' : 'the context has no parsed semantic manifest — its build did not parse' });
+    const groupable = project ? null : this._groupableRefs(ctx);
+    const own = ctx.state.semantic_model;
+    // what each metric can be grouped by is MetricFlow's list (src/group-by-items.js), never worked out here
+    const { groupBys } = listed;
+    if (parsed && !groupBys) shown.push({ severity: 'note', message: `MetricFlow did not list what the metrics can be grouped by${listed.error ? `: ${listed.error}` : ''} — group_by below is left out` });
+    const metrics = scope.metrics.map((m) => {
+      const def = layer.definition(m.name) || {};
+      const items = groupBys?.[m.name] || [];
+      const t = timeItem(items);
+      const time = t ? { metric_time: { grain: t.grain || 'day' } } : {};
+      let cut;
+      if (project) {
+        const refs = items.filter((i) => i !== t).map((i) => ({ item: i, ref: refOf(i, own, items) }));
+        const dims = refs.filter((r) => r.item.kind === 'dimension');
+        const ents = uniqueRefs(refs.filter((r) => r.item.kind === 'entity').map((r) => r.ref));
+        cut = input.metric
+          // one metric: every item, spelled exactly as the query takes it
+          ? { dimensions: dims.map((r) => r.ref), entities: ents, ...time }
+          : { dimensions_from: [...new Set(dims.map((r) => r.item.semantic_model))], entities: ents, ...time };
+        if (groupBys && !dims.length && !ents.length && (def.numerator || def.inputs || def.input || def.base)) shown.push({ severity: 'note', metric: m.name, message: 'its inputs share no dimension or entity: it can be grouped by metric_time only' });
+      } else {
+        // a task's context: its attributes are the context's (one list, under groupable), named in full
+        // for one metric
+        cut = { ...(input.metric ? { attributes: groupable } : {}), ...time };
+      }
+      // what this metric's query takes in group_by (and where / order_by), spelled as it takes it
+      return { ...m, definition: def, group_by: cut };
+    });
+    const first = scope.metrics[0];
+    const firstItem = first && project ? (groupBys?.[first.name] || []).find((i) => i.name !== 'metric_time') : null;
+    const firstCut = first && (project ? (firstItem ? refOf(firstItem, own, groupBys[first.name]) : null) : groupable?.[0] || null);
+    const errors = shown.filter((i) => i.severity === 'error').length;
+    return {
+      context_id: ctx.id,
+      layer: project ? 'project' : 'task',
+      status: {
+        parsed,
+        valid: parsed && !errors,
+        ...(running ? { building: true } : {}),
+        issues: shown,
+        note: 'valid says what the declaration and its parse show; validate: true (with a time_range) compiles every metric in MetricFlow and runs it, and each semantic model\'s dimensions, in the warehouse.',
+      },
+      semantic_models: scope.semanticModels.map(({ measures, ...sm }) => ({ ...sm, ...(measures?.length ? { measures } : {}) })),
+      metrics,
+      // what a query of THIS context names a cut by
+      ...(project ? {} : { groupable }),
+      ...(first ? { query_with: `query_semantic_model(${JSON.stringify({ context_id: ctx.id, metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }], time_range: { start: '<date>', end: '<date>' } })})` } : {}),
+      validate_with: `preview_semantic_model(${JSON.stringify({ context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } })})`,
+    };
+  }
+
+  /**
+   * The validation a preview's `validate` starts, as a task: MetricFlow compiles every metric in scope
+   * (all at once; one by one to name the ones that fail), and with a time_range the warehouse runs
+   * them over it (a value each) and runs each semantic model's dimensions and entities — grouped by
+   * all of them through one of its own metrics, one by one again to name a column that fails. What
+   * the context declares is read when the task runs, after any build queued before it.
+   */
+  async _previewValidateWork(ctx, input, id) {
+    const dir = this.ctxs.dir(ctx.id);
+    const { layer, parsed } = this._previewLayer(ctx);
+    if (!parsed) return { ok: false, error: { stage: 'parse', message: 'the context has no parsed semantic manifest — its build did not parse' } };
+    const scope = this._previewScope(ctx, layer, input);
+    const names = scope.metrics.map((m) => m.name);
+    const bounds = input.time_range ? resolveTimeRange(input.time_range) || {} : null;
+    const window = bounds ? { startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined } : {};
+    // what each metric in view can be grouped by, as MetricFlow lists it — the cuts the dimension check
+    // runs, and the tokens a message may quote, in the caller's spelling (see _callerSpelling)
+    const listed = await this._listedGroupBys(ctx, names);
+    const groupBys = listed.groupBys || {};
+    const spelled = new Map();
+    for (const items of Object.values(groupBys)) for (const item of items) spelled.set(tokenOf(item), columnOf(item));
+    for (const m of names) spelled.set(`__${m}`, m); // MetricFlow's alias for a metric's own column
+    const speak = this._callerSpelling(spelled);
+    const message = (r) => speak(formatDbtError(r.stdout, r.stderr) || r.error || 'failed');
+    const signalled = () => currentSignal()?.aborted;
+    /** Run `opts` for a list at once; when that fails, one by one, to name each that fails. */
+    const eachOrAll = async (items, opts) => {
+      if (!items.length) return [];
+      const all = await this.runner.query(dir, opts(items));
+      if (all.ok) return items.map((it) => ({ item: it, ok: true, raw: all }));
+      if (items.length === 1) return [{ item: items[0], ok: false, error: message(all) }];
+      const out = [];
+      for (const it of items) {
+        if (signalled()) break;
+        const r = await this.runner.query(dir, opts([it]));
+        out.push(r.ok ? { item: it, ok: true, raw: r } : { item: it, ok: false, error: message(r) });
+      }
+      return out;
+    };
+    const compiled = await eachOrAll(names, (ms) => ({ metrics: ms, explain: true }));
+    const result = {
+      ok: true, context_id: ctx.id, layer: ctx.state.engine === 'project' ? 'project' : 'task',
+      compiled: compiled.map((c) => ({ metric: c.item, ok: c.ok, ...(c.ok ? {} : { error: c.error }) })),
+    };
+    if (bounds) {
+      await this._ensureTimeSpineBuilt(ctx.id);
+      const good = compiled.filter((c) => c.ok).map((c) => c.item);
+      const ran = await eachOrAll(good, (ms) => ({ metrics: ms, ...window, limit: 1 }));
+      const valueOf = (c) => (c.raw?.rows?.[0] ? c.raw.rows[0][c.item] ?? null : null);
+      const dims = [];
+      for (const sm of scope.semanticModels) {
+        if (signalled()) break;
+        // one of its own metrics that ran carries the cut (so a failure is the cut's); a model no
+        // such metric reads directly is not run
+        const via = ran.filter((c) => c.ok).map((c) => c.item).find((n) => layer.definition(n)?.semantic_model === sm.name);
+        // its dimensions and entities as MetricFlow lists them for that metric — each by its own token
+        const listedFor = via ? groupBys[via] || [] : [];
+        const own = listedFor.filter((i) => i.kind === 'dimension' && i.semantic_model === sm.name).map((i) => ({ name: i.name, token: tokenOf(i) }));
+        const keys = listedFor.filter((i) => i.kind === 'entity' && i.semantic_model === sm.name).map((i) => ({ name: i.name, token: tokenOf(i), entity: true }));
+        const cuts = [...own, ...keys];
+        if (!via) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no metric of it in view ran over the window — nothing to cut its rows with' }); continue; }
+        if (!listed.groupBys) { dims.push({ semantic_model: sm.name, checked: false, reason: `MetricFlow did not list what ${via} can be grouped by${listed.error ? `: ${listed.error}` : ''}` }); continue; }
+        if (!cuts.length) { dims.push({ semantic_model: sm.name, checked: false, reason: 'no dimension or entity to cut by' }); continue; }
+        const r = await eachOrAll(cuts, (cs) => ({ metrics: [via], groupBy: cs.map((c) => c.token), ...window, limit: 1 }));
+        const failed = r.filter((x) => !x.ok).map((x) => ({ [x.item.entity ? 'entity' : 'dimension']: x.item.name, error: x.error }));
+        dims.push({ semantic_model: sm.name, checked: true, through: via, ok: !failed.length, dimensions: own.map((c) => c.name), entities: keys.map((c) => c.name), ...(failed.length ? { failed } : {}) });
+      }
+      result.window = input.time_range;
+      result.ran = {
+        metrics: ran.map((c) => ({ metric: c.item, ok: c.ok, ...(c.ok ? { value: valueOf(c) } : { error: c.error }) })),
+        semantic_models: dims,
+      };
+    }
+    const failures = [...result.compiled, ...(result.ran?.metrics || []), ...(result.ran?.semantic_models || [])].filter((x) => x.ok === false).length;
+    result.valid = !failures;
+    result.summary = `${result.compiled.filter((c) => c.ok).length}/${names.length} metric(s) compile${result.ran ? `; ${result.ran.metrics.filter((c) => c.ok).length}/${result.ran.metrics.length} run over the window; ${result.ran.semantic_models.filter((d) => d.ok).length}/${result.ran.semantic_models.filter((d) => d.checked).length} semantic model(s) whose dimensions all run` : ' (no time_range: nothing was run in the warehouse)'}`;
+    return result;
+  }
+
+  /**
+   * MetricFlow's names, in the caller's spelling. A query is addressed by WHAT and WHERE — { model,
+   * attribute }, { semantic_model, dimension }, { entity }, metric_time — and the server resolves that to MetricFlow's
+   * `entity__dimension__grain` tokens. `names` maps each token the query used to the name the caller
+   * sees (its result column), longest first — and ONLY those: a text is never rewritten by a pattern,
+   * since a project's own columns may carry `__` in their names (measure__…), and SQL that renamed them
+   * would not run. Applied to an explained query's SQL and plan and to every failure message; it
+   * renames each occurrence alike, so SQL keeps its meaning.
+   */
+  /** The tokens any metric query causes besides what it names: metric_time at every grain, and
+   *  MetricFlow's alias for each metric's own column (`__<metric>`). */
+  _queryTokens(metricNames) {
+    const out = new Map();
+    for (const g of this.catalog.timeGranularities()) out.set(`metric_time__${g}`, `metric_time_${g}`);
+    for (const m of metricNames) out.set(`__${m}`, m);
+    return out;
+  }
+
+  /** The tokens of every item MetricFlow listed for the metrics — a joined model's validity window, a
+   *  dimension the query did not name — in the caller's spelling: `<semantic_model>_<dimension>`, the
+   *  result column the same item would give, a time dimension at each grain. */
+  _listedTokens(groupBys) {
+    const out = new Map();
+    for (const items of Object.values(groupBys || {})) {
+      for (const item of items) {
+        out.set(tokenOf(item), columnOf(item));
+        if (item.type === 'time' && item.semantic_model) {
+          out.set(item.dunder_name, `${item.semantic_model}_${item.name}`);
+          for (const g of this.catalog.timeGranularities()) out.set(tokenOf(item, g), columnOf(item, g));
+        }
+      }
+    }
+    return out;
+  }
+
+  /** The name MetricFlow gives a semantic model's own time dimension inside a plan — `<dimension>__<grain>`,
+   *  before any entity is prefixed — for every time dimension the manifest declares, in the caller's
+   *  spelling. Exact tokens from the declaration, like everything _callerSpelling rewrites. */
+  _localTimeTokens(layer) {
+    const out = new Map();
+    for (const sm of layer?.semantic_models || []) {
+      for (const d of sm.dimensions) if (d.type === 'time') for (const g of this.catalog.timeGranularities()) out.set(`${d.name}__${g}`, `${sm.name}_${d.name}_${g}`);
+    }
+    return out;
+  }
+
+  _callerSpelling(names = new Map()) {
+    const pairs = [...names].filter(([tok, name]) => tok.includes('__') && tok !== name).sort((a, b) => b[0].length - a[0].length);
+    const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const one = (text) => {
+      let out = text;
+      for (const [tok, name] of pairs) out = out.replace(new RegExp(`\\b${esc(tok)}\\b`, 'g'), name);
+      return out;
+    };
+    const speak = (v) => (typeof v === 'string' ? one(v) : Array.isArray(v) ? v.map(speak) : v && typeof v === 'object' ? Object.fromEntries(Object.entries(v).map(([k, x]) => [speak(k), speak(x)])) : v);
+    return speak;
+  }
+
+  /** The metrics a context of the project's layer offers: every metric that reads its semantic model. */
+  _projectMetricsOf(ctx) {
+    return this.project.layer.metrics.filter((m) => m.semantic_models.includes(ctx.state.semantic_model));
+  }
+
+  /** What one context of the project's own layer offers — or, with no id, what they all do: the
+   *  semantic model it is (its dimensions and entities), and its metrics, each with the semantic models
+   *  whose dimensions cut it and the entities it is grouped by. */
+  _projectOverview(only = null) {
+    const layer = this.project.layer;
+    const one = (id) => {
+      const ctx = this.ctxs.get(id);
+      const sm = layer.semantic_models.find((x) => x.name === ctx.state.semantic_model);
+      return {
+        context_id: id,
+        ...(sm.description ? { description: sm.description } : {}), ...(sm.table ? { table: sm.table } : {}), ...(sm.meta ? { meta: sm.meta } : {}),
+        dimensions: sm.dimensions.map((d) => ({ name: d.name, ...(d.type === 'time' ? { time: true, grain: d.grain } : {}), ...(d.description ? { description: d.description } : {}) })),
+        entities: sm.entities.map((e) => e.name),
+        // each metric with what MetricFlow says it can be grouped by, in short: the semantic models whose
+        // dimensions it takes, its entities, and its time axis (preview_semantic_model gives every item)
+        metrics: this._projectMetricsOf(ctx).map((m) => {
+          const items = layer.groupBys[m.name] || [];
+          const time = items.find((i) => i.name === 'metric_time' && !i.semantic_model);
+          return {
+            ...m,
+            dimensions_from: [...new Set(items.filter((i) => i.kind === 'dimension' && i.semantic_model).map((i) => i.semantic_model))],
+            entities: uniqueRefs(items.filter((i) => i.kind === 'entity').map((i) => refOf(i, id, items))),
+            ...(time ? { metric_time: { grain: time.grain } } : {}),
+          };
+        }),
+      };
+    };
+    if (only) return one(only);
+    return {
+      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_semantic_model({ context_id: '<semantic model>', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ context_id, metric }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
+      contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map(one),
+      ...(this.project.skipped?.length ? { not_served: this.project.skipped } : {}),
+      // semantic models no metric reads: no context of their own; their dimensions are reached from
+      // the contexts whose metrics reach them (each metric's dimensions_from names them)
+      ...(this.project.dimension_only?.length ? { dimension_only: this.project.dimension_only } : {}),
+    };
+  }
+
+  /**
+   * One metric query of a context of the dbt project's OWN semantic layer (one per semantic model),
+   * checked here against that layer — the context's metrics, and the dimensions each can be grouped
+   * and filtered by —
+   * and run by MetricFlow over the project as the project defines it. What is returned is the work
+   * its task runs, the same task, read and result shape as any metric query.
+   */
+  _projectQueryWork(ctx, input) {
+    const layer = this.project.layer;
+    const own = ctx.state.semantic_model;
+    const known = new Map(this._projectMetricsOf(ctx).map((m) => [m.name, m]));
+    const list = () => [...known.keys()].join(', ') || '(none)';
+    if (!input.metrics?.length) throw new ToolError(`metrics is required. The context '${ctx.id}' has: ${list()}`, { stage: 'validate', field: 'metrics' });
+    for (const m of input.metrics) {
+      if (known.has(m)) continue;
+      const home = layer.metrics.find((x) => x.name === m)?.semantic_models;
+      throw new ToolError(`'${m}' is not a metric of the context '${ctx.id}'${home ? ` — it reads ${home.join(', ')}: query it in ${home.length > 1 ? 'one of those contexts' : `the context '${home[0]}'`}` : ''}. The context has: ${list()}`, { stage: 'validate', field: 'metrics' });
+    }
+    // what EVERY requested metric can be grouped by, as MetricFlow listed it (src/group-by-items.js):
+    // a reference names one of these items exactly — nothing here chooses a join, a path or a grain
+    const items = commonItems(layer.groupBys, input.metrics);
+    const pick = (ref, field) => {
+      if (ref && typeof ref === 'object' && 'model' in ref) throw new ToolError(`${field}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { semantic_model: [the chain of models it is reached through], dimension } and an entity { entity } — the project's own names, not the catalog's { model, attribute }. preview_semantic_model({ context_id: '${ctx.id}', metric }) lists each exactly.`, { stage: 'validate', field });
+      const r = resolveRef(items, ref, own, input.metrics.join(' and '));
+      if (r.error) throw new ToolError(`${field}: ${r.error}`, { stage: 'validate', field });
+      return r.item;
+    };
+    const groupBy = [];
+    const rename = new Map();
+    const groupByResolved = {};
+    // the item each group_by named, by its key — carried, so an order_by naming the same item gets its token
+    const tokenByItem = new Map();
+    const itemKey = (item) => `${item.kind}\u0000${item.semantic_model || ''}\u0000${tokenOf(item)}`;
+    for (const g of input.group_by || []) {
+      const item = g && g.time === 'metric_time' ? items.find((i) => i.name === 'metric_time' && !i.semantic_model) : pick(g, 'group_by');
+      if (!item) throw new ToolError(`group_by: ${input.metrics.join(', ')} ${input.metrics.length > 1 ? 'share' : 'has'} no time axis to group by`, { stage: 'validate', field: 'group_by' });
+      const grain = item.type === 'time' ? g.grain || item.grain || 'day' : null;
+      const tok = tokenOf(item, grain);
+      const column = columnOf(item, grain);
+      if (input.metrics.includes(column) || [...rename.values()].includes(column)) throw new ToolError(`group_by: ${labelOf(item, own, items)} would make a result column '${column}' that another column of this query already has`, { stage: 'validate', field: 'group_by' });
+      groupBy.push(tok); rename.set(tok, column);
+      if (!(g && g.time === 'metric_time')) groupByResolved[labelOf(item, own, items)] = column;
+      tokenByItem.set(itemKey(item), tok);
+    }
+    let where = [];
+    // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
+    const whereNames = new Map();
+    if (input.where) {
+      const translated = clone(input.where);
+      walkPredicates(translated, (p) => {
+        if (p.field?.kind !== 'entity' && p.field?.kind !== 'dimension') return;
+        const item = pick(p.field, 'where');
+        whereNames.set(tokenOf(item), columnOf(item));
+        if (item.kind === 'entity') { p.field = { kind: 'entity', name: tokenOf(item) }; return; }
+        if (item.type === 'time') {
+          whereNames.set(item.dunder_name, `${item.semantic_model}_${item.name}`);
+          p.field = { kind: 'time_dimension', path: item.dunder_name, grain: item.grain || 'day' };
+          return;
+        }
+        p.field = { kind: 'dimension', path: item.dunder_name };
+      });
+      where = renderWhereClauses(translated);
+    }
+    // order_by: a requested metric, a result column name, `metric_time`, { semantic_model, dimension } or { entity }
+    const { orderBy } = this._metricOrderBy(input, {
+      groupBy, rename,
+      resolveKey: (key) => {
+        const item = pick(key, 'order_by');
+        return tokenByItem.get(itemKey(item)) || tokenOf(item);
+      },
+      label: (key) => JSON.stringify(key),
+      refusePath: (key) => { throw new ToolError(`order_by: a dimension is named as in group_by ({ semantic_model: [...], dimension }, { entity }) or by its result column, not by a path string: '${key}'`, { stage: 'validate', field: 'order_by' }); },
+    });
+    if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
+    // the guardrail, as a task's query has it: a semantic model over a dbt model the catalog requires a
+    // window for — or every one, when the deployment does — is not scanned whole
+    const reads = [...new Set(input.metrics.flatMap((m) => known.get(m).semantic_models))];
+    // (keyed by the dbt model dbt itself records each semantic model reads)
+    const guarded = reads.filter((name) => this.catalog.requireTimeRangeForDbtModel(layer.sources?.[name] ?? null));
+    const { bounds, windowWarnings } = this._metricWindow(input, guarded);
+    const paging = this._metricPaging(input);
+    const qopts = { metrics: input.metrics, groupBy, where, orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: paging.fetch };
+    const explain = !!(input.dry_run || input.explain);
+    const speak = this._callerSpelling(new Map([...this._localTimeTokens(layer), ...this._queryTokens(layer.metrics.map((m) => m.name)), ...this._listedTokens(Object.fromEntries(input.metrics.map((m) => [m, layer.groupBys[m] || []]))), ...whereNames, ...rename]));
+    const respond = (raw) => {
+      this.ctxs.touch(ctx.id);
+      const early = this._metricEarlyAnswer(raw, { explain, input, speak });
+      if (early) return early;
+      const columns = (raw.columns || []).map((c) => (rename.has(c.name) ? { ...c, name: rename.get(c.name) } : c));
+      const { rows: pageRows, page } = paging.page((raw.rows || []).map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [rename.get(k) || k, v]))));
+      const recs = [];
+      if (!pageRows.length) recs.push('0 rows — a where that matches nothing, or a window with no data: widen time_range or re-check the filter.');
+      if (page.has_more) recs.push(`More rows exist — page with offset: ${page.offset + page.limit} (same query), or add order_by + a tighter limit.`);
+      return {
+        ok: true, command: raw.command, columns, rows: pageRows, row_count: pageRows.length, page,
+        ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
+        provenance: { tier: 'project_metric', metrics: input.metrics, semantic_models: reads },
+        warnings: windowWarnings,
+        recommendations: recs,
+      };
+    };
+    return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond });
   }
 
   /**
    * One metric query, checked: every mistake is refused HERE (metrics, group_by, where values,
    * order_by, the time window), and what is returned is the work its task runs.
    */
+  // THE SHELL A METRIC QUERY RUNS IN — one for a task's context (_semanticQueryWork) and a project
+  // semantic model's (_projectQueryWork): order_by, the window and its guardrail, paging, the answer
+  // to a failure or an explain, and the task that runs it. What differs between the two is only how a
+  // reference is resolved to MetricFlow's tokens and what a finished answer carries besides its rows.
+
+  /** order_by → MetricFlow's order tokens: a requested metric, a result column name (the caller's —
+   *  never the internal token), `metric_time` for the grained time column, or a group_by reference
+   *  resolved by `resolveKey`. → { orderBy, orderableKeys } */
+  _metricOrderBy(input, { groupBy, rename, resolveKey, label, refusePath }) {
+    const orderable = new Set([...input.metrics, ...groupBy]);
+    const orderableKeys = [...orderable].map((k) => rename.get(k) || k); // what the caller may name
+    const byFriendly = new Map([...rename].map(([tok, friendly]) => [friendly, tok]));
+    const metricTimeTok = groupBy.find((g) => g.startsWith('metric_time__'));
+    const orderBy = (input.order_by || []).map((o) => {
+      let key = o.key;
+      if (typeof key === 'object' && key) key = resolveKey(key);
+      else if (key === 'metric_time' && metricTimeTok) key = metricTimeTok;
+      else if (typeof key === 'string' && key.includes('__')) refusePath(key);
+      else if (typeof key === 'string' && byFriendly.has(key)) key = byFriendly.get(key); // a result column name
+      if (!orderable.has(key)) throw new ToolError(`order_by key '${typeof o.key === 'object' ? label(o.key) : o.key}' is not a requested metric or group_by column. Orderable: ${orderableKeys.join(', ')}`, { stage: 'validate', field: 'order_by' });
+      return `${o.direction === 'desc' ? '-' : ''}${key}`;
+    });
+    return { orderBy, orderableKeys };
+  }
+
+  /** The window: the cost guardrail (`guarded` names what requires a bounded one), the timezone, the
+   *  bounds, and the warnings an open or still-filling window gets. → { bounds, windowWarnings } */
+  _metricWindow(input, guarded = []) {
+    // Cost guardrail (require_time_range): block an unbounded scan over what the query reads
+    if (guarded.length && !input.time_range?.start) {
+      throw new ToolError(`${guarded.join(', ')} require${guarded.length === 1 ? 's' : ''} a bounded time window (require_time_range): pass time_range { start, end } to prune partitions`, { stage: 'validate', field: 'time_range' });
+    }
+    // Timezone-aware boundaries: time_range.timezone reads start/end as wall-clock in that IANA zone
+    // and converts them to the UTC instants the warehouse stores.
+    if (input.time_range?.timezone && !isValidTimezone(input.time_range.timezone)) {
+      throw new ToolError(`unknown timezone '${input.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
+    }
+    // Window honesty: warn when unbounded or when the window reaches into today (the trailing bucket
+    // is incomplete) — so partial periods are never reported silently.
+    return { bounds: resolveTimeRange(input.time_range) || {}, windowWarnings: timeRangeWarnings(input.time_range) };
+  }
+
+  /** Paging: the page asked for, and one row over it fetched so has_more means something. */
+  _metricPaging(input) {
+    const limit = input.limit ?? 1000;
+    const offset = input.offset ?? 0;
+    return { limit, offset, fetch: limit + offset + 1, page: (rows) => ({ rows: rows.slice(offset, offset + limit), page: { limit, offset, has_more: rows.length > offset + limit } }) };
+  }
+
+  /** The answer to a query that failed, or was only explained — null for one that ran. */
+  _metricEarlyAnswer(res, { explain, input, speak, extra = {} }) {
+    if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: speak(formatDbtError(res.stdout, res.stderr)) } };
+    if (!explain) return null;
+    return { ok: true, command: res.command, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(input.explain ? { explain: true, plan: speak(res.plan) } : {}) };
+  }
+
+  /** The task a metric query is: the time spine first (a real query needs it for metric_time), then
+   *  the query — stored as a table with materialize, else answered by `respond`. */
+  _metricTask(ctx, { qopts, input, rename, speak, explain, respond }) {
+    return async (id) => {
+      if (!explain) await this._ensureTimeSpineBuilt(ctx.id);
+      if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id, speak);
+      return respond(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain }));
+    };
+  }
+
   _semanticQueryWork(ctx, input) {
 
     const known = new Set(ctx.state.metrics.map((m) => m.name));
@@ -3349,10 +3892,15 @@ export class Engine {
     });
     let where = [];
     let filterWarnings = [];
+    // the MetricFlow names a where resolved to, in the caller's spelling (see _callerSpelling)
+    const whereNames = new Map();
     if (input.where) {
       const translated = clone(input.where);
       const specs = [];
       walkPredicates(translated, (p) => {
+        // a field named the way a project semantic model's context names it is refused with that
+        // context's name, as group_by refuses it (the schema takes both shapes in every context)
+        if (p.field?.kind === 'entity' || (p.field?.kind === 'dimension' && ('dimension' in p.field || 'semantic_model' in p.field))) this._normalizeRef(ctx, p.field, 'where');
         if (p.field?.kind === 'dimension') {
           if (p.field.path != null) throw new ToolError(`where: a dimension is addressed by where it lives — { kind: 'dimension', model, attribute } — never by a path string. '${p.field.path}' → ${this._suggestRef(ctx, p.field.path)}.`, { stage: 'validate', field: 'where' });
           const label = `${p.field.model}.${p.field.attribute}`;
@@ -3362,6 +3910,7 @@ export class Engine {
           // sources happen to share.
           const at = this._valueKeyForColumn(p.field.model, p.field.attribute);
           p.field.path = this._normalizeRef(ctx, { model: p.field.model, attribute: p.field.attribute, via: p.field.via }, 'where');
+          whereNames.set(p.field.path, `${refModel}_${refAttr}`);
           delete p.field.model; delete p.field.attribute; delete p.field.via;
           if (!allowed.has(p.field.path)) throw new ToolError(`where: '${label}' is not reachable in this context. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'where' });
           this._checkModelLoaded(ctx, { model: refModel, attribute: refAttr });
@@ -3373,66 +3922,37 @@ export class Engine {
       filterWarnings = this._guardFilterValues(specs); // throws on a case/typo/absent mismatch
       where = renderWhereClauses(translated);
     }
-    // order_by keys must be a requested metric or group-by token. `metric_time` is a
-    // convenience alias that resolves to the GRAINED token a time group_by actually
-    // produces (e.g. metric_time__day), so callers don't have to guess the suffix.
-    // A string key is a RESULT COLUMN name (a metric, or the friendly `<model>_<attribute>` /
-    // `metric_time_<grain>` a group_by produces) — never MetricFlow's internal `__` token.
-    const orderable = new Set([...input.metrics, ...groupBy]);
-    const orderableKeys = [...orderable].map((k) => rename.get(k) || k); // what the caller may name
-    const byFriendly = new Map([...rename].map(([tok, friendly]) => [friendly, tok]));
-    const metricTimeTok = groupBy.find((g) => g.startsWith('metric_time__'));
-    const orderBy = (input.order_by || []).map((o) => {
-      let key = o.key;
-      if (typeof key === 'object' && key) key = this._normalizeRef(ctx, key, 'order_by'); // { model, attribute } → the group-by token
-      else if (key === 'metric_time' && metricTimeTok) key = metricTimeTok;
-      else if (typeof key === 'string' && key.includes('__')) throw new ToolError(`order_by: an attribute is addressed as { model, attribute }, not by a path string. '${key}' → ${this._suggestRef(ctx, key)}.`, { stage: 'validate', field: 'order_by' });
-      else if (typeof key === 'string' && byFriendly.has(key)) key = byFriendly.get(key); // a result column name
-      if (!orderable.has(key)) throw new ToolError(`order_by key '${typeof o.key === 'object' ? `${o.key.model}.${o.key.attribute}` : o.key}' is not a requested metric or group_by attribute. Orderable: ${orderableKeys.join(', ')}${metricTimeTok ? ' (metric_time is an alias of the time column)' : ''}`, { stage: 'validate', field: 'order_by' });
-      return `${o.direction === 'desc' ? '-' : ''}${key}`;
+    // order_by: a requested metric, a result column name, `metric_time`, or { model, attribute }
+    const { orderBy, orderableKeys } = this._metricOrderBy(input, {
+      groupBy, rename,
+      resolveKey: (key) => this._normalizeRef(ctx, key, 'order_by'), // { model, attribute } → the group-by token
+      label: (key) => `${key.model}.${key.attribute}`,
+      refusePath: (key) => { throw new ToolError(`order_by: an attribute is addressed as { model, attribute }, not by a path string. '${key}' → ${this._suggestRef(ctx, key)}.`, { stage: 'validate', field: 'order_by' }); },
     });
 
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
-
-    // Cost guardrail (require_time_range): block an unbounded scan over any source this context
-    // reads, so a partitioned source is protected whichever one the metrics come from.
-    const guarded = (ctx.state.usedModels || []).filter((k) => this.catalog.requireTimeRangeFor(k));
-    if (guarded.length && !input.time_range?.start) {
-      throw new ToolError(`source(s) ${guarded.join(', ')} require a bounded time window (require_time_range): pass time_range { start, end } to prune partitions`, { stage: 'validate', field: 'time_range' });
-    }
-    // Timezone-aware boundaries: time_range.timezone reads start/end as wall-clock in
-    // that IANA zone and converts them to the UTC instants the warehouse stores.
-    if (input.time_range?.timezone && !isValidTimezone(input.time_range.timezone)) {
-      throw new ToolError(`unknown timezone '${input.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
-    }
-    const bounds = resolveTimeRange(input.time_range) || {};
-    // Window honesty: warn when unbounded or when the window reaches into today
-    // (the trailing bucket is incomplete) — so partial periods are never reported silently.
-    const windowWarnings = timeRangeWarnings(input.time_range);
-
-    const limit = input.limit ?? 1000;
-    const offset = input.offset ?? 0;
-    // Over-fetch one extra row so `has_more` is meaningful (H2): without the +1,
-    // res.rows is capped at limit+offset and has_more can never be true.
-    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...this._semanticPartitionWhere(ctx, bounds)], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: limit + offset + 1 };
+    // the guardrail covers every source this context reads, whichever one the metrics come from
+    const guarded = (ctx.state.usedModels || []).filter((k) => this.catalog.requireTimeRangeFor(k)).map((k) => `source ${k}`);
+    const { bounds, windowWarnings } = this._metricWindow(input, guarded);
+    const paging = this._metricPaging(input);
+    const qopts = { metrics: input.metrics, groupBy, where: [...where, ...this._semanticPartitionWhere(ctx, bounds)], orderBy, startTime: bounds.start ?? undefined, endTime: bounds.end ?? undefined, limit: paging.fetch };
     const explain = !!(input.dry_run || input.explain);
     // The response is built from the runner's answer in ONE place, whether the query finished
     // inside the call or after it was handed back as a job.
+    // …and the partition filter this query adds for its window, named as the caller would name it
+    const [source] = this._measureSources(ctx);
+    const partitionToken = source && this.catalog.primaryEntityName(source) ? [[`${this.catalog.primaryEntityName(source)}__${PARTITION_DIM}`, `${source}_${PARTITION_DIM}`]] : [];
+    const spelled = new Map([...this._queryTokens((ctx.state.metrics || []).map((m) => m.name)), ...partitionToken, ...whereNames, ...rename]);
+    const speak = this._callerSpelling(spelled);
     const respond = async (raw) => {
       this.ctxs.touch(ctx.id);
       const res = raw.ok && !explain ? { ...raw, ...friendlyResult(raw.columns, raw.rows) } : raw;
-
-      if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: formatDbtError(res.stdout, res.stderr) } };
-      if (explain) {
-        const out = { ok: true, command: res.command, sql: res.sql, orderable_keys: orderableKeys };
-        if (input.dry_run) out.dry_run = true;
-        if (input.explain) { out.explain = true; out.plan = res.plan; }
-        if (filterWarnings.length) out.warnings = filterWarnings;
-        return out;
-      }
-
-      const pageRows = res.rows.slice(offset, offset + limit);
-      const page = { limit, offset, has_more: res.rows.length > offset + limit };
+      // an explain or a failure is text that may quote any item MetricFlow resolved: spelled with its list
+      const listed = !res.ok || explain ? await this._listedGroupBys(ctx, input.metrics) : null;
+      const fully = listed ? this._callerSpelling(new Map([...this._localTimeTokens(this._previewLayer(ctx).layer), ...this._listedTokens(listed.groupBys), ...spelled])) : speak;
+      const early = this._metricEarlyAnswer(res, { explain, input, speak: fully, extra: { orderable_keys: orderableKeys, ...(filterWarnings.length ? { warnings: filterWarnings } : {}) } });
+      if (early) return early;
+      const { rows: pageRows, page } = paging.page(res.rows);
       // A context can span several facts (e.g. crashes vs sessions compared over metric_time):
       // report the freshness of each one it reads, and headline the STALEST — that is the date
       // the combined result is actually complete through.
@@ -3463,7 +3983,7 @@ export class Engine {
       if (usesDistinct && groupBy.some((g) => String(g).startsWith('metric_time__'))) {
         recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_pipeline_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
-      if (page.has_more) recs.push(`More rows exist — page with offset: ${offset + limit} (same query), or add order_by + a tighter limit.`);
+      if (page.has_more) recs.push(`More rows exist — page with offset: ${page.offset + page.limit} (same query), or add order_by + a tighter limit.`);
       recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_pipeline_model({ action: \'start\', from_task })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
       const out = {
         ok: true,
@@ -3491,13 +4011,7 @@ export class Engine {
     // The query is a TASK: validated above, run below, its response read with query_semantic_model({ task_id }).
     // A metric query over a big window can outlast the client in front of this call — so no call
     // holds it.
-    return async (id) => {
-      // Build the time-spine table before a REAL query (not needed for dry_run/explain, which only
-      // generate SQL). MetricFlow requires the spine materialized for metric_time / SCD joins.
-      if (!explain) await this._ensureTimeSpineBuilt(ctx.id);
-      if (input.materialize && !explain) return this._materialize(ctx, qopts, input, rename, id);
-      return respond(await this.runner.query(this.ctxs.dir(ctx.id), { ...qopts, explain, plan: !!input.explain }));
-    };
+    return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond });
   }
 
   /**
@@ -3506,25 +4020,25 @@ export class Engine {
    * first page back. The table is the durable result: query_semantic_model({ task_id }) pages it after the in-memory
    * response is gone, a card drills into it, and a pipeline can start from it (from_task).
    */
-  async _materialize(ctx, qopts, input, rename, id) {
+  async _materialize(ctx, qopts, input, rename, id, speak = this._callerSpelling(rename)) {
     const dir = this.ctxs.dir(ctx.id);
     // The TABLE is the deliverable here, so it holds the whole result. `limit` is the caller's page
     // size for reading rows back below; baking it into the query would persist one page and let
     // every later total be read off it as if it were the full answer.
     const { limit: _page, ...full } = qopts;
     const explain = await this.runner.query(dir, { ...full, explain: true });
-    if (!explain.ok) return { ok: false, error: { stage: 'query', message: formatDbtError(explain.stdout, explain.stderr) } };
+    if (!explain.ok) return { ok: false, error: { stage: 'query', message: speak(formatDbtError(explain.stdout, explain.stderr)) } };
     // The stored table's columns get the caller-facing names (`<model>_<attribute>`,
     // `metric_time_<grain>`), never `__` — they are what a card and a pipeline address.
     const projected = rename.size
       ? `select ${[...(full.groupBy || []).map((g) => (rename.has(g) ? `${g} as ${rename.get(g)}` : g)), ...full.metrics].join(', ')} from (\n${explain.sql}\n) _q`
       : explain.sql;
-    const table = `qr_${id}`;
+    const table = `${RESULT_MODEL_PREFIX}${id}`;
     this.jobs.setTable(id, table);
     const header = sqlConfigHeader('materialized_query', { context_id: ctx.id, metrics: input.metrics, group_by: input.group_by, where: input.where, order_by: input.order_by, time_range: input.time_range });
     this.ctxs.writeModel(ctx.id, table, `${this._modelConfigLine('table')}\n${header}${projected}\n`);
     const r = await this.runner.run(dir, table);
-    if (!r.ok) return { ok: false, table, error: { stage: 'materialize', message: this._sqlRunMessage(r.stdout, r.stderr) } };
+    if (!r.ok) return { ok: false, table, error: { stage: 'materialize', message: speak(this._sqlRunMessage(r.stdout, r.stderr)) } };
     return this._readTable(dir, table, input.limit ?? 1000, undefined, {}, input.offset ?? 0);
   }
 
@@ -3978,6 +4492,8 @@ export class Engine {
 
   /** Reclaim idle, lease-free contexts (bounds workspace growth). */
   gc(maxIdleMs) {
+    // the project's context is never reclaimed; its stored results age out as any context's do
+    if (this.project) this.ctxs.pruneResultModels(PROJECT_STORE, maxIdleMs);
     return this.ctxs.gc(maxIdleMs);
   }
 
@@ -4001,12 +4517,17 @@ export class Engine {
     if (!this.runner?.run) return;
     const ctx = this.ctxs.get(ctxId);
     if (ctx.state._timeSpineBuilt) return;
-    // the queries of a batch run side by side: they share ONE build of the spine, never race to write it
+    // the queries of a batch run side by side — and contexts that share one directory (the project's
+    // own semantic models) query one copy: they share ONE build of the spine, never race to write it
     this._spineBuilds ||= new Map();
-    if (!this._spineBuilds.has(ctxId)) {
-      this._spineBuilds.set(ctxId, this._buildTimeSpine(ctxId, ctx).finally(() => this._spineBuilds.delete(ctxId)));
+    this._spinesBuilt ||= new Set();
+    const dir = this.ctxs.dir(ctxId);
+    if (this._spinesBuilt.has(dir)) { ctx.state._timeSpineBuilt = true; return; }
+    if (!this._spineBuilds.has(dir)) {
+      this._spineBuilds.set(dir, this._buildTimeSpine(ctxId, ctx).then(() => { if (ctx.state._timeSpineBuilt) this._spinesBuilt.add(dir); }).finally(() => this._spineBuilds.delete(dir)));
     }
-    return this._spineBuilds.get(ctxId);
+    await this._spineBuilds.get(dir);
+    if (this._spinesBuilt.has(dir)) ctx.state._timeSpineBuilt = true;
   }
 
   async _buildTimeSpine(ctxId, ctx) {
@@ -4059,10 +4580,15 @@ const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArr
 // task (a build, a query over a built model) with query_pipeline_model({ task_id }). An experiment
 // is no task at all: its statistics come back with its call.
 const TASK_SIDE = {
-  build_semantic_model: 'semantic', update_semantic_model: 'semantic', query_semantic_model: 'semantic',
+  build_semantic_model: 'semantic', update_semantic_model: 'semantic', query_semantic_model: 'semantic', preview_semantic_model: 'semantic',
   build_pipeline_model: 'pipeline', register_native_model: 'pipeline', query_pipeline_model: 'pipeline',
 };
 const SIDE_READER = { semantic: 'query_semantic_model', pipeline: 'query_pipeline_model' };
+// references, each once (an entity several semantic models declare is one key to group by)
+const uniqueRefs = (refs) => [...new Map(refs.map((r) => [JSON.stringify(r), r])).values()];
+
+// the tasks that change a context's semantic manifest (a parse follows them)
+const SEMANTIC_BUILDS = new Set(['build_semantic_model', 'update_semantic_model']);
 
 function clone(x) {
   return JSON.parse(JSON.stringify(x ?? null));

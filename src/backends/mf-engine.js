@@ -71,6 +71,14 @@ export class MfEngineBackend {
     return this._dbt.parse(projectDir);
   }
 
+  semanticManifest(projectDir) {
+    return this._dbt.semanticManifest(projectDir);
+  }
+
+  semanticModelSources(projectDir) {
+    return this._dbt.semanticModelSources(projectDir);
+  }
+
   async run(projectDir, select) {
     return this._dbt.run(projectDir, select);
   }
@@ -137,6 +145,17 @@ export class MfEngineBackend {
     const columns = (r.columns || []).map((name) => ({ name }));
     const rows = (r.rows || []).map((row) => Object.fromEntries(r.columns.map((c, i) => [c, row[i]])));
     return { ok: true, command: 'mf_sidecar.query', columns, rows };
+  }
+
+  /**
+   * What each metric can be grouped by, as MetricFlow itself resolves it over this project — every
+   * dimension (its semantic model, the entity path to it, its type and grain) and entity — so a
+   * caller of this server names one of these rather than a path the server worked out.
+   * → { ok, group_bys: { <metric>: [item] } } | { ok: false, error }
+   */
+  async groupBys(projectDir, metrics) {
+    const r = await this._request(projectDir, { op: 'group_bys', project_dir: projectDir, profiles_dir: this.profilesDir, metrics });
+    return r.ok ? { ok: true, group_bys: r.group_bys || {} } : { ok: false, error: r.error || 'MetricFlow could not list the group-by items' };
   }
 
   close() {

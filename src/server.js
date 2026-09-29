@@ -20,6 +20,7 @@ import { ContextManager } from './context-manager.js';
 import { createDbt, DEFAULT_ENV } from './dbt/index.js';
 import { Engine } from './engine.js';
 import { resolveFeatures } from './features.js';
+import { loadProjectSemantics } from './project-semantics.js';
 import { BackgroundIndexer } from './value-index.js';
 import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
@@ -160,7 +161,12 @@ export async function makeEngine(opts = {}) {
   const rawExpiry = process.env.MCP_TABLE_EXPIRATION_DAYS;
   const tableExpirationDays = rawExpiry == null || rawExpiry === '' ? 30 : Number(rawExpiry);
   if (!Number.isInteger(tableExpirationDays) || tableExpirationDays < 0) throw new Error(`MCP_TABLE_EXPIRATION_DAYS must be a whole number of days (0 keeps the tables), got '${rawExpiry}'`);
-  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, tableExpirationDays, features, featureStatus });
+  // the dbt project's own semantic models and metrics, read once before the tools are served: the
+  // schema names them, and query_semantic_model runs them in their own context with no build
+  const project = runner ? await loadProjectSemantics({ runner, contextManager: ctxs }) : null;
+  if (project?.layer) console.error(`[mcp] ${new Date().toISOString()} project semantic layer: ${project.layer.metrics.length} metric(s) over ${project.layer.semantic_models.length} semantic model(s), one context each: ${project.contexts.join(', ')}${project.skipped?.length ? ` (not served: ${project.skipped.map((x) => `${x.semantic_model} — ${x.reason}`).join('; ')})` : ''}`);
+  if (project?.error) console.error(`[mcp] ${new Date().toISOString()} project semantic layer not served: ${project.error}`);
+  const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, tableExpirationDays, features, featureStatus, project });
   // Persistence surfaces as semantic_index({ status }).value_index.persisted. If a DB path was
   // configured but the store is in-memory, node:sqlite is unavailable (Node < 22.5) — say so
   // loudly, because otherwise the index silently rebuilds from scratch on every restart.

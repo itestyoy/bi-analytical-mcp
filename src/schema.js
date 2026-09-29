@@ -8,11 +8,12 @@
 import { RESEARCH_DOMAINS } from './research-guides.js';
 import { pipelineStageSchema, stageDefs } from './pipeline.js';
 import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
-import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
+import { DRILL_ROWS } from './apps/result-view-model.js';
+import { CONTEXT_ID } from './context-manager.js'; // the most rows one view of a drill-down card reads
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
-const CTX = '^[a-z0-9]{6,40}$';
+const CTX = CONTEXT_ID;
 const TASK_ID = '^[a-f0-9]{12}$'; // what src/jobs.js hands out
 const WINDOW = '^[0-9]+ (second|minute|hour|day|week|month|quarter|year)s?$';
 
@@ -237,7 +238,48 @@ function metricSchema() {
   };
 }
 
-function predicateDefs(catalog) {
+/** `via`: an entity path as MetricFlow lists it — one entity, or several in order. */
+const viaSchema = (entities, description) => ({ description, oneOf: [{ enum: entities }, { type: 'array', minItems: 1, items: { enum: entities } }] });
+
+/** A dimension of the dbt project's OWN semantic layer (src/project-semantics.js), addressed by the
+ *  semantic model that carries it — what a query of a context of the project's own semantic models names. */
+function projectRef(project, catalog, { withKind = false } = {}) {
+  const names = project.semantic_models.map((m) => m.name);
+  const entities = [...new Set(project.semantic_models.flatMap((m) => m.entities.map((e) => e.name)))].sort();
+  return {
+    type: 'object', additionalProperties: false, required: [...(withKind ? ['kind'] : []), 'semantic_model', 'dimension'],
+    description: `A dimension of one of the dbt project's own semantic models, used in that model's context (context_id: the semantic model's name), named by what it is and where it lives: semantic_model is the chain of semantic models it is reached through — ["<the context's own>"] for a dimension of the context's own model, ["X"] for one of X joined to directly, ["A", "X"] for one of X reached through A — and MetricFlow makes the joins. via is needed only for a role: when one chain is joined through different keys (a buyer's and a seller's country); the preview shows it then. ${withKind ? 'The condition compares that dimension\'s values.' : 'Its result column is <semantic_model>_<dimension>, with _<grain> for a time dimension.'} preview_semantic_model({ context_id, metric }) lists every dimension a metric takes, spelled as here, under its group_by.dimensions.`,
+    properties: {
+      ...(withKind ? { kind: { enum: ['dimension'], description: 'Filter on a dimension.' } } : {}),
+      semantic_model: { type: 'array', minItems: 1, items: { enum: names }, description: 'Where the dimension lives: the chain of semantic models it is reached through, in order, ending with the one that carries it — one model for its own dimensions or a direct join, several for a chain of joins.' },
+      dimension: { type: 'string', description: 'The dimension\'s name, as the project declares it.' },
+      ...(withKind ? {} : { grain: { enum: catalog.timeGranularities(), description: 'Only for a time dimension: the bucket rows are grouped into (default: the dimension\'s own granularity).' } }),
+      ...(entities.length ? { via: viaSchema(entities, 'Only for a role — the same chain of semantic models joined through different keys (a buyer and a seller): the entity meant, as preview_semantic_model lists it.') } : {}),
+    },
+  };
+}
+
+/** An entity of the dbt project's own semantic layer, grouped or filtered by name — the key a project
+ *  may declare only as an entity (an app, a country), which MetricFlow groups by as it is. → [] when
+ *  the layer declares none, [ref] otherwise. */
+function projectEntityRef(project, { withKind = false } = {}) {
+  const entities = [...new Set(project.semantic_models.flatMap((m) => m.entities.map((e) => e.name)))].sort();
+  if (!entities.length) return [];
+  return [{
+    type: 'object', additionalProperties: false, required: [...(withKind ? ['kind'] : []), 'entity'],
+    description: `An entity of one of the dbt project's own semantic models, by name, used in that model's context: a key the project declares as an entity — often a column with no dimension of its own, such as a foreign key. ${withKind ? 'The condition compares the key\'s values.' : 'Grouping by it gives one row per key value; its result column is the entity\'s name.'} Every requested metric has to carry it; preview_semantic_model({ context_id, metric }) lists a metric's entities under its group_by.entities.`,
+    properties: {
+      ...(withKind ? { kind: { enum: ['entity'], description: 'Filter on an entity.' } } : {}),
+      entity: { enum: entities, description: 'The entity\'s name, as the project declares it.' },
+      via: viaSchema(entities, 'Only when MetricFlow reaches this entity through several paths: the one meant, as preview_semantic_model lists it.'),
+    },
+  }];
+}
+
+/** A metric_time window, as a metric query and a preview's validation take it. */
+const METRIC_TIME_RANGE = { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } };
+
+function predicateDefs(catalog, project = null) {
   return {
     fieldRef: {
       type: 'object',
@@ -248,6 +290,7 @@ function predicateDefs(catalog) {
       oneOf: [
         { type: 'object', additionalProperties: false, required: ['kind', 'model', 'attribute'], description: 'A dimension addressed by WHERE IT LIVES: { kind: "dimension", model: "users", attribute: "country" } — the join path is resolved from the schema (add via when the source has several relationships to that model).', properties: { kind: { enum: ['dimension'], description: 'Filter on a dimension.' }, model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column) on that model.' }, via: { type: 'string', description: 'Optional relationship name when several lead to the model.' } } },
         { type: 'object', additionalProperties: false, required: ['kind'], description: 'The metric time axis.', properties: { kind: { enum: ['metric_time'], description: 'Filter on the metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time grain to bucket by.' } } },
+        ...(project ? [projectRef(project, catalog, { withKind: true }), ...projectEntityRef(project, { withKind: true })] : []),
       ],
     },
     predicate: {
@@ -296,7 +339,18 @@ function terse(schema) {
   return out;
 }
 
-export function buildSchemas(catalog) {
+export function buildSchemas(catalog, { project = null, projectContexts = [] } = {}) {
+  // a context_id that may be a PRESET one — the dbt project's own semantic models, each a context
+  // read at start and named after it — or any id a build returned: the presets are offered as values
+  const contextId = (description) => (projectContexts.length
+    ? {
+      description,
+      anyOf: [
+        { type: 'string', enum: [...projectContexts].sort(), description: 'One of the dbt project\'s own semantic models: a context read at start, with nothing to build.' },
+        { type: 'string', pattern: CTX, description: 'A context a build returned.' },
+      ],
+    }
+    : { type: 'string', pattern: CTX, description });
   const modelKeys = catalog.modelKeys();
   const create = {
     type: 'object',
@@ -401,7 +455,7 @@ export function buildSchemas(catalog) {
     },
   };
 
-  const pdefs = predicateDefs(catalog);
+  const pdefs = predicateDefs(catalog, project);
   // HOW A RESULT IS SHOWN — declared by the caller, never guessed: the card display_model_result draws in
   // a host that renders MCP Apps follows this when it is given. Every form
   // is one closed branch tagged by `kind` (a discriminator), and what a form needs is said by the
@@ -552,20 +606,21 @@ export function buildSchemas(catalog) {
 
   const semanticQueryFields = {
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
-      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: 'Metric names to fetch (as exposed by the context, e.g. task_<metric>).' },
+      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ context_id }) lists them)' : ''}.` },
       group_by: {
         type: 'array',
-        description: 'How to break the metrics down. Two forms only: { time: "metric_time", grain } for a time series, and { model, attribute } for an attribute addressed by WHERE IT LIVES — the join path is resolved from the schema (add via: "<relationship>" when the source carries several relationships to that model). The owning model must be in use_base_models. No path strings.',
+        description: `How to break the metrics down: one item per column of the result, in the order given. { time: "metric_time", grain } works in every context — the metrics' time axis at a grain, result column metric_time_<grain>. In a task's context an attribute is { model, attribute }, addressed by where it lives: the join path comes from the schema (add via: "<relationship>" when several lead to that model), and its model must be in use_base_models; result column <model>_<attribute>.${project ? ' In a context of one of the dbt project\'s own semantic models (context_id: its name) the project\'s own names are used instead: { semantic_model: [...], dimension, grain? } for a dimension, semantic_model being the chain of models it is reached through (the context\'s own model alone for its own dimensions), MetricFlow making the joins — via only for a role, one chain through several keys — and { entity } for a key the project declares as an entity; preview_semantic_model({ context_id, metric }) lists, under the metric\'s group_by, exactly the items MetricFlow accepts, each spelled as here.' : ''} No path strings.`,
         items: {
           oneOf: [
             { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
             { type: 'object', additionalProperties: false, required: ['model', 'attribute'], description: 'An attribute addressed by where it lives: { model: "users", attribute: "country" }. semantic_index() lists every one under groupable_attributes; build_semantic_model returns the context\'s under groupable. The response echoes the resolved column under group_by_resolved.', properties: { model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column or task dimension) on that model, as semantic_index({ model }) lists it.' }, via: { type: 'string', description: 'Optional: the relationship to reach the model through, when there are several (key variants).' } } },
+            ...(project ? [projectRef(project, catalog), ...projectEntityRef(project)] : []),
           ],
         },
       },
       where: { $ref: '#/$defs/predicateGroup', description: 'Row filter applied before aggregation (boolean tree of conditions on dimensions / metric_time).' },
-      order_by: { type: 'array', description: 'Sort order. Each key is a requested metric name, a RESULT COLUMN of this query ("metric_time_day", "users_country" — the names the rows come back with; "metric_time" is an alias of the time column), or a group_by attribute as { model, attribute }.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { oneOf: [{ type: 'string', description: 'A requested metric name, a result column name (e.g. "users_country", "metric_time_day"), or "metric_time".' }, { type: 'object', additionalProperties: false, required: ['model', 'attribute'], properties: { model: { enum: catalog.modelKeys() }, attribute: { type: 'string' }, via: { type: 'string' } }, description: 'A group_by attribute, addressed as in group_by.' }] }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
-      time_range: { type: 'object', additionalProperties: false, description: 'Restrict to a metric_time range (ISO dates). Unbounded queries scan the whole history — always bound when exploring.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone (e.g. "Europe/Berlin"): start/end are read as wall-clock in this zone and converted to the UTC instants the warehouse stores. Omit for warehouse-native (UTC) bounds.' } } },
+      order_by: { type: 'array', description: 'Sort order. Each key is a requested metric name, a RESULT COLUMN of this query ("metric_time_day", "users_country" — the names the rows come back with; "metric_time" is an alias of the time column), or a group_by attribute as { model, attribute }.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { oneOf: [{ type: 'string', description: 'A requested metric name, a result column name (e.g. "users_country", "metric_time_day"), or "metric_time".' }, { type: 'object', additionalProperties: false, required: ['model', 'attribute'], properties: { model: { enum: catalog.modelKeys() }, attribute: { type: 'string' }, via: { type: 'string' } }, description: 'A group_by attribute, addressed as in group_by.' }, ...(project ? [projectRef(project, catalog), ...projectEntityRef(project)] : [])] }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
+      time_range: METRIC_TIME_RANGE,
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000); with task_id, pages a stored result.' },
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging); with task_id, pages a stored result.' },
       materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with query_semantic_model({ task_id, offset, limit }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_pipeline_model({ action: "start", from_task })).' },
@@ -580,7 +635,7 @@ export function buildSchemas(catalog) {
     allOf: queryModes(Object.keys(semanticQueryFields).filter((f) => f !== 'limit' && f !== 'offset')),
     properties: {
       ...taskRead,
-      context_id: { type: 'string', pattern: CTX, description: D.context_id },
+      context_id: contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id build_semantic_model returned' : ': the context_id build_semantic_model returned'}. The context decides which metrics there are and how a dimension is named in group_by and where. Not needed with task_id / task_ids.`),
       ...semanticQueryFields,
       queries: batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: terse(semanticQueryFields) }, 'metric queries'),
     },
@@ -623,7 +678,7 @@ export function buildSchemas(catalog) {
     ],
     properties: {
       action: { enum: ['list', 'describe', 'drop', 'delete_model', 'delete_semantic_model'], description: 'list → all active contexts; describe → one context in depth; drop → tear down the whole context; delete_model → remove the native pipeline model only; delete_semantic_model → remove one model\'s task additions.' },
-      context_id: { type: 'string', pattern: CTX, description: `${D.context_id} Required for every action except list.` },
+      context_id: contextId(`The context to act on: the context_id a build returned${projectContexts.length ? ', or one of the dbt project\'s own semantic models by its name (those can be described, never dropped or changed)' : ''}. Required for every action except list.`),
       semantic_model: { type: 'string', enum: modelKeys, description: 'delete_semantic_model: which model\'s task additions to remove.' },
       cascade: { type: 'boolean', description: 'delete_semantic_model: also remove metrics that depend on the removed measures.' },
       force: { type: 'boolean', description: 'drop: tear the context down even though another draft READS a table it built (a fork that inherited a materialized prefix). Those drafts then have to recompute that prefix from the source.' },
@@ -675,6 +730,18 @@ export function buildSchemas(catalog) {
       properties: { ...ctxRef.properties, force: { type: 'boolean', description: 'Drop even though another draft reads a table this context built.' } },
     },
     describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
+    // a context's semantic layer as dbt parsed it — one of the project's own semantic models, or a task's
+    preview_semantic_model: {
+      type: 'object', additionalProperties: false, required: ['context_id'],
+      description: 'Three ways to call it: context_id alone shows the context\'s whole semantic layer; with metric, one metric in full (its inputs and everything its group_by takes); with semantic_model, one semantic model and the metrics that read it. Add validate: true (and time_range to read the warehouse) to check it by running it instead — that starts a task.',
+      properties: {
+        context_id: contextId(`The context to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name (the listed values), or ' : ''}the context_id build_semantic_model returned.`),
+        semantic_model: { type: 'string', description: 'Narrow the answer to one semantic model of the context (as its semantic_models name them) and the metrics that read it — mostly for a task\'s context, which can hold several.' },
+        metric: { type: 'string', description: 'Narrow the answer to one metric: its definition, the metrics it is made of (each with its own), and its group_by in full — every dimension, entity and the time axis it can be grouped by, each item spelled exactly as query_semantic_model\'s group_by takes it.' },
+        validate: { type: 'boolean', description: 'Check the layer by running it rather than only reading it. MetricFlow compiles each metric in view, naming one whose SQL it cannot build; with time_range the warehouse also runs each metric over that window (its value comes back) and groups each semantic model\'s rows by all its dimensions and entities, naming a column it cannot read — the checks a dbt v2 parse skips. It is a task: the call returns { task_id }, and query_semantic_model({ task_id }) returns valid, compiled[], ran.metrics[], ran.semantic_models[] and a summary.' },
+        time_range: { ...METRIC_TIME_RANGE, description: 'Only with validate: the metric_time window the metrics and dimensions are run over. Keep it short — the warehouse reads what falls in it. Without it, validate compiles only and reads nothing.' },
+      },
+    },
     list_contexts: empty,
     semantic_index: semanticIndexSchema(catalog),
     time: {

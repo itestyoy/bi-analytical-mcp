@@ -307,11 +307,11 @@
   percentile is always approximate there: `config.meta.mcp_percentile` puts the request back).
   Metric queries go through MetricFlow's `mf` on either version.
 - THE PROJECT'S OWN SEMANTIC LAYER IS READ AT START, NEVER BUILT (`src/project-semantics.js`): the
-  semantic models and metrics DBT_BASE_PROJECT declares itself (either spec, any file layout — e.g. a
-  `models/core/*_semantic_models.yml` whose entries are the only ones of their thin-view models, and a
-  `*_metrics.yml` of ratio / derived metrics) are parsed once, before the tools are served, into ONE
+  semantic models and metrics DBT_BASE_PROJECT declares itself (either spec, any file names and
+  layout under its model-paths — a model's only entry may be the one that carries its semantic model;
+  NOTHING is keyed on a name: every name is read from the manifest dbt writes) are parsed once, before the tools are served, into ONE
   internal copy (`PROJECT_STORE`, never addressed or listed; re-read on every start), and EACH
-  SEMANTIC MODEL IS A CONTEXT OF ITS OWN, ADDRESSED BY ITS NAME (context_id: "aso_store_performance";
+  SEMANTIC MODEL IS A CONTEXT OF ITS OWN, ADDRESSED BY ITS NAME (context_id: "<semantic model>";
   `ContextManager.createShared` — no copy or parse per model; pinned: never gc'd, built on or
   dropped). There is no context for the layer as a whole. Where one of them is a valid context_id
   (query_semantic_model, preview_semantic_model, context), the schema offers them as an enum next to

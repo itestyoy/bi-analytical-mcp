@@ -5,7 +5,7 @@
 // At start the server copies the project into ONE internal context (PROJECT_STORE, never addressed by a
 // caller), parses it through the dbt client, and reads the semantic manifest dbt wrote into the LAYER
 // (src/semantic-manifest.js). Each of the project's semantic models is then a context of its OWN,
-// addressed by its name (context_id: "aso_store_performance") — its metrics (and every metric made of
+// addressed by its name as the project declares it (context_id: "<semantic model>") — its metrics (and every metric made of
 // metrics that read it), its dimensions — all of them working in that one parsed copy, so nothing is
 // copied or parsed per model. A query is checked against the layer before anything runs, and
 // MetricFlow runs it over the copy exactly as the project defines it. Nothing is rendered or

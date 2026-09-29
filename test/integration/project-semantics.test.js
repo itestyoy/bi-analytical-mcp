@@ -400,3 +400,40 @@ test('a preview refuses what the context does not have, naming what it does', op
   await assert.rejects(Promise.resolve().then(() => preview({ context_id: ACQ, time_range: WINDOW })), /pass validate: true/);
   await assert.rejects(Promise.resolve().then(() => preview({ context_id: 'project' })), /unknown context_id/);
 });
+
+test('nothing is keyed on a name: files moved and renamed, a semantic model and its metrics renamed — served under the new names, the same numbers', opts, async (t) => {
+  if (skip(t)) return;
+  const other = join(mkdtempSync(join(tmpdir(), 'projsem-renamed-')), 'project');
+  cpSync(BASE, other, { recursive: true, filter: (src) => !/\/(target|logs)(\/|$)/.test(src) });
+  // the layer's files in another folder, under other names
+  const from = join(other, 'models', 'core');
+  const to = join(other, 'models', 'marts', 'spend');
+  mkdirSync(to, { recursive: true });
+  const doc = yaml.load(readFileSync(join(from, 'project_semantic_models.yml'), 'utf8'));
+  const metricsDoc = yaml.load(readFileSync(join(from, 'project_metrics.yml'), 'utf8'));
+  // the semantic model and every metric under new names
+  const renamed = (n) => n.replace(/^project_/, 'zz_');
+  const acq = doc.models.find((m) => m.semantic_model?.name === ACQ);
+  acq.semantic_model.name = 'paid_spend_daily';
+  for (const m of acq.metrics) m.name = renamed(m.name);
+  const keep = metricsDoc.metrics.filter((m) => ['project_touches', 'project_ctr', 'project_cost_per_touch'].includes(m.name)).map((m) => JSON.parse(JSON.stringify(m).replace(/"project_/g, '"zz_')));
+  writeFileSync(join(to, 'layer.yaml'), yaml.dump(doc, { lineWidth: 120, noRefs: true }));
+  writeFileSync(join(to, 'derived.yml'), yaml.dump({ metrics: keep }, { lineWidth: 120, noRefs: true }));
+  for (const f of ['project_semantic_models.yml', 'project_metrics.yml']) writeFileSync(join(from, f), '');
+  // (the events semantic model stays where it was, on the project's own entry)
+  const ctxs3 = new ContextManager({ baseProjectDir: other, workspaceRoot: mkdtempSync(join(tmpdir(), 'projsem3-')), timeSpineDialect: 'duckdb' });
+  const loaded3 = await loadProjectSemantics({ runner: backend, contextManager: ctxs3 });
+  assert.ok(loaded3?.layer, JSON.stringify(loaded3));
+  assert.deepEqual(loaded3.contexts.sort(), ['paid_spend_daily', EV]);
+  const engine3 = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs3, runner: backend, project: loaded3 }));
+  assert.deepEqual(engine3.schemas.query_semantic_model.properties.context_id.anyOf[0].enum, ['paid_spend_daily', EV]);
+  const want = Object.fromEntries((await wh.query('select media_source, sum(cost) as cost, sum(clicks) as clicks, sum(impressions) as imp from fct_player_acquisition group by 1')).rows.map((r) => [r.media_source, r]));
+  const got = rowsOf(await engine3.query_semantic_model({ context_id: 'paid_spend_daily', time_range: WINDOW, metrics: ['zz_cost', 'zz_cost_per_touch'], group_by: [{ entity: 'media_source' }, { dimension: 'campaign' }] }));
+  const sums = {};
+  for (const r of got) sums[r.media_source] = (sums[r.media_source] || 0) + num(r.zz_cost);
+  for (const [src, w] of Object.entries(want)) assert.ok(Math.abs(sums[src] - num(w.cost)) < 1e-9, src);
+  // the result column of a dimension carries the semantic model's own name
+  assert.ok(got.every((r) => 'paid_spend_daily_campaign' in r), JSON.stringify(got[0]));
+  // the old names are nobody's now
+  await assert.rejects(Promise.resolve().then(() => engine3.raw.query_semantic_model({ context_id: ACQ, metrics: ['project_cost'] })), /unknown context_id/);
+});

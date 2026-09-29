@@ -93,6 +93,10 @@ function pipelineFamilyMatcher(model) {
   return (f) => re.test(f);
 }
 
+/** What a context id may be: a generated one (hex), or a name such as a project semantic model's —
+ *  never a path, and never with a leading `_` (reserved for internal contexts). */
+export const CONTEXT_ID = '^[a-z0-9][a-z0-9_]{2,63}$';
+
 /** The dbt model a materialized query result is stored as: `<prefix><task_id>` (Engine._materialize). */
 export const RESULT_MODEL_PREFIX = 'qr_';
 
@@ -187,8 +191,28 @@ export class ContextManager {
     writeFileSync(this.registryPath, JSON.stringify(data, null, 2));
   }
 
+  /** A context's project directory — its own, or the one it SHARES (a context of the project's own
+   *  semantic layer reads the one copy of the project the server parsed at start). */
   dir(id) {
-    return join(this.workspaceRoot, id);
+    return join(this.workspaceRoot, this.contexts.get(id)?.state?.shares || id);
+  }
+
+  /**
+   * Register a context that works in ANOTHER context's directory (`storeId`): it has its own id,
+   * tasks and state, but no copy of its own — nothing is copied or parsed for it. Dropping it removes
+   * only the registration.
+   */
+  createShared(id, storeId, state = {}) {
+    if (!this.has(storeId)) throw new Error(`unknown context_id: ${storeId}`);
+    const ctx = { id, createdAt: Date.now(), lastUsedAt: Date.now(), state: { tasks: [], additions: {}, metrics: [], usedModels: [], ...state, shares: storeId } };
+    this.contexts.set(id, ctx);
+    this._persist();
+    return ctx;
+  }
+
+  /** The contexts that work in `storeId`'s directory. */
+  sharing(storeId) {
+    return [...this.contexts.values()].filter((c) => c.state?.shares === storeId).map((c) => c.id);
   }
 
   targetPath(id) {
@@ -214,7 +238,8 @@ export class ContextManager {
 
   list() {
     const now = Date.now();
-    return [...this.contexts.values()].map((c) => ({
+    // an internal context (the parsed copy the project's own contexts share) is nobody's to address
+    return [...this.contexts.values()].filter((c) => !c.state?.internal).map((c) => ({
       context_id: c.id,
       tasks: c.state.tasks || [],
       // What the caller said this context is FOR. A listing of ids, task names and metric names
@@ -461,7 +486,7 @@ export class ContextManager {
    * results. The table stays in the warehouse like a dropped context's; the task reads as gone.
    */
   pruneResultModels(id, maxAgeMs) {
-    if (!(maxAgeMs > 0) || !this.has(id) || this.leases.get(id)) return [];
+    if (!(maxAgeMs > 0) || !this.has(id) || [id, ...this.sharing(id)].some((c) => this.leases.get(c))) return [];
     const now = Date.now();
     const old = this.resultModels(id).filter((m) => now - m.mtimeMs > maxAgeMs).map((m) => m.name);
     for (const name of old) rmSync(join(this.generatedDir(id), `${name}.sql`), { force: true });
@@ -574,7 +599,8 @@ export class ContextManager {
     if (!this.contexts.has(id)) return { removed: false };
     if (this.leases.get(id)) throw new Error(`context ${id} has in-flight operations`);
     const dir = this.dir(id);
-    if (existsSync(dir)) rmSync(dir, { recursive: true, force: true });
+    // a context that shares another's directory leaves it to its owner
+    if (!this.contexts.get(id).state?.shares && existsSync(dir)) rmSync(dir, { recursive: true, force: true });
     this.contexts.delete(id);
     this._persist();
     return { removed: true };

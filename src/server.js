@@ -164,7 +164,7 @@ export async function makeEngine(opts = {}) {
   // the dbt project's own semantic models and metrics, read once before the tools are served: the
   // schema names them, and query_semantic_model runs them in their own context with no build
   const project = runner ? await loadProjectSemantics({ runner, contextManager: ctxs }) : null;
-  if (project?.layer) console.error(`[mcp] ${new Date().toISOString()} project semantic layer: ${project.layer.metrics.length} metric(s) over ${project.layer.semantic_models.length} semantic model(s), in context '${project.context_id}'`);
+  if (project?.layer) console.error(`[mcp] ${new Date().toISOString()} project semantic layer: ${project.layer.metrics.length} metric(s) over ${project.layer.semantic_models.length} semantic model(s), one context each: ${project.contexts.join(', ')}${project.skipped?.length ? ` (not served: ${project.skipped.map((x) => `${x.semantic_model} — ${x.reason}`).join('; ')})` : ''}`);
   if (project?.error) console.error(`[mcp] ${new Date().toISOString()} project semantic layer not served: ${project.error}`);
   const engine = new Engine({ catalog, contextManager: ctxs, runner, recipes, queryTimeoutMs, dbPath, resetDb, embedder, memoryDbPath, tableExpirationDays, features, featureStatus, project });
   // Persistence surfaces as semantic_index({ status }).value_index.persisted. If a DB path was

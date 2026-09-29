@@ -8,11 +8,12 @@
 import { RESEARCH_DOMAINS } from './research-guides.js';
 import { pipelineStageSchema, stageDefs } from './pipeline.js';
 import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
-import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
+import { DRILL_ROWS } from './apps/result-view-model.js';
+import { CONTEXT_ID } from './context-manager.js'; // the most rows one view of a drill-down card reads
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
-const CTX = '^[a-z0-9]{6,40}$';
+const CTX = CONTEXT_ID;
 const TASK_ID = '^[a-f0-9]{12}$'; // what src/jobs.js hands out
 const WINDOW = '^[0-9]+ (second|minute|hour|day|week|month|quarter|year)s?$';
 
@@ -238,16 +239,16 @@ function metricSchema() {
 }
 
 /** A dimension of the dbt project's OWN semantic layer (src/project-semantics.js), addressed by the
- *  semantic model that carries it — what a query of the project's context (PROJECT_CONTEXT) names. */
+ *  semantic model that carries it — what a query of a context of the project's own semantic models names. */
 function projectRef(project, catalog, { withKind = false } = {}) {
   const names = project.semantic_models.map((m) => m.name);
   const entities = [...new Set(project.semantic_models.flatMap((m) => m.entities.map((e) => e.name)))].sort();
   return {
-    type: 'object', additionalProperties: false, required: [...(withKind ? ['kind'] : []), 'semantic_model', 'dimension'],
-    description: 'A dimension of the dbt project\'s own semantic layer (context "project"): the semantic model that carries it and the dimension, as the project names them. semantic_index() lists what each project metric can be grouped by.',
+    type: 'object', additionalProperties: false, required: [...(withKind ? ['kind'] : []), 'dimension'],
+    description: 'A dimension of the dbt project\'s own semantic layer, in a context of one of its semantic models (context_id: the semantic model\'s name): the dimension as the project names it, and semantic_model when it is another model\'s that the context\'s metrics reach. semantic_index() lists what each project metric can be grouped by.',
     properties: {
       ...(withKind ? { kind: { enum: ['dimension'], description: 'Filter on a dimension.' } } : {}),
-      semantic_model: { enum: names, description: 'The project\'s semantic model that carries the dimension.' },
+      semantic_model: { enum: names, description: 'The semantic model that carries the dimension — omit it for the context\'s own.' },
       dimension: { type: 'string', description: 'The dimension, as the project names it.' },
       ...(withKind ? {} : { grain: { enum: catalog.timeGranularities(), description: 'A time dimension: the bucket size (default: its own granularity).' } }),
       ...(entities.length ? { via: { enum: entities, description: 'The entity to reach the semantic model through, when the metric reaches it by several.' } } : {}),
@@ -263,7 +264,7 @@ function projectEntityRef(project, { withKind = false } = {}) {
   if (!entities.length) return [];
   return [{
     type: 'object', additionalProperties: false, required: [...(withKind ? ['kind'] : []), 'entity'],
-    description: 'An entity of the dbt project\'s own semantic layer (context "project"), by name: a key its semantic models declare as an entity. semantic_index() lists the entities each project metric can be grouped by.',
+    description: 'An entity of the dbt project\'s own semantic layer, by name, in a context of one of its semantic models: a key its semantic models declare as an entity. semantic_index() lists the entities each project metric can be grouped by.',
     properties: {
       ...(withKind ? { kind: { enum: ['entity'], description: 'Filter on an entity.' } } : {}),
       entity: { enum: entities, description: 'The entity, as the project names it.' },
@@ -590,10 +591,10 @@ export function buildSchemas(catalog, { project = null } = {}) {
 
   const semanticQueryFields = {
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
-      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `Metric names to fetch (as exposed by the context, e.g. task_<metric>)${project ? `; in the context "project", the dbt project's own metrics as it names them (${project.metrics.slice(0, 12).map((m) => m.name).join(', ')}${project.metrics.length > 12 ? ', …' : ''})` : ''}.` },
+      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `Metric names to fetch (as exposed by the context, e.g. task_<metric>)${project ? `; in a context of one of the dbt project's own semantic models (context_id: its name — ${project.semantic_models.slice(0, 12).map((m) => m.name).join(', ')}${project.semantic_models.length > 12 ? ', …' : ''}), that model's metrics as the project names them` : ''}.` },
       group_by: {
         type: 'array',
-        description: `How to break the metrics down. Two forms only: { time: "metric_time", grain } for a time series, and { model, attribute } for an attribute addressed by WHERE IT LIVES — the join path is resolved from the schema (add via: "<relationship>" when the source carries several relationships to that model). The owning model must be in use_base_models. No path strings.${project ? ' In the context "project" (the dbt project\'s own layer), the project\'s own names instead: { semantic_model, dimension } and { entity }, plus metric_time.' : ''}`,
+        description: `How to break the metrics down. Two forms only: { time: "metric_time", grain } for a time series, and { model, attribute } for an attribute addressed by WHERE IT LIVES — the join path is resolved from the schema (add via: "<relationship>" when the source carries several relationships to that model). The owning model must be in use_base_models. No path strings.${project ? ' In a context of the dbt project\'s own semantic model (context_id: its name), the project\'s own names instead: { dimension } of that model ({ semantic_model, dimension } for another it reaches) and { entity }, plus metric_time.' : ''}`,
         items: {
           oneOf: [
             { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
@@ -714,13 +715,13 @@ export function buildSchemas(catalog, { project = null } = {}) {
       properties: { ...ctxRef.properties, force: { type: 'boolean', description: 'Drop even though another draft reads a table this context built.' } },
     },
     describe_context: { ...ctxRef, description: 'Describe a context: tasks, semantic models, measures, metrics, reachable group-by paths.' },
-    // a context's semantic layer as dbt parsed it — the project's own ("project") or a task's
+    // a context's semantic layer as dbt parsed it — one of the project's own semantic models, or a task's
     preview_semantic_model: {
       type: 'object', additionalProperties: false, required: ['context_id'],
       description: 'context_id alone shows its whole semantic layer; add semantic_model or metric to narrow it. validate: true (with time_range to run it in the warehouse) checks it instead and starts a task.',
       properties: {
-        context_id: { type: 'string', description: `The context whose semantic layer to show: ${project ? '"project" (the dbt project\'s own semantic models and metrics) or ' : ''}a context build_semantic_model returned.` },
-        semantic_model: { type: 'string', description: 'Show only this semantic model and the metrics that read it.' },
+        context_id: { type: 'string', pattern: CTX, description: `The context whose semantic layer to show: ${project ? `one of the dbt project's own semantic models, by its name (${project.semantic_models.slice(0, 12).map((m) => m.name).join(', ')}${project.semantic_models.length > 12 ? ', …' : ''}), or ` : ''}a context build_semantic_model returned.` },
+        semantic_model: { type: 'string', description: 'Show only this semantic model of the context and the metrics that read it.' },
         metric: { type: 'string', description: 'Show only this metric — with the metrics it is made of, and every cut it takes in the form a query names it.' },
         validate: { type: 'boolean', description: 'Also check it by running it: MetricFlow compiles every metric shown; with time_range, each metric and each semantic model\'s dimensions are also run in the warehouse over that window (a value per metric). Starts a task: the call returns { task_id }, read with query_semantic_model({ task_id }).' },
         time_range: { ...METRIC_TIME_RANGE, description: 'With validate: the window the metrics and dimensions are run over in the warehouse. Without it, validate compiles only (nothing is read).' },

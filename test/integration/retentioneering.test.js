@@ -589,7 +589,8 @@ test('a read is a summary by default and every record with detail: "full"', opts
   const summary = await engine.query_retentioneering_model({ task_id: q.task_id });
   const [tb] = summary.analyses.path_metrics.tables;
   assert.equal(tb.total_rows, built.users);
-  assert.equal(tb.rows.length, Math.min(built.users, 20));
+  // the first rows the read kept (7 in this suite), up to the 20 a summary shows
+  assert.equal(tb.rows.length, Math.min(built.users, 20, 7));
   const all = await engine.query_retentioneering_model({ task_id: q.task_id, detail: 'full' });
   assert.equal(all.analyses.path_metrics.tables[0].rows.length, built.users);
 });

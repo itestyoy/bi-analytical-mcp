@@ -86,7 +86,7 @@ export class Engine {
     // queried in a context of their own per semantic model (its name), and the schema names them
     this.project = project?.layer ? project : null;
     this.projectError = project?.error || null;
-    this.schemas = buildSchemas(catalog, { project: this.project?.layer || null });
+    this.schemas = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [] });
     // THE FEATURES THIS DEPLOYMENT RUNS (src/features.js): each adds its tools — a schema here and a
     // method on this engine — and the task side they start and read. A feature that is off adds
     // nothing, so its tools are neither listed nor callable.

@@ -335,7 +335,18 @@ function terse(schema) {
   return out;
 }
 
-export function buildSchemas(catalog, { project = null } = {}) {
+export function buildSchemas(catalog, { project = null, projectContexts = [] } = {}) {
+  // a context_id that may be a PRESET one — the dbt project's own semantic models, each a context
+  // read at start and named after it — or any id a build returned: the presets are offered as values
+  const contextId = (description) => (projectContexts.length
+    ? {
+      description,
+      anyOf: [
+        { type: 'string', enum: [...projectContexts].sort(), description: 'One of the dbt project\'s own semantic models: a context read at start, with nothing to build.' },
+        { type: 'string', pattern: CTX, description: 'A context a build returned.' },
+      ],
+    }
+    : { type: 'string', pattern: CTX, description });
   const modelKeys = catalog.modelKeys();
   const create = {
     type: 'object',
@@ -591,7 +602,7 @@ export function buildSchemas(catalog, { project = null } = {}) {
 
   const semanticQueryFields = {
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
-      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `Metric names to fetch (as exposed by the context, e.g. task_<metric>)${project ? `; in a context of one of the dbt project's own semantic models (context_id: its name — ${project.semantic_models.slice(0, 12).map((m) => m.name).join(', ')}${project.semantic_models.length > 12 ? ', …' : ''}), that model's metrics as the project names them` : ''}.` },
+      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `Metric names to fetch (as exposed by the context, e.g. task_<metric>)${project ? '; in a context of one of the dbt project\'s own semantic models (context_id: its name), that model\'s metrics as the project names them' : ''}.` },
       group_by: {
         type: 'array',
         description: `How to break the metrics down. Two forms only: { time: "metric_time", grain } for a time series, and { model, attribute } for an attribute addressed by WHERE IT LIVES — the join path is resolved from the schema (add via: "<relationship>" when the source carries several relationships to that model). The owning model must be in use_base_models. No path strings.${project ? ' In a context of the dbt project\'s own semantic model (context_id: its name), the project\'s own names instead: { dimension } of that model ({ semantic_model, dimension } for another it reaches) and { entity }, plus metric_time.' : ''}`,
@@ -620,7 +631,7 @@ export function buildSchemas(catalog, { project = null } = {}) {
     allOf: queryModes(Object.keys(semanticQueryFields).filter((f) => f !== 'limit' && f !== 'offset')),
     properties: {
       ...taskRead,
-      context_id: { type: 'string', pattern: CTX, description: D.context_id },
+      context_id: contextId(D.context_id),
       ...semanticQueryFields,
       queries: batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: terse(semanticQueryFields) }, 'metric queries'),
     },
@@ -663,7 +674,7 @@ export function buildSchemas(catalog, { project = null } = {}) {
     ],
     properties: {
       action: { enum: ['list', 'describe', 'drop', 'delete_model', 'delete_semantic_model'], description: 'list → all active contexts; describe → one context in depth; drop → tear down the whole context; delete_model → remove the native pipeline model only; delete_semantic_model → remove one model\'s task additions.' },
-      context_id: { type: 'string', pattern: CTX, description: `${D.context_id} Required for every action except list.` },
+      context_id: contextId(`${D.context_id} Required for every action except list.`),
       semantic_model: { type: 'string', enum: modelKeys, description: 'delete_semantic_model: which model\'s task additions to remove.' },
       cascade: { type: 'boolean', description: 'delete_semantic_model: also remove metrics that depend on the removed measures.' },
       force: { type: 'boolean', description: 'drop: tear the context down even though another draft READS a table it built (a fork that inherited a materialized prefix). Those drafts then have to recompute that prefix from the source.' },
@@ -720,7 +731,7 @@ export function buildSchemas(catalog, { project = null } = {}) {
       type: 'object', additionalProperties: false, required: ['context_id'],
       description: 'context_id alone shows its whole semantic layer; add semantic_model or metric to narrow it. validate: true (with time_range to run it in the warehouse) checks it instead and starts a task.',
       properties: {
-        context_id: { type: 'string', pattern: CTX, description: `The context whose semantic layer to show: ${project ? `one of the dbt project's own semantic models, by its name (${project.semantic_models.slice(0, 12).map((m) => m.name).join(', ')}${project.semantic_models.length > 12 ? ', …' : ''}), or ` : ''}a context build_semantic_model returned.` },
+        context_id: contextId(`The context whose semantic layer to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name, or ' : ''}a context build_semantic_model returned.`),
         semantic_model: { type: 'string', description: 'Show only this semantic model of the context and the metrics that read it.' },
         metric: { type: 'string', description: 'Show only this metric — with the metrics it is made of, and every cut it takes in the form a query names it.' },
         validate: { type: 'boolean', description: 'Also check it by running it: MetricFlow compiles every metric shown; with time_range, each metric and each semantic model\'s dimensions are also run in the warehouse over that window (a value per metric). Starts a task: the call returns { task_id }, read with query_semantic_model({ task_id }).' },

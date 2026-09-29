@@ -106,6 +106,13 @@ test('each of the project\'s semantic models is read at start as a context named
   const described = await engine.context({ action: 'describe', context_id: ACQ });
   assert.equal(described.engine, 'project');
   assert.equal(described.context_id, ACQ);
+  // the tools that take one of them offer them as values, and still take any id a build returned
+  for (const tool of ['query_semantic_model', 'preview_semantic_model', 'context']) {
+    const [presets, built] = engine.schemas[tool].properties.context_id.anyOf;
+    assert.deepEqual(presets.enum, [ACQ, EV], tool);
+    assert.ok(built.pattern, tool);
+  }
+  await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_semantic_model({ context_id: 'Not-An-Id', metrics: ['project_cost'] })), /context_id/);
   // the parsed copy they share is nobody's to address, nor listed
   await assert.rejects(Promise.resolve().then(() => (engine.raw || engine).query_semantic_model({ context_id: PROJECT_STORE, metrics: ['project_cost'] })), /context_id/);
   assert.equal((await engine.context({ action: 'list' })).contexts?.some?.((c) => c.context_id === PROJECT_STORE) ?? false, false);

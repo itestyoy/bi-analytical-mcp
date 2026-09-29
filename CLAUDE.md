@@ -313,7 +313,9 @@
   internal copy (`PROJECT_STORE`, never addressed or listed; re-read on every start), and EACH
   SEMANTIC MODEL IS A CONTEXT OF ITS OWN, ADDRESSED BY ITS NAME (context_id: "aso_store_performance";
   `ContextManager.createShared` — no copy or parse per model; pinned: never gc'd, built on or
-  dropped). There is no context for the layer as a whole. A context offers the metrics that read its
+  dropped). There is no context for the layer as a whole. Where one of them is a valid context_id
+  (query_semantic_model, preview_semantic_model, context), the schema offers them as an enum next to
+  the pattern any built context's id matches (`anyOf`). A context offers the metrics that read its
   semantic model (a metric of several models is in each of theirs), queried with
   query_semantic_model({ context_id: "<semantic model>" }) — `{ dimension, grain? }` of its own model,
   `{ semantic_model, dimension, via? }` of one it reaches, and `{ entity }` (a key the project

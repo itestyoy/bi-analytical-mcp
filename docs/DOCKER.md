@@ -117,6 +117,21 @@ analytics:
   session table that lived in the process: after a restart, clients got errors for a session id the
   new process had never issued until the connector was re-added by hand.)
 
+## The error log
+
+Every failure is kept in the store (the same `MCP_DB` file), so it can be looked at after the fact
+with the `explore_errors` tool:
+- a tool call that was refused or failed, with the arguments it was called with;
+- a task that ended in an error, with what dbt or the warehouse said;
+- what a start could not serve: the dbt project's semantic layer, a join it leaves out, a feature
+  that cannot run here.
+
+`explore_errors()` gives the newest 20 and a summary by source, tool and stage. `since` / `until`,
+`source`, `severity`, `tool`, `stage`, `context_id`, `task_id` and `text` narrow them, and `{ id }`
+gives one in full. The log keeps `MCP_ERROR_RETENTION_DAYS` days (default **30**) and at most the
+newest `MCP_ERROR_MAX_ROWS` (default **10000**). It is not cleared by `MCP_DB_RESET`, because a server
+that fails on every start is exactly what it is for.
+
 ## Table expiration on BigQuery
 
 Every table the server builds for a task — a pipeline's models, a stored query result (`qr_*`), a

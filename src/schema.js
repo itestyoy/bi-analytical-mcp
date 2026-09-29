@@ -5,6 +5,7 @@
 // Every property carries a `description` so the meaning/purpose of each
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
+import { ERROR_SOURCES } from './error-log.js';
 import { RESEARCH_DOMAINS } from './research-guides.js';
 import { pipelineStageSchema, stageDefs } from './pipeline.js';
 import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
@@ -238,23 +239,18 @@ function metricSchema() {
   };
 }
 
-/** `via`: an entity path as MetricFlow lists it — one entity, or several in order. */
-const viaSchema = (entities, description) => ({ description, oneOf: [{ enum: entities }, { type: 'array', minItems: 1, items: { enum: entities } }] });
-
 /** A dimension of the dbt project's OWN semantic layer (src/project-semantics.js), addressed by the
  *  semantic model that carries it — what a query of a context of the project's own semantic models names. */
 function projectRef(project, catalog, { withKind = false } = {}) {
   const names = project.semantic_models.map((m) => m.name);
-  const entities = [...new Set(project.semantic_models.flatMap((m) => m.entities.map((e) => e.name)))].sort();
   return {
     type: 'object', additionalProperties: false, required: [...(withKind ? ['kind'] : []), 'semantic_model', 'dimension'],
-    description: `A dimension of one of the dbt project's own semantic models, used in that model's context (context_id: the semantic model's name), named by what it is and where it lives: semantic_model is the chain of semantic models it is reached through — ["<the context's own>"] for a dimension of the context's own model, ["X"] for one of X joined to directly, ["A", "X"] for one of X reached through A — and MetricFlow makes the joins. via is needed only for a role: when one chain is joined through different keys (a buyer's and a seller's country); the preview shows it then. ${withKind ? 'The condition compares that dimension\'s values.' : 'Its result column is <semantic_model>_<dimension>, with _<grain> for a time dimension.'} preview_semantic_model({ context_id, metric }) lists every dimension a metric takes, spelled as here, under its group_by.dimensions.`,
+    description: `A dimension of one of the dbt project's own semantic models, used in that model's context (context_id: the semantic model's name), named by what it is and where it lives: semantic_model is the chain of semantic models it is reached through — ["<the context's own>"] for a dimension of the context's own model, ["X"] for one of X joined to directly, ["A", "X"] for one of X reached through A — and MetricFlow makes the joins. ${withKind ? 'The condition compares that dimension\'s values.' : 'Its result column is <semantic_model>_<dimension>, with _<grain> for a time dimension.'} preview_semantic_model({ context_id, metric }) lists every dimension a metric takes, spelled as here, under its group_by.dimensions.`,
     properties: {
       ...(withKind ? { kind: { enum: ['dimension'], description: 'Filter on a dimension.' } } : {}),
       semantic_model: { type: 'array', minItems: 1, items: { enum: names }, description: 'Where the dimension lives: the chain of semantic models it is reached through, in order, ending with the one that carries it — one model for its own dimensions or a direct join, several for a chain of joins.' },
       dimension: { type: 'string', description: 'The dimension\'s name, as the project declares it.' },
       ...(withKind ? {} : { grain: { enum: catalog.timeGranularities(), description: 'Only for a time dimension: the bucket rows are grouped into (default: the dimension\'s own granularity).' } }),
-      ...(entities.length ? { via: viaSchema(entities, 'Only for a role — the same chain of semantic models joined through different keys (a buyer and a seller): the entity meant, as preview_semantic_model lists it.') } : {}),
     },
   };
 }
@@ -271,7 +267,6 @@ function projectEntityRef(project, { withKind = false } = {}) {
     properties: {
       ...(withKind ? { kind: { enum: ['entity'], description: 'Filter on an entity.' } } : {}),
       entity: { enum: entities, description: 'The entity\'s name, as the project declares it.' },
-      via: viaSchema(entities, 'Only when MetricFlow reaches this entity through several paths: the one meant, as preview_semantic_model lists it.'),
     },
   }];
 }
@@ -609,7 +604,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ context_id }) lists them)' : ''}.` },
       group_by: {
         type: 'array',
-        description: `How to break the metrics down: one item per column of the result, in the order given. { time: "metric_time", grain } works in every context — the metrics' time axis at a grain, result column metric_time_<grain>. In a task's context an attribute is { model, attribute }, addressed by where it lives: the join path comes from the schema (add via: "<relationship>" when several lead to that model), and its model must be in use_base_models; result column <model>_<attribute>.${project ? ' In a context of one of the dbt project\'s own semantic models (context_id: its name) the project\'s own names are used instead: { semantic_model: [...], dimension, grain? } for a dimension, semantic_model being the chain of models it is reached through (the context\'s own model alone for its own dimensions), MetricFlow making the joins — via only for a role, one chain through several keys — and { entity } for a key the project declares as an entity; preview_semantic_model({ context_id, metric }) lists, under the metric\'s group_by, exactly the items MetricFlow accepts, each spelled as here.' : ''} No path strings.`,
+        description: `How to break the metrics down: one item per column of the result, in the order given. { time: "metric_time", grain } works in every context — the metrics' time axis at a grain, result column metric_time_<grain>. In a task's context an attribute is { model, attribute }, addressed by where it lives: the join path comes from the schema (add via: "<relationship>" when several lead to that model), and its model must be in use_base_models; result column <model>_<attribute>.${project ? ' In a context of one of the dbt project\'s own semantic models (context_id: its name) the project\'s own names are used instead: { semantic_model: [...], dimension, grain? } for a dimension, semantic_model being the chain of models it is reached through (the context\'s own model alone for its own dimensions), MetricFlow making the joins — and { entity } for a key the project declares as an entity; preview_semantic_model({ context_id, metric }) lists, under the metric\'s group_by, exactly the items MetricFlow accepts, each spelled as here.' : ''} No path strings.`,
         items: {
           oneOf: [
             { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
@@ -750,6 +745,25 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       properties: {
         seconds: { type: 'number', minimum: 0, maximum: 86400, description: `Seconds to wait; the actual wait is capped at ${MAX_WAIT_SECONDS} (larger values are clamped, with clamped:true and cap_seconds in the result).` },
         reason: { type: 'string', description: 'Optional note on what you are waiting for (echoed back; metadata only).' },
+      },
+    },
+    explore_errors: {
+      type: 'object', additionalProperties: false,
+      description: 'Read the failures the server kept. { id } → one in full; otherwise a page of them, newest first, narrowed by the fields given.',
+      properties: {
+        id: { type: 'integer', minimum: 1, description: 'One error in full: the call\'s arguments (a task\'s input) and everything that was said about it.' },
+        since: { type: 'string', description: 'Only errors at or after this moment (ISO 8601 date or date-time, e.g. "2026-09-29" or "2026-09-29T10:00:00Z").' },
+        until: { type: 'string', description: 'Only errors at or before this moment (ISO 8601; a date alone means the whole of that day).' },
+        source: { enum: ERROR_SOURCES, description: 'Where it happened: tool — a call refused or failed; task — warehouse work that ended in an error; startup — what a start could not serve.' },
+        severity: { enum: ['error', 'warning'], description: 'error — something failed; warning — something was left out and served without it (a join the project declares that no reference can name, a feature that cannot run here).' },
+        tool: { type: 'string', description: 'Only the errors of this tool (for a task: the tool that started it).' },
+        stage: { type: 'string', description: 'Only this stage (validate, query, build, task, …).' },
+        context_id: { type: 'string', description: 'Only the errors on this context.' },
+        task_id: { type: 'string', description: 'Only this task\'s errors.' },
+        text: { type: 'string', minLength: 1, description: 'Only errors whose message contains this text (any case).' },
+        detail: { type: 'boolean', description: 'Give each error of the page in full (arguments and detail), not only its message.' },
+        limit: { type: 'integer', minimum: 1, maximum: 200, description: 'How many to return (default 20).' },
+        offset: { type: 'integer', minimum: 0, description: 'Skip this many of the newest first (next_offset of the previous page).' },
       },
     },
     experiment: experimentSchema(),

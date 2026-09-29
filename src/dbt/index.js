@@ -11,6 +11,9 @@
 //   validate(projectDir)                  → { ok, stdout, stderr }
 //   warehouse(projectDir)                 → { adapter, singleWriter, turn }
 //   semanticSpec                          → 'legacy' | 'latest'   (the semantic YAML this dbt reads)
+//   semanticManifest(projectDir)          → the semantic manifest the last parse wrote, or null
+//   semanticModelSources(projectDir)      → { <semantic model>: <dbt model it reads> }
+//   groupBys(projectDir, metrics)         → { ok, group_bys: { <metric>: [item] } }  (MetricFlow's list)
 //   pythonModelsOn(adapter)               → can this dbt run Python models there
 //
 // Every method takes the project it works on (a context's overlay project) and never throws for a
@@ -58,7 +61,7 @@ export function createDbt({ version = 'auto', environment, ...opts } = {}) {
   let env = null;
   if (environment) {
     env = typeof environment === 'string' ? resolveEnvironment(environment) : environment;
-    opts = { dbtBin: env.dbtBin, ...(env.mfBin ? { mfBin: env.mfBin } : {}), ...opts };
+    opts = { dbtBin: env.dbtBin, ...(env.mfBin ? { mfBin: env.mfBin } : {}), ...(env.pythonBin ? { pythonBin: env.pythonBin } : {}), ...opts };
   }
   const major = version === 'auto' ? detectDbtMajor(opts.dbtBin) ?? 1 : Number(version);
   const Impl = IMPLEMENTATIONS[major];

@@ -287,6 +287,12 @@
   the tool descriptions, and every tool description stands on its own (each within 2,048 too); long
   procedures live behind semantic_index ({ guide }, { recipe }) and the skills
   (test/unit/tool-surface.test.js holds the budgets).
+- EVERY FAILURE IS KEPT (src/error-log.js → the store's `errors` table), read with `explore_errors`
+  (read-only): a call refused or failed, with its arguments (runTool — one point, for every tool); a
+  task that ended in an error, with its input (`_startTask`); what a start could not serve (the
+  project's layer, a join `servable` leaves out, a feature that cannot run). A read of a failed task
+  is not kept again. Bounded by MCP_ERROR_RETENTION_DAYS / MCP_ERROR_MAX_ROWS, not cleared by
+  MCP_DB_RESET; recording never fails the call it records.
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`
@@ -305,7 +311,7 @@
   there (side by side on BigQuery).
 - dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
   the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
-  / semanticSpec / semanticManifest / semanticModelSources / pythonModelsOn) over the installed dbt, each major version its own implementation
+  / semanticSpec / semanticManifest / semanticModelSources / groupBys / pythonModelsOn) over the installed dbt, each major version its own implementation
   — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
   and do NOT branch on the dbt version outside `src/dbt/`.
 - ONE SEMANTIC LAYER, TWO YAML SPECS: the context is rendered once (`src/yaml-render.js`, legacy
@@ -337,10 +343,14 @@
   items — each dimension with its semantic model and entity path, each entity, metric_time with its
   grain — and finds the item a reference names in that list (src/group-by-items.js); each hop of
   MetricFlow's entity path is named by the model it joins onto (the one model unique on that entity
-  carrying the next — `annotateChains`), so a chain is written in models. `via` (the entity) is asked
-  for ONLY for a role — one chain joined through different keys, a buyer's and a seller's country —
-  the case MetricFlow does not choose either; anything else not naming one listed item is refused
-  with the ways it can be named. Do NOT re-derive joins from the manifest. Checked before anything runs, the
+  carrying the next — `annotateChains`), so a chain is written in models, and a reference carries no
+  path of keys (no `via`). A join no chain of models can name is NOT SERVED (`servable`): a model
+  joined onto through several keys (a role — a buyer's and a seller's country, both of users) or a hop
+  that lands on no single model. Its items are left out of every metric's list, and it is reported —
+  in the overview (`joins_not_served`), as an error in the preview, and in the refusal of a query that
+  names it — with how to declare it so it is served: one semantic model per key, each a dbt model of
+  its own over the same one. Anything else not naming one listed item is refused with the ways it can
+  be named. Do NOT re-derive joins from the manifest. Checked before anything runs, the
   project's names kept, and the catalog's require_time_range holding on a semantic model over a dbt
   model the catalog requires a window for (the dbt model dbt itself records the semantic model reads —
   manifest.json depends_on, `semanticModelSources` in the dbt client). Their queries run side by side (nothing writes to them)

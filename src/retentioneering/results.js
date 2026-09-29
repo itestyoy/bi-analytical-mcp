@@ -117,7 +117,7 @@ const round = (x, digits = 4) => (typeof x === 'number' ? Number(x.toFixed(digit
 /** What the model reads of one analysis: the numbers that answer, not every cell. */
 export function summarize(result) {
   const { kind } = result;
-  const generic = summarizeGeneric(result);
+  const libraryTables = summarizeGeneric(result);
   if (kind === 'transition_graph' && result.edges) {
     const edges = [...result.edges].sort((a, b) => b.count - a.count || byText(a.source, b.source) || byText(a.target, b.target));
     return {
@@ -139,7 +139,7 @@ export function summarize(result) {
       })),
     };
   }
-  if (kind === 'funnel' && result.steps) return { kind, steps: result.steps.map((s) => ({ step: s.step, unique_paths: s.unique_paths, conversion_rate: round(s.conversion_rate), step_conversion_rate: round(s.step_conversion_rate) })), ...generic };
+  if (kind === 'funnel' && result.steps) return { kind, steps: result.steps.map((s) => ({ step: s.step, unique_paths: s.unique_paths, conversion_rate: round(s.conversion_rate), step_conversion_rate: round(s.step_conversion_rate) })), ...libraryTables };
   if ((kind === 'cluster_analysis' || kind === 'segment_overview') && result.levels) {
     const levelKey = kind === 'cluster_analysis' ? 'clusters' : 'levels';
     const size = result.metrics.find((m) => m.metric === 'segment_size');
@@ -163,10 +163,10 @@ export function summarize(result) {
       })),
       ...(result.best_params ? { best_params: result.best_params } : {}),
       ...(result.silhouette ? { silhouette: result.silhouette.map((s) => ({ ...s.params, score: round(s.score), best: s.best })) } : {}),
-      ...generic,
+      ...libraryTables,
     };
   }
-  return { kind, ...generic };
+  return { kind, ...libraryTables };
 }
 
 /** Whether a result holds only the first rows of one of its tables (the rest is in the stored table). */

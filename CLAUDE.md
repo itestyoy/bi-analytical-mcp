@@ -214,7 +214,9 @@
   step that passes returns the shape it leaves, read off the stand-ins by the library's own schema — what
   the next step is checked against, as a pipeline stage is checked against the columns before it. It
   does not restate the library's checks in JS; a check that cannot run refuses nothing. No cap on analyses, steps, rows or
-  tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
+  tasks: nothing the library computes or returns is cut — only what a READ holds in memory is bounded
+  (a table's first rows, `keptRows`), and every row is there on detail: "full" and for the card that
+  draws it. The schema carries the catalog's own events and attributes as enums. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the
   eventstream's shape rules out. The build reaches the source's OWN columns (every real column, the

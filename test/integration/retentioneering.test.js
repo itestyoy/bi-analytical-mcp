@@ -434,7 +434,11 @@ test('steps asked for at once are applied one after the other: none is lost', op
 test('a column a step makes is an identifier the warehouse stores; a segment named for a keyword is carried', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await stepsContext();
-  await assert.rejects(engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'base', step: { type: 'add_segment', name: 'ad format', rules: { cases: [{ column: 'platform', op: '=', value: 'ios', level: 'x' }], else: 'y' } } }), (e) => e.field === 'step' && /'ad format' cannot be a column/.test(e.message) && /nothing changed/.test(e.message));
+  const segmentNamed = (name) => engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'base', step: { type: 'add_segment', name, rules: { cases: [{ column: 'platform', op: '=', value: 'ios', level: 'x' }], else: 'y' } } });
+  await assert.rejects(segmentNamed('ad format'), (e) => e.field === 'step' && /'ad format' cannot be a column/.test(e.message) && /nothing changed/.test(e.message));
+  await assert.rejects(segmentNamed('seg\n'), (e) => e.field === 'step' && /cannot be a column/.test(e.message));
+  // nor a name the stored eventstream uses for what it carries besides
+  await assert.rejects(segmentNamed('event_order'), (e) => e.field === 'step' && /uses that name itself/.test(e.message));
   // `group` is a keyword in both warehouses: quoted wherever the eventstream and its summary name it
   const b = await engine.build_retentioneering_model({ context_id: ctx, name: 'keyworded', source: 'events', segments: [{ model: 'users', attribute: 'platform', as: 'group' }] });
   const read = await engine.query_retentioneering_model({ task_id: b.task_id });
@@ -467,6 +471,62 @@ test('a card speaks of the rows its analysis read, whatever the eventstream beca
   assert.ok(after.users < before.users);
   const d = await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'transition_graph' });
   assert.deepEqual([d.scope.users, d.scope.events], [before.users, before.events]);
+});
+
+test('a materialize that ends while a step is being edited never leaves a table standing for the old steps', opts, async (t) => {
+  if (skip(t)) return;
+  const ctx = await stepsContext();
+  await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'base', name: 'racing', after: 0 });
+  await engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'racing', steps: [{ type: 'collapse_events', loops: true }, { type: 'drop_events', names: ['tutorial'] }] });
+  const m = await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: 'racing' });
+  // the edit is made while the materialize runs; whichever ends first, the other sees it
+  await engine.build_retentioneering_model({ action: 'edit_step', context_id: ctx, eventstream: 'racing', index: 2, step: { type: 'drop_events', names: ['shop_opened'] } });
+  await engine.query_retentioneering_model({ task_id: m.task_id });
+  const p = await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'racing' });
+  assert.equal(p.materialized_through, 0, 'the table of the old steps does not stand for the edited ones');
+  await assert.rejects(engine.query_retentioneering_model({ context_id: ctx, eventstream: 'racing', analyses: [{ kind: 'describe' }] }), (e) => e.field === 'eventstream' && /materialize/.test(e.message));
+  // materialized again, the table holds the edited steps' events
+  const again = await engine.query_retentioneering_model({ task_id: (await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: 'racing' })).task_id });
+  const names = again.vocabulary.map((v) => v.event);
+  assert.ok(names.includes('tutorial') && !names.includes('shop_opened'));
+});
+
+test('a result stored before its rows were numbered per table is read whole; a draw that does not happen leaves no mark', opts, async (t) => {
+  if (skip(t)) return;
+  const q = await engine.query_retentioneering_model({ context_id: built.context_id, eventstream: 'paths', analyses: [{ kind: 'path_metrics', metrics: [{ metric: 'length' }] }, { kind: 'conversion_rate', start_anchor: 'level_started', end_anchor: 'level_completed' }] });
+  await engine.query_retentioneering_model({ task_id: q.task_id });
+  // as a result of an earlier version: its origin a bare eventstream name, no longer held in memory
+  const ctx = engine.ctxs.get(built.context_id);
+  const table = engine.jobs.get(q.task_id).table;
+  ctx.state.retentioneering.results[table] = 'paths';
+  engine._taskResults.delete(q.task_id);
+  const read = await engine.query_retentioneering_model({ task_id: q.task_id });
+  const [tb] = read.analyses.path_metrics.tables;
+  assert.equal(tb.total_rows, built.users, 'every row counted');
+  // read whole: the summary shows its first 20 rows, not the 7 a read keeps of a result it can cut
+  assert.equal(tb.rows.length, Math.min(built.users, 20));
+  // an analysis without a card is refused, and the refusal leaves nothing behind: no mark, nothing held
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'conversion_rate' }), /no card/);
+  assert.ok(!ctx.state.retentioneering.drawn?.[q.task_id]?.includes('conversion_rate'));
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'conversion_rate' }), /no card/, 'refused for what it is, not as shown already');
+});
+
+test('a task whose context is gone is refused as gone, and a preview is not held behind a step waiting for a build', opts, async (t) => {
+  if (skip(t)) return;
+  const b = await engine.build_retentioneering_model({ name: 'short_lived', source: 'events', events: { include: ['tutorial', 'level_started'] } });
+  await engine.query_retentioneering_model({ task_id: b.task_id });
+  const q = await engine.query_retentioneering_model({ context_id: b.context_id, eventstream: 'short_lived', analyses: [{ kind: 'transition_graph' }] });
+  await engine.query_retentioneering_model({ task_id: q.task_id });
+  // a start in the same context, and a step on it that waits for that build — while a preview of the
+  // first eventstream answers at once
+  await engine.build_retentioneering_model({ context_id: b.context_id, name: 'second', source: 'events' });
+  const order = [];
+  const stepping = engine.build_retentioneering_model({ action: 'add_step', context_id: b.context_id, eventstream: 'second', step: { type: 'collapse_events', loops: true } }).then(() => order.push('step'));
+  await engine.build_retentioneering_model({ action: 'preview', context_id: b.context_id, eventstream: 'short_lived' }).then(() => order.push('preview'));
+  await stepping;
+  assert.deepEqual(order, ['preview', 'step']);
+  await engine.context({ action: 'drop', context_id: b.context_id, force: true });
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'transition_graph' }), (e) => e.code === 'result_gone' && e.stage === 'validate');
 });
 
 test('what the library refuses in an analysis is refused by the library itself before the run — its own message, in seconds', opts, async (t) => {

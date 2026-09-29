@@ -18,8 +18,8 @@ columns the one before it left.
     python retentioneering_check.py --serve     one JSON request per line on stdin, one answer per line
     python retentioneering_check.py < request   one request, one answer
 
-A request: {"shape": {...}, "steps": [op, ...], "analyses": [analysis, ...]} (either list may be
-empty). An answer: {"steps": [{"ok": true, "shape": {...}} | {"ok": false, "problem": "..."} |
+A request: {"shape": {...}, "steps": [op, ...], "analyses": [analysis, ...], "reserved": [name, ...]}
+(either list may be empty; `reserved`: the column names the stored eventstream uses itself). An answer: {"steps": [{"ok": true, "shape": {...}} | {"ok": false, "problem": "..."} |
 {"ok": null, "note": "..."}], "analyses": [{"where": "...", "message": "..."}]}.
 """
 
@@ -53,7 +53,7 @@ CONFIG_ERRORS = {
 # ValueError): counted when the library itself raised it — its frame, not sklearn's, pandas' or ours.
 PLAIN_ERRORS = {"ValueError", "KeyError", "TypeError"}
 # A column name a table in either warehouse takes as it is
-IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # The fixed column names of an eventstream (src/retentioneering/eventstream.js ES_COLUMNS)
 COLUMNS = {"user": "user_id", "event": "event", "time": "event_time"}
 # How many events one stand-in path carries at most: every event is still on some path, since there are
@@ -165,7 +165,7 @@ def shape_after(before, streams, constants):
     return {"events": events, "paths": held["paths"], "segments": segments, "columns": held["custom"]}
 
 
-def check_steps(shape, steps, constants):
+def check_steps(shape, steps, constants, reserved=frozenset()):
     """Each step on the stand-ins of the shape before it → its outcome, until the first refused one."""
     from retentioneering.ops import apply_ops
 
@@ -200,9 +200,14 @@ def check_steps(shape, steps, constants):
         # a column a step makes is stored in the warehouse's table when the steps are materialized: its
         # name is an identifier there (what BigQuery and DuckDB both take unquoted)
         made = [c for c in after["paths"] + list(after["segments"]) + after["columns"] if c not in shape["paths"] + list(shape["segments"]) + (shape.get("columns") or [])]
-        bad = [c for c in made if not IDENT.match(c)]
+        bad = [c for c in made if not IDENT.fullmatch(c)]
         if bad:
             out.append({"ok": False, "problem": f"'{bad[0]}' cannot be a column of the eventstream: a column name is letters, digits and underscores, starting with a letter or an underscore — the warehouse stores the eventstream after its steps as a table"})
+            break
+        # nor one the stored table already uses for what it carries besides (the caller's `reserved`)
+        taken = [c for c in made if c in reserved]
+        if taken:
+            out.append({"ok": False, "problem": f"'{taken[0]}' cannot be a column a step makes: the stored eventstream uses that name itself ({', '.join(sorted(reserved))}) — name it otherwise"})
             break
         out.append({"ok": True, "shape": after})
         shape, streams = after, alive
@@ -234,7 +239,7 @@ def answer(request):
     steps = request.get("steps") or []
     analyses = request.get("analyses") or []
     constants = _constants([steps, analyses], set())
-    return {"steps": check_steps(request["shape"], steps, constants) if steps else [],
+    return {"steps": check_steps(request["shape"], steps, constants, frozenset(request.get("reserved") or [])) if steps else [],
             "analyses": check_analyses(request["shape"], analyses, constants, request.get("edge_weights") or [])}
 
 

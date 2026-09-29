@@ -113,7 +113,7 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
         precheck: (engine, args) => {
           engine._validate(DISPLAY, args);
           engine._taskForSide(args.task_id, SIDE);
-          if (drawnAlready(engine, args.task_id, args.analysis)) throw new ToolError(`analysis '${args.analysis}' of task ${args.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'analysis' });
+          if (drawnAlready(engine, feature, args.task_id, args.analysis)) throw new ToolError(`analysis '${args.analysis}' of task ${args.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'analysis' });
         },
       },
     },
@@ -316,14 +316,12 @@ function pathContext(engine, id) {
  *  library's steps, a draft like a pipeline's, each step checked by the library itself as it is added. */
 async function build(engine, feature, input) {
   engine._validate(BUILD, input);
-  const action = input.action || 'start';
-  // one build action at a time on a context: a step reads the draft, awaits the library's check and
-  // writes the draft back — two at once would each write over the other's
-  if (!input.context_id) return start(engine, feature, input);
-  return serially(feature, input.context_id, () => buildAction(engine, feature, input, action));
+  return buildAction(engine, feature, input, input.action || 'start');
 }
 
-/** `fn` after whatever the feature is already doing on this context — one at a time, in order. */
+/** `fn` after whatever else changes this context's draft — one at a time, in order. What is locked is
+ *  only a read-check-write of the draft (a step's, a materialize's commit): waiting for a build to
+ *  finish happens before it, so a preview or a fork never queues behind that wait. */
 function serially(feature, key, fn) {
   const locks = (feature.locks ||= new Map());
   const before = locks.get(key) || Promise.resolve();
@@ -522,8 +520,9 @@ function toLibrary(step, field) {
 /** The seed a draw the caller left unseeded gets: every run of it keeps the same paths. */
 export const SEED = 0;
 
-/** A step's or an analysis's parameters with the library's random_state set when the caller left it
- *  unset — the library's default draws afresh on every run, and the feature is deterministic. */
+/** A step's parameters with the library's random_state set when the caller left it unset — the
+ *  library's default draws afresh on every run, and the feature is deterministic. (No analysis of the
+ *  sheet takes one: the library's analyses seed themselves.) */
 function seeded(names, params) {
   return names.has('random_state') && params.random_state == null ? { ...params, random_state: SEED } : params;
 }
@@ -541,7 +540,7 @@ async function checkSteps(feature, view, from, fieldOf) {
     entries.forEach((e) => { e.note = `not checked: a step before it (${from - 1}) could not be checked, so what it reads is not known — materialize to know it`; });
     return entries;
   }
-  const reply = await feature.checker.check({ shape, steps: library, analyses: [] });
+  const reply = await feature.checker.check({ shape, steps: library, analyses: [], reserved: [ORDER_COL, ROLES_COL] });
   if (!reply) {
     entries.forEach((e) => { e.note = NOT_CHECKED; });
     return entries;
@@ -584,6 +583,16 @@ function shapeChange(before, after) {
 
 async function editSteps(engine, feature, ctx, name, es, action, input) {
   await builtShape(engine, name, es, ctx);
+  // the draft is read, checked and written back as one: another step, or a materialize that finishes
+  // meanwhile, waits for it (and a materialize then sees the steps as they are after it)
+  return serially(feature, ctx.id, () => {
+    const now = ctx.state.retentioneering.eventstreams[name];
+    if (!now?.base.shape) throw new ToolError(`eventstream '${name}' was started again meanwhile and is still being built — add the step once it is`, { stage: 'validate', field: 'eventstream' });
+    return commitSteps(engine, feature, ctx, name, now, action, input);
+  });
+}
+
+async function commitSteps(engine, feature, ctx, name, es, action, input) {
   const n = es.steps.length;
   const inRange = (i, max, field) => { if (!Number.isInteger(i) || i < 1 || i > max) throw new ToolError(`${field} ${i} is not a step of eventstream '${name}' (it has ${n}${n ? `: 1..${n}` : ''})`, { stage: 'validate', field }); };
   let list = es.steps.slice();
@@ -716,15 +725,18 @@ async function materializeSteps(engine, feature, ctx, name, es) {
       const summary = await summarizeEventstream(feature.runner, dir, modelName, { segments: roles.segments, paths: roles.paths, spec: es.spec, dialect: engine.catalog.dialect });
       if (summary.ok === false) return summary;
       const shape = shapeOf(summary, roles.paths, roles.custom);
-      // the eventstream still has these steps (it may have grown meanwhile): the table stands for them
-      const now = ctx.state.retentioneering.eventstreams[name];
-      if (now && now.steps.length >= through && JSON.stringify(now.steps.slice(0, through).map((s) => s.library)) === stood) {
-        now.checkpoint = { upto: through, model: modelName, summary, shape, task_id: taskId };
-        now.model = modelName;
-        now.summary = summary;
-      }
-      (ctx.state.retentioneering.tables ||= {})[modelName] = { eventstream: name, summary, steps: through };
-      engine.ctxs.touch(ctx.id);
+      // the eventstream still has these steps (it may have grown meanwhile): the table stands for them —
+      // decided with the draft held, so a step being edited right now is seen as edited
+      await serially(feature, ctx.id, () => {
+        const now = ctx.state.retentioneering.eventstreams[name];
+        if (now && now.steps.length >= through && JSON.stringify(now.steps.slice(0, through).map((s) => s.library)) === stood) {
+          now.checkpoint = { upto: through, model: modelName, summary, shape, task_id: taskId };
+          now.model = modelName;
+          now.summary = summary;
+        }
+        (ctx.state.retentioneering.tables ||= {})[modelName] = { eventstream: name, summary, steps: through };
+        engine.ctxs.touch(ctx.id);
+      });
       return {
         ok: true, kind: 'eventstream', context_id: ctx.id, eventstream: name, model: modelName, steps_materialized: through,
         ...summary, paths: roles.paths, ...(roles.custom.length ? { custom_columns: roles.custom } : {}),
@@ -850,7 +862,7 @@ function validateAnalyses(es, shape, analyses) {
     const segment = params.segment_col ?? (Array.isArray(params.diff) && params.diff.length === 3 && typeof params.diff[0] === 'string' ? params.diff[0] : undefined);
     if (segment !== undefined && !segments.includes(segment)) throw new ToolError(`'${segment}' is not a segment of eventstream '${es.name}' (${segments.join(', ') || 'it holds none'}) — carry it with segments at start, or make it with an add_segment step and materialize`, { stage: 'validate', field: 'analyses.segment_col' });
     if (methodParams(kind).has('path_col')) params.path_col = pathCol;
-    return { id, kind, method: f.analyses[kind].method, path_col: pathCol, params: seeded(methodParams(kind), params) };
+    return { id, kind, method: f.analyses[kind].method, path_col: pathCol, params };
   });
 }
 
@@ -897,7 +909,7 @@ async function query(engine, feature, input) {
   const modelName = `rete_q${state.queries}_${es.name}_${ctx.id}`.toLowerCase().replace(/[^a-z0-9_]/g, '_');
   // which eventstream, and which of its tables, a result was computed from — carried, so a later read
   // (and its card) speaks of those rows, whatever the eventstream became after
-  (state.results ||= {})[modelName] = { eventstream: es.name, table: es.model };
+  (state.results ||= {})[modelName] = { eventstream: es.name, table: es.model, analyses: analyses.map((a) => a.id), rows_per_table: true };
   engine.ctxs.writeFile(ctx.id, `${modelName}.py`, compileAnalysisModel({ inputModel: es.model, spec, config: analysisModelConfig(engine.catalog, feature.operatorConfig) }));
   const expiry = engine._expiryConfig('python');
   if (Object.keys(expiry).length) engine.ctxs.writeFile(ctx.id, `${modelName}.yml`, yaml.dump({ version: 2, models: [{ name: modelName, config: expiry }] }, { lineWidth: 200, noRefs: true }));
@@ -920,7 +932,7 @@ const KEPT_ROWS = 1000;
 
 /** The stored result table of a query task, read and shaped: every record but a table's rows past
  *  `rows` (Infinity: all of them), of every analysis or of one. */
-async function readResult(engine, feature, dir, model, { context_id, eventstream, order, rows = feature.keptRows ?? KEPT_ROWS, analysis = null }) {
+async function readResult(engine, feature, dir, model, { context_id, eventstream, order, rows = feature.keptRows, analysis = null }) {
   const d = getDialect(engine.catalog.dialect);
   const where = [Number.isFinite(rows) ? `(part <> 'row' or seq < ${Number(rows)})` : null, analysis ? `analysis = ${d.sqlLiteral(analysis)}` : null].filter(Boolean);
   const from = `from {{ ref('${model}') }}${where.length ? ` where ${where.join(' and ')}` : ''}`;
@@ -937,11 +949,18 @@ function resultOrigin(state, table) {
   return typeof r === 'string' ? { eventstream: r, table: null } : r || { eventstream: null, table: null };
 }
 
+/** How many rows of each table a read of this stored result may keep: a result written before its rows
+ *  were numbered within their table (no rows_per_table) is read whole — cutting it by position would
+ *  cut across its tables. */
+function rowsFor(origin, rows) {
+  return origin.rows_per_table ? rows : Infinity;
+}
+
 /** What a read of a finished task answers: the eventstream summary, or each analysis summarized. */
-function answer(engine, id, out, detail = 'summary') {
+function answer(engine, feature, id, out, detail = 'summary') {
   if (out?.kind === 'eventstream') return withLevels(out, detail);
   if (out?.kind !== 'analyses') return out;
-  const drawable = Object.keys(out.analyses).filter((a) => hasCard(out.analyses[a].kind, !!out.analyses[a].diff) && !drawnAlready(engine, id, a));
+  const drawable = Object.keys(out.analyses).filter((a) => hasCard(out.analyses[a].kind, !!out.analyses[a].diff) && !drawnAlready(engine, feature, id, a));
   return {
     ok: true, kind: 'analyses', context_id: out.context_id, eventstream: out.eventstream,
     analyses: detail === 'full' ? out.analyses : Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, summarize(r)])),
@@ -976,7 +995,8 @@ async function readTask(engine, feature, id, { wait_seconds: wait, detail } = {}
     return { ok: true, ...head, status: 'running', waited_seconds: waited, next: `still running — call ${QUERY}({ task_id: '${id}' }) again; it waits up to ${MAX_WAIT_SECONDS}s` };
   }
   if (now.status === 'cancelled') return { ok: false, ...head, status: 'cancelled', error: { stage: 'cancelled', code: 'cancelled', message: now.error || 'cancelled' } };
-  let out = await taskOutput(engine, feature, now);
+  // a full read not held in memory reads every row at once (not the kept rows, then all of them)
+  let out = await taskOutput(engine, feature, now, detail === 'full' ? { rows: Infinity } : {});
   if (!out) return { ok: false, ...head, status: 'error', error: { stage: 'task', code: RESULT_GONE, message: now.error || 'this task\'s result is gone — run it again' } };
   if (out.ok === false) return { ...head, ...out, status: 'error' };
   // every record, when asked for: a table the kept read cut is read whole from the stored table (and
@@ -985,7 +1005,7 @@ async function readTask(engine, feature, id, { wait_seconds: wait, detail } = {}
     const whole = await readResult(engine, feature, engine.ctxs.dir(job.contextId), now.table, { context_id: out.context_id, eventstream: out.eventstream, order: Object.keys(out.analyses), rows: Infinity });
     if (whole.ok) out = whole;
   }
-  return { ...head, status: 'done', ...answer(engine, id, out, detail) };
+  return { ...head, status: 'done', ...answer(engine, feature, id, out, detail) };
 }
 
 async function readTasks(engine, feature, input) {
@@ -998,16 +1018,20 @@ async function readTasks(engine, feature, input) {
   return { ok: true, status: running.length ? 'running' : 'done', results, ...(running.length ? { next: `${running.length} still running — call ${QUERY}({ task_ids: [${running.map((i) => `'${i}'`).join(', ')}] }) for them` } : {}) };
 }
 
-/** A finished task's full output: held in memory, else re-read from its stored table (a query task). */
-async function taskOutput(engine, feature, job) {
+/** A finished task's output: held in memory, else read from its stored table — a query task's with a
+ *  table's first rows kept (`rows`: how many; Infinity: all), of every analysis or of one. Only the kept
+ *  read of every analysis is held in memory. */
+async function taskOutput(engine, feature, job, { rows = feature.keptRows, analysis = null } = {}) {
   const kept = engine._taskResults?.get(job.id)?.out;
   if (kept) return kept;
   if (job.status !== 'ready' || !job.table || !engine.ctxs.has(job.contextId)) return job.status === 'error' ? { ok: false, error: { stage: 'task', message: job.error } } : null;
   const ctx = engine.ctxs.get(job.contextId);
   const dir = engine.ctxs.dir(job.contextId);
   if (job.tool === QUERY) {
-    const out = await readResult(engine, feature, dir, job.table, { context_id: job.contextId, eventstream: resultOrigin(ctx.state.retentioneering, job.table).eventstream, order: [] });
-    if (out.ok) engine._keepTaskResult(job.id, { tool: job.tool, input: null, out });
+    const origin = resultOrigin(ctx.state.retentioneering, job.table);
+    const n = rowsFor(origin, rows);
+    const out = await readResult(engine, feature, dir, job.table, { context_id: job.contextId, eventstream: origin.eventstream, order: origin.analyses || [], rows: n, analysis });
+    if (out.ok && !analysis && n === feature.keptRows) engine._keepTaskResult(job.id, { tool: job.tool, input: null, out });
     return out;
   }
   const t = ctx.state.retentioneering?.tables?.[job.table];
@@ -1017,7 +1041,10 @@ async function taskOutput(engine, feature, job) {
 
 // ── display ───────────────────────────────────────────────────────────────────────────────────
 
-function drawnAlready(engine, taskId, analysis) {
+/** Whether this analysis of the task is drawn — or being drawn right now (held in memory only, so a
+ *  draw that does not happen leaves nothing behind, not even across a restart). */
+function drawnAlready(engine, feature, taskId, analysis) {
+  if (feature.drawing?.has(`${taskId}\u0000${analysis}`)) return true;
   const job = engine.jobs.get(taskId);
   if (!job?.contextId || !engine.ctxs.has(job.contextId)) return false;
   return !!engine.ctxs.get(job.contextId).state.retentioneering?.drawn?.[taskId]?.includes(analysis);
@@ -1027,46 +1054,48 @@ async function display(engine, feature, input) {
   engine._validate(DISPLAY, input);
   const job = engine._taskForSide(input.task_id, SIDE);
   if (job.tool !== QUERY) throw new ToolError(`task ${input.task_id} built an eventstream — draw an analysis of a ${QUERY} task`, { stage: 'validate', field: 'task_id' });
-  if (drawnAlready(engine, input.task_id, input.analysis)) throw new ToolError(`analysis '${input.analysis}' of task ${input.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'analysis' });
-  // the mark is taken before anything is awaited, so a second call for the same analysis — a retry, or
-  // one made alongside — is refused rather than drawn twice; it is given back if nothing is drawn
-  const ctx = engine.ctxs.get(job.contextId);
-  const marks = (ctx.state.retentioneering.drawn ||= {});
-  (marks[input.task_id] ||= []).push(input.analysis);
-  const giveBack = () => {
-    const list = marks[input.task_id] || [];
-    const at = list.lastIndexOf(input.analysis);
-    if (at >= 0) list.splice(at, 1);
-  };
+  if (!job.contextId || !engine.ctxs.has(job.contextId)) throw new ToolError(`task ${input.task_id} has no result to draw: its context is gone (dropped, or expired) — run the analyses again`, { stage: 'validate', field: 'task_id', code: RESULT_GONE });
+  if (drawnAlready(engine, feature, input.task_id, input.analysis)) throw new ToolError(`analysis '${input.analysis}' of task ${input.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'analysis' });
+  // taken before anything is awaited, so a second call for the same analysis — a retry, or one made
+  // alongside — is refused rather than drawn twice; recorded with the task only once it is drawn
+  const key = `${input.task_id}\u0000${input.analysis}`;
+  const drawing = (feature.drawing ||= new Set());
+  drawing.add(key);
   try {
-    const drawn = await drawOne(engine, feature, ctx, job, input);
-    if (!drawn.drawn) giveBack();
-    engine.ctxs.touch(ctx.id);
+    const ctx = engine.ctxs.get(job.contextId);
+    const drawn = await drawOne(engine, feature, ctx, input);
+    if (drawn.drawn) {
+      const marks = (ctx.state.retentioneering.drawn ||= {});
+      (marks[input.task_id] ||= []).push(input.analysis);
+      engine.ctxs.touch(ctx.id);
+    }
     return drawn;
-  } catch (e) {
-    giveBack();
-    throw e;
+  } finally {
+    drawing.delete(key);
   }
 }
 
-async function drawOne(engine, feature, ctx, job, input) {
+async function drawOne(engine, feature, ctx, input) {
   await engine._awaitTask(input.task_id, MAX_WAIT_SECONDS);
   const now = engine.jobs.get(input.task_id);
   if (now.status === 'running') throw new ToolError(`task ${input.task_id} is still running — read it with ${QUERY}({ task_id }) until it is done, then draw it`, { stage: 'validate', field: 'task_id' });
-  const out = await taskOutput(engine, feature, now);
+  const state = ctx.state.retentioneering;
+  const origin = resultOrigin(state, now.table);
+  // a card draws every record of its analysis: held in memory, and cut there, it is read whole — that
+  // analysis alone; not held, it is read whole at once
+  const held = engine._taskResults?.get(now.id)?.out;
+  const out = held || await taskOutput(engine, feature, now, { rows: Infinity, analysis: input.analysis });
   if (!out || out.ok === false) throw new ToolError(`task ${input.task_id} has no result to draw${out?.error?.message ? ` (${out.error.message})` : ''}`, { stage: 'validate', field: 'task_id' });
   let result = out.analyses[input.analysis];
-  if (!result) throw new ToolError(`task ${input.task_id} has no analysis '${input.analysis}' (it has ${Object.keys(out.analyses).join(', ')})`, { stage: 'validate', field: 'analysis' });
+  const names = held ? Object.keys(out.analyses) : origin.analyses || Object.keys(out.analyses);
+  if (!result) throw new ToolError(`task ${input.task_id} has no analysis '${input.analysis}' (it has ${names.join(', ')})`, { stage: 'validate', field: 'analysis' });
   if (!hasCard(result.kind, !!result.diff)) throw new ToolError(`'${input.analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers query_retentioneering_model({ task_id }) returned`, { stage: 'validate', field: 'analysis' });
-  // a card draws every record of its analysis: one the kept read cut is read whole, that one alone
-  if (truncatedTables(result)) {
+  if (held && truncatedTables(result)) {
     const whole = await readResult(engine, feature, engine.ctxs.dir(ctx.id), now.table, { context_id: out.context_id, eventstream: out.eventstream, order: [input.analysis], rows: Infinity, analysis: input.analysis });
-    if (whole.ok && whole.analyses[input.analysis]) result = whole.analyses[input.analysis];
+    if (whole?.ok && whole.analyses[input.analysis]) result = whole.analyses[input.analysis];
   }
   // what the numbers are about — who, when, how much of it — from the table the analyses read, shown on
   // the card with them (whatever the eventstream became after)
-  const state = ctx.state.retentioneering;
-  const origin = resultOrigin(state, now.table);
   const sm = (origin.table && state.tables?.[origin.table]?.summary) || state.eventstreams?.[out.eventstream]?.summary || null;
   const scope = sm ? {
     users: sm.users, events: sm.events, ...(sm.sessions != null ? { sessions: sm.sessions } : {}),

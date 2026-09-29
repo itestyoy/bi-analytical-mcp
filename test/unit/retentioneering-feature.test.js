@@ -87,7 +87,7 @@ test('on: three tools within the budgets, the drawing one pointing at its own vi
   // the guide, its routing trigger, the skill, one line of the core instructions
   const g = await e.semantic_index({ guide: 'retentioneering' });
   assert.deepEqual(Object.keys(g.analyses).sort(), [...ANALYSIS_KINDS].sort());
-  assert.deepEqual(Object.keys(g.preprocess), OFFERED_OPS);
+  assert.deepEqual(Object.keys(g.steps), OFFERED_OPS);
   const all = await e.semantic_index({ guide: true });
   assert.ok(all.routing_triggers.some((t) => t.do.includes('build_retentioneering_model')));
   assert.ok(s.skills.list().some((k) => k.frontmatter.name === 'retentioneering'));
@@ -111,7 +111,7 @@ test('the schemas offer exactly what the library does — every choice from the 
   assert.deepEqual(branches.map((b) => b.title), Object.keys(f.analyses));
   for (const b of branches) {
     const lib = f.analyses[b.title].params.map((p) => (p.name === 'path_col' ? 'path' : p.name)).filter((n) => !NOT_OFFERED.params[n]);
-    assert.deepEqual(Object.keys(b.properties).filter((k) => !['kind', 'id', 'preprocess'].includes(k)).sort(), lib.sort(), b.title);
+    assert.deepEqual(Object.keys(b.properties).filter((k) => !['kind', 'id'].includes(k)).sort(), lib.sort(), b.title);
     assert.deepEqual(b.required.filter((k) => k !== 'kind').sort(), f.analyses[b.title].params.filter((p) => p.required).map((p) => p.name).sort(), `${b.title}: required as the library requires`);
   }
   const cluster = branches.find((b) => b.title === 'cluster_analysis');
@@ -122,15 +122,24 @@ test('the schemas offer exactly what the library does — every choice from the 
   const metric = deref(deref(cluster.properties.features).items);
   assert.deepEqual(metric.oneOf.map(deref).map((m) => m.properties.metric.const), f.path_metrics);
   for (const m of metric.oneOf.map(deref)) assert.deepEqual(Object.keys(deref(m.properties.metric_args)?.properties || {}).sort(), Object.keys(f.metric_args[m.properties.metric.const]).sort(), m.title);
-  // every op the library registers, but the ones not offered for their stated reason
-  const ops = deref(deref(q.properties.preprocess).items).oneOf.map(deref);
+  // every op the library registers — an eventstream's steps — but the ones not offered for their stated reason
+  const b0 = e.schemas.build_retentioneering_model;
+  const bderef = (n) => (n?.$ref ? bderef(n.$ref.replace(/^#\//, '').split('/').reduce((x, k) => x[k], b0)) : n);
+  const ops = bderef(b0.properties.step).oneOf.map(bderef);
+  assert.deepEqual(bderef(b0.properties.steps.items).oneOf.map(bderef).map((o) => o.title), ops.map((o) => o.title), 'add_steps offers the same steps');
+  assert.ok(!('preprocess' in q.properties), 'a query reads the eventstream as materialized: it takes no steps of its own');
+  for (const br of branches) assert.ok(!('preprocess' in br.properties), `${br.title} takes no steps of its own`);
   assert.deepEqual(ops.map((o) => o.title), Object.keys(f.ops).filter((op) => !NOT_OFFERED.ops[op]));
   for (const o of ops) for (const p of Object.keys(NOT_OFFERED.params)) assert.ok(!(p in o.properties), `${o.title} offers no ${p}`);
+  // metric_bins: the metrics that give one value per path, and the fewest equal quantiles, as the library has them
+  const bins = bderef(ops.find((o) => o.title === 'add_segment').properties.metric_bins);
+  assert.deepEqual(bderef(bins.properties.metric).oneOf.map(bderef).map((m) => m.properties.metric.const), f.metric_bins.metrics);
+  assert.equal(bderef(bins.properties.bins).oneOf.find((x) => x.title === 'equal quantiles').minItems, f.metric_bins.min_quantile_bins);
   // the build: the source's events and the models' attributes are enums from the catalog
-  const b = e.schemas.build_retentioneering_model;
-  assert.ok(deref(deref(b.anyOf[0].properties.events).properties.include).items.enum?.includes('level_started'), 'an events source: its events, as an enum');
-  const seg = deref(deref(b.properties.segments).items).oneOf.map(deref).find((x) => x.title === 'users');
-  assert.ok(deref(seg.properties.attribute).enum.includes('platform'));
+  const startRule = b0.allOf[0].then;
+  assert.ok(bderef(bderef(startRule.anyOf[0].properties.events).properties.include).items.enum?.includes('level_started'), 'an events source: its events, as an enum');
+  const seg = bderef(bderef(b0.properties.segments).items).oneOf.map(bderef).find((x) => x.title === 'users');
+  assert.ok(bderef(seg.properties.attribute).enum.includes('platform'));
 });
 
 test('the facts sheet is what the installed library says (where the feature\'s environment is built)', (t) => {
@@ -154,10 +163,55 @@ test('input the schema refuses is refused before anything starts', async () => {
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [] }, /invalid input/);
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis' }] }, /invalid input/); // features: required by the library
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'path_metrics', metrics: [{ metric: 'has_event', metric_args: { events: ['a'] } }] }] }, /invalid input/);
-  await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'filter_events', sql: 'select * from eventstream' }], analyses: [{ kind: 'describe' }] }, /invalid input/);
-  await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'add_start_end_events' }], analyses: [{ kind: 'describe' }] }, /invalid input/);
-  await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'filter_paths', condition: { op: '>', metric: 'has_event_bulk', value: 1 } }], analyses: [{ kind: 'describe' }] }, /invalid input/);
+  // a step is one of the library's own ops, checked by the schema first
+  const step = (st) => ({ action: 'add_step', context_id: 'abc', step: st });
+  await refused('build_retentioneering_model', step({ type: 'filter_events', sql: 'select * from eventstream' }), /invalid input/);
+  await refused('build_retentioneering_model', step({ type: 'add_start_end_events' }), /invalid input/);
+  await refused('build_retentioneering_model', step({ type: 'filter_paths', condition: { op: '>', metric: 'has_event_bulk', value: 1 } }), /invalid input/);
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'step_matrix', anchor: { pattern: 'a' }, path_pattern: 'a->b' }] }, /invalid input/);
+  await refused('query_retentioneering_model', { context_id: 'abc', preprocess: [{ type: 'collapse_events', loops: true }], analyses: [{ kind: 'describe' }] }, /invalid input/); // steps belong to the eventstream
+  // each action takes its own fields: a step with a start, a start's field with a step
+  await refused('build_retentioneering_model', { name: 'x', source: 'events', step: { type: 'collapse_events', loops: true } }, /invalid input/);
+  await refused('build_retentioneering_model', { action: 'add_step', context_id: 'abc', source: 'events', step: { type: 'collapse_events', loops: true } }, /invalid input/);
+  await refused('build_retentioneering_model', { action: 'edit_step', context_id: 'abc', step: { type: 'collapse_events', loops: true } }, /invalid input/); // which step
+  await refused('build_retentioneering_model', { action: 'truncate', context_id: 'abc' }, /invalid input/);
+  await refused('build_retentioneering_model', { action: 'fork', context_id: 'abc' }, /invalid input/);
+  // a condition compares a metric with a constant of the metric's own kind: a date is not a time metric's value
+  await refused('build_retentioneering_model', step({ type: 'filter_paths', condition: { op: '<', metric: 'first_event_time', value: '2026-09-26' } }), /invalid input/);
+  // metric_bins is one list of bins, so a level count that disagrees with the cut points cannot be written
+  const segment = (metric_bins) => step({ type: 'add_segment', name: 'by_length', metric_bins });
+  await refused('build_retentioneering_model', segment({ metric: { metric: 'length' }, edges: [3, 6, 10], segment_levels: ['short', 'long'] }), /invalid input/);
+  await refused('build_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short', from: 0 }, { level: 'long', from: 6 }] }), /invalid input/); // the lowest bin has no start
+  await refused('build_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'mid', from: 3 }, { level: 'long', from_quantile: 0.9 }] }), /invalid input/); // values or quantiles, not both
+  await refused('build_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'all' }] }), /invalid input/);
+  await refused('build_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from_quantile: 1 }] }), /invalid input/);
+  await refused('build_retentioneering_model', segment({ metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: retentioneeringFacts().metric_bins.undefined_level, from: 3 }] }), /invalid input/);
+  await refused('build_retentioneering_model', segment({ metric: { metric: 'event_count_bulk' }, bins: [{ level: 'a' }, { level: 'b' }] }), /invalid input/); // a value per event, not per path
+  // 'in' takes a list, a comparison one constant
+  const cond = (condition) => step({ type: 'filter_paths', condition });
+  await refused('build_retentioneering_model', cond({ op: 'in', metric: 'length', value: 3 }), /invalid input/);
+  await refused('build_retentioneering_model', cond({ op: '=', metric: 'length', value: [3] }), /invalid input/);
+  // a clustering's method_args are the chosen method's own (kmeans is the default)
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method: 'hdbscan', method_args: { n_clusters: 3 } }] }, /invalid input/);
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method_args: { min_cluster_size: 3 } }] }, /invalid input/);
+  // rules are cases the tool quotes: no operator or value becomes SQL of the call's own
+  const rules = (r) => step({ type: 'add_segment', name: 'store', rules: r });
+  await refused('build_retentioneering_model', rules([['platform', "= 'a' OR 1=1 OR platform =", "'q'", 'hit'], ['other']]), /invalid input/);
+  await refused('build_retentioneering_model', rules({ cases: [{ column: 'platform', op: "= 'a' OR 1=1 --", value: 'x', level: 'hit' }], else: 'other' }), /invalid input/);
+  await refused('build_retentioneering_model', rules({ cases: [{ column: 'platform', op: 'in', value: "('a') OR 1=1", level: 'hit' }], else: 'other' }), /invalid input/);
+  // ...while each written form passes the schema (and stops only at the context, which does not exist)
+  const pastSchema = (err) => !/invalid input/.test(err.message) && /abc/.test(err.message);
+  for (const bins of [[{ level: 'short' }, { level: 'long', from: 6 }, { level: 'mid', from: 3 }], [{ level: 'low' }, { level: 'top', from_quantile: 0.9 }], [{ level: 'q1' }, { level: 'q2' }, { level: 'q3' }]]) {
+    await refused('build_retentioneering_model', segment({ metric: { metric: 'length' }, bins }), pastSchema);
+  }
+  await refused('build_retentioneering_model', cond({ op: '<', metric: 'first_event_time', value: 1790380800 }), pastSchema);
+  await refused('build_retentioneering_model', cond({ op: 'in', metric: 'length', value: [3, 4] }), pastSchema);
+  await refused('build_retentioneering_model', rules({ cases: [{ column: 'platform', op: 'in', value: ['ios', "it's"], level: 'apple' }, { column: 'platform', op: '=', value: 'web', level: 'web' }], else: 'other' }), pastSchema);
+  await refused('build_retentioneering_model', { action: 'add_steps', context_id: 'abc', steps: [{ type: 'collapse_events', loops: true }, { type: 'split_sessions', timeout: '30m', session_col: 'visit' }] }, pastSchema);
+  for (const input of [{ action: 'edit_step', index: 1, step: { type: 'collapse_events', loops: true } }, { action: 'delete_step', index: 1 }, { action: 'truncate', after: 0 }, { action: 'fork', name: 'variant', after: 1 }, { action: 'preview' }, { action: 'materialize' }]) {
+    await refused('build_retentioneering_model', { context_id: 'abc', ...input }, pastSchema);
+  }
+  await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method: 'hdbscan', method_args: { min_cluster_size: 3 } }] }, pastSchema);
   await refused('display_retentioneering_result', { task_id: 'nope', analysis: 'funnel' }, /unknown task_id/);
   // a card for a client that renders none is refused like display_model_result
   const r = await runTool(e, 'display_retentioneering_result', { task_id: 'x', analysis: 'funnel' }, { renders: false });
@@ -188,4 +242,29 @@ test('a card is decided by kind: an analysis of a card kind with nothing in it i
   assert.equal(hasCard('funnel', true), false, 'a funnel diff has no card');
   assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'transition_graph', nodes: [], edges: [] } }), { kind: 'none', reason: 'empty' });
   assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'describe', values: {} } }), { kind: 'none', reason: 'no_card' });
+});
+
+test('a request the library\'s check cannot carry is answered at once, under its own id — not at the timeout', async (t) => {
+  const env = dbtEnv('retentioneering');
+  if (!env) { t.skip('dbt environment retentioneering not installed'); return; }
+  const { LibraryChecker } = await import('../../src/retentioneering/checker.js');
+  const checker = new LibraryChecker(join(env.dir, 'bin', 'python'));
+  try {
+    const started = Date.now();
+    // a shape with no path columns: the stand-in cannot be built
+    assert.equal(await checker.check({ shape: { events: ['a'], segments: {} }, steps: [{ type: 'collapse_events', loops: true }] }), null);
+    assert.ok(Date.now() - started < 30000, 'answered, not waited out');
+    // and the same process answers the next request
+    const ok = await checker.check({ shape: { events: ['a', 'b'], paths: ['user_id'], segments: {}, columns: [] }, steps: [{ type: 'collapse_events', loops: true }] });
+    assert.equal(ok.steps[0].ok, true);
+  } finally {
+    checker.close();
+  }
+});
+
+test('ties are ordered by code point, the same on every machine — not by the locale', async () => {
+  const { summarize } = await import('../../src/retentioneering/results.js');
+  const edge = (source) => ({ source, target: 'x', count: 1, unique_paths: 1, proba_out: 1, proba_in: 1, time_median: 0 });
+  const s = summarize({ kind: 'transition_graph', nodes: [], edges: [edge('a'), edge('B'), edge('_c')] });
+  assert.deepEqual(s.top_transitions.map((e) => e.from), ['B', '_c', 'a']);
 });

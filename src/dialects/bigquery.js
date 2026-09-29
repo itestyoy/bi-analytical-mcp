@@ -7,6 +7,11 @@ import { Dialect } from './base.js';
 const CASTS = { int: 'INT64', integer: 'INT64', bigint: 'INT64', numeric: 'NUMERIC', float: 'FLOAT64', double: 'FLOAT64' };
 
 export class BigQueryDialect extends Dialect {
+  /** BigQuery quotes an identifier in backticks. */
+  quoteIdent(name) {
+    return `\`${this.ident(name)}\``;
+  }
+
   get name() { return 'bigquery'; }
 
   castType(type) { return CASTS[String(type || '').toLowerCase()]; }

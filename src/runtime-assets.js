@@ -41,6 +41,11 @@ export const RUNTIME_ASSETS = {
     repoPath: 'python/retentioneering_model.py',
     why: 'the analysis step the retentioneering feature inlines into every dbt Python model it generates — without it no analysis can run',
   },
+  retentioneeringCheck: {
+    path: join(ROOT, 'python', 'retentioneering_check.py'),
+    repoPath: 'python/retentioneering_check.py',
+    why: 'the library\'s own check of every path-analysis step and analysis — a warm process on the feature\'s environment that runs them on stand-ins of the eventstream\'s shape before the warehouse runtime is started; without it a parameter the library refuses surfaces only minutes into the run',
+  },
   resultView: {
     path: join(ROOT, 'src', 'apps', 'result-view', 'dist', 'mcp-app.html'),
     repoPath: 'src/apps/result-view/dist/mcp-app.html',

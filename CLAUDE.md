@@ -175,21 +175,48 @@
   overview each walk `engine.features` at ONE point (a tool's schema/method/side/description/view,
   a guide name + triggers, a skill, an instructions line, an overview entry). Do NOT add an
   `if (feature)` branch in the core, and do NOT let a feature reach into another side's tools.
-- RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA — an eventstream
-  declared by the caller and rendered in SQL through the pipeline's own stages (scope, the declared
-  relationship for segments, point-in-time for a slowly-changing model), materialized; query = the
-  COMPUTATION — every analysis of one call in ONE dbt Python model (python/retentioneering_model.py,
-  THIS server's code inlined; the caller's input is data, never code), on its own dbt environment
-  (`retentioneering`); show = its own view (`ui://betti/retentioneering-view.html`, src/apps/
+- RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA, SHAPED STEP BY STEP LIKE A
+  PIPELINE — `start` declares the eventstream, rendered in SQL through the pipeline's own stages (scope,
+  the declared relationship for segments, point-in-time for a slowly-changing model), materialized, its
+  summary carrying the vocabulary and every segment's levels; then the library's own steps
+  (`add_step` / `add_steps` / `edit_step` / `insert_step` / `delete_step` / `truncate` / `fork` /
+  `preview`, the pipeline builder's own words), each CHECKED BY THE LIBRARY ITSELF as it is added
+  (below) and answered at once with what it changed; `materialize` runs the steps not yet materialized
+  in one dbt Python model and stores the eventstream after them (its columns' roles and each event's
+  order carried in the table), a checkpoint an edit at or before it retires. Every start builds a table
+  of its own (a fork of an earlier one keeps reading its rows), one build action at a time runs on a
+  context, and a column a step makes must be an identifier the warehouse stores (quoted wherever SQL
+  names it); query = the COMPUTATION —
+  every analysis of one call over the eventstream AS MATERIALIZED (a query takes no steps of its own:
+  a variant is a fork), read back with a table's first rows kept (the whole of it on detail: "full" or
+  for the card that draws it) and its card's scope from the table it read, in ONE dbt Python model (python/retentioneering_model.py, THIS server's code
+  inlined; the caller's input is data, never code), on its own dbt environment (`retentioneering`); show = its own view (`ui://betti/retentioneering-view.html`, src/apps/
   retentioneering-view/, drawn with the result view's theme and shared pieces, src/apps/shared/). It is
-  deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds), and
+  deterministic (a user sample by a hash of the key, ordered rows, the library's fixed seeds and a fixed
+  one for a draw the caller left unseeded, ties in code-point order — never the locale's), and
   every choice it offers comes from `config/retentioneering-facts.json`, generated from the library.
   IT IS A WRAPPER OVER THE WHOLE LIBRARY, WITH NO LIMITS OF ITS OWN: every analysis and every
   registered preprocessing op (the library's own `{ type, ...params }` op model, applied with
   `apply_ops`), each with its own parameters under the library's names, typed as far as the library
   says — each path metric with exactly its arguments, the condition grammar, where `agg` applies (the
-  sheet PROBES the library for what its prose does not state). No cap on analyses, steps, rows or
-  tasks; the schema carries the catalog's own events and attributes as enums. Left out, each for the
+  sheet PROBES the library for what its prose does not state). A parameter the library takes as PARALLEL LISTS whose lengths must
+  agree is asked for as ONE list of items and translated back (`RESHAPED`, src/retentioneering/schema.js —
+  today `add_segment.metric_bins` as `bins`), so a count that disagrees cannot be written; a condition's
+  constant is typed by what the metric's value is (probed: kind and unit). A parameter the library
+  pastes into SQL is reshaped the same way, into constants this tool quotes (`add_segment.rules` as
+  `{ cases, else }`, the operator from the library's condition grammar) — the caller's input stays data.
+  WHAT THE LIBRARY REFUSES, THE LIBRARY SAYS BEFORE THE RUN: every step as it is added, and every
+  analysis of a query, is run by the library itself on the feature's environment — one warm process
+  (python/retentioneering_check.py --serve, src/retentioneering/checker.js) — over two stand-in
+  eventstreams of the SHAPE the eventstream has at that point (its event names, path columns, segments
+  with their levels, custom columns); what both raise alike as a configuration error is refused in a
+  fraction of a second with the library's own message, instead of minutes into the warehouse run, and a
+  step that passes returns the shape it leaves, read off the stand-ins by the library's own schema — what
+  the next step is checked against, as a pipeline stage is checked against the columns before it. It
+  does not restate the library's checks in JS; a check that cannot run refuses nothing. No cap on analyses, steps, rows or
+  tasks: nothing the library computes or returns is cut — only what a READ holds in memory is bounded
+  (a table's first rows, `keptRows`), and every row is there on detail: "full" and for the card that
+  draws it. The schema carries the catalog's own events and attributes as enums. Left out, each for the
   reason in `NOT_OFFERED` (src/retentioneering/schema.js): a Python callable, a DuckDB statement run on
   the analysis runtime (code — the data is declared in the build instead), and the two ops the
   eventstream's shape rules out. The build reaches the source's OWN columns (every real column, the

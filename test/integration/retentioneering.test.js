@@ -43,7 +43,9 @@ before(async () => {
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'rete-ctx-')), timeSpineDialect: 'duckdb' });
   engine = settle(new Engine({
     catalog, contextManager: ctxs, runner, dbPath: join(mkdtempSync(join(tmpdir(), 'rete-db-')), 'x.sqlite'),
-    features: [createRetentioneeringFeature({ runner })], featureStatus: [{ id: 'retentioneering', available: true }],
+    // a read keeps 7 rows of a table (not 1000), so these few users' per-path tables are cut as a large
+    // eventstream's are, and every whole read is proved by the numbers
+    features: [createRetentioneeringFeature({ runner, keptRows: 7 })], featureStatus: [{ id: 'retentioneering', available: true }],
   }));
   // the rows every expectation below is counted from: each event, its user, its time — in path order
   rows = (await wh.query('select player_id_of_internal as u, event_name as e, device_time as t from fct_analytics_events order by 1, 3, 2')).rows;
@@ -72,7 +74,7 @@ const paths = () => {
   return by;
 };
 /** One analysis of the task in full — every cell the card draws, not the summary the model reads. */
-const full = async (id) => engine._taskResults.get(analyses.task_id).out.analyses[id];
+const full = async (id) => (await engine.query_retentioneering_model({ task_id: analyses.task_id, detail: 'full' })).analyses[id];
 
 test('the eventstream holds every event of every user, and its vocabulary is the source\'s own counts', opts, async (t) => {
   if (skip(t)) return;
@@ -156,6 +158,15 @@ test('clusters cover every path once; segment overview sizes are the users per p
   const perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform')).rows;
   const s = analyses.read.analyses.segment_overview;
   assert.deepEqual(Object.fromEntries(s.levels.map((l) => [l.name, l.size])), Object.fromEntries(perPlatform.map((r) => [r.platform, Number(r.n)])));
+  // the summary is the groups' profiles plus the library's own tables — the label of every path among
+  // them, its first rows shown and all of them counted — never the metric list spread into it
+  for (const summary of [c, s]) assert.deepEqual(Object.keys(summary).filter((k) => /^\d+$/.test(k)), []);
+  const labels = c.tables.find((tb) => tb.total_rows === built.users);
+  assert.ok(labels, `a table with a row per path (${c.tables.map((tb) => `${tb.name}: ${tb.total_rows}`).join(', ')})`);
+  assert.equal(labels.rows.length, Math.min(built.users, 7), 'the summary shows the first rows the read kept');
+  // detail: "full" reads every row of it from the stored table — the read kept only its first
+  const whole = (await engine.query_retentioneering_model({ task_id: analyses.task_id, detail: 'full' })).analyses.cluster_analysis.tables.find((tb) => tb.name === labels.name);
+  assert.equal(whole.rows.length, built.users);
 });
 
 test('the same call twice gives the same numbers, and a user sample keeps the same users on every build', opts, async (t) => {
@@ -182,6 +193,11 @@ test('display draws one analysis once — the card model is built from the store
   assert.deepEqual(vm.steps.map((s) => s.value), analyses.read.analyses.funnel.steps.map((s) => s.unique_paths));
   assert.ok(toCallToolResult(d, 'display_retentioneering_result', {}, engine).structuredContent, 'a drawn card carries its structured result');
   await assert.rejects(engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'funnel' }), /shown already/);
+  // two calls at once for one analysis: one draws it, the other is refused — never two cards
+  const both = await Promise.allSettled([0, 1].map(() => engine.display_retentioneering_result({ task_id: analyses.task_id, analysis: 'step_matrix' })));
+  assert.deepEqual(both.map((b) => b.status).sort(), ['fulfilled', 'rejected']);
+  assert.equal(both.find((b) => b.status === 'fulfilled').value.drawn, true);
+  assert.match(String(both.find((b) => b.status === 'rejected').reason?.message), /shown already/);
 });
 
 test('what cannot run is refused before anything starts', opts, async (t) => {
@@ -224,33 +240,315 @@ const runFull = async (input) => {
   assert.equal(r.status, 'done', JSON.stringify(r.error));
   return { task_id: q.task_id, analyses: r.analyses };
 };
+/** The analyses of a call as a read summarizes them (a segment's levels with their sizes). */
+const runRead = async (input) => {
+  const q = await engine.query_retentioneering_model({ context_id: built.context_id, ...input });
+  const r = await engine.query_retentioneering_model({ task_id: q.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  return { task_id: q.task_id, analyses: r.analyses };
+};
 const table = (result, name) => {
   const t = result.tables.find((x) => x.name === name);
   assert.ok(t, `a table '${name}' (has ${result.tables.map((x) => x.name).join(', ')})`);
   return t.rows.map((r) => Object.fromEntries(t.columns.map((c, i) => [c, r[i]])));
 };
 
-test('preprocess is the library\'s own op model: collapsed loops leave no self-transition, a path filter keeps the paths it names', opts, async (t) => {
+// ── an eventstream's steps: a draft the library checks as each step is added ─────────────────────
+
+let stepsBuilt = null;
+/** A context of its own for the step tests: one eventstream `base` (the users' paths, with platform). */
+const stepsContext = async () => {
+  if (!stepsBuilt) {
+    const b = await engine.build_retentioneering_model({ name: 'base', source: 'events', segments: [{ model: 'users', attribute: 'platform' }] });
+    stepsBuilt = await engine.query_retentioneering_model({ task_id: b.task_id });
+    assert.equal(stepsBuilt.status, 'done', JSON.stringify(stepsBuilt.error));
+  }
+  return stepsBuilt.context_id;
+};
+/** A fork of `base` with these steps, materialized; its build's read. */
+const shaped = async (name, steps) => {
+  const ctx = await stepsContext();
+  await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'base', name, after: 0 });
+  const added = await engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: name, steps });
+  const m = await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: name });
+  const read = await engine.query_retentioneering_model({ task_id: m.task_id });
+  assert.equal(read.status, 'done', JSON.stringify(read.error));
+  return { ctx, added, read };
+};
+/** The analyses of one call over `eventstream`, read back. */
+const analyze = async (ctx, eventstream, analyses, detail) => {
+  const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream, analyses });
+  const r = await engine.query_retentioneering_model({ task_id: q.task_id, ...(detail ? { detail } : {}) });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  return r.analyses;
+};
+/** Each user's event names in path order, collapsed runs of one event into one. */
+const collapsed = (list) => list.map((r) => r.e).filter((e, i, all) => i === 0 || e !== all[i - 1]);
+
+test('steps are the library\'s own op model: collapsed loops leave no self-transition, a path filter keeps the paths it names', opts, async (t) => {
   if (skip(t)) return;
-  const { analyses: a } = await runFull({
-    preprocess: [{ type: 'collapse_events', loops: true }],
-    analyses: [
-      { kind: 'transition_graph' },
-      { kind: 'describe', id: 'long_paths', preprocess: [{ type: 'filter_paths', condition: { op: '>', metric: 'length', value: 5 } }] },
-    ],
-  });
+  const { ctx } = await shaped('collapsed', [{ type: 'collapse_events', loops: true }]);
+  const a = await analyze(ctx, 'collapsed', [{ kind: 'transition_graph' }], 'full');
   // the pairs of the paths once every run of one event is one event
   const expected = new Map();
   for (const list of paths().values()) {
-    const seq = ['path_start', ...list.map((r) => r.e).filter((e, i, all) => i === 0 || e !== all[i - 1]), 'path_end'];
+    const seq = ['path_start', ...collapsed(list), 'path_end'];
     for (let i = 0; i + 1 < seq.length; i += 1) expected.set(`${seq[i]}>${seq[i + 1]}`, (expected.get(`${seq[i]}>${seq[i + 1]}`) || 0) + 1);
   }
   assert.deepEqual(new Map(a.transition_graph.edges.map((e) => [`${e.source}>${e.target}`, e.count])), expected);
   assert.ok(!a.transition_graph.edges.some((e) => e.source === e.target), 'no self-loops');
-  // describe after filter_paths(length > 5), over the collapsed paths of the call
-  const long = [...paths().values()].filter((list) => list.map((r) => r.e).filter((e, i, all) => i === 0 || e !== all[i - 1]).length > 5).length;
-  assert.equal(a.long_paths.values['shape'].n_paths, long);
-  assert.equal(a.long_paths.paths, long);
+  // a fork of it with one more step: the collapsed paths longer than 5, the parent untouched
+  await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'collapsed', name: 'long_paths' });
+  await engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'long_paths', step: { type: 'filter_paths', condition: { op: '>', metric: 'length', value: 5 } } });
+  const m = await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: 'long_paths' });
+  const read = await engine.query_retentioneering_model({ task_id: m.task_id });
+  const long = [...paths().values()].filter((list) => collapsed(list).length > 5).length;
+  assert.equal(read.users, long, 'the materialized eventstream holds the paths the filter kept');
+  const d = await analyze(ctx, 'long_paths', [{ kind: 'describe' }], 'full');
+  assert.equal(d.describe.values['shape'].n_paths, long);
+  const whole = await analyze(ctx, 'collapsed', [{ kind: 'describe' }], 'full');
+  assert.equal(whole.describe.values['shape'].n_paths, built.users, 'the fork left its parent as it was');
+});
+
+test('each step is checked by the library as it is added, and says what it changed — a refused one changes nothing', opts, async (t) => {
+  if (skip(t)) return;
+  const ctx = await stepsContext();
+  await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'base', name: 'loop', after: 0 });
+  const add = (step) => engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'loop', step });
+  const started = Date.now();
+  const s1 = await add({ type: 'rename_events', mapping: { shop_opened: 'shop' } });
+  assert.deepEqual([s1.step.checked, s1.changed.events_added, s1.changed.events_removed], [true, ['shop'], ['shop_opened']]);
+  const s2 = await add({ type: 'split_sessions', timeout: '30m', session_col: 'visit' });
+  assert.deepEqual(s2.changed.paths_added, ['visit']);
+  const s3 = await add({ type: 'add_segment', name: 'band', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from: 5 }] } });
+  assert.deepEqual(s3.changed.segments_added, ['band']);
+  assert.deepEqual(s3.shape.segments.band.levels.sort(), ['long', 'short']);
+  // refused by the library, with its own message, on what the eventstream holds at that step
+  const refusedStep = (step, re) => assert.rejects(add(step), (e) => e.field === 'step' && re.test(e.message) && /nothing changed/.test(e.message));
+  await refusedStep({ type: 'rename_events', mapping: { shop_opened: 'store' } }, /shop_opened/); // renamed at step 1
+  await refusedStep({ type: 'filter_events', keep: { platform: ['no_such_platform'] } }, /no_such_platform/);
+  await refusedStep({ type: 'collapse_events', loops: true, name: 'x->y' }, /->/);
+  await refusedStep({ type: 'add_segment', name: 'band', rules: { cases: [{ column: 'platform', op: '=', value: 'ios', level: 'apple' }], else: 'other' } }, /band/); // exists
+  assert.ok(Date.now() - started < 60000, 'every answer came from the library\'s own check, without a run');
+  const p = await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'loop' });
+  assert.deepEqual(p.steps.map((x) => [x.index, x.step.type, x.checked]), [[1, 'rename_events', true], [2, 'split_sessions', true], [3, 'add_segment', true]]);
+  // an edit is checked with every step after it: renaming another event leaves step 2 and 3 as they are
+  const e1 = await engine.build_retentioneering_model({ action: 'edit_step', context_id: ctx, eventstream: 'loop', index: 1, step: { type: 'rename_events', mapping: { level_started: 'start' } } });
+  assert.equal(e1.steps, 3);
+  // an inserted step is checked on what the step before it left, and moves the rest along
+  const i1 = await engine.build_retentioneering_model({ action: 'insert_step', context_id: ctx, eventstream: 'loop', index: 2, step: { type: 'drop_events', names: ['tutorial'] } });
+  assert.deepEqual([i1.steps, i1.step.index, i1.changed.events_removed], [4, 2, ['tutorial']]);
+  await assert.rejects(engine.build_retentioneering_model({ action: 'insert_step', context_id: ctx, eventstream: 'loop', index: 2, step: { type: 'drop_events', names: ['level_started'] } }), (e) => /level_started/.test(e.message) && /nothing changed/.test(e.message)); // renamed by step 1
+  assert.equal((await engine.build_retentioneering_model({ action: 'delete_step', context_id: ctx, eventstream: 'loop', index: 2 })).steps, 3);
+  // ...while deleting the step that makes the session column breaks a later step that reads it
+  await engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'loop', step: { type: 'filter_paths', condition: { op: '>', metric: 'length', value: 1 }, path: 'visit' } });
+  await assert.rejects(engine.build_retentioneering_model({ action: 'delete_step', context_id: ctx, eventstream: 'loop', index: 2 }), (e) => /step 3 \(filter_paths\)|step 4|visit/.test(e.message) && /nothing changed/.test(e.message));
+  // the analyses read what is materialized: steps not yet materialized are said, not skipped
+  await assert.rejects(engine.query_retentioneering_model({ context_id: ctx, eventstream: 'loop', analyses: [{ kind: 'describe' }] }), (e) => e.field === 'eventstream' && /materialize/.test(e.message));
+  const m = await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: 'loop' });
+  const read = await engine.query_retentioneering_model({ task_id: m.task_id });
+  assert.equal(read.status, 'done', JSON.stringify(read.error));
+  assert.equal(read.steps_materialized, 4);
+  assert.ok(read.vocabulary.some((v) => v.event === 'start') && !read.vocabulary.some((v) => v.event === 'level_started'), 'the table holds the renamed events');
+  assert.deepEqual(read.paths, ['user_id', 'visit']);
+  // the numbers: a path per visit, as many as the table holds
+  const visits = Number((await wh.query(`select count(distinct visit) as n from ${read.model}`)).rows[0].n);
+  const d = await analyze(ctx, 'loop', [{ kind: 'path_metrics', metrics: [{ metric: 'length' }], path: 'visit' }], 'full');
+  assert.equal(table(d.path_metrics, 'result').length, visits);
+  // an edit at or before the materialized steps retires their table: the next materialize rebuilds
+  const t1 = await engine.build_retentioneering_model({ action: 'truncate', context_id: ctx, eventstream: 'loop', after: 2 });
+  assert.ok(t1.checkpoint_dropped);
+  assert.equal(t1.materialized_through, 0);
+});
+
+test('metric bins: each bin holds the paths whose metric falls in it — by value, by quantile — and two bins of one name are refused in the call', opts, async (t) => {
+  if (skip(t)) return;
+  const lengths = [...paths().values()].map((list) => list.length);
+  // pandas' linear quantile, which the library cuts at
+  const sorted = [...lengths].sort((a, b) => a - b);
+  const quantile = (q) => { const p = (sorted.length - 1) * q; const lo = Math.floor(p); return sorted[lo] + (sorted[Math.ceil(p)] - sorted[lo]) * (p - lo); };
+  const median = quantile(0.5);
+  const { ctx } = await shaped('bands', [
+    // the bins in any order after the lowest: each keeps its own level
+    { type: 'add_segment', name: 'length_band', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'short' }, { level: 'long', from: 10 }, { level: 'mid', from: 5 }] } },
+    { type: 'add_segment', name: 'half', metric_bins: { metric: { metric: 'length' }, bins: [{ level: 'lower' }, { level: 'upper', from_quantile: 0.5 }] } },
+  ]);
+  const a = await analyze(ctx, 'bands', [
+    { kind: 'segment_overview', id: 'by_value', segment_col: 'length_band', metrics: [{ metric: 'length', agg: 'mean' }] },
+    { kind: 'segment_overview', id: 'by_quantile', segment_col: 'half', metrics: [{ metric: 'length', agg: 'mean' }] },
+  ]);
+  const sizes = (s) => Object.fromEntries(s.levels.map((l) => [l.name, l.size]));
+  const count = (f) => lengths.filter(f).length;
+  assert.deepEqual(sizes(a.by_value), Object.fromEntries(Object.entries({ short: count((n) => n < 5), mid: count((n) => n >= 5 && n < 10), long: count((n) => n >= 10) }).filter(([, n]) => n)));
+  assert.deepEqual(sizes(a.by_quantile), Object.fromEntries(Object.entries({ lower: count((n) => n < median), upper: count((n) => n >= median) }).filter(([, n]) => n)));
+  const bins = (list) => engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'bands', step: { type: 'add_segment', name: 'x', metric_bins: { metric: { metric: 'length' }, bins: list } } });
+  await assert.rejects(bins([{ level: 'a' }, { level: 'a', from: 3 }]), (e) => e.field === 'step.metric_bins' && /two bins are named 'a'/.test(e.message));
+  await assert.rejects(bins([{ level: 'a' }, { level: 'b', from: 3 }, { level: 'c', from: 3 }]), (e) => e.field === 'step.metric_bins' && /two bins start/.test(e.message));
+});
+
+test('rules are cases the tool writes: each path gets the level of the first case its row matches, the rest the else level', opts, async (t) => {
+  if (skip(t)) return;
+  const perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform order by platform')).rows;
+  const [first] = perPlatform;
+  const { ctx, read } = await shaped('stores', [{ type: 'add_segment', name: 'store', rules: { cases: [{ column: 'platform', op: 'in', value: [first.platform, "it's not a level"], level: 'first_store' }], else: 'other_store' } }]);
+  const rest = perPlatform.slice(1).reduce((n, r) => n + Number(r.n), 0);
+  const want = Object.fromEntries(Object.entries({ first_store: Number(first.n), other_store: rest }).filter(([, n]) => n));
+  // the materialized eventstream knows the levels the step made, with their users
+  assert.deepEqual(Object.fromEntries(read.segment_levels.store.levels.map((l) => [l.level, l.users])), want);
+  const a = await analyze(ctx, 'stores', [{ kind: 'segment_overview', segment_col: 'store', metrics: [{ metric: 'length', agg: 'mean' }] }]);
+  assert.deepEqual(Object.fromEntries(a.segment_overview.levels.map((l) => [l.name, l.size])), want);
+});
+
+test('a later start of the same name makes a table of its own: a fork of the earlier eventstream keeps reading its rows', opts, async (t) => {
+  if (skip(t)) return;
+  const ctx = await stepsContext();
+  const first = await engine.query_retentioneering_model({ task_id: (await engine.build_retentioneering_model({ context_id: ctx, name: 'origin', source: 'events' })).task_id });
+  await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'origin', name: 'origin_copy' });
+  const again = await engine.query_retentioneering_model({ task_id: (await engine.build_retentioneering_model({ context_id: ctx, name: 'origin', source: 'events', events: { include: ['tutorial'] } })).task_id });
+  assert.notEqual(again.model, first.model);
+  assert.deepEqual(again.vocabulary.map((v) => v.event), ['tutorial']);
+  // the fork reads the rows it was made from, and the first build's task still says them
+  const graph = await analyze(ctx, 'origin_copy', [{ kind: 'transition_graph' }], 'full');
+  assert.deepEqual(graph.transition_graph.nodes.map((n) => n.event).filter((e) => !['path_start', 'path_end'].includes(e)).sort(), first.vocabulary.map((v) => v.event).sort());
+  const reread = await engine.query_retentioneering_model({ task_id: first.task_id });
+  assert.equal(reread.events, first.events);
+});
+
+test('steps asked for at once are applied one after the other: none is lost', opts, async (t) => {
+  if (skip(t)) return;
+  const ctx = await stepsContext();
+  await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'base', name: 'parallel', after: 0 });
+  const steps = [{ type: 'rename_events', mapping: { shop_opened: 'shop' } }, { type: 'drop_events', names: ['tutorial'] }, { type: 'collapse_events', loops: true }];
+  const answers = await Promise.all(steps.map((step) => engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'parallel', step })));
+  assert.deepEqual(answers.map((a) => a.steps).sort(), [1, 2, 3]);
+  const p = await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'parallel' });
+  assert.deepEqual(p.steps.map((x) => x.step.type).sort(), steps.map((x) => x.type).sort());
+  assert.ok(p.steps.every((x) => x.checked));
+  // and the numbers are those of all three
+  const m = await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: 'parallel' });
+  const read = await engine.query_retentioneering_model({ task_id: m.task_id });
+  const names = read.vocabulary.map((v) => v.event);
+  assert.ok(names.includes('shop') && !names.includes('shop_opened') && !names.includes('tutorial'));
+});
+
+test('a column a step makes is an identifier the warehouse stores; a segment named for a keyword is carried', opts, async (t) => {
+  if (skip(t)) return;
+  const ctx = await stepsContext();
+  const segmentNamed = (name) => engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'base', step: { type: 'add_segment', name, rules: { cases: [{ column: 'platform', op: '=', value: 'ios', level: 'x' }], else: 'y' } } });
+  await assert.rejects(segmentNamed('ad format'), (e) => e.field === 'step' && /'ad format' cannot be a column/.test(e.message) && /nothing changed/.test(e.message));
+  await assert.rejects(segmentNamed('seg\n'), (e) => e.field === 'step' && /cannot be a column/.test(e.message));
+  // nor a name the stored eventstream uses for what it carries besides
+  await assert.rejects(segmentNamed('event_order'), (e) => e.field === 'step' && /uses that name itself/.test(e.message));
+  // `group` is a keyword in both warehouses: quoted wherever the eventstream and its summary name it
+  const b = await engine.build_retentioneering_model({ context_id: ctx, name: 'keyworded', source: 'events', segments: [{ model: 'users', attribute: 'platform', as: 'group' }] });
+  const read = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(read.status, 'done', JSON.stringify(read.error));
+  const perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform')).rows;
+  assert.deepEqual(Object.fromEntries(read.segment_levels.group.levels.map((l) => [l.level, l.users])), Object.fromEntries(perPlatform.map((r) => [String(r.platform), Number(r.n)])));
+  const a = await analyze(ctx, 'keyworded', [{ kind: 'segment_overview', segment_col: 'group', metrics: [{ metric: 'length', agg: 'mean' }] }]);
+  assert.deepEqual(Object.fromEntries(a.segment_overview.levels.map((l) => [l.name, l.size])), Object.fromEntries(perPlatform.map((r) => [String(r.platform), Number(r.n)])));
+});
+
+test('a sample the caller left unseeded is drawn with a fixed seed: the same paths on every materialize', opts, async (t) => {
+  if (skip(t)) return;
+  const kept = [];
+  for (const name of ['half_a', 'half_b']) {
+    const { read } = await shaped(name, [{ type: 'sample_paths', frac: 0.5 }]);
+    kept.push((await wh.query(`select distinct user_id from ${read.model} order by 1`)).rows.map((r) => r.user_id));
+  }
+  assert.ok(kept[0].length > 0 && kept[0].length < built.users, 'a real sample');
+  assert.deepEqual(kept[0], kept[1]);
+});
+
+test('a card speaks of the rows its analysis read, whatever the eventstream became after', opts, async (t) => {
+  if (skip(t)) return;
+  const { ctx, read: before } = await shaped('scoped', [{ type: 'collapse_events', loops: true }]);
+  const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream: 'scoped', analyses: [{ kind: 'transition_graph' }] });
+  await engine.query_retentioneering_model({ task_id: q.task_id });
+  // the eventstream moves on: fewer paths
+  await engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'scoped', step: { type: 'filter_paths', condition: { op: '>', metric: 'length', value: 5 } } });
+  const after = await engine.query_retentioneering_model({ task_id: (await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: 'scoped' })).task_id });
+  assert.ok(after.users < before.users);
+  const d = await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'transition_graph' });
+  assert.deepEqual([d.scope.users, d.scope.events], [before.users, before.events]);
+});
+
+test('a materialize that ends while a step is being edited never leaves a table standing for the old steps', opts, async (t) => {
+  if (skip(t)) return;
+  const ctx = await stepsContext();
+  await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'base', name: 'racing', after: 0 });
+  await engine.build_retentioneering_model({ action: 'add_steps', context_id: ctx, eventstream: 'racing', steps: [{ type: 'collapse_events', loops: true }, { type: 'drop_events', names: ['tutorial'] }] });
+  const m = await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: 'racing' });
+  // the edit is made while the materialize runs; whichever ends first, the other sees it
+  await engine.build_retentioneering_model({ action: 'edit_step', context_id: ctx, eventstream: 'racing', index: 2, step: { type: 'drop_events', names: ['shop_opened'] } });
+  await engine.query_retentioneering_model({ task_id: m.task_id });
+  const p = await engine.build_retentioneering_model({ action: 'preview', context_id: ctx, eventstream: 'racing' });
+  assert.equal(p.materialized_through, 0, 'the table of the old steps does not stand for the edited ones');
+  await assert.rejects(engine.query_retentioneering_model({ context_id: ctx, eventstream: 'racing', analyses: [{ kind: 'describe' }] }), (e) => e.field === 'eventstream' && /materialize/.test(e.message));
+  // materialized again, the table holds the edited steps' events
+  const again = await engine.query_retentioneering_model({ task_id: (await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: 'racing' })).task_id });
+  const names = again.vocabulary.map((v) => v.event);
+  assert.ok(names.includes('tutorial') && !names.includes('shop_opened'));
+});
+
+test('a result stored before its rows were numbered per table is read whole; a draw that does not happen leaves no mark', opts, async (t) => {
+  if (skip(t)) return;
+  const q = await engine.query_retentioneering_model({ context_id: built.context_id, eventstream: 'paths', analyses: [{ kind: 'path_metrics', metrics: [{ metric: 'length' }] }, { kind: 'conversion_rate', start_anchor: 'level_started', end_anchor: 'level_completed' }] });
+  await engine.query_retentioneering_model({ task_id: q.task_id });
+  // as a result of an earlier version: its origin a bare eventstream name, no longer held in memory
+  const ctx = engine.ctxs.get(built.context_id);
+  const table = engine.jobs.get(q.task_id).table;
+  ctx.state.retentioneering.results[table] = 'paths';
+  engine._taskResults.delete(q.task_id);
+  const read = await engine.query_retentioneering_model({ task_id: q.task_id });
+  const [tb] = read.analyses.path_metrics.tables;
+  assert.equal(tb.total_rows, built.users, 'every row counted');
+  // read whole: the summary shows its first 20 rows, not the 7 a read keeps of a result it can cut
+  assert.equal(tb.rows.length, Math.min(built.users, 20));
+  // an analysis without a card is refused, and the refusal leaves nothing behind: no mark, nothing held
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'conversion_rate' }), /no card/);
+  assert.ok(!ctx.state.retentioneering.drawn?.[q.task_id]?.includes('conversion_rate'));
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'conversion_rate' }), /no card/, 'refused for what it is, not as shown already');
+});
+
+test('a task whose context is gone is refused as gone, and a preview is not held behind a step waiting for a build', opts, async (t) => {
+  if (skip(t)) return;
+  const b = await engine.build_retentioneering_model({ name: 'short_lived', source: 'events', events: { include: ['tutorial', 'level_started'] } });
+  await engine.query_retentioneering_model({ task_id: b.task_id });
+  const q = await engine.query_retentioneering_model({ context_id: b.context_id, eventstream: 'short_lived', analyses: [{ kind: 'transition_graph' }] });
+  await engine.query_retentioneering_model({ task_id: q.task_id });
+  // a start in the same context, and a step on it that waits for that build — while a preview of the
+  // first eventstream answers at once
+  await engine.build_retentioneering_model({ context_id: b.context_id, name: 'second', source: 'events' });
+  const order = [];
+  const stepping = engine.build_retentioneering_model({ action: 'add_step', context_id: b.context_id, eventstream: 'second', step: { type: 'collapse_events', loops: true } }).then(() => order.push('step'));
+  await engine.build_retentioneering_model({ action: 'preview', context_id: b.context_id, eventstream: 'short_lived' }).then(() => order.push('preview'));
+  await stepping;
+  assert.deepEqual(order, ['preview', 'step']);
+  await engine.context({ action: 'drop', context_id: b.context_id, force: true });
+  await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'transition_graph' }), (e) => e.code === 'result_gone' && e.stage === 'validate');
+});
+
+test('what the library refuses in an analysis is refused by the library itself before the run — its own message, in seconds', opts, async (t) => {
+  if (skip(t)) return;
+  const started = Date.now();
+  const refused = (input, field, re) => assert.rejects(engine.query_retentioneering_model({ context_id: built.context_id, eventstream: 'paths', ...input }), (e) => e.field === field && re.test(e.message) && /nothing ran/.test(e.message));
+  // an anchor token the library reads with its spacing, an event a metric names, a level the segment does not have
+  await refused({ analyses: [{ kind: 'step_matrix', anchor: { pattern: 'level_started -> shop_opened' } }] }, 'analyses.step_matrix', /level_started /);
+  await refused({ analyses: [{ kind: 'segment_overview', segment_col: 'platform', metrics: [{ metric: 'has_event', metric_args: { event: 'no_such_event' }, agg: 'mean' }] }] }, 'analyses.segment_overview', /no_such_event/);
+  await refused({ analyses: [{ kind: 'transition_graph', diff: ['platform', 'no_such_platform', '<REST>'] }] }, 'analyses.transition_graph', /no_such_platform/);
+  assert.ok(Date.now() - started < 60000, 'refused without a run');
+  // the build's summary knows each segment's levels, with their users — what a diff or a filter may name
+  const perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform')).rows;
+  assert.deepEqual(Object.fromEntries(built.segment_levels.platform.levels.map((l) => [l.level, l.users])), Object.fromEntries(perPlatform.map((r) => [String(r.platform), Number(r.n)])));
+});
+
+test('a condition on a time metric compares seconds since the epoch: the paths that started before a moment', opts, async (t) => {
+  if (skip(t)) return;
+  const firsts = (await wh.query('select epoch(min(device_time)) as s from fct_analytics_events group by player_id_of_internal order by 1')).rows.map((r) => Number(r.s));
+  const moment = firsts[Math.floor(firsts.length / 2)];
+  const { read } = await shaped('early', [{ type: 'filter_paths', condition: { op: '<', metric: 'first_event_time', value: moment } }]);
+  assert.equal(read.users, firsts.filter((s) => s < moment).length);
 });
 
 test('conversion rate and path metrics are the library\'s tables, and their numbers are the rows\'', opts, async (t) => {
@@ -351,7 +649,8 @@ test('a read is a summary by default and every record with detail: "full"', opts
   const summary = await engine.query_retentioneering_model({ task_id: q.task_id });
   const [tb] = summary.analyses.path_metrics.tables;
   assert.equal(tb.total_rows, built.users);
-  assert.equal(tb.rows.length, Math.min(built.users, 20));
+  // the first rows the read kept (7 in this suite), up to the 20 a summary shows
+  assert.equal(tb.rows.length, Math.min(built.users, 20, 7));
   const all = await engine.query_retentioneering_model({ task_id: q.task_id, detail: 'full' });
   assert.equal(all.analyses.path_metrics.tables[0].rows.length, built.users);
 });

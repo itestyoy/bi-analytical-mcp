@@ -154,12 +154,19 @@ path analysis with [retentioneering](https://github.com/retentioneering/retentio
   event, time }`), reading that table's columns; its cards are the same transition graph, step
   matrix and sankey.
   It is built in SQL where the data lives and materialized; the call returns a task.
-- **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, preprocess?, analyses: [...] }`
-  runs every listed analysis — each a library method with its own parameters under the library's
-  names: transition graph, step matrix, step sankey, funnel, path clusters, segment overview,
-  conversion rate, metric distribution, path metrics, describe, and diff between two segment levels —
-  after the library's own preprocessing steps (`{ type, ...params }`: filter_paths, truncate_paths,
-  collapse_events, split_sessions, add_segment, add_clusters, …), for the whole call or per analysis.
+  Then the eventstream is SHAPED STEP BY STEP, like a pipeline draft: `action: "add_step"` (and
+  `add_steps`, `edit_step`, `insert_step`, `delete_step`, `truncate`, `fork`, `preview`) takes one of
+  the library's own steps (`{ type, ...params }`: filter_paths, truncate_paths, collapse_events,
+  split_sessions, add_segment, add_clusters, …). The library itself checks each one, in a warm local
+  process on the feature's environment, over stand-in eventstreams of what the eventstream holds at
+  that step — a step it refuses is refused at once with its message; one it takes comes back with what
+  it changed (events, path columns, segments and their levels). `action: "materialize"` runs the steps
+  on the warehouse (one dbt Python model, a task) and stores the eventstream after them.
+- **`query_retentioneering_model`** — the COMPUTATION: `{ context_id, eventstream, analyses: [...] }`
+  runs every listed analysis over the eventstream as materialized — each a library method with its own
+  parameters under the library's names: transition graph, step matrix, step sankey, funnel, path
+  clusters, segment overview, conversion rate, metric distribution, path metrics, describe, and diff
+  between two segment levels — checked by the library first on what the eventstream holds.
   It is ONE dbt Python model: in the dbt process on DuckDB, on the warehouse's Python runtime on
   BigQuery (Colab Enterprise through `submission_method: bigframes`). One call = one run = one cold
   start. `{ task_id }` reads it back, summarized for the model (`detail: "full"`: every record). The

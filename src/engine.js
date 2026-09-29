@@ -3987,6 +3987,8 @@ export class Engine {
     try { if (this._ownsStore) this.store?.close?.(); } catch { /* noop */ }
     try { this._memoryStore?.close?.(); } catch { /* noop */ } // separate memory store (MCP_MEMORY_DB)
     try { this.runner?.close?.(); } catch { /* noop */ }
+    // what a feature keeps running (a warm process of its own) goes with the engine
+    for (const f of this.features || []) { try { f.close?.(); } catch { /* noop */ } }
   }
 
   /**

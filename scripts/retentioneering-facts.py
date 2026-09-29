@@ -109,6 +109,13 @@ def from_hint(t):
         if any(p == {} for p in parts):
             return {}
         return parts[0] if len(parts) == 1 else {"anyOf": parts}
+    if origin is tuple and args and args[-1] is not Ellipsis:
+        # a fixed tuple: exactly its members, each of its own type
+        parts = [from_hint(a) or {} for a in args]
+        return {"type": "array", "prefixItems": parts, "minItems": len(parts), "maxItems": len(parts)}
+    if origin is tuple and args:
+        item = from_hint(args[0])
+        return {"type": "array", **({"items": item} if item else {})}
     if origin in (list, tuple, set, typing.Collection) or (origin is not None and getattr(origin, "__name__", "") in ("Collection", "Sequence", "Iterable")):
         item = from_hint(args[0]) if args else None
         return {"type": "array", **({"items": item} if item else {})}
@@ -259,6 +266,8 @@ def _metric_args():
         for combo in itertools.product([None, *range(len(candidates))], repeat=len(keys)):
             results[combo] = accepted(metric, {k: candidates[i][1] for k, i in zip(keys, combo) if i is not None})
         good = [c for c, ok in results.items() if ok]
+        for c in sorted(good, key=lambda c: sum(i is not None for i in c)):
+            METRIC_EXAMPLES.setdefault(metric, []).append({k: candidates[i][1] for k, i in zip(keys, c) if i is not None})
         spec = {}
         for pos, key in enumerate(keys):
             seen = {c[pos] for c in good if c[pos] is not None}
@@ -287,30 +296,126 @@ def _metric_args():
 
 
 METRIC_ARGS = None
+# metric → the argument sets the library accepted for it on the probe stream, fewest first
+METRIC_EXAMPLES = {}
+# metric → {type, unit, value_kinds} (_metric_values)
+METRIC_VALUES = {}
 
 
 CONDITION_REF = "#/$defs/retentioneering_condition"
+
+UNITS = {"epoch_seconds": "seconds since 1970-01-01 UTC (a Unix timestamp, not a date string)", "seconds": "seconds"}
+
+
+def _metric_values():
+    """metric → {type, unit, value_kinds}: what a metric's value IS, PROBED on the library. `type` is
+    the dtype build_metrics returns; `unit` is read off how the value moves when the probe paths are
+    shifted by an hour (a point in time moves by 3600: epoch seconds) or their gaps doubled (a span
+    doubles: seconds); `value_kinds` are the constants a condition may compare it with — each kind
+    put through filter_paths, kept when the library runs the comparison (an empty result is a run)."""
+    from retentioneering.exceptions import EmptyEventstreamError
+
+    base = pd.Timestamp("2024-01-01")
+    offsets = {"u": [0, 86400, 3 * 86400], "v": [0]}
+    names = {"u": ["e", "f", "e"], "v": ["e"]}
+
+    def stream(shift=0, spread=1):
+        rows = [(u, names[u][i], base + pd.Timedelta(seconds=shift + spread * o), "x" if u == "u" else "y")
+                for u, os_ in offsets.items() for i, o in enumerate(os_)]
+        frame = pd.DataFrame(rows, columns=["user_id", "event", "timestamp", "seg"])
+        return Eventstream(frame, schema={"path_cols": ["user_id"], "event_col": "event", "timestamp_col": "timestamp", "segment_cols": ["seg"]})
+
+    a, shifted, spread = stream(), stream(shift=3600), stream(spread=2)
+    kinds = [("number", 1.5), ("boolean", True), ("string", "2024-01-02")]
+    out = {}
+    for metric in sorted(metric_builder.VALID_METRICS):
+        if metric not in METRIC_EXAMPLES:
+            continue
+        cfg, dtype, unit = None, None, None
+        # the argument sets in turn — each also with one of its events swapped for the probe's other
+        # one — until one moves the value (from e to e can be zero on every path)
+        tries = []
+        for args in METRIC_EXAMPLES[metric]:
+            tries.append(args)
+            tries += [{**args, k: "f"} for k, v in args.items() if v == "e"]
+        for args in tries:
+            one = {"metric": metric, **({"metric_args": args} if args else {})}
+            try:
+                va, vs, vd = (metric_builder.MetricBuilder(x).build_metrics([one], "user_id") for x in (a, shifted, spread))
+            except Exception:  # noqa: BLE001 — a refusal is the answer being probed
+                continue
+            if va.shape[1] != 1:
+                cfg = False  # a value per event or per level: not one value per path
+                break
+            if cfg is None:
+                cfg, dtype = one, va.iloc[:, 0].dtype
+            numeric = pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(dtype)
+            if not numeric:
+                break
+            col = [x.iloc[:, 0].astype(float) for x in (va, vs, vd)]
+            diff = (col[1] - col[0]).dropna()
+            if len(diff) and (diff == 3600).all():
+                unit = "epoch_seconds"
+            elif (col[0].fillna(0) != 0).any() and ((col[2] - 2 * col[0]).dropna() == 0).all() and (diff == 0).all():
+                unit = "seconds"
+            if unit:
+                break
+        if not cfg:
+            continue
+        numeric = pd.api.types.is_numeric_dtype(dtype) and not pd.api.types.is_bool_dtype(dtype)
+        accepted = []
+        if metric not in condition_ast.FORBIDDEN_IN_CONDITIONS:
+            for kind, value in kinds:
+                try:
+                    a.filter_paths(condition={"op": "<", **cfg, "value": value})
+                    accepted.append(kind)
+                except EmptyEventstreamError:
+                    accepted.append(kind)
+                except Exception:  # noqa: BLE001 — a refusal is the answer being probed
+                    pass
+        kind = "boolean" if pd.api.types.is_bool_dtype(dtype) else "integer" if pd.api.types.is_integer_dtype(dtype) else "number" if numeric else "string"
+        # a comparison with the value's own kind, where the library runs it (a number is cast to a
+        # flag and back, which the warehouse allows but says nothing)
+        natural = "number" if kind == "integer" else kind
+        out[metric] = {"type": kind, **({"unit": unit} if unit else {}),
+                       "value_kinds": [natural] if natural in accepted else accepted}
+    return out
+
+
+def value_note(metric):
+    v = METRIC_VALUES.get(metric)
+    if not v:
+        return None
+    return f"Its value is {({'integer': 'an integer', 'number': 'a number', 'boolean': 'true or false'}).get(v['type'], 'a string')}" + (f", in {UNITS[v['unit']]}" if v.get("unit") else "") + "."
 
 
 def condition_schema(grammar):
     """A condition node as JSON Schema: a comparison leaf per metric (with that metric's own arguments),
     AND/OR over `args`, NOT over one arg. Recursive through CONDITION_REF."""
-    primitive = [{"type": "string"}, {"type": "number"}, {"type": "boolean"}]
     leaves = []
     for metric in sorted(set(metric_builder.VALID_METRICS) - set(grammar["forbidden_metrics"])):
         args = METRIC_ARGS.get(metric, {})
         required = sorted(k for k, a in args.items() if a["required"])
+        # the constants the library compares this metric with (probed), else any it might
+        kinds = (METRIC_VALUES.get(metric) or {}).get("value_kinds") or ["string", "number", "boolean"]
+        primitive = [{"type": k} for k in kinds]
+        one = primitive[0] if len(primitive) == 1 else {"anyOf": primitive}
+        note = value_note(metric)
         leaf = {
             "type": "object", "additionalProperties": False, "title": metric,
             "required": ["op", "metric", "value", *(["metric_args"] if required else [])],
             "properties": {
                 "op": {"enum": [*grammar["compare"], grammar["membership"]]},
                 "metric": {"const": metric},
-                "value": {"anyOf": [*primitive, {"type": "array", "minItems": 1, "items": {"anyOf": primitive}}], "description": f"A constant; a list of them for '{grammar['membership']}'."},
+                "value": {"anyOf": [*primitive, {"type": "array", "minItems": 1, "items": one}], "description": f"A constant; a list of them for '{grammar['membership']}'." + (f" {note}" if note else "")},
             },
         }
         if args:
             leaf["properties"]["metric_args"] = {"type": "object", "additionalProperties": False, **({"required": required} if required else {}), "properties": {k: a["schema"] for k, a in sorted(args.items())}}
+        # membership takes a list of constants, a comparison one constant
+        leaf["if"] = {"properties": {"op": {"const": grammar["membership"]}}}
+        leaf["then"] = {"properties": {"value": {"type": "array"}}}
+        leaf["else"] = {"properties": {"value": {"not": {"type": "array"}}}}
         leaves.append(leaf)
     node = {"$ref": CONDITION_REF}
     return {"oneOf": [
@@ -393,17 +498,18 @@ def agg_mode(method, param, many):
     return "optional" if run({"metric": "length"}) is not None else "required"
 
 
-def metric_config_schema(mode, many):
+def metric_config_schema(mode, many, metrics=None):
     """A path-metric config as the library's metric registry defines it: one branch per metric of its own
     list, each with exactly the arguments that metric takes, and — where the parameter rolls the values up
     (agg_mode) — an aggregation of its own list."""
     rolls_up = mode is not None
     branches = []
-    for metric in sorted(metric_builder.VALID_METRICS):
+    for metric in sorted(metrics or metric_builder.VALID_METRICS):
         args = METRIC_ARGS.get(metric, {})
         required = sorted(k for k, a in args.items() if a["required"])
+        note = value_note(metric)
         branch = {
-            "type": "object", "additionalProperties": False, "title": metric,
+            "type": "object", "additionalProperties": False, "title": metric, **({"description": note} if note else {}),
             "required": ["metric", *(["metric_args"] if required else []), *(["agg"] if mode == "required" else [])],
             "properties": {"metric": {"const": metric}},
         }
@@ -420,9 +526,76 @@ def metric_config_schema(mode, many):
     return {"type": "array", "items": item} if many else item
 
 
+def metric_bins_facts():
+    """What add_segment's metric_bins takes, PROBED on the library's own resolver
+    (add_segment._bin_edges_and_levels) and metric builder: how many level names a split takes
+    (the tool asks for one list of bins, so a count that disagrees cannot be written — which holds
+    only while N cut points make N + 1 bins and `quantiles: q` makes q, both checked here), the
+    fewest equal quantiles, the open interval a cut quantile lies in, the level reserved for paths
+    with no value, and the metrics that give one value per path (the only ones a split can bin)."""
+    from retentioneering.data_processors import add_segment
+
+    values = pd.Series([float(v) for v in range(1, 41)])
+
+    def levels_taken(bins):
+        taken = []
+        for n in range(1, 8):
+            try:
+                add_segment._bin_edges_and_levels({**bins, "segment_levels": [f"l{i}" for i in range(n)]}, values)
+                taken.append(n)
+            except add_segment.PreprocessingConfigError:
+                pass
+        return taken
+
+    def refused(bins):
+        try:
+            add_segment._bin_edges_and_levels(bins, values)
+            return False
+        except add_segment.PreprocessingConfigError:
+            return True
+
+    for cuts in (1, 2, 3):
+        if levels_taken({"edges": [float(10 * (i + 1)) for i in range(cuts)]}) != [cuts + 1] \
+                or levels_taken({"quantiles": [(i + 1) / (cuts + 1) for i in range(cuts)]}) != [cuts + 1]:
+            raise SystemExit(f"metric_bins: {cuts} cut point(s) no longer make {cuts + 1} bins — the tool's bins form needs rethinking")
+    for q in (2, 3, 4):
+        if levels_taken({"quantiles": q}) != [q]:
+            raise SystemExit(f"metric_bins: quantiles={q} no longer makes {q} bins — the tool's bins form needs rethinking")
+    fewest = next(q for q in range(1, 10) if not refused({"quantiles": q}))
+    if not (refused({"quantiles": [0.0]}) and refused({"quantiles": [1.0]}) and not refused({"quantiles": [0.5]})):
+        raise SystemExit("metric_bins: a cut quantile is no longer bounded by the open interval (0, 1)")
+    if not refused({"edges": [2.0, 1.0]}) or not refused({"edges": [1.0, 1.0]}):
+        raise SystemExit("metric_bins: cut points no longer have to be strictly increasing")
+
+    # two events and two segment levels, so a metric that gives a value per event or per level shows it
+    frame = pd.DataFrame({"user_id": ["u", "u", "v"], "event": ["e", "f", "e"],
+                          "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-01"]), "seg": ["x", "x", "y"]})
+    stream = Eventstream(frame, schema={"path_cols": ["user_id"], "event_col": "event", "timestamp_col": "timestamp", "segment_cols": ["seg"]})
+    builder = metric_builder.MetricBuilder(stream)
+    single = []
+    for metric in sorted(metric_builder.VALID_METRICS):
+        if metric not in METRIC_EXAMPLES:
+            continue
+        cfg = {"metric": metric, **({"metric_args": METRIC_EXAMPLES[metric][0]} if METRIC_EXAMPLES[metric][0] else {})}
+        try:
+            if builder.build_metrics([cfg], "user_id").shape[1] == 1:
+                single.append(metric)
+        except Exception:  # noqa: BLE001 — a refusal is the answer being probed
+            pass
+    return {
+        "min_quantile_bins": fewest,
+        "quantile_bounds": {"exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "undefined_level": add_segment.UNDEFINED_LEVEL,
+        "metrics": single,
+        "metric_schema": metric_config_schema(None, False, single),
+    }
+
+
 # What the library narrows only by its own constants, not in the signature: the clustering method and
 # scaler of cluster_analysis_data (typed there as plain str) are the same Literals add_clusters declares.
 CONSTANT_OVERRIDES = {
+    # Eventstream.funnel_data leaves diff untyped and hands it to the Funnel tool, which declares it
+    ("funnel_data", "diff"): lambda: from_hint(typing.get_type_hints(__import__("retentioneering.tools.funnel", fromlist=["Funnel"]).Funnel.fit)["diff"]),
     ("cluster_analysis_data", "method"): lambda: {"enum": list(typing.get_args(cluster_analysis.T_ClusteringMethod))},
     ("cluster_analysis_data", "scaler"): lambda: {"enum": list(typing.get_args(typing.get_args(cluster_analysis.T_Scaler)[0]))},
 }
@@ -501,6 +674,7 @@ def dedupe(schema):
 def build():
     global METRIC_ARGS
     METRIC_ARGS = _metric_args()
+    METRIC_VALUES.update(_metric_values())
     edge = typing.get_args(typing.get_type_hints(Eventstream.transition_graph_data)["edge_weight"])
     return {
         "library": "retentioneering",
@@ -510,6 +684,7 @@ def build():
         "analyses": dedupe({kind: {"method": m, "summary": summary_line(getattr(Eventstream, m)), "params": params_of(getattr(Eventstream, m))} for kind, m in ANALYSES.items()}),
         "ops": dedupe({op: {"summary": summary_line(getattr(Eventstream, op)), "params": params_of(getattr(Eventstream, op), processor_class(op))} for op in sorted(registered_ops())}),
         "metric_args": {m: {k: a for k, a in sorted(args.items())} for m, args in sorted(METRIC_ARGS.items())},
+        "metric_values": METRIC_VALUES,
         "edge_weights": list(edge),
         "path_metrics": sorted(metric_builder.VALID_METRICS),
         "in_segment_modes": sorted(metric_builder.IN_SEGMENT_MODES),
@@ -520,6 +695,7 @@ def build():
         "cluster_scalers": list(typing.get_args(typing.get_args(cluster_analysis.T_Scaler)[0])) if typing.get_args(cluster_analysis.T_Scaler) else [],
         "condition": condition_grammar(),
         "condition_schema": condition_schema(condition_grammar()),
+        "metric_bins": metric_bins_facts(),
         "anchor_keys": sorted(anchors.SPEC_KEYS),
         "anchor_occurrences": list(anchors.OCCURRENCES),
         "anchor_offset_sides": list(anchors.OFFSET_SIDES),

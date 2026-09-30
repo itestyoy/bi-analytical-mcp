@@ -17,8 +17,7 @@
 
 import { classifyInboundRequest, CLIENT_CAPABILITIES_META_KEY, SERVER_INFO_META_KEY } from '@modelcontextprotocol/server';
 import { SERVER_INFO } from './mcp-surface.js';
-import { TASKS_EXTENSION } from './mcp-server.js';
-import { envelopeCapabilities, declaresExtension } from './client-extensions.js';
+import { envelopeCapabilities, declaresExtension, TASKS_EXTENSION } from './client-extensions.js';
 
 const METHODS = new Set(['tasks/get', 'tasks/cancel']);
 

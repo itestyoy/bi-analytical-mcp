@@ -11,6 +11,12 @@
 // server it builds offers.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { EXTENSION_ID } from '@modelcontextprotocol/ext-apps/server';
+
+/** The extensions this server offers, by id: MCP Apps (the id is the official package's), Skills, Tasks. */
+export const UI_EXTENSION = EXTENSION_ID;
+export const SKILLS_EXTENSION = 'io.modelcontextprotocol/skills';
+export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
 
 const storage = new AsyncLocalStorage();
 

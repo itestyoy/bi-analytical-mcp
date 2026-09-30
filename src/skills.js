@@ -24,7 +24,6 @@ import { RESEARCH_DOMAINS, RESEARCH_GUIDES, RESEARCH_SCOPE, researchGuide } from
 import { pythonAuthoringGuide } from './python-guide.js';
 import { frameProfile } from './python-model.js';
 
-export const SKILLS_EXTENSION = 'io.modelcontextprotocol/skills';
 const MARKDOWN = 'text/markdown';
 
 const sha256 = (buf) => `sha256:${createHash('sha256').update(buf).digest('hex')}`;

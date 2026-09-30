@@ -35,7 +35,7 @@
 
 import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage, RUNTIME_ASSETS } from './runtime-assets.js';
-import { RESOURCE_MIME_TYPE, RESOURCE_URI_META_KEY, EXTENSION_ID, getUiCapability } from '@modelcontextprotocol/ext-apps/server';
+import { RESOURCE_MIME_TYPE, RESOURCE_URI_META_KEY, getUiCapability } from '@modelcontextprotocol/ext-apps/server';
 
 // WHAT DEPENDS ON THE CLIENT DECLARING THIS EXTENSION (with this view's MIME type, in the request
 // served — src/client-extensions.js): what speaks to its MODEL — the card instructions and the
@@ -51,7 +51,7 @@ export function rendersApps(clientCapabilities) {
   return Array.isArray(ui?.mimeTypes) && ui.mimeTypes.includes(RESOURCE_MIME_TYPE);
 }
 
-export { RESOURCE_MIME_TYPE, EXTENSION_ID as UI_EXTENSION };
+export { RESOURCE_MIME_TYPE };
 export const RESULT_VIEW_URI = 'ui://betti/result-view.html';
 export const RESULT_VIEW_FILE = RUNTIME_ASSETS.resultView.path;
 

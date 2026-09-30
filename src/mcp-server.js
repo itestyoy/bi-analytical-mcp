@@ -24,12 +24,10 @@ import { z } from 'zod';
 import { Server, ProtocolError, ResourceNotFoundError } from '@modelcontextprotocol/server';
 import { SERVER_INFO, isCallableTool, runTool, runToCompletion, logLine, unknownToolMessage } from './mcp-surface.js';
 import { releasableSignal } from './request-context.js';
-import { UI_EXTENSION, RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
-import { clientCapabilities, declaresExtension } from './client-extensions.js';
-import { SKILLS_EXTENSION } from './skills.js';
+import { RESOURCE_MIME_TYPE, rendersApps } from './apps.js';
+import { clientCapabilities, declaresExtension, UI_EXTENSION, SKILLS_EXTENSION, TASKS_EXTENSION } from './client-extensions.js';
 import { LIST_TTL_MS } from './surface-change.js';
 
-export const TASKS_EXTENSION = 'io.modelcontextprotocol/tasks';
 
 // What this server lists and says depends on which extensions the client declared
 // (src/client-extensions.js), so those answers are its own to cache — for LIST_TTL_MS, short, so a

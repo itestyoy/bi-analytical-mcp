@@ -19,7 +19,7 @@ import { timeRangeConditions, isValidTimezone } from './time-range.js';
 import { registerStage } from './pipeline.js';
 import { getDialect } from './dialects/index.js';
 import { comparison, typedAs } from './conditions.js';
-import { oneOfOr, strEnum } from './schema-kit.js';
+import { anyOfOr, strEnum } from './schema-kit.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
@@ -405,12 +405,12 @@ function matchRecognizeSchema(catalog) {
         type: 'array',
         // A catalog whose sources declare no relationship offers only the column form — the
         // { entity } branch is left out rather than carrying an empty vocabulary.
-        items: oneOfOr([
+        items: anyOfOr([
           { title: 'a column', type: 'string', pattern: NAME, description: 'A column available at this point in the pipeline (an event column, or one an upstream derive/compute/join added).' },
           ...(relationshipNames(catalog).length ? [{
             title: '{ entity }', type: 'object', additionalProperties: false, required: ['entity'],
             description: 'A relationship the source DECLARES — its key column is used, so you do not have to know which physical column carries it.',
-            properties: { entity: strEnum(relationshipNames(catalog), 'Name of a relationship declared by the pipeline\'s source (semantic_index({ model }) lists them).') },
+            properties: { entity: strEnum(relationshipNames(catalog), 'Name of a relationship declared by the pipeline\'s source (semantic_index({ request: { model } }) lists them).') },
           }] : []),
         ]),
         minItems: 1,

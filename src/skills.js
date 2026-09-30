@@ -2,8 +2,8 @@
 // the recipes and the python-stage guide served as Agent Skills.
 //
 // None of this is new text. The same objects the tools already serve are rendered as a skill
-// directory: `semantic_index({ guide })` is buildGuide(), `semantic_index({ recipe })` is the
-// recipe set, `semantic_index({ guide: "python" })` is pythonAuthoringGuide(). A skill is those
+// directory: `semantic_index({ request: { guide } })` is buildGuide(), `semantic_index({ request: { recipe } })` is the
+// recipe set, `semantic_index({ request: { guide: "python" } })` is pythonAuthoringGuide(). A skill is those
 // objects written as Markdown, generated once at startup from the same calls — so the skill and
 // the tool can never say two different things. The tools stay; the skill is the form a host that
 // understands skills loads progressively (name + description up front, SKILL.md on activation, a
@@ -56,7 +56,7 @@ function withFrontmatter(frontmatter, body) {
 
 const RECIPE_PROSE = ['when_to_use', 'approach', 'instead_of', 'read_first', 'notes', 'hack', 'naming_note', 'building_block'];
 function recipeMarkdown(r) {
-  const out = [`# ${r.title || r.id}`, '', `Recipe \`${r.id}\` · family \`${r.task_type || 'other'}\`${r.requires ? ` · requires ${r.requires}` : ''}. The same entry the tool returns: \`semantic_index({ recipe: "${r.id}" })\`.`];
+  const out = [`# ${r.title || r.id}`, '', `Recipe \`${r.id}\` · family \`${r.task_type || 'other'}\`${r.requires ? ` · requires ${r.requires}` : ''}. The same entry the tool returns: \`semantic_index({ request: { recipe: "${r.id}" } })\`.`];
   for (const k of RECIPE_PROSE) if (r[k]) out.push('', `## ${titleCase(k)}`, '', String(r[k]));
   const skip = new Set(['id', 'title', 'task_type', 'requires', 'origin', 'runtime', 'unavailable_here', ...RECIPE_PROSE]);
   for (const [k, v] of Object.entries(r)) {
@@ -89,7 +89,7 @@ export function buildSkills(engine) {
 
   // Each recipe as the TOOL returns it (engine.get_recipe fits a pipeline payload to this catalog —
   // a point-in-time window on a slowly-changing join), never the raw file entry: the skill must say
-  // exactly what semantic_index({ recipe }) says.
+  // exactly what semantic_index({ request: { recipe } }) says.
   const visible = recipes ? recipes.ids().filter((id) => !recipes.get(id).unavailable_here).map((id) => engine.get_recipe({ id })) : [];
   const recipeFile = (r) => [`recipes/${r.id}.md`, recipeMarkdown(r)];
 
@@ -128,10 +128,10 @@ export function buildSkills(engine) {
   }, body, visible.map(recipeFile));
 
   // ── the research guides: how to run an investigation, and one reference per domain ──
-  // Each file renders exactly what semantic_index({ guide: "research" | "research/<domain>" }) returns.
+  // Each file renders exactly what semantic_index({ request: { guide: "research" | "research/<domain>" } }) returns.
   const research = researchGuide('research');
   const fileOf = (key) => `${key.split('/')[1]}.md`;
-  const guideMarkdown = (key, g, drop = []) => [`# ${g.title}`, '', `The same guide the tool returns: \`semantic_index({ guide: "${key}" })\`.`, '', mdValue(Object.fromEntries(Object.entries(g).filter(([k]) => !['task', 'title', ...drop].includes(k))))].join('\n');
+  const guideMarkdown = (key, g, drop = []) => [`# ${g.title}`, '', `The same guide the tool returns: \`semantic_index({ request: { guide: "${key}" } })\`.`, '', mdValue(Object.fromEntries(Object.entries(g).filter(([k]) => !['task', 'title', ...drop].includes(k))))].join('\n');
   const researchBody = [
     guideMarkdown('research', research, ['domains']),
     '',

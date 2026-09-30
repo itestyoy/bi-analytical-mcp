@@ -2,8 +2,8 @@
 // others from the catalog (src/schema.js, by the tool's name); everything else about it is here.
 //
 // WHICH SIDE A TASK BELONGS TO (`side`) — and so which query tool reads it back (`reads`). A semantic
-// task (a declared model being parsed, a metric query) is read with query_semantic_model({ task_id }); a
-// pipeline task (a build, a query over a built model) with query_pipeline_model({ task_id }). An
+// task (a declared model being parsed, a metric query) is read with query_semantic_model({ request: { task_id } }); a
+// pipeline task (a build, a query over a built model) with query_pipeline_model({ request: { task_id } }). An
 // experiment is no task at all: its statistics come back with its call.
 
 import { MAX_WAIT_SECONDS, MAX_BATCH } from '../schema.js';
@@ -22,7 +22,7 @@ export const CORE_TOOLS = [
     name: 'build_semantic_model',
     aliases: ['create_semantic_model'],
     title: 'Build Semantic Model',
-    description: 'Declare reusable, named metrics for a task — semantic models (one per source; several sources may sit side by side, e.g. spend next to an event measure) plus metrics — in an isolated context, then query them many ways with query_semantic_model (group_by, time grain, filters). Use it for measurable metrics such as DAU, revenue, conversion or retention; for a one-off derived table whose rows are the answer (a funnel, sessions, a window, a pivot) use build_pipeline_model instead. Omit context_id to start a task; pass it to extend the same one. To change a task already in a context — add or remove measures, dimensions or metrics on one model without restating the rest — call it with action:"update" (context_id, semantic_model, the add_*/remove_* fields). The declaration is validated in the call; parsing it is a task, so the call returns only { task_id, context_id } and does not wait. query_semantic_model({ task_id }) returns the parse, the metrics and what they can be grouped by; a query on the context can be started right away (it waits for the parse). preview_semantic_model shows the context\'s layer as parsed and checks it.',
+    description: 'Declare reusable, named metrics for a task — semantic models (one per source; several sources may sit side by side, e.g. spend next to an event measure) plus metrics — in an isolated context, then query them many ways with query_semantic_model (group_by, time grain, filters). Use it for measurable metrics such as DAU, revenue, conversion or retention; for a one-off derived table whose rows are the answer (a funnel, sessions, a window, a pivot) use build_pipeline_model instead. Omit context_id to start a task; pass it to extend the same one. To change a task already in a context — add or remove measures, dimensions or metrics on one model without restating the rest — call it with action:"update" (context_id, semantic_model, the add_*/remove_* fields). The declaration is validated in the call; parsing it is a task, so the call returns only { task_id, context_id } and does not wait. query_semantic_model({ request: { task_id } }) returns the parse, the metrics and what they can be grouped by; a query on the context can be started right away (it waits for the parse). preview_semantic_model shows the context\'s layer as parsed and checks it.',
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     side: 'semantic',
     run: (engine, input) => engine.build_semantic_model(input),
@@ -31,7 +31,7 @@ export const CORE_TOOLS = [
     name: 'build_pipeline_model',
     aliases: ['build_native_model'],
     title: 'Build Pipeline Model',
-    description: 'Build a one-off derived table whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the named metrics of build_semantic_model cannot express; for reusable metrics sliced many ways, use build_semantic_model instead. The pipeline is composed step by step with `action`: start a draft, add_step one stage at a time (where / derive / compute / unnest / join / aggregate / pivot / unpivot / window / order_by / limit / match_recognize), optionally preview the SQL, then materialize. Each add_step validates the stage and returns the columns available to the next one; nothing runs in the warehouse until materialize. A join names the relationship the schema declares (via: <name>) rather than its columns, and joins stack, so one pipeline can reach several sources. materialize returns only a task_id and does not wait: query_pipeline_model({ task_id }) returns the rows, and query_pipeline_model({ context_id, transform }) filters or regroups the built table later (query_semantic_model does not read pipelines). start with from_task re-slices the stored table of a finished task (a materialized query, an earlier build) without recomputing it. A `python` stage is a dbt Python model of its own, run on the warehouse\'s Python runtime; it may appear anywhere in the pipeline, more than once, and carries only what SQL cannot say. Its own description holds the rules — what belongs in it, what this warehouse\'s frame raises, and the recipes to study before writing one. Its table is read with query_pipeline_model like any pipeline.',
+    description: 'Build a one-off derived table whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the named metrics of build_semantic_model cannot express; for reusable metrics sliced many ways, use build_semantic_model instead. The pipeline is composed step by step with `action`: start a draft, add_step one stage at a time (where / derive / compute / unnest / join / aggregate / pivot / unpivot / window / order_by / limit / match_recognize), optionally preview the SQL, then materialize. Each add_step validates the stage and returns the columns available to the next one; nothing runs in the warehouse until materialize. A join names the relationship the schema declares (via: <name>) rather than its columns, and joins stack, so one pipeline can reach several sources. materialize returns only a task_id and does not wait: query_pipeline_model({ request: { task_id } }) returns the rows, and query_pipeline_model({ request: { context_id, transform } }) filters or regroups the built table later (query_semantic_model does not read pipelines). start with from_task re-slices the stored table of a finished task (a materialized query, an earlier build) without recomputing it. A `python` stage is a dbt Python model of its own, run on the warehouse\'s Python runtime; it may appear anywhere in the pipeline, more than once, and carries only what SQL cannot say. Its own description holds the rules — what belongs in it, what this warehouse\'s frame raises, and the recipes to study before writing one. Its table is read with query_pipeline_model like any pipeline.',
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
     side: 'pipeline',
     run: (engine, input) => engine.build_pipeline_model(input),
@@ -68,7 +68,7 @@ export const CORE_TOOLS = [
 - semantic_models: each with its table, entity (the primary entity its dimensions are addressed through), entities (keys: name, type, expr — the column) and dimensions (name, type categorical or time, grain, expr — the column or expression).
 - metrics: each with type, label, description, meta (the project's notes on reading it, such as additive: false), filter, and definition — a simple metric's semantic_model, agg and expr (plus percentile, non_additive_dimension, agg_time_dimension when set); a ratio's numerator and denominator; a derived metric's expr and inputs with their aliases. Its group_by is what it can be grouped by, each item spelled as query_semantic_model's group_by takes it: dimensions, entities, and metric_time (its time axis and grain); without metric, dimensions_from names the semantic models whose dimensions it takes. A metric of several semantic models offers only what they all share.
 - groupable: a task context's { model, attribute } list. query_with and validate_with: calls to start from.
-metric narrows it to one metric with its inputs and its group_by in full; semantic_model to one semantic model. validate: true checks by running instead — MetricFlow compiles each metric, and with a time_range the warehouse runs each one (its value comes back) and each semantic model's dimensions, naming what fails. That is warehouse work: it returns { task_id }, read with query_semantic_model({ task_id }). semantic_index lists what exists.`,
+metric narrows it to one metric with its inputs and its group_by in full; semantic_model to one semantic model. validate: true checks by running instead — MetricFlow compiles each metric, and with a time_range the warehouse runs each one (its value comes back) and each semantic model's dimensions, naming what fails. That is warehouse work: it returns { task_id }, read with query_semantic_model({ request: { task_id } }). semantic_index lists what exists.`,
     // reads a parsed layer; validate starts a task that compiles and runs metrics, writing nothing
     annotations: { readOnlyHint: true, idempotentHint: true },
     side: 'semantic',
@@ -115,7 +115,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'memory',
     title: 'Use Memory',
-    description: 'Durable analyst memory: record what you found out, so it comes back through semantic_index next time. Use it after you resolve something non-obvious — a vague request tracked down to a real field, a gotcha, a useful source. action:"record" takes `note` (the finding); `question` (the original business question it answers, in the stakeholder\'s words — it is embedded with the note, so a later question with the same meaning retrieves it); `targets` (the catalog entities it is about, each { source, name } — a property, attribute or event of that source, e.g. { source: "events", name: "ad_type_of_event_data" }, { source: "users", name: "country" } — or { source } for a model); `aliases` (the words the user actually used, e.g. "ad format", in the original language and in English so search works across languages); `links` (any sources). The note then appears on the linked semantic_index views ({ model } / { source, event } / { source, property }) and in semantic_index({ search }). Keep one finding per note: when studying a topic or a document, split it into several small notes, each with its own targets and aliases — small notes link precisely and are retrieved far better, while an over-long note matches poorly and may fail to index. Other actions: list (all, or one { target }) | search (by word — typo-tolerant, and by meaning when embeddings are enabled) | forget (by id).',
+    description: 'Durable analyst memory: record what you found out, so it comes back through semantic_index next time. Use it after you resolve something non-obvious — a vague request tracked down to a real field, a gotcha, a useful source. action:"record" takes `note` (the finding); `question` (the original business question it answers, in the stakeholder\'s words — it is embedded with the note, so a later question with the same meaning retrieves it); `targets` (the catalog entities it is about, each { source, name } — a property, attribute or event of that source, e.g. { source: "events", name: "ad_type_of_event_data" }, { source: "users", name: "country" } — or { source } for a model); `aliases` (the words the user actually used, e.g. "ad format", in the original language and in English so search works across languages); `links` (any sources). The note then appears on the linked semantic_index views ({ model } / { source, event } / { source, property }) and in semantic_index({ request: { search } }). Keep one finding per note: when studying a topic or a document, split it into several small notes, each with its own targets and aliases — small notes link precisely and are retrieved far better, while an over-long note matches poorly and may fail to index. Other actions: list (all, or one { target }) | search (by word — typo-tolerant, and by meaning when embeddings are enabled) | forget (by id).',
     // forget removes a finding
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     run: (engine, input) => engine.memory(input),
@@ -132,7 +132,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'explore_errors',
     title: 'Explore Errors',
-    description: 'Read the failures this server kept, to find out why something did not work: a tool call that was refused or failed (with the arguments it was called with), a task that ended in an error (what dbt or the warehouse said), and what the last start could not serve (the dbt project\'s semantic layer, a join it leaves out, a feature that cannot run here). Use it when a result was an error you cannot explain from its message, when a task failed earlier in the conversation, or when something the overview lists as unavailable needs its reason. With no arguments it gives the newest 20 and a summary by source, tool and stage; since / until, source, severity, tool, stage, context_id, task_id and text narrow them, and { id } gives one in full. It reads the log only and changes nothing.',
+    description: 'Read the failures this server kept, to find out why something did not work: a tool call that was refused or failed (with the arguments it was called with), a task that ended in an error (what dbt or the warehouse said), and what the last start could not serve (the dbt project\'s semantic layer, a join it leaves out, a feature that cannot run here). Use it when a result was an error you cannot explain from its message, when a task failed earlier in the conversation, or when something the overview lists as unavailable needs its reason. With an empty request it gives the newest 20 and a summary by source, tool and stage; since / until, source, severity, tool, stage, context_id, task_id and text narrow them, and { id } gives one in full. It reads the log only and changes nothing.',
     // reads the error log; writes nothing
     annotations: { readOnlyHint: true, idempotentHint: true },
     run: (engine, input) => engine.explore_errors(input),
@@ -149,7 +149,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'update_semantic_model',
     title: 'Update Semantic Model',
-    // folded into build_semantic_model({ action: 'update' })
+    // folded into build_semantic_model({ request: { action: 'update' } })
     description: 'Add/remove task measures, dimensions or metrics for a table SM within a context; re-parses.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     listed: false,
@@ -169,7 +169,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'list_query_jobs',
     title: 'List Query Jobs',
-    // folded into semantic_index({ status })
+    // folded into semantic_index({ request: { status } })
     description: 'The background tasks this server knows.',
     annotations: { readOnlyHint: true, idempotentHint: true },
     listed: false,
@@ -178,7 +178,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'list_contexts',
     title: 'List Contexts',
-    // folded into context({ action: 'list' })
+    // folded into context({ request: { action: 'list' } })
     description: 'Every active context.',
     annotations: { readOnlyHint: true, idempotentHint: true },
     listed: false,
@@ -187,7 +187,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'describe_context',
     title: 'Describe Context',
-    // folded into context({ action: 'describe' })
+    // folded into context({ request: { action: 'describe' } })
     description: 'One context in depth.',
     annotations: { readOnlyHint: true, idempotentHint: true },
     listed: false,
@@ -196,7 +196,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'drop_context',
     title: 'Drop Context',
-    // folded into delete_context({ context_id })
+    // folded into delete_context({ request: { context_id } })
     description: 'Tear a context down.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
     listed: false,
@@ -205,7 +205,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'delete_native_model',
     title: 'Delete Native Model',
-    // folded into delete_context({ what: 'pipeline_model' })
+    // folded into delete_context({ request: { what: 'pipeline_model' } })
     description: 'Remove the pipeline model of a context.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
     listed: false,
@@ -214,7 +214,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'delete_semantic_model',
     title: 'Delete Semantic Model',
-    // folded into delete_context({ what: 'semantic_model' })
+    // folded into delete_context({ request: { what: 'semantic_model' } })
     description: 'Remove one model\'s task additions from a context.',
     annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
     listed: false,
@@ -223,7 +223,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'ab_test',
     title: 'A/B Test',
-    // folded into experiment({ action: 'analyze' })
+    // folded into experiment({ request: { action: 'analyze' } })
     description: 'The significance test on per-group aggregates.',
     annotations: { readOnlyHint: true, idempotentHint: true },
     listed: false,
@@ -232,7 +232,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'srm_check',
     title: 'Sample Ratio Check',
-    // folded into experiment({ action: 'check_split' })
+    // folded into experiment({ request: { action: 'check_split' } })
     description: 'The sample-ratio-mismatch check.',
     annotations: { readOnlyHint: true, idempotentHint: true },
     listed: false,
@@ -241,7 +241,7 @@ metric narrows it to one metric with its inputs and its group_by in full; semant
   defineTool({
     name: 'sample_size',
     title: 'Sample Size',
-    // folded into experiment({ action: 'plan' })
+    // folded into experiment({ request: { action: 'plan' } })
     description: 'Power and sample-size planning.',
     annotations: { readOnlyHint: true, idempotentHint: true },
     listed: false,

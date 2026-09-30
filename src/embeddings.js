@@ -1,4 +1,4 @@
-// OPTIONAL embedding backend for semantic memory search. When configured, memory({ search })
+// OPTIONAL embedding backend for semantic memory search. When configured, memory({ request: { search } })
 // becomes semantic (cosine similarity over text embeddings) on top of the lexical/fuzzy
 // match — so "monetization issues" finds a note about "IAP purchase failures" even with no
 // shared words. When NOT configured, memory stays purely fuzzy (no network, no change).

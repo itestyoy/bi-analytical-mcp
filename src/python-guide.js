@@ -8,7 +8,7 @@
 //      scripts/bigframes-facts.py. Nothing anywhere restates a fact in prose.
 //   2. RULES with their reasoning, and a do / avoid per operation: this file (the cookbook data
 //      below), rendered two ways — compact into the stage description (`pythonRulesText`) and in
-//      full through semantic_index({ guide: 'python' }) (`pythonAuthoringGuide`).
+//      full through semantic_index({ request: { guide: 'python' } }) (`pythonAuthoringGuide`).
 //   3. FAILURE HINTS — what a class name means on this runtime: `bigframesRunHints()` here, built
 //      from the same fact sheet, carried by the frame profile and matched by `pythonRunHints`.
 //   4. THE REFERENCE a caller fetches mid-write: `pythonReferenceRecipes()` here — the extracted
@@ -31,7 +31,7 @@
 //     declaring the stage, and WHERE THE FULL TEXT IS (the guide, the worked recipes by count,
 //     the two generated references, the failure hints). Where a deployment ships no recipes there
 //     is nothing to point at, so it carries every rule and the right form per operation instead;
-//   - in full, through semantic_index({ guide: 'python' }) (`pythonAuthoringGuide`) — the same
+//   - in full, through semantic_index({ request: { guide: 'python' } }) (`pythonAuthoringGuide`) — the same
 //     rules with the reasoning behind each, each example as do / avoid / why, the five failures
 //     with the complete method lists, the checklist, and the index of the worked recipes.
 //
@@ -144,9 +144,9 @@ function whereTheFullTextIs(index = []) {
   const ids = index.map((r) => r.id);
   const refs = ['bf_frame_method_rules', 'bf_ml_signatures'].filter((id) => ids.includes(id));
   return [
-    'semantic_index({ guide: "python" }) — every rule with its reasoning, a works / fails / why example per operation, every ml signature, and the ids of the worked recipes with the move each covers.',
-    ...(index.length > refs.length ? [`semantic_index({ recipe: "<id>" }) — ${index.length - refs.length} worked, compiling recipes, one per move (the form that works next to the form that raises); read the ones your question involves, usually several — their ids are in the guide (recipes.moves) and in the semantic_index overview.`] : []),
-    ...(refs.length ? [`Generated from the installed library (${VERSION}): ${refs.map((id) => (id === 'bf_frame_method_rules' ? 'semantic_index({ recipe: "bf_frame_method_rules" }) — every method that needs an ordering or an index, and the signatures that surprise' : 'semantic_index({ recipe: "bf_ml_signatures" }) — every bigframes.ml constructor and its parameters')).join('; ')}.`] : []),
+    'semantic_index({ request: { guide: "python" } }) — every rule with its reasoning, a works / fails / why example per operation, every ml signature, and the ids of the worked recipes with the move each covers.',
+    ...(index.length > refs.length ? [`semantic_index({ request: { recipe: "<id>" } }) — ${index.length - refs.length} worked, compiling recipes, one per move (the form that works next to the form that raises); read the ones your question involves, usually several — their ids are in the guide (recipes.moves) and in the semantic_index overview.`] : []),
+    ...(refs.length ? [`Generated from the installed library (${VERSION}): ${refs.map((id) => (id === 'bf_frame_method_rules' ? 'semantic_index({ request: { recipe: "bf_frame_method_rules" } }) — every method that needs an ordering or an index, and the signatures that surprise' : 'semantic_index({ request: { recipe: "bf_ml_signatures" } }) — every bigframes.ml constructor and its parameters')).join('; ')}.`] : []),
     'A failed run comes back with a hint naming the rule it broke and the recipe to read.',
   ];
 }
@@ -211,8 +211,8 @@ const BIGFRAMES = {
     },
     {
       rule: 'Modelling is bigframes.ml — the scikit-learn API executed as BigQuery ML, with BQML\'s parameters.',
-      short: `modelling is bigframes.ml — the scikit-learn API run as BigQuery ML: fit trains in BigQuery and predict returns a frame; sklearn/scipy/statsmodels, which need to_pandas(), run single-node in the notebook instead. The parameters are BQML's, not scikit-learn's: an argument scikit-learn has and BQML lacks does not exist here (KMeans(standardize_features=...), n_init, random_state → TypeError: unexpected keyword argument), and everything after \`*\` is keyword-only — ${list(ML_KEY_SIGNATURES)}. Scaling is not a flag on an estimator but a transformer of its own (preprocessing.StandardScaler(), no parameters), alone or as the first of pipeline.Pipeline's exactly two steps (transform, estimator) — or done in SQL before the stage. Every extracted signature is listed in semantic_index({ guide: "python" }), and offered as a reference recipe of its own where this deployment ships recipes`,
-      why: `fit() trains inside BigQuery and predict() returns a BigFrames frame, so the data never leaves; sklearn / scipy / statsmodels would first need to_pandas() and then run single-node in the notebook. The trap is the API's resemblance: these classes are wrappers OVER BQML — each constructor maps its parameters to CREATE MODEL options (cluster.py _BQML_PARAMS_MAPPING / _bqml_options), so the surface is BQML's, and a familiar sklearn argument with no BQML option raises TypeError. The signatures below are extracted from ${VERSION}, not remembered, and are also fetchable on their own with semantic_index({ recipe: "bf_ml_signatures" }): ${list(ML_SIGNATURES)}. Pipeline takes exactly two steps, (transform, estimator), and raises NotImplementedError for anything else.`,
+      short: `modelling is bigframes.ml — the scikit-learn API run as BigQuery ML: fit trains in BigQuery and predict returns a frame; sklearn/scipy/statsmodels, which need to_pandas(), run single-node in the notebook instead. The parameters are BQML's, not scikit-learn's: an argument scikit-learn has and BQML lacks does not exist here (KMeans(standardize_features=...), n_init, random_state → TypeError: unexpected keyword argument), and everything after \`*\` is keyword-only — ${list(ML_KEY_SIGNATURES)}. Scaling is not a flag on an estimator but a transformer of its own (preprocessing.StandardScaler(), no parameters), alone or as the first of pipeline.Pipeline's exactly two steps (transform, estimator) — or done in SQL before the stage. Every extracted signature is listed in semantic_index({ request: { guide: "python" } }), and offered as a reference recipe of its own where this deployment ships recipes`,
+      why: `fit() trains inside BigQuery and predict() returns a BigFrames frame, so the data never leaves; sklearn / scipy / statsmodels would first need to_pandas() and then run single-node in the notebook. The trap is the API's resemblance: these classes are wrappers OVER BQML — each constructor maps its parameters to CREATE MODEL options (cluster.py _BQML_PARAMS_MAPPING / _bqml_options), so the surface is BQML's, and a familiar sklearn argument with no BQML option raises TypeError. The signatures below are extracted from ${VERSION}, not remembered, and are also fetchable on their own with semantic_index({ request: { recipe: "bf_ml_signatures" } }): ${list(ML_SIGNATURES)}. Pipeline takes exactly two steps, (transform, estimator), and raises NotImplementedError for anything else.`,
       consequences: [
         'Before passing a parameter, check it against the signature list — the resemblance to scikit-learn is where the TypeError comes from, and the list is the whole surface in this version.',
         'Standardizing features is not a flag: preprocessing.StandardScaler() (which takes no parameters at all) either on its own, or as the first of Pipeline\'s two steps. Scaling already done in a SQL stage before this one is just as valid and cheaper.',
@@ -384,13 +384,13 @@ export function pythonAuthoringGuide(profile, recipes = []) {
       recipes: {
         ids: index.map((r) => r.id),
         moves: index.filter((r) => r.title).map((r) => `${r.id}: ${r.title}`),
-        note: 'Read these before writing a function — and not only the nearest one: a real question needs several. They are not per-business-task templates: each is one approach — the correct form of a single move on this runtime (a lookup, a per-group value, a top-N, a threshold, a prediction, a cached intermediate) as a complete compiling payload, with `approach` = the form that works, `instead_of` = the form that raises and why, and `hack` = how to generalise it. `moves` says which id covers which move; they are listed side by side under `tasks` in semantic_index({ guide: true }) too.',
-        fetch: `semantic_index({ recipe: '${index[0].id}' })`,
+        note: 'Read these before writing a function — and not only the nearest one: a real question needs several. They are not per-business-task templates: each is one approach — the correct form of a single move on this runtime (a lookup, a per-group value, a top-N, a threshold, a prediction, a cached intermediate) as a complete compiling payload, with `approach` = the form that works, `instead_of` = the form that raises and why, and `hack` = how to generalise it. `moves` says which id covers which move; they are listed side by side under `tasks` in semantic_index({ request: { guide: true } }) too.',
+        fetch: `semantic_index({ request: { recipe: '${index[0].id}' } })`,
       },
     } : {}),
     read_next: index.length
-      ? `Read the recipes before you write: fetch every move your question involves (semantic_index({ recipe: '${index[0].id}' }), … — \`recipes.moves\` above says which id covers which), adapt them, and only then declare the stage with build_pipeline_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.`
-      : 'Declare the stage with build_pipeline_model({ action: "add_step", stage: { stage: "python", imports, functions, steps, output } }); the stage description lists the allowlisted packages.',
+      ? `Read the recipes before you write: fetch every move your question involves (semantic_index({ request: { recipe: '${index[0].id}' } }), … — \`recipes.moves\` above says which id covers which), adapt them, and only then declare the stage with build_pipeline_model({ request: { action: "add_step", stage: { stage: "python", imports, functions, steps, output } } }); the stage description lists the allowlisted packages.`
+      : 'Declare the stage with build_pipeline_model({ request: { action: "add_step", stage: { stage: "python", imports, functions, steps, output } } }); the stage description lists the allowlisted packages.',
   };
 }
 
@@ -457,22 +457,22 @@ export function bigframesRunHints() {
     {
       match: 'NullIndexError|Cannot implicitly align',
       hint: 'About this runtime: the frame dbt.ref() returns carries no index, so two objects can only be combined while they share a root — the same frame, narrowed by a projection, a filter or a window. Anything re-read as its own query is a different root: a locally built frame, a groupby aggregate, a cache()d frame, and the output of bigframes.ml predict/transform. '
-        + `${claim('align_needs_common_root')} The traceback says which operation it was; the forms that do not need alignment are a merge on a key (a SQL join), a value computed from the same frame, and — for an estimator — returning its frame instead of assigning its column back (that output already carries the input columns). Worked forms: semantic_index({ recipe: "bf_lookup_via_merge" }) / ({ recipe: "bf_ml_predict_as_column" }).`,
+        + `${claim('align_needs_common_root')} The traceback says which operation it was; the forms that do not need alignment are a merge on a key (a SQL join), a value computed from the same frame, and — for an estimator — returning its frame instead of assigning its column back (that output already carries the input columns). Worked forms: semantic_index({ request: { recipe: "bf_lookup_via_merge" } }) / ({ recipe: "bf_ml_predict_as_column" }).`,
     },
     {
       match: 'OrderRequiredError',
-      hint: `About this runtime: it carries no row order (the dbt wrapper runs with ordering_mode="partial"), and the operations that need one are marked in the library — ${list(NEEDS_ORDER)}${BY_ARG.length ? `, and by argument ${list(BY_ARG)}` : ''}. sort_values (or sort_index) before the operation is what grants the ordering — nothing else does. The full list with the index-only ones: semantic_index({ recipe: "bf_frame_method_rules" }).`,
+      hint: `About this runtime: it carries no row order (the dbt wrapper runs with ordering_mode="partial"), and the operations that need one are marked in the library — ${list(NEEDS_ORDER)}${BY_ARG.length ? `, and by argument ${list(BY_ARG)}` : ''}. sort_values (or sort_index) before the operation is what grants the ordering — nothing else does. The full list with the index-only ones: semantic_index({ request: { recipe: "bf_frame_method_rules" } }).`,
     },
     {
       match: 'unexpected keyword argument|__init__\\(\\) got an unexpected',
-      hint: `About this runtime: ${claim('ml_is_bqml_not_sklearn')} Fetch the signature instead of guessing: semantic_index({ recipe: "bf_ml_signatures" }). Scaling is not a flag either — ${claim('ml_scaling_is_a_transformer')}`,
+      hint: `About this runtime: ${claim('ml_is_bqml_not_sklearn')} Fetch the signature instead of guessing: semantic_index({ request: { recipe: "bf_ml_signatures" } }). Scaling is not a flag either — ${claim('ml_scaling_is_a_transformer')}`,
     },
     {
       // The library's own words for it, so the matcher cannot fire on the word "pipeline" in
       // our own build log: pipeline.py raises "Currently only two step (transform, estimator)
       // pipelines are supported."
       match: 'only two step|two step \\(transform',
-      hint: 'About this runtime: pipeline.Pipeline takes exactly two steps, (transform, estimator), and raises NotImplementedError for anything else — several transformers go inside one compose.ColumnTransformer as that single transform step (semantic_index({ recipe: "bf_ml_categoricals_into_a_model" })). Feature work that is not a transformer belongs in a SQL stage before this one.',
+      hint: 'About this runtime: pipeline.Pipeline takes exactly two steps, (transform, estimator), and raises NotImplementedError for anything else — several transformers go inside one compose.ColumnTransformer as that single transform step (semantic_index({ request: { recipe: "bf_ml_categoricals_into_a_model" } })). Feature work that is not a transformer belongs in a SQL stage before this one.',
     },
     {
       // The runtime's own way of running out of room, which is a different failure from the
@@ -493,7 +493,7 @@ export function bigframesRunHints() {
  * The long guide carries these lists inside its reasoning, which is the wrong place to look
  * something up mid-write: a caller about to pass a parameter wants the signature, not the essay.
  * So the same fact sheet is also published as two REFERENCE recipes, addressable by id
- * (semantic_index({ recipe: 'bf_ml_signatures' })) and filtered by the ordinary capability rules —
+ * (semantic_index({ request: { recipe: 'bf_ml_signatures' } })) and filtered by the ordinary capability rules —
  * they are offered only where this deployment submits to BigFrames.
  *
  * They are GENERATED from config/bigframes-facts.json, never hand-written: the version they name is
@@ -541,7 +541,7 @@ export function pythonReferenceRecipes() {
         signatures: FACTS.signatures || {},
         rules: (FACTS.rules || []).map((r) => ({ id: r.id, claim: r.claim })),
       },
-      notes: 'The lists come from the library\'s own decorators (@validations.requires_index / @requires_ordering) and the signatures from its source, so they are exact for this version. The reasoning behind each, with a do / avoid per operation, is semantic_index({ guide: "python" }).',
+      notes: 'The lists come from the library\'s own decorators (@validations.requires_index / @requires_ordering) and the signatures from its source, so they are exact for this version. The reasoning behind each, with a do / avoid per operation, is semantic_index({ request: { guide: "python" } }).',
       hack: 'Two questions before every line: does this need a row ORDER (then sort first), and does it combine two objects (then they must share a root, or be merged on a key).',
       origin: 'generated',
     });

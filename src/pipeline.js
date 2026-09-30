@@ -74,7 +74,7 @@ export function sqlRunHints(text) {
   const log = String(text || '');
   const hints = [];
   if (/Resources exceeded|memory limit|out of memory|exceeded .*memory/i.test(log)) {
-    hints.push('This is usually a GLOBAL ANALYTIC WINDOW: an OVER() with no PARTITION BY (a compute `window` stage without partition_by, or op=raw) keeps every row and attaches the value to each, so one worker holds the whole input — an exact percentile worst of all, since it must also order the values. Two passes instead: an `aggregate` stage with NO group_by gives ONE row of statistics, and a second pass applies them per row as literals (compute sub/div, least/greatest with { value }). Worked: semantic_index({ recipe: "agg_table_stat_no_global_window" }) and ({ recipe: "agg_scale_rows_by_literals" }). A window that really is per group needs its group in partition_by.');
+    hints.push('This is usually a GLOBAL ANALYTIC WINDOW: an OVER() with no PARTITION BY (a compute `window` stage without partition_by, or op=raw) keeps every row and attaches the value to each, so one worker holds the whole input — an exact percentile worst of all, since it must also order the values. Two passes instead: an `aggregate` stage with NO group_by gives ONE row of statistics, and a second pass applies them per row as literals (compute sub/div, least/greatest with { value }). Worked: semantic_index({ request: { recipe: "agg_table_stat_no_global_window" } }) and ({ recipe: "agg_scale_rows_by_literals" }). A window that really is per group needs its group in partition_by.');
   }
   return hints;
 }

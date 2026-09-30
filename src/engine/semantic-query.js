@@ -93,10 +93,10 @@ export const semanticQueryMethods = {
       throw new ToolError(`${where}: an attribute is addressed by where it lives — { model, attribute } (plus via when several relationships lead there) — never by a path string. '${ref}' → ${this._suggestRef(ctx, ref)}.`, { stage: 'validate', field: where });
     }
     if (ref && typeof ref === 'object' && 'entity' in ref && !('attribute' in ref)) {
-      throw new ToolError(`${where}: the entity '${ref.entity}' is one of the dbt project's own semantic layer — group by it in the context of one of its semantic models (context_id: the semantic model's name; semantic_index() lists them), with that model's metrics; here attributes are { model, attribute }.`, { stage: 'validate', field: where });
+      throw new ToolError(`${where}: the entity '${ref.entity}' is one of the dbt project's own semantic layer — group by it in the context of one of its semantic models (context_id: the semantic model's name; semantic_index({ request: {} }) lists them), with that model's metrics; here attributes are { model, attribute }.`, { stage: 'validate', field: where });
     }
     if (ref && typeof ref === 'object' && 'dimension' in ref && !('attribute' in ref)) {
-      throw new ToolError(`${where}: '${[].concat(ref.semantic_model || []).join(' → ')}${ref.semantic_model ? '.' : ''}${ref.dimension}' is named as a dimension of the dbt project's own semantic layer — query it in the context of the semantic model whose metrics you want (context_id: its name; semantic_index() lists them); here attributes are { model, attribute }.`, { stage: 'validate', field: where });
+      throw new ToolError(`${where}: '${[].concat(ref.semantic_model || []).join(' → ')}${ref.semantic_model ? '.' : ''}${ref.dimension}' is named as a dimension of the dbt project's own semantic layer — query it in the context of the semantic model whose metrics you want (context_id: its name; semantic_index({ request: {} }) lists them); here attributes are { model, attribute }.`, { stage: 'validate', field: where });
     }
     if (ref == null || typeof ref !== 'object' || !('attribute' in ref)) return ref;
     const c = this.catalog;
@@ -138,7 +138,7 @@ export const semanticQueryMethods = {
     }
     if (candidates.size === 1) return `${[...candidates][0]}__${attribute}`;
     if (candidates.size > 1) throw new ToolError(`${where}: '${model}' is reachable through several relationships (${[...candidates].join(', ')}) — add via: '<relationship>' to say which key to join on.`, { stage: 'validate', field: 'via' });
-    throw new ToolError(`${where}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it with use_base_models and check semantic_index({ model: '${model}' }).relationships. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'model' });
+    throw new ToolError(`${where}: no source in this context declares a relationship to '${model}' (it must OWN a key some source points at — type primary/unique). Load it with use_base_models and check semantic_index({ request: { model: '${model}' } }).relationships. ${this._reachableHint(ctx)}`, { stage: 'validate', field: 'model' });
   },
 
   async query_semantic_model(input) {
@@ -154,7 +154,7 @@ export const semanticQueryMethods = {
     // the result: read them from its build's task, or re-slice them with a pipeline started from it.
     if (ctx.state.engine === 'pipeline') {
       const built = ctx.state.native?.task_id;
-      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ task_id: '${built}' }), filter or regroup them with query_pipeline_model({ context_id: '${ctx.id}', transform }), or build on them with build_pipeline_model({ action: 'start', name, from_task: '${built}' })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
+      throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), not metrics: ${built ? `read its rows with query_pipeline_model({ request: { task_id: '${built}' } }), filter or regroup them with query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }), or build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${built}' } })` : 're-slice it with a new pipeline'} — not query_semantic_model`, { stage: 'validate' });
     }
     // the dbt project's own semantic layer: its metrics and dimensions, as the project defines them
     const project = ctx.state.engine === 'project';
@@ -260,7 +260,7 @@ export const semanticQueryMethods = {
     };
     if (only) return one(only);
     return {
-      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_semantic_model({ context_id: '<semantic model>', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ context_id, metric }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
+      note: `The dbt project's own semantic models and metrics, read from the project at start (nothing to build). Each semantic model is a context of its own, named after it: query_semantic_model({ request: { context_id: '<semantic model>', metrics: [...], group_by: [{ semantic_model: [...], dimension }, { entity }, { time: 'metric_time', grain }] } }) — semantic_model is the chain of models a dimension is reached through: ['<the context>'] for its own, ['X'] for a model joined to directly, ['A', 'X'] through A. A metric is cut by the dimensions of the semantic models under its dimensions_from, and by its entities — a key the project declares only as an entity is grouped by its name. Its meta is what the project says about reading it. preview_semantic_model({ request: { context_id, metric } }) shows a metric's definition and its group_by — everything it can be grouped by; with validate: true it runs them.`,
       contexts: this.project.contexts.filter((id) => this.ctxs.has(id)).map(one),
       ...(this.project.skipped?.length ? { not_served: this.project.skipped } : {}),
       // joins the project declares that no reference could name — a model joined through several keys,
@@ -294,7 +294,7 @@ export const semanticQueryMethods = {
     // a reference names one of these items exactly — nothing here chooses a join, a path or a grain
     const items = commonItems(layer.groupBys, input.metrics);
     const pick = (ref, field) => {
-      if (ref && typeof ref === 'object' && 'model' in ref) throw new ToolError(`${field}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { semantic_model: [the chain of models it is reached through], dimension } and an entity { entity } — the project's own names, not the catalog's { model, attribute }. preview_semantic_model({ context_id: '${ctx.id}', metric }) lists each exactly.`, { stage: 'validate', field });
+      if (ref && typeof ref === 'object' && 'model' in ref) throw new ToolError(`${field}: in the context '${ctx.id}' (a semantic model of the dbt project's own layer) a dimension is { semantic_model: [the chain of models it is reached through], dimension } and an entity { entity } — the project's own names, not the catalog's { model, attribute }. preview_semantic_model({ request: { context_id: '${ctx.id}', metric } }) lists each exactly.`, { stage: 'validate', field });
       const r = resolveRef(items, ref, input.metrics.join(' and '), layer.blocked || []);
       if (r.error) throw new ToolError(`${field}: ${r.error}`, { stage: 'validate', field });
       return r.item;
@@ -558,7 +558,7 @@ export const semanticQueryMethods = {
         if (!endDay || endDay > freshDay) recs.push(`Data is current only through ${freshDay} (latest event time)${endDay ? `, but your window ends ${endDay}` : ' and your window has no end'} — rows past ${freshDay} are empty/partial.`);
       }
       // #2 ZERO/degenerate result: almost always a scoping bug, not a real "0".
-      if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ source, property }).');
+      if (pageRows.length === 0) recs.push('0 rows — usually an over-scoped where, a group_by with no data in this window, or a measure on a property that is NULL for the scoped events. Widen time_range, re-check the filter, or inspect the property coverage via semantic_index({ request: { source, property } }).');
       // #4 NON-ADDITIVE distinct across time → prefer HLL sketches (mergeable).
       const distinctMeasures = new Set();
       for (const add of Object.values(ctx.state.additions || {})) for (const mm of add.measures || []) if (mm.agg === 'count_distinct') distinctMeasures.add(mm.name);
@@ -567,7 +567,7 @@ export const semanticQueryMethods = {
         recs.push('count_distinct is NOT additive across time buckets — do not sum the per-bucket values for a period total. Prefer HLL sketches (a build_pipeline_model pipeline: hll_init per bucket → hll_merge to combine): a high-accuracy distinct count that IS mergeable/re-aggregatable across buckets and segments. Or query the whole period without the time grain.');
       }
       if (page.has_more) recs.push(`More rows exist — page with offset: ${page.offset + page.limit} (same query), or add order_by + a tighter limit.`);
-      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_pipeline_model({ action: \'start\', from_task })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
+      recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_pipeline_model({ request: { action: \'start\', from_task } })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
       const out = {
         ok: true,
         columns: res.columns,
@@ -590,7 +590,7 @@ export const semanticQueryMethods = {
       return out;
     };
 
-    // The query is a TASK: validated above, run below, its response read with query_semantic_model({ task_id }).
+    // The query is a TASK: validated above, run below, its response read with query_semantic_model({ request: { task_id } }).
     // A metric query over a big window can outlast the client in front of this call — so no call
     // holds it.
     return this._metricTask(ctx, { qopts, input, rename, speak, explain, respond });

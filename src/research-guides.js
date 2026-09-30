@@ -1,7 +1,7 @@
 // RESEARCH GUIDES — how to run an analytical investigation with this server, and what matters in
 // three domains of a free-to-play product: engagement / retention, monetization, user acquisition.
 //
-// Served by semantic_index({ guide: "research" }) and ({ guide: "research/<domain>" }), and as the
+// Served by semantic_index({ request: { guide: "research" } }) and ({ guide: "research/<domain>" }), and as the
 // `research` skill (src/skills.js renders these same objects — no second copy of the text). They
 // are METHOD, not data: no column, event or model is named here — the catalog says what exists
 // (semantic_index), and every "how" points at a tool or a shipped recipe (config/recipes.json;
@@ -39,10 +39,10 @@ const RESEARCH = {
     { step: 'Lock the metric contract', do: 'Find the real fields with semantic_index (overview → { source, event } → { source, property } / { search }), and fix the definition: numerator, denominator, grain (per event / per user / per day), filters, timezone of the day boundary, window. Prefer a governed metric (build_semantic_model) — its definition is reusable and reviewable; a pipeline only when no metric can express it.', why: 'Two analysts who disagree usually measured two different things. The catalog is the starting map of what exists, not the edge of what can be asked.' },
     { step: 'Check the data before the behaviour', do: 'Volume and NULL coverage per day, per app version and per platform around the period (recipe "pipeline_volume_and_coverage_check"); the latest data time (freshness); duplicates; test / internal users excluded. A break confined to one version or platform is usually tracking.', why: 'A tracking change looks exactly like a behaviour change in the aggregate.' },
     { step: 'Reproduce the headline', do: 'Recompute the number the question is about, with the contract above, and compare it with the figure the person saw. Compare against the right baseline: the same weekday a week earlier, the same period a year earlier, complete periods only.', why: 'An investigation of a number you cannot reproduce investigates the wrong thing; seasonality and weekday mix explain many "changes".' },
-    { step: 'Decompose', do: 'Split the metric into its drivers and find which one moved: a rate into numerator vs denominator; a total into its multiplicative factors (revenue = DAU × payer conversion × ARPPU + ad revenue; DAU = new + retained + resurrected). Then segment the driver that moved, in a fixed order — platform → app version → country → acquisition source → install cohort → payer status — with one breakdown per query (several at once in one batch: query_semantic_model({ context_id, queries: [ … ] })).', why: 'A driver tree localises the change; a fixed segment order keeps you from stopping at the first plausible cut.' },
+    { step: 'Decompose', do: 'Split the metric into its drivers and find which one moved: a rate into numerator vs denominator; a total into its multiplicative factors (revenue = DAU × payer conversion × ARPPU + ad revenue; DAU = new + retained + resurrected). Then segment the driver that moved, in a fixed order — platform → app version → country → acquisition source → install cohort → payer status — with one breakdown per query (several at once in one batch: query_semantic_model({ request: { context_id, queries: [ … ] } })).', why: 'A driver tree localises the change; a fixed segment order keeps you from stopping at the first plausible cut.' },
     { step: 'Separate mix from rate', do: 'For each segment show both its share of the population and its own value, in the base and the current period. A total can move while every segment stays flat (the mix shifted) — or against every segment (Simpson\'s paradox). Reconcile: the segment contributions should add up to the total change, or size the residual.', why: 'A burst of low-quality installs lowers total retention with no segment getting worse; the fix is in acquisition, not in the product.' },
     { step: 'Localise in the product', do: 'Where in the journey it happens: a funnel over the steps (recipe "funnel_from_event_property_steps", or an ordered sequence: recipe "pipeline_ordered_sequence"), time between steps, per segment.', why: 'The drop sits at one step far more often than everywhere at once.' },
-    { step: 'Test the explanation', do: 'An experiment answers causation: per-group aggregates in a pipeline, then experiment({ action: "check_split" }) and ({ action: "analyze" }) (recipe "ab_test_conversion" for a rate, recipe "ab_test_revenue" for a mean, recipe "ab_test_srm" for the split check). Two groups that are not an experiment: recipe "two_sample_significance". Without either, look for variation the user did not choose (a staged rollout, a region, a date), and say what the evidence cannot rule out.', why: 'Users who adopt a feature are already different users — a comparison of adopters and non-adopters measures selection, not the feature.' },
+    { step: 'Test the explanation', do: 'An experiment answers causation: per-group aggregates in a pipeline, then experiment({ request: { action: "check_split" } }) and ({ action: "analyze" }) (recipe "ab_test_conversion" for a rate, recipe "ab_test_revenue" for a mean, recipe "ab_test_srm" for the split check). Two groups that are not an experiment: recipe "two_sample_significance". Without either, look for variation the user did not choose (a staged rollout, a region, a date), and say what the evidence cannot rule out.', why: 'Users who adopt a feature are already different users — a comparison of adopters and non-adopters measures selection, not the feature.' },
     { step: 'Review, then report', do: 'Run the checks below, rate the result (ready / share with caveats / needs revision), and report as described under `report`.', why: 'The first plausible story is rarely the whole one; a result that confirms the hypothesis without friction deserves a second look.' },
   ],
   checks: [
@@ -207,9 +207,9 @@ export const RESEARCH_DOMAINS = Object.keys(RESEARCH_GUIDES).filter((k) => k !==
  * instructions and the research skill all interpolate it rather than keep a wording of their own.
  */
 export const RESEARCH_SCOPE = 'an open question rather than a lookup — why a metric moved, what drives an outcome, whether a change worked, a deep dive';
-export const RESEARCH_ROUTE = `semantic_index({ guide: "research" }) — the investigation sequence, checks and report, with a guide per domain (${RESEARCH_DOMAINS.join(', ')})`;
+export const RESEARCH_ROUTE = `semantic_index({ request: { guide: "research" } }) — the investigation sequence, checks and report, with a guide per domain (${RESEARCH_DOMAINS.join(', ')})`;
 
-const HOW_TO_FETCH = 'A recipe "<id>" named here is fetched with semantic_index({ recipe: "<id>" }): a worked, warehouse-proven payload of that technique.';
+const HOW_TO_FETCH = 'A recipe "<id>" named here is fetched with semantic_index({ request: { recipe: "<id>" } }): a worked, warehouse-proven payload of that technique.';
 
 /** Whether `name` names a research guide (research, research/<domain>), in any case. */
 export function isResearchGuide(name) {
@@ -230,7 +230,7 @@ export function researchGuide(name) {
     ...g,
     ...(key === 'research'
       ? { domains: Object.fromEntries(RESEARCH_DOMAINS.map((d) => [d, RESEARCH_GUIDES[d].when_to_use])) }
-      : { start_with: 'semantic_index({ guide: "research" }) — the investigation sequence, the checks and the report this domain guide plugs into.' }),
+      : { start_with: 'semantic_index({ request: { guide: "research" } }) — the investigation sequence, the checks and the report this domain guide plugs into.' }),
     recipes_note: HOW_TO_FETCH,
   };
 }

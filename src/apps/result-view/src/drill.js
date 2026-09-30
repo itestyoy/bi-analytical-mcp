@@ -17,7 +17,7 @@ export const canFollow = () => !!app.getHostCapabilities()?.serverTools;
  * card was drawn from — its stored table's next view when a drill-down steps down (a pivot row, a
  * chart mark). Read-only, and only this card's own result.
  */
-export const readResult = (args) => app.callServerTool({ name: 'drill_result', arguments: args });
+export const readResult = (args) => app.callServerTool({ name: 'drill_result', arguments: { request: args } });
 
 /**
  * Chart.js click and hover options for a chart that can be drilled into (nothing otherwise): a

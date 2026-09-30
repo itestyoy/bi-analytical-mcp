@@ -60,6 +60,6 @@ Per case, a run records:
 
 ## How the tools reach the model
 
-The Messages API takes no `anyOf` / `allOf` / `oneOf` at the top of a tool's input schema, so those three are left out of what the model sees. The server still holds every call to the whole schema, and refuses a bad call with its reason — what the model reads under any host.
+The model gets every listed tool as the server lists it, schema unchanged. A tool's input is one field, `request`: the schema's root is a closed object with that one field, and the tool's modes sit under it as `anyOf` of closed forms. That is the shape the Messages API accepts (it refuses a union at the root), so what the model sees is the schema the server validates against.
 
 Refused turns are re-run on a fallback model (`fallbacks: "default"`), so a safety classifier's decline is not graded as the model's answer.

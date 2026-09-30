@@ -9,6 +9,26 @@ export function transportSchema(schema) {
 }
 
 /**
+ * THE INPUT AS A CLIENT SEES IT: every tool takes ONE field, `request`, and what the tool's own schema
+ * describes is its value. The root is a plain closed object with one required field — the one shape
+ * every host's API takes at a tool's root (a union there is refused: Anthropic's API rejects the
+ * whole request) — and the tool's forms, its `anyOf`, sit one level down, where every API takes them.
+ * The `$defs` stay at the root, so every `#/$defs/…` inside still resolves. The surface unwraps the
+ * call at one point (src/mcp-surface.js runTool): the engine validates and runs `request` against the
+ * same schema it built, so what a client is shown and what is checked are one schema.
+ */
+export function wireSchema(schema) {
+  const { $defs, ...request } = schema;
+  return {
+    type: 'object',
+    additionalProperties: false,
+    required: ['request'],
+    properties: { request },
+    ...($defs ? { $defs } : {}),
+  };
+}
+
+/**
  * Fold IDENTICAL subtrees of one schema into `#/$defs` and point every occurrence at the one copy.
  * Purely a transport saving: the folded node carries its own description, so nothing a reader sees
  * is lost, and ajv validates through the ref exactly as it did inline.
@@ -20,7 +40,7 @@ export function transportSchema(schema) {
  *
  * Largest repetition first, so a big list is extracted before the structures that contain it.
  */
-export const MIN_FOLD = 300;
+export const MIN_FOLD = 100;
 
 export const SCHEMA_MAPS = ['properties', 'patternProperties', '$defs', 'definitions'];
 

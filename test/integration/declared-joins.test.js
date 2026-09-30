@@ -811,7 +811,7 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
     const tools = (await client.listTools()).tools.map((x) => x.name);
     assert.ok(tools.includes('build_pipeline_model'), 'the pipeline tool is advertised');
     const call = async (name, args) => {
-      const res = await client.callTool({ name, arguments: args });
+      const res = await client.callTool({ name, arguments: { request: args } });
       assert.ok(!res.isError, `${name}: ${res.content?.[0]?.text}`);
       return JSON.parse(res.content[0].text);
     };
@@ -839,7 +839,7 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
     const s2 = await call('build_pipeline_model', { action: 'start', name: `mcp_${seq++}`, source: 'events' });
     const bad = await client.callTool({
       name: 'build_pipeline_model',
-      arguments: { action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' } },
+      arguments: { request: { action: 'add_step', draft_id: s2.draft_id, stage: { stage: 'join', with: 'experiments', via: 'ad_funnel_rewarded' } } },
     });
     assert.equal(bad.isError, true);
     assert.match(JSON.parse(bad.content[0].text).error.message, /declares no such relationship/);

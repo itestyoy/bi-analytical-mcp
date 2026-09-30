@@ -156,7 +156,7 @@ export class BackgroundIndexer {
     const wmOf = (rows) => rows.reduce((mx, r) => { const v = r.wm == null ? null : (Number.isFinite(Number(r.wm)) ? Number(r.wm) : Date.parse(r.wm)); return (v != null && (mx == null || v > mx)) ? v : mx; }, null);
     let done = 0;
     let written = 0; // example value rows stored — counted into the run's values_written
-    // Per-property run diagnostics, same rows the scalar pass writes (semantic_index({ run })).
+    // Per-property run diagnostics, same rows the scalar pass writes (semantic_index({ request: { run } })).
     const timing = (fields) => this._recordTiming(runId, fields);
     for (const name of names) {
       const spec = c.eventPropertySpec(name, fact);
@@ -612,7 +612,7 @@ export class BackgroundIndexer {
             batchFailed = true;
             const note = `combined batch scan of ${batch.length} propert${batch.length === 1 ? 'y' : 'ies'} from ${ref} [${label(batch[0])}…${label(batch[batch.length - 1])}] FAILED → fell back to per-property: ${e?.message || e}`;
             this.logger?.(`sync #${runId} ${note}`);
-            this.index.recordRunNote?.(runId, note); // logged AND surfaced via semantic_index({ status })/({ run }).fallbacks
+            this.index.recordRunNote?.(runId, note); // logged AND surfaced via semantic_index({ request: { status } })/({ run }).fallbacks
           }
           for (const t of batch) {
             i += 1;

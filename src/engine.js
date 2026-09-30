@@ -87,7 +87,7 @@ export class Engine {
       const moved = this.memoryStore.retarget((canon) => this.notes.canonForward(canon));
       if (moved.targets) console.error(`[mcp] memory targets stored structurally: ${moved.targets} target(s) on ${moved.notes} note(s)`);
     } catch (e) { console.error(`[mcp] memory target migration skipped: ${e?.message || e}`); }
-    this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ search })
+    this.catalogSearch = new CatalogSearch({ catalog, recipes, valueIndex: this.valueIndex }); // semantic_index({ request: { search } })
     this.indexViews = new ValueIndexViews({ valueIndex: this.valueIndex, jobs: this.jobs }); // what semantic_index shows of the value index
     this.advisor = new PipelineAdvisor({ catalog, valueIndex: this.valueIndex }); // what a step is told as it is added
     // HOW LONG A BEST-EFFORT WAREHOUSE READ MAY HOLD AN INTERACTIVE CALL (engine.probe.bestEffort): the extras
@@ -213,7 +213,7 @@ export class Engine {
    */
   _ctxToWrite(id, field = 'context_id') {
     const ctx = this._ctx(id);
-    if (ctx.state.pinned) throw new ToolError(`context '${id}' is the dbt project's own semantic layer, read from the project as it is — nothing is built on, changed in or deleted from it. Query its metrics with query_semantic_model({ context_id: '${id}', metrics }); a task of your own is built in a context of its own (omit ${field})`, { stage: 'validate', field });
+    if (ctx.state.pinned) throw new ToolError(`context '${id}' is the dbt project's own semantic layer, read from the project as it is — nothing is built on, changed in or deleted from it. Query its metrics with query_semantic_model({ request: { context_id: '${id}', metrics } }); a task of your own is built in a context of its own (omit ${field})`, { stage: 'validate', field });
     return ctx;
   }
 
@@ -231,7 +231,7 @@ export class Engine {
     if (ctx.state?.internal) throw new ToolError(`unknown context_id: ${id}${this.project ? ` — the dbt project's own semantic models are contexts of their own, named after them: ${this.project.contexts.join(', ')}` : ''}`, { stage: 'validate', field: 'context_id' });
     const gone = [...new Set([...(ctx.state.usedModels || []), ...Object.keys(ctx.state.additions || {})])].filter((k) => !this.catalog.models[k]);
     if (gone.length) {
-      throw new ToolError(`context '${id}' was built over ${gone.map((k) => `'${k}'`).join(', ')}, which the catalog no longer serves${this.catalog.unavailableHint(gone[0])} Start a new context over the sources that are available (semantic_index() lists them).`, { stage: 'validate', field: 'context_id' });
+      throw new ToolError(`context '${id}' was built over ${gone.map((k) => `'${k}'`).join(', ')}, which the catalog no longer serves${this.catalog.unavailableHint(gone[0])} Start a new context over the sources that are available (semantic_index({ request: {} }) lists them).`, { stage: 'validate', field: 'context_id' });
     }
     return ctx;
   }
@@ -389,7 +389,7 @@ export class Engine {
    */
   async context(input = {}) {
     // what context used to remove is delete_context's now: said so, rather than a bare enum refusal
-    const moved = { drop: 'delete_context({ context_id })', delete_model: "delete_context({ context_id, what: 'pipeline_model' })", delete_semantic_model: "delete_context({ context_id, what: 'semantic_model', semantic_model })" };
+    const moved = { drop: 'delete_context({ request: { context_id } })', delete_model: "delete_context({ request: { context_id, what: 'pipeline_model' } })", delete_semantic_model: "delete_context({ request: { context_id, what: 'semantic_model', semantic_model } })" };
     if (Object.hasOwn(moved, input?.action)) throw new ToolError(`context only reads (list, describe); removing is ${moved[input.action]}`, { stage: 'validate', field: 'action' });
     this._validate('context', input);
     return input.action === 'list' ? this.list_contexts() : this.describe_context({ context_id: input.context_id });
@@ -556,7 +556,7 @@ export class Engine {
           },
         } : {}),
         ...(Object.keys(ctx.state.checkpoint_consumers || {}).length ? { checkpoint_consumers: ctx.state.checkpoint_consumers } : {}),
-        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ task_id: '${n.task_id}' }) for its rows, query_pipeline_model({ context_id: '${ctx.id}', transform }) to filter or regroup them; build on them with build_pipeline_model({ action: 'start', name, from_task: '${n.task_id}' })` } : {}),
+        ...(n.task_id ? { built_by_task: n.task_id, read_with: `query_pipeline_model({ request: { task_id: '${n.task_id}' } }) for its rows, query_pipeline_model({ request: { context_id: '${ctx.id}', transform } }) to filter or regroup them; build on them with build_pipeline_model({ request: { action: 'start', name, from_task: '${n.task_id}' } })` } : {}),
         files: this.ctxs.generatedFiles(ctx.id),
       };
     }

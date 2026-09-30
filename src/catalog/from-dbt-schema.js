@@ -96,7 +96,7 @@ export function dbtSchemaToCatalog(doc) {
     // source such as acquisition). There is NO default or "anchor" source: a source may
     // be omitted only when the catalog has exactly one.
     if (mcp.anchor !== undefined) {
-      throw new Error(`model '${model.name}': meta.mcp.anchor is no longer a schema key — there is no default source. Every events source is addressed by name (semantic_index({ source }), build_pipeline_model({ source }), semantic_models[].from); a source may be omitted only when the catalog has exactly one.`);
+      throw new Error(`model '${model.name}': meta.mcp.anchor is no longer a schema key — there is no default source. Every events source is addressed by name (semantic_index({ request: { source } }), build_pipeline_model({ request: { source } }), semantic_models[].from); a source may be omitted only when the catalog has exactly one.`);
     }
     const isFact = (model.columns || []).some((c) => { const cm = c.meta?.mcp || {}; return cm.is_event_name || cm.is_event_data; });
     if (isFact) (out.facts ||= []).push(key);
@@ -212,7 +212,7 @@ export function dbtSchemaToCatalog(doc) {
         throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.events is no longer a schema key — which events carry a property is measured by the value index. To mark the column as an event-payload PROPERTY use meta.mcp.property: true (an array column needs only meta.mcp.array).`);
       }
       if (cm.values !== undefined || (cm.dimension && typeof cm.dimension === 'object' && cm.dimension.values !== undefined)) {
-        throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.values is no longer a schema key — a column's real values and their frequencies come from the value index (semantic_index({ source, property })). Remove it; put the MEANING of special values in the description instead.`);
+        throw new Error(`column '${col.name}' of model '${model.name}': meta.mcp.values is no longer a schema key — a column's real values and their frequencies come from the value index (semantic_index({ request: { source, property } })). Remove it; put the MEANING of special values in the description instead.`);
       }
       // Flattened event payload: on a FACT, a column marked meta.mcp.property (scalar) or
       // meta.mcp.array (array / array<struct>) is a per-event PROPERTY. These are REAL physical

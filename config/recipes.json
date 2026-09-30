@@ -1001,7 +1001,7 @@
           ]
         }
       ],
-      "notes": "The unit lives in the schema (e.g. cents): convert it in a derived metric so every consumer divides once, in one place. Grouping by a high-cardinality descriptor (an id) returns a long result — check the value distribution with semantic_index({ source, property }) first.",
+      "notes": "The unit lives in the schema (e.g. cents): convert it in a derived metric so every consumer divides once, in one place. Grouping by a high-cardinality descriptor (an id) returns a long result — check the value distribution with semantic_index({ request: { source, property } }) first.",
       "hack": "A typed payload column is a MEASURE when it is an amount and a DIMENSION when it is a descriptor; scope the model to the event that carries them, then sum the amount and group by its neighbours. The event scope is what makes the payload readable — the same column is NULL on every other event."
     },
     {
@@ -1312,8 +1312,8 @@
         "n_field": "n",
         "conversions_field": "conversions"
       },
-      "notes": "The native-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ action: 'analyze', metric: proportion }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ action: 'analyze', metric: mean }).",
-      "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call experiment({ action: 'analyze' }). Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
+      "notes": "The native-model pipeline builds a model whose rows are n + conversions per variant (exposed = users with in-window events). Then call experiment({ request: { action: 'analyze', metric: proportion } }): control = the control variant_group row, variants = the rest. For a continuous metric (revenue/ARPU per user), aggregate per-user then per-variant mean+stddev and call experiment({ request: { action: 'analyze', metric: mean } }).",
+      "hack": "Join the experiments source, window events to [assigned_at, ended_at], flag conversion per user (compute case → aggregate max), then aggregate n + conversions per variant and call experiment({ request: { action: 'analyze' } }). Extrapolate: per-variant rate (proportion) or per-user mean+stddev (Welch) for ANY experiment metric."
     },
     {
       "id": "cumulative_metric",
@@ -1631,8 +1631,8 @@
         "mean_field": "rev_mean",
         "stddev_field": "rev_sd"
       },
-      "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + avg + stddev and call experiment({ action: 'analyze', metric: mean }) (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
-      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). experiment({ action: 'analyze', metric: mean }) runs Welch t-test: control = control variant_group row, variants = the rest."
+      "hack": "Per-user continuous A/B: window events to the assignment period, coalesce the per-event value to 0, sum per user (one value per exposed user), then per variant compute n + avg + stddev and call experiment({ request: { action: 'analyze', metric: mean } }) (Welch). Extrapolate to ANY per-user continuous metric (revenue, session time, items) between variants.",
+      "notes": "mean A/B needs per-variant n, mean and stddev of a PER-USER value (aggregate per user first, then per variant). experiment({ request: { action: 'analyze', metric: mean } }) runs Welch t-test: control = control variant_group row, variants = the rest."
     },
     {
       "id": "ab_test_cuped",
@@ -1874,7 +1874,7 @@
         "sumX2_field": "sum_x2",
         "sumXY_field": "sum_xy"
       },
-      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call experiment({ action: 'analyze', metric: cuped }). Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
+      "hack": "CUPED = variance reduction via a pre-experiment covariate: per user compute Y (metric inside [assigned_at, ended_at]) and X (same metric BEFORE assigned_at) with two compute-case windows, then per variant emit the sufficient sums n, ΣY, ΣY², ΣX, ΣX², ΣXY (sum of Y, Y*Y, X, X*X, X*Y) and call experiment({ request: { action: 'analyze', metric: cuped } }). Extrapolate: any continuous A/B gains power when a correlated pre-period covariate exists — no per-user data leaves SQL, only the 6 sums.",
       "notes": "CUPED needs a PRE-experiment covariate (the same metric before assignment); it removes its variance, raising power, and reduces to a plain t-test when there is no pre-period signal. Pass per-variant sufficient sums; the tool computes the pooled theta and runs Welch on the adjusted means."
     },
     {
@@ -1904,8 +1904,8 @@
         "sumDen2_field": "sum_den2",
         "sumNumDen_field": "sum_numden"
       },
-      "notes": "The native-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call experiment({ action: 'analyze', metric: ratio }): control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
-      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. experiment({ action: 'analyze', metric: ratio }) applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
+      "notes": "The native-model pipeline builds a model whose rows carry, per variant: n (users) plus the per-user numerator/denominator sums and their squares/cross-product. Then call experiment({ request: { action: 'analyze', metric: ratio } }): control = the control variant_group row, variants = the rest. The ratio is Σnumerator/Σdenominator; the delta method turns the per-user sums into a cluster-robust variance, so attempts within a user are not treated as independent.",
+      "hack": "For a ratio metric whose denominator is counted at a finer grain than the randomization unit (events/sessions per user), aggregate numerator & denominator PER USER first so each user is one independent observation, then carry forward their squares (num², den²) and cross-product (num·den) and sum per variant. experiment({ request: { action: 'analyze', metric: ratio } }) applies the delta method for the correct (cluster-robust) variance — a plain proportion test on pooled events would understate it. Extrapolate to CTR (clicks/impressions), completion rate, ARPDAU, etc.",
       "register_payload": {
         "name": "ab_level_completion_ratio",
         "pipeline": {
@@ -2115,8 +2115,8 @@
         "group_field": "variant_group",
         "n_field": "n"
       },
-      "notes": "The native-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ action: 'check_split' }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
-      "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with experiment({ action: 'check_split' }) (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
+      "notes": "The native-model pipeline builds a model whose rows are the number of EXPOSED users per variant (distinct users with in-window events). Feed those counts to experiment({ request: { action: 'check_split' } }): it runs a χ² goodness-of-fit against the intended split (equal by default; pass expected_ratio for an uneven design). p < 0.001 ⇒ srm_detected=true ⇒ STOP and fix assignment/logging before reading any metric. This is a guardrail, not a metric — run it alongside the metric recipes (conversion/revenue/ratio/cuped).",
+      "hack": "Count distinct exposed users per variant in the warehouse, then compare observed vs intended counts with experiment({ request: { action: 'check_split' } }) (χ² goodness-of-fit). Extrapolate: ANY 'observed category counts vs an expected split' sanity check (traffic allocation, platform mix, day-of-week balance) is the same χ² test.",
       "register_payload": {
         "name": "ab_srm_counts",
         "pipeline": {
@@ -2208,7 +2208,7 @@
       "metric_types": [
         "power"
       ],
-      "notes": "experiment({ action: 'plan' }) is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev from a monetization_metrics or active_users_trend query first, then plan. Pair every experiment({ action: 'analyze' }) with an up-front MDE so a non-significant result can be read correctly.",
+      "notes": "experiment({ request: { action: 'plan' } }) is a pure calculation (no warehouse). Provide a baseline rate (metric=proportion) or a stddev (metric=mean) plus EXACTLY ONE of mde (→ required n per group) or n (→ minimum detectable effect). Estimate the baseline/stddev from a monetization_metrics or active_users_trend query first, then plan. Pair every experiment({ request: { action: 'analyze' } }) with an up-front MDE so a non-significant result can be read correctly.",
       "hack": "Up-front power analysis: baseline/stddev + target effect → required n per group; or n → MDE. Run it before the test to size it and after an inconclusive test to check it was powered. Extrapolate to any two-arm comparison (proportion z-test or mean t-test).",
       "tool_calls": [
         {
@@ -2783,7 +2783,7 @@
         }
       },
       "notes": "Distinguish an EXPECTED NULL (the property does not belong to that event) from a gap (it does and is missing) — the property view reports them separately. A volume change with stable coverage is behaviour; stable volume with collapsing coverage is instrumentation.",
-      "hack": "Count rows and distinct actors per event, then read the properties' NULL coverage (semantic_index({ source, property })) before trusting any movement. Triage order: volume → coverage → metric; most \"metric drops\" are a tracking change, and this ordering is what tells the two apart."
+      "hack": "Count rows and distinct actors per event, then read the properties' NULL coverage (semantic_index({ request: { source, property } })) before trusting any movement. Triage order: volume → coverage → metric; most \"metric drops\" are a tracking change, and this ordering is what tells the two apart."
     },
     {
       "id": "two_sample_significance",
@@ -2798,8 +2798,8 @@
         "mean",
         "proportion"
       ],
-      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_pipeline_model pipeline, then feed them to experiment({ action: \"analyze\" }) — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (avg) + stddev, then ab_test({ metric: 'mean' }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then ab_test({ metric: 'proportion' }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a CASE/derive column, two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final ab_test step on example per-group aggregates.",
-      "hack": "Compare two groups → aggregate each to its sufficient stats (mean: n+mean+stddev; proportion: conversions+n) in one pipeline, then ONE experiment({ action: \"analyze\" }) call returns lift + p-value + CI + significance. Reuse for first-vs-last, before-vs-after, cohort-vs-cohort — anywhere you'd otherwise eyeball two numbers.",
+      "notes": "Don't hand-roll a t-test/z-test. Compute per-group aggregates with a build_pipeline_model pipeline, then feed them to experiment({ request: { action: \"analyze\" } }) — 'control'/'variants' are just group A vs group B(…). For a CONTINUOUS metric (time, value, count per unit): aggregate per group to n + mean (avg) + stddev, then ab_test({ request: { metric: 'mean' } }) (Welch t-test). For a RATE: aggregate to conversions + n per group, then ab_test({ request: { metric: 'proportion' } }) (two-proportion z-test). The pipeline that produces the groups can be ANY grouping — a CASE/derive column, two event_data values, a date split — it does NOT require the experiments role. The tool_calls below show the final ab_test step on example per-group aggregates.",
+      "hack": "Compare two groups → aggregate each to its sufficient stats (mean: n+mean+stddev; proportion: conversions+n) in one pipeline, then ONE experiment({ request: { action: \"analyze\" } }) call returns lift + p-value + CI + significance. Reuse for first-vs-last, before-vs-after, cohort-vs-cohort — anywhere you'd otherwise eyeball two numbers.",
       "tool_calls": [
         {
           "tool": "experiment",
@@ -2852,7 +2852,7 @@
       "instead_of": "`df[\"v\"] = df[\"k\"].map(mapping)` — map aligns two objects by index, and the frame from dbt.ref() has none: NullIndexError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "lookup_merge",
         "pipeline": {
@@ -2944,7 +2944,7 @@
       "instead_of": "`df[\"m\"] = df.groupby(\"k\")[\"x\"].mean()` — the groupby result is another object with its own index; assigning it needs alignment the frame cannot do.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "group_back_to_rows",
         "pipeline": {
@@ -3035,7 +3035,7 @@
       "instead_of": "`df[\"k\"].unique()` with no argument — its default keep_order=True demands a row ordering and raises OrderRequiredError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "distinct_pairs",
         "pipeline": {
@@ -3108,7 +3108,7 @@
       "instead_of": "`df.head(10)` / `df.tail(10)` / `df.iloc[:10]` on an unsorted frame, and `df.nlargest(10, \"x\")` — every one of them raises OrderRequiredError here (nlargest only escapes it with keep=\"all\", because ties then need no tie-break).",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "top_payers",
         "pipeline": {
@@ -3187,7 +3187,7 @@
       "instead_of": "Calling rolling/shift/cumsum on the frame as it arrives — the window is then over an arbitrary order, and the numbers are silently meaningless.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "series_ops",
         "pipeline": {
@@ -3281,7 +3281,7 @@
       "instead_of": "Computing the statistic in another frame and joining it in (it is a different root, so it needs a merge), and `std(ddof=…)` — this Series.std takes NO parameters at all, so passing ddof is a TypeError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "frame_statistics",
         "pipeline": {
@@ -3365,7 +3365,7 @@
       "instead_of": "`df[\"x\"].quantile([0.5, 0.9])` — a SERIES indexed by q, which this runtime has no index to align; and a hard-coded threshold nobody can defend.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "distribution_cut",
         "pipeline": {
@@ -3456,7 +3456,7 @@
       "instead_of": "`df[other[\"flag\"]]` / `df[df[\"k\"].isin(other_series)]` — a Series from ANOTHER frame has no index to align with this one.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "filter_by_other",
         "pipeline": {
@@ -3540,7 +3540,7 @@
       "instead_of": "`df[\"segment\"] = model.predict(X)[\"CENTROID_ID\"]` — predict re-reads its result as a NEW query, so its frame has a different root than df and the assignment raises NullIndexError. Also sklearn/scipy: they need to_pandas() first and then run single-node.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "ml_predict_column",
         "pipeline": {
@@ -3658,7 +3658,7 @@
       "instead_of": "`KMeans(n_clusters=4, standardize_features=True)` → TypeError: __init__() got an unexpected keyword argument. bigframes.ml wears the scikit-learn API but wraps BigQuery ML: a constructor takes the options its BQML model type has, so an sklearn-only argument (standardize_features, n_init, random_state, algorithm) does not exist here. A third Pipeline step raises NotImplementedError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for the signature of the class you are about to build (every bigframes.ml constructor, extracted from the installed library), and semantic_index({ guide: \"python\" }) for the frame rules this recipe rests on.",
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for the signature of the class you are about to build (every bigframes.ml constructor, extracted from the installed library), and semantic_index({ request: { guide: \"python\" } }) for the frame rules this recipe rests on.",
       "register_payload": {
         "name": "ml_estimator_params",
         "pipeline": {
@@ -3771,7 +3771,7 @@
           ]
         }
       },
-      "notes": "Why the resemblance misleads: each estimator maps its parameters to BQML CREATE MODEL options (cluster.py _BQML_PARAMS_MAPPING / _bqml_options), so the surface is BQML's and nothing else is accepted — and the parameters after the first are keyword-only, so a positional call fails the same way. The signatures are extracted from the installed library (config/bigframes-facts.json) and published as a fetchable reference — semantic_index({ recipe: \"bf_ml_signatures\" }) — so they are this version's, not a memory of the docs. Standardizing in a SQL stage before the python stage is equally valid and cheaper — compute the mean and the deviation as a ONE-ROW aggregate and apply them as literals (see agg_table_stat_no_global_window); then the estimator needs no transformer at all.",
+      "notes": "Why the resemblance misleads: each estimator maps its parameters to BQML CREATE MODEL options (cluster.py _BQML_PARAMS_MAPPING / _bqml_options), so the surface is BQML's and nothing else is accepted — and the parameters after the first are keyword-only, so a positional call fails the same way. The signatures are extracted from the installed library (config/bigframes-facts.json) and published as a fetchable reference — semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) — so they are this version's, not a memory of the docs. Standardizing in a SQL stage before the python stage is equally valid and cheaper — compute the mean and the deviation as a ONE-ROW aggregate and apply them as literals (see agg_table_stat_no_global_window); then the estimator needs no transformer at all.",
       "hack": "Read the signature, pass only what is in it, and express anything it lacks as a step of its own (a transformer) or as SQL before the stage. The same holds for every estimator: only the class and its option names change."
     },
     {
@@ -3783,7 +3783,7 @@
       "instead_of": "Declaring the input columns as the output — the following SQL stages then reference columns that do not exist.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "ml_output_shape",
         "pipeline": {
@@ -3890,7 +3890,7 @@
       "instead_of": "`model.fit(df)` with the label still inside the features (it then predicts itself), a Series as y, or assigning `df[\"pred\"] = model.predict(...)` — predict re-reads its result, so the assignment raises NullIndexError. Also sklearn's LogisticRegression/RandomForest: they need to_pandas() and run single-node.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for the estimator's own parameters, and semantic_index({ guide: \"python\" }) for the frame rules this recipe rests on.",
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for the estimator's own parameters, and semantic_index({ request: { guide: \"python\" } }) for the frame rules this recipe rests on.",
       "register_payload": {
         "name": "ml_supervised",
         "pipeline": {
@@ -4025,7 +4025,7 @@
       "instead_of": "Scoring on the training rows (an accuracy that means nothing), splitting with a pandas train_test_split after to_pandas(), or reporting a prediction with no error figure at all.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for train_test_split's own parameters (test_size, train_size, random_state, stratify, shuffle), and semantic_index({ guide: \"python\" }) for the frame rules.",
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for train_test_split's own parameters (test_size, train_size, random_state, stratify, shuffle), and semantic_index({ request: { guide: \"python\" } }) for the frame rules.",
       "register_payload": {
         "name": "ml_model_score",
         "pipeline": {
@@ -4155,7 +4155,7 @@
       "instead_of": "Expecting the input columns back (the SQL stages after it would then reference columns that do not exist), or assigning a component into df (a cross-frame assignment → NullIndexError). Also sklearn's PCA: it needs to_pandas() and runs single-node.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for PCA's parameters (n_components, svd_solver), and semantic_index({ guide: \"python\" }) for the frame rules.",
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for PCA's parameters (n_components, svd_solver), and semantic_index({ request: { guide: \"python\" } }) for the frame rules.",
       "register_payload": {
         "name": "ml_pca_components",
         "pipeline": {
@@ -4271,7 +4271,7 @@
       "instead_of": "Hand-rolled dummies with np.where / a lookup frame per value (a cross-frame alignment → NullIndexError, and a column per value you have to keep in step), a THIRD Pipeline step (NotImplementedError — it takes exactly two), or LabelEncoder on a nominal column, which invents an order between its values.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ recipe: \"bf_ml_signatures\" }) for the transformers' parameters (OneHotEncoder(drop, min_frequency, max_categories), KBinsDiscretizer(n_bins, strategy), and the scalers, which take none), and semantic_index({ guide: \"python\" }) for the frame rules.",
+      "read_first": "semantic_index({ request: { recipe: \"bf_ml_signatures\" } }) for the transformers' parameters (OneHotEncoder(drop, min_frequency, max_categories), KBinsDiscretizer(n_bins, strategy), and the scalers, which take none), and semantic_index({ request: { guide: \"python\" } }) for the frame rules.",
       "register_payload": {
         "name": "ml_categorical_features",
         "pipeline": {
@@ -4438,7 +4438,7 @@
       "instead_of": "Deriving several results from the same expensive expression without caching (deferred execution re-runs it per dependent result), and mixing objects taken BEFORE the cache with the cached frame — cache() swaps the object's node for a read of the temporary table, so a mask or column taken earlier belongs to the old expression and combining them raises NullIndexError.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "cache_intermediate",
         "pipeline": {
@@ -4524,7 +4524,7 @@
       "instead_of": "`to_pandas()` to get a Python equivalent — that leaves BigQuery and brings the whole result into the notebook.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "bbq_functions",
         "pipeline": {
@@ -4612,7 +4612,7 @@
       "instead_of": "`pdf = df.to_pandas()` on the incoming frame — it downloads the whole table into the notebook runtime and everything after it is single-node.",
       "requires": "python_models",
       "runtime": "bigframes",
-      "read_first": "semantic_index({ guide: \"python\" }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
+      "read_first": "semantic_index({ request: { guide: \"python\" } }) first — the frame rules of this runtime. This recipe is ONE approach from it, filled in and compiling.",
       "register_payload": {
         "name": "pandas_last_resort",
         "pipeline": {

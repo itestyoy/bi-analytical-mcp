@@ -118,7 +118,7 @@ export class TaskRunner {
       task_ids: ids,
       context_id: ctx.id,
       read_with: reader,
-      next: `${reader}({ task_ids: [${ids.map((id) => `'${id}'`).join(', ')}] }) — it waits for them together (up to ${MAX_WAIT_SECONDS}s per call) and returns each one's result, in this order`,
+      next: `${reader}({ request: { task_ids: [${ids.map((id) => `'${id}'`).join(', ')}] } }) — it waits for them together (up to ${MAX_WAIT_SECONDS}s per call) and returns each one's result, in this order`,
     };
   }
 
@@ -131,7 +131,7 @@ export class TaskRunner {
   /** The call that reads a task back: its side's query tool, with the task_id. */
   readWith(id) {
     const side = this.sideOf(this.jobs.get(id)?.tool);
-    return side ? `${this.readers[side]}({ task_id: '${id}' })` : `query_semantic_model or query_pipeline_model with { task_id: '${id}' }`;
+    return side ? `${this.readers[side]}({ request: { task_id: '${id}' } })` : `query_semantic_model or query_pipeline_model with { task_id: '${id}' }`;
   }
 
   /** Keep a task's finished response for the query tools to read back — the newest few hundred, for an hour. A stored table outlives it. */
@@ -158,7 +158,7 @@ export class TaskRunner {
   forSide(id, side) {
     const job = this.known(id);
     const own = this.sideOf(job.tool);
-    if (own && own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ task_id: '${job.id}' })`, { stage: 'validate', field: 'task_id' });
+    if (own && own !== side) throw new ToolError(`task ${job.id} is a ${own} task (${job.tool}) — read it with ${this.readers[own]}({ request: { task_id: '${job.id}' } })`, { stage: 'validate', field: 'task_id' });
     return job;
   }
 
@@ -176,7 +176,7 @@ export class TaskRunner {
       if (job.status !== 'running') {
         return { task_id: id, cancelled: false, status: job.status === 'ready' ? 'done' : job.status, note: `already ${job.status === 'ready' ? 'finished' : job.status} — nothing to cancel` };
       }
-      const reason = `cancelled by ${this.readers[side]}({ task_id, cancel: true })`;
+      const reason = `cancelled by ${this.readers[side]}({ request: { task_id, cancel: true } })`;
       this.controls.get(id)?.abort(new Error(reason));
       this.jobs.cancel(id, reason);
       this.keep(id, { tool: job.tool, input: null, out: { ok: false, error: { stage: 'cancelled', code: 'cancelled', message: reason } } });

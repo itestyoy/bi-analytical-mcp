@@ -121,7 +121,7 @@ test('python stage anywhere: first (reads the source), middle, twice — each a 
 
 test('python stage: the allowed packages are an ENUM in the tool schema; anything else is refused by the schema', async () => {
   const e = engine();
-  const items = stageUnion(e.schemas.register_native_model, 'stages').find((s) => s.properties.stage.enum?.[0] === 'python');
+  const items = stageBranch(e.schemas.register_native_model, 'python', 'stages');
   assert.deepEqual(items.properties.imports.items.properties.package.enum, [...importAllowlist().keys()], 'the enum IS the allowlist');
   assert.ok(items.properties.imports.items.properties.package.enum.includes('sklearn'));
   await assert.rejects(() => e.register_native_model(decl({ pipeline: { source: 'events', stages: [AGG, { ...PY_STAGE, imports: [{ package: 'requests' }] }] } })), /package. must be one of: pandas, numpy, sklearn, scipy, statsmodels/);
@@ -252,8 +252,7 @@ test('python stage: the body schema is a recursive $ref to $defs.py_block hoiste
     const root = e.schemas[tool];
     assert.ok(root.$defs?.py_block, `${tool} carries $defs.py_block at its root`);
     assert.deepEqual(root.$defs.py_block.items.anyOf[1], { $ref: '#/$defs/py_block' }, 'the block refers to itself');
-    const stages = stageUnion(root, tool === 'build_pipeline_model' ? 'stage' : 'stages');
-    const py = stages.find((st) => st.properties.stage.enum?.[0] === 'python');
+    const py = stageBranch(root, 'python', tool === 'build_pipeline_model' ? 'stage' : 'stages');
     assert.equal(py.properties.functions.items.properties.body.$ref, '#/$defs/py_block');
   }
   // twelve levels deep validates and renders — deeper than any unrolled schema allowed
@@ -521,7 +520,7 @@ test('the python authoring guide is served for this deployment\'s runtime, with 
     assert.ok(text.includes(needle), `the guide covers ${needle}`);
   }
   // …and the stage description points at it rather than repeating it
-  assert.match(frameProfile(catalog.pythonRuntime, {}).guide, /semantic_index\(\{ guide: "python" \}\)/);
+  assert.match(frameProfile(catalog.pythonRuntime, {}).guide, /semantic_index\(\{ request: \{ guide: "python" \} \}\)/);
 
   // a deployment that runs no python models says so instead of showing another runtime's guide
   const plain = loadCatalog(CATALOG, {});
@@ -587,7 +586,7 @@ test('the stage description and the guide send the caller to this deployment\'s 
   // stays small, the detail arrives when it is asked for.)
   assert.match(py.description, /read the ones your question involves/, 'the description asks for them to be read');
   assert.ok(py.description.includes(`${entries.filter((r) => !['bf_ml_signatures', 'bf_frame_method_rules'].includes(r.id)).length} worked`), 'it says how many there are (the generated references apart)');
-  assert.match(py.description, /semantic_index\(\{ recipe: "<id>" \}\)/, 'and the description says HOW to fetch one');
+  assert.match(py.description, /semantic_index\(\{ request: \{ recipe: "<id>" \} \}\)/, 'and the description says HOW to fetch one');
   // The ids it may name are the two REFERENCES generated from the library (its signatures, its
   // method preconditions), because that lookup is what a caller needs mid-write; the worked recipes
   // are fetched from the guide's index.
@@ -603,12 +602,12 @@ test('the stage description and the guide send the caller to this deployment\'s 
   // what it still carries itself: why this runtime bites, and where the reasoning lives
   assert.match(py.description, /NullIndexError/);
   assert.match(py.description, /OrderRequiredError/);
-  assert.match(py.description, /semantic_index\(\{ guide: "python" \}\)/);
+  assert.match(py.description, /semantic_index\(\{ request: \{ guide: "python" \} \}\)/);
 
   const g = await e.semantic_index({ guide: 'python' });
   assert.deepEqual(g.recipes.ids, ids);
   assert.deepEqual(g.recipes.moves, entries.map((r) => `${r.id}: ${r.title}`), 'the guide names the move behind every id too');
-  assert.match(g.recipes.fetch, /semantic_index\(\{ recipe: '/);
+  assert.match(g.recipes.fetch, /semantic_index\(\{ request: \{ recipe: '/);
   assert.match(g.read_next, /Read the recipes before you write/);
   assert.match(g.recipes.note, /Read these before writing a function/);
 

@@ -46,7 +46,7 @@ export async function display(engine, feature, input) {
 export async function drawOne(engine, feature, ctx, input) {
   await engine.tasks.await([input.task_id], MAX_WAIT_SECONDS);
   const now = engine.jobs.get(input.task_id);
-  if (now.status === 'running') throw new ToolError(`task ${input.task_id} is still running — read it with ${QUERY}({ task_id }) until it is done, then draw it`, { stage: 'validate', field: 'task_id' });
+  if (now.status === 'running') throw new ToolError(`task ${input.task_id} is still running — read it with ${QUERY}({ request: { task_id } }) until it is done, then draw it`, { stage: 'validate', field: 'task_id' });
   const state = ctx.state.retentioneering;
   const origin = resultOrigin(state, now.table);
   // a card draws every record of its analysis: held in memory, and cut there, it is read whole — that
@@ -62,8 +62,8 @@ export async function drawOne(engine, feature, ctx, input) {
     // a diff of a kind that has its card, stored in the form an earlier version wrote, is drawn by running the query again
     const earlier = result.diff && DIFF_CARD_KINDS.includes(result.kind);
     throw new ToolError(earlier
-      ? `'${input.analysis}' is a diff of ${result.kind} stored before its card existed: run the same query again to draw it, or answer in words from the numbers query_retentioneering_model({ task_id }) returned`
-      : `'${input.analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers query_retentioneering_model({ task_id }) returned`, { stage: 'validate', field: 'analysis' });
+      ? `'${input.analysis}' is a diff of ${result.kind} stored before its card existed: run the same query again to draw it, or answer in words from the numbers query_retentioneering_model({ request: { task_id } }) returned`
+      : `'${input.analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers query_retentioneering_model({ request: { task_id } }) returned`, { stage: 'validate', field: 'analysis' });
   }
   if (held && truncatedTables(result)) {
     const whole = await readResult(engine, feature, engine.ctxs.dir(ctx.id), now.table, { context_id: out.context_id, eventstream: out.eventstream, order: [input.analysis], rows: Infinity, analysis: input.analysis });

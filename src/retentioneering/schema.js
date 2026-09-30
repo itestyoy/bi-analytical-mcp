@@ -21,6 +21,7 @@ import { ToolError } from '../validate.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
 import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
+import { anyOfOr, form, pick, stringOtherThan } from '../schema-kit.js';
 
 let factsCache;
 /** The facts sheet (read once). */
@@ -147,13 +148,13 @@ export function buildSchema(catalog) {
   const VALUE = { description: 'The constant (an array for in/not_in; [low, high] for between, both included; none for is_null/is_not_null).' };
   // one condition on the source's own column or on a scalar event property — the filter's and a split case's
   const condition = {
-    oneOf: [
+    anyOf: [
       { type: 'object', additionalProperties: false, required: ['column', 'op'], title: 'column', properties: { column: column('A column of the source'), op: OPS, value: VALUE } },
       ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property', 'op'], title: 'event property', properties: { property: own(ownProps, 'A scalar event_data property'), op: OPS, value: VALUE } }] : []),
     ],
   };
   const parameter = {
-    oneOf: [
+    anyOf: [
       { type: 'object', additionalProperties: false, required: ['column'], title: 'column', properties: { column: column('A column of the source') } },
       ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property'], title: 'event property', properties: { property: own(ownProps, 'A scalar event_data property') } }] : []),
     ],
@@ -162,7 +163,7 @@ export function buildSchema(catalog) {
     type: 'array', minItems: 1,
     description: 'Make events out of an event\'s parameters, in SQL, before the paths are built: each rule renames the rows of one event. `by` splits it by the value of a property or column (ad_finished by is_error → ad_finished_true / ad_finished_false; `names` gives values their own names: { "true": "ad_finished_failed", "false": "ad_finished_success" }); `cases` names it by conditions, the first that holds (and `else` the rest). Rows of the event without the parameter keep its name. The new names are what every analysis reads; groups and top apply after.',
     items: {
-      oneOf: [
+      anyOf: [
         {
           type: 'object', additionalProperties: false, required: ['event', 'by'], title: 'by value',
           properties: {
@@ -184,11 +185,10 @@ export function buildSchema(catalog) {
   };
   const f = retentioneeringFacts();
   const index = { type: 'integer', minimum: 1, description: 'edit_step / insert_step / delete_step: which step (1-based; insert_step puts the new one before it, or at the end with steps + 1).' };
-  return withTaskEvents(event, {
-    type: 'object', additionalProperties: false,
+  return buildForms(event, {
     description: 'The eventstream a path analysis reads — declared and built in SQL where the data lives (start), then shaped step by step with the library\'s own steps, each checked by the library as it is added, and materialized. Its rows come from an events source of the catalog (source), or from the stored table of a task (from_task + columns).',
     properties: {
-      action: { enum: BUILD_ACTIONS, default: 'start', description: `start (the default) declares the eventstream and builds it in SQL (a task); add_step appends one library step and returns what the eventstream holds after it — its events, path columns, segments and their levels — checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs); add_steps appends several, all or none; edit_step replaces step \`index\`, insert_step inserts one before it, delete_step removes it, truncate keeps steps 1..\`after\` — each re-checks every step after it and names the first one it breaks; fork copies steps 1..\`after\` into a new eventstream (\`name\`), to try a variant without touching this one; preview lists the steps with what each changed; materialize runs the steps not yet materialized on the warehouse (a task) — the analyses read the eventstream as materialized. Steps: ${offeredOps().join(', ')}. Not offered: ${NOT_OFFERED_OPS()}.` },
+      action: { enum: BUILD_ACTIONS, description: `start (the default) declares the eventstream and builds it in SQL (a task); add_step appends one library step and returns what the eventstream holds after it — its events, path columns, segments and their levels — checked by the library itself on that shape, so a step the library refuses is refused at once with the library's message (nothing runs); add_steps appends several, all or none; edit_step replaces step \`index\`, insert_step inserts one before it, delete_step removes it, truncate keeps steps 1..\`after\` — each re-checks every step after it and names the first one it breaks; fork copies steps 1..\`after\` into a new eventstream (\`name\`), to try a variant without touching this one; preview lists the steps with what each changed; materialize runs the steps not yet materialized on the warehouse (a task) — the analyses read the eventstream as materialized. Steps: ${offeredOps().join(', ')}. Not offered: ${NOT_OFFERED_OPS()}.` },
       eventstream: { type: 'string', pattern: NAME, description: 'The eventstream a step action or fork works on (optional when the context holds one).' },
       step: { ...stepSchema(), description: 'add_step / edit_step / insert_step: one of the library\'s own steps — { type: <op>, ...its parameters under the library\'s names }.' },
       steps: { type: 'array', minItems: 1, items: stepSchema(), description: 'add_steps: several steps, applied in order.' },
@@ -236,15 +236,15 @@ export function buildSchema(catalog) {
       segments: {
         type: 'array', minItems: 1,
         description: 'Columns to carry on every event as segments — what segment_overview, metric_distribution, diff and in_segment read: an attribute of a model the source reaches by a declared relationship ({ model, attribute }), a column of the source itself ({ column }), or a scalar event property ({ property }).',
-        items: segmentBranches.length ? { oneOf: segmentBranches } : { not: {} },
+        items: anyOfOr(segmentBranches),
       },
       where: {
         type: 'array', minItems: 1,
         description: 'Keep only the events matching every condition — on a column of the source itself or a segment declared above ({ column }), or on a scalar event property ({ property }). Applied in SQL before the paths are built.',
         items: {
-          oneOf: [
-            { ...condition.oneOf[0], properties: { ...condition.oneOf[0].properties, column: column('A column of the source (an environment or app column, say) or a segment declared above (its `as` or attribute name)') } },
-            ...condition.oneOf.slice(1),
+          anyOf: [
+            { ...condition.anyOf[0], properties: { ...condition.anyOf[0].properties, column: column('A column of the source (an environment or app column, say) or a segment declared above (its `as` or attribute name)') } },
+            ...condition.anyOf.slice(1),
           ],
         },
       },
@@ -274,46 +274,40 @@ export function buildSchema(catalog) {
 /** The build's actions, the pipeline builder's own words for the same moves. */
 export const BUILD_ACTIONS = ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize'];
 
-/** The fields of a start — the declaration of the rows. */
-const START_FIELDS = ['source', 'from_task', 'columns', 'time_range', 'path', 'events', 'segments', 'where', 'sessions', 'sample'];
-
-/** What each action takes: exactly its own fields, so a stray one is refused rather than ignored. */
-function actionRules(startBranches) {
-  const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
-  const is = (...actions) => ({ properties: { action: actions.length === 1 ? { const: actions[0] } : { enum: actions } }, required: ['action'] });
-  const stepFields = ['eventstream', 'step', 'steps', 'index', 'after'];
-  const others = (keep) => [...START_FIELDS, 'name', 'description', ...stepFields].filter((k) => !keep.includes(k));
-  return [
-    { if: { anyOf: [{ not: { required: ['action'] } }, is('start')] }, then: { required: ['name'], anyOf: startBranches, ...forbid(stepFields) } },
-    { if: is('add_step'), then: { required: ['context_id', 'step'], ...forbid(others(['eventstream', 'step'])) } },
-    { if: is('add_steps'), then: { required: ['context_id', 'steps'], ...forbid(others(['eventstream', 'steps'])) } },
-    { if: is('edit_step', 'insert_step'), then: { required: ['context_id', 'index', 'step'], ...forbid(others(['eventstream', 'index', 'step'])) } },
-    { if: is('delete_step'), then: { required: ['context_id', 'index'], ...forbid(others(['eventstream', 'index'])) } },
-    { if: is('truncate'), then: { required: ['context_id', 'after'], ...forbid(others(['eventstream', 'after'])) } },
-    { if: is('fork'), then: { required: ['context_id', 'name'], ...forbid(others(['eventstream', 'name', 'after', 'description'])) } },
-    { if: is('preview', 'materialize'), then: { required: ['context_id'], ...forbid(others(['eventstream'])) } },
-  ];
-}
-
 /**
+ * The build as forms, one per action (and two for a start: from an events source, or from a task's
+ * table) — each with exactly its own fields, so a stray one is refused rather than ignored. `schema`
+ * carries every field (`properties`), the build's description and its `$defs`.
+ *
  * The event fields hold the source's own names (an enum) when the rows come from an events source,
- * and the names a task's table holds when they come from one — a pipeline can compute event names
- * the catalog does not know. So the fields at the top take any name, and the events-source branch
- * restates events and sample with the catalog's enum: a typo there is still refused by the schema.
+ * and the names a task's table holds when they come from one — a pipeline can compute event names the
+ * catalog does not know. So a start from a task takes the same fields with that one constraint lifted,
+ * and a start from a source keeps the catalog's enum: a typo there is still refused by the schema.
  */
-function withTaskEvents(event, schema) {
-  const branches = [
-    { required: ['source'], not: { required: ['from_task'] }, title: 'from an events source' },
-    { required: ['from_task', 'columns'], title: 'from a task\'s table' },
-  ];
-  if (!event.enum) return { ...schema, allOf: actionRules(branches) };
+function buildForms(event, schema) {
+  const { properties: F, description, $defs } = schema;
   const free = { type: 'string', minLength: 1, description: 'An event name: of the source, or one the from_task table holds.' };
   const relax = (node) => (node === event ? free : Array.isArray(node) ? node.map(relax) : node && typeof node === 'object' ? Object.fromEntries(Object.entries(node).map(([k, v]) => [k, relax(v)])) : node);
-  const strict = { events: schema.properties.events, sample: schema.properties.sample };
-  const { $defs, ...rest } = schema;
-  const out = relax(rest);
-  branches[0] = { ...branches[0], properties: strict };
-  return { ...out, allOf: actionRules(branches), $defs };
+  const lifted = event.enum ? relax(F) : F;
+  const action = (value) => ({ tag: ['action', value], tagDescription: F.action.description });
+  const declaration = ['context_id', 'name', 'description', 'time_range', 'path', 'events', 'segments', 'where', 'sessions', 'sample'];
+  const step = (value, title, required, optional = []) => form({ title, ...action(value), required: ['context_id', ...required], properties: pick(F, ['context_id', 'eventstream', ...required, ...optional]) });
+  return {
+    type: 'object',
+    description,
+    anyOf: [
+      form({ title: 'start from an events source', ...action('start'), optionalTag: true, required: ['name', 'source'], properties: pick(F, ['source', ...declaration]) }),
+      form({ title: 'start from a task\'s table', ...action('start'), optionalTag: true, required: ['name', 'from_task', 'columns'], properties: pick(lifted, ['from_task', 'columns', 'source', ...declaration]) }),
+      step('add_step', 'add a step', ['step']),
+      step('add_steps', 'add several steps', ['steps']),
+      step(['edit_step', 'insert_step'], 'edit or insert a step', ['index', 'step']),
+      step('delete_step', 'delete a step', ['index']),
+      step('truncate', 'truncate the steps', ['after']),
+      step('fork', 'fork the eventstream', ['name'], ['after', 'description']),
+      step(['preview', 'materialize'], 'preview or materialize', []),
+    ],
+    ...($defs ? { $defs } : {}),
+  };
 }
 
 /** Whose paths: the wrapper's name for the library's path column. */
@@ -344,7 +338,7 @@ export function pathPatternUses() {
 /** A library parameter as a schema property: its type, its default, its first docstring paragraph. */
 function param(p) {
   // a parameter written in the path-pattern language points at its grammar, which the guide carries
-  const doc = p.doc && takesPathPattern(p) ? `${p.doc} The grammar in full: semantic_index({ guide: "retentioneering" }) → path_patterns.` : p.doc;
+  const doc = p.doc && takesPathPattern(p) ? `${p.doc} The grammar in full: semantic_index({ request: { guide: "retentioneering" } }) → path_patterns.` : p.doc;
   return { ...p.schema, ...(p.default !== undefined ? { default: p.default } : {}), ...(doc ? { description: doc } : {}) };
 }
 
@@ -356,7 +350,8 @@ function param(p) {
  *  quantiles, the open interval of a cut quantile, the reserved level) comes from the sheet. */
 function metricBinsSchema() {
   const b = retentioneeringFacts().metric_bins;
-  const level = { type: 'string', minLength: 1, not: { const: b.undefined_level }, description: `This bin's segment level (unique within the split; '${b.undefined_level}' is the level of paths the metric has no value for).` };
+  // '${b.undefined_level}' is the library's own level (the paths the metric has no value for): any other name
+  const level = stringOtherThan(b.undefined_level, { minLength: 1, description: `This bin's segment level (unique within the split; '${b.undefined_level}' is the level of paths the metric has no value for).` });
   const lowest = { type: 'object', additionalProperties: false, required: ['level'], properties: { level } };
   const bounded = (key, schema) => ({ type: 'object', additionalProperties: false, required: ['level', key], properties: { level, [key]: schema } });
   return {
@@ -365,7 +360,7 @@ function metricBinsSchema() {
     properties: {
       metric: { ...b.metric_schema, description: 'The per-path metric binned (one value per path).' },
       bins: {
-        oneOf: [
+        anyOf: [
           { title: 'by value', type: 'array', minItems: 2, prefixItems: [lowest], items: bounded('from', { type: 'number', description: 'Where this bin starts (inclusive), in the metric\'s units.' }) },
           { title: 'by quantile', type: 'array', minItems: 2, prefixItems: [lowest], items: bounded('from_quantile', { type: 'number', ...b.quantile_bounds, description: 'Where this bin starts, as the share of paths below it.' }) },
           { title: 'equal quantiles', type: 'array', minItems: b.min_quantile_bins, items: lowest },
@@ -405,7 +400,7 @@ function rulesSchema() {
     type: 'object', additionalProperties: false, required: ['cases', 'else'],
     description: 'Segment levels by conditions on the eventstream\'s columns, the first case that matches deciding: each case a column, an operator and a constant (a list of them for \'in\'), and `else` for what no case matches.',
     properties: {
-      cases: { type: 'array', minItems: 1, items: { oneOf: [kase({ enum: g.compare }, { anyOf: scalar }), kase({ const: g.membership }, { type: 'array', minItems: 1, items: { anyOf: scalar } })] } },
+      cases: { type: 'array', minItems: 1, items: { anyOf: [kase({ enum: g.compare }, { anyOf: scalar }), kase({ const: g.membership }, { type: 'array', minItems: 1, items: { anyOf: scalar } })] } },
       else: { ...level, description: 'The level of every row no case matches.' },
     },
   };
@@ -439,10 +434,10 @@ function rowConditionSchema() {
   const g = retentioneeringFacts().condition;
   const scalar = { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }] };
   // a list of one kind of constant: it is compared as that kind, whatever type the column is stored in
-  const list = { oneOf: ['string', 'number', 'boolean'].map((type) => ({ type: 'array', minItems: 1, items: { type } })) };
+  const list = { anyOf: ['string', 'number', 'boolean'].map((type) => ({ type: 'array', minItems: 1, items: { type } })) };
   const column = { type: 'string', pattern: NAME_OR_COLUMN, description: 'A column of the eventstream at this step: the event, its time, a path column (a session a split_sessions step made, its index), a segment, a custom column.' };
   const leaf = {
-    oneOf: [
+    anyOf: [
       { type: 'object', additionalProperties: false, required: ['column', 'op', 'value'], properties: { column, op: { enum: g.compare }, value: scalar } },
       { type: 'object', additionalProperties: false, required: ['column', 'op', 'value'], properties: { column, op: { enum: [g.membership, `not_${g.membership}`] }, value: list } },
       { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column, op: { enum: ['is_null', 'is_not_null'] } } },
@@ -452,7 +447,7 @@ function rowConditionSchema() {
   const negated = (of) => ({ type: 'object', additionalProperties: false, required: [g.negation], properties: { [g.negation]: of } });
   const inner = group(leaf);
   return {
-    ...group({ oneOf: [leaf, inner, negated({ oneOf: [leaf, inner] })] }),
+    ...group({ anyOf: [leaf, inner, negated({ anyOf: [leaf, inner] })] }),
     description: `Keep only the rows whose columns satisfy a condition — a threshold, a range, a list, a missing value — on any column the eventstream has at this step (what keep / drop cannot say: they match listed values only). A number or a flag is compared as one, whatever the column is stored as (a segment is text). A missing value matches no comparison and no list, so a negation (!=, not_${g.membership}, ${g.negation}) keeps it, as drop does; is_null picks it out. Conditions combine with ${g.logical.join(' / ')} (one level of nesting) and ${g.negation}; this tool writes the SQL the library runs, its names and constants quoted. Instead of keep / drop, not with them.`,
   };
 }
@@ -503,7 +498,9 @@ export const RESHAPED = {
 };
 
 /** The properties and required list of a library callable's parameters — path_col as `path`, the
- *  parameters a call cannot carry left out, the reshaped ones in their own shape. */
+ *  parameters a call cannot carry left out, the reshaped ones in their own shape — and the VARIANTS
+ *  its forms split into where one parameter decides what another may hold (a clustering's method
+ *  decides its method_args). */
 function params(list) {
   const properties = {};
   const required = [];
@@ -513,41 +510,60 @@ function params(list) {
     properties[p.name] = RESHAPED[p.name] ? RESHAPED[p.name].schema() : param(p);
     if (p.required) required.push(p.name);
   }
-  return { properties, required, allOf: methodArgs(list, properties) };
+  return { properties, required, variants: methodVariants(list, properties) };
 }
 
-/** A clustering's method_args: the keys each method reads, from the library's own table of them —
- *  all of them described, and for the method chosen (its default when none is) only its own. */
-function methodArgs(list, properties) {
+/** A clustering's method_args: the keys each method reads, from the library's own table of them — a
+ *  variant per method, whose method_args take exactly that method's keys (the default method's may
+ *  leave `method` out). → [] for a callable without both. */
+function methodVariants(list, properties) {
   if (!properties.method_args || !properties.method) return [];
-  const f = retentioneeringFacts();
-  const table = f.cluster_method_args;
-  const keys = [...new Set(Object.values(table).flat())].sort();
-  properties.method_args = { ...properties.method_args, type: 'object', additionalProperties: false, properties: Object.fromEntries(keys.map((k) => [k, { description: `${METHOD_ARGS_NOTE} (${Object.entries(table).filter(([, ks]) => ks.includes(k)).map(([m]) => m).join(', ')})` }])) };
+  const table = retentioneeringFacts().cluster_method_args;
   const fallback = list.find((p) => p.name === 'method')?.default;
   return Object.entries(table).map(([m, ks]) => ({
-    if: m === fallback ? { anyOf: [{ not: { required: ['method'] } }, { properties: { method: { const: m } }, required: ['method'] }] } : { properties: { method: { const: m } }, required: ['method'] },
-    then: { properties: { method_args: { propertyNames: { enum: ks } } } },
+    title: `method: ${m}`,
+    optional: m === fallback ? ['method'] : [],
+    properties: {
+      method: { const: m, ...(properties.method.description ? { description: properties.method.description } : {}) },
+      method_args: { ...properties.method_args, type: 'object', additionalProperties: false, properties: Object.fromEntries(ks.map((k) => [k, { description: METHOD_ARGS_NOTE }])) },
+    },
   }));
+}
+
+/**
+ * The forms of a library callable (an op, an analysis): one — its tag, its parameters — or one per
+ * variant, and a second of each where two parameters say the same thing two ways (`exclusive`: an
+ * anchor and a path pattern centre the same steps, so a form takes one or the other).
+ */
+function callableForms({ tag, title, description, properties, required, variants, exclusive = null }) {
+  const base = variants.length ? variants : [{ title: null, optional: [], properties: {} }];
+  const out = [];
+  for (const v of base) {
+    const props = { ...properties, ...v.properties };
+    const req = required.filter((r) => !v.optional.includes(r)).concat(Object.keys(v.properties).filter((k) => k === 'method' && !v.optional.includes('method')));
+    const t = v.title ? `${title} — ${v.title}` : title;
+    const one = (label, drop, need = null) => form({ title: label, description, tag, required: [...req.filter((r) => r !== drop), ...(need ? [need] : [])], properties: Object.fromEntries(Object.entries(props).filter(([k]) => k !== drop)) });
+    // the first way is the one taken by default (its field optional); the second is the form that
+    // names its own field — so a value giving neither is the first form's, and never both
+    if (exclusive && exclusive.every((k) => k in props)) {
+      out.push(one(`${t} — by ${exclusive[0]}`, exclusive[1]), one(`${t} — by ${exclusive[1]}`, exclusive[0], exclusive[1]));
+    } else out.push(one(t, null));
+  }
+  return out;
 }
 
 function opSchemas() {
   const f = retentioneeringFacts();
-  return offeredOps().map((op) => {
-    const { properties, required, allOf } = params(f.ops[op].params);
+  return offeredOps().flatMap((op) => {
+    const { properties, required, variants } = params(f.ops[op].params);
     for (const [name, a] of Object.entries(ADDED[op] || {})) properties[name] = a.schema();
-    return {
-      ...(allOf.length ? { allOf } : {}),
-      type: 'object', additionalProperties: false, title: op, description: f.ops[op].summary,
-      required: ['type', ...required],
-      properties: { type: { const: op }, ...properties },
-    };
+    return callableForms({ tag: ['type', op], title: op, description: f.ops[op].summary, properties, required, variants });
   });
 }
 
 /** One of the library's own steps ({ type: <op>, ...its parameters }) — an eventstream's step. */
 function stepSchema() {
-  return { oneOf: opSchemas(), discriminator: { propertyName: 'type' } };
+  return { anyOf: opSchemas() };
 }
 
 /** The ops left out, each with its reason — said wherever steps are offered. */
@@ -558,39 +574,41 @@ const METHOD_ARGS_NOTE = 'the method\'s own arguments';
 function analysisSchemas() {
   const f = retentioneeringFacts();
   const id = { type: 'string', pattern: NAME, description: 'Your name for this analysis in the result (default: its kind). Unique within the call.' };
-  return analysisKinds().map((kind) => {
+  return analysisKinds().flatMap((kind) => {
     const a = f.analyses[kind];
-    const { properties, required, allOf } = params(a.params);
-    const branch = {
-      ...(allOf.length ? { allOf } : {}),
-      type: 'object', additionalProperties: false, title: kind, description: `${a.summary}${CARD_KINDS.includes(kind) ? '' : ' (returned as tables, answered in words: it has no card)'}`,
-      required: ['kind', ...required],
-      properties: { kind: { const: kind }, id, ...properties },
-    };
-    // an anchor and a path pattern are two ways to centre the same steps: one or the other
-    if (properties.anchor && properties.path_pattern) branch.not = { required: ['anchor', 'path_pattern'] };
-    return branch;
+    const { properties, required, variants } = params(a.params);
+    return callableForms({
+      tag: ['kind', kind], title: kind,
+      description: `${a.summary}${CARD_KINDS.includes(kind) ? '' : ' (returned as tables, answered in words: it has no card)'}`,
+      properties: { id, ...properties }, required, variants,
+      // an anchor and a path pattern are two ways to centre the same steps: one or the other
+      exclusive: ['anchor', 'path_pattern'],
+    });
   });
 }
 
 export function querySchema() {
   const f = retentioneeringFacts();
+  const F = {
+    context_id: { type: 'string', pattern: CTX, description: 'The context the eventstream was built in.' },
+    eventstream: { type: 'string', pattern: NAME, description: 'Which eventstream of the context (optional when it holds one).' },
+    analyses: { type: 'array', minItems: 1, items: { anyOf: analysisSchemas() }, description: 'The analyses to run, computed together in one run.' },
+    task_id: TASK_ID,
+    task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: TASK_ID, description: 'Several tasks, read together.' },
+    detail: { enum: ['summary', 'full'], default: 'summary', description: 'Reading a task: each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table (summary) — or every record it computed (full).' },
+    cancel: { const: true, description: 'Stop the tasks instead of reading them.' },
+    wait_seconds: { type: 'integer', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait for a running task (default and cap ${MAX_WAIT_SECONDS}s).` },
+  };
   return {
-    type: 'object', additionalProperties: false,
+    type: 'object',
     description: 'Start path analyses over a built eventstream (its materialized steps included), or read one back.',
-    allOf: [
-      { if: { required: ['analyses'] }, then: { required: ['context_id'] } },
+    anyOf: [
+      form({ title: 'start analyses', required: ['context_id', 'analyses'], properties: pick(F, ['context_id', 'eventstream', 'analyses']) }),
+      form({ title: 'read a task', required: ['task_id'], properties: pick(F, ['task_id', 'detail', 'wait_seconds']) }),
+      form({ title: 'read several tasks', required: ['task_ids'], properties: pick(F, ['task_ids', 'detail', 'wait_seconds']) }),
+      form({ title: 'cancel a task', required: ['task_id', 'cancel'], properties: pick(F, ['task_id', 'cancel']) }),
+      form({ title: 'cancel several tasks', required: ['task_ids', 'cancel'], properties: pick(F, ['task_ids', 'cancel']) }),
     ],
-    properties: {
-      context_id: { type: 'string', pattern: CTX, description: 'The context the eventstream was built in.' },
-      eventstream: { type: 'string', pattern: NAME, description: 'Which eventstream of the context (optional when it holds one).' },
-      analyses: { type: 'array', minItems: 1, items: { oneOf: analysisSchemas(), discriminator: { propertyName: 'kind' } }, description: 'The analyses to run, computed together in one run.' },
-      task_id: TASK_ID,
-      task_ids: { type: 'array', minItems: 1, uniqueItems: true, items: TASK_ID, description: 'Several tasks, read together.' },
-      detail: { enum: ['summary', 'full'], default: 'summary', description: 'Reading a task: each analysis summarized — the biggest transitions, the leading events per step, each group\'s profile, the first rows of a table (summary) — or every record it computed (full).' },
-      cancel: { type: 'boolean', description: 'With task_id / task_ids: stop them.' },
-      wait_seconds: { type: 'integer', minimum: 0, maximum: MAX_WAIT_SECONDS, description: `How long to wait for a running task (default and cap ${MAX_WAIT_SECONDS}s).` },
-    },
     $defs: { [CONDITION_DEF]: f.condition_schema },
   };
 }

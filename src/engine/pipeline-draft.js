@@ -20,7 +20,7 @@ export const pipelineDraftMethods = {
     if (input.action === 'fork') return this._draftFork(input); // branches a NEW draft (no live draft required)
     const ctx = this._ctx(input.draft_id);
     const draft = ctx.state.draft;
-    if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_pipeline_model({ action: 'start', name })`, { stage: 'validate', field: 'draft_id' });
+    if (!draft) throw new ToolError(`no draft in context '${input.draft_id}' — start one with build_pipeline_model({ request: { action: 'start', name } })`, { stage: 'validate', field: 'draft_id' });
     this.ctxs.touch(ctx.id);
     if (input.action === 'add_step') return this._draftAddStep(ctx, draft, input.stage, input.include_columns, input.include_steps);
     if (input.action === 'add_steps') return this._draftAddSteps(ctx, draft, input.stages, input.include_columns);
@@ -103,7 +103,7 @@ export const pipelineDraftMethods = {
       if (st?.building && forBuild) {
         throw new ToolError(
           `steps 1..${list[i].at} are still being materialized as ${list[i].model} — nothing can read that table yet, so a second build would only duplicate the work. `
-          + `Wait for it with query_pipeline_model({ task_id: '${st.building}' }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with truncate/edit_step at or before step ${list[i].at} — or delete_context({ what: 'pipeline_model' }) — and materialize again.`,
+          + `Wait for it with query_pipeline_model({ request: { task_id: '${st.building}' } }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with truncate/edit_step at or before step ${list[i].at} — or delete_context({ request: { what: 'pipeline_model' } }) — and materialize again.`,
           { stage: 'validate', field: 'draft_id' },
         );
       }
@@ -231,13 +231,13 @@ export const pipelineDraftMethods = {
       ...(base ? { from_task: base.task_id, reads: base.model } : {}),
       ...(ctx.state.draft.description ? { description: ctx.state.draft.description } : {}),
       steps: [], column_count: cols.length,
-      next: 'Append stages one at a time with build_pipeline_model({ action: "add_step", draft_id, stage }); each response shows only the columns that stage added/removed (use include_columns:true or preview for the full list).',
+      next: 'Append stages one at a time with build_pipeline_model({ request: { action: "add_step", draft_id, stage } }); each response shows only the columns that stage added/removed (use include_columns:true or preview for the full list).',
       recommendations: [
         base
           ? `The table of task ${base.task_id} (${base.model}) has ${cols.length} columns your first stage can reference (include_columns:true lists them); nothing before it is recomputed.`
-          : `The source has ${cols.length} columns your first stage can reference; get the full list with build_pipeline_model({ action: "start", ..., include_columns: true }) or inspect via semantic_index({ model: '${source}' }).`,
+          : `The source has ${cols.length} columns your first stage can reference; get the full list with build_pipeline_model({ request: { action: "start", ..., include_columns: true } }) or inspect via semantic_index({ request: { model: '${source}' } }).`,
         `For an ordered funnel/path, add a match_recognize stage; for a plain transform, start with where/derive then aggregate.`,
-        `When the steps look right, materialize with build_pipeline_model({ action: "materialize", draft_id }).`,
+        `When the steps look right, materialize with build_pipeline_model({ request: { action: "materialize", draft_id } }).`,
       ],
     };
     if (input.include_columns) resp.available_columns = cols;
@@ -386,7 +386,7 @@ export const pipelineDraftMethods = {
       recommendations: [
         `Forked ${after} of ${total} step(s) into a new draft ${ctx.id}; the source ${input.draft_id} is unchanged — branch variants freely.`,
         ...(inherited.length ? [`Steps 1..${inherited[inherited.length - 1].at} are already materialized (${inherited[inherited.length - 1].model}, built in ${inherited[inherited.length - 1].owner}) and this fork READS that table: only the steps you add here are computed. Keep that context alive while this fork uses it — delete_context on it is refused unless forced.`] : []),
-        `Materialize with build_pipeline_model({ action: "materialize", draft_id: "${ctx.id}" }).`,
+        `Materialize with build_pipeline_model({ request: { action: "materialize", draft_id: "${ctx.id}" } }).`,
       ],
     };
     if (input.include_columns) resp.available_columns = cols;
@@ -477,7 +477,7 @@ export const pipelineDraftMethods = {
         ...filterWarnings,
         ...(plan.checkpoint ? [`Steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model}: this step reads THAT table, so the prefix is not recomputed. Editing a step at or before ${plan.checkpoint.at} retires it and the next materialize rebuilds from '${draft.source}'.`] : []),
         ...(retiredNow.length ? [`Materialized prefix retired (${retiredNow.map((r) => `step ${r.at}: ${r.reason}`).join('; ')}) — the next materialize recomputes from '${draft.source}'.`] : []),
-        ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_pipeline_model({ action: "preview", draft_id }).`] : []),
+        ...(leanSteps ? [`Only the applied step is echoed (steps_count: ${allSteps.length}) to save tokens — you already have the earlier steps. For the FULL step list, pass include_steps:true or use build_pipeline_model({ request: { action: "preview", draft_id } }).`] : []),
         ...(changedStage ? [...this.advisor.eventScopeWarnings(draft, changedStage), ...this.advisor.emptyCombinationWarnings(draft, changedStage), ...this.advisor.funnelCompletionWarnings(changedStage), ...this.advisor.joinCompletenessWarnings(changedStage, draft), ...this.advisor.pythonPreparationWarnings(changedStage, { source: draft.source, stages: draft.stages, timeRange: draft.time_range, startsFromTable: !!plan.from }, stepIndex != null ? stepIndex - 1 : draft.stages.indexOf(changedStage)), ...this.advisor.globalWindowWarnings(changedStage), ...this.advisor.stepRecommendations(changedStage, after)] : []),
       ],
     };

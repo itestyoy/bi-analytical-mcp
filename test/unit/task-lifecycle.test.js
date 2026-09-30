@@ -187,7 +187,7 @@ test('a protocol task refuses a read of the other side at once, instead of waiti
   const build = await e.build_pipeline_model({ action: 'materialize', draft_id });
   await until(() => runner.held.length);
   const t0 = Date.now();
-  const { result } = await runToCompletion(e, 'query_semantic_model', { task_id: build.task_id });
+  const { result } = await runToCompletion(e, 'query_semantic_model', { request: { task_id: build.task_id } });
   assert.equal(result.isError, true);
   assert.match(JSON.parse(result.content[0].text).error.message, /query_pipeline_model/);
   assert.ok(Date.now() - t0 < 5000, 'answered without waiting for the build');
@@ -199,9 +199,9 @@ test('a protocol task refuses a read of the other side at once, instead of waiti
 test('a renamed tool answers under its old name; a removed one says what replaced it', async () => {
   const { runTool } = await import('../../src/mcp-surface.js');
   const e = engine(orderedRunner());
-  const { raw } = await runTool(e, 'build_native_model', { action: 'start', name: 'old_name', source: 'events' });
+  const { raw } = await runTool(e, 'build_native_model', { request: { action: 'start', name: 'old_name', source: 'events' } });
   assert.match(raw.draft_id, /^[a-z0-9]+$/, 'build_native_model still starts a draft');
-  const gone = await runTool(e, 'get_task_result', { task_id: 'aabbccddeeff' });
+  const gone = await runTool(e, 'get_task_result', { request: { task_id: 'aabbccddeeff' } });
   assert.equal(gone.result.isError, true);
   assert.match(JSON.parse(gone.result.content[0].text).error.message, /query_semantic_model.*query_pipeline_model/);
 });
@@ -238,10 +238,10 @@ test('a drawn pivot keeps opening after a restart, and whatever envelope the hos
   assert.notEqual(level.ok, false, JSON.stringify(level.error));
   await assert.rejects(() => e2.display_model_result({ task_id: build.task_id, display }), /shown already/, 'and it is still drawn once');
   // a host proxying the card's read without the Apps envelope is still served (the proof is the drawn task)
-  const proxied = await runTool(e2, 'drill_result', { task_id: build.task_id, transform: { group_by: ['event_name'] } }, { renders: false });
+  const proxied = await runTool(e2, 'drill_result', { request: { task_id: build.task_id, transform: { group_by: ['event_name'] } } }, { renders: false });
   assert.equal(proxied.result.isError, undefined, proxied.result.content[0].text);
   // …while display_model_result itself is still refused to such a client
-  assert.equal((await runTool(e2, 'display_model_result', { task_id: build.task_id }, { renders: false })).result.isError, true);
+  assert.equal((await runTool(e2, 'display_model_result', { request: { task_id: build.task_id } }, { renders: false })).result.isError, true);
   e2.close();
 });
 
@@ -329,7 +329,7 @@ test('a protocol task follows a batch read until every member is done', async ()
   const created = await e.build_semantic_model(TWO);
   const batch = await e.query_semantic_model({ context_id: created.context_id, queries: [{ metrics: ['task_cnt'] }, { metrics: ['task_cnt2'] }] });
   await until(() => runner.held.length === 2);
-  const followed = runToCompletion(e, 'query_semantic_model', { task_ids: batch.task_ids });
+  const followed = runToCompletion(e, 'query_semantic_model', { request: { task_ids: batch.task_ids } });
   runner.held.shift()();
   await tick();
   runner.held.shift()();
@@ -416,7 +416,7 @@ test('a cancel under a protocol task is answered at once, not after the task', a
   const q = await e.query_semantic_model({ context_id: created.context_id, metrics: ['task_cnt'] });
   await until(() => runner.held.length === 1);
   const t0 = Date.now();
-  const { raw } = await runToCompletion(e, 'query_semantic_model', { task_id: q.task_id, cancel: true });
+  const { raw } = await runToCompletion(e, 'query_semantic_model', { request: { task_id: q.task_id, cancel: true } });
   assert.equal(raw.status, 'cancelled');
   assert.ok(Date.now() - t0 < 2000);
   runner.held.shift()();

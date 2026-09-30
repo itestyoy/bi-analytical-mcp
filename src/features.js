@@ -22,7 +22,7 @@
 //                        waiting) } } — each becomes a tool definition like a core tool's
 //                        (src/tools/define.js), in the one registry the engine holds
 //   view:    { uri, name, title, description, asset (a RUNTIME_ASSETS key), viewModel(result, args) }
-//   guide:   { name (a reserved semantic_index({ guide }) name), build(catalog) → object,
+//   guide:   { name (a reserved semantic_index({ request: { guide } }) name), build(catalog) → object,
 //              triggers: [{ if, do }] (routing triggers added to the analyst guide) }
 //   skill(engine) → { path, frontmatter, body, references: [[relPath, text]] }
 //   instructions: one line for the core instructions

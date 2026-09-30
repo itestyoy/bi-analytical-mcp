@@ -64,17 +64,19 @@ SCALARS = {str: {"type": "string"}, int: {"type": "integer"}, float: {"type": "n
 
 
 def anchor_schema():
-    """An anchor spec as the library defines it (paths.anchors): a pattern, or an object of its keys."""
+    """An anchor spec as the library defines it (paths.anchors): a pattern, or an object of its keys.
+    Every union this sheet writes is an `anyOf` of alternatives told apart by their type or their pinned
+    values — the one union every client's schema reader takes (src/schema-kit.js)."""
     return {
-        "oneOf": [
+        "anyOf": [
             {"type": "string", "description": "An event, or a '->'-separated pattern of events."},
             {
                 "type": "object", "additionalProperties": False, "required": ["pattern"],
                 "properties": {
                     "pattern": {"type": "string"},
-                    "at": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+                    "at": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
                     "occurrence": {"enum": list(anchors.OCCURRENCES)},
-                    "offset": {"oneOf": [{"type": "integer"}, {"type": "string"}]},
+                    "offset": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
                     "offset_side": {"enum": list(anchors.OFFSET_SIDES)},
                     "event_col": {"type": "string"},
                 },
@@ -401,24 +403,32 @@ def condition_schema(grammar):
         primitive = [{"type": k} for k in kinds]
         one = primitive[0] if len(primitive) == 1 else {"anyOf": primitive}
         note = value_note(metric)
-        leaf = {
-            "type": "object", "additionalProperties": False, "title": metric,
-            "required": ["op", "metric", "value", *(["metric_args"] if required else [])],
+        # a comparison takes one constant, membership a list of them: two forms, told apart by `op`
+        base_required = ["op", "metric", "value", *(["metric_args"] if required else [])]
+        metric_args = ({"metric_args": {"type": "object", "additionalProperties": False, **({"required": required} if required else {}), "properties": {k: a["schema"] for k, a in sorted(args.items())}}} if args else {})
+        described = lambda text: text + (f" {note}" if note else "")
+        leaves.append({
+            "type": "object", "additionalProperties": False, "title": f"{metric} compared",
+            "required": base_required,
             "properties": {
-                "op": {"enum": [*grammar["compare"], grammar["membership"]]},
+                "op": {"enum": list(grammar["compare"])},
                 "metric": {"const": metric},
-                "value": {"anyOf": [*primitive, {"type": "array", "minItems": 1, "items": one}], "description": f"A constant; a list of them for '{grammar['membership']}'." + (f" {note}" if note else "")},
+                "value": {**one, "description": described("A constant.")} if "anyOf" not in one else {"anyOf": one["anyOf"], "description": described("A constant.")},
+                **metric_args,
             },
-        }
-        if args:
-            leaf["properties"]["metric_args"] = {"type": "object", "additionalProperties": False, **({"required": required} if required else {}), "properties": {k: a["schema"] for k, a in sorted(args.items())}}
-        # membership takes a list of constants, a comparison one constant
-        leaf["if"] = {"properties": {"op": {"const": grammar["membership"]}}}
-        leaf["then"] = {"properties": {"value": {"type": "array"}}}
-        leaf["else"] = {"properties": {"value": {"not": {"type": "array"}}}}
-        leaves.append(leaf)
+        })
+        leaves.append({
+            "type": "object", "additionalProperties": False, "title": f"{metric} {grammar['membership']} a list",
+            "required": base_required,
+            "properties": {
+                "op": {"const": grammar["membership"]},
+                "metric": {"const": metric},
+                "value": {"type": "array", "minItems": 1, "items": one, "description": described("The constants.")},
+                **metric_args,
+            },
+        })
     node = {"$ref": CONDITION_REF}
-    return {"oneOf": [
+    return {"anyOf": [
         *leaves,
         {"type": "object", "additionalProperties": False, "title": "/".join(grammar["logical"]), "required": ["op", "args"],
          "properties": {"op": {"enum": grammar["logical"]}, "args": {"type": "array", "minItems": 1, "items": node}}},
@@ -522,7 +532,7 @@ def metric_config_schema(mode, many, metrics=None):
         if rolls_up:
             branch["properties"]["agg"] = {"enum": sorted(segment_overview.AGG_FUNCTIONS) + ["complement_distance"]}
         branches.append(branch)
-    item = {"type": "object", "required": ["metric"], "oneOf": branches, "discriminator": {"propertyName": "metric"}}
+    item = {"type": "object", "anyOf": branches}
     return {"type": "array", "items": item} if many else item
 
 
@@ -614,7 +624,7 @@ def params_of(method, processor=None):
         if "anchor" in p.name:
             schema = anchor_schema()
             if "list" in doc_type:
-                schema = {"oneOf": [*anchor_schema()["oneOf"], {"type": "array", "items": anchor_schema()}]}
+                schema = {"anyOf": [*anchor_schema()["anyOf"], {"type": "array", "items": anchor_schema()}]}
         elif (method.__name__, p.name) in CONSTANT_OVERRIDES:
             schema = CONSTANT_OVERRIDES[(method.__name__, p.name)]()
         elif re.match(r"condition tree", doc_text, re.I):
@@ -656,7 +666,7 @@ def dedupe(schema):
     """The same alternative twice (two hints naming one JSON type) is one alternative."""
     if isinstance(schema, dict):
         schema = {k: dedupe(v) for k, v in schema.items()}
-        for key in ("anyOf", "oneOf"):
+        for key in ("anyOf",):
             if key in schema:
                 unique = []
                 for part in schema[key]:

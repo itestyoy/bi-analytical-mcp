@@ -12,6 +12,7 @@ import { buildToolDefs } from '../../src/server.js';
 import { renderContext } from '../../src/yaml-render.js';
 import { stageBranch } from '../helpers/stage-schema.js';
 import { settle } from '../helpers/settle.js';
+import { deref, field } from '../helpers/schema-nav.js';
 
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const RECIPES = fileURLToPath(new URL('../../config/recipes.json', import.meta.url));
@@ -86,7 +87,7 @@ test('context lists and describes, delete_context removes — and a read never r
   await assert.rejects(() => e.context({ action: 'list', context_id: s.draft_id }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'bogus' }), /invalid input/);
   // what context used to remove is refused there, with the call that does it
-  await assert.rejects(() => e.context({ action: 'drop', context_id: s.draft_id }), /delete_context\(\{ context_id \}\)/);
+  await assert.rejects(() => e.context({ action: 'drop', context_id: s.draft_id }), /delete_context\(\{ request: \{ context_id \} \}\)/);
   assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.draft_id), 'a read removed nothing');
   // delete_context: semantic_model needs its model; context forbids the model's fields
   await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.draft_id }), /invalid input/);
@@ -299,8 +300,9 @@ test('a task dimension is reported under its declared attribute even when one ta
 // magic word means a relationship, and nothing in the engine knows what any relationship is called.
 test('match_recognize partition_by: a column, or { entity } from the declared relationships', async () => {
   const e = engine();
-  const st = stageBranch(e.schemas.build_pipeline_model, 'match_recognize');
-  const branches = st.properties.partition_by.items.oneOf;
+  const bpm = e.schemas.build_pipeline_model;
+  const st = stageBranch(bpm, 'match_recognize');
+  const branches = deref(bpm, field(bpm, st, 'partition_by').items).anyOf.map((b) => deref(bpm, b));
   const entityBranch = branches.find((b) => b.type === 'object');
   assert.ok(entityBranch, 'the entity form is in the schema, not only in prose');
   assert.deepEqual(entityBranch.properties.entity.enum, ['ad_funnel', 'ad_funnel_banner', 'ad_funnel_interstitial', 'ad_funnel_rewarded', 'session', 'user'], 'the enum is what the catalog declares');

@@ -187,7 +187,7 @@ export class PipelineAdvisor {
       }
     }
     if (errors.length) {
-      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ source, property }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
+      throw new ToolError(`filter value(s) not verified against the real data — check the exact value via semantic_index({ request: { source, property } }) and use it as stored: ${errors.join(' ')}`, { stage: 'validate', field: 'value' });
     }
     warnings.onEmpty = unverified;
     return warnings;
@@ -212,7 +212,7 @@ export class PipelineAdvisor {
     const risky = referenced.filter((p) => { const evs = applies[p]; return evs && evs.length && !evs.every((e) => scoped.has(e)); });
     if (!risky.length) return [];
     const p = risky[0]; const evs = applies[p] || [];
-    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ source: '${fact}', property: '${p}' }).event_coverage).`];
+    return [`'${p}' is populated only on event(s) ${evs.join(', ')} — ${hasScope ? 'your event_name scope does not cover all of them' : 'add an earlier where on event_name to those'}, or it reads NULL on the other rows (see semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`];
   }
 
   /**
@@ -252,17 +252,17 @@ export class PipelineAdvisor {
           if (!cell || cell.non_null === 0) empty.push(`${b} + ${ev}`); // missing cell = no rows for that combo
         }
         const total = scopedBundles.size * scopedEvents.size;
-        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ bundle: '${[...scopedBundles][0]}' }) or semantic_index({ source: '${fact}', property: '${p}' }).bundle_coverage / event_coverage.`);
+        if (empty.length === total) warns.push(`'${p}' has NO values for the scoped app+event combination ${fmt(empty)} (NULL/absent in the index) — this step will likely return nothing for '${p}'. Pick a field populated there: semantic_index({ request: { bundle: '${[...scopedBundles][0]}' } }) or semantic_index({ request: { source: '${fact}', property: '${p}' } }).bundle_coverage / event_coverage.`);
         else if (empty.length) warns.push(`'${p}' is empty for app+event ${fmt(empty)} (present for the other scoped pairs) — those rows contribute no '${p}'.`);
       } else if (scopedBundles.size) {
         const byB = new Map(this.valueIndex.bundleCoverage(fact, p).map((x) => [x.bundle, x]));
         const empty = [...scopedBundles].filter((b) => byB.get(b) && byB.get(b).non_null === 0);
-        if (empty.length === scopedBundles.size) warns.push(`'${p}' is NULL for app(s) ${fmt(empty)} — this step likely yields no '${p}' values for ${empty.length > 1 ? 'them' : 'this app'} (semantic_index({ bundle: '${empty[0]}' })).`);
+        if (empty.length === scopedBundles.size) warns.push(`'${p}' is NULL for app(s) ${fmt(empty)} — this step likely yields no '${p}' values for ${empty.length > 1 ? 'them' : 'this app'} (semantic_index({ request: { bundle: '${empty[0]}' } })).`);
         else if (empty.length) warns.push(`'${p}' is empty for app(s) ${fmt(empty)} (populated for the other scoped app(s)).`);
       } else {
         const byE = new Map(this.valueIndex.coverage(fact, p).map((x) => [x.event_name, x]));
         const empty = [...scopedEvents].filter((ev) => byE.get(ev) && byE.get(ev).non_null === 0);
-        if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ source: '${fact}', property: '${p}' }).event_coverage).`);
+        if (empty.length === scopedEvents.size) warns.push(`'${p}' is NULL on event(s) ${fmt(empty)} — this step likely yields no '${p}' values (semantic_index({ request: { source: '${fact}', property: '${p}' } }).event_coverage).`);
         else if (empty.length) warns.push(`'${p}' is empty on event(s) ${fmt(empty)} (populated on the other scoped event(s)).`);
       }
     }
@@ -274,7 +274,7 @@ export class PipelineAdvisor {
     const own = stageDef(stage.stage)?.recommend;
     return [
       ...(own ? own(available) : [`Reference any of available_columns in the next stage (${listSome(available)}).`]),
-      'Preview the SQL anytime with build_pipeline_model({ action: "preview", draft_id }); materialize when done.',
+      'Preview the SQL anytime with build_pipeline_model({ request: { action: "preview", draft_id } }); materialize when done.',
     ];
   }
 }

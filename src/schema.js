@@ -17,6 +17,7 @@ import { TASK, CTX, TASK_ID, D, genericMeasureItem, genericDimensionItem, semant
 import { display } from './schema/display.js';
 import { projection } from './schema/projection.js';
 import { transportSchema } from './schema/transport.js';
+import { form, pick } from './schema-kit.js';
 import { semanticIndexSchema } from './schema/semantic-index.js';
 import { memorySchema } from './schema/memory.js';
 import { abTestSchema, srmCheckSchema, sampleSizeSchema, experimentSchema } from './schema/experiment.js';
@@ -35,40 +36,39 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     }
     : { type: 'string', pattern: CTX, description });
   const modelKeys = catalog.modelKeys();
+  const createFields = {
+    context_id: { type: 'string', pattern: CTX, description: D.context_id },
+    name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
+    description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ request: { action: "describe" | "list" } }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
+    use_base_models: { type: 'array', items: { type: 'string', enum: catalog.modelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as { model, attribute } (e.g. "users" to slice by { model: "users", attribute: "country" }). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
+    semantic_models: { type: 'array', items: { anyOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
+    metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
+    dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
+    include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false). The YAML is always written to the context files regardless; omit it to keep responses small.' },
+  };
+  // action: 'update' — the incremental path. Same vocabulary as a declaration (that is why the two are
+  // one tool: two schemas meant two copies of every enum in every listing).
+  const updateFields = {
+    context_id: { type: 'string', pattern: CTX, description: 'The context whose task to change.' },
+    semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s semantic model to change.' },
+    add_dimensions: { type: 'array', items: genericDimensionItem(catalog), description: 'Dimensions to add.' },
+    remove_dimensions: { type: 'array', items: { type: 'string' }, description: 'Dimensions to remove, by the ATTRIBUTE they declare (the name `groupable` shows).' },
+    add_measures: { type: 'array', items: genericMeasureItem(catalog), description: 'Measures to add.' },
+    remove_measures: { type: 'array', items: { type: 'string' }, description: 'Measures to remove; refused while a metric depends on one, unless cascade.' },
+    add_metrics: { type: 'array', items: metricSchema(), description: 'Metrics to add.' },
+    remove_metrics: { type: 'array', items: { type: 'string' }, description: 'Metrics to remove.' },
+    task: { type: 'string', description: 'The task the additions belong to (defaults to the context\'s first task).' },
+    cascade: { type: 'boolean', description: 'Also remove the metrics that depend on a removed measure.' },
+    dry_run: createFields.dry_run,
+    include_yaml: createFields.include_yaml,
+  };
   const create = {
     type: 'object',
-    additionalProperties: false,
-    // No root `required`: the two modes require different things, and the allOf below says which
-    // (create → name + metrics, update → context_id + semantic_model), so a caller is never told
-    // to supply a field the mode it asked for does not take.
-
-    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the governed path. Produces named metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). Two modes: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived table (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_pipeline_model instead. It returns a task_id: query_semantic_model({ task_id }) returns the parsed model (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
-    allOf: [
-      { if: { properties: { action: { const: 'update' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'] } },
-      { if: { not: { properties: { action: { const: 'update' } }, required: ['action'] } }, then: { required: ['name', 'metrics'] } },
+    description: 'Declaratively create/extend the semantic models + metrics for an analytics task inside an isolated context — the governed path. Produces named metrics you query many ways with query_semantic_model (group_by / time / filters), reusably. Use this for measurable, re-sliceable metrics (DAU, revenue, conversion, retention). Two modes: the default declares a task (name + semantic_models + metrics); action:"update" edits the task already in a context — add_measures / add_dimensions / add_metrics and the matching remove_* on one `semantic_model`, without restating the rest. For a one-off derived table (funnel/sessionization/window/pivot — things the governed metrics cannot express), use build_pipeline_model instead. It returns a task_id: query_semantic_model({ request: { task_id } }) returns the parsed model (metrics, what it can be grouped by) — a query on this context waits for it by itself.',
+    anyOf: [
+      form({ title: 'declare a task', tag: ['action', 'create'], optionalTag: true, tagDescription: 'create (the default): declare a task — name + semantic_models + metrics.', required: ['name', 'metrics'], properties: createFields }),
+      form({ title: 'update the task in a context', tag: ['action', 'update'], tagDescription: 'update: change the task already in this context — the add_*/remove_* fields, on one `semantic_model`.', required: ['context_id', 'semantic_model'], properties: updateFields }),
     ],
-    properties: {
-      action: { enum: ['create', 'update'], description: 'create (default) = declare a task: name + semantic_models + metrics. update = change the task already in this context: the add_*/remove_* fields below, on one `semantic_model`.' },
-      context_id: { type: 'string', pattern: CTX, description: D.context_id },
-      name: { type: 'string', pattern: TASK, description: 'Task name (lowercase snake_case). Namespaces all measures/metrics so multiple tasks coexist in one context.' },
-      description: { type: 'string', description: 'What this task computes, in your words. Kept with the context and returned by context({ action: "describe" | "list" }), so a later call — or another session — can tell what this context is for without re-reading its YAML.' },
-      use_base_models: { type: 'array', items: { type: 'string', enum: catalog.modelKeys() }, description: 'Additional source models to load so their attributes become groupable/filterable as { model, attribute } (e.g. "users" to slice by { model: "users", attribute: "country" }). Every source named in semantic_models[].from is loaded already — list here only a model you join TO but define no measures on. Measures from SEVERAL sources may live in one task (one semantic model each): each reaches the joined model by its own declared key. If that model is slowly-changing, the join is point-in-time automatically — MetricFlow applies its validity window, so nothing is stated here.' },
-      semantic_models: { type: 'array', items: { oneOf: modelKeys.map((k) => semanticModelBranch(catalog, k)) }, description: 'Semantic model definitions (one per source model) carrying the measures/dimensions for this task.' },
-      metrics: { type: 'array', minItems: 1, items: metricSchema(), description: 'The metrics to expose for querying (each references measures defined above).' },
-      dry_run: { type: 'boolean', description: 'If true, validate and return the definition WITHOUT writing files or building anything.' },
-      include_yaml: { type: 'boolean', description: 'Return the full rendered context YAML in the response (default false). The YAML is always written to the context files regardless; omit it to keep responses small.' },
-      // action: 'update' — the incremental path. Same vocabulary as above (that is why the two are
-      // one tool: two schemas meant two copies of every enum in every listing).
-      semantic_model: { type: 'string', enum: modelKeys, description: 'action:"update" — which model\'s semantic model to change.' },
-      add_dimensions: { type: 'array', items: genericDimensionItem(catalog), description: 'action:"update" — dimensions to add.' },
-      remove_dimensions: { type: 'array', items: { type: 'string' }, description: 'action:"update" — dimensions to remove, by the ATTRIBUTE they declare (the name `groupable` shows).' },
-      add_measures: { type: 'array', items: genericMeasureItem(catalog), description: 'action:"update" — measures to add.' },
-      remove_measures: { type: 'array', items: { type: 'string' }, description: 'action:"update" — measures to remove; refused while a metric depends on one, unless cascade.' },
-      add_metrics: { type: 'array', items: metricSchema(), description: 'action:"update" — metrics to add.' },
-      remove_metrics: { type: 'array', items: { type: 'string' }, description: 'action:"update" — metrics to remove.' },
-      task: { type: 'string', description: 'action:"update" — the task the additions belong to (defaults to the context\'s first task).' },
-      cascade: { type: 'boolean', description: 'action:"update" — also remove the metrics that depend on a removed measure.' },
-    },
   };
 
   // register_native_model: build a derived dbt model from a declarative PIPELINE
@@ -76,11 +76,11 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // and materialize it. The pipeline's rows ARE the result.
   const registerModel = {
     type: 'object', additionalProperties: false, required: ['name', 'pipeline'],
-    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — the call returns a task_id and query_pipeline_model({ task_id }) returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
+    description: 'Build a derived model from a PIPELINE: a `source` + ordered `stages` (where/derive/compute/unnest/join/aggregate/pivot/unpivot/sample/window/order_by/limit/project, and the match_recognize funnel stage). Its ROWS are the result — the call returns a task_id and query_pipeline_model({ request: { task_id } }) returns them; a pipeline started from that task (from_task) re-slices them without recomputing. Funnels are pipelines too: add a match_recognize stage, then slice it with a downstream join/aggregate (e.g. conversion by country).',
     properties: {
       context_id: { type: 'string', pattern: CTX, description: D.context_id },
       name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
-      description: { type: 'string', description: 'What this model computes, in your words. Kept with the context (returned by context({ action: "describe" | "list" })) and written into the generated model\'s config banner, so the table can be traced back to the question it answers.' },
+      description: { type: 'string', description: 'What this model computes, in your words. Kept with the context (returned by context({ request: { action: "describe" | "list" } })) and written into the generated model\'s config banner, so the table can be traced back to the question it answers.' },
       materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored: table (precomputed snapshot, default) or view (always fresh).' },
       dry_run: { type: 'boolean', description: 'If true, return the generated model definition for preview WITHOUT building anything.' },
       pipeline: {
@@ -100,42 +100,40 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // returns the columns now available for the NEXT stage (schema only — nothing is
   // materialized until materialize). The all-at-once register_native_model still works.
   const trProp = { type: 'object', additionalProperties: false, description: 'Restrict the pipeline to a time window on the source\'s time column (ISO dates), applied BEFORE the stages.', properties: { start: { type: 'string', description: 'Inclusive start (ISO date/datetime).' }, end: { type: 'string', description: 'Inclusive end (ISO date/datetime; a date-only end means the WHOLE day).' }, timezone: { type: 'string', description: 'Optional IANA timezone: start/end are wall-clock in this zone, converted to UTC instants.' } } };
-  // A then-clause fragment that forbids the named properties (valid only when ALL are absent).
-  const forbid = (props) => ({ not: { anyOf: props.map((p) => ({ required: [p] })) } });
+  const pipelineFields = {
+    draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). For fork it may also be a context whose pipeline was already materialized.' },
+    name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>.' },
+    description: { type: 'string', description: 'What this pipeline computes, in your words. Kept with the draft and carried to the model it materializes: returned by context({ request: { action: "describe" | "list" } }) and written into the generated model\'s config banner. A draft is cheap to make and easy to lose track of — this is what tells two of them apart later.' },
+    materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
+    from_task: { type: 'string', pattern: TASK_ID, description: 'Begin FROM the stored table of a finished task — a query run with materialize:true, or a pipeline build — instead of a catalog source. The steps re-slice that result (filter, regroup, join, window…) WITHOUT recomputing it.' },
+    source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads. Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
+    time_range: trProp,
+    stage: { $ref: '#/$defs/pipeline_stage', description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
+    stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
+    index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index). insert_step places the stage BEFORE this position (count+1 appends).' },
+    after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — truncate drops the rest; fork copies that prefix into the new draft (omit on fork to copy all steps). 0 = none.' },
+    include_columns: { type: 'boolean', description: 'Also return the FULL available_columns list. Off by default — the per-step response returns only the diff (columns_added + columns_removed_count, with the removed names only when short) to avoid re-dumping the whole schema each step; use preview for the full list too.' },
+    include_steps: { type: 'boolean', description: 'Also return the FULL steps array. Off by default — add_step is append-only, so it echoes just the applied `step` + `steps_count` (you already have the earlier steps); pass true, or use preview, when you need the whole pipeline back.' },
+  };
+  const echo = ['include_columns', 'include_steps'];
+  // One form per action, each with exactly the fields that action takes: a stray field is refused
+  // rather than silently ignored, and nothing is said about it beside the form — it is not in it.
+  const step = (action, title, tagDescription, required, optional = []) => form({ title, tag: ['action', action], tagDescription, required: ['draft_id', ...required], properties: pick(pipelineFields, ['draft_id', ...required, ...optional, ...echo]) });
+  const startOptional = ['draft_id', 'description', 'materialized', 'time_range', ...echo];
   const buildModel = {
-    type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Compose a native pipeline model incrementally, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the next stage (pure schema; nothing is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. Materialize is not the end: the draft stays open and the table it built stands for the steps so far, so the steps you add next read that table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). When to use: a one-off derived table whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; materialize returns a task_id — read the rows with query_pipeline_model({ task_id }), filter or regroup them with query_pipeline_model({ context_id, transform }). For reusable named metrics you query many ways (group_by / time / filters), use build_semantic_model instead (the governed path).',
-    // Each action accepts ONLY its relevant fields: start takes name/source/materialized/
-    // time_range (+ an optional draft_id to reuse a context); add_step takes draft_id+stage;
-    // preview/materialize/discard take just draft_id. `forbid` rejects any field that does not
-    // belong to the action, so a stray param is an error rather than silently ignored.
-    allOf: [
-      // a draft reads a catalog source, or the stored table of a finished task (from_task)
-      { if: { properties: { action: { const: 'start' } }, required: ['action'] }, then: { required: ['name'], anyOf: [{ required: ['source'] }, { required: ['from_task'] }], ...forbid(['stage', 'stages', 'index', 'after']) } },
-      { if: { properties: { action: { const: 'add_step' } }, required: ['action'] }, then: { required: ['draft_id', 'stage'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'index', 'after', 'stages', 'description']) } },
-      { if: { properties: { action: { const: 'add_steps' } }, required: ['action'] }, then: { required: ['draft_id', 'stages'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'index', 'after', 'stage', 'description']) } },
-      { if: { properties: { action: { enum: ['edit_step', 'insert_step'] } }, required: ['action'] }, then: { required: ['draft_id', 'index', 'stage'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'after', 'stages', 'description']) } },
-      { if: { properties: { action: { const: 'delete_step' } }, required: ['action'] }, then: { required: ['draft_id', 'index'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'after', 'description']) } },
-      { if: { properties: { action: { const: 'truncate' } }, required: ['action'] }, then: { required: ['draft_id', 'after'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'description']) } },
-      { if: { properties: { action: { const: 'fork' } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['from_task', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index']) } },
-      { if: { properties: { action: { enum: ['preview', 'materialize', 'discard'] } }, required: ['action'] }, then: { required: ['draft_id'], ...forbid(['from_task', 'name', 'source', 'materialized', 'time_range', 'stage', 'stages', 'index', 'after', 'description']) } },
+    type: 'object',
+    description: 'Compose a native pipeline model incrementally, one stage at a time — a single tool driven by `action`. Each add_step validates the stage and returns the exact columns now available for the next stage (pure schema; nothing is materialized until materialize), so you build with full visibility instead of guessing a whole pipeline up front. Lifecycle: start → add_step* → (optional preview) → materialize (builds + runs the model) → add_step* → materialize again. Materialize is not the end: the draft stays open and the table it built stands for the steps so far, so the steps you add next read that table instead of recomputing an expensive prefix (an aggregate, a python model). Editing a step at or before a materialized prefix retires it (the next materialize rebuilds from the source); editing a step after it keeps it. Each response says what it started from (from_checkpoint / steps_recomputed) and what it retired (checkpoints_dropped). When to use: a one-off derived table whose rows are the answer — funnels (match_recognize), sessionization, window functions, pivots, anything the governed metrics cannot express; materialize returns a task_id — read the rows with query_pipeline_model({ request: { task_id } }), filter or regroup them with query_pipeline_model({ request: { context_id, transform } }). For reusable named metrics you query many ways (group_by / time / filters), use build_semantic_model instead (the governed path). Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. Prefer add_step or small add_steps chunks over one giant add_steps, so you see how each chunk changes the data.',
+    anyOf: [
+      form({ title: 'start from a source', tag: ['action', 'start'], tagDescription: 'start a new draft over a catalog source (returns a draft_id + the source columns); draft_id reuses a context.', required: ['name', 'source'], properties: pick(pipelineFields, ['name', 'source', ...startOptional]) }),
+      form({ title: 'start from a task', tag: ['action', 'start'], tagDescription: 'start a new draft over the stored table of a finished task (from_task); `source` names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).', required: ['name', 'from_task'], properties: pick(pipelineFields, ['name', 'from_task', 'source', ...startOptional]) }),
+      step('add_step', 'add a step', 'add_step: append one stage; returns the columns available after it.', ['stage']),
+      step('add_steps', 'add several steps', 'add_steps: append several stages at once (applied in order), atomic (all-or-nothing); returns a per-step breakdown of how each changed the data.', ['stages']),
+      step(['edit_step', 'insert_step'], 'edit or insert a step', 'edit_step replaces step `index`; insert_step inserts a stage before `index`.', ['index', 'stage']),
+      step('delete_step', 'delete a step', 'delete_step: remove step `index`.', ['index']),
+      step('truncate', 'truncate the draft', 'truncate: keep only steps 1..`after` (cheap "go back to step N").', ['after']),
+      step('fork', 'fork the draft', 'fork: branch a new draft from steps 1..`after` of this draft (or an already-materialized pipeline) without touching the original — iterate variants without re-typing the shared prefix; name defaults to the source draft\'s, description overrides the parent\'s.', [], ['name', 'description', 'after']),
+      step(['preview', 'materialize', 'discard'], 'preview, materialize or discard', 'preview shows the steps + the SQL that would actually run (from a materialized prefix when there is one); materialize builds the model and keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft.', []),
     ],
-    properties: {
-      action: { enum: ['start', 'add_step', 'add_steps', 'edit_step', 'insert_step', 'delete_step', 'truncate', 'fork', 'preview', 'materialize', 'discard'], description: 'start a new draft (returns a draft_id + source columns); add_step appends one stage and returns the columns available after it; add_steps appends several stages at once (applied in order) and returns a per-step breakdown of how each changed the data — atomic (all-or-nothing); edit_step replaces step `index`; insert_step inserts a stage before `index`; delete_step removes step `index`; truncate keeps only steps 1..`after` (cheap "go back to step N"); fork branches a new draft from steps 1..`after` of this draft (or an already-materialized pipeline) without touching the original — iterate variants without re-typing the shared prefix; preview shows steps + the SQL that would actually run (from a materialized prefix when there is one); materialize builds the model and keeps the draft, recording the built table as the prefix the next steps read; discard drops the draft. Every edit revalidates the whole pipeline end-to-end and reports the failing step if an edit breaks a later one. Prefer add_step or small add_steps chunks over one giant add_steps, so you see how each chunk changes the data.' },
-      draft_id: { type: 'string', pattern: CTX, description: 'Draft handle returned by start (it is a context_id). Required for everything except start. For fork it may also be a context whose pipeline was already materialized.' },
-      name: { type: 'string', pattern: TASK, description: 'Model name (lowercase snake_case); generated as pipe_<name>. Required for start; optional for fork (defaults to the source draft\'s name).' },
-      description: { type: 'string', description: 'What this pipeline computes, in your words (start, or fork to override the parent\'s). Kept with the draft and carried to the model it materializes: returned by context({ action: "describe" | "list" }) and written into the generated model\'s config banner. A draft is cheap to make and easy to lose track of — this is what tells two of them apart later.' },
-      materialized: { enum: ['view', 'table'], default: 'table', description: 'How the result is stored when materialized (chosen at start): table (default) or view.' },
-      from_task: { type: 'string', pattern: TASK_ID, description: 'start only: begin FROM the stored table of a finished task — a query run with materialize:true, or a pipeline build — instead of a catalog source. The steps re-slice that result (filter, regroup, join, window…) WITHOUT recomputing it. `source` then names the source the steps resolve payload properties and relationships against (taken from the task when it read one source).' },
-      source: { type: 'string', enum: modelKeys, description: `Source table the pipeline reads (start only, and REQUIRED there unless from_task). Each source (${catalog.modelKeys().join(', ')}) has its own columns, events and payload, and they are never mixed.` },
-      time_range: trProp,
-      stage: { $ref: '#/$defs/pipeline_stage', description: 'ONE pipe stage — appended (add_step), or placed at `index` (edit_step/insert_step), validated against the columns available at that point.' },
-      stages: { type: 'array', minItems: 1, items: { $ref: '#/$defs/pipeline_stage' }, description: 'Several pipe stages to append IN ORDER (add_steps). Applied sequentially; the response reports each stage\'s effect on the data. Keep this to a small LOGICAL chunk — do NOT dump the whole pipeline at once.' },
-      index: { type: 'integer', minimum: 1, description: 'Target step (1-based, per steps[].index) for edit_step / insert_step / delete_step. insert_step places the stage BEFORE this position (count+1 appends).' },
-      after: { type: 'integer', minimum: 0, description: 'Keep steps 1..after — for truncate (drop the rest) and fork (copy that prefix into the new draft). 0 = none; omit on fork to copy all steps.' },
-      include_columns: { type: 'boolean', description: 'start/add_step/edit ops: also return the FULL available_columns list. Off by default — the per-step response returns only the diff (columns_added + columns_removed_count, with the removed names only when short) to avoid re-dumping the whole schema each step; use preview for the full list too.' },
-      include_steps: { type: 'boolean', description: 'add_step only: also return the FULL steps array. Off by default — add_step is append-only, so it echoes just the applied `step` + `steps_count` (you already have the earlier steps); pass true, or use preview, when you need the whole pipeline back.' },
-    },
   };
 
   const pdefs = predicateDefs(catalog, project);
@@ -151,52 +149,53 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   };
   taskRead.cancel = { type: 'boolean', const: true, description: 'With task_id / task_ids: CANCEL those tasks instead of reading them — a running task ends at once as cancelled (its warehouse process is stopped; one still queued never starts); a finished one is left as it is.' };
   taskRead.task_ids = { type: 'array', minItems: 1, maxItems: MAX_BATCH, uniqueItems: true, items: { type: 'string', pattern: TASK_ID }, description: `READ up to ${MAX_BATCH} tasks of this side at once (the task_ids a batch returned): waits until all are done and returns each one's result, in this order.` };
-  // The four modes of a query tool: start one query (context_id + its fields), start a batch
-  // (context_id + queries), read one task (task_id), read several (task_ids). Each takes only its own fields.
-  const queryModes = (fields) => [
-    { if: { required: ['cancel'] }, then: { anyOf: [{ required: ['task_id'] }, { required: ['task_ids'] }], ...forbid(['wait_seconds', 'offset', 'limit']) } },
-    { if: { required: ['task_id'] }, then: forbid(['context_id', ...fields, 'queries', 'task_ids']) },
-    { if: { required: ['task_ids'] }, then: forbid(['context_id', ...fields, 'queries', 'task_id', 'offset', 'limit']) },
-    { if: { required: ['queries'] }, then: { required: ['context_id'], ...forbid([...fields, 'offset', 'limit', 'wait_seconds']) } },
-    { if: { not: { anyOf: [{ required: ['task_id'] }, { required: ['task_ids'] }] } }, then: { required: ['context_id'] } },
+  // THE MODES OF A QUERY TOOL, one form each: start one query (context_id + its fields), start a
+  // batch (context_id + queries), read one task (task_id), read several (task_ids), cancel either.
+  // Told apart by the fields each requires; each takes only its own.
+  const queryModes = (startFields, batch) => [
+    form({ title: 'start a query', required: ['context_id'], properties: { context_id: startFields.context_id, ...startFields.fields } }),
+    form({ title: 'start a batch', required: ['context_id', 'queries'], properties: { context_id: startFields.context_id, queries: batch } }),
+    form({ title: 'read a task', required: ['task_id'], properties: pick(taskRead, ['task_id', 'wait_seconds']) }),
+    form({ title: 'read several tasks', required: ['task_ids'], properties: pick(taskRead, ['task_ids', 'wait_seconds']) }),
+    form({ title: 'cancel a task', required: ['task_id', 'cancel'], properties: pick(taskRead, ['task_id', 'cancel']) }),
+    form({ title: 'cancel several tasks', required: ['task_ids', 'cancel'], properties: pick(taskRead, ['task_ids', 'cancel']) }),
   ];
+  // a read of one task may page what it returns
+  const paged = (modes, paging) => modes.map((m) => (m.title === 'read a task' ? { ...m, properties: { ...m.properties, ...paging } } : m));
   const batchOf = (item, what) => ({ type: 'array', minItems: 1, maxItems: MAX_BATCH, description: `START up to ${MAX_BATCH} ${what} on this context in one call, run side by side: each item takes the fields of a single query (described above; context_id stays at the top). All are checked first — one mistake refuses the whole batch. Returns task_ids, in this order: read them together with { task_ids }.`, items: item });
 
   const semanticQueryFields = {
       task: { type: 'string', description: 'Optional task name hint (disambiguates when a context holds several tasks).' },
-      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ context_id }) lists them)' : ''}.` },
+      metrics: { type: 'array', minItems: 1, items: { type: 'string' }, description: `The metrics to compute, by the names the context offers: in a task's context, <task>_<metric> as build_semantic_model returned them${project ? '; in a context of one of the dbt project\'s own semantic models, the project\'s own names — every metric that reads that model (preview_semantic_model({ request: { context_id } }) lists them)' : ''}.` },
       group_by: {
         type: 'array',
-        description: `How to break the metrics down: one item per column of the result, in the order given. { time: "metric_time", grain } works in every context — the metrics' time axis at a grain, result column metric_time_<grain>. In a task's context an attribute is { model, attribute }, addressed by where it lives: the join path comes from the schema (add via: "<relationship>" when several lead to that model), and its model must be in use_base_models; result column <model>_<attribute>.${project ? ' In a context of one of the dbt project\'s own semantic models (context_id: its name) the project\'s own names are used instead: { semantic_model: [...], dimension, grain? } for a dimension, semantic_model being the chain of models it is reached through (the context\'s own model alone for its own dimensions), MetricFlow making the joins — and { entity } for a key the project declares as an entity; preview_semantic_model({ context_id, metric }) lists, under the metric\'s group_by, exactly the items MetricFlow accepts, each spelled as here.' : ''} No path strings.`,
+        description: `How to break the metrics down: one item per column of the result, in the order given. { time: "metric_time", grain } works in every context — the metrics' time axis at a grain, result column metric_time_<grain>. In a task's context an attribute is { model, attribute }, addressed by where it lives: the join path comes from the schema (add via: "<relationship>" when several lead to that model), and its model must be in use_base_models; result column <model>_<attribute>.${project ? ' In a context of one of the dbt project\'s own semantic models (context_id: its name) the project\'s own names are used instead: { semantic_model: [...], dimension, grain? } for a dimension, semantic_model being the chain of models it is reached through (the context\'s own model alone for its own dimensions), MetricFlow making the joins — and { entity } for a key the project declares as an entity; preview_semantic_model({ request: { context_id, metric } }) lists, under the metric\'s group_by, exactly the items MetricFlow accepts, each spelled as here.' : ''} No path strings.`,
         items: {
-          oneOf: [
+          anyOf: [
             { type: 'object', additionalProperties: false, required: ['time'], description: 'Group by the metric time axis at a grain.', properties: { time: { enum: ['metric_time'], description: 'The metric time dimension.' }, grain: { enum: catalog.timeGranularities(), description: 'Time bucket size.' } } },
-            { type: 'object', additionalProperties: false, required: ['model', 'attribute'], description: 'An attribute addressed by where it lives: { model: "users", attribute: "country" }. semantic_index() lists every one under groupable_attributes; build_semantic_model returns the context\'s under groupable. The response echoes the resolved column under group_by_resolved.', properties: { model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column or task dimension) on that model, as semantic_index({ model }) lists it.' }, via: { type: 'string', description: 'Optional: the relationship to reach the model through, when there are several (key variants).' } } },
+            { type: 'object', additionalProperties: false, required: ['model', 'attribute'], description: 'An attribute addressed by where it lives: { model: "users", attribute: "country" }. semantic_index({ request: {} }) lists every one under groupable_attributes; build_semantic_model returns the context\'s under groupable. The response echoes the resolved column under group_by_resolved.', properties: { model: { enum: catalog.modelKeys(), description: 'The model that carries the attribute.' }, attribute: { type: 'string', description: 'The attribute (column or task dimension) on that model, as semantic_index({ request: { model } }) lists it.' }, via: { type: 'string', description: 'Optional: the relationship to reach the model through, when there are several (key variants).' } } },
             ...(project ? [projectRef(project, catalog), ...projectEntityRef(project)] : []),
           ],
         },
       },
       where: { $ref: '#/$defs/predicateGroup', description: 'Row filter applied before aggregation (boolean tree of conditions on dimensions / metric_time).' },
-      order_by: { type: 'array', description: 'Sort order. Each key is a requested metric name, a RESULT COLUMN of this query ("metric_time_day", "users_country" — the names the rows come back with; "metric_time" is an alias of the time column), or a group_by attribute as { model, attribute }.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { oneOf: [{ type: 'string', description: 'A requested metric name, a result column name (e.g. "users_country", "metric_time_day"), or "metric_time".' }, { type: 'object', additionalProperties: false, required: ['model', 'attribute'], properties: { model: { enum: catalog.modelKeys() }, attribute: { type: 'string' }, via: { type: 'string' } }, description: 'A group_by attribute, addressed as in group_by.' }, ...(project ? [projectRef(project, catalog), ...projectEntityRef(project)] : [])] }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
+      order_by: { type: 'array', description: 'Sort order. Each key is a requested metric name, a RESULT COLUMN of this query ("metric_time_day", "users_country" — the names the rows come back with; "metric_time" is an alias of the time column), or a group_by attribute as { model, attribute }.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { anyOf: [{ type: 'string', description: 'A requested metric name, a result column name (e.g. "users_country", "metric_time_day"), or "metric_time".' }, { type: 'object', additionalProperties: false, required: ['model', 'attribute'], properties: { model: { enum: catalog.modelKeys() }, attribute: { type: 'string' }, via: { type: 'string' } }, description: 'A group_by attribute, addressed as in group_by.' }, ...(project ? [projectRef(project, catalog), ...projectEntityRef(project)] : [])] }, direction: { enum: ['asc', 'desc'], description: 'Sort direction (default asc).' } } } },
       time_range: METRIC_TIME_RANGE,
       limit: { type: 'integer', minimum: 1, maximum: 100000, description: 'Max rows to return (default 1000); with task_id, pages a stored result.' },
       offset: { type: 'integer', minimum: 0, description: 'Rows to skip from the start (paging); with task_id, pages a stored result.' },
-      materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with query_semantic_model({ task_id, offset, limit }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_pipeline_model({ action: "start", from_task })).' },
+      materialize: { type: 'boolean', description: 'Store the WHOLE result as a table (the rows you get back are one page of it: `limit`/`offset`). A stored result survives a restart, is paged with query_semantic_model({ request: { task_id, offset, limit } }), can be drawn as a drill-down (a pivot, a chart with drill), and can be re-sliced by a pipeline started from it (build_pipeline_model({ request: { action: "start", from_task } })).' },
       dry_run: { type: 'boolean', description: 'If true, validate and return the compiled query WITHOUT executing it.' },
       explain: { type: 'boolean', description: 'If true, return the query plan (how the metrics compile) and the compiled query WITHOUT executing. A superset of dry_run; useful for inspecting/optimizing.' },
   };
+  const semanticContextId = contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id build_semantic_model returned' : ': the context_id build_semantic_model returned'}. The context decides which metrics there are and how a dimension is named in group_by and where.`);
   const query = {
     type: 'object',
-    additionalProperties: false,
     description: `Start a metric query against a context (or up to ${MAX_BATCH} at once with queries) — or, with task_id / task_ids, read semantic tasks back.`,
     $defs: pdefs,
-    allOf: queryModes(Object.keys(semanticQueryFields).filter((f) => f !== 'limit' && f !== 'offset')),
-    properties: {
-      ...taskRead,
-      context_id: contextId(`The context to query${projectContexts.length ? ': one of the dbt project\'s own semantic models, by its name (the listed values — read at start, nothing to build), or the context_id build_semantic_model returned' : ': the context_id build_semantic_model returned'}. The context decides which metrics there are and how a dimension is named in group_by and where. Not needed with task_id / task_ids.`),
-      ...semanticQueryFields,
-      queries: batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: terse(semanticQueryFields) }, 'metric queries'),
-    },
+    anyOf: paged(
+      queryModes({ context_id: semanticContextId, fields: semanticQueryFields }, batchOf({ type: 'object', additionalProperties: false, required: ['metrics'], properties: terse(semanticQueryFields) }, 'metric queries')),
+      pick(semanticQueryFields, ['offset', 'limit']),
+    ),
   };
 
   const update = {
@@ -229,34 +228,23 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
   // read-only as a whole; removing what a context holds is delete_context, a tool of its own, because
   // a client asks before a destructive call and should not have to ask before a listing.
   const contextTool = {
-    type: 'object', additionalProperties: false, required: ['action'],
+    type: 'object',
     description: 'Read the isolated execution contexts (the workspaces build_semantic_model / build_pipeline_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths). Removing one, or a model in one, is delete_context.',
-    allOf: [
-      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['context_id']) },
-      { if: { properties: { action: { const: 'describe' } }, required: ['action'] }, then: { required: ['context_id'] } },
+    anyOf: [
+      form({ title: 'list the contexts', tag: ['action', 'list'], tagDescription: 'list: all active contexts.' }),
+      form({ title: 'describe a context', tag: ['action', 'describe'], tagDescription: 'describe: one context in depth.', required: ['context_id'], properties: { context_id: contextId(`The context to describe — the context_id a build returned${projectContexts.length ? ', or one of the dbt project\'s own semantic models by its name' : ''}.`) } }),
     ],
-    properties: {
-      action: { enum: ['list', 'describe'], description: 'list → all active contexts; describe → one context in depth.' },
-      context_id: contextId(`describe: the context to describe — the context_id a build returned${projectContexts.length ? ', or one of the dbt project\'s own semantic models by its name' : ''}.`),
-    },
   };
   // WHAT A CONTEXT HOLDS, REMOVED — the whole context, its pipeline model, or one model's task additions.
+  const deleteId = { type: 'string', pattern: CTX, description: 'The context a build returned. The dbt project\'s own semantic models are read at start and cannot be removed.' };
   const deleteContext = {
-    type: 'object', additionalProperties: false, required: ['context_id'],
+    type: 'object',
     description: 'Remove a context, or part of what it holds. It cannot be undone.',
-    allOf: [
-      { if: { properties: { what: { const: 'semantic_model' } }, required: ['what'] }, then: { required: ['semantic_model'], ...forbid(['force']) } },
-      { if: { properties: { what: { const: 'pipeline_model' } }, required: ['what'] }, then: forbid(['semantic_model', 'cascade', 'force']) },
-      { if: { not: { required: ['what'] } }, then: forbid(['semantic_model', 'cascade']) },
-      { if: { properties: { what: { const: 'context' } }, required: ['what'] }, then: forbid(['semantic_model', 'cascade']) },
+    anyOf: [
+      form({ title: 'the whole context', tag: ['what', 'context'], optionalTag: true, tagDescription: 'context (the default): tear the whole context down.', required: ['context_id'], properties: { context_id: deleteId, force: { type: 'boolean', description: 'Tear it down even though another draft READS a table it built (a fork that inherited a materialized prefix); those drafts then recompute that prefix from the source.' } } }),
+      form({ title: 'its pipeline model', tag: ['what', 'pipeline_model'], tagDescription: 'pipeline_model: remove the context\'s pipeline model and keep the context.', required: ['context_id'], properties: { context_id: deleteId } }),
+      form({ title: 'one semantic model\'s additions', tag: ['what', 'semantic_model'], tagDescription: 'semantic_model: remove one model\'s task additions.', required: ['context_id', 'semantic_model'], properties: { context_id: deleteId, semantic_model: { type: 'string', enum: modelKeys, description: 'Which model\'s task additions to remove.' }, cascade: { type: 'boolean', description: 'Also remove the metrics that depend on the removed measures.' } } }),
     ],
-    properties: {
-      context_id: { type: 'string', pattern: CTX, description: 'The context a build returned. The dbt project\'s own semantic models are read at start and cannot be removed.' },
-      what: { enum: ['context', 'pipeline_model', 'semantic_model'], description: 'context (default) → tear the whole context down; pipeline_model → remove its pipeline model and keep the context; semantic_model → remove one model\'s task additions (with cascade, the metrics that depend on them).' },
-      semantic_model: { type: 'string', enum: modelKeys, description: 'what: semantic_model — which model\'s task additions to remove.' },
-      cascade: { type: 'boolean', description: 'what: semantic_model — also remove the metrics that depend on the removed measures.' },
-      force: { type: 'boolean', description: 'what: context — tear it down even though another draft READS a table it built (a fork that inherited a materialized prefix); those drafts then recompute that prefix from the source.' },
-    },
   };
 
   const tools = {
@@ -269,15 +257,15 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     delete_context: deleteContext,
     query_semantic_model: query,
     query_pipeline_model: {
-      type: 'object', additionalProperties: false,
+      type: 'object',
       description: `Query a built pipeline model (or up to ${MAX_BATCH} queries at once with queries) — or, with task_id / task_ids, read pipeline tasks back.`,
-      allOf: queryModes(['transform']),
-      properties: {
-        ...taskRead,
-        context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the draft_id build_pipeline_model returned, after materialize).' },
-        ...pipelineQueryFields,
-        queries: batchOf({ type: 'object', additionalProperties: false, properties: terse(pipelineQueryFields) }, 'queries over the built model'),
-      },
+      anyOf: paged(
+        queryModes(
+          { context_id: { type: 'string', pattern: CTX, description: 'The context whose BUILT pipeline model to query (the draft_id build_pipeline_model returned, after materialize).' }, fields: pipelineQueryFields },
+          batchOf({ type: 'object', additionalProperties: false, properties: terse(pipelineQueryFields) }, 'queries over the built model'),
+        ),
+        pick(pipelineQueryFields, ['offset', 'limit']),
+      ),
     },
     display_model_result: {
       type: 'object', additionalProperties: false, required: ['task_id'],
@@ -313,7 +301,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
         context_id: contextId(`The context to show: ${projectContexts.length ? 'one of the dbt project\'s own semantic models, by its name (the listed values), or ' : ''}the context_id build_semantic_model returned.`),
         semantic_model: { type: 'string', description: 'Narrow the answer to one semantic model of the context (as its semantic_models name them) and the metrics that read it — mostly for a task\'s context, which can hold several.' },
         metric: { type: 'string', description: 'Narrow the answer to one metric: its definition, the metrics it is made of (each with its own), and its group_by in full — every dimension, entity and the time axis it can be grouped by, each item spelled exactly as query_semantic_model\'s group_by takes it.' },
-        validate: { type: 'boolean', description: 'Check the layer by running it rather than only reading it. MetricFlow compiles each metric in view, naming one whose SQL it cannot build; with time_range the warehouse also runs each metric over that window (its value comes back) and groups each semantic model\'s rows by all its dimensions and entities, naming a column it cannot read — the checks a dbt v2 parse skips. It is a task: the call returns { task_id }, and query_semantic_model({ task_id }) returns valid, compiled[], ran.metrics[], ran.semantic_models[] and a summary.' },
+        validate: { type: 'boolean', description: 'Check the layer by running it rather than only reading it. MetricFlow compiles each metric in view, naming one whose SQL it cannot build; with time_range the warehouse also runs each metric over that window (its value comes back) and groups each semantic model\'s rows by all its dimensions and entities, naming a column it cannot read — the checks a dbt v2 parse skips. It is a task: the call returns { task_id }, and query_semantic_model({ request: { task_id } }) returns valid, compiled[], ran.metrics[], ran.semantic_models[] and a summary.' },
         time_range: { ...METRIC_TIME_RANGE, description: 'Only with validate: the metric_time window the metrics and dimensions are run over. Keep it short — the warehouse reads what falls in it. Without it, validate compiles only and reads nothing.' },
       },
     },

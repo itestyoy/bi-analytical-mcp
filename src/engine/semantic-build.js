@@ -46,7 +46,7 @@ export const semanticBuildMethods = {
    */
   async register_native_model(input) {
     this._validate('register_native_model', input);
-    // a build is a task: the id now, the rows from query_pipeline_model({ task_id })
+    // a build is a task: the id now, the rows from query_pipeline_model({ request: { task_id } })
     const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
     const taskId = this._startTask(existing, 'register_native_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }), { input });
@@ -74,7 +74,7 @@ export const semanticBuildMethods = {
     ctx.state.metrics ||= []; ctx.state.additions ||= {}; ctx.state.usedModels ||= []; // core-safe after delete
     this.ctxs.touch(ctx.id);
     const parse = this.runner ? await this.runner.parse(this.ctxs.dir(ctx.id)) : { ok: true, executed: false, reason: 'no runner configured — not parsed (dry/unit mode)' };
-    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (delete_context({ context_id })) or the store cleans ephemeral objects" };
+    return { context_id: ctx.id, removed: true, model, removed_files: removedFiles, ...(consumers.length ? { consumers_recomputing: consumers } : {}), parse: parse.ok ? { ok: true } : { ok: false, error: { stage: 'parse', message: formatDbtError(parse.stdout, parse.stderr) } }, note: "model definition removed; the stored view may persist until the context is dropped (delete_context({ request: { context_id } })) or the store cleans ephemeral objects" };
   },
 
   async build_semantic_model(input) {
@@ -136,18 +136,18 @@ export const semanticBuildMethods = {
       assumptions: this._assumptions(ctx),
       warnings: render.warnings || [],
       // Never a dead end: name the exact next call with real metric/path names.
-      next: `Query it: query_semantic_model({ context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end }, group_by: [${exText}] }).`,
+      next: `Query it: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [${render.metricNames.slice(0, 3).map((m) => `'${m}'`).join(', ')}], time_range: { start, end }, group_by: [${exText}] } }).`,
       recommendations: [
         `Bound every query with time_range. Group or filter by an attribute from \`groupable\`, addressed as { model, attribute } (e.g. ${exText}), or by { time: 'metric_time', grain }.`,
-        `Extend this task later with build_semantic_model({ action: 'update', context_id: '${ctx.id}', semantic_model, ... }); inspect it anytime with context({ action: 'describe', context_id: '${ctx.id}' }).`,
+        `Extend this task later with build_semantic_model({ request: { action: 'update', context_id: '${ctx.id}', semantic_model, ... } }); inspect it anytime with context({ request: { action: 'describe', context_id: '${ctx.id}' } }).`,
       ],
     };
   },
 
   /**
    * The INCREMENTAL path on an existing task. It is reachable two ways and the body is one: as
-   * build_semantic_model({ action: 'update', … }) — the mode the tool listing advertises — and as
-   * update_semantic_model({ … }), kept callable for a client that learned that name, but no longer
+   * build_semantic_model({ request: { action: 'update', … } }) — the mode the tool listing advertises — and as
+   * update_semantic_model({ request: { … } }), kept callable for a client that learned that name, but no longer
    * advertised, because the two schemas repeat the same vocabulary and the listing is what every
    * request carries.
    */
@@ -209,7 +209,7 @@ export const semanticBuildMethods = {
       return {
         context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
         metrics: render.metricNames, groupable: this._groupableSplit(ctx).now, parse, warnings: render.warnings || [],
-        next: `Query the updated task: query_semantic_model({ context_id: '${ctx.id}', metrics: [...] }) — \`metrics\` above is the current full list.`,
+        next: `Query the updated task: query_semantic_model({ request: { context_id: '${ctx.id}', metrics: [...] } }) — \`metrics\` above is the current full list.`,
       };
     }, { input });
     return this._taskStarted(taskId, { context_id: ctx.id });

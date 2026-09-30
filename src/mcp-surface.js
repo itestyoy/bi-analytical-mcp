@@ -8,6 +8,7 @@ import { RESEARCH_ROUTE, RESEARCH_SCOPE } from './research-guides.js';
 import { MAX_WAIT_SECONDS } from './schema.js';
 import { withSignal } from './request-context.js';
 import { appsSurface, viewMeta } from './apps.js';
+import { wireSchema } from './schema/transport.js';
 import { buildViewModel } from './apps/result-view-model.js';
 import { toolRegistry } from './tools/define.js';
 import { CORE_TOOLS } from './tools/core.js';
@@ -18,7 +19,7 @@ import { TaskRegistry } from './tasks.js';
 
 // Told only to a client that renders MCP Apps (src/apps.js): the rest of the instructions hold for everyone.
 const RESULT_CARDS = `RESULT CARDS
-In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ task_id, display }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with its query tool — query_semantic_model({ task_id }) or query_pipeline_model({ task_id }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
+In a host that renders MCP Apps, a result can be drawn for the person as a card. A model result — a chart, KPI tiles, a funnel, a sankey, a drill-down pivot — is drawn by one tool, display_model_result({ request: { task_id, display } }); starting work and reading tasks never draws. The flow: start the work (it returns a task_id), read it with its query tool — query_semantic_model({ request: { task_id } }) or query_pipeline_model({ request: { task_id } }) — as often as your analysis needs (reads draw nothing), then call display_model_result once, for the result the person should see, before summarising it. The card is the chart, so there is no need to draw your own chart of the same rows. An experiment is a separate process — statistics over the per-group numbers you bring, with no task: experiment returns them at once and draws its own card — the A/B test (analyze) only — when you pass card: true; the split check and the plan are answered in words. In \`display\`, pick the \`kind\` whose description in the schema matches the question — each kind lists the fields it needs — and the card draws exactly that, in the declared order. It names result columns and changes no numbers; a column that is not in the result is refused with the list of those that are. A pivot, or a chart with drill, reads a stored result: run the query with materialize:true (a pipeline build is stored already).`;
 
 /**
  * THE FIRST THING A CLIENT READS, and in some the only thing. `instructions` (InitializeResult in
@@ -34,13 +35,14 @@ function coreInstructions({ apps = false, skillUris = [], featureLines = [] } = 
   return [
     'Semantic layer for product analytics over a fixed data catalog: you declare metrics and derived tables and query them by name; the server writes and runs the SQL. Flow: semantic_index (find what exists) → build_semantic_model (reusable named metrics) or build_pipeline_model (a one-off table: funnels, sessions, pivots) → query_semantic_model / query_pipeline_model. Warehouse work returns a task_id at once; read it back with the same side\'s query tool.',
     '',
-    `semantic_index with no arguments gives the overview of the catalog — events sources, a users dimension, experiment assignments, measures sources; { guide: true } gives the analyst workflow and which tool fits which question. A read ({ task_id }) waits up to ${MAX_WAIT_SECONDS}s per call.`,
+    'Every tool takes its input under one field: tool({ request: { … } }); a bare shape below, like { task_id }, is the request\'s content.',
+    `semantic_index({ request: {} }) gives the catalog overview — its sources and models; { guide: true } the analyst workflow and which tool fits which question. A read ({ task_id }) waits up to ${MAX_WAIT_SECONDS}s per call.`,
     '',
     'Name the events source in every call: sources are independent and never mixed. User attributes live on the users model ({ model: "users", attribute }), not on the events, and joins follow the relationships the catalog declares — you never state join columns.',
     `For ${RESEARCH_SCOPE}, first read ${RESEARCH_ROUTE}.`,
     'Answer as soon as a result answers the question; query again when the numbers look wrong or the question needs another cut, not to re-confirm a result you already have.',
     ...featureLines,
-    ...(apps ? ['Show the result the person should see as a card, once: display_model_result({ task_id, display }) (see RESULT CARDS below).'] : []),
+    ...(apps ? ['Show the result the person should see as a card, once, with display_model_result (see RESULT CARDS below).'] : []),
     ...(skillUris.length ? [`The same procedure is served as Agent Skills: ${skillUris.join(', ')}.`] : []),
     '',
     'The sections below describe the data model and how its sources join.',
@@ -51,21 +53,21 @@ function coreInstructions({ apps = false, skillUris = [], featureLines = [] } = 
 // description carries; the per-tool detail lives in the tool descriptions and the schema, the long
 // procedures behind semantic_index ({ guide }, { recipe }) and the skills.
 const SERVER_DESCRIPTION = `DATA MODEL (fixed roles)
-- events source: one row per event — a user id, a session id, an event timestamp (the time axis), an event_name and typed event-data properties. Only per-event columns live here. A catalog may declare several events sources (e.g. product analytics events and crash reports). They are independent and equal: each owns its event vocabulary, its payload properties and its own indexed values, none is a default, and they are never mixed. The semantic_index overview lists them under "facts" with each one's own event_names. Name the source you mean in every call — semantic_index({ source, event }) / ({ source, property }), build_pipeline_model({ source }), build_semantic_model({ semantic_models: [{ from: <source> }] }) — so a name always has one owner. Within a source, event and property names are used as-is. Choose the source that records what the question is about.
+- events source: one row per event — a user id, a session id, an event timestamp (the time axis), an event_name and typed event-data properties. Only per-event columns live here. A catalog may declare several events sources (e.g. product analytics events and crash reports). They are independent and equal: each owns its event vocabulary, its payload properties and its own indexed values, none is a default, and they are never mixed. The semantic_index overview lists them under "facts" with each one's own event_names. Name the source you mean in every call — semantic_index({ request: { source, event } }) / ({ source, property }), build_pipeline_model({ request: { source } }), build_semantic_model({ request: { semantic_models: [{ from: <source> }] } }) — so a name always has one owner. Within a source, event and property names are used as-is. Choose the source that records what the question is about.
 - users dimension: one row per user — attributes (country, platform, media_source, acquisition_type, install_date, ...). It is reached by a join: group or filter by { model: 'users', attribute } in metric queries (declare use_base_models: ['users']), or add a join stage in pipelines. User attributes are not columns of the fact.
-- experiments: one row per user×experiment (experiment_name, variant_group, assigned_at, ended_at) — join to events by the user entity, window to the assignment period, aggregate per group, then experiment({ action: check_split | analyze }).
-- measures sources (optional): a non-events fact whose columns are amounts rather than events (e.g. acquisition spend at one row per player x day). It has no event_name; it declares its own time axis, and the catalog marks which of its fields are amounts — semantic_index({ model }) lists them under "aggregatable" with their unit and meaning. No aggregation is fixed: name the field in a measure's "field" and choose "agg" (sum / average / max / median / percentile / count_distinct) per question. It carries the user entity, so { model: 'users', attribute } segments it too. In a pipeline it joins an events source by the player key alone (via the declared relationship): one player has many events and several dated rows, so that pairing is many-to-many by design — use it to carry an attribute (channel, campaign) onto events, and aggregate the source itself to total an amount, since totals over the many-to-many join would be inflated.
+- experiments: one row per user×experiment (experiment_name, variant_group, assigned_at, ended_at) — join to events by the user entity, window to the assignment period, aggregate per group, then experiment({ request: { action: check_split | analyze } }).
+- measures sources (optional): a non-events fact whose columns are amounts rather than events (e.g. acquisition spend at one row per player x day). It has no event_name; it declares its own time axis, and the catalog marks which of its fields are amounts — semantic_index({ request: { model } }) lists them under "aggregatable" with their unit and meaning. No aggregation is fixed: name the field in a measure's "field" and choose "agg" (sum / average / max / median / percentile / count_distinct) per question. It carries the user entity, so { model: 'users', attribute } segments it too. In a pipeline it joins an events source by the player key alone (via the declared relationship): one player has many events and several dated rows, so that pairing is many-to-many by design — use it to carry an attribute (channel, campaign) onto events, and aggregate the source itself to total an amount, since totals over the many-to-many join would be inflated.
 
 JOINS BETWEEN SOURCES
-Relationships are declared in the catalog: each has a name, and its key columns live in the schema. Group by { model: '<the model that carries the attribute>', attribute } in a metric query (with that model in use_base_models; add via when several relationships lead to it), or join with via: '<relationship>' in a pipeline. A key may span several columns and the two sides may name their columns differently — only the relationship name and the number of key parts have to agree. A relationship that no model owns has no governed path (MetricFlow joins only onto a unique key) and is a pipeline join; that is correct rather than a limitation. semantic_index({ model }) lists a model's relationships, their key columns and what each points at. Two events sources are joined the same way — in a pipeline, since a row-to-row match between two event streams is many-to-many. When a source carries several alternative key columns for one relationship (one tracking id per ad format), each is listed as its own relationship <name>_<variant>; pick the one the question is about. The users dimension may be slowly-changing (several versions per player, each with a validity window): joining it on the player key alone matches every version and inflates counts, so a pipeline join adds between: { value: <this source's time column>, from: <validity start>, to: <validity end> }. A metric query needs nothing — MetricFlow applies the window itself.
+Relationships are declared in the catalog: each has a name, and its key columns live in the schema. Group by { model: '<the model that carries the attribute>', attribute } in a metric query (with that model in use_base_models; add via when several relationships lead to it), or join with via: '<relationship>' in a pipeline. A key may span several columns and the two sides may name their columns differently — only the relationship name and the number of key parts have to agree. A relationship that no model owns has no governed path (MetricFlow joins only onto a unique key) and is a pipeline join; that is correct rather than a limitation. semantic_index({ request: { model } }) lists a model's relationships, their key columns and what each points at. Two events sources are joined the same way — in a pipeline, since a row-to-row match between two event streams is many-to-many. When a source carries several alternative key columns for one relationship (one tracking id per ad format), each is listed as its own relationship <name>_<variant>; pick the one the question is about. The users dimension may be slowly-changing (several versions per player, each with a validity window): joining it on the player key alone matches every version and inflates counts, so a pipeline join adds between: { value: <this source's time column>, from: <validity start>, to: <validity end> }. A metric query needs nothing — MetricFlow applies the window itself.
 Funnels and sequences are built from events (a step = an event + an event_data property value) and run over one source, since a row-pattern match scans one table. Metrics from different sources can still be compared side by side when grouped by metric_time.
 
 WHERE THE DETAIL IS
-- semantic_index({ guide: true }): the analyst workflow, which tool fits which question, the recipe families.
-- semantic_index({ recipe: "<id>" }): one warehouse-proven payload in full; the overview lists the ids, and a real question usually combines two or three.
-- semantic_index({ guide: "python" }): the frame rules for a python stage, where the overview's python_models says it is available; the SQL stages before it prepare the table it reads.
-- memory: record a vague phrase you tracked down to a real field, or a gotcha, linked to the catalog entities it concerns; it resurfaces on their semantic_index views and in semantic_index({ search }).
-- context({ action }): list or describe a workspace (context_id) and the models in it; delete_context removes one.`;
+- semantic_index({ request: { guide: true } }): the analyst workflow, which tool fits which question, the recipe families.
+- semantic_index({ request: { recipe: "<id>" } }): one warehouse-proven payload in full; the overview lists the ids, and a real question usually combines two or three.
+- semantic_index({ request: { guide: "python" } }): the frame rules for a python stage, where the overview's python_models says it is available; the SQL stages before it prepare the table it reads.
+- memory: record a vague phrase you tracked down to a real field, or a gotcha, linked to the catalog entities it concerns; it resurfaces on their semantic_index views and in semantic_index({ request: { search } }).
+- context({ request: { action } }): list or describe a workspace (context_id) and the models in it; delete_context removes one.`;
 
 
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
@@ -95,7 +97,7 @@ export function buildToolDefs(engine) {
     name: def.name,
     title: def.title,
     description: def.description,
-    inputSchema: engine.schemas[def.name],
+    inputSchema: wireSchema(engine.schemas[def.name]),
     // `title` is the MCP display-name field; `annotations.title` mirrors it for clients that
     // read the older annotations location. `name` remains the stable programmatic identifier.
     annotations: { title: def.title, openWorldHint: false, ...def.annotations },
@@ -108,8 +110,8 @@ export function buildToolDefs(engine) {
 // get_task_result is not an alias: it was not renamed but split, each side's query tool reading its
 // own tasks, and a call to it is answered with that (see runTool).
 const REMOVED_TOOLS = {
-  get_task_result: 'a task is read back by the query tool of its side: query_semantic_model({ task_id }) for a semantic model or a metric query, query_pipeline_model({ task_id }) for a pipeline build or a query over one',
-  get_query_result: 'a task is read back by the query tool of its side ({ task_id }); a built pipeline model is queried with query_pipeline_model({ context_id, transform })',
+  get_task_result: 'a task is read back by the query tool of its side: query_semantic_model({ request: { task_id } }) for a semantic model or a metric query, query_pipeline_model({ request: { task_id } }) for a pipeline build or a query over one',
+  get_query_result: 'a task is read back by the query tool of its side ({ task_id }); a built pipeline model is queried with query_pipeline_model({ request: { context_id, transform } })',
 };
 /** What a call to a name that is not a tool is told — with the replacement, for a tool that was removed. */
 export function unknownToolMessage(name) {
@@ -126,6 +128,21 @@ export function isCallableTool(engine, name) {
 }
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+
+/**
+ * The input of a call: the value of its one field, `request`. A call written some other way — its
+ * fields at the top, or nothing at all — is refused with the shape to use, the fields it gave moved
+ * where they belong, so the next call is right.
+ */
+export function requestOf(name, args) {
+  const given = isPlainObject(args) ? args : {};
+  const keys = Object.keys(given);
+  if (keys.length === 1 && keys[0] === 'request' && isPlainObject(given.request)) return { request: given.request };
+  const others = keys.filter((k) => k !== 'request');
+  const moved = others.length ? `{ request: { ${others.join(', ')} } } — the fields ${others.map((k) => `'${k}'`).join(', ')} go inside request` : '{ request: { … } } — request holds the fields the tool\'s schema lists ({ request: {} } when it needs none)';
+  const bad = keys.includes('request') && !isPlainObject(given.request) ? ' (request must be an object)' : '';
+  return { error: `${name} takes its input under one field, request: call ${name}(${moved})${bad}` };
+}
 
 /** A tool's return value as an MCP CallToolResult: the JSON as text (what the model reads) and the
  *  same value as `structuredContent` (what a program — the Apps view — reads; the spec asks for
@@ -164,7 +181,9 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
   const started = Date.now();
   logLine(calledAs, `▶ call ${summarizeArgs(args)}`);
   // every failure of a call is kept in the error log (src/error-log.js), with the call's arguments
-  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof args?.context_id === 'string' ? args.context_id : typeof args?.draft_id === 'string' ? args.draft_id : null, task_id: typeof args?.task_id === 'string' ? args.task_id : null });
+  // (the arguments are kept as they came, so a failure is replayed by the same call)
+  const inner = isPlainObject(args?.request) ? args.request : {};
+  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof inner.context_id === 'string' ? inner.context_id : typeof inner.draft_id === 'string' ? inner.draft_id : null, task_id: typeof inner.task_id === 'string' ? inner.task_id : null });
   if (!isCallableTool(engine, calledAs)) {
     logLine(calledAs, '✗ unknown tool');
     failed(calledAs, unknownToolMessage(calledAs), { stage: 'validate' });
@@ -172,6 +191,15 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
   }
   const def = toolsOf(engine).get(calledAs);
   const name = def.name;
+  // every tool takes its input under `request` (src/schema/transport.js wireSchema); the rest of the
+  // call sees that input and nothing else
+  const call = requestOf(name, args);
+  if (call.error) {
+    logLine(name, '✗ not under request');
+    failed(name, call.error, { stage: 'validate', field: 'request' });
+    return { result: errorResult(call.error, 'validate', 'request'), raw: null };
+  }
+  const input = call.request;
   // a card for a client that renders none: the tool is not offered to it, so not accepted. The
   // card's own read (drill_result) is the exception: the HOST makes that call on behalf of a card
   // this server drew, and the proof it may read is the drawn task — not the envelope the host puts
@@ -182,7 +210,7 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
     return { result: errorResult(`${name} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so nothing is drawn — read results with query_semantic_model / query_pipeline_model ({ task_id })`, 'validate'), raw: null };
   }
   const cardField = def.cardField;
-  if (!renders && cardField && args?.[cardField] !== undefined) {
+  if (!renders && cardField && input[cardField] !== undefined) {
     logLine(name, `✗ ${cardField} from a client without the Apps extension`);
     failed(name, `${cardField} is not available: this client does not declare the MCP Apps extension`, { stage: 'validate', field: cardField });
     return { result: errorResult(`${cardField} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so no card is drawn — drop the ${cardField} field`, 'validate', cardField), raw: null };
@@ -197,14 +225,14 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
   }
   try {
     // a tool that answers synchronously still answers through the promise, so a throw is its rejection
-    let raw = await withSignal(signal, () => Promise.resolve().then(() => def.run(engine, args || {})));
+    let raw = await withSignal(signal, () => Promise.resolve().then(() => def.run(engine, input)));
     // the hint to show a result as a card means nothing to a client that draws none
     if (!renders && isPlainObject(raw) && 'show_to_user' in raw) { const { show_to_user: _hint, ...rest } = raw; raw = rest; }
     logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(raw)}`);
     // a failure the engine RETURNED ({ ok: false }) is kept too — except a read of a task that failed,
     // whose failure the task itself recorded when it ended
     if (isPlainObject(raw) && raw.ok === false && !raw.task_id && !raw.task_ids) failed(name, raw.error?.message || (typeof raw.error === 'string' ? raw.error : 'the call failed'), { stage: raw.error?.stage, field: raw.error?.field, code: raw.error?.code, detail: raw.error });
-    return { result: toCallToolResult(raw, name, args, engine), raw };
+    return { result: toCallToolResult(raw, name, input, engine), raw };
   } catch (err) {
     const cancelled = !!signal?.aborted;
     logLine(name, `✗ ${cancelled ? 'cancelled' : 'error'} in ${Date.now() - started}ms: ${err?.message || String(err)}${err?.field ? ` (field: ${err.field})` : ''}`);
@@ -225,16 +253,18 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
 export async function runToCompletion(engine, calledAs, args, { signal, renders = true } = {}) {
   const def = toolsOf(engine).get(calledAs);
   const name = def?.name ?? calledAs;
+  // what the call asks, under `request` (a call not written so is refused by runTool below)
+  const input = isPlainObject(args?.request) ? args.request : {};
   // the tasks the call reads: one (task_id), or a batch (task_ids) — followed until every one is done
-  const ids = typeof args?.task_id === 'string' ? [args.task_id] : Array.isArray(args?.task_ids) ? args.task_ids.filter((id) => typeof id === 'string') : [];
+  const ids = typeof input.task_id === 'string' ? [input.task_id] : Array.isArray(input.task_ids) ? input.task_ids.filter((id) => typeof id === 'string') : [];
   // (a cancel is answered at once: it never waits for the task it stops)
   // a call that WAITS on an engine task — a query tool's read half ({ task_id }), a drawing tool — is
   // run to its end under a protocol task
-  let waits = !!def?.waits && !args?.cancel && ids.length > 0 && ids.every((id) => engine.jobs?.get?.(id));
+  let waits = !!def?.waits && !input.cancel && ids.length > 0 && ids.every((id) => engine.jobs?.get?.(id));
   // what the call would refuse — bad arguments, a task of the other side, a card already drawn — is
   // refused NOW, not after sitting through the whole task
   if (waits && engine.host) {
-    try { engine.host.precheckWait(name, args); } catch { waits = false; }
+    try { engine.host.precheckWait(name, input); } catch { waits = false; }
   }
   if (waits) {
     // Following the task has the same contract as the call itself: a failure while waiting is a
@@ -360,7 +390,7 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
           uriTemplate: s.uri.replace(/SKILL\.md$/, 'recipes/{recipe}.md'),
           name: `${s.frontmatter.name}-recipe`,
           title: `Recipe (${s.frontmatter.name})`,
-          description: 'One recipe of this skill in full — payload, example queries, the reusable technique. The same entry as semantic_index({ recipe }).',
+          description: 'One recipe of this skill in full — payload, example queries, the reusable technique. The same entry as semantic_index({ request: { recipe } }).',
           mimeType: 'text/markdown',
         }))
         : [];

@@ -123,6 +123,24 @@
   before a destructive call, and must not have to before a read. Do NOT hand-roll wire
   behaviour the SDK provides (headers, envelope, discover, sessions, error codes); the one exception
   is `src/mcp-tasks.js`, which exists only until the SDK serves the Tasks extension.
+- EVERY TOOL TAKES ONE FIELD, `request`, AND ITS SCHEMA IS NEVER CUT (HARD RULE). What a client is
+  shown is `wireSchema(engine.schemas[name])` (src/schema/transport.js): a closed root object whose one
+  required field is `request`, the tool's own schema as its value, `$defs` at the root — the one root
+  every host's API takes (Anthropic's refuses a union there, OpenAI's strict mode a root anyOf). The
+  surface unwraps it at ONE point (`requestOf`, runTool) and the engine validates `request` against
+  the same schema it published, so what the model sees and what is checked are one schema. A tool's
+  modes are an `anyOf` of CLOSED forms (`form` in src/schema-kit.js: a pinned `const`/`enum` tag or
+  distinct required keys, `additionalProperties: false`), pairwise disjoint so the anyOf means oneOf —
+  a field a mode does not read is refused, not ignored. The portable subset is the only one used:
+  `anyOf`, `$defs`/`$ref`, `enum`/`const`, `pattern` — no oneOf / allOf / not / if-then-else /
+  discriminator, in a core or a feature schema, or in the generated facts sheet
+  (test/unit/schema-portability.test.js holds every listed schema to it, and every union to being
+  closed and disjoint). A refusal names the form the value meant and its fields (`explain`,
+  src/validate.js). Do NOT strip or simplify a schema for a client: a host that cannot take a
+  construct is served by writing the schema in the subset, never by showing less than is checked.
+  Every call shape written in this file, the descriptions and the guides is the CONTENT of `request`
+  unless it is spelled `tool({ request: { … } })`. `MIN_FOLD` (100) is the smallest repeated subtree
+  the transport folds into `$defs`.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine.get_recipe`, the python
   guide, the research guides of `src/research-guides.js`, a tool's result); they never carry text or numbers of their own. The Apps view follows the
   official ext-apps templates and draws shadcn/ui components (Card, Badge, Button, Table — the

@@ -84,10 +84,10 @@ export class ValueIndexViews {
     return { runs: history.length, avg_ms: timed.length ? Math.round(timed.reduce((s, r) => s + r.ms, 0) / timed.length) : null, history };
   }
 
-  /** semantic_index({ run }): per-property breakdown within one sync run (slowest first). */
+  /** semantic_index({ request: { run } }): per-property breakdown within one sync run (slowest first). */
   run(input) {
     const run = this.valueIndex.runById(input.run);
-    if (!run) throw new ToolError(`unknown index run '${input.run}'. See semantic_index({ status: true }).value_index.recent_runs[].id`, { stage: 'validate', field: 'run' });
+    if (!run) throw new ToolError(`unknown index run '${input.run}'. See semantic_index({ request: { status: true } }).value_index.recent_runs[].id`, { stage: 'validate', field: 'run' });
     const props = this.valueIndex.runProperties(input.run).map((r) => this.propertyRow(r));
     const fallbacks = (this.valueIndex.runNotes ? this.valueIndex.runNotes(run.id) : []).map((n) => n.note);
     return {
@@ -100,14 +100,14 @@ export class ValueIndexViews {
       // NB: per-property `ms` is only meaningful for properties scanned individually (~0 when batched).
       ...(fallbacks.length ? { fallbacks } : {}),
       recommendations: [
-        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ source: '${props[0].source || '<source>'}', property: '${props[0].property}' }).` : `No per-property timing recorded for run ${run.id}.`,
+        props.length ? `Slowest: ${props.slice(0, 3).map((p) => `${p.property} (${p.ms}ms)`).join(', ')}. Drill into one across syncs with semantic_index({ request: { source: '${props[0].source || '<source>'}', property: '${props[0].property}' } }).` : `No per-property timing recorded for run ${run.id}.`,
         ...(fallbacks.length ? [`${fallbacks.length} batch(es) fell back to per-property — full reason in fallbacks[].`] : []),
       ],
     };
   }
 
   /**
-   * semantic_index({ status: true }): operational state — the value-index SYNC state
+   * semantic_index({ request: { status: true } }): operational state — the value-index SYNC state
    * (last/recent refresh runs, coverage counts, whether one is in flight) plus the
    * background QUERY jobs and their statuses. Read-only, cheap; touches no warehouse.
    */
@@ -129,12 +129,12 @@ export class ValueIndexViews {
 
     const recommendations = [];
     if (sync.running) recommendations.push(`A value-index refresh is in progress — values/cardinality in semantic_index may still be filling in.`);
-    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ source, property }) will show no sample_values until the first sync (it runs in the background at startup).`);
+    else if (sync.total_runs === 0) recommendations.push(`The value index has not run yet — semantic_index({ request: { source, property } }) will show no sample_values until the first sync (it runs in the background at startup).`);
     else if (last?.status === 'error') recommendations.push(`The last value-index sync FAILED (${last.error || 'unknown error'}); sample_values may be stale or empty. Check the data source.`);
-    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ source, property }).`);
-    if (running.length) recommendations.push(`${running.length} task(s) running — read one with its side's query tool — query_semantic_model({ task_id }) or query_pipeline_model({ task_id }); it waits for the task. semantic_index({ status }) lists them.`);
-    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ run: ${last.id} }) for the full breakdown, or semantic_index({ source: '${slowest[0].source}', property: '${slowest[0].property}' }) for one property across syncs.`);
-    if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property — combined scan failed. Full reason in value_index.last_run_fallbacks[] (also semantic_index({ run: ${last.id} }).fallbacks).`);
+    else if (secsSince != null) recommendations.push(`Value index is ${sync.indexed_properties} properties / ${sync.total_values} values, last synced ${secsSince}s ago. Inspect a property's values via semantic_index({ request: { source, property } }).`);
+    if (running.length) recommendations.push(`${running.length} task(s) running — read one with its side's query tool — query_semantic_model({ request: { task_id } }) or query_pipeline_model({ request: { task_id } }); it waits for the task. semantic_index({ request: { status } }) lists them.`);
+    if (slowest.length && last?.id != null) recommendations.push(`Per-property timing: semantic_index({ request: { run: ${last.id} } }) for the full breakdown, or semantic_index({ request: { source: '${slowest[0].source}', property: '${slowest[0].property}' } }) for one property across syncs.`);
+    if (fallbacks.length) recommendations.push(`${fallbacks.length} batch(es) fell back to per-property — combined scan failed. Full reason in value_index.last_run_fallbacks[] (also semantic_index({ request: { run: ${last.id} } }).fallbacks).`);
     if (!recommendations.length) recommendations.push(`No running tasks and the value index is idle/current.`);
 
     return {

@@ -78,14 +78,14 @@ export function readTable(engine, contextId, table, { transform, limit = 1000 } 
  * waited on forever. Returns { res, out }: the last MCP result and its parsed payload.
  */
 export async function settleMcp(client, name, args, { deadlineMs = 10 * 60 * 1000 } = {}) {
-  let res = await client.callTool({ name, arguments: args });
+  let res = await client.callTool({ name, arguments: { request: args } });
   let out = JSON.parse(res.content[0].text);
   if (!res.isError && isStartedTask(out)) {
     const { read_with: reader, task_id: taskId } = out;
     const until = Date.now() + deadlineMs;
     do {
       if (Date.now() > until) throw new Error(`task ${taskId} (${name}) still running after ${Math.round(deadlineMs / 1000)}s`);
-      res = await client.callTool({ name: reader, arguments: { task_id: taskId } });
+      res = await client.callTool({ name: reader, arguments: { request: { task_id: taskId } } });
       out = JSON.parse(res.content[0].text);
     } while (!res.isError && out.status === 'running');
   }

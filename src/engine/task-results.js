@@ -18,7 +18,7 @@ export const taskResultMethods = {
   /**
    * Materialization mode (inside the query's task): compile the query to SQL, write it as a
    * materialized='table' dbt model named after the task (`qr_<task_id>`), build it, and read the
-   * first page back. The table is the durable result: query_semantic_model({ task_id }) pages it after the in-memory
+   * first page back. The table is the durable result: query_semantic_model({ request: { task_id } }) pages it after the in-memory
    * response is gone, a card drills into it, and a pipeline can start from it (from_task).
    */
   async _materialize(ctx, qopts, input, rename, id, speak = this._callerSpelling(rename)) {
@@ -70,7 +70,7 @@ export const taskResultMethods = {
 
   /** How to get rows past what a task holds — said in the terms of the tool that ran it. */
   _pageHint(job) {
-    if (job.tool === 'query_pipeline_model') return 'query the model again with the offset/limit you want — query_pipeline_model({ context_id, transform, limit, offset }) — or page the build\'s own task, whose table is stored';
+    if (job.tool === 'query_pipeline_model') return 'query the model again with the offset/limit you want — query_pipeline_model({ request: { context_id, transform, limit, offset } }) — or page the build\'s own task, whose table is stored';
     if (this._taskSide(job) === 'pipeline') return 'build it again — a pipeline build stores its table, which then pages';
     return 'run the query again with the offset/limit you want, or with materialize:true to store the whole result as a table that pages';
   },
@@ -81,8 +81,8 @@ export const taskResultMethods = {
   },
 
   /**
-   * THE READ HALF OF A QUERY TOOL — query_semantic_model({ task_id }) / query_pipeline_model({
-   * task_id }): wait for a task of THAT side (at most `wait_seconds`, capped at MAX_WAIT_SECONDS,
+   * THE READ HALF OF A QUERY TOOL — query_semantic_model({ request: { task_id } }) / query_pipeline_model({ request: {
+   * task_id } }): wait for a task of THAT side (at most `wait_seconds`, capped at MAX_WAIT_SECONDS,
    * returning the moment it is done) and return its finished response — the rows of a query or a
    * build, a parsed model, or the error it ended in. Still running → `status: 'running'`: call
    * again. A task that stored a table (a materialized query, a pipeline build) can be PAGED with
@@ -119,7 +119,7 @@ export const taskResultMethods = {
       waited_seconds: waited,
       ...(failed ? { failed } : {}),
       results,
-      ...(running.length ? { next: `${running.length} still running — call ${this._readers[side]}({ task_ids: [${running.map((id) => `'${id}'`).join(', ')}] }) for them; the others are final above` } : {}),
+      ...(running.length ? { next: `${running.length} still running — call ${this._readers[side]}({ request: { task_ids: [${running.map((id) => `'${id}'`).join(', ')}] } }) for them; the others are final above` } : {}),
     };
   },
 
@@ -250,7 +250,7 @@ export const taskResultMethods = {
   _showHint(id, out) {
     const drawable = isPlainObject(out) && Array.isArray(out.rows) && out.rows.length > 0;
     if (!drawable || this._displayed?.has(id)) return {};
-    return { show_to_user: { tool: 'display_model_result', arguments: { task_id: id }, why: `in a host that renders MCP Apps this draws the result as a card for the person — add \`display\` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns. Once per result, and only for what the person should see — not for the intermediate reads you make to work something out.` } };
+    return { show_to_user: { tool: 'display_model_result', arguments: { request: { task_id: id } }, why: `in a host that renders MCP Apps this draws the result as a card for the person — add \`display\` with the kind that fits the question (a chart, KPI tiles, a funnel, a pivot…), over these columns. Once per result, and only for what the person should see — not for the intermediate reads you make to work something out.` } };
   },
 
   /**

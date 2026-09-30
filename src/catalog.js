@@ -344,7 +344,7 @@ export class Catalog {
     if (this.eventNames(fact).includes(name)) return name;
     const other = this.facts.find((f) => f !== fact && this.eventNames(f).includes(name));
     if (other) throw new Error(`event '${name}' belongs to the '${other}' source, not '${fact}'${hint ? ` — ${hint}` : ''}`);
-    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ model: '${fact}' })`);
+    throw new Error(`unknown event '${name}' on '${fact}'. See semantic_index({ request: { model: '${fact}' } })`);
   }
 
   /**

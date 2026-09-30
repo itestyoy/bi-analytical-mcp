@@ -234,7 +234,7 @@ test('meta.mcp.events is refused, naming the property marker', () => {
 
 test('meta.mcp.values is refused on a property and on an attribute', () => {
   assert.throws(() => load(withCol(EVENTS, '      - { name: result, data_type: string, meta: { mcp: { property: true, values: [win, lose] } } }') + USERS()),
-    /meta\.mcp\.values is no longer a schema key.*semantic_index\(\{ source, property \}\)/s);
+    /meta\.mcp\.values is no longer a schema key.*semantic_index\(\{ request: \{ source, property \} \}\)/s);
   const dimVals = USERS().replace('- { name: country, data_type: string }', '- { name: country, data_type: string, meta: { mcp: { values: [US, GB] } } }');
   assert.throws(() => load(EVENTS + dimVals), /meta\.mcp\.values is no longer a schema key/);
   const blobVals = EVENTS.replace('      - { name: event_name, data_type: string, meta: { mcp: { is_event_name: true } } }',

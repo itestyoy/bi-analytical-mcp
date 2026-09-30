@@ -339,7 +339,7 @@ export class SqliteBackend {
     // Per-property timing within a run — detailed stats drilled into via semantic_index.
     // Per-property run rows are keyed by (run, SOURCE, property) like every other index table.
     db.exec('CREATE TABLE IF NOT EXISTS index_run_props (run_id INTEGER, source TEXT, property TEXT, ms INTEGER, values_written INTEGER, distinct_count INTEGER, total_count INTEGER, status TEXT, error TEXT, PRIMARY KEY(run_id, source, property))');
-    // Run-level events surfaced in semantic_index({ status })/({ run }), e.g. "a batch fell
+    // Run-level events surfaced in semantic_index({ request: { status } })/({ run }), e.g. "a batch fell
     // back to per-property because the combined scan failed: <reason>".
     db.exec('CREATE TABLE IF NOT EXISTS index_run_notes (run_id INTEGER, note TEXT, at INTEGER)');
     // Analyst memory: durable curated findings. targets/aliases/links are JSON arrays.

@@ -40,7 +40,7 @@ function propExpr(catalog, modelKey, name) {
 /** SQL for a single event_data property condition (used for funnel-step scoping). */
 function propCond(catalog, modelKey, cond) {
   const found = factProp(catalog, modelKey, cond.property, 'where.property');
-  if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ source: '${modelKey}', event })`, 'where.property');
+  if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ request: { source: '${modelKey}', event } })`, 'where.property');
   const lhs = propExpr(catalog, modelKey, found.name);
   try { return comparison(lhs, cond.op, cond.value); } catch (e) { return fail(e.message, 'where.op'); }
 }
@@ -105,7 +105,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     // the tool cannot offer a field this then rejects.
     const columns = new Set([...(catalog.modelColumns(modelKey) || []).map((col) => col.name), ...catalog.entityKeyColumns(modelKey)]);
     if (!columns.has(field)) {
-      fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ model: '${modelKey}' }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
+      fail(`measure '${decl.name}': '${field}' is not a column, event property or aggregatable amount of '${modelKey}'. semantic_index({ request: { model: '${modelKey}' } }) lists its columns and amounts; a payload property is addressed by its property name.`, 'measures.field');
     }
     valueExpr = field;
   }
@@ -131,7 +131,7 @@ function compileDimension(catalog, task, modelKey, decl) {
   if (decl.source === 'event_property') {
     if (!catalog.isFact(modelKey)) fail(`event_property dimensions are only valid on an events fact (${catalog.facts.join(', ')}), not on '${modelKey}'`, 'dimensions.source');
     const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
-    if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ source: '${modelKey}', event })`, 'dimensions.property');
+    if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ request: { source: '${modelKey}', event } })`, 'dimensions.property');
     if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
     return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), _task: task, _attribute: found.name };
   }

@@ -24,7 +24,7 @@ export const semanticPreviewMethods = {
   async preview_semantic_model(input) {
     this._validate('preview_semantic_model', input);
     const ctx = this._ctx(input.context_id);
-    if (ctx.state.engine === 'pipeline') throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), which has no semantic layer — context({ action: 'describe', context_id: '${ctx.id}' }) lists its columns`, { stage: 'validate', field: 'context_id' });
+    if (ctx.state.engine === 'pipeline') throw new ToolError(`context ${ctx.id} holds a pipeline model (${ctx.state.model}), which has no semantic layer — context({ request: { action: 'describe', context_id: '${ctx.id}' } }) lists its columns`, { stage: 'validate', field: 'context_id' });
     if (input.time_range && !input.validate) throw new ToolError('time_range is the window validate runs the metrics over — pass validate: true with it', { stage: 'validate', field: 'time_range' });
     if (input.time_range?.timezone && !isValidTimezone(input.time_range.timezone)) throw new ToolError(`unknown timezone '${input.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`, { stage: 'validate', field: 'time_range.timezone' });
     const project = ctx.state.engine === 'project';
@@ -117,7 +117,7 @@ export const semanticPreviewMethods = {
     const inManifest = new Set(layer.metrics.map((m) => m.name));
     if (!project) {
       for (const m of ctx.state.metrics || []) {
-        if (!inManifest.has(m.name) && (!input.metric || input.metric === m.name)) shown.push({ severity: 'error', metric: m.name, message: `declared in this context but not in its parsed manifest — ${running ? 'its build is still running: preview again once it is done' : 'its last parse did not take it: read the build task (query_semantic_model({ task_id })) for the parse error'}` });
+        if (!inManifest.has(m.name) && (!input.metric || input.metric === m.name)) shown.push({ severity: 'error', metric: m.name, message: `declared in this context but not in its parsed manifest — ${running ? 'its build is still running: preview again once it is done' : 'its last parse did not take it: read the build task (query_semantic_model({ request: { task_id } })) for the parse error'}` });
       }
     }
     if (!parsed) shown.unshift({ severity: 'error', message: running ? 'the context has not been parsed yet — its build is running' : 'the context has no parsed semantic manifest — its build did not parse' });
@@ -167,8 +167,8 @@ export const semanticPreviewMethods = {
       metrics,
       // what a query of THIS context names a cut by
       ...(project ? {} : { groupable }),
-      ...(first ? { query_with: `query_semantic_model(${JSON.stringify({ context_id: ctx.id, metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }], time_range: { start: '<date>', end: '<date>' } })})` } : {}),
-      validate_with: `preview_semantic_model(${JSON.stringify({ context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } })})`,
+      ...(first ? { query_with: `query_semantic_model(${JSON.stringify({ request: { context_id: ctx.id, metrics: [first.name], group_by: [...(firstCut ? [firstCut] : []), { time: 'metric_time', grain: 'day' }], time_range: { start: '<date>', end: '<date>' } } })})` } : {}),
+      validate_with: `preview_semantic_model(${JSON.stringify({ request: { context_id: ctx.id, ...(input.metric ? { metric: input.metric } : input.semantic_model ? { semantic_model: input.semantic_model } : {}), validate: true, time_range: { start: '<date>', end: '<date>' } } })})`,
     };
   },
 

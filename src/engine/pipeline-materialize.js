@@ -66,7 +66,7 @@ export const pipelineMaterializeMethods = {
   _chainColumnHints(text) {
     const log = String(text || '');
     if (!/unknown column|Unrecognized name|column .* does not exist|no such column|Invalid column/i.test(log)) return [];
-    return ['If the failing column is one you declared in a python stage\'s `output.columns`, that declaration is what the SQL stages after it were rendered against — nothing projects the frame for you. The frame decides: make the last step return exactly those columns, or declare exactly what it returns. An estimator\'s output often has its OWN shape (a forecast, score(), PCA components), which is the case semantic_index({ recipe: "bf_ml_output_replaces_frame" }) works through; the response of a successful build reports the columns the table really has.'];
+    return ['If the failing column is one you declared in a python stage\'s `output.columns`, that declaration is what the SQL stages after it were rendered against — nothing projects the frame for you. The frame decides: make the last step return exactly those columns, or declare exactly what it returns. An estimator\'s output often has its OWN shape (a forecast, score(), PCA components), which is the case semantic_index({ request: { recipe: "bf_ml_output_replaces_frame" } }) works through; the response of a successful build reports the columns the table really has.'];
   },
 
   /**
@@ -132,7 +132,7 @@ export const pipelineMaterializeMethods = {
     if (draft.building) {
       throw new ToolError(
         `a build of this draft is already in flight (started ${draft.building.started_at}) — it is the SAME pipeline, so a second run would build nothing new and would write over the first one. `
-        + `${draft.building.task_id ? `Read it with query_pipeline_model({ task_id: '${draft.building.task_id}' })` : 'Read it with query_pipeline_model and the task_id its call returned'}; the result table is ${draft.building.model}.`,
+        + `${draft.building.task_id ? `Read it with query_pipeline_model({ request: { task_id: '${draft.building.task_id}' } })` : 'Read it with query_pipeline_model and the task_id its call returned'}; the result table is ${draft.building.model}.`,
         { stage: 'validate', field: 'draft_id' },
       );
     }
@@ -142,7 +142,7 @@ export const pipelineMaterializeMethods = {
     const plan = this._renderPlan(draft, draft.stages, { forBuild: true });
     const retiredNow = this._applyCheckpointPlan(ctx, draft, plan);
     if (plan.checkpoint && !plan.stages.length) {
-      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_step first${plan.checkpoint.task_id ? `, or read that build with query_pipeline_model({ task_id: '${plan.checkpoint.task_id}' })` : ''}`, { stage: 'validate', field: 'draft_id' });
+      throw new ToolError(`nothing to build: steps 1..${plan.checkpoint.at} are already materialized as ${plan.checkpoint.model} and there is no step after them — add_step first${plan.checkpoint.task_id ? `, or read that build with query_pipeline_model({ request: { task_id: '${plan.checkpoint.task_id}' } })` : ''}`, { stage: 'validate', field: 'draft_id' });
     }
     const modelName = this._nextPipelineModel(ctx, draft.name, { advance: true });
     // What this build computes, fixed now: the draft stays open and may grow while it runs.
@@ -218,8 +218,8 @@ export const pipelineMaterializeMethods = {
    * Register (or rebuild) a general transformation PIPELINE as a dbt model.
    * The pipeline's rows ARE the result: we materialize, build, and read them back.
    * It runs INSIDE a task (register_native_model, or a draft's materialize): the build is waited
-   * for here, and the caller reads the response with query_pipeline_model({ task_id }). A later pipeline re-slices
-   * the table without recomputing it: build_pipeline_model({ action: 'start', from_task }).
+   * for here, and the caller reads the response with query_pipeline_model({ request: { task_id } }). A later pipeline re-slices
+   * the table without recomputing it: build_pipeline_model({ request: { action: 'start', from_task } }).
    */
   async _registerPipeline(input, { ctxId: presetCtxId = null, taskId = null } = {}) {
     const dialect = this.catalog.dialect;
@@ -357,7 +357,7 @@ export const pipelineMaterializeMethods = {
         ...(models.length > 1
           ? [`The pipeline built as a chain of ${models.length} dbt models (${chainInfo.map((m) => `${m.model} [${m.kind}]`).join(' → ')}); each python stage is a Python model run by dbt on the warehouse's Python runtime, never here, reading the previous model via dbt.ref. The last, ${modelName}, is the result.${input.materialized === 'view' && last.kind === 'python' ? ' materialized: view was requested, but a Python model is a TABLE.' : ''}`]
           : [`Pipeline materialized as a ${materialized} model (${modelName}); its rows are the result.`]),
-        `To re-slice it without recomputing, start a pipeline FROM this build: build_pipeline_model({ action: 'start', name, from_task: '<this task_id>' }) — its steps read ${modelName}. Page its rows with query_pipeline_model({ task_id, offset, limit }), or filter / regroup them with query_pipeline_model({ context_id, transform }).`,
+        `To re-slice it without recomputing, start a pipeline FROM this build: build_pipeline_model({ request: { action: 'start', name, from_task: '<this task_id>' } }) — its steps read ${modelName}. Page its rows with query_pipeline_model({ request: { task_id, offset, limit } }), or filter / regroup them with query_pipeline_model({ request: { context_id, transform } }).`,
       ],
       warnings: [
         // The same per-stage judgements the incremental builder makes — a pipeline submitted all at

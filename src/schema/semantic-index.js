@@ -48,7 +48,7 @@ export function semanticIndexSchema(catalog) {
   };
 
   const branches = [
-    view('overview (no arguments)', 'OVERVIEW (no arguments): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
+    view('overview (an empty request)', 'OVERVIEW (an empty request): models, each source\'s events, group-by paths, value-index freshness, recipe ids.', [], {}),
     view('{ model }', 'VIEW { model }: one model — its entities, time axis, dimension attributes with real sample values, physical columns, declared relationships and aggregatable amounts.', ['model'], {
       model: field.model,
     }),
@@ -93,33 +93,9 @@ export function semanticIndexSchema(catalog) {
     // so the branch union narrows the shape but never replaces it.
     type: 'object',
     description: 'THE data-exploration entry point — call it FIRST and whenever unsure what a field means. One progressive index over meaning + real values + completeness + freshness. Pass NO arguments for the overview, then exactly ONE view: { model } | { source, event } | { source, property } | { search } | { status } | { run } | { bundle } | { recipe } | { guide }. Each view below lists what it takes; a source and a name are separate fields, never glued into one string.',
-    // A FLAT map of every field, next to the union. Some clients rewrite a tool schema for
-    // OpenAI-style function calling, where a union at the ROOT is not part of the supported
-    // subset: they drop it, and what the caller is then shown is an object with no fields at all
-    // — which is how "the server wants `source` but it was not in the schema" happens. The union
-    // is still the gate (a stripped schema only loses the narrowing, never the checking, because
-    // validation runs here); this map is what survives the stripping.
-    //
-    // A NAME is still never offered without its owner: `event` and `property` are plain strings
-    // here, and the per-source branch above is what enumerates the names of one source.
-    properties: {
-      model: field.model,
-      source: { enum: models, description: `The source a name belongs to — passed TOGETHER with \`event\` or \`property\` (each source owns its own events and payload; they are never mixed). One of: ${models.join(', ')}.` },
-      event: { type: 'string', description: 'An event NAME of `source` — the two are one address. The { source, event } branch for that source enumerates the names it declares.' },
-      property: { type: 'string', description: 'A payload property or attribute NAME of `source` — the two are one address. The { source, property } branch for that source enumerates the names it has.' },
-      search: field.search,
-      fuzzy: field.fuzzy,
-      status: field.status,
-      run: field.run,
-      ...(bundleSources.length ? { bundle: field.bundle } : {}),
-      recipe: field.recipe,
-      guide: field.guide,
-      ...paging,
-    },
-    // `anyOf`, not `oneOf`: every branch is CLOSED (additionalProperties: false) and has its own
-    // required set, so "at least one" and "exactly one" reject the same inputs here — and anyOf is
-    // inside the subset the strict function-calling schemas support, so a client that keeps it
-    // keeps the narrowing too.
+    // One closed form per view (an `anyOf` — src/schema-kit.js says why), each with its own required
+    // set, so exactly one matches. A NAME is never offered without its owner: the { source, event }
+    // and { source, property } forms enumerate one source's names each.
     anyOf: branches,
   };
 }

@@ -1,18 +1,29 @@
-// The two JSON Schema constructs that are INVALID when empty — `enum: []` and `oneOf: []` — built
-// so an empty one cannot be written down.
+// THE SCHEMA CONSTRUCTS EVERY TOOL IS WRITTEN WITH — the ones every client takes, built so an empty
+// one cannot be written down.
 //
-// A catalog decides every vocabulary in this server: which events a source declares, which columns
-// are groupable, which relationships exist. Any of them may legitimately be EMPTY in a catalog
-// someone writes tomorrow (an events source with no declared relationship, a dimension model that
-// carries only its key). Written straight into a schema, an empty vocabulary produces a schema ajv
-// refuses to compile — and since every tool schema is compiled while the Engine is constructed, the
-// SERVER DOES NOT START. The failure is total, it is far from the catalog that caused it, and no
-// test with a well-populated fixture can see it.
+// ONLY WHAT EVERY CLIENT READS. A tool's input reaches a model through its host's API, and the APIs
+// take a SUBSET of JSON Schema: Anthropic's refuses a whole request whose tool schema has a union at
+// its root, OpenAI's strict mode refuses `allOf`, `not` and `if/then/else`, and neither documents
+// `oneOf`. What both take is a plain object, `enum` / `const`, `$ref` into `$defs`, and `anyOf` below
+// the root. So a union here is an `anyOf` of CLOSED forms (`form`): each form lists exactly its own
+// fields (`additionalProperties: false`) and is told apart from the others by a pinned value — the
+// mode it is (`action: "start"`) — or by the fields it requires. Closed and told apart, exactly one
+// form matches any input, so the `anyOf` means what a `oneOf` would, in the spelling all of them read.
+// A rule "in this mode that field is required, this one is not allowed" is not a condition bolted on
+// beside the fields (`if/then`, `not`) but the form itself: the field is in its required list, or it is
+// not among its properties. test/unit/tool-schema-portability.test.js holds every published schema to
+// that subset.
 //
-// So the constructs are built here instead of inline, and the empty case is answered once:
+// EMPTY CONSTRUCTS. A catalog decides every vocabulary in this server: which events a source
+// declares, which columns are groupable, which relationships exist. Any of them may legitimately be
+// EMPTY in a catalog someone writes tomorrow (an events source with no declared relationship, a
+// dimension model that carries only its key). Written straight into a schema, an empty vocabulary
+// produces a schema ajv refuses to compile — and since every tool schema is compiled while the Engine
+// is constructed, the SERVER DOES NOT START. So the two constructs that are invalid when empty are
+// built here, and the empty case is answered once:
 //   strEnum  — no values → an open string (nothing valid to pick; compile-time checks still refuse
 //              a bad name), so the field stays writable and the schema stays valid.
-//   oneOfOr  — no branches → undefined, so the CALLER omits the field entirely: a choice with no
+//   anyOfOr  — no branches → undefined, so the CALLER omits the field entirely: a choice with no
 //              options is not a field the caller can fill in.
 // `assertSchemaSound` is the backstop: it walks a finished schema and names any empty construct
 // that got in another way, with the path to it.
@@ -26,11 +37,54 @@ export function strEnum(values, description) {
 }
 
 /** A choice between `branches` — or undefined when there is nothing to choose between. */
-export function oneOfOr(branches, rest = {}) {
-  return branches?.length ? { ...rest, oneOf: branches } : undefined;
+export function anyOfOr(branches, rest = {}) {
+  return branches?.length ? { ...rest, anyOf: branches } : undefined;
 }
 
-/** Drop the keys whose value is undefined — for spreading an `oneOfOr` that came back empty. */
+/** The named fields of `fields`, in the order named — what one form of a union takes. */
+export function pick(fields, names) {
+  return Object.fromEntries(names.filter((n) => fields[n] !== undefined).map((n) => [n, fields[n]]));
+}
+
+/**
+ * One CLOSED form of a union: exactly `properties`, `required` of them, and — with `tag` — one field
+ * pinned to the value(s) that say which form this is: `tag: ['action', 'start']`, or several values
+ * that share the form (`['action', ['preview', 'materialize']]`). A tag marked `optional` may be left
+ * out (the form a tool takes by default). `tagDescription` says what that value of the tag means.
+ */
+export function form({ title, description, tag, tagDescription, optionalTag = false, required = [], properties = {} }) {
+  const [key, value] = tag || [];
+  const pinned = key === undefined ? {} : {
+    [key]: {
+      ...(Array.isArray(value) ? (value.length === 1 ? { const: value[0] } : { enum: value }) : { const: value }),
+      ...(tagDescription ? { description: tagDescription } : {}),
+    },
+  };
+  const req = [...new Set([...(key !== undefined && !optionalTag ? [key] : []), ...required])];
+  return {
+    type: 'object',
+    additionalProperties: false,
+    ...(title ? { title } : {}),
+    ...(description ? { description } : {}),
+    ...(req.length ? { required: req } : {}),
+    properties: { ...pinned, ...properties },
+  };
+}
+
+/**
+ * A string that is anything but `value` — the one rule `not: { const }` would say, written in the
+ * portable subset: a string of another length, or one that differs from `value` at some position. Each
+ * alternative is a plain pattern (a character class and a count), so it reads the same everywhere.
+ */
+export function stringOtherThan(value, rest = {}) {
+  const v = String(value);
+  const esc = (c) => c.replace(/[\\\]^-]/g, (x) => `\\${x}`);
+  const lengths = [...(v.length ? [`^[\\s\\S]{0,${v.length - 1}}$`] : []), `^[\\s\\S]{${v.length + 1},}$`];
+  const positions = [...v].map((c, i) => `^[\\s\\S]{${i}}[^${esc(c)}][\\s\\S]{${v.length - i - 1}}$`);
+  return { type: 'string', ...rest, anyOf: [...lengths, ...positions].map((pattern) => ({ pattern })) };
+}
+
+/** Drop the keys whose value is undefined — for spreading an `anyOfOr` that came back empty. */
 export function withoutEmpty(obj) {
   return Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 }

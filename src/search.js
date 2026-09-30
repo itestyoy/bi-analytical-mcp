@@ -1,4 +1,4 @@
-// The catalog SEARCH subsystem behind semantic_index({ search }). Owns all matching +
+// The catalog SEARCH subsystem behind semantic_index({ request: { search } }). Owns all matching +
 // ranking so the engine just delegates. Five corpora are searched in one call:
 //   event names · event properties · dimension attributes · recipes · indexed VALUES.
 //
@@ -134,19 +134,19 @@ export class CatalogSearch {
     const recs = [];
     if (value_matches.length) {
       const top = value_matches[0];
-      recs.push(`Value '${top.value}' lives in ${top.model ? 'attribute' : 'property'} '${top.property}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ source: '${top.source}', property: '${top.property}' }).`);
-      if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ source: '${top.source}', event: '${top.events[0]}' }).`);
+      recs.push(`Value '${top.value}' lives in ${top.model ? 'attribute' : 'property'} '${top.property}' of source '${top.source}'${top.events ? ` (events: ${top.events.join(', ')})` : ''} — see its full value/frequency distribution: semantic_index({ request: { source: '${top.source}', property: '${top.property}' } }).`);
+      if (top.events?.[0]) recs.push(`See everything event '${top.events[0]}' carries: semantic_index({ request: { source: '${top.source}', event: '${top.events[0]}' } }).`);
     }
-    if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ recipe: '${recipe_matches[0].id}' }) returns a ready payload + the reusable technique.`);
-    if (dimension_matches.length) { const d = dimension_matches[0]; recs.push(`Attribute '${d.column}' of source '${d.source}' matches — drill its values with semantic_index({ source: '${d.source}', property: '${d.column}' }).`); }
-    if (property_matches.length) { const pm = property_matches[0]; recs.push(`Drill into property '${pm.property}' of source '${pm.source}' for its real values + cardinality: semantic_index({ source: '${pm.source}', property: '${pm.property}' }).`); }
-    if (event_names.length) { const ev = event_names[0]; recs.push(`See what event '${ev.event}' of source '${ev.source}' carries: semantic_index({ source: '${ev.source}', event: '${ev.event}' }).`); }
+    if (recipe_matches.length) recs.push(`Recipe '${recipe_matches[0].id}' covers this task type — semantic_index({ request: { recipe: '${recipe_matches[0].id}' } }) returns a ready payload + the reusable technique.`);
+    if (dimension_matches.length) { const d = dimension_matches[0]; recs.push(`Attribute '${d.column}' of source '${d.source}' matches — drill its values with semantic_index({ request: { source: '${d.source}', property: '${d.column}' } }).`); }
+    if (property_matches.length) { const pm = property_matches[0]; recs.push(`Drill into property '${pm.property}' of source '${pm.source}' for its real values + cardinality: semantic_index({ request: { source: '${pm.source}', property: '${pm.property}' } }).`); }
+    if (event_names.length) { const ev = event_names[0]; recs.push(`See what event '${ev.event}' of source '${ev.source}' carries: semantic_index({ request: { source: '${ev.source}', event: '${ev.event}' } }).`); }
 
     const all = [...event_names, ...property_matches, ...dimension_matches, ...value_matches, ...recipe_matches];
     if (all.length && !all.some((m) => m.match === 'exact')) {
       recs.unshift(`No exact match for '${query}' — these are the closest matches by similarity (fuzzy). Refine the spelling if none fit.`);
     }
-    if (!all.length) recs.push(`No catalog match for '${query}'${fuzzy ? '' : ' (fuzzy disabled)'}. Try semantic_index() for the event list, a broader substring${fuzzy ? '' : ', or drop fuzzy:false'}.`);
+    if (!all.length) recs.push(`No catalog match for '${query}'${fuzzy ? '' : ' (fuzzy disabled)'}. Try semantic_index({ request: {} }) for the event list, a broader substring${fuzzy ? '' : ', or drop fuzzy:false'}.`);
     return recs.slice(0, 4);
   }
 }

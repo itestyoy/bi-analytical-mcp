@@ -37,6 +37,7 @@ const RULES = [
     why: 'matching a generated name by prefix — one name may be a prefix of another',
     allow: {
       'engine/helpers.js': ['startsWith(`${tk}_`)'], // declaredAttribute: the fallback for contexts persisted before `_task`/`_attribute` existed
+      'validate.js': ['startsWith(`${base}/`)'], // a JSON pointer inside a refused call (ajv's instancePath), cut at a `/` — not a name
     },
   },
   {

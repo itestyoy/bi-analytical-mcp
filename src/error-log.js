@@ -100,7 +100,7 @@ export class ErrorLog {
     const shown = (r, full) => ({
       id: Number(r.id), at: iso(r.at), source: r.source, severity: r.severity,
       ...Object.fromEntries(['tool', 'stage', 'field', 'code', 'context_id', 'task_id'].filter((k) => r[k] != null).map((k) => [k, r[k]])),
-      message: full || !r.message || r.message.length <= 600 ? r.message : `${r.message.slice(0, 600)}… (explore_errors({ id: ${Number(r.id)} }) for all of it)`,
+      message: full || !r.message || r.message.length <= 600 ? r.message : `${r.message.slice(0, 600)}… (explore_errors({ request: { id: ${Number(r.id)} } }) for all of it)`,
       ...(full ? Object.fromEntries(['args', 'detail', 'context', 'files', 'runtime'].filter((k) => r[k] != null).map((k) => [k, parsed(r[k])])) : {}),
     });
     if (input.id != null) {
@@ -130,7 +130,7 @@ export class ErrorLog {
       ...(offset + rows.length < total ? { next_offset: offset + rows.length } : {}),
       errors: rows.map((r) => shown(r, input.detail === true)),
       by_source: this.summary(filter).map((g) => ({ ...g, last_at: iso(g.last_at) })),
-      note: `Newest first. explore_errors({ id }) gives one in full — what reproduces it: the call's arguments (a task's input), the state of the context it worked on, the code of each generated model the error names (as written and as dbt compiled it), the runtime, and everything the warehouse said. Kept ${this.retentionMs / 86400000} days, the newest ${this.maxRows}.`,
+      note: `Newest first. explore_errors({ request: { id } }) gives one in full — what reproduces it: the call's arguments (a task's input), the state of the context it worked on, the code of each generated model the error names (as written and as dbt compiled it), the runtime, and everything the warehouse said. Kept ${this.retentionMs / 86400000} days, the newest ${this.maxRows}.`,
     };
   }
 

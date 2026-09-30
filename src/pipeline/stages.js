@@ -5,7 +5,8 @@
 
 import { GRAINS } from '../catalog.js';
 import { NAME, AGG_FNS, SKETCH_FNS, statAccuracyNote, OPERAND, CONDITION, propEnum, sourceProp, operandSql, condPred, aggExpr, addCol, requireCol } from './sql.js';
-import { COMPUTE_OPS, computeRequirements } from './compute.js';
+import { COMPUTE_OPS, computeForms } from './compute.js';
+import { form, pick } from '../schema-kit.js';
 
 // ── Stage registry ───────────────────────────────────────────────────────────
 export const STAGES = {
@@ -24,24 +25,28 @@ export const STAGES = {
 
   derive: {
     keepsSourceRows: true,
-    schema: (catalog) => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'name', 'op'],
-      allOf: [
-        { if: { properties: { op: { enum: ['extract', 'array_length', 'contains', 'struct_field'] } }, required: ['op'] }, then: { required: ['source'] } },
-        { if: { properties: { op: { const: 'contains' } }, required: ['op'] }, then: { required: ['value'] } },
-        { if: { properties: { op: { const: 'struct_field' } }, required: ['op'] }, then: { required: ['field'] } },
-      ],
-      description: 'Add ONE scalar column from an event property — `extract` a scalar value, or `array_length`/`contains`/`struct_field` for array/struct properties. Surfaces a payload field so it can be filtered, grouped, or aggregated. For math/time/CASE/window over EXISTING columns, use `compute`.',
-      properties: {
+    schema: (catalog) => {
+      const fields = {
         stage: { enum: ['derive'] },
         name: { type: 'string', pattern: NAME },
-        op: { enum: ['extract', 'array_length', 'contains', 'struct_field'] },
         source: propEnum(catalog.eventPropEnum(), 'event_data property the value derives from — one of the PIPELINE SOURCE\'s own properties (a property of another source is rejected, naming the source that has it).'),
-        value: { description: 'Membership value for op=contains.' },
-        field: { type: 'string', description: 'Struct field for op=struct_field.' },
+        value: { description: 'The value to look for in the array.' },
+        field: { type: 'string', description: 'The struct field to read.' },
         type: { enum: ['int', 'integer', 'numeric', 'float', 'string'], description: 'Result/extract type (default string).' },
-      },
-    }),
+      };
+      // one form per op, each with the fields that op reads
+      const op = (value, title, needs, may = []) => form({ title, tag: ['op', value], required: ['stage', 'name', 'source', ...needs], properties: pick(fields, ['stage', 'name', 'source', ...needs, ...may]) });
+      return {
+        type: 'object',
+        description: 'Add ONE scalar column from an event property — `extract` a scalar value, or `array_length`/`contains`/`struct_field` for array/struct properties. Surfaces a payload field so it can be filtered, grouped, or aggregated. For math/time/CASE/window over EXISTING columns, use `compute`.',
+        anyOf: [
+          op('extract', 'op: extract — a scalar value', [], ['type']),
+          op('array_length', 'op: array_length — how many elements an array holds', []),
+          op('contains', 'op: contains — whether an array holds `value`', ['value']),
+          op('struct_field', 'op: struct_field — one field of a struct', ['field'], ['type']),
+        ],
+      };
+    },
     build: ({ d, catalog, cols, source }, p) => {
       // The RAW payload blob. Only a BLOB property is ever read through it; a flattened payload
       // column carries its value itself and is referenced directly below — which is what makes
@@ -85,14 +90,8 @@ export const STAGES = {
 
   compute: {
     keepsSourceRows: true,
-    schema: () => ({
-      type: 'object', additionalProperties: false, required: ['stage', 'name', 'op'],
-      allOf: computeRequirements(),
-      description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, string fns, date functions (date_diff/date_trunc/date_part/unix_date/elapsed_days), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running & rolling aggregates). Each op enforces its required params at the schema level.',
-      properties: {
-        stage: { enum: ['compute'] },
-        name: { type: 'string', pattern: NAME },
-        op: { enum: Object.keys(COMPUTE_OPS) },
+    schema: () => {
+      const fields = {
         field: { type: 'string', description: 'Struct field name for op=json_field — extract one field from a column holding a JSON OBJECT: an unnested array-of-struct element, or a flattened payload column that holds JSON (e.g. a crash report\'s custom keys).' },
         value: { description: 'Constant literal (number / string / boolean) for op=const.' },
         left: OPERAND, right: OPERAND, // arithmetic
@@ -133,8 +132,13 @@ export const STAGES = {
             following: { description: 'Upper bound: an integer offset, "unbounded", or 0/omitted = CURRENT ROW.' },
           },
         },
-      },
-    }),
+      };
+      return {
+        type: 'object',
+        description: 'Add a column from existing columns + literals: arithmetic, rounding, coalesce, cast, string fns, date functions (date_diff/date_trunc/date_part/unix_date/elapsed_days), a CASE expression (op=case), or a window function (op=window: row_number/rank/lag/lead/running & rolling aggregates). Each op enforces its required params at the schema level.',
+        anyOf: computeForms({ required: ['stage', 'name', 'op'], properties: { stage: { enum: ['compute'] }, name: { type: 'string', pattern: NAME } } }, fields),
+      };
+    },
     build: ({ d, cols }, p) => {
       const op = Object.hasOwn(COMPUTE_OPS, p.op) ? COMPUTE_OPS[p.op] : null;
       if (!op) throw new Error(`compute: bad op ${p.op}`);
@@ -190,22 +194,22 @@ export const STAGES = {
     recommend: () => ['Joined columns are now referenceable; add a where to filter on them or an aggregate to roll up.'],
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'with'],
-      description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ model }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
+      description: 'Bring in columns from a related model, exposing them for grouping and date math. PREFER `via`: the relationship and its key columns are declared in the catalog schema, so you never restate them and cannot pick the wrong column. Use `on` only for an ad-hoc match on a column both sides happen to name identically. Add `between` when the joined model keeps SEVERAL VERSIONS per key (a validity window): without it every row matches every historical version and counts/sums inflate. `attrs` is REQUIRED and it is the whole contract: exactly the columns you list arrive, nothing is pulled in implicitly, so what the next stage sees is what you asked for. semantic_index({ request: { model } }) lists what a model has to offer. Join stages STACK — each one sees everything the previous ones added, so a chain can reach several models; `via` always resolves its left-hand key on the pipeline\'s OWN source, so every relationship you chain must be declared there.',
       anyOf: [{ required: ['via'] }, { required: ['on'] }],
       properties: {
         stage: { enum: ['join'] },
         with: { type: 'string', enum: catalog.modelKeys(), description: 'Catalog model to join (any model but the pipeline\'s own source).' },
-        via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ model }) lists each model\'s relationships, their key columns and what they point at.' },
+        via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ request: { model } }) lists each model\'s relationships, their key columns and what they point at.' },
         on: {
           description: 'Ad-hoc fallback when no relationship is declared: key column(s) that exist under the SAME NAME on both sides. A single name, or several for a composite key.',
-          oneOf: [{ type: 'string' }, { type: 'array', minItems: 1, items: { type: 'string' } }],
+          anyOf: [{ type: 'string' }, { type: 'array', minItems: 1, items: { type: 'string' } }],
         },
         attrs: {
           type: 'array',
           minItems: 1,
-          description: 'REQUIRED — the columns of the joined model to expose, and the ONLY ones that arrive. Nothing is added implicitly: list what the downstream stages will use. Each entry is a column name, or { column, as } to expose it under a different name. A name that would end up used twice — because the pipeline already has one, or because two entries resolve to the same name — is rejected with the reason and the rename to apply, since one name cannot address two columns. semantic_index({ model }) lists the joined model\'s columns.',
+          description: 'REQUIRED — the columns of the joined model to expose, and the ONLY ones that arrive. Nothing is added implicitly: list what the downstream stages will use. Each entry is a column name, or { column, as } to expose it under a different name. A name that would end up used twice — because the pipeline already has one, or because two entries resolve to the same name — is rejected with the reason and the rename to apply, since one name cannot address two columns. semantic_index({ request: { model } }) lists the joined model\'s columns.',
           items: {
-            oneOf: [
+            anyOf: [
               { type: 'string', description: 'A column of the joined model, exposed under its own name.' },
               {
                 type: 'object', additionalProperties: false, required: ['column'],
@@ -267,7 +271,7 @@ export const STAGES = {
         throw new Error(
           `join '${p.with}': \`attrs\` is required — list the columns you want from it; nothing is added implicitly.`
           + `${joined.size ? ` Columns of '${p.with}': ${avail()}.` : ''}`
-          + ` Use { column, as } to expose one under a different name. semantic_index({ model: '${p.with}' }) describes them.`,
+          + ` Use { column, as } to expose one under a different name. semantic_index({ request: { model: '${p.with}' } }) describes them.`,
         );
       }
       const attrs = p.attrs.map((a) => (typeof a === 'string' ? { column: a, as: a } : { column: a.column, as: a.as || a.column }));
@@ -316,7 +320,7 @@ export const STAGES = {
       `Aggregated: the output is now group_by keys + measures (${listSome(available)}); add order_by/limit or materialize.`,
       // Comparing two groups? The stats live in a tool — don't hand-roll a t-test: the experiment
       // tool's analyze is a GENERAL two-sample significance test (not only randomized experiments).
-      'Comparing two groups (A vs B, before/after, first vs last)? Don\'t compute significance by hand — feed the per-group aggregates to experiment({ action: "analyze", metric: "mean" → n + mean + stddev (Welch t-test), "proportion" → conversions + n (z-test) }) for the p-value and CI.',
+      'Comparing two groups (A vs B, before/after, first vs last)? Don\'t compute significance by hand — feed the per-group aggregates to experiment({ request: { action: "analyze", metric: "mean" → n + mean + stddev (Welch t-test), "proportion" → conversions + n (z-test) } }) for the p-value and CI.',
     ],
     schema: (catalog) => ({
       type: 'object', additionalProperties: false, required: ['stage', 'measures'],
@@ -332,7 +336,7 @@ export const STAGES = {
       properties: {
         stage: { enum: ['aggregate'] },
         group_by: { type: 'array', items: { type: 'string' }, description: 'Grouping columns (empty = grand total).' },
-        measures: { type: 'array', minItems: 1, items: { type: 'object', additionalProperties: false, required: ['name', 'fn'], allOf: [{ if: { properties: { fn: { const: 'percentile' } }, required: ['fn'] }, then: { required: ['q'] } }, { if: { properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median', 'percentile'] } }, required: ['fn'] }, then: { required: ['column'] } }], properties: { name: { type: 'string', pattern: NAME }, fn: { enum: AGG_FNS, description: 'Aggregate: sum/avg/min/max/count/count_distinct; statistical stddev/variance/median/percentile. For DISTINCT counts PREFER the HLL sketch path — approx_count_distinct (one-shot HLL++), or hll_init (build a sketch per group) → hll_merge (combine sketches): high accuracy AND mergeable, so a distinct count re-aggregates across time buckets / segments and composes incrementally (exact count_distinct is NOT additive across groups — use it only for an exact integer on a small set).' }, column: { type: 'string' }, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1) for fn=percentile.' } } } },
+        measures: { type: 'array', minItems: 1, items: aggregateMeasure('Aggregate: sum/avg/min/max/count/count_distinct; statistical stddev/variance/median/percentile. For DISTINCT counts PREFER the HLL sketch path — approx_count_distinct (one-shot HLL++), or hll_init (build a sketch per group) → hll_merge (combine sketches): high accuracy AND mergeable, so a distinct count re-aggregates across time buckets / segments and composes incrementally (exact count_distinct is NOT additive across groups — use it only for an exact integer on a small set).') },
       },
     }),
     build: ({ d, cols }, p) => {
@@ -457,7 +461,27 @@ export function availableStages(catalog) {
 }
 
 export function pipelineStageSchema(catalog) {
-  // discriminator on `stage` → a bad stage reports only THAT stage's requirements, not every
-  // stage's (each stage schema pins stage:{const} + requires it), so errors stay actionable.
-  return { discriminator: { propertyName: 'stage' }, oneOf: availableStages(catalog).map((s) => s.schema(catalog)) };
+  // each stage's schema pins `stage` to its own name, so exactly one branch is the stage asked for —
+  // and the refusal of a bad stage is that stage's, not every stage's (src/validate.js)
+  return { anyOf: availableStages(catalog).map((s) => s.schema(catalog)) };
+}
+
+/**
+ * One measure of an aggregate stage, in three forms told apart by its `fn`: a percentile, which reads a
+ * column at the quantile `q`; the functions that read a column; and the ones for which a column is
+ * optional (count counts rows without one; the sketch functions read one when given).
+ */
+function aggregateMeasure(fnDescription) {
+  const needColumn = ['sum', 'avg', 'min', 'max', 'count_distinct', 'approx_count_distinct', 'stddev', 'variance', 'median'];
+  const optional = AGG_FNS.filter((f) => f !== 'percentile' && !needColumn.includes(f));
+  const name = { type: 'string', pattern: NAME };
+  const column = { type: 'string' };
+  return {
+    type: 'object',
+    anyOf: [
+      form({ title: `fn: ${needColumn.join(' | ')}`, tag: ['fn', needColumn], tagDescription: fnDescription, required: ['name', 'column'], properties: { name, column } }),
+      form({ title: `fn: ${optional.join(' | ')}`, tag: ['fn', optional], tagDescription: fnDescription, required: ['name'], properties: { name, column } }),
+      form({ title: 'fn: percentile', tag: ['fn', 'percentile'], tagDescription: fnDescription, required: ['name', 'column', 'q'], properties: { name, column, q: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: 'Quantile in (0,1).' } } }),
+    ],
+  };
 }

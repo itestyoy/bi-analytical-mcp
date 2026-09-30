@@ -62,7 +62,7 @@ export class WarehouseProbe {
 
   /**
    * Physical column NAMES (lowercased Set) of a source's relation, via the same
-   * introspection semantic_index({ model }) uses — cached per source. null when it
+   * introspection semantic_index({ request: { model } }) uses — cached per source. null when it
    * cannot be known (no runner / relation not built / introspection failed / slower than
    * the grace), in which case the catalog's declared columns are used as-is (grounding
    * is skipped).

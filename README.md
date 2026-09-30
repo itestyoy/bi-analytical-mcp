@@ -28,7 +28,12 @@ Design docs:
 | `build_semantic_model` | declaratively create/augment SMs + metrics in an isolated context (one SM per table); `action: "update"` edits the task already there (add/remove measures, dimensions, metrics) |
 | `build_pipeline_model` | compose a pipeline incrementally (start → add_step* → materialize) whose rows are the result; a `python` stage — anywhere, any number of times — is a dbt **Python model** of its own run on the warehouse's Python runtime; the pipeline builds as a chain of dbt models reading each other via `ref`, and steps work on the frame `dbt.ref()` returns there (BigFrames / Snowpark / PySpark), nothing is converted for them |
 | `query_semantic_model` | run `mf query` against a context (metrics + group_by + where) |
-| `context` | manage contexts: `{ action: list \| describe \| drop \| delete_model \| delete_semantic_model }` |
+| `context` | read contexts: `{ action: list \| describe }`; `delete_context` removes one |
+
+Every tool takes its input under one field, `request`: `semantic_index({ request: { recipe: "…" } })`.
+The shapes above are that field's content. A tool's schema is a closed root with this one field,
+and its modes are an `anyOf` of closed forms under it. That shape is accepted as-is by the Anthropic
+and OpenAI APIs, so a client is shown the whole schema the server checks.
 
 ## Architecture
 

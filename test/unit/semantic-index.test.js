@@ -130,7 +130,8 @@ function engineFor(yaml) {
 test('semantic_index: an event or a column is never asked for without its source', async () => {
   // ONE events source: being the only one earns it no shortcut — the pairing is still written out.
   const one = engineFor(SINGLE_SOURCE);
-  await assert.rejects(() => one.semantic_index({ event: 'login' }), /unexpected property 'event'/);
+  // the refusal says what to add: the source, in the { source, event } view
+  await assert.rejects(() => one.semantic_index({ event: 'login' }), /\{ source, event \}.*missing required property 'source'/);
   assert.equal((await one.semantic_index({ source: 'events', event: 'login' })).event, 'login');
 
   // SEVERAL events sources: same rule, same spelling — nothing about the catalog changes it.
@@ -145,6 +146,6 @@ test('semantic_index: an event or a column is never asked for without its source
   await assert.rejects(() => two.semantic_index({ source: 'events', event: 'boom' }), /`event` must be one of: login, purchase/);
 
   // A COLUMN is addressed the same way: a bare name has no spelling in either catalog.
-  await assert.rejects(() => one.semantic_index({ property: 'user_id' }), /unexpected property 'property'/);
-  await assert.rejects(() => two.semantic_index({ property: 'user_id' }), /unexpected property 'property'/);
+  await assert.rejects(() => one.semantic_index({ property: 'user_id' }), /\{ source, property \}.*missing required property 'source'/);
+  await assert.rejects(() => two.semantic_index({ property: 'user_id' }), /\{ source, property \}.*missing required property 'source'/);
 });

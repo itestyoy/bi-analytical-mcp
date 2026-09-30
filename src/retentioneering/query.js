@@ -148,7 +148,7 @@ export async function query(engine, feature, input) {
   const upto = es.checkpoint?.upto || 0;
   if (es.steps.length > upto) {
     const pending = es.steps.slice(upto).map((s, i) => `${upto + i + 1} ${s.step.type}`);
-    throw new ToolError(`eventstream '${es.name}' has step${pending.length === 1 ? '' : 's'} not materialized yet (${pending.join(', ')}) — ${BUILD}({ action: 'materialize', context_id: '${ctx.id}', eventstream: '${es.name}' }) builds ${pending.length === 1 ? 'it' : 'them'}, and the analyses then read the eventstream after ${pending.length === 1 ? 'it' : 'them'}`, { stage: 'validate', field: 'eventstream' });
+    throw new ToolError(`eventstream '${es.name}' has step${pending.length === 1 ? '' : 's'} not materialized yet (${pending.join(', ')}) — ${BUILD}({ request: { action: 'materialize', context_id: '${ctx.id}', eventstream: '${es.name}' } }) builds ${pending.length === 1 ? 'it' : 'them'}, and the analyses then read the eventstream after ${pending.length === 1 ? 'it' : 'them'}`, { stage: 'validate', field: 'eventstream' });
   }
   const shape = es.checkpoint?.shape || es.base.shape;
   const analyses = validateAnalyses(es, shape, input.analyses);
@@ -236,7 +236,7 @@ export function answer(engine, feature, id, out, detail = 'summary') {
   return {
     ok: true, kind: 'analyses', context_id: out.context_id, eventstream: out.eventstream,
     analyses: detail === 'full' ? out.analyses : Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, summarize(r)])),
-    ...(drawable.length ? { show_to_user: { tool: DISPLAY, arguments: { task_id: id, analysis: drawable[0] }, why: `in a host that renders MCP Apps this draws one analysis as a card (${drawable.join(', ')} can be drawn) — once per analysis, for what the person should see.` } } : {}),
+    ...(drawable.length ? { show_to_user: { tool: DISPLAY, arguments: { request: { task_id: id, analysis: drawable[0] } }, why: `in a host that renders MCP Apps this draws one analysis as a card (${drawable.join(', ')} can be drawn) — once per analysis, for what the person should see.` } } : {}),
   };
 }
 
@@ -281,7 +281,7 @@ export async function readTasks(engine, feature, input) {
   const results = [];
   for (const id of input.task_ids) results.push(await readTask(engine, feature, id, { wait_seconds: 0, detail: input.detail }));
   const running = results.filter((r) => r.status === 'running').map((r) => r.task_id);
-  return { ok: true, status: running.length ? 'running' : 'done', results, ...(running.length ? { next: `${running.length} still running — call ${QUERY}({ task_ids: [${running.map((i) => `'${i}'`).join(', ')}] }) for them` } : {}) };
+  return { ok: true, status: running.length ? 'running' : 'done', results, ...(running.length ? { next: `${running.length} still running — call ${QUERY}({ request: { task_ids: [${running.map((i) => `'${i}'`).join(', ')}] } }) for them` } : {}) };
 }
 
 /** A finished task's output: held in memory, else read from its stored table — a query task's with a

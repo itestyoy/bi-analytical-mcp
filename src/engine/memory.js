@@ -66,15 +66,15 @@ export class MemoryTool {
     // rather than linking to something the caller did not write.
     const own = [...c.propertyEnumFor(source), ...(c.isFact(source) ? c.eventNames(source) : [])];
     const near = rankFuzzy(name, own, { fields: (x) => [x], threshold: 0.7, limit: 3 }).map((m) => `'${m.item}'`);
-    throw new ToolError(`memory target: '${name}' is not a property, attribute or event of '${source}'.${near.length ? ` Did you mean: ${near.join(', ')}?` : ''} semantic_index({ model: '${source}' }) lists what it carries.`, { stage: 'validate', field: 'targets' });
+    throw new ToolError(`memory target: '${name}' is not a property, attribute or event of '${source}'.${near.length ? ` Did you mean: ${near.join(', ')}?` : ''} semantic_index({ request: { model: '${source}' } }) lists what it carries.`, { stage: 'validate', field: 'targets' });
   }
 
   /** Where a resolved target's findings surface in semantic_index (a ready call to copy). */
   surfaceHint({ kind, addressable: target }) {
-    if (kind === 'property') return `semantic_index({ source: '${target.source}', property: '${target.name}' })`;
-    if (kind === 'event') return `semantic_index({ source: '${target.source}', event: '${target.name}' })`;
-    if (kind === 'model') return `semantic_index({ model: '${target.source}' })`;
-    return `semantic_index({ search: '${target.term}' })`;
+    if (kind === 'property') return `semantic_index({ request: { source: '${target.source}', property: '${target.name}' } })`;
+    if (kind === 'event') return `semantic_index({ request: { source: '${target.source}', event: '${target.name}' } })`;
+    if (kind === 'model') return `semantic_index({ request: { model: '${target.source}' } })`;
+    return `semantic_index({ request: { search: '${target.term}' } })`;
   }
 
   /** Compact notes linked to any of these TARGETS, for attaching to a semantic_index view. */
@@ -84,8 +84,8 @@ export class MemoryTool {
 
   /**
    * Attach saved findings to a semantic_index view COMPACTLY (token-lean): the `cap` most recent,
-   * each note truncated. Always leaves an explicit drill so nothing is lost — memory({ action:
-   * 'list', target }) returns EVERY linked finding in full. `drillTarget` is the singular target
+   * each note truncated. Always leaves an explicit drill so nothing is lost — memory({ request: { action:
+   * 'list', target } }) returns EVERY linked finding in full. `drillTarget` is the singular target
    * that view is about — { source, name } for a property/attribute/event, { source } for a model.
    */
   attach(out, targets, drillTarget, { cap = 3 } = {}) {
@@ -98,7 +98,7 @@ export class MemoryTool {
     if (hiddenCount > 0) out.memory_more = hiddenCount;
     if (hiddenCount > 0 || truncatedAny) {
       (out.next_actions ||= []).push({
-        call: `memory({ action: 'list', target: ${JSON.stringify(drillTarget)} })`,
+        call: `memory({ request: { action: 'list', target: ${JSON.stringify(drillTarget)} } })`,
         why: hiddenCount > 0
           ? `read all ${all.length} saved findings linked here IN FULL (only the ${shown.length} most recent are shown, truncated)`
           : `read the ${all.length} finding(s) above IN FULL (note text is truncated here)`,
@@ -136,7 +136,7 @@ export class MemoryTool {
         linked_to: resolved.map((r) => ({ kind: r.kind, target: r.addressable, surfaces_in: this.surfaceHint(r) })),
         ...(resolved.some((r) => r.kind === 'term') ? { unresolved_terms: resolved.filter((r) => r.kind === 'term').map((r) => r.addressable.term) } : {}),
         aliases, links,
-        next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ search }) (and memory({ action: "search" })) — including the aliases/words above.',
+        next: 'Saved. This finding now surfaces in semantic_index on the linked entities and via semantic_index({ request: { search } }) (and memory({ request: { action: "search" } })) — including the aliases/words above.',
       };
     }
 
@@ -165,7 +165,7 @@ export class MemoryTool {
 
 /**
  * A resolved memory target: `target` is what gets STORED (the kind and its parts), `addressable` is
- * the same thing as the tool speaks it back — what you hand to memory({ action: 'list', target })
+ * the same thing as the tool speaks it back — what you hand to memory({ request: { action: 'list', target } })
  * — and `label` is its words, for fuzzy matching and messages. Nothing here is ever re-parsed.
  */
 function memoryTarget(kind, source, name = null) {
@@ -175,13 +175,13 @@ function memoryTarget(kind, source, name = null) {
 
 // Compact form of a saved finding for ATTACHING to a semantic_index view: id + a truncated note +
 // the date. The full text + question + about[] + aliases[] + links[] are fetched on demand via
-// memory({ action: 'list', target }) — so the view stays light without losing the finding.
+// memory({ request: { action: 'list', target } }) — so the view stays light without losing the finding.
 function memoryCompact(e, maxLen = 220) {
   const note = String(e.note || '');
   const truncated = note.length > maxLen;
   // Keep the semantically useful, usually-short parts inline (note/question/about); drop the long
   // search-metadata (aliases/links). The full untruncated note + aliases/links is one drill away
-  // via memory({ action: 'list', target }).
+  // via memory({ request: { action: 'list', target } }).
   const targets = [...(e.targets || [])];
   return {
     view: {

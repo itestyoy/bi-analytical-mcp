@@ -1,5 +1,7 @@
 // THE MEMORY TOOL'S INPUT — durable analyst findings, each linked to what it is about in the catalog.
 
+import { form } from '../schema-kit.js';
+
 // ── Analyst memory (durable findings linked to catalog entities) ───────────────
 // A single action-driven tool. `record` saves a finding (+ the entities it is about,
 // the user's phrasings, and any source links); list/search/forget manage them. Strict
@@ -13,7 +15,7 @@
 export function memoryTargetSchema(catalog, description) {
   return {
     ...(description ? { description } : {}),
-    oneOf: [
+    anyOf: [
       {
         title: '{ source, name }',
         type: 'object', additionalProperties: false, required: ['source'],
@@ -39,7 +41,7 @@ export function memorySchema(catalog) {
     question: { type: 'string', description: 'The ORIGINAL business question / analytical goal this finding answers — why you looked it up, in the stakeholder\'s terms (e.g. "which ad format drives the most rewarded-video revenue?"). Embedded together with the note, so a future similarly-phrased business question retrieves this insight by meaning. Include it whenever the finding answers a real question.' },
     targets: { type: 'array', items: memoryTargetSchema(catalog), description: 'The catalog entities this finding is ABOUT (an ARRAY — note the plural), so it surfaces on their semantic_index views. Each is { source, name } — a property, user attribute or event of that source (e.g. { source: "events", name: "ad_type_of_event_data" }) — or { source } alone for the model itself. A name is never written on its own: the source says which entity it is. A phrase the catalog has no entity for is written { term: "..." } and stays searchable as itself.' },
     aliases: { type: 'array', items: { type: 'string' }, description: 'The word(s)/phrasing for this finding — give them IN BOTH the user\'s language AND English (e.g. ["ad format", "формат рекламы", "тип рекламы"]). Bilingual aliases make retrieval work cross-language: the lexical/fuzzy match needs the literal words (it cannot bridge scripts on its own), and the aliases are also embedded with the note so a query in either language matches by meaning. Add the user\'s exact wording + synonyms in each language.' },
-    links: { type: 'array', description: 'Associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { oneOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
+    links: { type: 'array', description: 'Associated sources for the finding — a Confluence page, a dashboard, a ticket. A URL string, or { url, title }.', items: { anyOf: [{ type: 'string', description: 'A URL.' }, { type: 'object', additionalProperties: false, required: ['url'], properties: { url: { type: 'string', description: 'Link URL.' }, title: { type: 'string', description: 'Human-readable title.' } } }] } },
     target: memoryTargetSchema(catalog, 'Return notes linked to this ONE entity (singular — the same forms as record\'s `targets`).'),
     query: { type: 'string', description: 'A word/phrase to match against note text, the business question, aliases and linked targets. Token-aware + typo-tolerant fuzzy by default; when embeddings are enabled it ALSO matches by MEANING (a same-sense note with no shared words still surfaces).' },
     fuzzy: { type: 'boolean', description: 'Enable typo/approximate lexical matching (default true). false = exact word/substring only (semantic matching, if enabled, still runs).' },
@@ -47,23 +49,14 @@ export function memorySchema(catalog) {
     limit: { type: 'integer', minimum: 1, maximum: 200, description: 'Max notes to return (default 50 for list, 20 for search).' },
   };
 
-  // One strict, self-contained branch per action: ONLY its fields, additionalProperties:false,
-  // its required set. The AI sees exactly what to pass for the chosen action — no guessing.
-  const branch = (act, props, required, desc) => ({
-    type: 'object', additionalProperties: false, required: ['action', ...required],
-    title: act, description: desc,
-    properties: { action: { enum: [act] }, ...props },
-  });
+  // One strict, self-contained form per action: ONLY its fields, closed, its required set — the AI
+  // sees exactly what to pass for the chosen action, and a field of another action is refused.
+  const branch = (act, props, required, desc) => form({ title: act, description: desc, tag: ['action', act], required, properties: props });
 
   return {
     type: 'object',
-    required: ['action'],
     description: 'Durable analyst memory: save what you found out — a vague request tracked down to a real field, a gotcha, a useful source — linked to the catalog entities it concerns, so it comes back through semantic_index next time. Pick exactly one action; each action has its own fixed field set (a field that does not belong to the action is rejected): record = save a finding (note [required] + question + targets[] + aliases[] + links[]); list = read notes (no args = all; { target } = notes about one entity); search = find notes by a word/phrase ({ query } [required] + fuzzy + limit); forget = delete one note ({ id } [required]). Record one atomic finding per note — when studying a topic/document, make several small single-fact notes, not one big dump. Note: record takes the plural `targets` (array); list takes the singular `target`.',
-    discriminator: { propertyName: 'action' },
-    // Union of every action\'s fields (gives MCP clients the real types); the selected
-    // oneOf branch below enforces the exact per-action field set + rejects foreign fields.
-    properties: { action: { enum: ['record', 'list', 'search', 'forget'], description: 'record → save a finding; list → read notes (all, or one { target }); search → find notes by { query }; forget → delete one note by { id }.' }, ...F },
-    oneOf: [
+    anyOf: [
       branch('record', { note: F.note, question: F.question, targets: F.targets, aliases: F.aliases, links: F.links }, ['note'],
         'Save a finding. Required: note (one atomic fact). Optional: question (the business question it answers), targets (PLURAL array of entities it is about), aliases (the words the user used), links (sources).'),
       branch('list', { target: F.target, limit: F.limit }, [],

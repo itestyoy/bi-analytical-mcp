@@ -1,13 +1,14 @@
-// THE COMPUTE STAGE'S OPS — one table: each op's required fields and its SQL. The stage's schema (the
-// op enum, the per-op requirements) and its build both read it (src/pipeline/stages.js).
+// THE COMPUTE STAGE'S OPS — one table: each op's fields and its SQL. The stage's schema (one form per
+// op, with exactly that op's fields) and its build both read it (src/pipeline/stages.js).
 
 import { rawUnknownColumns, condPred, frameClause, requireCol, requireArrayCol } from './sql.js';
 
 // ── The compute stage's ops ─────────────────────────────
-// One entry per op: what it needs (`needs` — the fields its schema makes required, or `then` for a rule
-// that is not a plain list) and how it is written (`sql`, over one step's helpers → { expr, type },
-// type 'numeric' when it is not said). The op enum, the schema's per-op requirements and the build all
-// read this table, so an op is added in one place.
+// One entry per op: the fields it requires (`needs`), the ones it may take besides (`may` — what its
+// `sql` reads when given), or several alternative field sets (`forms`, for an op written two ways), and
+// how it is written (`sql`, over one step's helpers → { expr, type }, type 'numeric' when it is not
+// said). The schema's forms and the build both read this table, so an op is added in one place — and a
+// field an op does not read is not in its form, so it is refused instead of silently ignored.
 export const fn1 = (fn, type) => ({ needs: ['column'], sql: ({ col }) => ({ expr: `${fn}(${col()})`, type }) });
 
 export const arith = (sym) => ({
@@ -22,7 +23,7 @@ export const arith = (sym) => ({
 // operands may be literals as well as columns: `parts` takes operands, `columns` stays the shorthand
 // for the all-columns form.
 export const clamp = (fn) => ({
-  then: { anyOf: [{ title: 'all-columns form: { columns: ["a", "b"] }', required: ['columns'] }, { title: 'with a literal: { parts: [{ column: "a" }, { value: 12.5 }] }', required: ['parts'] }] },
+  forms: [{ title: 'all-columns form: { columns: ["a", "b"] }', needs: ['columns'] }, { title: 'with a literal: { parts: [{ column: "a" }, { value: 12.5 }] }', needs: ['parts'] }],
   sql: ({ operand, list, p }) => {
     const args = p.parts?.length ? p.parts.map((o, i) => operand(o, `part[${i}]`)) : list();
     if (!args.length) throw new Error(`compute op '${fn}' needs \`columns\` (column names) or \`parts\` (columns and/or literals, e.g. a threshold)`);
@@ -42,11 +43,11 @@ export const COMPUTE_OPS = {
   sub: arith('-'),
   mul: arith('*'),
   div: arith('/'),
-  round: { needs: ['column'], sql: ({ d, col, p }) => ({ expr: d.roundExpr(col(), p.places ?? 0) }) },
+  round: { needs: ['column'], may: ['places'], sql: ({ d, col, p }) => ({ expr: d.roundExpr(col(), p.places ?? 0) }) },
   floor: fn1('floor'),
   ceil: fn1('ceil'),
   abs: fn1('abs'),
-  coalesce: { needs: ['columns'], sql: ({ d, list, p }) => ({ expr: `coalesce(${[...list(), ...(p.default !== undefined ? [d.sqlLiteral(p.default)] : [])].join(', ')})`, type: 'string' }) },
+  coalesce: { needs: ['columns'], may: ['default'], sql: ({ d, list, p }) => ({ expr: `coalesce(${[...list(), ...(p.default !== undefined ? [d.sqlLiteral(p.default)] : [])].join(', ')})`, type: 'string' }) },
   least: clamp('least'),
   greatest: clamp('greatest'),
   cast: { needs: ['column', 'type'], sql: ({ d, col, p }) => ({ expr: d.castExpr(col(), p.type || 'string'), type: p.type || 'string' }) },
@@ -60,11 +61,12 @@ export const COMPUTE_OPS = {
   upper: fn1('upper', 'string'),
   lower: fn1('lower', 'string'),
   length: fn1('length', 'int'),
-  substring: { needs: ['column', 'start'], sql: ({ d, col, p }) => ({ expr: d.substringExpr(col(), p.start ?? 1, p.len), type: 'string' }) },
+  substring: { needs: ['column', 'start'], may: ['len'], sql: ({ d, col, p }) => ({ expr: d.substringExpr(col(), p.start ?? 1, p.len), type: 'string' }) },
   trim: fn1('trim', 'string'),
   replace: { needs: ['column', 'search', 'replacement'], sql: ({ d, col, p }) => ({ expr: `replace(${col()}, ${d.sqlLiteral(p.search ?? '')}, ${d.sqlLiteral(p.replacement ?? '')})`, type: 'string' }) },
   json_field: {
     needs: ['column', 'field'],
+    may: ['type'],
     // An unnested struct element is already JSON-typed; a flattened payload column holding JSON is
     // TEXT and has to be parsed first, or the json operators do not apply to it.
     sql: ({ d, cols, col, p }) => {
@@ -74,10 +76,11 @@ export const COMPUTE_OPS = {
     },
   },
   json_parse_array: { needs: ['column'], sql: ({ d, col }) => ({ expr: d.jsonParseArray(col()), type: 'array' }) }, // STRING JSON array → native array (then unnest)
-  element_at: { needs: ['column', 'index'], sql: ({ d, cols, col, p }) => { requireArrayCol(cols, p.column, 'element_at'); return { expr: d.arrayElementAt(col(), p.index), type: p.type || 'string' }; } },
-  array_last: { needs: ['column'], sql: ({ d, cols, col, p }) => { requireArrayCol(cols, p.column, 'array_last'); return { expr: d.arrayLast(col()), type: p.type || 'string' }; } },
+  element_at: { needs: ['column', 'index'], may: ['type'], sql: ({ d, cols, col, p }) => { requireArrayCol(cols, p.column, 'element_at'); return { expr: d.arrayElementAt(col(), p.index), type: p.type || 'string' }; } },
+  array_last: { needs: ['column'], may: ['type'], sql: ({ d, cols, col, p }) => { requireArrayCol(cols, p.column, 'array_last'); return { expr: d.arrayLast(col()), type: p.type || 'string' }; } },
   raw: {
     needs: ['sql'],
+    may: ['type'],
     // escape hatch: verbatim dialect SQL — over columns that exist at this point
     sql: ({ cols, p }) => {
       if (!p.sql) throw new Error('raw: needs sql');
@@ -93,6 +96,7 @@ export const COMPUTE_OPS = {
   unix_date: { needs: ['column'], sql: ({ d, col }) => ({ expr: d.unixDateExpr(col()), type: 'int' }) },
   elapsed_days: {
     needs: ['from', 'to'],
+    may: ['clamp_zero'],
     // Whole 24-HOUR days between `from` and `to` (retention-day) — floor of the span in 24h buckets,
     // NOT calendar days. Default clamp_zero folds negatives (pre-`from` events) AND NULLs (e.g. a
     // missing install_date on a left join) to 0, so the result is a clean day 0+.
@@ -103,6 +107,7 @@ export const COMPUTE_OPS = {
   },
   case: {
     needs: ['cases'],
+    may: ['else', 'type'],
     sql: ({ d, cols, operand, p }) => {
       if (!p.cases?.length) throw new Error('case: needs at least one branch');
       const branches = p.cases.map((cs) => `WHEN ${cs.when.map((c) => condPred(d, cols, c)).join(' AND ')} THEN ${operand(cs.then, 'then')}`);
@@ -111,6 +116,7 @@ export const COMPUTE_OPS = {
   },
   window: {
     needs: ['fn'],
+    may: ['column', 'partition_by', 'order_by', 'offset', 'default', 'frame'],
     sql: ({ d, cols, col, p }) => {
       (p.partition_by || []).forEach((c) => requireCol(cols, c));
       (p.order_by || []).forEach((o) => requireCol(cols, o.key));
@@ -132,14 +138,30 @@ export const COMPUTE_OPS = {
   },
 };
 
-/** The compute schema's per-op requirements, read off COMPUTE_OPS — ops that need the same fields share one rule. */
-export function computeRequirements() {
-  const byRule = new Map();
+/**
+ * The compute stage's forms, read off COMPUTE_OPS: one per field set — the ops that take the same
+ * fields share one form, tagged by all of them — each with the stage's own fields (`base`, required)
+ * and exactly the fields of its op(s), picked from `fields`.
+ */
+export function computeForms(base, fields) {
+  const byShape = new Map();
   for (const [op, o] of Object.entries(COMPUTE_OPS)) {
-    const then = o.then || { required: o.needs };
-    const key = JSON.stringify(then);
-    if (!byRule.has(key)) byRule.set(key, { then, ops: [] });
-    byRule.get(key).ops.push(op);
+    for (const f of o.forms || [{ needs: o.needs || [], may: o.may || [] }]) {
+      const shape = { title: f.title || null, needs: f.needs, may: f.may || o.may || [] };
+      const key = JSON.stringify(shape);
+      if (!byShape.has(key)) byShape.set(key, { ...shape, ops: [] });
+      byShape.get(key).ops.push(op);
+    }
   }
-  return [...byRule.values()].map(({ then, ops }) => ({ if: { properties: { op: ops.length === 1 ? { const: ops[0] } : { enum: ops } }, required: ['op'] }, then }));
+  return [...byShape.values()].map(({ title, needs, may, ops }) => ({
+    type: 'object',
+    additionalProperties: false,
+    title: `op: ${ops.join(' | ')}${title ? ` — ${title}` : ''}`,
+    required: [...base.required, ...needs],
+    properties: {
+      ...base.properties,
+      op: ops.length === 1 ? { const: ops[0] } : { enum: ops },
+      ...Object.fromEntries([...needs, ...may].map((n) => [n, fields[n]])),
+    },
+  }));
 }

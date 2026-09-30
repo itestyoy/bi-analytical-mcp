@@ -40,15 +40,12 @@ const anthropic = new Anthropic();
 const ZERO = () => ({ input: 0, output: 0, cache_read: 0, cache_write: 0 });
 
 // the listed tools as the model receives them: the same name, description and input schema a host
-// passes on — less the combinators at the schema's top (anyOf / allOf / oneOf), which the Messages
-// API does not take there. The server still holds every call to the whole schema, and a call that
-// breaks one of them is refused with its reason, which is what the model reads under any host.
-const TOP_COMBINATORS = new Set(['anyOf', 'allOf', 'oneOf', 'discriminator']);
-const forModel = (schema) => Object.fromEntries(Object.entries(schema).filter(([k]) => !TOP_COMBINATORS.has(k)));
-
+// passes on, unchanged. Each schema's root is one closed object with a single field, `request`
+// (src/schema/transport.js wireSchema), and the tool's forms sit under it as `anyOf` — the shape the
+// Messages API takes, so nothing is left out of what the model sees.
 /** One case, start to answer, in its own world: the loop a host runs, every tool call through MCP. */
 async function runCase(world, c, trace) {
-  const tools = (await world.client.listTools()).tools.map((t) => ({ name: t.name, description: t.description, input_schema: forModel(t.inputSchema) }));
+  const tools = (await world.client.listTools()).tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.inputSchema }));
   const system = world.client.getInstructions() || '';
   const messages = [{ role: 'user', content: `${c.prompt}\n\n${ANSWER_FORMAT}` }];
   const started = Date.now();

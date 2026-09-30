@@ -34,7 +34,7 @@ test('a client connected before a restart keeps working after it, with no new ha
   const url = new URL(`http://127.0.0.1:${first.port}/mcp`);
   const client = new Client({ name: 'survivor', version: '0' });
   await client.connect(new StreamableHTTPClientTransport(url));
-  assert.equal(JSON.parse((await client.callTool({ name: 'time', arguments: { seconds: 0 } })).content[0].text).ok, true);
+  assert.equal(JSON.parse((await client.callTool({ name: 'time', arguments: { request: { seconds: 0 } } })).content[0].text).ok, true);
 
   await first.stop(); // the deploy
   // (the old process closed its sockets; give the client's connection pool the moment it takes to
@@ -42,7 +42,7 @@ test('a client connected before a restart keeps working after it, with no new ha
   await new Promise((r) => setTimeout(r, 200));
   const second = await serveOn(first.port);
   try {
-    const after = await client.callTool({ name: 'experiment', arguments: { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 } });
+    const after = await client.callTool({ name: 'experiment', arguments: { request: { action: 'plan', metric: 'proportion', baseline: 0.1, mde: 0.02 } } });
     assert.equal(JSON.parse(after.content[0].text).n_per_group, 3841, 'the same client, the next call, a real answer');
   } finally { await client.close().catch(() => {}); await second.stop(); }
 });

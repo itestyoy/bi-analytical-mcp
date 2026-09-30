@@ -194,6 +194,12 @@ export class DbtV1 {
       let columns = [];
       let rows = [];
       if (r.ok && existsSync(csvFile)) ({ columns, rows } = parseCsv(readFileSync(csvFile, 'utf8')));
+      // a CSV carries no types: a metric's column is a number, as the warehouse computed it (a
+      // dimension's values stay as written — "1.0.0" or "007" is not a number)
+      const metricCols = new Set(opts.metrics || []);
+      for (const row of rows) {
+        for (const c of metricCols) if (typeof row[c] === 'string' && row[c].trim() !== '' && Number.isFinite(Number(row[c]))) row[c] = Number(row[c]);
+      }
       return { ok: r.ok, command: `mf ${args.join(' ')}`, columns, rows, stdout: r.stdout, stderr: r.stderr };
     } finally {
       rmSync(tmpDir, { recursive: true, force: true }); // don't leak per-query temp dirs

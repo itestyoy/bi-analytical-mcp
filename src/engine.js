@@ -3849,7 +3849,7 @@ export class Engine {
       if (!pageRows.length) recs.push('0 rows — a where that matches nothing, or a window with no data: widen time_range or re-check the filter.');
       if (page.has_more) recs.push(`More rows exist — page with offset: ${page.offset + page.limit} (same query), or add order_by + a tighter limit.`);
       return {
-        ok: true, command: raw.command, columns, rows: pageRows, row_count: pageRows.length, page,
+        ok: true, columns, rows: pageRows, row_count: pageRows.length, page,
         ...(Object.keys(groupByResolved).length ? { group_by_resolved: groupByResolved } : {}),
         provenance: { tier: 'project_metric', metrics: input.metrics, semantic_models: reads },
         warnings: windowWarnings,
@@ -3914,9 +3914,9 @@ export class Engine {
 
   /** The answer to a query that failed, or was only explained — null for one that ran. */
   _metricEarlyAnswer(res, { explain, input, speak, extra = {} }) {
-    if (!res.ok) return { ok: false, command: res.command, error: { stage: 'query', message: speak(formatDbtError(res.stdout, res.stderr)) } };
+    if (!res.ok) return { ok: false, error: { stage: 'query', message: speak(formatDbtError(res.stdout, res.stderr)) } };
     if (!explain) return null;
-    return { ok: true, command: res.command, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(input.explain ? { explain: true, plan: speak(res.plan) } : {}) };
+    return { ok: true, sql: speak(res.sql), ...speak(extra), ...(input.dry_run ? { dry_run: true } : {}), ...(input.explain ? { explain: true, plan: speak(res.plan) } : {}) };
   }
 
   /** The task a metric query is: the time spine first (a real query needs it for metric_time), then
@@ -4053,7 +4053,6 @@ export class Engine {
       recs.push('Re-slice or persist: pass materialize:true to keep the result as a table — a pipeline can then start from it (build_pipeline_model({ action: \'start\', from_task })) and re-slice it without recomputing; group differently or compare segments by re-querying with another group_by.');
       const out = {
         ok: true,
-        command: res.command,
         columns: res.columns,
         rows: pageRows,
         row_count: pageRows.length,

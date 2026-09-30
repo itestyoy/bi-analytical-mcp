@@ -139,9 +139,11 @@ export function requestOf(name, args) {
   const keys = Object.keys(given);
   if (keys.length === 1 && keys[0] === 'request' && isPlainObject(given.request)) return { request: given.request };
   const others = keys.filter((k) => k !== 'request');
-  const moved = others.length ? `{ request: { ${others.join(', ')} } } — the fields ${others.map((k) => `'${k}'`).join(', ')} go inside request` : '{ request: { … } } — request holds the fields the tool\'s schema lists ({ request: {} } when it needs none)';
+  const call = others.length
+    ? `${name}({ request: { ${others.join(', ')} } }) — ${others.length === 1 ? `the field '${others[0]}' goes` : `the fields ${others.map((k) => `'${k}'`).join(', ')} go`} inside request`
+    : `${name}({ request: { … } }) — request holds the fields the tool's schema lists ({ request: {} } when it needs none)`;
   const bad = keys.includes('request') && !isPlainObject(given.request) ? ' (request must be an object)' : '';
-  return { error: `${name} takes its input under one field, request: call ${name}(${moved})${bad}` };
+  return { error: `${name} takes its input under one field, request: call ${call}${bad}` };
 }
 
 /** A tool's return value as an MCP CallToolResult: the JSON as text (what the model reads) and the

@@ -61,9 +61,9 @@ function valueAt(input, instancePath) {
   return node;
 }
 
-/** Human path: '/control/conversions' → '`control.conversions`'; '' → 'input'. */
+/** Human path: '/control/conversions' → '`control.conversions`'; '' → 'request' (the call's one field, whose content every path is relative to). */
 function fieldRef(instancePath) {
-  if (!instancePath) return 'input';
+  if (!instancePath) return 'request';
   return `\`${instancePath.replace(/^\//, '').replace(/\//g, '.')}\``;
 }
 

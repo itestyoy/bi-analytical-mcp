@@ -4,7 +4,7 @@
 // backend (see store.js) — this class holds NO SQL, just the domain operations. The
 // BackgroundIndexer populates it NON-BLOCKING from the warehouse at startup + on a schedule.
 
-import { jsonExtract, jsonArrayLength, arrayLength, jsonColumnArrayLength, recentSince, sinceTimestampMs, approxCountDistinct, approxTopK, parseApproxTopK } from './dialect.js';
+import { jsonArrayLength, arrayLength, jsonColumnArrayLength, recentSince, sinceTimestampMs, approxCountDistinct, approxTopK, parseApproxTopK } from './dialect.js';
 import { openStore } from './store.js';
 import { rankFuzzy } from './fuzzy.js';
 

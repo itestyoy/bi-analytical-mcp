@@ -19,7 +19,6 @@ import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
 import { compilePythonStage, importAllowlist, runAstGate, frameProfile, pythonRunHints } from './python-model.js'; // registers the python pipeline stage
 import { partitionConditions, resolveTimeRange, timeRangeConditions, timeRangeWarnings, isValidTimezone } from './time-range.js';
-import { sqlLiteral } from './dialect.js';
 import { renderPipeline, sqlRunHints } from './pipeline.js';
 import { CatalogSearch } from './search.js';
 import { rankFuzzy } from './fuzzy.js';
@@ -34,8 +33,9 @@ import { ErrorLog, readGenerated } from './error-log.js';
 import { buildProjection, projectionProblems } from './projection.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
-import { detached, currentSignal, isolatedTarget, withSignal } from './request-context.js';
-import { pivotTransform, PIVOT_LEVEL_ROWS, drillView, DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // what one drill-down view is, and whether a result draws anything: the same code for the engine and the card
+import { detached, currentSignal } from './request-context.js';
+import { DRILL_ROWS, buildViewModel } from './apps/result-view-model.js'; // whether a result draws anything: the same code for the engine and the card
+import { resultColumns, displayProblems, drillFirstRead } from './display-check.js';
 
 export class Engine {
   constructor({ catalog, contextManager, runner, recipes, sqlRunner, queryTimeoutMs, dbPath, store, resetDb = false, embedder, memoryDbPath, pythonBin, pythonModelConfig, tableExpirationDays = 30, features = [], featureStatus = [], project = null }) {
@@ -4150,15 +4150,15 @@ export class Engine {
       const tool = result.tool || kept?.tool || null;
       let out;
       {
-        const cols = this._resultColumns(result);
+        const cols = resultColumns(result);
         if (!cols) throw new ToolError(`task ${id} (${tool || 'a task'}) returned no rows to draw — display_model_result draws the rows of a model: a semantic query or a pipeline`, { stage: 'validate', field: 'task_id' });
         const d = input.display || null;
-        const first = this._drillFirstRead(d);
+        const first = drillFirstRead(d);
         const job = this.jobs.get(id);
         if (first && !job?.table) throw new ToolError(`a ${d.kind === 'pivot' ? 'pivot' : 'drill-down'} reads the STORED result view by view, and this task holds none — ${job?.tool === 'query_pipeline_model' ? 'show the pipeline BUILD\'s task instead (its table is stored)' : 'run the query with materialize:true, then show that task'}`, { stage: 'validate', field: 'display' });
         if (d) {
           // a drill-down's columns are the stored table's, not one view's: its row shape is not checked
-          const problems = this._displayProblems(d, cols, first ? null : result.rows);
+          const problems = displayProblems(d, cols, first ? null : result.rows);
           if (problems.length) throw new ToolError(`display: ${problems.join('; ')}. This result's columns: ${cols.join(', ')}`, { stage: 'validate', field: 'display' });
         }
         if (first) {
@@ -4196,105 +4196,6 @@ export class Engine {
     if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
     const out = await this._readTable(this.ctxs.dir(job.contextId), job.table, input.limit ?? DRILL_ROWS, input.transform);
     return { task_id: job.id, ...out };
-  }
-
-  /** The column names of a result with rows, or null when it has none (running, failed). */
-  _resultColumns(out) {
-    if (!out || out.ok === false || !Array.isArray(out.rows)) return null;
-    if (Array.isArray(out.columns) && out.columns.length) return out.columns.map((c) => (c && typeof c === 'object' ? c.name : String(c)));
-    return out.rows[0] && typeof out.rows[0] === 'object' ? Object.keys(out.rows[0]) : [];
-  }
-
-  /**
-   * What is wrong with a card declaration against these result columns (and rows, when known): a
-   * named column that is not there, or a shape the rows cannot have. Empty = it can be drawn.
-   */
-  _displayProblems(display, columns, rows = null) {
-    const have = new Set(columns);
-    const ys = display.y === undefined ? [] : [].concat(display.y);
-    const stepColumns = Array.isArray(display.steps); // steps as columns of one row, or { label_column, value_column } over a row per step
-    const named = display.kind === 'funnel'
-      ? [...(stepColumns ? display.steps.flatMap((st) => [st.column, st.parent]) : [display.steps?.label_column, display.steps?.value_column, display.steps?.parent_column]), display.series_column]
-      : display.kind === 'pie' ? [display.label_column, display.value_column]
-        : display.kind === 'kpi' ? [display.x, ...(display.values || []).flatMap((v) => [v.column, v.previous_column])]
-          : display.kind === 'sankey' ? [display.source_column, display.target_column, display.value_column]
-            : display.kind === 'pivot' ? [...(display.levels || []).map((l) => l.column), ...(display.values || []).map((v) => v.column)]
-              : [display.x, ...ys, ...(display.series_column ? [display.series_column] : [])];
-    const drillLevels = (display.drill?.levels || []).map((l) => l.column);
-    named.push(...drillLevels);
-    const problems = [...new Set(named.filter((c) => c && !have.has(c)))].map((c) => `'${c}' is not a column of this result`);
-    if (display.kind === 'funnel' && stepColumns && new Set(display.steps.map((st) => st.column)).size !== display.steps.length) problems.push('a step is listed twice');
-    if (display.kind === 'funnel' && stepColumns && !display.series_column && Array.isArray(rows) && rows.length !== 1) problems.push(`a funnel whose steps are columns needs a ONE-row result, and this one has ${rows.length} — aggregate to one row first, give series_column for a funnel per row, or declare steps: { label_column, value_column } for a row per step`);
-    if (display.kind === 'funnel' && stepColumns) {
-      // a step's parent is a step listed BEFORE it
-      display.steps.forEach((st, i) => {
-        if (st.parent === undefined) return;
-        const p = display.steps.findIndex((x) => x.column === st.parent);
-        if (p < 0 || p >= i) problems.push(`the parent of step '${st.column}' is '${st.parent}', which is not a step listed before it`);
-      });
-    }
-    const pc = display.kind === 'funnel' && !stepColumns ? display.steps?.parent_column : null;
-    if (pc && Array.isArray(rows) && have.has(pc) && have.has(display.steps.label_column)) {
-      // each row's parent names a step (a row) before it, within its own funnel
-      const seen = new Map();
-      for (const r of rows) {
-        const key = display.series_column ? String(r?.[display.series_column]) : '';
-        const before = seen.get(key) || new Set();
-        const parent = r?.[pc];
-        if (parent !== null && parent !== undefined && parent !== '' && !before.has(String(parent))) {
-          problems.push(`the parent of step '${r?.[display.steps.label_column]}' is '${parent}', which is not a step before it${display.series_column ? ` in its funnel (${key})` : ''}`);
-          break;
-        }
-        before.add(String(r?.[display.steps.label_column]));
-        seen.set(key, before);
-      }
-    }
-    if (display.kind === 'funnel' && display.series_column && Array.isArray(rows) && have.has(display.series_column)) {
-      const series = new Set(rows.map((r) => String(r?.[display.series_column])));
-      if (series.size > 8) problems.push(`${series.size} funnels side by side are too many to compare — keep the 8 that matter in the query (the rest as "Other")`);
-    }
-    if (display.series_column && ys.length > 1) problems.push(`series_column splits ONE y column into a ${display.kind === 'bar' ? 'bar' : display.kind === 'area' ? 'band' : 'line'} per value — declare a single y with it`);
-    if (display.kind === 'pivot' && new Set((display.levels || []).map((l) => l.column)).size !== (display.levels || []).length) problems.push('a level is listed twice');
-    // a drill level is a dimension the chart does not already draw
-    const drawn = new Set([display.x, display.label_column, display.series_column].filter(Boolean));
-    if (new Set(drillLevels).size !== drillLevels.length) problems.push('a drill level is listed twice');
-    for (const c of drillLevels.filter((c) => drawn.has(c))) problems.push(`'${c}' is drawn by the chart already — a drill level is another dimension`);
-    if (display.kind === 'kpi' && !display.x && Array.isArray(rows) && rows.length !== 1) problems.push(`KPI tiles read ONE row, and this result has ${rows.length} — aggregate to one row, or give x (the time column) to show the last row with its trend`);
-    if (display.kind === 'sankey' && Array.isArray(rows) && have.has(display.source_column) && have.has(display.target_column)) {
-      const links = rows.map((r) => [String(r?.[display.source_column]), String(r?.[display.target_column])]);
-      if (links.some(([a, b]) => a === b)) problems.push('a sankey link may not flow into itself (source = target)');
-      else if (this._hasCycle(links)) problems.push('the links loop back (a cycle) — a sankey flows one way; name each stage apart (e.g. prefix the step) so no node is both before and after another');
-      const nodes = new Set(links.flat());
-      if (nodes.size > 40) problems.push(`${nodes.size} nodes are too many to read — group the small ones into "Other" in the query first (40 at most)`);
-    }
-    if (display.kind === 'pie' && Array.isArray(rows) && have.has(display.value_column)) {
-      if (rows.length < 2) problems.push(`a pie needs a slice per row, and this result has ${rows.length} — a single number is better said as a number`);
-      if (rows.some((r) => Number(r?.[display.value_column]) < 0)) problems.push(`a pie's slices are shares of one total, and '${display.value_column}' has negative values — use a bar`);
-    }
-    return problems;
-  }
-
-  /** The first read of a drill-down display (a pivot's top level, a drillable chart as declared), or null. */
-  _drillFirstRead(display) {
-    if (display?.kind === 'pivot') return { transform: pivotTransform(display, []), limit: PIVOT_LEVEL_ROWS };
-    if (display?.drill) return { transform: drillView(display).transform, limit: DRILL_ROWS };
-    return null;
-  }
-
-  /** Whether directed links [from, to] loop back anywhere (depth-first, three colours). */
-  _hasCycle(links) {
-    const next = new Map();
-    for (const [a, b] of links) { if (!next.has(a)) next.set(a, []); next.get(a).push(b); }
-    const state = new Map(); // 1 = on the current path, 2 = done
-    const visit = (n) => {
-      if (state.get(n) === 1) return true;
-      if (state.get(n) === 2) return false;
-      state.set(n, 1);
-      for (const m of next.get(n) || []) if (visit(m)) return true;
-      state.set(n, 2);
-      return false;
-    };
-    return [...next.keys()].some((n) => visit(n));
   }
 
   list_query_jobs() {

@@ -16,6 +16,7 @@ import { join } from 'node:path';
 import { startServer, APPS_CAPS } from '../helpers/mcp-http.js';
 import { buildViewModel, drillView, pivotRows, pivotTransform } from '../../src/apps/result-view-model.js';
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
+import { displayProblems } from '../../src/display-check.js';
 import { runTool, toCallToolResult } from '../../src/mcp-surface.js';
 
 let s;
@@ -358,12 +359,12 @@ test('view model: a sankey sums a link seen twice, drops empty flows and sizes e
 
 test('display guard: a sankey that loops back, or KPI tiles over many rows with no axis, are refused', () => {
   const links = [{ a: 'menu', b: 'level' }, { a: 'level', b: 'shop' }, { a: 'shop', b: 'menu' }].map((r) => ({ ...r, v: 1 }));
-  const loop = s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links);
+  const loop = displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links);
   assert.equal(loop.length, 1);
-  assert.equal(s.engine._displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links.slice(0, 2)).length, 0, 'a chain is fine');
-  assert.equal(s.engine._displayProblems({ kind: 'kpi', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 1);
-  assert.equal(s.engine._displayProblems({ kind: 'kpi', x: 'a', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 0);
-  assert.equal(s.engine._displayProblems({ kind: 'pivot', levels: [{ column: 'a' }, { column: 'a', label: 'again' }], values: [{ column: 'v' }] }, ['a', 'b', 'v']).length, 1, 'a level twice');
+  assert.equal(displayProblems({ kind: 'sankey', source_column: 'a', target_column: 'b', value_column: 'v' }, ['a', 'b', 'v'], links.slice(0, 2)).length, 0, 'a chain is fine');
+  assert.equal(displayProblems({ kind: 'kpi', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 1);
+  assert.equal(displayProblems({ kind: 'kpi', x: 'a', values: [{ column: 'v' }] }, ['a', 'b', 'v'], links).length, 0);
+  assert.equal(displayProblems({ kind: 'pivot', levels: [{ column: 'a' }, { column: 'a', label: 'again' }], values: [{ column: 'v' }] }, ['a', 'b', 'v']).length, 1, 'a level twice');
 });
 
 test('pivot: one level is the rows under a path, grouped by the next level; its rows keep the key as it came', () => {
@@ -486,7 +487,7 @@ test('a funnel with outcomes, one per ad format: shares of the parent, the main 
   assert.equal(inter.biggest_drop, 3, 'loaded → started is the continuation that lost the most (a failed load is an outcome, not a drop)');
   assert.equal(inter.overall, 52 / 918, 'the main line: attempts → loaded → started → shown');
   // a parent that is not a step before it is refused
-  assert.equal(s.engine._displayProblems({ kind: 'funnel', steps: [{ column: 'a' }, { column: 'b', parent: 'c' }, { column: 'c' }] }, ['a', 'b', 'c'], [{ a: 3, b: 2, c: 1 }]).length, 1);
-  assert.equal(s.engine._displayProblems(display, ['format', 'step', 'parent', 'n'], [...rows, { format: 'banner', step: 'shown', parent: 'nope', n: 1 }]).length, 1);
-  assert.equal(s.engine._displayProblems(display, ['format', 'step', 'parent', 'n'], rows).length, 0);
+  assert.equal(displayProblems({ kind: 'funnel', steps: [{ column: 'a' }, { column: 'b', parent: 'c' }, { column: 'c' }] }, ['a', 'b', 'c'], [{ a: 3, b: 2, c: 1 }]).length, 1);
+  assert.equal(displayProblems(display, ['format', 'step', 'parent', 'n'], [...rows, { format: 'banner', step: 'shown', parent: 'nope', n: 1 }]).length, 1);
+  assert.equal(displayProblems(display, ['format', 'step', 'parent', 'n'], rows).length, 0);
 });

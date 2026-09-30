@@ -10,7 +10,7 @@ import { MEASURE_AGGS, GRAINS } from './catalog.js';
 import { TASK_ID_PATTERN } from './jobs.js';
 import { AGGS as PROJECTION_AGGS } from './projection.js';
 import { RESEARCH_DOMAINS } from './research-guides.js';
-import { pipelineStageSchema, stageDefs } from './pipeline.js';
+import { stageDefs } from './pipeline.js';
 import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
 import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
 import { CONTEXT_ID } from './context-manager.js';

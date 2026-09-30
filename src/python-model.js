@@ -17,8 +17,7 @@
 
 import { runWithInput } from './dbt/process.js';
 import { assetPath, missingAssetMessage } from './runtime-assets.js';
-import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { registerStage } from './pipeline.js';
 import { pythonRulesText, mlClassesText, bigframesRunHints } from './python-guide.js';

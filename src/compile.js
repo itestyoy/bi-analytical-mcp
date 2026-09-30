@@ -2,7 +2,7 @@
 // objects (measures/dimensions/metrics) for a single context. All physical SQL
 // and namespacing happens here; the renderer just serializes.
 
-import { sqlLiteral, isNumericType, castExpr } from './dialect.js';
+import { isNumericType, castExpr } from './dialect.js';
 import { NUMERIC_AGGS } from './catalog.js';
 import { comparison } from './conditions.js';
 

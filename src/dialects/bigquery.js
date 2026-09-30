@@ -14,6 +14,9 @@ export class BigQueryDialect extends Dialect {
 
   get name() { return 'bigquery'; }
 
+  /** A pipeline is lowered to BigQuery's pipe syntax (FROM … |> …), which dbt's own SQL parser (dbt v2) does not read. */
+  get writesPipeSyntax() { return true; }
+
   castType(type) { return CASTS[String(type || '').toLowerCase()]; }
 
   jsonExtract(column, key, type = 'string') {

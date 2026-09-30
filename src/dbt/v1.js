@@ -25,6 +25,10 @@ export class DbtV1 {
   /** The semantic-layer YAML this dbt reads: 1.x (below 1.12) knows only the legacy spec. */
   get semanticSpec() { return 'legacy'; }
 
+  /** The config a SQL model needs when its SQL is written in a syntax dbt's own parser does not read
+   *  (BigQuery's pipe syntax) — dbt 1.x parses no SQL, so none. */
+  unparsedSqlConfig() { return {}; }
+
   /** Whether this dbt runs Python models on `adapter` — 1.x leaves that to the adapter (catalog.js decides). */
   pythonModelsOn(_adapter) { return true; }
 

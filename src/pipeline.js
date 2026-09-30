@@ -129,6 +129,59 @@ function operandSql(d, cols, o, label = 'operand') {
   throw new Error(`${label}: needs column | value | now`);
 }
 
+// A RAW expression is the caller's own SQL, run as written — but a column it names has to exist at
+// this point, or the warehouse refuses the whole model ("Unrecognized name") minutes later. What is
+// surely a column reference is checked here: a name with an underscore (a SQL keyword that is not a
+// function call rarely has one — those that do are listed), outside strings and quoted names, not a
+// function (followed by "("), not a field of something (".x" / "x."), not an alias the expression
+// declares itself (AS x, a lambda's x ->). Anything else — a bare word, a date part, a type — is left
+// to the warehouse.
+const RAW_KEYWORDS = new Set(['current_date', 'current_time', 'current_timestamp', 'current_datetime', 'current_user', 'session_user', 'current_catalog', 'current_schema', 'current_role', 'utc_timestamp', 'utc_date']);
+export function rawUnknownColumns(sql, cols) {
+  const text = String(sql)
+    .replace(/--[^\n]*|\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/'(?:[^'\\]|\\.|'')*'|"(?:[^"\\]|\\.|"")*"|`[^`]*`/g, ' ');
+  const known = new Set([...cols.keys()].map((c) => c.toLowerCase()));
+  for (const m of text.matchAll(/\bas\s+([A-Za-z_][A-Za-z0-9_]*)|([A-Za-z_][A-Za-z0-9_]*)\s*->/gi)) known.add((m[1] || m[2]).toLowerCase());
+  const unknown = [];
+  for (const m of text.matchAll(/[A-Za-z_][A-Za-z0-9_]*/g)) {
+    const name = m[0]; const at = m.index; const end = at + name.length;
+    if (!name.includes('_') || /[0-9]/.test(text[at - 1] || '') || RAW_KEYWORDS.has(name.toLowerCase()) || known.has(name.toLowerCase())) continue;
+    if (/[.@:$]\s*$/.test(text.slice(Math.max(0, at - 2), at)) || /^\s*[(.]/.test(text.slice(end, end + 3))) continue;
+    if (!unknown.includes(name)) unknown.push(name);
+  }
+  return unknown;
+}
+
+// A constant compared with a column of a KNOWN type is written in that type. A warehouse compares a
+// value only with its own type — BigQuery refuses BOOL = STRING and INT64 = STRING outright — and the
+// caller often spells a flag "true" or a number "5". So a boolean column takes true / false (written
+// either way, or 1 / 0) and a numeric one a number (or a numeric string); anything else is refused
+// HERE, when the stage is added, rather than by the warehouse when it runs. A column typed 'string'
+// is left as it is: that is also the type of what nothing more is known about.
+const BOOL_TEXT = new Map([['true', true], ['false', false], ['1', true], ['0', false]]);
+const NUMERIC_TYPES = new Set(['numeric', 'int', 'integer', 'float']);
+function typedLiteral(d, type, v, where) {
+  if (v === null) return d.sqlLiteral(v);
+  if (type === 'boolean') {
+    const b = typeof v === 'boolean' ? v : typeof v === 'number' && (v === 0 || v === 1) ? v === 1 : typeof v === 'string' ? BOOL_TEXT.get(v.trim().toLowerCase()) : undefined;
+    if (b === undefined) throw new Error(`${where} is a boolean column: compare it with true or false, not ${JSON.stringify(v)}`);
+    return d.sqlLiteral(b);
+  }
+  if (NUMERIC_TYPES.has(type)) {
+    if (typeof v === 'number') return d.sqlLiteral(v);
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return d.sqlLiteral(Number(v));
+    throw new Error(`${where} is a numeric column: compare it with a number, not ${JSON.stringify(v)}`);
+  }
+  return d.sqlLiteral(v);
+}
+
+/** The type of the COLUMN one side of a comparison names (null for a constant, `now`, or an untyped column). */
+function sideType(cols, c, side) {
+  const name = side === 'left' ? (c.left ? c.left.column : c.column) : c.right?.column;
+  return name !== undefined ? cols.get(name)?.type || null : null;
+}
+
 // One comparison. Each side may be a column, a constant (value), or now:
 //   { column, op, value }        — column vs constant (shorthand)
 //   { left:{...}, op, right:{...} } — operands on both sides (column vs column,
@@ -140,15 +193,20 @@ function condPred(d, cols, c) {
   else throw new Error('condition needs `column` or `left`');
   if (c.op === 'is_null') return `${lhs} IS NULL`;
   if (c.op === 'is_not_null') return `${lhs} IS NOT NULL`;
+  // the column a constant is compared with, and what it is called in a refusal
+  const leftType = sideType(cols, c, 'left');
+  const rightType = sideType(cols, c, 'right');
+  const colName = c.left ? c.left.column : c.column;
+  const lit = (v, type = leftType, name = colName) => typedLiteral(d, type, v, `'${name}'`);
   if (c.op === 'in' || c.op === 'not_in') {
     const arr = c.right?.value ?? c.value;
     if (!Array.isArray(arr)) throw new Error(`${c.op} needs an array value`);
-    return `${lhs} ${c.op === 'in' ? 'IN' : 'NOT IN'} (${arr.map((v) => d.sqlLiteral(v)).join(', ')})`;
+    return `${lhs} ${c.op === 'in' ? 'IN' : 'NOT IN'} (${arr.map((v) => lit(v)).join(', ')})`;
   }
   if (c.op === 'between') {
     const arr = c.right?.value ?? c.value;
     if (!Array.isArray(arr) || arr.length !== 2) throw new Error('between needs [low, high]');
-    return `${lhs} BETWEEN ${d.sqlLiteral(arr[0])} AND ${d.sqlLiteral(arr[1])}`;
+    return `${lhs} BETWEEN ${lit(arr[0])} AND ${lit(arr[1])}`;
   }
   if (['like', 'not_like', 'contains', 'starts_with', 'ends_with'].includes(c.op)) {
     const v = c.right?.value ?? c.value;
@@ -158,8 +216,10 @@ function condPred(d, cols, c) {
   }
   if (!OPSYM[c.op]) throw new Error(`unsupported comparison op: ${c.op}`);
   let rhs;
-  if (c.right !== undefined) rhs = operandSql(d, cols, c.right, 'right');
-  else if (c.value !== undefined) rhs = d.sqlLiteral(c.value);
+  // a constant on the left compared with a column on the right is written in that column's type
+  if (c.left?.value !== undefined && c.right?.column !== undefined) lhs = lit(c.left.value, rightType, c.right.column);
+  if (c.right !== undefined) rhs = c.right.value !== undefined && !c.right.column ? lit(c.right.value) : operandSql(d, cols, c.right, 'right');
+  else if (c.value !== undefined) rhs = lit(c.value);
   else throw new Error('condition needs `value` or `right`');
   return `${lhs} ${OPSYM[c.op]} ${rhs}`;
 }
@@ -200,7 +260,7 @@ const STAGES = {
   where: {
     schema: () => ({
       type: 'object', additionalProperties: false, required: ['stage', 'conditions'],
-      description: 'Keep only rows where all conditions hold (ANDed). Each condition compares two operands — each a column, a literal constant, or the current time (now). Shorthand `{column, op, value}` = column vs constant; or `{left, op, right}` for column-vs-column / constant-vs-column. Use it to scope to an event, a segment, or a value range — at any point in the pipeline, including after a window or aggregate to filter on a computed column.',
+      description: 'Keep only rows where all conditions hold (ANDed). Each condition compares two operands — each a column, a literal constant, or the current time (now). Shorthand `{column, op, value}` = column vs constant; or `{left, op, right}` for column-vs-column / constant-vs-column. Use it to scope to an event, a segment, or a value range — at any point in the pipeline, including after a window or aggregate to filter on a computed column. A constant is compared in the column\'s own type: a boolean column takes true / false ("true" is read as true), a numeric one a number; one of another type is refused here, since the warehouse would refuse it.',
       properties: {
         stage: { enum: ['where'] },
         conditions: { type: 'array', minItems: 1, items: CONDITION },
@@ -316,7 +376,7 @@ const STAGES = {
         replacement: { type: 'string', description: 'Replacement string for op=replace.' },
         start: { type: 'integer', minimum: 1, description: '1-based start position for op=substring.' },
         index: { type: 'integer', minimum: 1, description: '1-based index for op=element_at.' },
-        sql: { type: 'string', description: 'Raw dialect SQL expression over existing columns — escape hatch for op=raw when no built-in op fits (e.g. array indexing, dialect functions). Not portable across dialects.' },
+        sql: { type: 'string', description: 'Raw dialect SQL expression over existing columns — escape hatch for op=raw when no built-in op fits (e.g. array indexing, dialect functions). Not portable across dialects. It reads only the columns available at this step: a name it uses that is not one of them is refused when the step is added.' },
         len: { type: 'integer', minimum: 0, description: 'Length (chars) for op=substring (optional).' },
         unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'date_diff unit.' },
         granularity: { enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'date_trunc granularity.' },
@@ -402,7 +462,13 @@ const STAGES = {
       else if (p.op === 'json_parse_array') { expr = d.jsonParseArray(col()); type = 'array'; } // STRING JSON array → native array (then unnest)
       else if (p.op === 'element_at') { requireArrayCol(cols, p.column, 'element_at'); expr = d.arrayElementAt(col(), p.index); type = p.type || 'string'; }
       else if (p.op === 'array_last') { requireArrayCol(cols, p.column, 'array_last'); expr = d.arrayLast(col()); type = p.type || 'string'; }
-      else if (p.op === 'raw') { if (!p.sql) throw new Error('raw: needs sql'); expr = `(${p.sql})`; type = p.type || 'string'; } // escape hatch: verbatim dialect SQL
+      else if (p.op === 'raw') {
+        // escape hatch: verbatim dialect SQL — over columns that exist at this point
+        if (!p.sql) throw new Error('raw: needs sql');
+        const unknown = rawUnknownColumns(p.sql, cols);
+        if (unknown.length) throw new Error(`pipeline: raw expression for '${p.name}' names ${unknown.map((n) => `'${n}'`).join(', ')}, not ${unknown.length === 1 ? 'a column' : 'columns'} at this stage (available: ${[...cols.keys()].join(', ')}) — a raw expression reads the columns the steps before it produced`);
+        expr = `(${p.sql})`; type = p.type || 'string';
+      }
       else if (p.op === 'hll_extract') { expr = d.hllExtract(col()); type = 'int'; }
       else if (p.op === 'case') {
         if (!p.cases?.length) throw new Error('case: needs at least one branch');

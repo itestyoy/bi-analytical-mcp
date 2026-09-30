@@ -311,7 +311,7 @@
   there (side by side on BigQuery).
 - dbt IS REACHED ONLY THROUGH THE dbt CLIENT (`src/dbt/index.js` → `createDbt`, version read from
   the CLI): one contract (parse / run / seed / show / relationColumns / query / validate / warehouse
-  / semanticSpec / semanticManifest / semanticModelSources / groupBys / pythonModelsOn) over the installed dbt, each major version its own implementation
+  / semanticSpec / semanticManifest / semanticModelSources / groupBys / pythonModelsOn / unparsedSqlConfig) over the installed dbt, each major version its own implementation
   — `src/dbt/v1.js` (dbt 1.x) and `src/dbt/v2.js` (dbt v2). Do NOT spawn dbt or `mf` anywhere else,
   and do NOT branch on the dbt version outside `src/dbt/`.
 - ONE SEMANTIC LAYER, TWO YAML SPECS: the context is rendered once (`src/yaml-render.js`, legacy

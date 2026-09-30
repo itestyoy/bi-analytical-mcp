@@ -169,6 +169,35 @@ test('clusters cover every path once; segment overview sizes are the users per p
   assert.equal(whole.rows.length, built.users);
 });
 
+test('a metric asked for at two aggs — or twice — in one overview is computed, each number the one it has alone', opts, async (t) => {
+  if (skip(t)) return;
+  const mean = { metric: 'length', agg: 'mean' };
+  const median = { metric: 'length', agg: 'median' };
+  const features = [{ metric: 'event_count_bulk' }];
+  const q = await engine.query_retentioneering_model({ context_id: built.context_id, analyses: [
+    // the library computes one column per metric before it rolls them up: these made two of one name
+    { kind: 'segment_overview', id: 'both', segment_col: 'platform', metrics: [mean, median, mean] },
+    { kind: 'segment_overview', id: 'mean', segment_col: 'platform', metrics: [mean] },
+    { kind: 'segment_overview', id: 'median', segment_col: 'platform', metrics: [median] },
+    { kind: 'cluster_analysis', id: 'clusters_both', features, method_args: { n_clusters: 2 }, overview_metrics: [mean, median] },
+    { kind: 'cluster_analysis', id: 'clusters_mean', features, method_args: { n_clusters: 2 }, overview_metrics: [mean] },
+    { kind: 'cluster_analysis', id: 'clusters_median', features, method_args: { n_clusters: 2 }, overview_metrics: [median] },
+  ] });
+  const r = await engine.query_retentioneering_model({ task_id: q.task_id, detail: 'full' });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  const values = (id, name) => r.analyses[id].metrics.find((m) => m.metric === name)?.values;
+  for (const [both, alone] of [['both', ''], ['clusters_both', 'clusters_']]) {
+    assert.deepEqual(r.analyses[both].levels, r.analyses[`${alone}mean`].levels);
+    assert.deepEqual(values(both, 'length_mean'), values(`${alone}mean`, 'length_mean'));
+    assert.deepEqual(values(both, 'length_median'), values(`${alone}median`, 'length_median'));
+    assert.ok(values(both, 'length_mean').length > 1);
+  }
+  // …and the platform sizes are the warehouse's users per platform, as for any overview
+  const perPlatform = (await wh.query('select platform, count(distinct u.player_id_of_internal) as n from dim_users u join (select distinct player_id_of_internal from fct_analytics_events) e using (player_id_of_internal) group by platform')).rows;
+  const size = values('both', 'segment_size');
+  assert.deepEqual(Object.fromEntries(r.analyses.both.levels.map((l, i) => [l, size[i]])), Object.fromEntries(perPlatform.map((row) => [row.platform, Number(row.n)])));
+});
+
 test('the same call twice gives the same numbers, and a user sample keeps the same users on every build', opts, async (t) => {
   if (skip(t)) return;
   const again = await engine.query_retentioneering_model({ context_id: built.context_id, analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'event_count_bulk' }], method_args: { n_clusters: [2, 3] }, overview_metrics: [{ metric: 'length', agg: 'mean' }] }, { kind: 'transition_graph' }] });

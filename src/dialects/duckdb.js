@@ -15,6 +15,9 @@ const keyPath = (key) => `'$."${key}"'`;
 export class DuckDBDialect extends Dialect {
   get name() { return 'duckdb'; }
 
+  /** A pipeline is lowered to chained CTEs: plain SQL any parser reads. */
+  get writesPipeSyntax() { return false; }
+
   castType(type) { return CASTS[String(type || '').toLowerCase()]; }
 
   /**

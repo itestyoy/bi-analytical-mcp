@@ -107,6 +107,8 @@ export class MfEngineBackend {
 
   pythonModelsOn(adapter) { return this._dbt.pythonModelsOn(adapter); }
 
+  unparsedSqlConfig() { return this._dbt.unparsedSqlConfig(); }
+
   /** One sidecar request, in the warehouse's turn when it takes one process at a time. */
   _request(projectDir, req) {
     const { turn } = this._dbt.warehouse(projectDir);

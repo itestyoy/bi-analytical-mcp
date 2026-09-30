@@ -140,8 +140,12 @@ function pipelineColumnType(cm, col) {
   }
   const dt = String(col.data_type || '').toLowerCase();
   if (TIME_DATA_TYPES.has(dt)) return 'time';
+  if (isBooleanType(dt)) return 'boolean';
   return isNumericType(dt) ? 'numeric' : 'string';
 }
+
+/** A warehouse type that is a boolean (BigQuery BOOL / BOOLEAN, DuckDB BOOLEAN / BOOL). */
+const isBooleanType = (t) => /^bool(ean)?$/i.test(String(t || '').trim());
 
 /**
  * Reconcile a catalog against the warehouse: introspect each model's physical columns
@@ -158,12 +162,17 @@ const RELATION_ABSENT = /does not exist|doesn't exist|not found|no such table|un
 export async function groundCatalogToPhysical(catalog, runner, baseProjectDir, log = () => {}) {
   if (!runner || !baseProjectDir || typeof runner.relationColumns !== 'function') return { pruned: {} };
   const phys = {};
+  const types = {};
   const transient = [];
   const keys = catalog.modelKeys();
   for (const key of keys) {
     try {
       const r = await runner.relationColumns(baseProjectDir, catalog.getModel(key).dbt_model);
-      if (r && r.ok && Array.isArray(r.columns)) { phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase())); continue; }
+      if (r && r.ok && Array.isArray(r.columns)) {
+        phys[key] = new Set(r.columns.map((c) => String(c.name).toLowerCase()));
+        types[key] = new Map(r.columns.map((c) => [String(c.name).toLowerCase(), c.dtype]));
+        continue;
+      }
       // dbt never got to ASK the warehouse (its own timeout, a signal, a spawn failure). That says
       // nothing about the table, so it is not evidence of an absent one. Told apart by OUTPUT, not
       // by stream: dbt ran means dbt printed — and it prints its diagnostics to STDOUT, leaving
@@ -189,7 +198,9 @@ export async function groundCatalogToPhysical(catalog, runner, baseProjectDir, l
     return { pruned: {} };
   }
   for (const [key, why] of transient) log(`catalog grounding: '${key}' was NOT checked (dbt could not run: ${why}) — it stays as declared`);
-  return catalog.groundToPhysical(phys);
+  const out = catalog.groundToPhysical(phys);
+  catalog.typeToPhysical(types);
+  return out;
 }
 
 export function loadCatalog(path, opts = {}) {
@@ -1020,6 +1031,24 @@ export class Catalog {
    * unavailable / relation not built) are left untouched. Returns { pruned } for logs.
    * Call BEFORE building schemas (so the enums reflect physical reality).
    */
+  /**
+   * What the warehouse says a column IS, where the declaration could not: a column with no
+   * `data_type` in the YAML is typed 'string' for a pipeline, and a BOOL among them then takes a
+   * constant as a string — which the warehouse refuses (BOOL = STRING). The physical type of each
+   * boolean column is carried onto the pipeline's column. → the columns retyped, by model.
+   */
+  typeToPhysical(typesByModel = {}) {
+    const retyped = {};
+    for (const [key, types] of Object.entries(typesByModel)) {
+      const m = this.models[key];
+      if (!m || !(types instanceof Map)) continue;
+      for (const c of m.columns || []) {
+        if (c.type !== 'boolean' && isBooleanType(types.get(String(c.name).toLowerCase()))) { c.type = 'boolean'; (retyped[key] ||= []).push(c.name); }
+      }
+    }
+    return retyped;
+  }
+
   groundToPhysical(physByModel) {
     const get = (k) => (physByModel instanceof Map ? physByModel.get(k) : physByModel?.[k]);
     const pruned = {};

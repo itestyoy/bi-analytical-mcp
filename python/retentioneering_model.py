@@ -348,7 +348,16 @@ def _metric_meta(stream, configs):
 
 
 def cluster_analysis(stream, spec, a, out):
-    data = stream.cluster_analysis_data(**a["params"])
+    params = a["params"]
+    batches = _metric_batches(stream, params["overview_metrics"]) if params.get("overview_metrics") else [None]
+    data = stream.cluster_analysis_data(**({**params, "overview_metrics": batches[0]} if batches[0] is not None else params))
+    # the overview's other batches (a metric at a second agg): the clustering is seeded, so each call
+    # finds the same clusters, and only the overview's rows are taken from it
+    for batch in batches[1:]:
+        more = stream.cluster_analysis_data(**{**params, "overview_metrics": batch}).get("overview_df")
+        if more is not None and data.get("overview_df") is not None:
+            both = pd.concat([data["overview_df"], more])
+            data["overview_df"] = both[~both.index.duplicated(keep="first")]
     if data.get("overview_df") is not None:
         _overview(data["overview_df"], a, out, "cluster_analysis", "cluster", _metric_meta(stream, a["params"].get("overview_metrics")))
     if data.get("best_params") is not None:
@@ -365,9 +374,43 @@ def cluster_analysis(stream, spec, a, out):
             _emit(out, a, k, v)
 
 
+def _metric_batches(stream, configs):
+    """The metric configs in batches the library computes in ONE call: it builds one column per metric
+    (and event) BEFORE it rolls them up, so two configs of the same metric — the same one at another
+    agg (a median and a mean of event_count), or the same one twice — make two columns of one name and
+    the call fails ("Data must be 1-dimensional", or "'DataFrame' object has no attribute 'name'" on
+    another pandas). Each batch holds a column once; an identical config is kept once. The library's
+    own parse names the columns."""
+    from retentioneering.metrics.metric_builder import MetricConfig
+
+    events = sorted(str(e) for e in stream.get_event_counts().keys())
+    parsed = MetricConfig(configs, available_events=events).parsed_configs
+    batches, seen = [], set()
+    for cfg, p in zip(configs, parsed):
+        key = json.dumps(cfg, sort_keys=True, default=str)
+        if key in seen:
+            continue
+        seen.add(key)
+        cols = set(p.get("metric_names") or [])
+        home = next((b for b in batches if not (b["cols"] & cols)), None)
+        if home is None:
+            home = {"cols": set(), "configs": []}
+            batches.append(home)
+        home["cols"] |= cols
+        home["configs"].append(cfg)
+    return [b["configs"] for b in batches]
+
+
 def segment_overview(stream, spec, a, out):
-    frame = stream.segment_overview_data(**a["params"])
-    _overview(frame, a, out, "segment_overview", "level", _metric_meta(stream, a["params"].get("metrics")))
+    params = a["params"]
+    if not params.get("metrics"):
+        frames = [stream.segment_overview_data(**params)]
+    else:
+        frames = [stream.segment_overview_data(**{**params, "metrics": batch}) for batch in _metric_batches(stream, params["metrics"])]
+    # the rows of every batch, each once (the segment's size and share come back with each)
+    frame = pd.concat(frames)
+    frame = frame[~frame.index.duplicated(keep="first")]
+    _overview(frame, a, out, "segment_overview", "level", _metric_meta(stream, params.get("metrics")))
 
 
 CHARTED = {

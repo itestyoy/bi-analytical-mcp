@@ -15,6 +15,7 @@
 //   semanticModelSources(projectDir)      → { <semantic model>: <dbt model it reads> }
 //   groupBys(projectDir, metrics)         → { ok, group_bys: { <metric>: [item] } }  (MetricFlow's list)
 //   pythonModelsOn(adapter)               → can this dbt run Python models there
+//   unparsedSqlConfig()                   → the config a model whose SQL dbt's parser cannot read needs
 //
 // Every method takes the project it works on (a context's overlay project) and never throws for a
 // dbt failure: `ok: false` with what dbt printed. The cancellation of the call or task in progress

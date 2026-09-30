@@ -268,6 +268,40 @@ test('unnest an ARRAY payload property of the crash fact = 20 elements, net_retr
   assert.equal(by.iap_start, 1);
 });
 
+// A BOOL column compared with a constant written as text ("true", as a caller often writes it): the
+// constant is written as the column's own type — a warehouse compares a BOOL only with a BOOL
+// (BigQuery refuses BOOL = STRING) — and a constant that is no boolean is refused when the step is added.
+test('a boolean column takes true / false however it is written, and its rows are the warehouse\'s own', opts, async (t) => {
+  if (skip(t)) return;
+  const [want] = (await wh.query('select count(*) filter (where is_fatal_of_event_data) as yes, count(*) filter (where not is_fatal_of_event_data) as no from fct_crashlytics_events')).rows;
+  assert.ok(num(want.yes) > 0 && num(want.no) > 0, 'the fixture has both');
+  const count = async (conditions) => {
+    const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_flag', source: 'crashlytics' });
+    await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [{ stage: 'where', conditions }, { stage: 'aggregate', measures: [{ name: 'n', fn: 'count' }] }] });
+    const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+    assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+    return num(c.rows[0].n);
+  };
+  assert.equal(await count([{ column: 'is_fatal_of_event_data', op: 'eq', value: 'true' }]), num(want.yes));
+  assert.equal(await count([{ column: 'is_fatal_of_event_data', op: 'eq', value: 'FALSE' }]), num(want.no));
+  assert.equal(await count([{ column: 'is_fatal_of_event_data', op: 'in', value: ['true', false] }]), num(want.yes) + num(want.no));
+  assert.equal(await count([{ left: { value: 'true' }, op: 'eq', right: { column: 'is_fatal_of_event_data' } }]), num(want.yes));
+  // a constant that is no boolean is refused in the call, naming the column
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_bad', source: 'crashlytics' });
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'is_fatal_of_event_data', op: 'eq', value: 'yes' }] } })), /'is_fatal_of_event_data' is a boolean column/);
+});
+
+// A raw expression runs as written, over the columns the steps before it made: one naming a column
+// that is not there is refused when it is added, not by the warehouse minutes later.
+test('a raw expression naming a column that does not exist at that step is refused when it is added', opts, async (t) => {
+  if (skip(t)) return;
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'raw_cols', source: 'crashlytics' });
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'usd', op: 'raw', sql: 'safe_cast(price_in_usd_of_event_data as double)' } })), /names 'price_in_usd_of_event_data', not a column at this stage/);
+  // one over real columns — with functions, keywords, strings and an alias of its own — is taken
+  const ok = await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'compute', name: 'fatal_flag', op: 'raw', sql: "case when is_fatal_of_event_data then 'fatal_x' when current_date is null then 'no_such_col' else 'other' end" } });
+  assert.equal(ok.step_index, 1);
+});
+
 // A GOVERNED measure — one the SCHEMA declares with a fixed aggregation (meta.mcp.measures with
 // `agg`), not one the task invents. The task only names it in a metric; the aggregation is the
 // schema's. It has to reach the semantic model of whatever source declared it: an events source

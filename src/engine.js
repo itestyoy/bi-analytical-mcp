@@ -1349,7 +1349,7 @@ export class Engine {
     // a build is a task: the id now, the rows from query_pipeline_model({ task_id })
     const existing = input.context_id ? this._ctxToWrite(input.context_id) : null;
     const ctxId = existing ? existing.id : this.ctxs.newId();
-    const taskId = this._startTask(existing, 'register_native_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }));
+    const taskId = this._startTask(existing, 'register_native_model', (id) => this._registerPipeline(input, { ctxId, taskId: id }), { input });
     return this._taskStarted(taskId, { context_id: ctxId });
   }
 
@@ -1609,8 +1609,10 @@ export class Engine {
   }
 
   /** The `{{ config(...) }}` line of a SQL model built for a task: how it is materialized, and when it expires. */
-  _modelConfigLine(materialized = 'table') {
-    const cfg = { materialized, ...this._expiryConfig('sql') };
+  _modelConfigLine(materialized = 'table', { pipeline = false } = {}) {
+    // a pipeline written in a syntax dbt's own parser does not read says so (dbt v2 would warn on it)
+    const unparsed = pipeline && getDialect(this.catalog.dialect).writesPipeSyntax ? this.runner?.unparsedSqlConfig?.() || {} : {};
+    const cfg = { materialized, ...this._expiryConfig('sql'), ...unparsed };
     return `{{ config(${Object.entries(cfg).map(([k, v]) => `${k}=${typeof v === 'number' ? v : `'${String(v).replace(/'/g, "\\'")}'`}`).join(', ')}) }}`;
   }
 
@@ -2501,7 +2503,7 @@ export class Engine {
     });
     this._ctxQueue ||= new Map();
     const batch = { before: this._ctxQueue.get(ctx.id) || null };
-    const ids = works.map((work) => this._startTask(ctx, tool, work, { batch }));
+    const ids = works.map((work, i) => this._startTask(ctx, tool, work, { batch, input: { ...queries[i], context_id: ctx.id } }));
     const all = Promise.allSettled(ids.map((id) => this._taskRuns.get(id))).finally(() => {
       if (this._ctxQueue.get(ctx.id) === all) this._ctxQueue.delete(ctx.id);
     });
@@ -2616,7 +2618,7 @@ export class Engine {
         + (plan.checkpoint ? ` This build recomputed only ${plan.stages.length} step(s), reading ${plan.checkpoint.model} for the first ${plan.checkpoint.at}.` : ''),
       );
       return result;
-    });
+    }, { input: { action: 'materialize', draft_id: ctx.id, name: draft.name, source: draft.source, ...(draft.time_range ? { time_range: draft.time_range } : {}), stages, ...(from ? { from_checkpoint: { at: from.at, model: from.model } } : {}) } });
     draft.building.task_id = taskId;
     this.jobs.setTable(taskId, modelName); // the table this task leaves behind (paged, drawn, started from)
     // The built table STANDS FOR the first `stages.length` steps from now on: record the checkpoint
@@ -2735,7 +2737,7 @@ export class Engine {
     // allows one model per name, and a shorter chain would otherwise keep orphaned _sN files.
     this.ctxs.removePipelineFiles(ctx.id, modelName);
     for (const m of models) {
-      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `${this._modelConfigLine(m === last ? materialized : 'table')}\n${header}${m.sql}\n`);
+      if (m.kind === 'sql') this.ctxs.writeModel(ctx.id, m.model, `${this._modelConfigLine(m === last ? materialized : 'table', { pipeline: true })}\n${header}${m.sql}\n`);
       else { this.ctxs.writeFile(ctx.id, `${m.model}.py`, m.code); this.ctxs.writeFile(ctx.id, `${m.model}.yml`, m.yml); }
     }
     const pyInfo = hasPython ? models.filter((m) => m.kind === 'python').map(({ yml, functions, bindings, ...m }) => m) : null;
@@ -2919,7 +2921,7 @@ export class Engine {
     const render = renderContext(this.catalog, ctx.state, { spec: this._semanticSpec() });
     const file = this.ctxs.writeSemanticYaml(ctx.id, render);
     this.ctxs.touch(ctx.id);
-    const taskId = this._startTask(ctx, 'build_semantic_model', () => this._declared(ctx, input, compiled, render, file));
+    const taskId = this._startTask(ctx, 'build_semantic_model', () => this._declared(ctx, input, compiled, render, file), { input });
     return this._taskStarted(taskId, { context_id: ctx.id });
   }
 
@@ -3022,7 +3024,7 @@ export class Engine {
         metrics: render.metricNames, groupable: this._groupableRefs(ctx), parse, warnings: render.warnings || [],
         next: `Query the updated task: query_semantic_model({ context_id: '${ctx.id}', metrics: [...] }) — \`metrics\` above is the current full list.`,
       };
-    });
+    }, { input });
     return this._taskStarted(taskId, { context_id: ctx.id });
   }
 
@@ -3417,7 +3419,7 @@ export class Engine {
     // The project's context is never written after start (nothing is built on it) and every
     // conversation queries it: its queries run side by side, like a batch's members, instead of
     // each waiting for the one before it.
-    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), project ? { batch: { before: null } } : {}), { context_id: ctx.id });
+    return this._taskStarted(this._startTask(ctx, 'query_semantic_model', work(input), { input, ...(project ? { batch: { before: null } } : {}) }), { context_id: ctx.id });
   }
 
   /**
@@ -3442,7 +3444,7 @@ export class Engine {
     if (input.validate) {
       if (!this.runner) throw new ToolError('no query engine configured', { stage: 'query' });
       const work = (id) => this._previewValidateWork(ctx, input, id);
-      return this._taskStarted(this._startTask(ctx, 'preview_semantic_model', work, project ? { batch: { before: null } } : {}), { context_id: ctx.id });
+      return this._taskStarted(this._startTask(ctx, 'preview_semantic_model', work, { input, ...(project ? { batch: { before: null } } : {}) }), { context_id: ctx.id });
     }
     // whether a build is running is read now, before MetricFlow is asked (the build may end meanwhile)
     const building = this._building(ctx);
@@ -4281,7 +4283,7 @@ export class Engine {
     if (input.task_ids) return this._pollTasks(input, 'pipeline');
     const ctx = this._ctx(input.context_id);
     if (input.queries) return this._startBatch(ctx, 'query_pipeline_model', input.queries, (q) => this._pipelineQueryWork(ctx, q));
-    return this._taskStarted(this._startTask(ctx, 'query_pipeline_model', this._pipelineQueryWork(ctx, input)), { context_id: ctx.id });
+    return this._taskStarted(this._startTask(ctx, 'query_pipeline_model', this._pipelineQueryWork(ctx, input), { input }), { context_id: ctx.id });
   }
 
   /** One query over a context's built pipeline model, checked against its columns; returns the work its task runs. */

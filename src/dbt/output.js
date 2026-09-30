@@ -7,6 +7,12 @@
  * strips ANSI colors and dbt log timestamps, and surfaces the meaningful part
  * (from the first Error/Database Error/Parsing Error marker onward).
  */
+/** A dbt output line without its terminal colours. */
+export const stripAnsi = (text) => String(text || '').replace(/\x1b\[[0-9;]*m/g, '');
+
+/** Where `dbt parse` writes the semantic manifest MetricFlow reads, in a project. */
+export const SEMANTIC_MANIFEST = ['target', 'semantic_manifest.json'];
+
 export function formatDbtError(stdout = '', stderr = '') {
   const raw = `${stderr || ''}\n${stdout || ''}`;
   const cleaned = raw
@@ -64,7 +70,7 @@ export function extractSql(stdout) {
 export function extractPlan(stdout) {
   // With --show-dataflow-plan the plan is printed BEFORE the SQL; return the
   // cleaned text preceding the first SELECT/WITH (ANSI/timestamps stripped).
-  const cleaned = (stdout || '').replace(/\x1b\[[0-9;]*m/g, '');
+  const cleaned = stripAnsi(stdout);
   const idx = cleaned.search(/\b(with|select)\b/i);
   const planText = (idx >= 0 ? cleaned.slice(0, idx) : cleaned).trim();
   return planText ? { dataflow_plan: planText.slice(0, 20000) } : undefined;
@@ -75,7 +81,7 @@ export function extractPlan(stdout) {
  * { "show": [ {col:val}, ... ] }; dbt v2 prints the bare array [ {col:val}, ... ]. Both are read.
  */
 export function parseShowJson(stdout) {
-  const cleaned = (stdout || '').replace(/\x1b\[[0-9;]*m/g, '');
+  const cleaned = stripAnsi(stdout);
   const tryParse = (from, to) => { try { return JSON.parse(cleaned.slice(from, to + 1)); } catch { return undefined; } };
   const obj = cleaned.indexOf('{"show"') >= 0 ? tryParse(cleaned.indexOf('{"show"'), cleaned.lastIndexOf('}')) : undefined;
   if (Array.isArray(obj?.show)) return obj.show;

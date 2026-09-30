@@ -10,7 +10,7 @@ import { inIsolatedTarget } from '../request-context.js';
 import { runProcess, runWithInput } from './process.js';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { warehouseOf } from './warehouse.js';
-import { parseShowJson, parseCsv, extractSql, extractPlan } from './output.js';
+import { parseShowJson, parseCsv, extractSql, extractPlan, stripAnsi, SEMANTIC_MANIFEST } from './output.js';
 
 export class DbtV1 {
   constructor({ dbtBin, mfBin, pythonBin, profilesDir, timeout = 600000 } = {}) {
@@ -68,12 +68,12 @@ export class DbtV1 {
 
   async parse(projectDir) {
     const r = await this._proc(this.dbtBin, projectDir, ['parse']);
-    return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, 'target', 'semantic_manifest.json')) };
+    return { ok: r.ok, stdout: r.stdout, stderr: r.stderr, manifest: existsSync(join(projectDir, ...SEMANTIC_MANIFEST)) };
   }
 
   /** The semantic manifest the last parse of `projectDir` wrote (what MetricFlow reads), or null. */
   semanticManifest(projectDir) {
-    const file = join(projectDir, 'target', 'semantic_manifest.json');
+    const file = join(projectDir, ...SEMANTIC_MANIFEST);
     if (!existsSync(file)) return null;
     try { return JSON.parse(readFileSync(file, 'utf8')); } catch { return null; }
   }
@@ -139,7 +139,7 @@ export class DbtV1 {
     // Preserve the process-level facts (killed/signal/error = timeout, spawn failure): the caller
     // has to tell "dbt could not run" from "dbt ran and this relation is not there".
     if (!r.ok) return { ok: false, stdout: r.stdout, stderr: r.stderr, error: r.error, killed: r.killed, signal: r.signal };
-    const m = (r.stdout || '').replace(/\x1b\[[0-9;]*m/g, '').match(/MCP_COLS:(\[[^\n]*\])/);
+    const m = stripAnsi(r.stdout).match(/MCP_COLS:(\[[^\n]*\])/);
     if (!m) return { ok: false, stdout: r.stdout };
     try { return { ok: true, columns: JSON.parse(m[1]) }; } catch { return { ok: false, stdout: r.stdout }; }
   }

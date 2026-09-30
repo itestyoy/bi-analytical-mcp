@@ -44,7 +44,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -56,9 +56,9 @@ import { makeMcpServer } from '../../src/server.js';
 import { Client } from '@modelcontextprotocol/client';
 import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { mcp, setMcp } from '../helpers/catalog-doc.js';
+import { mcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -1354,7 +1354,6 @@ test('51. `unique` is a claim nobody checks: a false one inflates 184 to 190', o
   assert.equal(num(dup.rows[0].n), 1, 'one duplicated (funnel, player) pair — u1 with fnl_01, four times');
 });
 
-
 // 52. The KEY SHAPE comes from the declaration and nothing else. The same warehouse, the same
 //     question, the crash source owning the funnel by ONE column instead of two: both sides
 //     render that one column, the keys still meet, and the answer is identical to scenario 50.
@@ -1406,7 +1405,6 @@ test('53. every attribute the catalog advertises for an owned relationship answe
   assert.deepEqual(refused, [], 'the catalog must not offer an attribute the engine refuses');
   for (const a of own) assert.equal(totals[a], 184, `${a} must not inflate`);
 });
-
 
 // 54. THE ANSWER TO "how can a many-to-one join fan out". It cannot. Section K's 190 came from a
 //     FALSE claim; here the owning column really does hold one row per value (checked against

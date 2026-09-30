@@ -22,7 +22,7 @@ import { createDbt, DEFAULT_ENV } from './dbt/index.js';
 import { Engine } from './engine.js';
 import { resolveFeatures } from './features.js';
 import { loadProjectSemantics } from './project-semantics.js';
-import { BackgroundIndexer } from './value-index.js';
+import { BackgroundIndexer } from './value-indexer.js';
 import { createEmbedder } from './embeddings.js';
 import { buildToolDefs, servicesFor, logLine } from './mcp-surface.js';
 import { createMcpServer } from './mcp-server.js';

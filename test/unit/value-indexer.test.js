@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { loadCatalog } from '../../src/catalog.js';
-import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
+import { ValueIndex } from '../../src/value-index.js';
+import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { settle } from '../helpers/settle.js';
 
 // Allowed observability/lifecycle test: a STUB runner returns canned rows by SQL SHAPE (no

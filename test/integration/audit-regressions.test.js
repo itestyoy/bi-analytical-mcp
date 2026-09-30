@@ -31,7 +31,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -40,12 +40,13 @@ import yaml from 'js-yaml';
 import { loadCatalog, groundCatalogToPhysical } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { ValueIndex, BackgroundIndexer } from '../../src/value-index.js';
+import { ValueIndex } from '../../src/value-index.js';
+import { BackgroundIndexer } from '../../src/value-indexer.js';
 import { openStore } from '../../src/store.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { mcp, setMcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, MF_BIN, PY_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side

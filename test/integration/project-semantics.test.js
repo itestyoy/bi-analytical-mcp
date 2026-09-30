@@ -18,7 +18,7 @@ import { mergeModelEntry } from '../../src/semantic-latest.js';
 import { createDbt, DEFAULT_ENV } from '../../src/dbt/index.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, taskResult, isStartedTask } from '../helpers/settle.js';
-import { DBT_BIN, PY_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project');

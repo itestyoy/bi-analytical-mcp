@@ -9,18 +9,33 @@ export const RETENTIONEERING_VIEW_URI = 'ui://betti/retentioneering-view.html';
  *  comparison orders mixed case and punctuation differently from one deployment to the next). */
 export const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
+/**
+ * THE KINDS THAT HAVE A CARD — one table: a kind's title, whether its card is a chart of its own
+ * (`charted`; a distribution is drawn as its histogram), how its card is built (`card`, from the
+ * card's head, the result and what the drawing call carries), and for a diff that has a card, how
+ * that one is built (`diff`) — the library's matrices as heatmaps, or, where `diffCharted`, in the
+ * analysis's own shape (a funnel's: both groups on the same steps, and their difference). A kind not
+ * in it has no card and is answered in words.
+ */
+const KINDS = {
+  transition_graph: { title: 'Transition graph', charted: true, card: (head, r, at) => graph(head, r, at.weight, at.synthetic), diff: diffMatrices },
+  step_matrix: { title: 'Step matrix', charted: true, card: (head, r, at) => stepMatrix(head, r, at.synthetic), diff: diffMatrices },
+  step_sankey: { title: 'Step sankey', charted: true, card: stepSankey, diff: diffMatrices },
+  funnel: { title: 'Funnel', charted: true, card: funnel, diff: funnelDiff, diffCharted: true },
+  cluster_analysis: { title: 'Path clusters', charted: true, card: overview },
+  segment_overview: { title: 'Segment overview', charted: true, card: overview },
+  metric_distribution: { card: distribution },
+};
+const kindsWhere = (test) => Object.keys(KINDS).filter((k) => test(KINDS[k]));
 /** The analyses the card draws as a chart of their own. */
-export const CHARTED_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel', 'cluster_analysis', 'segment_overview'];
-/** WHICH ANALYSES HAVE A CARD — the one list: the charted ones and a distribution (its histogram). */
-export const CARD_KINDS = [...CHARTED_KINDS, 'metric_distribution'];
-/** WHICH DIFFS HAVE A CARD, AND WHICH ONE — the one table: a diff whose parts are the library's
- *  matrices drawn as heatmaps, or a funnel's in the funnel's own shape (both groups on the same steps,
- *  and their difference). */
-const DIFF_CARDS = { transition_graph: diffMatrices, step_matrix: diffMatrices, step_sankey: diffMatrices, funnel: funnelDiff };
-export const DIFF_CARD_KINDS = Object.keys(DIFF_CARDS);
+export const CHARTED_KINDS = kindsWhere((k) => k.charted);
+/** Which analyses have a card: the charted ones and a distribution (its histogram). */
+export const CARD_KINDS = Object.keys(KINDS);
+/** Which diffs have a card. */
+export const DIFF_CARD_KINDS = kindsWhere((k) => k.diff);
 /** The kinds whose diff keeps the analysis's own shape: the query spec tells the analysis step so
  *  (`diff_charted`), which then runs it — and its pre-run check — through the charted function. */
-export const CHARTED_DIFF_KINDS = DIFF_CARD_KINDS.filter((k) => DIFF_CARDS[k] !== diffMatrices);
+export const CHARTED_DIFF_KINDS = kindsWhere((k) => k.diffCharted);
 
 /** How a stored result holds its diff: 'charted' (the analysis's own shape), 'tables' (the library's
  *  tables — every diff stored before a funnel's kept its shape too), or false for no diff. */
@@ -42,12 +57,8 @@ export const WEIGHT_LABELS = {
   count: 'Transitions', unique_paths: 'Paths', share_of_total: 'Share of all transitions', avg_per_path: 'Per path',
   proba_in: 'Share of the target\'s arrivals', proba_out: 'Share of the source\'s departures', time_median: 'Median time', time_q95: 'Time, 95th percentile',
 };
-const TITLES = {
-  transition_graph: 'Transition graph', step_matrix: 'Step matrix', step_sankey: 'Step sankey',
-  funnel: 'Funnel', cluster_analysis: 'Path clusters', segment_overview: 'Segment overview',
-};
 /** A title for any analysis: its own, else its kind in words. */
-const titleOf = (kind) => TITLES[kind] || (kind.charAt(0).toUpperCase() + kind.slice(1)).replace(/_/g, ' ');
+const titleOf = (kind) => (Object.hasOwn(KINDS, kind) && KINDS[kind].title) || (kind.charAt(0).toUpperCase() + kind.slice(1)).replace(/_/g, ' ');
 /** How the library's synthetic events read on a card: where a path begins, and where it has ended.
  *  Which events ARE synthetic is the library's word: the server draws a card with the facts sheet's
  *  `synthetic_events` (this page does not carry the sheet); a card drawn before it did falls back to
@@ -72,15 +83,9 @@ export function retentioneeringViewModel(drawn, args = {}) {
   // a card per KIND (hasCard): any other analysis has none and is answered in words; a kind with a
   // card whose result holds nothing to draw is `empty`
   if (!hasCard(r.kind, diffForm(r))) return none('no_card');
-  if (r.diff) return DIFF_CARDS[r.kind](head, r);
-  switch (r.kind) {
-    case 'transition_graph': return graph(head, r, args.edge_weight || drawn.edge_weight, synthetic);
-    case 'step_matrix': return stepMatrix(head, r, synthetic);
-    case 'step_sankey': return stepSankey(head, r);
-    case 'funnel': return funnel(head, r);
-    case 'metric_distribution': return distribution(head, r);
-    default: return overview(head, r);
-  }
+  const kind = KINDS[r.kind];
+  if (r.diff) return kind.diff(head, r);
+  return kind.card(head, r, { weight: args.edge_weight || drawn.edge_weight, synthetic });
 }
 
 /** A library name as a reader reads it: "paths_with_start" → "Paths with start", "path_stats.user_id"

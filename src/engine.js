@@ -368,15 +368,21 @@ export class Engine {
    * drop_context / delete_native_model / delete_semantic_model. Delegates to the internal
    * handlers (kept private so the all-at-once register path + tests reuse them).
    */
-  async context(input) {
+  async context(input = {}) {
+    // what context used to remove is delete_context's now: said so, rather than a bare enum refusal
+    const moved = { drop: 'delete_context({ context_id })', delete_model: "delete_context({ context_id, what: 'pipeline_model' })", delete_semantic_model: "delete_context({ context_id, what: 'semantic_model', semantic_model })" };
+    if (Object.hasOwn(moved, input?.action)) throw new ToolError(`context only reads (list, describe); removing is ${moved[input.action]}`, { stage: 'validate', field: 'action' });
     this._validate('context', input);
-    switch (input.action) {
-      case 'list': return this.list_contexts();
-      case 'describe': return this.describe_context({ context_id: input.context_id });
-      case 'drop': return this.drop_context({ context_id: input.context_id, ...(input.force ? { force: true } : {}) });
-      case 'delete_model': return this.delete_native_model({ context_id: input.context_id });
-      case 'delete_semantic_model': return this.delete_semantic_model({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });
-      default: throw new ToolError(`unknown context action '${input.action}'`, { stage: 'validate', field: 'action' });
+    return input.action === 'list' ? this.list_contexts() : this.describe_context({ context_id: input.context_id });
+  }
+
+  /** Remove a context, its pipeline model, or one model's task additions. */
+  async delete_context(input = {}) {
+    this._validate('delete_context', input);
+    switch (input.what || 'context') {
+      case 'pipeline_model': return this.delete_native_model({ context_id: input.context_id });
+      case 'semantic_model': return this.delete_semantic_model({ context_id: input.context_id, semantic_model: input.semantic_model, cascade: input.cascade });
+      default: return this.drop_context({ context_id: input.context_id, ...(input.force ? { force: true } : {}) });
     }
   }
 

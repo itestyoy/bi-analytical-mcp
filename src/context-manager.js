@@ -567,7 +567,7 @@ export class ContextManager {
       if (this.leases.get(c.id)) continue; // never reclaim a context with a live build
       if (c.state?.pinned) continue; // …nor one served for as long as the server runs (the project's own semantic layer)
       // …nor one whose materialized prefix another (live) context reads: dropping it would take
-      // that table with it, which is exactly what context({ action: 'drop' }) refuses to do
+      // that table with it, which is exactly what delete_context refuses to do
       // without force. A consumer in use keeps this one's lastUsedAt fresh, so an owner is only
       // held while its table is actually being read.
       if (this.checkpointConsumers(c.id).length) continue;

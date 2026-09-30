@@ -225,7 +225,7 @@ test('what the project does not define is refused in the call, naming what it do
   await refused({ metrics: ['project_events_total'], group_by: [{ entity: 'media_source' }] }, /not one project_events_total can be grouped by.*player/);
   // the project's contexts are read as they are: not built on, not dropped
   await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ context_id: ACQ, name: 'xyz', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] })), /own semantic layer/);
-  await assert.rejects(Promise.resolve().then(() => raw.context({ action: 'drop', context_id: ACQ })), /nothing to drop/);
+  await assert.rejects(Promise.resolve().then(() => raw.delete_context({ context_id: ACQ })), /nothing to drop/);
   // …not even as a dry run of a declaration over it
   await assert.rejects(Promise.resolve().then(() => raw.build_semantic_model({ context_id: ACQ, dry_run: true, name: 'xyz', semantic_models: [{ from: 'events', measures: [{ name: 'n', agg: 'count', field: '*' }] }], metrics: [{ name: 'n', type: 'simple', measure: { name: 'n' } }] })), /own semantic layer/);
   // …by any tool that would write into it

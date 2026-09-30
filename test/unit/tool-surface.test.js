@@ -72,8 +72,8 @@ test('experiment tool: plan / check_split / analyze dispatch + strict fields', (
   );
 });
 
-// context({ action }) — the unified lifecycle tool — dispatches + validates strictly.
-test('context tool: list / describe / drop dispatch and strict fields', async () => {
+// context reads the contexts; delete_context removes them — each validated strictly.
+test('context lists and describes, delete_context removes — and a read never removes', async () => {
   const e = engine();
   // start a draft to create a context.
   const s = await e.build_pipeline_model({ action: 'start', name: 'ctxtool', source: 'events' });
@@ -84,11 +84,14 @@ test('context tool: list / describe / drop dispatch and strict fields', async ()
   // strict: describe requires context_id; list forbids it.
   await assert.rejects(() => e.context({ action: 'describe' }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'list', context_id: s.draft_id }), /invalid input/);
-  // delete_semantic_model requires semantic_model.
-  await assert.rejects(() => e.context({ action: 'delete_semantic_model', context_id: s.draft_id }), /invalid input/);
   await assert.rejects(() => e.context({ action: 'bogus' }), /invalid input/);
-  // drop tears the context down.
-  await e.context({ action: 'drop', context_id: s.draft_id });
+  // what context used to remove is refused there, with the call that does it
+  await assert.rejects(() => e.context({ action: 'drop', context_id: s.draft_id }), /delete_context\(\{ context_id \}\)/);
+  assert.ok((await e.context({ action: 'list' })).contexts.some((c) => c.context_id === s.draft_id), 'a read removed nothing');
+  // delete_context: semantic_model needs its model; context forbids the model's fields
+  await assert.rejects(() => e.delete_context({ what: 'semantic_model', context_id: s.draft_id }), /invalid input/);
+  await assert.rejects(() => e.delete_context({ context_id: s.draft_id, cascade: true }), /invalid input/);
+  await e.delete_context({ context_id: s.draft_id });
   const after = await e.context({ action: 'list' });
   assert.ok(!after.contexts.some((c) => c.context_id === s.draft_id), 'dropped context is gone');
 });

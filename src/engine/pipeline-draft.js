@@ -103,7 +103,7 @@ export const pipelineDraftMethods = {
       if (st?.building && forBuild) {
         throw new ToolError(
           `steps 1..${list[i].at} are still being materialized as ${list[i].model} — nothing can read that table yet, so a second build would only duplicate the work. `
-          + `Wait for it with query_pipeline_model({ task_id: '${st.building}' }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with truncate/edit_step at or before step ${list[i].at} — or context({ action: 'delete_model' }) — and materialize again.`,
+          + `Wait for it with query_pipeline_model({ task_id: '${st.building}' }) and materialize again once it is done; if that build is gone for good (the server restarted), retire it with truncate/edit_step at or before step ${list[i].at} — or delete_context({ what: 'pipeline_model' }) — and materialize again.`,
           { stage: 'validate', field: 'draft_id' },
         );
       }
@@ -385,7 +385,7 @@ export const pipelineDraftMethods = {
       next: 'Continue editing this NEW draft (add_step / edit_step / insert_step / delete_step / truncate); the original is untouched. Materialize when done.',
       recommendations: [
         `Forked ${after} of ${total} step(s) into a new draft ${ctx.id}; the source ${input.draft_id} is unchanged — branch variants freely.`,
-        ...(inherited.length ? [`Steps 1..${inherited[inherited.length - 1].at} are already materialized (${inherited[inherited.length - 1].model}, built in ${inherited[inherited.length - 1].owner}) and this fork READS that table: only the steps you add here are computed. Keep that context alive while this fork uses it — context({ action: 'drop' }) on it is refused unless forced.`] : []),
+        ...(inherited.length ? [`Steps 1..${inherited[inherited.length - 1].at} are already materialized (${inherited[inherited.length - 1].model}, built in ${inherited[inherited.length - 1].owner}) and this fork READS that table: only the steps you add here are computed. Keep that context alive while this fork uses it — delete_context on it is refused unless forced.`] : []),
         `Materialize with build_pipeline_model({ action: "materialize", draft_id: "${ctx.id}" }).`,
       ],
     };

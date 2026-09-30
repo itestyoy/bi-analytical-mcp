@@ -645,7 +645,7 @@ test('a task whose context is gone is refused as gone, and a preview is not held
   await engine.build_retentioneering_model({ action: 'preview', context_id: b.context_id, eventstream: 'short_lived' }).then(() => order.push('preview'));
   await stepping;
   assert.deepEqual(order, ['preview', 'step']);
-  await engine.context({ action: 'drop', context_id: b.context_id, force: true });
+  await engine.delete_context({ context_id: b.context_id, force: true });
   await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'transition_graph' }), (e) => e.code === 'result_gone' && e.stage === 'validate');
 });
 

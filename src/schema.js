@@ -225,21 +225,37 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
 
   // ONE context-lifecycle tool (action-driven), replacing list_contexts / describe_context /
   // drop_context / delete_native_model / delete_semantic_model. Strict per-action fields.
+  // THE CONTEXTS, READ — list them, or describe one. Nothing here changes anything, so the tool is
+  // read-only as a whole; removing what a context holds is delete_context, a tool of its own, because
+  // a client asks before a destructive call and should not have to ask before a listing.
   const contextTool = {
     type: 'object', additionalProperties: false, required: ['action'],
-    description: 'Manage isolated execution contexts (the workspaces build_semantic_model / build_pipeline_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths) | drop (tear the whole context down) | delete_model (remove just the native pipeline model, keep the context) | delete_semantic_model (remove one table\'s task additions, with cascade for dependent metrics).',
+    description: 'Read the isolated execution contexts (the workspaces build_semantic_model / build_pipeline_model produce). action: list (all contexts) | describe (one context\'s tasks/models/metrics/group-by paths). Removing one, or a model in one, is delete_context.',
     allOf: [
-      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['from_task', 'context_id', 'semantic_model', 'cascade', 'force']) },
-      { if: { properties: { action: { enum: ['describe', 'delete_model'] } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['from_task', 'semantic_model', 'cascade', 'force']) } },
-      { if: { properties: { action: { const: 'drop' } }, required: ['action'] }, then: { required: ['context_id'], ...forbid(['from_task', 'semantic_model', 'cascade']) } },
-      { if: { properties: { action: { const: 'delete_semantic_model' } }, required: ['action'] }, then: { required: ['context_id', 'semantic_model'], ...forbid(['from_task', 'force']) } },
+      { if: { properties: { action: { const: 'list' } }, required: ['action'] }, then: forbid(['context_id']) },
+      { if: { properties: { action: { const: 'describe' } }, required: ['action'] }, then: { required: ['context_id'] } },
     ],
     properties: {
-      action: { enum: ['list', 'describe', 'drop', 'delete_model', 'delete_semantic_model'], description: 'list → all active contexts; describe → one context in depth; drop → tear down the whole context; delete_model → remove the native pipeline model only; delete_semantic_model → remove one model\'s task additions.' },
-      context_id: contextId(`The context to act on: the context_id a build returned${projectContexts.length ? ', or one of the dbt project\'s own semantic models by its name (those can be described, never dropped or changed)' : ''}. Required for every action except list.`),
-      semantic_model: { type: 'string', enum: modelKeys, description: 'delete_semantic_model: which model\'s task additions to remove.' },
-      cascade: { type: 'boolean', description: 'delete_semantic_model: also remove metrics that depend on the removed measures.' },
-      force: { type: 'boolean', description: 'drop: tear the context down even though another draft READS a table it built (a fork that inherited a materialized prefix). Those drafts then have to recompute that prefix from the source.' },
+      action: { enum: ['list', 'describe'], description: 'list → all active contexts; describe → one context in depth.' },
+      context_id: contextId(`describe: the context to describe — the context_id a build returned${projectContexts.length ? ', or one of the dbt project\'s own semantic models by its name' : ''}.`),
+    },
+  };
+  // WHAT A CONTEXT HOLDS, REMOVED — the whole context, its pipeline model, or one model's task additions.
+  const deleteContext = {
+    type: 'object', additionalProperties: false, required: ['context_id'],
+    description: 'Remove a context, or part of what it holds. It cannot be undone.',
+    allOf: [
+      { if: { properties: { what: { const: 'semantic_model' } }, required: ['what'] }, then: { required: ['semantic_model'], ...forbid(['force']) } },
+      { if: { properties: { what: { const: 'pipeline_model' } }, required: ['what'] }, then: forbid(['semantic_model', 'cascade', 'force']) },
+      { if: { not: { required: ['what'] } }, then: forbid(['semantic_model', 'cascade']) },
+      { if: { properties: { what: { const: 'context' } }, required: ['what'] }, then: forbid(['semantic_model', 'cascade']) },
+    ],
+    properties: {
+      context_id: { type: 'string', pattern: CTX, description: 'The context a build returned. The dbt project\'s own semantic models are read at start and cannot be removed.' },
+      what: { enum: ['context', 'pipeline_model', 'semantic_model'], description: 'context (default) → tear the whole context down; pipeline_model → remove its pipeline model and keep the context; semantic_model → remove one model\'s task additions (with cascade, the metrics that depend on them).' },
+      semantic_model: { type: 'string', enum: modelKeys, description: 'what: semantic_model — which model\'s task additions to remove.' },
+      cascade: { type: 'boolean', description: 'what: semantic_model — also remove the metrics that depend on the removed measures.' },
+      force: { type: 'boolean', description: 'what: context — tear it down even though another draft READS a table it built (a fork that inherited a materialized prefix); those drafts then recompute that prefix from the source.' },
     },
   };
 
@@ -250,6 +266,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     build_pipeline_model: withStageDefs(buildModel, catalog),
     delete_native_model: { ...ctxRef, description: 'Delete the registered native model in a context (remove its view + semantic model) and re-parse.' },
     context: contextTool,
+    delete_context: deleteContext,
     query_semantic_model: query,
     query_pipeline_model: {
       type: 'object', additionalProperties: false,

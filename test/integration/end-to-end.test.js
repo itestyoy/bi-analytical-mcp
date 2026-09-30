@@ -405,14 +405,14 @@ test('6. semantic_index overview lists recipes; { recipe: id } returns a payload
 test('7. context: delete models + drop contexts; list shows them gone', opts, async (t) => {
   if (skip(t)) return;
   // delete the semantic task's model additions (context delete_semantic_model action)
-  const dsm = await engine.context({ action: 'delete_semantic_model', context_id: S.semCtx, semantic_model: 'events', cascade: true });
+  const dsm = await engine.delete_context({ what: 'semantic_model', context_id: S.semCtx, semantic_model: 'events', cascade: true });
   assert.equal(dsm.removed, true);
   // delete the A/B pipeline model definition (context delete_model action)
-  const dnm = await engine.context({ action: 'delete_model', context_id: S.abCtx });
+  const dnm = await engine.delete_context({ what: 'pipeline_model', context_id: S.abCtx });
   assert.equal(dnm.removed, true);
 
   for (const id of [S.semCtx, S.pipeCtx, S.abCtx]) {
-    const d = await engine.context({ action: 'drop', context_id: id });
+    const d = await engine.delete_context({ context_id: id });
     assert.equal(d.removed, true, `dropped ${id}`);
   }
   const remaining = (await engine.context({ action: 'list' })).contexts;

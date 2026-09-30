@@ -82,8 +82,9 @@
   site. MetricFlow allows such a model exactly one join key, as its natural key: a
   second `primary`/`unique` key there is rejected at catalog load, and measures on it
   are dropped with a warning (count on an events source instead).
-- A/B significance is computed in JS via the `ab_test` tool over per-group
-  aggregates (proportion → z-test; mean → Welch t-test).
+- A/B significance is computed in JS by `experiment({ action: "analyze" })` (src/experiment.js; the
+  folded `ab_test` stays callable by name) over per-group aggregates (proportion → z-test; mean →
+  Welch t-test).
 - A FACT ABOUT AN EXTERNAL LIBRARY IS GENERATED FROM THAT LIBRARY, NEVER WRITTEN IN PROSE (HARD
   RULE). Signatures, which methods raise, what a class returns: extracted by a script into a
   checked-in sheet (`scripts/bigframes-facts.py` → `config/bigframes-facts.json`), and every text
@@ -250,8 +251,8 @@
   warehouse read like a pipeline reads it) and its scalar event properties — to filter, to carry as a
   segment, and to make events out of an event's parameters (`events.split`: by a value, or by
   conditions) — all in SQL through the pipeline's stages. The analyses with a card are CARD_KINDS (the charted ones and a
-  distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps, a funnel's diff as both groups on the same steps — which diff keeps its analysis's own shape is ONE
-  table, `DIFF_CARDS` in src/retentioneering/view-model.js, that the query spec carries to the analysis
+  distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps, a funnel's diff as both groups on the same steps — which kinds have a card, and which diff keeps its analysis's own shape, is ONE
+  table, `KINDS` in src/retentioneering/view-model.js, that the query spec carries to the analysis
   step and its pre-run check (`diff_charted`), and a stored diff says which form it holds); any other
   (describe, a conversion rate, per-path metrics) comes back as the tables and values the library
   returned, has no card, and is answered in words.

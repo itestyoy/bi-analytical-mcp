@@ -24,6 +24,7 @@ import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
 import { buildWarehouse, connectMcp, fixtureProject } from './warehouse-harness.js';
 import { settleMcp } from '../helpers/settle.js';
+import { forms, pinned } from '../helpers/schema-nav.js';
 import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
@@ -113,7 +114,8 @@ test('1. discovery to a point-in-time metric: spend by install country = 6.75 / 
   // two tools meant the deployment's whole vocabulary twice in every listing.
   assert.ok(!tools.includes('update_semantic_model'), 'the update tool is folded into build_semantic_model');
   const createTool = (await client.listTools()).tools.find((x) => x.name === 'build_semantic_model');
-  assert.deepEqual(createTool.inputSchema.properties.action.enum, ['create', 'update']);
+  const request = createTool.inputSchema.properties.request;
+  assert.deepEqual(forms(createTool.inputSchema, request).flatMap((f) => pinned(createTool.inputSchema, f, 'action')), ['create', 'update']);
   // …the overview names the four sources…
   const overview = await call('semantic_index', {});
   const models = JSON.stringify(overview.models || overview);

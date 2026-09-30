@@ -375,7 +375,7 @@ test('an analysis the library raises on keeps its error; the call\'s other analy
   // the graph is computed all the same: its transitions are the pairs of the paths
   const pairs = lists.reduce((n, l) => n + l.length + 1, 0);
   assert.equal(r.analyses.transition_graph.edges.reduce((n, e) => n + e.count, 0), pairs);
-  assert.notEqual(r.show_to_user?.arguments.analysis, 'step_matrix', 'the failed one is not offered as a card');
+  assert.notEqual(r.show_to_user?.arguments.request.analysis, 'step_matrix', 'the failed one is not offered as a card');
   await assert.rejects(engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'step_matrix' }), (e) => e.field === 'analysis' && /PatternNoMatchError/.test(e.message));
   assert.ok(JSON.stringify(await engine.explore_errors({ task_id: q.task_id })).includes('PatternNoMatchError'), 'the failure is in the error log');
 });
@@ -411,7 +411,7 @@ test('a funnel\'s diff has a card: both groups on the same steps, each the funne
   const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream: 'base', analyses: [{ kind: 'funnel', steps: FUNNEL, diff: ['platform', p1, p2] }] });
   const r = await engine.query_retentioneering_model({ task_id: q.task_id });
   assert.equal(r.status, 'done', JSON.stringify(r.error));
-  assert.equal(r.show_to_user?.arguments.analysis, 'funnel', 'the diff is offered as a card');
+  assert.equal(r.show_to_user?.arguments.request.analysis, 'funnel', 'the diff is offered as a card');
   const d = await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'funnel' });
   const vm = retentioneeringViewModel(d, { task_id: q.task_id, analysis: 'funnel' });
   assert.equal(vm.kind, 'funnel_diff');
@@ -754,7 +754,7 @@ test('a diff around an anchor is drawn block by block: each difference is its fi
     });
   }
   const read = await engine.query_retentioneering_model({ task_id });
-  assert.equal(read.show_to_user?.arguments.analysis, 'step_matrix', 'the anchored diff is offered as a card');
+  assert.equal(read.show_to_user?.arguments.request.analysis, 'step_matrix', 'the anchored diff is offered as a card');
   const d = await engine.display_retentioneering_result({ task_id, analysis: 'step_matrix' });
   const vm = retentioneeringViewModel(d, {});
   assert.equal(vm.kind, 'diff');

@@ -19,6 +19,7 @@ import { createDbt, DEFAULT_ENV } from '../../src/dbt/index.js';
 import { startWarehouse, fixtureProject } from './warehouse-harness.js';
 import { settle, taskResult, isStartedTask } from '../helpers/settle.js';
 import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { deref, field } from '../helpers/schema-nav.js';
 
 const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project');
@@ -117,7 +118,8 @@ test('each of the project\'s semantic models is read at start as a context named
   assert.equal(described.context_id, ACQ);
   // the tools that take one of them offer them as values, and still take any id a build returned
   for (const tool of ['query_semantic_model', 'preview_semantic_model', 'context']) {
-    const [presets, built] = engine.schemas[tool].properties.context_id.anyOf;
+    const schema = engine.schemas[tool];
+    const [presets, built] = field(schema, schema, 'context_id').anyOf.map((n) => deref(schema, n));
     assert.deepEqual(presets.enum, [ACQ, EV], tool);
     assert.ok(built.pattern, tool);
   }
@@ -556,7 +558,8 @@ test('nothing is keyed on a name: files moved and renamed, a semantic model and 
   assert.ok(loaded3?.layer, JSON.stringify(loaded3));
   assert.deepEqual(loaded3.contexts.sort(), ['paid_spend_daily', EV]);
   const engine3 = settle(new Engine({ catalog: loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE }), contextManager: ctxs3, runner: backend, project: loaded3 }));
-  assert.deepEqual(engine3.schemas.query_semantic_model.properties.context_id.anyOf[0].enum, ['paid_spend_daily', EV]);
+  const q3 = engine3.schemas.query_semantic_model;
+  assert.deepEqual(deref(q3, field(q3, q3, 'context_id').anyOf[0]).enum, ['paid_spend_daily', EV]);
   // a semantic model no metric reads is no context of its own: nothing could be queried there
   assert.deepEqual(loaded3.dimension_only.sort(), ['project_channels', 'project_media_sources', 'user_profiles']);
   assert.deepEqual((await engine3.semantic_index({})).project_semantic_layer.dimension_only.sort(), ['project_channels', 'project_media_sources', 'user_profiles']);

@@ -295,15 +295,23 @@ test('a boolean column takes true / false however it is written, and its rows ar
 test('a funnel step on a boolean column takes "true" as the flag, and matches the players the rows say', opts, async (t) => {
   if (skip(t)) return;
   const names = (await wh.query('select distinct event_name as e from fct_crashlytics_events order by 1')).rows.map((r) => r.e);
-  const [want] = (await wh.query('select count(distinct player_id_of_internal) as n from fct_crashlytics_events where is_fatal_of_event_data')).rows;
+  const perPlayer = (await wh.query('select player_id_of_internal as u, count(*) as n from fct_crashlytics_events where is_fatal_of_event_data group by 1')).rows;
+  const fatal = { event_name: names, where: [{ property: 'is_fatal_of_event_data', op: 'eq', value: 'true' }] };
   const s = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step', source: 'crashlytics' });
   await engine.build_pipeline_model({
     action: 'add_step', draft_id: s.draft_id,
-    stage: { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', event_name: names, where: [{ property: 'is_fatal_of_event_data', op: 'eq', value: 'true' }] }] },
+    stage: { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', ...fatal }, { name: 'again', ...fatal }] },
   });
   const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
   assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
-  assert.equal(c.rows.length, num(want.n), 'one row per player with a fatal crash');
+  assert.equal(c.rows.length, perPlayer.length, 'one row per player with a fatal crash');
+  assert.equal(c.rows.filter((r) => r.reached_again === true || r.reached_again === 't').length, perPlayer.filter((r) => num(r.n) >= 2).length, 'and a second one');
+  // a constant that is no flag is refused as the step is added, naming the property
+  const bad = await engine.build_pipeline_model({ action: 'start', name: 'fatal_step_bad', source: 'crashlytics' });
+  await assert.rejects(Promise.resolve().then(() => engine.raw.build_pipeline_model({
+    action: 'add_step', draft_id: bad.draft_id,
+    stage: { stage: 'match_recognize', partition_by: ['player_id_of_internal'], steps: [{ name: 'fatal', event_name: names, where: [{ property: 'is_fatal_of_event_data', op: 'eq', value: 'yes' }] }, { name: 'again', event_name: names }] },
+  })), /'is_fatal_of_event_data' is a boolean column/);
 });
 
 // A raw expression runs as written, over the columns the steps before it made: one naming a column

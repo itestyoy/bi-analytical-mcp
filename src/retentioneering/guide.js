@@ -4,7 +4,7 @@
 // Method, not data: it names no column or event (the catalog and the eventstream summary say what
 // exists), and every parameter it mentions is one the tool schema offers.
 
-import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED, COMPLEX_EVENT_LOGIC } from './schema.js';
+import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED, COMPLEX_EVENT_LOGIC, pathPatternUses } from './schema.js';
 import { CHARTED_KINDS, DIFF_CARD_KINDS } from './view-model.js';
 
 export const GUIDE_NAME = 'retentioneering';
@@ -48,7 +48,7 @@ export function retentioneeringGuide() {
     diff: `${DIFF_KINDS().join(', ')} take diff — the same analysis for two groups of paths and their difference. ${f.analyses[DIFF_KINDS()[0]].params.find((p) => p.name === 'diff').doc} The diff of ${DIFF_CARD_KINDS.join(', ')} has a card; any other is answered in words.`,
     // the language of path_pattern, an anchor's pattern and matches_pattern — the library's parser's own
     path_patterns: {
-      used_by: 'path_pattern (transition_graph, step_matrix, step_sankey), an anchor\'s pattern (step_matrix / step_sankey anchor, truncate_paths, conversion_rate, add_events anchor), and the matches_pattern metric',
+      used_by: pathPatternUses().join(', '),
       tokens: f.path_patterns.tokens.map((t) => `\`${t.token}\` — ${t.meaning}`),
       matching: f.path_patterns.matching,
       occurrence: f.path_patterns.occurrence,

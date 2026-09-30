@@ -359,6 +359,29 @@ test('filter_events takes a condition tree — what keep / drop cannot say — w
   await assert.rejects(engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'bad_where', step: { type: 'filter_events', where: { op: 'and', conditions: [{ column: 'no_such_col', op: '=', value: 'x' }] } } }), (e) => e.field === 'step' && /no_such_col/.test(e.message));
 });
 
+test('a where on a segment compares a number as a number, and a negation keeps the rows with no value — as the rows say', opts, async (t) => {
+  if (skip(t)) return;
+  const own = (await wh.query('select event_name as e, level_id_of_event_data as l from fct_analytics_events')).rows;
+  const b = await engine.build_retentioneering_model({ name: 'levels', source: 'events', segments: [{ property: 'level_id_of_event_data', as: 'level' }] });
+  const built = await engine.query_retentioneering_model({ task_id: b.task_id });
+  assert.equal(built.status, 'done', JSON.stringify(built.error));
+  const ctx = built.context_id;
+  // the segment is stored as text; level 10 is above 5 as a number and below it as text
+  assert.ok(own.some((x) => Number(x.l) >= 10), 'the fixture holds a level of two digits');
+  const counted = async (name, where) => {
+    await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'levels', name, after: 0 });
+    await engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: name, step: { type: 'filter_events', where } });
+    const m = await engine.build_retentioneering_model({ action: 'materialize', context_id: ctx, eventstream: name });
+    assert.equal((await engine.query_retentioneering_model({ task_id: m.task_id })).status, 'done');
+    const a = await analyze(ctx, name, [{ kind: 'transition_graph' }], 'full');
+    return new Map(a.transition_graph.nodes.filter((n) => n.event !== 'path_start' && n.event !== 'path_end').map((n) => [n.event, n.count]));
+  };
+  const tally = (list) => list.reduce((m, x) => m.set(x.e, (m.get(x.e) || 0) + 1), new Map());
+  assert.deepEqual(await counted('above_5', { op: 'and', conditions: [{ column: 'level', op: '>', value: 5 }] }), tally(own.filter((x) => x.l != null && Number(x.l) > 5)));
+  assert.deepEqual(await counted('not_level_1', { op: 'and', conditions: [{ not: { column: 'level', op: 'in', value: [1] } }] }), tally(own.filter((x) => x.l == null || Number(x.l) !== 1)));
+  assert.deepEqual(await counted('level_not_1', { op: 'and', conditions: [{ column: 'level', op: '!=', value: 1 }] }), tally(own.filter((x) => x.l == null || Number(x.l) !== 1)));
+});
+
 test('a funnel\'s diff has a card: both groups on the same steps, each the funnel of that group alone, and their difference', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await stepsContext();
@@ -380,6 +403,10 @@ test('a funnel\'s diff has a card: both groups on the same steps, each the funne
   assert.deepEqual(vm.steps.map((s) => s.first.value), await alone(p1));
   assert.deepEqual(vm.steps.map((s) => s.second.value), await alone(p2));
   for (const s of vm.steps) assert.equal(s.delta.value, s.first.value - s.second.value);
+  // the default read carries the same numbers: each step for both groups and their difference
+  const sm = r.analyses.funnel;
+  assert.deepEqual([sm.diff, sm.groups], [true, { segment: 'platform', first: p1, second: p2 }]);
+  assert.deepEqual(sm.steps.map((s) => [s.first.unique_paths, s.second.unique_paths, s.difference.unique_paths]), vm.steps.map((s) => [s.first.value, s.second.value, s.delta.value]));
 });
 
 test('each step is checked by the library as it is added, and says what it changed — a refused one changes nothing', opts, async (t) => {

@@ -33,7 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd  # noqa: E402
 
-from retentioneering_model import CHARTED, _Out, _stream, stream_columns  # noqa: E402
+from retentioneering_model import _Out, _stream, charted_of, stream_columns  # noqa: E402
 
 # The library's configuration errors — raised by what a step or an analysis was given, not by the
 # rows (the data's own are EmptyEventstreamError, PatternNoMatchError and PathIdNotFoundError, left
@@ -224,8 +224,8 @@ def check_analyses(shape, analyses, constants, edge_weights):
         found = {}
         stream = stand_in(shape, constants, variant)
         for a in analyses:
-            charted = CHARTED.get(a["kind"])
-            if charted and a["params"].get("diff") is None:
+            charted = charted_of(a)
+            if charted:
                 _, err = _attempt(lambda: charted(stream, spec, a, _Out()))
             else:
                 _, err = _attempt(lambda: getattr(stream, a["method"])(**a["params"]))
@@ -238,7 +238,8 @@ def check_analyses(shape, analyses, constants, edge_weights):
 def answer(request):
     steps = request.get("steps") or []
     analyses = request.get("analyses") or []
-    constants = _constants([steps, analyses], set())
+    # with the constants of the steps as the call wrote them (a value the server wrote into SQL is there)
+    constants = _constants([steps, analyses, request.get("constants") or []], set())
     return {"steps": check_steps(request["shape"], steps, constants, frozenset(request.get("reserved") or [])) if steps else [],
             "analyses": check_analyses(request["shape"], analyses, constants, request.get("edge_weights") or [])}
 

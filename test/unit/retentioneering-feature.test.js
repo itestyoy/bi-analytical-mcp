@@ -16,7 +16,7 @@ import { Engine } from '../../src/engine.js';
 import { resolveFeatures, flagOn } from '../../src/features.js';
 import { createRetentioneeringFeature, retentioneeringDefinition } from '../../src/retentioneering/index.js';
 import { retentioneeringFacts, ANALYSIS_KINDS, OFFERED_OPS, NOT_OFFERED } from '../../src/retentioneering/schema.js';
-import { RETENTIONEERING_VIEW_URI, retentioneeringViewModel, hasCard, CARD_KINDS, DIFF_CARD_KINDS } from '../../src/retentioneering/view-model.js';
+import { RETENTIONEERING_VIEW_URI, retentioneeringViewModel, hasCard, CARD_KINDS, DIFF_CARD_KINDS, CHARTED_DIFF_KINDS } from '../../src/retentioneering/view-model.js';
 import { buildToolDefs, createServices, runTool, coreInstructions } from '../../src/mcp-surface.js';
 import { RUNTIME_ASSETS } from '../../src/runtime-assets.js';
 import { settle } from '../helpers/settle.js';
@@ -238,9 +238,18 @@ test('the view draws and nothing else — no server call, no network — and its
 test('a card is decided by kind: an analysis of a card kind with nothing in it is empty, one of another kind has no card', () => {
   for (const kind of CARD_KINDS) assert.equal(hasCard(kind), true, kind);
   for (const kind of ['describe', 'conversion_rate', 'path_metrics']) assert.equal(hasCard(kind), false, kind);
-  assert.deepEqual(DIFF_CARD_KINDS.map((k) => hasCard(k, true)), DIFF_CARD_KINDS.map(() => true));
-  assert.equal(hasCard('funnel', true), true, 'a funnel diff has its card: both groups on the same steps');
-  assert.equal(hasCard('cluster_analysis', true), false, 'the library draws no diff of clusters');
+  // a diff has its card in the form its kind is stored in: a funnel's in its own shape, the others' as tables
+  assert.deepEqual(DIFF_CARD_KINDS.map((k) => hasCard(k, CHARTED_DIFF_KINDS.includes(k) ? 'charted' : 'tables')), DIFF_CARD_KINDS.map(() => true));
+  assert.deepEqual(CHARTED_DIFF_KINDS, ['funnel']);
+  assert.equal(hasCard('funnel', 'charted'), true, 'a funnel diff has its card: both groups on the same steps');
+  assert.equal(hasCard('funnel', 'tables'), false, 'a funnel diff stored as tables (before its card) has none');
+  assert.equal(hasCard('step_matrix', 'charted'), false);
+  assert.equal(hasCard('cluster_analysis', 'tables'), false, 'the library draws no diff of clusters');
+  // a funnel diff stored as the library's tables (before its card) draws nothing; one in its own shape does
+  const funnelDiff = (extra) => retentioneeringViewModel({ ok: true, analysis: 'funnel', result: { kind: 'funnel', diff: true, ...extra } });
+  assert.equal(funnelDiff({ tables: [{ name: 'funnel1', role: 'first', columns: ['step', 'unique_paths'], rows: [['a', 2]] }] }).reason, 'no_card');
+  const drawn = funnelDiff({ diff_charted: true, diff_groups: { segment: 'platform', first: 'ios', second: '<REST>' }, steps: [{ step: 'a', funnel1_unique_paths: 4, funnel2_unique_paths: 3, delta_unique_paths: 1, funnel1_conversion_rate: 1, funnel2_conversion_rate: 1, delta_conversion_rate: 0, funnel1_step_conversion_rate: 1, funnel2_step_conversion_rate: 1, delta_step_conversion_rate: 0 }] });
+  assert.deepEqual([drawn.kind, drawn.analysis_kind, drawn.groups.second], ['funnel_diff', 'funnel', 'the other levels']);
   assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'transition_graph', nodes: [], edges: [] } }), { kind: 'none', reason: 'empty' });
   assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'describe', values: {} } }), { kind: 'none', reason: 'no_card' });
 });

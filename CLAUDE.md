@@ -224,7 +224,8 @@
   `{ cases, else }`, the operator from the library's condition grammar) — the caller's input stays data.
   What the library would take only as code gets a structured parameter of this tool's (`ADDED`,
   src/retentioneering/schema.js — today `filter_events.where`, a condition tree on the eventstream's
-  columns, written into the library's `sql` with every name and constant quoted). The path-pattern
+  columns, written into the library's `sql` with every name and constant quoted, a column compared as its
+  constant's kind and a missing value matching nothing — so a negation keeps it, as the library's drop does). The path-pattern
   language (path_pattern, an anchor's pattern, matches_pattern) is the library's parser's own, extracted
   into the sheet (`path_patterns`) and rendered in the guide; the library's relative doc links are made
   absolute in the sheet.
@@ -246,7 +247,9 @@
   warehouse read like a pipeline reads it) and its scalar event properties — to filter, to carry as a
   segment, and to make events out of an event's parameters (`events.split`: by a value, or by
   conditions) — all in SQL through the pipeline's stages. The analyses with a card are CARD_KINDS (the charted ones and a
-  distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps, a funnel's diff as both groups on the same steps); any other
+  distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps, a funnel's diff as both groups on the same steps — which diff keeps its analysis's own shape is ONE
+  table, `DIFF_CARDS` in src/retentioneering/view-model.js, that the query spec carries to the analysis
+  step and its pre-run check (`diff_charted`), and a stored diff says which form it holds); any other
   (describe, a conversion rate, per-path metrics) comes back as the tables and values the library
   returned, has no card, and is answered in words.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its

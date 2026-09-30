@@ -322,10 +322,26 @@ const pathField = {
   description: 'Whose paths: each user\'s whole history (default), each session of the build (sessions), or the session column a split_sessions step made — a step of this eventstream before this one, or one materialized.',
 };
 
+/** Whether a schema (of the sheet) holds an anchor spec: an object with the library's anchor keys
+ *  (a path metric's own `pattern` argument is counted as that metric's, below). */
+const holdsAnchor = (sc) => !!sc && typeof sc === 'object' && (retentioneeringFacts().anchor_keys.every((k) => sc.properties?.[k] !== undefined) || Object.values(sc).some((v) => (Array.isArray(v) ? v.some(holdsAnchor) : holdsAnchor(v))));
+
+/** Whether a library parameter is written in the path-pattern language — read off the sheet: its
+ *  docstring links the grammar, or its type is an anchor spec (whose `pattern` is one). */
+export const takesPathPattern = (p) => /\/docs\/path-patterns/.test(p.doc || '') || holdsAnchor(p.schema);
+
+/** Every place the path-pattern language is written, from the sheet: each analysis's and op's
+ *  parameter that takes one, and each path metric with a `pattern` argument. */
+export function pathPatternUses() {
+  const f = retentioneeringFacts();
+  const of = (group) => Object.entries(group).flatMap(([k, x]) => x.params.filter(takesPathPattern).map((p) => `${k}.${p.name}`));
+  return [...of(f.analyses), ...of(f.ops), ...Object.entries(f.metric_args).filter(([, a]) => a.pattern !== undefined).map(([m]) => `the ${m} metric`)];
+}
+
 /** A library parameter as a schema property: its type, its default, its first docstring paragraph. */
 function param(p) {
   // a parameter written in the path-pattern language points at its grammar, which the guide carries
-  const doc = p.doc && /\/docs\/path-patterns/.test(p.doc) ? `${p.doc} The grammar in full: semantic_index({ guide: "retentioneering" }) → path_patterns.` : p.doc;
+  const doc = p.doc && takesPathPattern(p) ? `${p.doc} The grammar in full: semantic_index({ guide: "retentioneering" }) → path_patterns.` : p.doc;
   return { ...p.schema, ...(p.default !== undefined ? { default: p.default } : {}), ...(doc ? { description: doc } : {}) };
 }
 
@@ -416,11 +432,13 @@ function rulesToLibrary({ cases, else: otherwise }, field) {
 function rowConditionSchema() {
   const g = retentioneeringFacts().condition;
   const scalar = { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }] };
+  // a list of one kind of constant: it is compared as that kind, whatever type the column is stored in
+  const list = { oneOf: ['string', 'number', 'boolean'].map((type) => ({ type: 'array', minItems: 1, items: { type } })) };
   const column = { type: 'string', pattern: NAME_OR_COLUMN, description: 'A column of the eventstream at this step: the event, its time, a path column (a session a split_sessions step made, its index), a segment, a custom column.' };
   const leaf = {
     oneOf: [
       { type: 'object', additionalProperties: false, required: ['column', 'op', 'value'], properties: { column, op: { enum: g.compare }, value: scalar } },
-      { type: 'object', additionalProperties: false, required: ['column', 'op', 'value'], properties: { column, op: { enum: [g.membership, `not_${g.membership}`] }, value: { type: 'array', minItems: 1, items: scalar } } },
+      { type: 'object', additionalProperties: false, required: ['column', 'op', 'value'], properties: { column, op: { enum: [g.membership, `not_${g.membership}`] }, value: list } },
       { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column, op: { enum: ['is_null', 'is_not_null'] } } },
     ],
   };
@@ -429,29 +447,38 @@ function rowConditionSchema() {
   const inner = group(leaf);
   return {
     ...group({ oneOf: [leaf, inner, negated({ oneOf: [leaf, inner] })] }),
-    description: `Keep only the rows whose columns satisfy a condition — a threshold, a range, a list, a missing value — on any column the eventstream has at this step (what keep / drop cannot say: they match listed values only). Conditions combine with ${g.logical.join(' / ')} (one level of nesting) and ${g.negation}; this tool writes the SQL the library runs, its names and constants quoted. Instead of keep / drop, not with them.`,
+    description: `Keep only the rows whose columns satisfy a condition — a threshold, a range, a list, a missing value — on any column the eventstream has at this step (what keep / drop cannot say: they match listed values only). A number or a flag is compared as one, whatever the column is stored as (a segment is text). A missing value matches no comparison and no list, so a negation (!=, not_${g.membership}, ${g.negation}) keeps it, as drop does; is_null picks it out. Conditions combine with ${g.logical.join(' / ')} (one level of nesting) and ${g.negation}; this tool writes the SQL the library runs, its names and constants quoted. Instead of keep / drop, not with them.`,
   };
 }
 
-/** A column name as a DuckDB identifier, quoted. */
+/** A column name as a DuckDB identifier, quoted (the name pattern leaves no quote to escape). */
 const ident = (name, field) => {
   if (!new RegExp(NAME_OR_COLUMN).test(name)) throw new ToolError(`'${name}' is not a column name`, { stage: 'validate', field });
-  return `"${name.replace(/"/g, '""')}"`;
+  return `"${name}"`;
 };
 
 /** A row condition as the library's `sql` for filter_events: SELECT * FROM eventstream WHERE …, every
- *  column quoted as an identifier and every constant as a literal — the caller's input stays data. */
+ *  column quoted as an identifier and every constant as a literal — the caller's input stays data. A
+ *  column is compared as the kind of its constant (a segment is stored as text: a threshold on it is a
+ *  number's), and every test is two-valued — a missing value matches nothing, so a negation keeps it. */
 function whereToSql(where, field) {
   const g = retentioneeringFacts().condition;
   const node = (n) => {
     if (n[g.negation] !== undefined) return `NOT (${node(n[g.negation])})`;
     if (n.conditions) return n.conditions.map((c) => `(${node(c)})`).join(` ${n.op.toUpperCase()} `);
-    const col = ident(n.column, field);
-    if (n.op === 'is_null') return `${col} IS NULL`;
-    if (n.op === 'is_not_null') return `${col} IS NOT NULL`;
+    const name = ident(n.column, field);
+    if (n.op === 'is_null') return `${name} IS NULL`;
+    if (n.op === 'is_not_null') return `${name} IS NOT NULL`;
     const lit = (v) => { if (typeof v === 'number' && !Number.isFinite(v)) throw new ToolError(`condition on '${n.column}': ${v} is not a number a comparison can take`, { stage: 'validate', field }); return literal(v); };
-    if (n.op === g.membership || n.op === `not_${g.membership}`) return `${col} ${n.op === g.membership ? 'IN' : 'NOT IN'} (${n.value.map(lit).join(', ')})`;
-    return `${col} ${n.op === '==' ? '=' : n.op} ${lit(n.value)}`;
+    const sample = Array.isArray(n.value) ? n.value[0] : n.value;
+    const col = typeof sample === 'number' ? `TRY_CAST(${name} AS DOUBLE)` : typeof sample === 'boolean' ? `TRY_CAST(${name} AS BOOLEAN)` : name;
+    const test = (expr) => `COALESCE(${expr}, FALSE)`;
+    if (n.op === g.membership || n.op === `not_${g.membership}`) {
+      const inList = test(`${col} IN (${n.value.map(lit).join(', ')})`);
+      return n.op === g.membership ? inList : `NOT ${inList}`;
+    }
+    if (n.op === '!=') return `NOT ${test(`${col} = ${lit(n.value)}`)}`;
+    return test(`${col} ${n.op === '==' ? '=' : n.op} ${lit(n.value)}`);
   };
   return `SELECT * FROM eventstream WHERE ${node(where)}`;
 }

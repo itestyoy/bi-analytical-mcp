@@ -68,7 +68,7 @@ export class LibraryChecker {
     for (const s of [proc.stdin, proc.stdout, proc.stderr]) s?.[how]?.();
   }
 
-  /** The answer to one request ({ shape, steps, analyses, edge_weights }), or null when none came. */
+  /** The answer to one request ({ shape, steps, analyses, constants?, edge_weights }), or null when none came. */
   check(request) {
     if (!this.available) return Promise.resolve(null);
     const next = this.queue.then(() => this._ask(request));

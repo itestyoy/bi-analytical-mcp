@@ -497,8 +497,13 @@ def apply_steps(frame, spec):
     return out
 
 
-# The analyses whose diff keeps their own charted shape (the others' diffs are tables of matrices)
-DIFF_CHARTED = {"funnel"}
+def charted_of(a):
+    """The charted function an analysis runs through, or None for the library's own result — one
+    decision for the run and its pre-run check: a diff only where the spec says its card keeps the
+    analysis's own shape (`diff_charted`, set by the server's one table of diff cards)."""
+    if a["params"].get("diff") is not None and not a.get("diff_charted"):
+        return None
+    return CHARTED.get(a["kind"])
 
 
 def _diff_groups(diff):
@@ -518,12 +523,12 @@ def run(frame, spec):
         frame_out = stream.to_dataframe()
         if a["path_col"] in frame_out.columns:
             out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[a["path_col"]].nunique())})
-        charted = CHARTED.get(a["kind"])
+        charted = charted_of(a)
         diff = a["params"].get("diff")
         if diff is not None:
-            out.add(a["id"], a["kind"], "diff", {"diff": True, "groups": json.dumps(_diff_groups(diff), default=str)})
-        # a funnel's diff keeps the funnel's shape (each step, both groups and their difference)
-        if charted and (diff is None or a["kind"] in DIFF_CHARTED):
+            # which groups, and in which form the diff is stored: the analysis's own shape, or the library's tables
+            out.add(a["id"], a["kind"], "diff", {"diff": True, "charted": charted is not None, "groups": json.dumps(_diff_groups(diff), default=str)})
+        if charted:
             charted(stream, spec, a, out)
         else:
             _emit(out, a, "result", getattr(stream, a["method"])(**a["params"]))

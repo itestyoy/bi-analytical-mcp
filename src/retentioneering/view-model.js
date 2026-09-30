@@ -13,13 +13,24 @@ export const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 export const CHARTED_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel', 'cluster_analysis', 'segment_overview'];
 /** WHICH ANALYSES HAVE A CARD — the one list: the charted ones and a distribution (its histogram). */
 export const CARD_KINDS = [...CHARTED_KINDS, 'metric_distribution'];
-/** A diff has a card where its parts are matrices (drawn as heatmaps) and for a funnel (both groups
- *  on the same steps, and their difference). */
-export const DIFF_CARD_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel'];
+/** WHICH DIFFS HAVE A CARD, AND WHICH ONE — the one table: a diff whose parts are the library's
+ *  matrices drawn as heatmaps, or a funnel's in the funnel's own shape (both groups on the same steps,
+ *  and their difference). */
+const DIFF_CARDS = { transition_graph: diffMatrices, step_matrix: diffMatrices, step_sankey: diffMatrices, funnel: funnelDiff };
+export const DIFF_CARD_KINDS = Object.keys(DIFF_CARDS);
+/** The kinds whose diff keeps the analysis's own shape: the query spec tells the analysis step so
+ *  (`diff_charted`), which then runs it — and its pre-run check — through the charted function. */
+export const CHARTED_DIFF_KINDS = DIFF_CARD_KINDS.filter((k) => DIFF_CARDS[k] !== diffMatrices);
 
-/** Whether an analysis of this kind (a diff of it, or not) has a card — decided by kind alone. */
+/** How a stored result holds its diff: 'charted' (the analysis's own shape), 'tables' (the library's
+ *  tables — every diff stored before a funnel's kept its shape too), or false for no diff. */
+export const diffForm = (r) => (r?.diff ? (r.diff_charted ? 'charted' : 'tables') : false);
+
+/** Whether an analysis of this kind has a card — decided by kind, and for a diff by the form the
+ *  card of that kind reads (a diff stored in another form has none). */
 export function hasCard(kind, diff = false) {
-  return (diff ? DIFF_CARD_KINDS : CARD_KINDS).includes(kind);
+  if (!diff) return CARD_KINDS.includes(kind);
+  return DIFF_CARD_KINDS.includes(kind) && (diff === 'charted') === CHARTED_DIFF_KINDS.includes(kind);
 }
 
 /** How each transition weight reads: a count, a share of 0..1, a plain number, or a duration in seconds. */
@@ -52,11 +63,12 @@ export function retentioneeringViewModel(drawn, args = {}) {
   if (!isObj(drawn) || drawn.ok === false) return none('error');
   const r = drawn.result;
   if (!isObj(r) || typeof r.kind !== 'string') return none('empty');
-  const head = { kind: r.kind, title: titleOf(r.kind), analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
+  // analysis_kind stays the analysis's own kind where the card's kind is a shape of its (a diff, a distribution)
+  const head = { kind: r.kind, analysis_kind: r.kind, title: titleOf(r.kind), analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
   // a card per KIND (hasCard): any other analysis has none and is answered in words; a kind with a
   // card whose result holds nothing to draw is `empty`
-  if (!hasCard(r.kind, !!r.diff)) return none('no_card');
-  if (r.diff) return r.kind === 'funnel' ? funnelDiff(head, r) : diffMatrices(head, r);
+  if (!hasCard(r.kind, diffForm(r))) return none('no_card');
+  if (r.diff) return DIFF_CARDS[r.kind](head, r);
   switch (r.kind) {
     case 'transition_graph': return graph(head, r, args.edge_weight || drawn.edge_weight);
     case 'step_matrix': return stepMatrix(head, r);

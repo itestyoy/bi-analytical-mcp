@@ -27,7 +27,7 @@ import { getDialect } from '../dialects/index.js';
 import { compileAnalysisModel, compileStepsModel, analysisModelConfig } from './python.js';
 import { LibraryChecker } from './checker.js';
 import { parseResultRows, summarize, truncatedTables } from './results.js';
-import { retentioneeringViewModel, RETENTIONEERING_VIEW_URI, hasCard, byText } from './view-model.js';
+import { retentioneeringViewModel, RETENTIONEERING_VIEW_URI, hasCard, diffForm, DIFF_CARD_KINDS, CHARTED_DIFF_KINDS, byText } from './view-model.js';
 import { retentioneeringGuide, GUIDE_NAME, ROUTING_TRIGGERS, INSTRUCTIONS_LINE, retentioneeringSkill } from './guide.js';
 
 export const SIDE = 'retentioneering';
@@ -546,7 +546,9 @@ async function checkSteps(feature, view, from, fieldOf) {
     entries.forEach((e) => { e.note = `not checked: a step before it (${from - 1}) could not be checked, so what it reads is not known — materialize to know it`; });
     return entries;
   }
-  const reply = await feature.checker.check({ shape, steps: library, analyses: [], reserved: [ORDER_COL, ROLES_COL] });
+  // the constants each step names, as the call wrote them: a parameter written into SQL (filter_events'
+  // where) carries its levels only here, so the stand-ins hold them as a segment's levels
+  const reply = await feature.checker.check({ shape, steps: library, analyses: [], constants: list.map((s) => s.step), reserved: [ORDER_COL, ROLES_COL] });
   if (!reply) {
     entries.forEach((e) => { e.note = NOT_CHECKED; });
     return entries;
@@ -868,7 +870,8 @@ function validateAnalyses(es, shape, analyses) {
     const segment = params.segment_col ?? (Array.isArray(params.diff) && params.diff.length === 3 && typeof params.diff[0] === 'string' ? params.diff[0] : undefined);
     if (segment !== undefined && !segments.includes(segment)) throw new ToolError(`'${segment}' is not a segment of eventstream '${es.name}' (${segments.join(', ') || 'it holds none'}) — carry it with segments at start, or make it with an add_segment step and materialize`, { stage: 'validate', field: 'analyses.segment_col' });
     if (methodParams(kind).has('path_col')) params.path_col = pathCol;
-    return { id, kind, method: f.analyses[kind].method, path_col: pathCol, params };
+    // a diff whose card keeps the analysis's own shape is run through the charted function (the analysis step and its check alike)
+    return { id, kind, method: f.analyses[kind].method, path_col: pathCol, params, ...(params.diff != null && CHARTED_DIFF_KINDS.includes(kind) ? { diff_charted: true } : {}) };
   });
 }
 
@@ -966,7 +969,7 @@ function rowsFor(origin, rows) {
 function answer(engine, feature, id, out, detail = 'summary') {
   if (out?.kind === 'eventstream') return withLevels(out, detail);
   if (out?.kind !== 'analyses') return out;
-  const drawable = Object.keys(out.analyses).filter((a) => hasCard(out.analyses[a].kind, !!out.analyses[a].diff) && !drawnAlready(engine, feature, id, a));
+  const drawable = Object.keys(out.analyses).filter((a) => hasCard(out.analyses[a].kind, diffForm(out.analyses[a])) && !drawnAlready(engine, feature, id, a));
   return {
     ok: true, kind: 'analyses', context_id: out.context_id, eventstream: out.eventstream,
     analyses: detail === 'full' ? out.analyses : Object.fromEntries(Object.entries(out.analyses).map(([a, r]) => [a, summarize(r)])),
@@ -1095,7 +1098,13 @@ async function drawOne(engine, feature, ctx, input) {
   let result = out.analyses[input.analysis];
   const names = held ? Object.keys(out.analyses) : origin.analyses || Object.keys(out.analyses);
   if (!result) throw new ToolError(`task ${input.task_id} has no analysis '${input.analysis}' (it has ${names.join(', ')})`, { stage: 'validate', field: 'analysis' });
-  if (!hasCard(result.kind, !!result.diff)) throw new ToolError(`'${input.analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers query_retentioneering_model({ task_id }) returned`, { stage: 'validate', field: 'analysis' });
+  if (!hasCard(result.kind, diffForm(result))) {
+    // a diff of a kind that has its card, stored in the form an earlier version wrote, is drawn by running the query again
+    const earlier = result.diff && DIFF_CARD_KINDS.includes(result.kind);
+    throw new ToolError(earlier
+      ? `'${input.analysis}' is a diff of ${result.kind} stored before its card existed: run the same query again to draw it, or answer in words from the numbers query_retentioneering_model({ task_id }) returned`
+      : `'${input.analysis}' is ${result.diff ? `a diff of ${result.kind}` : `a ${result.kind}`}, which has no card: answer it in words from the numbers query_retentioneering_model({ task_id }) returned`, { stage: 'validate', field: 'analysis' });
+  }
   if (held && truncatedTables(result)) {
     const whole = await readResult(engine, feature, engine.ctxs.dir(ctx.id), now.table, { context_id: out.context_id, eventstream: out.eventstream, order: [input.analysis], rows: Infinity, analysis: input.analysis });
     if (whole?.ok && whole.analyses[input.analysis]) result = whole.analyses[input.analysis];

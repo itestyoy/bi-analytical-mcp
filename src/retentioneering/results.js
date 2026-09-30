@@ -72,12 +72,15 @@ function generic(parts) {
 }
 
 function shape({ kind, parts }) {
-  // a diff says so: the analysis step marks it, whatever shape the library gave the comparison
-  const groups = parts.diff?.[0]?.groups ? JSON.parse(parts.diff[0].groups) : null;
-  return { kind, ...(parts.diff?.length ? { diff: true, ...(groups ? { diff_groups: groups } : {}) } : {}), ...charted(kind, parts), ...generic(parts) };
+  // a diff says so: the analysis step marks it, with its two groups and the form it stored it in — the
+  // analysis's own shape (diff_charted) or the library's tables
+  const d = parts.diff?.[0];
+  const groups = d?.groups ? JSON.parse(d.groups) : null;
+  return { kind, ...(d ? { diff: true, ...(d.charted ? { diff_charted: true } : {}), ...(groups ? { diff_groups: groups } : {}) } : {}), ...charted(kind, parts), ...generic(parts) };
 }
 
-/** The charted analyses' own shape — present when the analysis step wrote it (not for a diff). */
+/** The charted analyses' own shape — present when the analysis step wrote it: for an analysis, and
+ *  for a diff stored in its analysis's shape (diff_charted). */
 function charted(kind, parts) {
   if (kind === 'transition_graph' && parts.edge) {
     const layout = Object.fromEntries((parts.layout || []).map((p) => [p.event, { x: p.x, y: p.y }]));
@@ -140,6 +143,11 @@ export function summarize(result) {
       })),
     };
   }
+  if (kind === 'funnel' && result.steps && result.diff) {
+    // each step for both groups and their difference (first minus second), under the groups' names
+    const side = (s, p) => ({ unique_paths: s[`${p}_unique_paths`], conversion_rate: round(s[`${p}_conversion_rate`]), step_conversion_rate: round(s[`${p}_step_conversion_rate`]) });
+    return { kind, diff: true, ...(result.diff_groups ? { groups: result.diff_groups } : {}), steps: result.steps.map((s) => ({ step: s.step, first: side(s, 'funnel1'), second: side(s, 'funnel2'), difference: side(s, 'delta') })), ...libraryTables };
+  }
   if (kind === 'funnel' && result.steps) return { kind, steps: result.steps.map((s) => ({ step: s.step, unique_paths: s.unique_paths, conversion_rate: round(s.conversion_rate), step_conversion_rate: round(s.step_conversion_rate) })), ...libraryTables };
   if ((kind === 'cluster_analysis' || kind === 'segment_overview') && result.levels) {
     const levelKey = kind === 'cluster_analysis' ? 'clusters' : 'levels';
@@ -167,7 +175,7 @@ export function summarize(result) {
       ...libraryTables,
     };
   }
-  return { kind, ...libraryTables };
+  return { kind, ...(result.diff ? { diff: true, ...(result.diff_groups ? { groups: result.diff_groups } : {}) } : {}), ...libraryTables };
 }
 
 /** Whether a result holds only the first rows of one of its tables (the rest is in the stored table). */

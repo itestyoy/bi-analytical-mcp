@@ -54,6 +54,7 @@
 
 import { getDialect } from './dialects/index.js';
 import { GRAINS } from './catalog.js';
+import { COMPARE_SQL, typedLiteral } from './conditions.js';
 import { partitionConditions } from './time-range.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
@@ -107,7 +108,7 @@ const CONDITION = {
   properties: { column: { type: 'string' }, value: {}, left: OPERAND, right: OPERAND, op: { enum: CMP } },
 };
 
-const OPSYM = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
+const OPSYM = COMPARE_SQL;
 
 // A string constrained to event-property `values`, but never an empty enum (ajv
 // rejects `enum: []` at compile time). When the catalog has no such properties
@@ -154,29 +155,6 @@ export function rawUnknownColumns(sql, cols) {
   return unknown;
 }
 
-// A constant compared with a column of a KNOWN type is written in that type. A warehouse compares a
-// value only with its own type — BigQuery refuses BOOL = STRING and INT64 = STRING outright — and the
-// caller often spells a flag "true" or a number "5". So a boolean column takes true / false (written
-// either way, or 1 / 0) and a numeric one a number (or a numeric string); anything else is refused
-// HERE, when the stage is added, rather than by the warehouse when it runs. A column typed 'string'
-// is left as it is: that is also the type of what nothing more is known about.
-const BOOL_TEXT = new Map([['true', true], ['false', false], ['1', true], ['0', false]]);
-const NUMERIC_TYPES = new Set(['numeric', 'int', 'integer', 'float']);
-export function typedLiteral(d, type, v, where) {
-  if (v === null) return d.sqlLiteral(v);
-  if (type === 'boolean') {
-    const b = typeof v === 'boolean' ? v : typeof v === 'number' && (v === 0 || v === 1) ? v === 1 : typeof v === 'string' ? BOOL_TEXT.get(v.trim().toLowerCase()) : undefined;
-    if (b === undefined) throw new Error(`${where} is a boolean column: compare it with true or false, not ${JSON.stringify(v)}`);
-    return d.sqlLiteral(b);
-  }
-  if (NUMERIC_TYPES.has(type)) {
-    if (typeof v === 'number') return d.sqlLiteral(v);
-    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return d.sqlLiteral(Number(v));
-    throw new Error(`${where} is a numeric column: compare it with a number, not ${JSON.stringify(v)}`);
-  }
-  return d.sqlLiteral(v);
-}
-
 /** The type of the COLUMN one side of a comparison names (null for a constant, `now`, or an untyped column). */
 function sideType(cols, c, side) {
   const name = side === 'left' ? (c.left ? c.left.column : c.column) : c.right?.column;
@@ -198,7 +176,7 @@ function condPred(d, cols, c) {
   const leftType = sideType(cols, c, 'left');
   const rightType = sideType(cols, c, 'right');
   const colName = c.left ? c.left.column : c.column;
-  const lit = (v, type = leftType, name = colName) => typedLiteral(d, type, v, `'${name}'`);
+  const lit = (v, type = leftType, name = colName) => typedLiteral(type, v, `'${name}'`);
   if (c.op === 'in' || c.op === 'not_in') {
     const arr = c.right?.value ?? c.value;
     if (!Array.isArray(arr)) throw new Error(`${c.op} needs an array value`);

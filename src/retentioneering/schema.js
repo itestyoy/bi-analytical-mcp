@@ -19,6 +19,7 @@ import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { ToolError } from '../validate.js';
 import { TASK_ID_PATTERN } from '../jobs.js';
+import { getDialect } from '../dialects/index.js';
 import { CARD_KINDS } from './view-model.js';
 
 let factsCache;
@@ -410,8 +411,11 @@ function rulesSchema() {
   };
 }
 
+/** The library runs what this tool writes on DuckDB (its analysis runtime): the constants and names in
+ *  it are the DuckDB dialect's own, quoted by its one writer. */
+const DUCKDB = getDialect('duckdb');
 /** A constant as a DuckDB literal: a string quoted (its quotes doubled), a number as itself. */
-const literal = (v) => (typeof v === 'string' ? `'${v.replace(/'/g, "''")}'` : typeof v === 'boolean' ? (v ? 'TRUE' : 'FALSE') : String(v));
+const literal = (v) => DUCKDB.sqlLiteral(v);
 
 /** rules as the library takes them: `[column, op, value, level]` per case, then `[else]`. A value is
  *  handed over as the library quotes it (a string, a number, a flag) — and a list for `in` as the
@@ -453,10 +457,9 @@ function rowConditionSchema() {
   };
 }
 
-/** A column name as a DuckDB identifier, quoted (the name pattern leaves no quote to escape). */
+/** A column name as a DuckDB identifier, quoted. */
 const ident = (name, field) => {
-  if (!new RegExp(NAME_OR_COLUMN).test(name)) throw new ToolError(`'${name}' is not a column name`, { stage: 'validate', field });
-  return `"${name}"`;
+  try { return DUCKDB.quoteIdent(name); } catch { throw new ToolError(`'${name}' is not a column name`, { stage: 'validate', field }); }
 };
 
 /** A row condition as the library's `sql` for filter_events: SELECT * FROM eventstream WHERE …, every

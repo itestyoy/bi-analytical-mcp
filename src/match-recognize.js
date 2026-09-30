@@ -15,30 +15,16 @@
 // MATCH / AFTER MATCH SKIP keywords), nested PATTERN enforces step order, GAP =
 // any non-step row, CLASSIFIER/aggregates in MEASURES.
 
-import { sqlLiteral } from './dialect.js';
 import { timeRangeConditions, isValidTimezone } from './time-range.js';
-import { registerStage, typedLiteral } from './pipeline.js';
+import { registerStage } from './pipeline.js';
+import { comparison, typedAs } from './conditions.js';
 import { oneOfOr, strEnum } from './schema-kit.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 
-/** Render a single comparison `lhs OP value`, the value a literal written in the type of what it is
- *  compared with (the pipeline's one rule: a flag spelled "true" is TRUE, a number spelled "5" is 5). */
-function comparePred(lhs, op, value, type = null, name = lhs) {
-  const lit = (v) => typedLiteral({ sqlLiteral }, type, v, `'${name}'`);
-  const arr = Array.isArray(value) ? value : [value];
-  switch (op) {
-    case 'eq': return `${lhs} = ${lit(value)}`;
-    case 'neq': return `${lhs} != ${lit(value)}`;
-    case 'gt': return `${lhs} > ${lit(value)}`;
-    case 'gte': return `${lhs} >= ${lit(value)}`;
-    case 'lt': return `${lhs} < ${lit(value)}`;
-    case 'lte': return `${lhs} <= ${lit(value)}`;
-    case 'in': return `${lhs} IN (${arr.map(lit).join(', ')})`;
-    case 'not_in': return `${lhs} NOT IN (${arr.map(lit).join(', ')})`;
-    default: throw new Error(`unsupported filter op: ${op}`);
-  }
-}
+/** A step's or the prefilter's comparison, its constants written in the type of what they are
+ *  compared with (src/conditions.js: a flag spelled "true" is TRUE, a number spelled "5" is 5). */
+const comparePred = (lhs, op, value, type = null, name = lhs) => comparison(lhs, op, value, { lit: typedAs(type, name) });
 
 /** The type of a model column, as the catalog declares it. */
 const columnType = (catalog, source, name) => catalog.modelColumns(source).find((x) => x.name === name)?.type || null;
@@ -57,7 +43,7 @@ export function stepPredicate(catalog, step, dialect, prepCols = new Map(), sour
   // carries no qualifier — so half of a qualified predicate would silently stay unqualified.
   const evCol = m.event_name.column;
   const names = factEventNames(catalog, source, step.event_name);
-  const ev = names.length === 1 ? `${evCol} = ${sqlLiteral(names[0])}` : `${evCol} IN (${names.map(sqlLiteral).join(', ')})`;
+  const ev = names.length === 1 ? comparison(evCol, 'eq', names[0]) : comparison(evCol, 'in', names);
   const props = (step.where || []).map((c) => {
     // a prepare-derived column is referenced directly (it's a real column now)
     if (prepCols.has(c.property)) {
@@ -101,7 +87,7 @@ export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = 
   // of a date-only end), and the partition column only where the scanned relation still carries it
   if (f.time_range?.timezone && !isValidTimezone(f.time_range.timezone)) throw new Error(`filter.time_range: unknown timezone '${f.time_range.timezone}' — use an IANA name like 'Europe/Berlin' or 'UTC'`);
   for (const c of timeRangeConditions(m, f.time_range, { partition: !!partitionCol }) || []) clauses.push(comparePred(c.column, c.op, c.value));
-  if (f.event_name?.length) clauses.push(`${evNameCol} IN (${factEventNames(catalog, source, f.event_name).map(sqlLiteral).join(', ')})`);
+  if (f.event_name?.length) clauses.push(comparison(evNameCol, 'in', factEventNames(catalog, source, f.event_name)));
   const modelCols = new Set(catalog.modelColumns(source).map((x) => x.name));
   for (const c of f.where || []) {
     const p = (m.properties || {})[c.property];

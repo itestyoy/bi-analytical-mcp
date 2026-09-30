@@ -4,6 +4,7 @@
 
 import { sqlLiteral, isNumericType, castExpr } from './dialect.js';
 import { NUMERIC_AGGS } from './catalog.js';
+import { comparison } from './conditions.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
 // (The __ separator is reserved for MetricFlow query *paths* like user__country.)
@@ -28,8 +29,7 @@ export function namesToScope(catalog, modelKey, names) {
   if (!catalog.isFact(modelKey) || !names?.length) return null;
   const col = catalog.getModel(modelKey).event_name.column;
   const vals = names.map((n) => factName(catalog, modelKey, n, 'event_name'));
-  if (vals.length === 1) return `${col} = ${sqlLiteral(vals[0])}`;
-  return `${col} in (${vals.map(sqlLiteral).join(', ')})`;
+  return vals.length === 1 ? comparison(col, 'eq', vals[0]) : comparison(col, 'in', vals);
 }
 
 /** SQL expression for an event property — the catalog's one rule (flat column or JSON extract). */
@@ -42,20 +42,7 @@ function propCond(catalog, modelKey, cond) {
   const found = factProp(catalog, modelKey, cond.property, 'where.property');
   if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ source: '${modelKey}', event })`, 'where.property');
   const lhs = propExpr(catalog, modelKey, found.name);
-  switch (cond.op) {
-    case 'eq': return `${lhs} = ${sqlLiteral(cond.value)}`;
-    case 'neq': return `${lhs} != ${sqlLiteral(cond.value)}`;
-    case 'gt': return `${lhs} > ${sqlLiteral(cond.value)}`;
-    case 'gte': return `${lhs} >= ${sqlLiteral(cond.value)}`;
-    case 'lt': return `${lhs} < ${sqlLiteral(cond.value)}`;
-    case 'lte': return `${lhs} <= ${sqlLiteral(cond.value)}`;
-    case 'in':
-    case 'not_in': {
-      const arr = Array.isArray(cond.value) ? cond.value : [cond.value];
-      return `${lhs} ${cond.op === 'in' ? 'in' : 'not in'} (${arr.map(sqlLiteral).join(', ')})`;
-    }
-    default: fail(`unsupported where op: ${cond.op}`, 'where.op');
-  }
+  try { return comparison(lhs, cond.op, cond.value); } catch (e) { return fail(e.message, 'where.op'); }
 }
 
 /** Combine event_name scope + property conditions into one boolean (or null). */

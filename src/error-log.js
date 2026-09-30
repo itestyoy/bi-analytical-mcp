@@ -14,6 +14,7 @@
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { envInt } from './config.js';
 
 const MESSAGE_MAX = 20000;
 const ARGS_MAX = 20000;
@@ -28,11 +29,6 @@ function jsonOf(value) {
   try { return JSON.stringify(value); } catch { return '(unserializable)'; }
 }
 
-const envInt = (name, fallback) => {
-  const v = process.env[name];
-  const n = v == null || v === '' ? fallback : Number(v);
-  return Number.isInteger(n) && n >= 0 ? n : fallback;
-};
 
 export const ERROR_SOURCES = ['tool', 'task', 'startup'];
 

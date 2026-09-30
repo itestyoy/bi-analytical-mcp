@@ -4,10 +4,9 @@
 // underlying analytics query. No raw SQL from the caller: identifiers are
 // validated, operators come from a fixed set, values are literal-escaped.
 
-import { sqlLiteral } from './dialect.js';
+import { comparison, COMPARE_SQL } from './conditions.js';
 
 const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
-const OPS = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
 /** The aggregations a projection (a read's transform, a drill-down) takes — the one list its schema offers. */
 export const AGGS = new Set(['sum', 'avg', 'min', 'max', 'count', 'count_distinct']);
 
@@ -17,15 +16,7 @@ function ident(x) {
 }
 
 function predicate(c) {
-  const col = ident(c.column);
-  if (c.op === 'is_null') return `${col} is null`;
-  if (c.op === 'is_not_null') return `${col} is not null`;
-  if (c.op === 'in' || c.op === 'not_in') {
-    const arr = Array.isArray(c.value) ? c.value : [c.value];
-    return `${col} ${c.op === 'in' ? 'in' : 'not in'} (${arr.map(sqlLiteral).join(', ')})`;
-  }
-  if (!OPS[c.op]) throw new Error(`unsupported where op: ${c.op}`);
-  return `${col} ${OPS[c.op]} ${sqlLiteral(c.value)}`;
+  return comparison(ident(c.column), c.op, c.value);
 }
 
 function aggSql(a) {
@@ -46,8 +37,8 @@ function aggSql(a) {
 }
 
 function havingPredicate(h) {
-  if (!OPS[h.op]) throw new Error(`unsupported having op: ${h.op}`);
-  return `${aggSql(h)} ${OPS[h.op]} ${sqlLiteral(h.value)}`;
+  if (!COMPARE_SQL[h.op]) throw new Error(`unsupported having op: ${h.op}`);
+  return comparison(aggSql(h), h.op, h.value);
 }
 
 /**

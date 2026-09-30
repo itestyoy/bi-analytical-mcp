@@ -2,7 +2,7 @@
 // The AI never sends raw SQL; the server renders the typed predicate tree into
 // safe Dimension()/TimeDimension()/Entity() wrappers.
 
-import { sqlLiteral } from './dialect.js';
+import { comparison } from './conditions.js';
 
 /** Render a fieldRef into its Jinja wrapper (left-hand side of a predicate). */
 export function renderField(field) {
@@ -39,40 +39,7 @@ function assertName(n) {
 
 /** Render one predicate {field, op, value} into a SQL boolean fragment. */
 export function renderPredicate(pred) {
-  const lhs = renderField(pred.field);
-  const op = pred.op;
-  switch (op) {
-    case 'eq':
-      return `${lhs} = ${sqlLiteral(pred.value)}`;
-    case 'neq':
-      return `${lhs} != ${sqlLiteral(pred.value)}`;
-    case 'gt':
-      return `${lhs} > ${sqlLiteral(pred.value)}`;
-    case 'gte':
-      return `${lhs} >= ${sqlLiteral(pred.value)}`;
-    case 'lt':
-      return `${lhs} < ${sqlLiteral(pred.value)}`;
-    case 'lte':
-      return `${lhs} <= ${sqlLiteral(pred.value)}`;
-    case 'in':
-    case 'not_in': {
-      const arr = Array.isArray(pred.value) ? pred.value : [pred.value];
-      const list = arr.map(sqlLiteral).join(', ');
-      return `${lhs} ${op === 'in' ? 'in' : 'not in'} (${list})`;
-    }
-    case 'between': {
-      if (!Array.isArray(pred.value) || pred.value.length !== 2) {
-        throw new Error("'between' requires value: [low, high]");
-      }
-      return `${lhs} between ${sqlLiteral(pred.value[0])} and ${sqlLiteral(pred.value[1])}`;
-    }
-    case 'is_null':
-      return `${lhs} is null`;
-    case 'is_not_null':
-      return `${lhs} is not null`;
-    default:
-      throw new Error(`Unsupported operator: ${op}`);
-  }
+  return comparison(renderField(pred.field), pred.op, pred.value);
 }
 
 /** Render a predicateGroup (recursive and/or) into a single boolean expression. */

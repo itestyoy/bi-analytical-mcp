@@ -6,6 +6,7 @@
 // spoken — there is no second code path here for an older client, and no session state to lose on
 // a restart.
 
+import { envFlag, envNumber, envInt } from './config.js';
 import { join, dirname } from 'node:path';
 import { createMcpHandler, CLIENT_CAPABILITIES_META_KEY } from '@modelcontextprotocol/server';
 import { toNodeHandler } from '@modelcontextprotocol/node';
@@ -70,18 +71,18 @@ export async function makeEngine(opts = {}) {
   const catalogSource = opts.catalogPath || process.env.CATALOG_PATH || baseProjectDir || join(process.cwd(), 'config', 'catalog.yml');
   // MCP_REQUIRE_TIME_RANGE=1 (or anchor meta.mcp.require_time_range) blocks unbounded
   // (no time window) queries — the cost guardrail for partitioned warehouses.
-  const requireTimeRange = process.env.MCP_REQUIRE_TIME_RANGE != null ? !/^(0|false|no|off)$/i.test(String(process.env.MCP_REQUIRE_TIME_RANGE).trim()) : undefined;
+  const requireTimeRange = envFlag('MCP_REQUIRE_TIME_RANGE', undefined);
   const catalog = loadCatalog(catalogSource, { profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, projectDir: baseProjectDir, requireTimeRange });
   // Fail fast if the dbt project doesn't implement the required macro(s) / model
   // nodes the server depends on (unless explicitly skipped, e.g. catalog-only dev).
-  if (baseProjectDir && process.env.SKIP_PROJECT_VALIDATION !== '1') validateDbtProject(baseProjectDir, catalog);
+  if (baseProjectDir && !envFlag('SKIP_PROJECT_VALIDATION', false)) validateDbtProject(baseProjectDir, catalog);
   const runner = opts.runner !== undefined
     ? opts.runner
     : baseProjectDir
       // dbt runs ONLY in one of this tool's environments (a venv under DBT_ENVS_DIR built from its
       // lock — DBT_ENV, else `dbt-v2`; MetricFlow's is `metricflow`); anything else is refused. The
       // client reads its version from the binary (DBT_VERSION pins it).
-      ? createDbt({ version: process.env.DBT_VERSION || 'auto', environment: process.env.DBT_ENV || DEFAULT_ENV, profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: (Number(process.env.DBT_TIMEOUT_SECONDS) || 600) * 1000 })
+      ? createDbt({ version: process.env.DBT_VERSION || 'auto', environment: process.env.DBT_ENV || DEFAULT_ENV, profilesDir: process.env.DBT_PROFILES_DIR || baseProjectDir, timeout: envNumber('DBT_TIMEOUT_SECONDS', 600, { min: 1 }) * 1000 })
       : null;
   // what the installed dbt can run decides what is offered (dbt v2 runs no Python models on DuckDB)
   gatePythonRuntime(catalog, runner);
@@ -113,13 +114,13 @@ export async function makeEngine(opts = {}) {
   // MCP_DB_RESET wipes the store (jobs + value index) on startup. DEFAULT OFF so state
   // (the value index, job history) SURVIVES a restart — opt IN to a clean slate with
   // MCP_DB_RESET=1/true. (Persistence still needs the DB on a durable volume + Node >= 22.5.)
-  const resetDb = /^(1|true|yes|on)$/i.test(String(process.env.MCP_DB_RESET ?? 'false').trim());
+  const resetDb = envFlag('MCP_DB_RESET', false);
   if (resetDb) console.error(`[mcp] ${new Date().toISOString()} MCP_DB_RESET on — clearing the store on startup (state will NOT survive this restart)`);
   // GROUND the catalog to the physical warehouse BEFORE building the engine (its tool
   // schemas + value index derive from the catalog): a column the dbt schema declares but
   // the physical table lacks is pruned, so it never appears in any tool. Best-effort and
   // opt-out via MCP_GROUND_CATALOG=0 (e.g. offline/catalog-only dev).
-  if (runner && baseProjectDir && !/^(0|false|no|off)$/i.test(String(process.env.MCP_GROUND_CATALOG ?? 'true').trim())) {
+  if (runner && baseProjectDir && envFlag('MCP_GROUND_CATALOG', true)) {
     try {
       const { pruned, unavailable } = await groundCatalogToPhysical(catalog, runner, baseProjectDir, (m) => console.error(`[mcp] ${new Date().toISOString()} ${m}`));
       // The report lists columns the table lacks, plus anything that had to go with them —
@@ -158,8 +159,7 @@ export async function makeEngine(opts = {}) {
   });
   // MCP_TABLE_EXPIRATION_DAYS: the tables built for tasks expire this many days after they are built
   // (default 30; 0 keeps them) — the warehouse does not collect what nobody reads again
-  const rawExpiry = process.env.MCP_TABLE_EXPIRATION_DAYS;
-  const tableExpirationDays = rawExpiry == null || rawExpiry === '' ? 30 : Number(rawExpiry);
+  const tableExpirationDays = envNumber('MCP_TABLE_EXPIRATION_DAYS', 30);
   if (!Number.isInteger(tableExpirationDays) || tableExpirationDays < 0) throw new Error(`MCP_TABLE_EXPIRATION_DAYS must be a whole number of days (0 keeps the tables), got '${rawExpiry}'`);
   // the dbt project's own semantic models and metrics, read once before the tools are served: the
   // schema names them, and query_semantic_model runs them in their own context with no build
@@ -298,12 +298,12 @@ export function createApp(engine, opts = {}) {
 if (import.meta.url === `file://${process.argv[1]}`) {
   const engine = await makeEngine();
   const app = createApp(engine);
-  const port = Number(process.env.PORT || 3000);
+  const port = envInt('PORT', 3000, { min: 1 });
   const host = process.env.HOST || '127.0.0.1'; // localhost by default; set HOST=0.0.0.0 in containers
   const httpServer = app.listen(port, host, () => console.log(`dbt-semantic-mcp streamable-HTTP on ${host}:${port}/mcp`));
 
   // Optional periodic reclamation of idle contexts (bounds workspace growth).
-  const ttlMs = Number(process.env.CONTEXT_TTL_MS) || 0;
+  const ttlMs = envNumber('CONTEXT_TTL_MS', 0);
   let gcTimer;
   if (ttlMs > 0) {
     gcTimer = setInterval(() => { try { engine.gc(ttlMs); } catch { /* noop */ } }, Math.min(ttlMs, 300000));
@@ -314,40 +314,40 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // (top values + cardinality) for semantic_index. Initial pass is fire-and-forget
   // (start() does NOT await) so server startup is never blocked; then refreshes on
   // an unref'd interval. VALUE_INDEX_REFRESH_MS=0 → one initial pass, no schedule.
-  const intervalMs = process.env.VALUE_INDEX_REFRESH_MS !== undefined ? Number(process.env.VALUE_INDEX_REFRESH_MS) : 21600000;
-  const maxValues = Number(process.env.VALUE_INDEX_MAX_VALUES) || 50;
+  const intervalMs = envNumber('VALUE_INDEX_REFRESH_MS', 21600000);
+  const maxValues = envInt('VALUE_INDEX_MAX_VALUES', 50, { min: 1 });
   // Optional cost lever: bound indexing scans to the last N days on the anchor time column
   // (0/unset → scan all history, the default). Set on a large partitioned fact to cut cost.
-  const windowDays = Number(process.env.MCP_INDEX_WINDOW_DAYS) || 0;
+  const windowDays = envNumber('MCP_INDEX_WINDOW_DAYS', 0);
   // Approximate (HLL) distinct counts during indexing — cheaper on a large fact. DEFAULT ON; the
   // dialect's own expression (BigQuery: APPROX_COUNT_DISTINCT; DuckDB counts exactly, where the
   // numbers are checked). Disable with MCP_INDEX_APPROX_DISTINCT=false/0/no/off to count exactly.
-  const approxDistinct = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_APPROX_DISTINCT ?? 'true').trim());
+  const approxDistinct = envFlag('MCP_INDEX_APPROX_DISTINCT', true);
   // Properties indexed per combined scan (cardinality + coverage in one query each); a failed
   // batch degrades to per-property. Tune down on very wide facts / strict column limits.
-  const batchSize = Number(process.env.MCP_INDEX_BATCH) || 40;
+  const batchSize = envInt('MCP_INDEX_BATCH', 40, { min: 1 });
   // Dedicated timeout for the heavy value-index scans — default 2 HOURS (7200s): a combined
   // scan over a large full events fact genuinely needs it, and it is separate from the general
   // dbt runner timeout (which stays short so ordinary user queries never hang). Pair with the
   // incremental knobs below to shorten individual runs.
-  const scanTimeout = (Number(process.env.MCP_INDEX_TIMEOUT_SECONDS) || 7200) * 1000;
+  const scanTimeout = envNumber('MCP_INDEX_TIMEOUT_SECONDS', 7200, { min: 1 }) * 1000;
   // Incremental MERGE (default ON): re-scan an already-indexed anchor property only for rows
   // NEWER than its watermark and ADD the counts to what is stored — each cycle scans a small
   // delta, not the whole history. Disable with MCP_INDEX_MERGE=false. It is mutually exclusive
   // with a rolling MCP_INDEX_WINDOW_DAYS (merge accumulates all-time; the window ages data out),
   // so a configured window turns merge OFF and takes precedence.
-  const mergeOn = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_MERGE ?? 'true').trim());
+  const mergeOn = envFlag('MCP_INDEX_MERGE', true);
   const merge = mergeOn && !windowDays;
   if (mergeOn && windowDays) console.error(`[mcp] ${new Date().toISOString()} value-index: MCP_INDEX_WINDOW_DAYS=${windowDays} set — incremental merge disabled (rolling window takes precedence)`);
   // Auto-skip near-unique (ID-like) fields once indexed: distinct ≥ this PERCENT of the field's
   // (non-null) rows → its top-N is noise, so it is not re-scanned on later syncs. Relative to the
   // field's own size (adapts to any table). Default 90%; set MCP_INDEX_HIGH_CARD_PCT=0 to disable.
-  const highCardPct = process.env.MCP_INDEX_HIGH_CARD_PCT !== undefined ? Number(process.env.MCP_INDEX_HIGH_CARD_PCT) : 90;
+  const highCardPct = envNumber('MCP_INDEX_HIGH_CARD_PCT', 90);
   // Rebuild-then-index (DEFAULT ON): each sync `dbt run`s the catalog's source models BEFORE
   // indexing, so the index + data_freshness reflect a freshly computed table (not the last
   // externally-built one). Disable with MCP_INDEX_DBT_RUN=false if an external scheduler
   // (Airflow/dbt Cloud) already builds the models. MCP_INDEX_DBT_RUN_SELECT overrides the selector.
-  const runModels = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_DBT_RUN ?? 'true').trim());
+  const runModels = envFlag('MCP_INDEX_DBT_RUN', true);
   const runModelsSelect = process.env.MCP_INDEX_DBT_RUN_SELECT || null;
   const indexer = new BackgroundIndexer({ catalog: engine.catalog, runner: engine.runner, index: engine.valueIndex, baseProjectDir: engine.ctxs.baseProjectDir, intervalMs, maxValues, windowDays, approxDistinct, batchSize, scanTimeout, merge, highCardPct, runModels, runModelsSelect, logger: (m) => console.error(`[mcp] ${new Date().toISOString()} value-index ${m}`) });
   indexer.start();

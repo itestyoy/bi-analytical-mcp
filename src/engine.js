@@ -6,6 +6,7 @@ import { assertSchemaSound } from './schema-kit.js';
 import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validate.js';
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration, measureRefs } from './compile.js';
+import { comparison } from './conditions.js';
 import { renderContext, PARTITION_DIM } from './yaml-render.js';
 import { gatePythonRuntime, MEASURE_AGGS } from './catalog.js';
 import { ContextManager, mergeCompiled, RESULT_MODEL_PREFIX } from './context-manager.js';
@@ -2827,8 +2828,7 @@ export class Engine {
     // the same window the pipeline applies — the time axis, and the partition column that prunes
     const conditions = tr && (tr.start || tr.end) ? this._timeRangeConditions(sourceKey, tr) : null;
     if (conditions) {
-      const OP = { gte: '>=', lt: '<', lte: '<=' };
-      where = ` WHERE ${conditions.map((c) => `${c.column} ${OP[c.op]} ${sqlLiteral(c.value)}`).join(' AND ')}`;
+      where = ` WHERE ${conditions.map((c) => comparison(c.column, c.op, c.value)).join(' AND ')}`;
     }
     return this._bestEffort(`rows:${sourceKey}:${where}`, async () => {
       try {

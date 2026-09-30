@@ -3,6 +3,7 @@
 // Server; the SDK owns the protocol — both revisions a client may speak, the wire format, the
 // envelope and header rules — so nothing here knows which revision a request came in.
 
+import { envNumber } from './config.js';
 import { RESEARCH_DOMAINS, RESEARCH_ROUTE, RESEARCH_SCOPE } from './research-guides.js';
 import { MAX_WAIT_SECONDS, MAX_BATCH } from './schema.js';
 import { withSignal } from './request-context.js';
@@ -259,7 +260,7 @@ export function toCallToolResult(result, name, args, engine = null) {
 
 // How often a call that carries a progressToken hears that it is still alive. Clients may reset
 // their request timeout on progress, so a long build is not abandoned while it is still working.
-const PROGRESS_EVERY_MS = Number(process.env.MCP_PROGRESS_INTERVAL_MS) || 5000;
+const PROGRESS_EVERY_MS = envNumber('MCP_PROGRESS_INTERVAL_MS', 5000); // 0: no heartbeat
 
 /**
  * Run one tool call. Never throws for a tool's own failure — that is a CallToolResult with
@@ -295,7 +296,7 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
     return { result: errorResult(`${cardField} is not available: this client does not declare the MCP Apps extension (io.modelcontextprotocol/ui), so no card is drawn — drop the ${cardField} field`, 'validate', cardField), raw: null };
   }
   let beat;
-  if (onProgress) {
+  if (onProgress && progressEveryMs > 0) {
     let n = 0;
     beat = setInterval(() => {
       n += 1;
@@ -402,13 +403,13 @@ export function errorResult(message, stage, field, code) {
  * and the resource space they share. Built once per engine (servicesFor caches it): the SDK builds
  * a server per request, and every one of them must see the same tasks and the same digests.
  */
-export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs = PROGRESS_EVERY_MS, taskAfterMs = Number(process.env.MCP_TASK_AFTER_MS) || 3000 } = {}) {
+export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs = PROGRESS_EVERY_MS, taskAfterMs = envNumber('MCP_TASK_AFTER_MS', 3000) } = {}) {
   const apps = appsSurface(engine.features || []);
   const featureLines = (engine.features || []).map((f) => f.instructions).filter(Boolean);
   let skills = null;
   try { skills = buildSkills(engine); } catch (e) { logLine('skills', `✗ not served: ${e?.message || e}`); }
   const tasks = new TaskRegistry({
-    ttlMs: taskTtlMs ?? (Number(process.env.MCP_TASK_TTL_SECONDS) || 3600) * 1000,
+    ttlMs: taskTtlMs ?? envNumber('MCP_TASK_TTL_SECONDS', 3600, { min: 1 }) * 1000,
     pollIntervalMs: taskPollMs ?? 2000,
   });
   const shutdownHooks = new Set();

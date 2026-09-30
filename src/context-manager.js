@@ -12,6 +12,7 @@ import { join } from 'node:path';
 import yaml from 'js-yaml';
 import { mergeModelEntry } from './semantic-latest.js';
 import { sqlConfigHeader } from './sql-header.js';
+import { getDialect } from './dialects/index.js';
 
 // A daily time spine is REQUIRED by MetricFlow for metric_time, grains,
 // cumulative and conversion metrics. We guarantee the model file is always
@@ -20,11 +21,7 @@ import { sqlConfigHeader } from './sql-header.js';
 // is the base project's responsibility; the server only guarantees the file.
 function timeSpineSql(dialect, start, end) {
   const header = sqlConfigHeader('time_spine', { model: 'metricflow_time_spine', dialect, start, end, granularity: 'day' });
-  if (dialect === 'bigquery') {
-    return `{{ config(materialized='table') }}\n${header}select d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d\n`;
-  }
-  // duckdb (default): range() is a table of timestamps, one per day
-  return `{{ config(materialized='table') }}\n${header}select cast(range as date) as date_day\nfrom range(date '${start}', date '${end}' + interval 1 day, interval 1 day)\n`;
+  return `{{ config(materialized='table') }}\n${header}${getDialect(dialect || 'duckdb').timeSpineSelect(start, end)}\n`;
 }
 
 const TIME_SPINE_YML = `models:

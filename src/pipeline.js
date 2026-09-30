@@ -126,7 +126,7 @@ const sourceProp = (catalog, source, name) => (source
 function operandSql(d, cols, o, label = 'operand') {
   if (o === null || typeof o !== 'object') throw new Error(`${label}: must be { column } | { value } | { now: true }`);
   if (o.now) return d.nowExpr();
-  if (o.column !== undefined) { requireCol(cols, o.column); return d.ident(o.column); }
+  if (o.column !== undefined) { requireCol(cols, o.column); return d.quoteIdent(o.column); }
   if (o.value !== undefined) return d.sqlLiteral(o.value);
   throw new Error(`${label}: needs column | value | now`);
 }
@@ -168,7 +168,7 @@ function sideType(cols, c, side) {
 function condPred(d, cols, c) {
   let lhs;
   if (c.left !== undefined) lhs = operandSql(d, cols, c.left, 'left');
-  else if (c.column !== undefined) { requireCol(cols, c.column); lhs = d.ident(c.column); }
+  else if (c.column !== undefined) { requireCol(cols, c.column); lhs = d.quoteIdent(c.column); }
   else throw new Error('condition needs `column` or `left`');
   if (c.op === 'is_null') return `${lhs} IS NULL`;
   if (c.op === 'is_not_null') return `${lhs} IS NOT NULL`;
@@ -221,7 +221,7 @@ function frameClause(f) {
 
 function aggExpr(d, fn, column, q) {
   if (fn === 'count' && !column) return 'count(*)';
-  const c = d.ident(column);
+  const c = d.quoteIdent(column);
   if (fn === 'count_distinct') return `count(distinct ${c})`;
   if (fn === 'approx_count_distinct') return d.approxCountDistinct(c);
   if (fn === 'hll_init') return d.hllInit(c);
@@ -384,8 +384,8 @@ const STAGES = {
     }),
     build: ({ d, cols }, p) => {
       const operand = (o, what) => operandSql(d, cols, o, `compute ${p.op} ${what}`);
-      const col = () => { requireCol(cols, p.column); return d.ident(p.column); };
-      const list = () => { (p.columns || []).forEach((c) => requireCol(cols, c)); return (p.columns || []).map((c) => d.ident(c)); };
+      const col = () => { requireCol(cols, p.column); return d.quoteIdent(p.column); };
+      const list = () => { (p.columns || []).forEach((c) => requireCol(cols, c)); return (p.columns || []).map((c) => d.quoteIdent(c)); };
       const ARITH = { add: '+', sub: '-', mul: '*', div: '/' };
       let expr; let type = 'numeric';
       if (p.op === 'const') {
@@ -460,8 +460,8 @@ const STAGES = {
       } else if (p.op === 'window') {
         (p.partition_by || []).forEach((c) => requireCol(cols, c));
         (p.order_by || []).forEach((o) => requireCol(cols, o.key));
-        const parts = (p.partition_by || []).map((c) => d.ident(c));
-        const ords = (p.order_by || []).map((o) => `${d.ident(o.key)}${o.direction === 'desc' ? ' DESC' : ''}`);
+        const parts = (p.partition_by || []).map((c) => d.quoteIdent(c));
+        const ords = (p.order_by || []).map((o) => `${d.quoteIdent(o.key)}${o.direction === 'desc' ? ' DESC' : ''}`);
         let call; let frame = '';
         if (['row_number', 'rank', 'dense_rank'].includes(p.fn)) { call = `${p.fn}()`; type = 'int'; }
         // the value a lag/lead/min/max returns is the column's own; a count is a whole number

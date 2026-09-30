@@ -4113,17 +4113,9 @@ export class Engine {
     const ref = `{{ ref('${table}') }}`;
     const base = transform ? buildProjection(ref, transform) : `select * from ${ref}`;
     if (sample) {
-      // A REPRESENTATIVE random subset rather than the first rows by physical
-      // order. BigQuery uses TABLESAMPLE SYSTEM (block sampling on the table
-      // reference); DuckDB uses ORDER BY random() (reliable on small result
-      // tables, where block sampling can return nothing). Paging doesn't apply.
-      let sql;
-      if (this.catalog.dialect === 'bigquery') {
-        const sampled = `${ref} TABLESAMPLE SYSTEM (${Number(samplePercent)} PERCENT)`;
-        sql = transform ? buildProjection(sampled, transform) : `select * from ${sampled}`;
-      } else {
-        sql = `select * from (${base}) _s order by random()`;
-      }
+      // A REPRESENTATIVE random subset rather than the first rows by physical order, the
+      // dialect's way (src/dialects). Paging doesn't apply.
+      const sql = getDialect(this.catalog.dialect).sampleQuery(ref, samplePercent, (rel) => (transform ? buildProjection(rel, transform) : `select * from ${rel}`));
       const res = await this.runner.show(dir, sql, limit);
       if (!res.ok) return { ok: false, status: 'error', table, ...extra, error: { stage: 'fetch', message: formatDbtError(res.stdout, res.stderr) } };
       return { ok: true, status: 'ready', table, ...extra, sampled: true, sampling: samplingNote(samplePercent), columns: res.columns, rows: res.rows, row_count: res.rows.length, ...(transform ? { projected: true } : {}) };

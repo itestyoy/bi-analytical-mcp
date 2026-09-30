@@ -15,7 +15,7 @@
 // packages and the operator's runtime settings) and the final `return` (from `output.columns`).
 // Function bodies pass a static gate (python/ast_gate.py) before anything is written or run.
 
-import { spawn } from 'node:child_process';
+import { runWithInput } from './dbt/process.js';
 import { assetPath, missingAssetMessage } from './runtime-assets.js';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -350,19 +350,12 @@ export function runAstGate(pythonBin, functions, bindings = [], { timeoutMs = 20
   const gate = assetPath('astGate');
   if (!gate) return Promise.reject(new Error(missingAssetMessage('astGate')));
   if (!pythonBin) return Promise.reject(new Error('ast gate has no Python to run on: the engine was given neither pythonBin nor a dbt environment (whose MetricFlow Python runs it) — nothing is taken from PATH'));
-  return new Promise((resolve, reject) => {
-    const proc = spawn(pythonBin, [gate], { stdio: ['pipe', 'pipe', 'pipe'] });
-    let out = ''; let err = '';
-    const timer = setTimeout(() => { proc.kill(); reject(new Error(`ast gate timed out after ${timeoutMs}ms`)); }, timeoutMs);
-    proc.stdout.on('data', (d) => { out += d; });
-    proc.stderr.on('data', (d) => { err += d; });
-    proc.on('error', (e) => { clearTimeout(timer); reject(new Error(`ast gate could not start (${pythonBin}): ${e.message}`)); });
-    proc.on('close', (code) => {
-      clearTimeout(timer);
-      if (code !== 0 && !out) return reject(new Error(`ast gate failed (${pythonBin} exit ${code}): ${err.trim()}`));
-      try { resolve(JSON.parse(out)); } catch { reject(new Error(`ast gate returned no JSON: ${(out || err).slice(0, 300)}`)); }
-    });
-    proc.stdin.end(JSON.stringify({ functions, bindings: [...bindings] }));
+  return runWithInput(pythonBin, [gate], JSON.stringify({ functions, bindings: [...bindings] }), { timeout: timeoutMs }).then((r) => {
+    if (r.cancelled) throw new Error('ast gate was not run: the call was cancelled');
+    if (r.killed) throw new Error(`ast gate timed out after ${timeoutMs}ms`);
+    if (!r.ok && r.code == null) throw new Error(`ast gate could not start (${pythonBin}): ${r.error}`);
+    if (!r.ok && !r.stdout) throw new Error(`ast gate failed (${pythonBin} exit ${r.code}): ${(r.stderr || '').trim()}`);
+    try { return JSON.parse(r.stdout); } catch { throw new Error(`ast gate returned no JSON: ${(r.stdout || r.stderr).slice(0, 300)}`); }
   });
 }
 

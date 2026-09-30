@@ -17,6 +17,7 @@
 
 import { timeRangeConditions, isValidTimezone } from './time-range.js';
 import { registerStage } from './pipeline.js';
+import { getDialect } from './dialects/index.js';
 import { comparison, typedAs } from './conditions.js';
 import { oneOfOr, strEnum } from './schema-kit.js';
 
@@ -263,6 +264,7 @@ function gapModeFor(r) {
  * ev/r1..rn/joined) over fromRel, in the dialect `dialectName`.
  */
 export function matchStepCte(r, fromRel, catalog, dialectName) {
+  const d = getDialect(dialectName);
   if (r.mode === 'strict') {
     throw new Error("sequence mode 'strict' (contiguous steps) is only supported for the BigQuery MATCH_RECOGNIZE target, not the CTE equivalent other warehouses run");
   }
@@ -309,7 +311,7 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
     `CASE ${furthestCase} END AS furthest_step_name`,
     `(j.t${r.steps.length} IS NOT NULL) AS completed`,
     ...r.steps.map((s) => `(j.t${s.idx} IS NOT NULL) AS reached_${s.name}`),
-    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `EXTRACT(EPOCH FROM (j.t${m.to} - j.t${m.from})) AS secs_${m.name}`),
+    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `${d.secondsBetween(`j.t${m.from}`, `j.t${m.to}`)} AS secs_${m.name}`),
     ...r.propCaptures.map((c) => `j.${c.id}`),
   ];
   return `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\nSELECT\n  ${outCols.join(',\n  ')}\nFROM joined j`;
@@ -325,6 +327,7 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
  *  - one_per_partition: BigQuery's default skip, and the first match per partition by a ROW_NUMBER
  *    window + `|> WHERE` — the earliest start's match, whatever the skip mode. */
 export function matchStepBigQueryPipe(r, spec, catalog) {
+  const d = getDialect('bigquery');
   const preds = r.stepPreds('bigquery');
   const sym = r.steps.map((s) => `S${s.idx}`);
   const measures = [
@@ -341,7 +344,7 @@ export function matchStepBigQueryPipe(r, spec, catalog) {
     `CASE ${furthestCase} END AS furthest_step_name`,
     `(t${r.steps.length} IS NOT NULL) AS completed`,
     ...r.steps.map((s) => `(t${s.idx} IS NOT NULL) AS reached_${s.name}`),
-    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`),
+    ...r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `${d.secondsBetween(`t${m.from}`, `t${m.to}`)} AS secs_${m.name}`),
   ];
   const outCols = [
     ...r.partCols,

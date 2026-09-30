@@ -117,6 +117,11 @@ export class BigQueryDialect extends Dialect {
   }
   valueBucket(expr, buckets) { return `MOD(ABS(FARM_FINGERPRINT(CAST(${expr} AS STRING))), ${Number(buckets)})`; }
 
+  secondsBetween(from, to) { return `TIMESTAMP_DIFF(${to}, ${from}, SECOND)`; }
+  timeSpineSelect(start, end) { return `select d as date_day\nfrom unnest(generate_date_array('${start}', '${end}', interval 1 day)) as d`; }
+  // block sampling on the table reference, then the projection over the sample
+  sampleQuery(ref, percent, project) { return project(`${ref} TABLESAMPLE SYSTEM (${Number(percent)} PERCENT)`); }
+
   dateDiff(unit, from, to) {
     const u = { day: 'DAY', hour: 'HOUR', minute: 'MINUTE', second: 'SECOND' }[unit];
     if (!u) throw new Error(`dateDiff: bad unit ${unit}`);
@@ -206,18 +211,18 @@ export class BigQueryDialect extends Dialect {
       case 'where':
         return `|> WHERE ${op.preds.join(' AND ')}`;
       case 'extend':
-        return `|> EXTEND ${op.cols.map((c) => `(${c.expr}) AS ${this.ident(c.name)}`).join(', ')}`;
+        return `|> EXTEND ${op.cols.map((c) => `(${c.expr}) AS ${this.quoteIdent(c.name)}`).join(', ')}`;
       case 'unnest': {
         const { join, element } = this.arrayUnnest(null, op.column, op.key, op.as, op.field, op.type, op.encoding);
         // bind the element to `as` (already so for the scalar form)
-        return op.field ? `|> ${join}\n|> EXTEND ${element} AS ${this.ident(op.as)}` : `|> ${join}`;
+        return op.field ? `|> ${join}\n|> EXTEND ${element} AS ${this.quoteIdent(op.as)}` : `|> ${join}`;
       }
       case 'join': {
         // The RIGHT side is a subquery that projects exactly what the stage promised: the join key
         // and `attrs` under their aliases — nothing else of the joined model reaches the pipe. Its
         // key expression is evaluated there, under the LEFT side's column name.
         const kind = op.kind === 'INNER' ? 'INNER ' : 'LEFT ';
-        const attrs = op.attrs.map((a) => (a.as === a.column ? this.ident(a.column) : `${this.ident(a.column)} AS ${this.ident(a.as)}`));
+        const attrs = op.attrs.map((a) => (a.as === a.column ? this.quoteIdent(a.column) : `${this.quoteIdent(a.column)} AS ${this.quoteIdent(a.as)}`));
         // Both sides come from the SAME builder, so a part's grain truncates both — never just the
         // projected one. `USING` can only equate bare columns, so it is used only when neither side
         // needs an expression; a truncated part joins `ON`, like a validity window does.
@@ -233,12 +238,12 @@ export class BigQueryDialect extends Dialect {
         // part with a declared grain is, and the only one that can carry a validity window.
         const priv = (n) => `_j_${n}`;
         const win = op.between
-          ? [`${this.ident(op.between.from)} AS ${priv('from')}`, `${this.ident(op.between.to)} AS ${priv('to')}`]
+          ? [`${this.quoteIdent(op.between.from)} AS ${priv('from')}`, `${this.quoteIdent(op.between.to)} AS ${priv('to')}`]
           : [];
         const proj = [...keys.map((k, i) => `${k.right} AS ${priv(`key${i}`)}`), ...win, ...attrs];
         const on = [
           ...keys.map((k, i) => `${k.left} = ${op.alias}.${priv(`key${i}`)}`),
-          ...(op.between ? [this.validityWindow(`base.${this.ident(op.between.value)}`, `${op.alias}.${priv('from')}`, `${op.alias}.${priv('to')}`)] : []),
+          ...(op.between ? [this.validityWindow(`base.${this.quoteIdent(op.between.value)}`, `${op.alias}.${priv('from')}`, `${op.alias}.${priv('to')}`)] : []),
         ];
         const drop = [...keys.map((_, i) => priv(`key${i}`)), ...(op.between ? [priv('from'), priv('to')] : [])];
         return `|> AS base
@@ -246,19 +251,19 @@ export class BigQueryDialect extends Dialect {
 |> DROP ${drop.join(', ')}`;
       }
       case 'aggregate':
-        return `|> AGGREGATE ${op.aggs.map((a) => `${a.expr} AS ${this.ident(a.as)}`).join(', ')}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.ident(c)).join(', ')}` : ''}`;
+        return `|> AGGREGATE ${op.aggs.map((a) => `${a.expr} AS ${this.quoteIdent(a.as)}`).join(', ')}${op.groupBy.length ? ` GROUP BY ${op.groupBy.map((c) => this.quoteIdent(c)).join(', ')}` : ''}`;
       case 'pivot':
-        return `|> AGGREGATE ${op.fn}(${this.ident(op.valueCol)}) AS v GROUP BY ${[...op.groupBy, op.on].map((c) => this.ident(c)).join(', ')}\n|> PIVOT(${op.fn}(v) FOR ${this.ident(op.on)} IN (${op.values.map((v) => this.sqlLiteral(v)).join(', ')}))`;
+        return `|> AGGREGATE ${op.fn}(${this.quoteIdent(op.valueCol)}) AS v GROUP BY ${[...op.groupBy, op.on].map((c) => this.quoteIdent(c)).join(', ')}\n|> PIVOT(${op.fn}(v) FOR ${this.quoteIdent(op.on)} IN (${op.values.map((v) => this.sqlLiteral(v)).join(', ')}))`;
       case 'unpivot':
-        return `|> UNPIVOT(${this.ident(op.valueAs)} FOR ${this.ident(op.nameAs)} IN (${op.columns.map((c) => this.ident(c)).join(', ')}))`;
+        return `|> UNPIVOT(${this.quoteIdent(op.valueAs)} FOR ${this.quoteIdent(op.nameAs)} IN (${op.columns.map((c) => this.quoteIdent(c)).join(', ')}))`;
       case 'order_by':
-        return `|> ORDER BY ${op.keys.map((k) => `${this.ident(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
+        return `|> ORDER BY ${op.keys.map((k) => `${this.quoteIdent(k.key)}${k.dir === 'desc' ? ' DESC' : ''}`).join(', ')}`;
       case 'sample':
         return `|> TABLESAMPLE SYSTEM (${Number(op.percent)} PERCENT)`;
       case 'limit':
         return `|> LIMIT ${Number(op.n)}`;
       case 'project':
-        return `|> SELECT ${op.cols.map((c) => this.ident(c)).join(', ')}`;
+        return `|> SELECT ${op.cols.map((c) => this.quoteIdent(c)).join(', ')}`;
       case 'match_recognize':
         // BigQuery pipe-native funnel: `|> MATCH_RECOGNIZE (...)` + derived EXTEND/WHERE/SELECT
         // (pre-rendered in match-recognize.js, which owns the funnel semantics).

@@ -313,6 +313,22 @@ test('a funnel step on a boolean column takes "true" as the flag, and matches th
   })), /'is_fatal_of_event_data' is a boolean column/);
 });
 
+// A column a caller names may be a SQL keyword: every stage writes it quoted, so it is a column.
+test('columns named like keywords (group, order) flow through the stages as columns, counted from the rows', opts, async (t) => {
+  if (skip(t)) return;
+  const [want] = (await wh.query('select count(*) as n from fct_crashlytics_events')).rows;
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'keyword_cols', source: 'crashlytics' });
+  await engine.build_pipeline_model({ action: 'add_steps', draft_id: s.draft_id, stages: [
+    { stage: 'compute', name: 'group', op: 'coalesce', columns: ['app_version'], default: 'none' },
+    { stage: 'aggregate', group_by: ['group'], measures: [{ name: 'order', fn: 'count' }] },
+    { stage: 'order_by', keys: [{ key: 'order', direction: 'desc' }] },
+  ] });
+  const c = await engine.build_pipeline_model({ action: 'materialize', draft_id: s.draft_id });
+  assert.equal(c.build?.ok, true, JSON.stringify(c.error || c.build));
+  assert.equal(c.rows.reduce((n, r) => n + num(r.order), 0), num(want.n));
+  assert.ok(c.rows.every((r, i) => i === 0 || num(r.order) <= num(c.rows[i - 1].order)), 'ordered by the keyword column');
+});
+
 // A raw expression runs as written, over the columns the steps before it made: one naming a column
 // that is not there is refused when it is added, not by the warehouse minutes later.
 test('a raw expression naming a column that does not exist at that step is refused when it is added', opts, async (t) => {

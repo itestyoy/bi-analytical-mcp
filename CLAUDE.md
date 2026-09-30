@@ -429,6 +429,13 @@
 - The integration tests query through the dbt client production runs (`testDbt`, test/helpers/
   dbt-env.js → `createDbt`): the numbers they prove come from `mf query` and `dbt show` as the server
   calls them. Do NOT add a query backend only the tests use.
+- THE EVALS ARE THE SAME WORLD WITH A MODEL IN IT (evals/): golden questions — direct, indirect,
+  negative — put to a model through the listed tools over MCP on the fixture warehouse (`npm run eval`,
+  Anthropic credentials needed), graded on the DATA (the answer states the truth a case's own SQL reads
+  from the warehouse) and on the tools (required, forbidden, a call budget), with calls, failed calls,
+  turns and tokens recorded. A truth is never typed in: `npm run eval:check` runs every case's SQL and
+  holds it to a reference path through the tools, with no model. A new question is a case in
+  evals/cases.js, never a number in a test.
 - Tests run on the `dbt-v2` environment; the python stage's file runs on `dbt-v1` (dbt 1.x),
   since v2 runs no Python models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 

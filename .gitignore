@@ -13,3 +13,6 @@ dbt_packages/
 # python bytecode
 __pycache__/
 *.pyc
+
+# eval runs (npm run eval) — kept locally, not in the repository
+evals/results/

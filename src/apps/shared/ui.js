@@ -3,7 +3,7 @@
 // helpers and the number formats, so the two cards are one design. Data always goes in as text,
 // never as markup.
 
-import { icon } from '../result-view/src/icons.js';
+import { icon } from './icons.js';
 
 export const numberFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 2 });
 export const integerFormat = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });

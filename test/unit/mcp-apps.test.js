@@ -19,6 +19,13 @@ import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
 import { displayProblems } from '../../src/display-check.js';
 import { runTool, toCallToolResult } from '../../src/mcp-surface.js';
 
+/** Every script of the views' shared layer (src/apps/shared/), which both views bundle. */
+function sharedSources() {
+  const dir = new URL('../../src/apps/shared/', import.meta.url).pathname;
+  return readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f));
+}
+
+
 let s;
 before(async () => { s = await startServer(); });
 after(async () => { await s.stop(); });
@@ -86,7 +93,7 @@ test('the view reads only its own result: one tool is app-callable (and only by 
   // the view's own code: no App method that reaches the model or other server methods, no network API
   const REACHES_OUT = /\b(readServerResource|listServerResources|createSamplingMessage|sendMessage|updateModelContext|openLink|downloadFile|sendLog|fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts)\s*\(/;
   const dir = new URL('../../src/apps/result-view/src/', import.meta.url).pathname;
-  const sources = [...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f)), new URL('../../src/apps/result-view-model.js', import.meta.url).pathname, new URL('../../src/apps/shared/ui.js', import.meta.url).pathname];
+  const sources = [...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f)), new URL('../../src/apps/result-view-model.js', import.meta.url).pathname, ...sharedSources()];
   const toolCalls = [];
   const reads = [];
   for (const file of sources) {

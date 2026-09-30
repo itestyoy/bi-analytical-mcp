@@ -1,5 +1,5 @@
-/* The path-analysis card's own pieces, on the result view's theme and components (global.css,
-   mcp-app.css): the graph, the sankey, the heatmap cells and the controls. Every colour is a theme
+/* The path-analysis card's own pieces, on the result view's theme and components (shared/global.css,
+   shared/components.css): the graph, the sankey, the heatmap cells and the controls. Every colour is a theme
    token, so the host's theme (and dark mode) carries through. */
 
 #content {

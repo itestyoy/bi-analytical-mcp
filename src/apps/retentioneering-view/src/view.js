@@ -26,12 +26,13 @@
  * to show is decided by retentioneeringViewModel (src/retentioneering/view-model.js), the function the
  * server runs too; this file only draws it, with the result view's shadcn pieces and theme.
  */
-import { App, applyDocumentTheme, applyHostFonts, applyHostStyleVariables } from '@modelcontextprotocol/ext-apps';
+import { App } from '@modelcontextprotocol/ext-apps';
+import { applyHostContext } from '../../shared/host.js';
 import { retentioneeringViewModel, byText } from '../../../retentioneering/view-model.js';
 import { el, badge, card, stat, formatNumber, formatShare } from '../../shared/ui.js';
-import { icon } from '../../result-view/src/icons.js';
-import '../../result-view/src/global.css';
-import '../../result-view/src/mcp-app.css';
+import { icon } from '../../shared/icons.js';
+import '../../shared/global.css';
+import '../../shared/components.css';
 import './view.css';
 
 const mainEl = document.querySelector('.main');
@@ -768,13 +769,7 @@ document.addEventListener('keydown', (e) => {
 // ── host wiring (the official MCP Apps template) ─────────────────────────────────────────────
 
 function handleHostContextChanged(ctx) {
-  if (ctx.theme) applyDocumentTheme(ctx.theme);
-  if (ctx.styles?.variables) applyHostStyleVariables(ctx.styles.variables);
-  if (ctx.styles?.css?.fonts) applyHostFonts(ctx.styles.css.fonts);
-  if (ctx.safeAreaInsets) {
-    const root = document.documentElement.style;
-    for (const side of ['top', 'right', 'bottom', 'left']) root.setProperty(`--safe-${side}`, `${Number(ctx.safeAreaInsets[side]) || 0}px`);
-  }
+  applyHostContext(ctx);
   if (ctx.displayMode) state.displayMode = ctx.displayMode;
   if (ctx.displayMode || ctx.containerDimensions) applyContainer({ ...app.getHostContext(), ...ctx });
   if (ctx.displayMode || ctx.availableDisplayModes) updateFullscreenButton();

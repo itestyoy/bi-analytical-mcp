@@ -21,14 +21,9 @@
  * official MCP Apps templates: handlers are registered on the App before connect(), the host's
  * theme, style variables and fonts are applied on connect and on every context change. The pieces
  * it draws are shadcn/ui components (Card, Badge, Button, Table, Alert, Accordion, Chart),
- * styled in mcp-app.css.
+ * styled in src/apps/shared/components.css.
  */
-import {
-  App,
-  applyDocumentTheme,
-  applyHostFonts,
-  applyHostStyleVariables,
-} from '@modelcontextprotocol/ext-apps';
+import { App } from '@modelcontextprotocol/ext-apps';
 import {
   ArcElement,
   BarController,
@@ -45,10 +40,11 @@ import {
 } from 'chart.js';
 import { Flow, SankeyController } from 'chartjs-chart-sankey';
 import { buildViewModel, drillView, DRILL_ROWS, pivotRows, pivotTransform, PIVOT_LEVEL_ROWS } from '../../result-view-model.js';
-import { icon } from './icons.js';
-import { el, badge, card, formatNumber, formatShare, numberFormat, integerFormat, stat } from '../../shared/ui.js';
-import './global.css';
-import './mcp-app.css';
+import { icon } from '../../shared/icons.js';
+import { applyHostContext } from '../../shared/host.js';
+import { el, badge, card, formatNumber, formatShare, integerFormat, stat } from '../../shared/ui.js';
+import '../../shared/global.css';
+import '../../shared/components.css';
 
 /**
  * The sankey drawn with rounded corners, like every other mark here (bars, slices, tiles): the nodes'
@@ -1328,21 +1324,7 @@ document.addEventListener('keydown', (e) => {
 // ── host context ──────────────────────────────────────────────────────────────────────────────
 
 function handleHostContextChanged(ctx) {
-  if (ctx.theme) {
-    applyDocumentTheme(ctx.theme);
-  }
-  if (ctx.styles?.variables) {
-    applyHostStyleVariables(ctx.styles.variables);
-  }
-  if (ctx.styles?.css?.fonts) {
-    applyHostFonts(ctx.styles.css.fonts);
-  }
-  if (ctx.safeAreaInsets) {
-    // the host's insets ADD to the view's own padding (the CSS reads them) — setting them as the
-    // padding would put the content flush against a frame the host rounds, where it gets clipped
-    const root = document.documentElement.style;
-    for (const side of ['top', 'right', 'bottom', 'left']) root.setProperty(`--safe-${side}`, `${Number(ctx.safeAreaInsets[side]) || 0}px`);
-  }
+  applyHostContext(ctx);
   if (ctx.toolInfo?.tool?.name) {
     state.toolName = ctx.toolInfo.tool.name;
   }

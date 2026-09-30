@@ -23,6 +23,13 @@ import { CONFIG_ERRORS } from '../../src/retentioneering/checker.js';
 import { settle } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
 
+/** Every script of the views' shared layer (src/apps/shared/), which both views bundle. */
+function sharedSources() {
+  const dir = new URL('../../src/apps/shared/', import.meta.url).pathname;
+  return readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f));
+}
+
+
 const CATALOG = fileURLToPath(new URL('../integration/fixtures/catalog.yml', import.meta.url));
 const TOOLS = ['build_retentioneering_model', 'query_retentioneering_model', 'display_retentioneering_result'];
 // a dbt client that is never asked to run anything here — the surface needs only that it exists
@@ -227,7 +234,7 @@ test('the view draws and nothing else — no server call, no network — and its
   const sources = [
     ...readdirSync(dir).filter((f) => f.endsWith('.js')).map((f) => join(dir, f)),
     new URL('../../src/retentioneering/view-model.js', import.meta.url).pathname,
-    new URL('../../src/apps/shared/ui.js', import.meta.url).pathname,
+    ...sharedSources(),
   ];
   for (const file of sources) assert.equal(readFileSync(file, 'utf8').match(REACHES_OUT), null, file);
   const { build } = await import('vite');

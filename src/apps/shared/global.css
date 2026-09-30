@@ -8,7 +8,7 @@
  *
  * The FALLBACKS are the shadcn/ui theme (base color "neutral", new-york v4 registry):
  * a host that sends no theme gets the shadcn look, a host that does gets its own.
- * The components (mcp-app.css) are written against the shadcn semantic names below
+ * The components (components.css) are written against the shadcn semantic names below
  * (--background, --muted, --primary, …), each of which reads a host variable.
  */
 :root {

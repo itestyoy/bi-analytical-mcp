@@ -3,7 +3,6 @@
 // one tool that draws a model result (display_model_result) with its drill-down reads. The lifecycle
 // itself is src/task-runner.js. Methods of the Engine (src/engine/helpers.js — mixin).
 
-import { MAX_WAIT_SECONDS } from '../schema.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { TaskRunner } from '../task-runner.js';
 import { RESULT_MODEL_PREFIX } from '../context-manager.js';

@@ -5,7 +5,6 @@
 import { ToolError } from '../validate.js';
 import { MEASURE_AGGS } from '../catalog.js';
 import { frameProfile } from '../python-model.js';
-import { CatalogSearch } from '../search.js';
 import { buildGuide } from '../guide.js';
 import { pythonAuthoringGuide } from '../python-guide.js';
 import { SUPPORTED_DIALECTS } from '../dialects/index.js';

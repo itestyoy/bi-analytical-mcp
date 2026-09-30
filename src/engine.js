@@ -27,7 +27,7 @@ import { renderPredicate } from './predicate.js';
 import { PROJECT_STORE } from './project-semantics.js';
 import { formatDbtError } from './dbt/index.js';
 import './match-recognize.js'; // registers the match_recognize pipeline stage
-import { runAstGate } from './python-model.js'; // registers the python pipeline stage
+import './python-model.js'; // registers the python pipeline stage
 import { partitionConditions, timeRangeConditions, isValidTimezone } from './time-range.js';
 import { CatalogSearch } from './search.js';
 import { featureTools } from './features.js';

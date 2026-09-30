@@ -1119,7 +1119,8 @@ async function drawOne(engine, feature, ctx, input) {
     ...(sm.sample?.share != null ? { sample: sm.sample.share } : {}),
     ...(sm.sample?.events ? { sampled_events: sm.sample.events } : {}),
   } : null;
-  const drawn = { ok: true, task_id: input.task_id, analysis: input.analysis, eventstream: out.eventstream, ...(scope ? { scope } : {}), ...(input.edge_weight ? { edge_weight: input.edge_weight } : {}), result };
+  // which events are the library's own (a path's start and end), for the card — the page carries no facts sheet
+  const drawn = { ok: true, task_id: input.task_id, analysis: input.analysis, eventstream: out.eventstream, ...(scope ? { scope } : {}), ...(input.edge_weight ? { edge_weight: input.edge_weight } : {}), synthetic_events: retentioneeringFacts().synthetic_events, result };
   const vm = retentioneeringViewModel(drawn, input);
   if (vm.kind === 'none') return { ...drawn, drawn: false, note: 'this analysis has nothing to draw (no transitions, steps, groups or rows)' };
   return { ...drawn, drawn: true };

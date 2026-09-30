@@ -297,3 +297,14 @@ test('with the feature off, loading the server never opens the library\'s sheet'
   assert.ok(out.includes('LOADED'), out);
   assert.ok(!out.includes('READ'), 'the sheet was read at import');
 });
+
+test('the synthetic events a card marks are the library\'s — the ones the server hands over, and without them the ones the sheet names', () => {
+  const sheet = retentioneeringFacts().synthetic_events;
+  const events = [...sheet, 'level_start'];
+  const r = { kind: 'transition_graph', nodes: events.map((event) => ({ event, count: 1 })), edges: [{ source: sheet[0], target: 'level_start', count: 1, proba_out: 1 }] };
+  const marked = (drawn) => retentioneeringViewModel({ ok: true, analysis: 'g', ...drawn, result: r }).nodes.filter((n) => n.synthetic).map((n) => n.event).sort();
+  // a card drawn before the server sent the list reads the ones the view labels — the sheet's own
+  assert.deepEqual(marked({}), [...sheet].sort());
+  assert.deepEqual(marked({ synthetic_events: sheet }), [...sheet].sort());
+  assert.deepEqual(marked({ synthetic_events: ['level_start'] }), ['level_start'], 'the list handed over decides');
+});

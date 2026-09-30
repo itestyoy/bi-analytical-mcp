@@ -48,8 +48,10 @@ const TITLES = {
 };
 /** A title for any analysis: its own, else its kind in words. */
 const titleOf = (kind) => TITLES[kind] || (kind.charAt(0).toUpperCase() + kind.slice(1)).replace(/_/g, ' ');
-const SYNTHETIC = new Set(['path_start', 'path_end']);
-/** How the library's synthetic events read on a card: where a path begins, and where it has ended. */
+/** How the library's synthetic events read on a card: where a path begins, and where it has ended.
+ *  Which events ARE synthetic is the library's word: the server draws a card with the facts sheet's
+ *  `synthetic_events` (this page does not carry the sheet); a card drawn before it did falls back to
+ *  the events these labels name, which test/unit/retentioneering-feature.test.js holds to the sheet. */
 const START_END = { path_start: 'Path start', path_end: 'Path end' };
 const STEP_START_END = { path_start: 'Path start', path_end: 'Ended' };
 /** retentioneering's own default for the graph: each event keeps its strongest few exits (plus every
@@ -65,14 +67,15 @@ export function retentioneeringViewModel(drawn, args = {}) {
   if (!isObj(r) || typeof r.kind !== 'string') return none('empty');
   if (r.error) return none('error');
   // analysis_kind stays the analysis's own kind where the card's kind is a shape of its (a diff, a distribution)
+  const synthetic = new Set(Array.isArray(drawn.synthetic_events) ? drawn.synthetic_events : Object.keys(START_END));
   const head = { kind: r.kind, analysis_kind: r.kind, title: titleOf(r.kind), analysis: drawn.analysis, eventstream: drawn.eventstream || null, scope: isObj(drawn.scope) ? drawn.scope : null, paths: Number.isFinite(r.paths) ? r.paths : null };
   // a card per KIND (hasCard): any other analysis has none and is answered in words; a kind with a
   // card whose result holds nothing to draw is `empty`
   if (!hasCard(r.kind, diffForm(r))) return none('no_card');
   if (r.diff) return DIFF_CARDS[r.kind](head, r);
   switch (r.kind) {
-    case 'transition_graph': return graph(head, r, args.edge_weight || drawn.edge_weight);
-    case 'step_matrix': return stepMatrix(head, r);
+    case 'transition_graph': return graph(head, r, args.edge_weight || drawn.edge_weight, synthetic);
+    case 'step_matrix': return stepMatrix(head, r, synthetic);
     case 'step_sankey': return stepSankey(head, r);
     case 'funnel': return funnel(head, r);
     case 'metric_distribution': return distribution(head, r);
@@ -143,13 +146,13 @@ function diffMatrices(head, r) {
   return { ...head, kind: 'diff', title: `${head.title} — difference between two groups`, tables };
 }
 
-function graph(head, r, weight) {
+function graph(head, r, weight, synthetic) {
   const edges = (r.edges || []).filter((e) => e.count > 0);
   if (!edges.length) return none('empty');
   const weights = Object.keys(WEIGHT_UNITS).filter((w) => edges.some((e) => e[w] != null));
   return {
     ...head,
-    nodes: (r.nodes || []).map((n) => ({ event: n.event, label: START_END[n.event] || n.event, count: n.count, x: n.x ?? null, y: n.y ?? null, synthetic: SYNTHETIC.has(n.event) })),
+    nodes: (r.nodes || []).map((n) => ({ event: n.event, label: START_END[n.event] || n.event, count: n.count, x: n.x ?? null, y: n.y ?? null, synthetic: synthetic.has(n.event) })),
     edges,
     weights,
     weight: weights.includes(weight) ? weight : weights.includes('proba_out') ? 'proba_out' : weights[0],
@@ -172,11 +175,11 @@ function eventOrder(cells, steps) {
     .map(([e]) => e);
 }
 
-function stepMatrix(head, r) {
+function stepMatrix(head, r, synthetic) {
   const blocks = (r.blocks || []).filter((b) => b.cells?.length).map((b) => {
     const events = eventOrder(b.cells, b.steps);
     const at = new Map(b.cells.map((c) => [`${c.event}\u0000${c.step}`, c.share]));
-    return { steps: b.steps, rows: events.map((e) => ({ event: e, label: STEP_START_END[e] || e, synthetic: SYNTHETIC.has(e), values: b.steps.map((s) => at.get(`${e}\u0000${s}`) ?? 0) })) };
+    return { steps: b.steps, rows: events.map((e) => ({ event: e, label: STEP_START_END[e] || e, synthetic: synthetic.has(e), values: b.steps.map((s) => at.get(`${e}\u0000${s}`) ?? 0) })) };
   });
   return blocks.length ? { ...head, blocks } : none('empty');
 }

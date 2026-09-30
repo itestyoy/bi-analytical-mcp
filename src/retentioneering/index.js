@@ -79,12 +79,11 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
     // the library's own check of every step and analysis, on the environment's own interpreter (the
     // client's pythonBin is MetricFlow's)
     checker: new LibraryChecker(runner.environment?.dir ? join(runner.environment.dir, 'bin', 'python') : null),
-    sides: { [SIDE]: QUERY },
     tools: {
       [BUILD]: {
         title: 'Build Retentioneering Model',
         description: TOOL_DESCRIPTIONS[BUILD],
-        behaviour: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         side: SIDE,
         schema: (catalog) => buildSchema(catalog),
         run: (engine, input) => build(engine, feature, input),
@@ -92,8 +91,9 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
       [QUERY]: {
         title: 'Query Retentioneering Model',
         description: TOOL_DESCRIPTIONS[QUERY],
-        behaviour: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
         side: SIDE,
+        reads: SIDE,
         waits: true,
         schema: () => querySchema(),
         run: (engine, input) => query(engine, feature, input),
@@ -105,7 +105,7 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
       [DISPLAY]: {
         title: 'Display Retentioneering Result',
         description: TOOL_DESCRIPTIONS[DISPLAY],
-        behaviour: { readOnlyHint: true, idempotentHint: false },
+        annotations: { readOnlyHint: true, idempotentHint: false },
         draws: true,
         waits: true,
         schema: () => displaySchema(),

@@ -30,7 +30,9 @@ import './match-recognize.js'; // registers the match_recognize pipeline stage
 import './python-model.js'; // registers the python pipeline stage
 import { partitionConditions, timeRangeConditions, isValidTimezone } from './time-range.js';
 import { CatalogSearch } from './search.js';
-import { featureTools } from './features.js';
+import { featureToolDefinitions } from './features.js';
+import { toolRegistry } from './tools/define.js';
+import { CORE_TOOLS } from './tools/core.js';
 import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { MemoryStore } from './memory.js';
@@ -113,22 +115,24 @@ export class Engine {
     for (const b of this.project?.layer.blocked || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `${b.message}: not served. To serve it, ${b.fix}.`, detail: b });
     for (const st of featureStatus || []) if (st.available === false) this.errors.record({ source: 'startup', severity: 'warning', stage: 'feature', message: `the feature '${st.id}' is not offered: ${st.reason}` });
     this.schemas = buildSchemas(catalog, { project: this.project?.layer || null, projectContexts: this.project?.contexts || [] });
-    // THE FEATURES THIS DEPLOYMENT RUNS (src/features.js): each adds its tools — a schema here and a
-    // method on this engine — and the task side they start and read. A feature that is off adds
-    // nothing, so its tools are neither listed nor callable.
+    // THE TOOLS — ONE REGISTRY (src/tools/define.js): the core's (src/tools/core.js) and those of the
+    // features this deployment runs (src/features.js). A feature that is off adds nothing, so its tools
+    // are neither listed nor callable. A core tool's schema is built with the others from the catalog
+    // (above, by its name); a feature's by its own definition.
     this.features = features;
     this.featureStatus = featureStatus;
-    this._featureTools = featureTools(features);
-    for (const [name, { tool }] of this._featureTools) {
-      if (Object.prototype.hasOwnProperty.call(this.schemas, name) || typeof this[name] === 'function') throw new Error(`feature tool '${name}' collides with a core tool`);
-      this.schemas[name] = transportSchema(tool.schema(catalog));
-      this[name] = (input) => tool.run(this, input || {});
+    this.tools = toolRegistry([...CORE_TOOLS, ...featureToolDefinitions(features)]);
+    for (const def of this.tools.values()) {
+      if (def.feature) {
+        if (Object.prototype.hasOwnProperty.call(this.schemas, def.name) || typeof this[def.name] === 'function') throw new Error(`feature tool '${def.name}' collides with a core tool`);
+        this.schemas[def.name] = transportSchema(def.schema(catalog));
+        this[def.name] = (input) => def.run(this, input || {});
+      } else if (!Object.prototype.hasOwnProperty.call(this.schemas, def.name)) throw new Error(`tool '${def.name}' has no schema (src/schema.js builds one per core tool)`);
     }
-    // which side a task belongs to, and which tool reads that side back — the core's two, and each feature's
-    this._sides = { ...TASK_SIDE };
-    this._readers = { ...SIDE_READER };
-    for (const feature of features) Object.assign(this._readers, feature.sides || {});
-    for (const [name, { tool }] of this._featureTools) if (tool.side) this._sides[name] = tool.side;
+    for (const name of Object.keys(this.schemas)) if (!this.tools.has(name)) throw new Error(`the schema '${name}' belongs to no tool definition`);
+    // which side a task belongs to, and which tool reads that side back — both read off the definitions
+    this._sides = Object.fromEntries(this.tools.values().filter((d) => d.side).map((d) => [d.name, d.side]));
+    this._readers = Object.fromEntries(this.tools.values().filter((d) => d.reads).map((d) => [d.reads, d.name]));
     // Recipes are NOT a standalone tool — they are building blocks surfaced THROUGH
     // semantic_index ({ recipe: id } for one, the overview list + { guide } per task family).
     // Constrain the recipe view to real ids when recipes are configured.
@@ -638,13 +642,3 @@ export class Engine {
 }
 
 mixin(Engine, memoryMethods, semanticIndexMethods, warehouseProbeMethods, pipelineWarningMethods, pipelineDraftMethods, pipelineMaterializeMethods, semanticBuildMethods, semanticQueryMethods, semanticPreviewMethods, taskResultMethods);
-
-// WHICH SIDE A TASK BELONGS TO — and so which query tool reads it back. A semantic task (a declared
-// model being parsed, a metric query) is read with query_semantic_model({ task_id }); a pipeline
-// task (a build, a query over a built model) with query_pipeline_model({ task_id }). An experiment
-// is no task at all: its statistics come back with its call.
-const TASK_SIDE = {
-  build_semantic_model: 'semantic', update_semantic_model: 'semantic', query_semantic_model: 'semantic', preview_semantic_model: 'semantic',
-  build_pipeline_model: 'pipeline', register_native_model: 'pipeline', query_pipeline_model: 'pipeline',
-};
-const SIDE_READER = { semantic: 'query_semantic_model', pipeline: 'query_pipeline_model' };

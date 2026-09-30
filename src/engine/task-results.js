@@ -138,13 +138,13 @@ export const taskResultMethods = {
    */
   _precheckWait(tool, args) {
     this._validate(tool, args);
-    const ids = args.task_ids || [args.task_id];
-    if (tool === 'query_semantic_model') for (const id of ids) this._taskForSide(id, 'semantic');
-    else if (tool === 'query_pipeline_model') for (const id of ids) this._taskForSide(id, 'pipeline');
-    else if (tool === 'display_model_result') {
-      this._knownTask(args.task_id);
-      if (this._displayed?.get(args.task_id) === 'drawn' || this.jobs.get(args.task_id)?.drawn) throw new ToolError(`task ${args.task_id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'task_id' });
-    } else this._featureTools.get(tool)?.tool.precheck?.(this, args);
+    this.tools.get(tool)?.precheck?.(this, args);
+  },
+
+  /** A task drawn once is not drawn again: its card is in the conversation already. */
+  _refuseDrawnAgain(id) {
+    this._knownTask(id);
+    if (this._displayed?.get(id) === 'drawn' || this.jobs.get(id)?.drawn) throw new ToolError(`task ${id} is shown already — its card is in the conversation above`, { stage: 'validate', field: 'task_id' });
   },
 
   /** Wait for a task (within the cap) and read what it produced — the one read the query tools and display_model_result share. */

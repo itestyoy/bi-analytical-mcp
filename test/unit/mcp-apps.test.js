@@ -18,6 +18,7 @@ import { buildViewModel, drillView, pivotRows, pivotTransform } from '../../src/
 import { RESULT_VIEW_URI, RESULT_VIEW_FILE } from '../../src/apps.js';
 import { displayProblems } from '../../src/display-check.js';
 import { runTool, toCallToolResult } from '../../src/mcp-surface.js';
+import { defineTool, toolRegistry } from '../../src/tools/define.js';
 
 /** Every script of the views' shared layer (src/apps/shared/), which both views bundle. */
 function sharedSources() {
@@ -73,7 +74,8 @@ test('a client that does not declare MCP Apps sees the same tools and page, but 
 
 test('the hint to show a result as a card reaches only a client that renders cards', async () => {
   // a stand-in tool answering the way a query tool's read ({ task_id }) does for a finished result with rows
-  const engine = { schemas: { result_like: {} }, result_like: () => ({ ok: true, rows: [{ n: 1 }], show_to_user: { tool: 'display_model_result', arguments: { task_id: 'aabbccddeeff' } } }) };
+  const answer = () => ({ ok: true, rows: [{ n: 1 }], show_to_user: { tool: 'display_model_result', arguments: { task_id: 'aabbccddeeff' } } });
+  const engine = { schemas: { result_like: {} }, tools: toolRegistry([defineTool({ name: 'result_like', title: 'Result Like', description: 'a stand-in', annotations: { readOnlyHint: true }, run: answer })]) };
   const withCards = await runTool(engine, 'result_like', {}, { renders: true });
   const without = await runTool(engine, 'result_like', {}, { renders: false });
   assert.deepEqual(withCards.raw.show_to_user.arguments, { task_id: 'aabbccddeeff' });

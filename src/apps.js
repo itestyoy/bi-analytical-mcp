@@ -55,34 +55,23 @@ export { RESOURCE_MIME_TYPE };
 export const RESULT_VIEW_URI = 'ui://betti/result-view.html';
 export const RESULT_VIEW_FILE = RUNTIME_ASSETS.resultView.path;
 
-// The tools whose result is drawn: display_model_result (a model's rows) and experiment (the A/B test;
-// the split check and the plan have no card). Nothing else carries the view — not a query, not a build, not a query
-// tool's read of a task — so no read, no poll and no intermediate step ever draws.
-export const VIEWED_TOOLS = new Set(['display_model_result', 'experiment']);
-
-/** Who may call a tool: the model only — never a view (see the header). */
+/** Who may call a tool: the model — and, for the one tool a card calls itself (its definition's
+ *  `appCallable`: drill_result, the card reading the next view of its own drawn task), the view too.
+ *  Its visibility is ["model", "app"] — the spec's default — and not ["app"] alone: a host refused
+ *  the card's call to an app-only tool ("Could not load this level"), while this pair is what hosts
+ *  serve. What keeps it the card's own read is the server: it answers only for a task that was DRAWN. */
 export const TOOL_VISIBILITY = Object.freeze(['model']);
-/**
- * The one tool a view calls: the card reading the next view of its own drawn task. Its visibility is
- * ["model", "app"] — the spec's default — and not ["app"] alone: a host refused the card's call to an
- * app-only tool ("Could not load this level"), while this pair is what hosts serve. What keeps it the
- * card's own read is the server: it answers only for a task that was DRAWN.
- */
-export const APP_CALLABLE_TOOLS = Object.freeze(['drill_result']);
-/** Tools that exist only with the view: a call that draws is accepted only from a client that renders MCP Apps (drill_result: only for a drawn task). */
-export const APPS_ONLY_TOOLS = new Set(['display_model_result', 'drill_result']);
-const visibilityOf = (tool) => (APP_CALLABLE_TOOLS.includes(tool) ? [...TOOL_VISIBILITY, 'app'] : [...TOOL_VISIBILITY]);
 
 /**
- * The `_meta` every tool carries: its visibility, and — for a viewed tool — the view, in both
- * spellings registerAppTool writes. `featureView` is the view of a feature's drawing tool (its own
- * page, src/features.js); a core viewed tool draws into the result view.
+ * The `_meta` a tool carries, from its definition (src/tools/define.js): its visibility, and — for a
+ * tool that draws (`view`: 'result' for the result view, or a feature's own view) — the view, in both
+ * spellings registerAppTool writes. Nothing else carries a view — not a query, not a build, not a query
+ * tool's read of a task — so no read, no poll and no intermediate step ever draws.
  */
-export function viewMeta(tool, featureView = null) {
-  const uri = featureView?.uri || (VIEWED_TOOLS.has(tool) ? RESULT_VIEW_URI : null);
-  return uri
-    ? { ui: { resourceUri: uri, visibility: visibilityOf(tool) }, [RESOURCE_URI_META_KEY]: uri }
-    : { ui: { visibility: visibilityOf(tool) } };
+export function viewMeta(def) {
+  const uri = def.view === 'result' ? RESULT_VIEW_URI : def.view?.uri || null;
+  const visibility = def.appCallable ? [...TOOL_VISIBILITY, 'app'] : [...TOOL_VISIBILITY];
+  return uri ? { ui: { resourceUri: uri, visibility }, [RESOURCE_URI_META_KEY]: uri } : { ui: { visibility } };
 }
 
 /** The view's network policy: nothing. Maps to CSP connect-src / resource / frame-src 'none'. */

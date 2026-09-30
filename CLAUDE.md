@@ -112,7 +112,15 @@
 - THE OFFICIAL SDK OWNS THE PROTOCOL. The server is built on `@modelcontextprotocol/server` v2
   (protocol 2026-07-28; it also serves clients that open with the 2025 `initialize`, from the same
   factory). `src/mcp-server.js` only says WHAT is offered — tools, resources, skills, the Apps view,
-  tasks — using `src/mcp-surface.js` (+ `tasks.js`, `skills.js`, `apps.js`). Do NOT hand-roll wire
+  tasks — using `src/mcp-surface.js` (+ `tasks.js`, `skills.js`, `apps.js`). A TOOL IS ONE DEFINITION
+  (`defineTool`, src/tools/define.js — name, aliases, title, description, annotations, listed, side /
+  reads, waits / precheck, view / appsOnly / appCallable / cardField, run): the core's in
+  src/tools/core.js, a feature's in its own module, all in the engine's one registry (`engine.tools`),
+  and the surface reads nothing else — no table of titles, hints or hidden names beside it; a core
+  tool's input schema is built with the others from the catalog (src/schema.js) under its name, and
+  test/unit/tool-definitions.test.js holds the two to each other. A tool that only reads is never
+  merged with one that removes (`context` lists and describes; `delete_context` removes): a client asks
+  before a destructive call, and must not have to before a read. Do NOT hand-roll wire
   behaviour the SDK provides (headers, envelope, discover, sessions, error codes); the one exception
   is `src/mcp-tasks.js`, which exists only until the SDK serves the Tasks extension.
 - Skills and the Apps view RENDER existing objects (buildGuide, `engine.get_recipe`, the python
@@ -193,8 +201,8 @@
   cannot run. Off, nothing of it exists: no schema (so neither listed nor callable), no view page, no
   guide name, no routing trigger, no skill, no line of the instructions — the surface is exactly what
   it is without it. The core never names a feature: engine, surface, apps, guide, skills and
-  overview each walk `engine.features` at ONE point (a tool's schema/method/side/description/view,
-  a guide name + triggers, a skill, an instructions line, an overview entry). Do NOT add an
+  overview each walk `engine.features` at ONE point (its tools become definitions in the same registry
+  as the core's, a guide name + triggers, a skill, an instructions line, an overview entry). Do NOT add an
   `if (feature)` branch in the core, and do NOT let a feature reach into another side's tools.
 - RETENTIONEERING (src/retentioneering/, the first feature): build = the DATA, SHAPED STEP BY STEP LIKE A
   PIPELINE — `start` declares the eventstream, rendered in SQL through the pipeline's own stages (scope,

@@ -59,7 +59,6 @@ export class TaskRegistry {
       ctl,
       result: undefined,
       error: undefined,
-      waiters: new Set(),
     };
     this.tasks.set(t.taskId, t);
     Promise.resolve()
@@ -78,12 +77,6 @@ export class TaskRegistry {
     t.lastUpdatedAt = new Date().toISOString();
     if (result !== undefined) t.result = result;
     if (error !== undefined) t.error = error;
-    this._wake(t);
-  }
-
-  _wake(t) {
-    for (const w of t.waiters) w();
-    t.waiters.clear();
   }
 
   /** The task, or null when unknown or expired. */
@@ -103,21 +96,8 @@ export class TaskRegistry {
       t.status = 'cancelled';
       t.statusMessage = reason;
       t.lastUpdatedAt = new Date().toISOString();
-      this._wake(t);
     }
     return t;
-  }
-
-  /** Resolves when the task changes or `ms` passes — what a blocking tasks/result waits on. */
-  waitForChange(t, ms, signal) {
-    if (isTerminal(t.status)) return Promise.resolve();
-    return new Promise((resolve) => {
-      // every way out removes every hook, so a long wait loop leaves no listener behind
-      const done = () => { clearTimeout(timer); t.waiters.delete(done); signal?.removeEventListener?.('abort', done); resolve(); };
-      const timer = setTimeout(done, ms);
-      t.waiters.add(done);
-      signal?.addEventListener?.('abort', done, { once: true });
-    });
   }
 
   _expired(t) {

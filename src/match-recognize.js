@@ -15,9 +15,9 @@
 // MATCH / AFTER MATCH SKIP keywords), nested PATTERN enforces step order, GAP =
 // any non-step row, CLASSIFIER/aggregates in MEASURES.
 
-import { jsonExtract, sqlLiteral } from './dialect.js';
+import { sqlLiteral } from './dialect.js';
 import { timeRangeConditions, isValidTimezone } from './time-range.js';
-import { registerStage, prepareColumns, typedLiteral } from './pipeline.js';
+import { registerStage, typedLiteral } from './pipeline.js';
 import { oneOfOr, strEnum } from './schema-kit.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
@@ -124,7 +124,6 @@ export function buildPrefilter(catalog, spec, dialect, source, { partitionCol = 
  * what dropped out, instead of as a warehouse error after the build.
  */
 function requireSourceColumns(catalog, spec, source, availableCols) {
-  if (!availableCols) return; // standalone resolve (no pipeline column set to check against)
   const m = catalog.getModel(source);
   const need = new Map(); // physical column -> what reads it
   const want = (col, why) => { if (col && !need.has(col)) need.set(col, why); };
@@ -144,7 +143,7 @@ function requireSourceColumns(catalog, spec, source, availableCols) {
   );
 }
 
-function resolve(catalog, spec, dialect, availableCols = null, source) {
+function resolve(catalog, spec, dialect, availableCols, source) {
   if (!spec || !Array.isArray(spec.steps) || spec.steps.length < 2) {
     throw new Error('sequence requires at least 2 ordered steps');
   }
@@ -210,10 +209,9 @@ function resolve(catalog, spec, dialect, availableCols = null, source) {
     ? spec.metrics
     : steps.map((s) => ({ name: `reached_${s.name}`, type: 'reached', step: s.name }));
 
-  // Real columns referenceable in step `where` / agg_at_step (vs event_data
-  // properties). In a pipeline these are the columns produced by earlier stages
-  // (passed in as availableCols); standalone, they come from spec.prepare.
-  const prepCols = availableCols || prepareColumns(catalog, dialect, spec.prepare || [], source);
+  // Real columns referenceable in step `where` / agg_at_step (vs event_data properties): the
+  // columns the stages before this one produced.
+  const prepCols = availableCols;
 
   // resolve metrics + collect which property values must be captured per step
   const propCaptures = []; // { id, idx, property, type, isColumn }
@@ -331,53 +329,15 @@ export function matchStepCte(r, fromRel, catalog, dialectName) {
   return `WITH ${ctes.map((c) => `${c.name} AS (\n  ${c.sql}\n)`).join(',\n')}\nSELECT\n  ${outCols.join(',\n  ')}\nFROM joined j`;
 }
 
-/** BigQuery lowering: a single SELECT … FROM fromRel MATCH_RECOGNIZE(…).
- *  rows handling, to stay numerically consistent with the CTE lowering:
- *  - one_per_match: emit `AFTER MATCH SKIP TO NEXT ROW` so a new match can begin on
- *    the very next row — every occurrence of the start step yields a match (overlapping
- *    matches), matching the "every S1 starts a match" CTE lowering. (Without it,
- *    BigQuery's default AFTER MATCH SKIP PAST LAST ROW gives NON-overlapping matches,
- *    which would diverge from the CTE lowering.)
- *  - one_per_partition: keep BigQuery's default skip and take the first match per
- *    partition via the outer QUALIFY (ROW_NUMBER ORDER BY t1 = 1) — the earliest-S1
- *    match, equivalent regardless of skip mode. */
-export function matchStepBigQuery(r, fromRel, catalog) {
-  const preds = r.stepPreds('bigquery');
-  const sym = r.steps.map((s) => `S${s.idx}`);
-  const measures = [
-    ...r.steps.map((s) => `    MAX(S${s.idx}.${r.timeCol}) AS t${s.idx}`),
-    ...r.propCaptures.map((c) => `    MAX(${c.isColumn ? `S${c.idx}.${c.property}` : catalog.propertyExpr(r.fact, c.property, 'bigquery', { type: c.type, qualifier: `S${c.idx}` })}) AS ${c.id}`),
-  ].join(',\n');
-  const defines = r.steps.map((s, i) => `    ${sym[i]} AS ${preds[i]}`);
-  const gapMode = gapModeFor(r);
-  if (gapMode === 'single') defines.push(`    GAP AS NOT (${preds.map((p) => `(${p})`).join(' OR ')})`);
-  else if (gapMode === 'perlevel') for (let i = 1; i < r.steps.length; i++) defines.push(`    G${i} AS NOT (${preds[i]})`);
-  const furthestCase = r.steps.slice().reverse().map((s) => `WHEN t${s.idx} IS NOT NULL THEN '${s.name}'`).join(' ');
-  const reached = r.steps.map((s) => `    t${s.idx} IS NOT NULL AS reached_${s.name}`);
-  const secs = r.metrics.filter((m) => m.type === 'avg_seconds_between').map((m) => `    TIMESTAMP_DIFF(t${m.to}, t${m.from}, SECOND) AS secs_${m.name}`);
-  return `SELECT
-${r.partCols.map((c) => `    ${c},`).join('\n')}
-    t1 AS first_seen_at,
-    CASE ${furthestCase} END AS furthest_step_name,
-    t${r.steps.length} IS NOT NULL AS completed,
-${[...reached, ...secs, ...r.propCaptures.map((c) => `    ${c.id}`)].join(',\n')}
-  FROM ${fromRel} MATCH_RECOGNIZE (
-    PARTITION BY ${r.partCols.join(', ')}
-    ORDER BY ${r.timeCol}
-    MEASURES
-${measures}${r.rows === 'one_per_match' ? '\n    AFTER MATCH SKIP TO NEXT ROW' : ''}
-    PATTERN ${nestedPattern(r.steps, gapMode)}
-    DEFINE
-${defines.join(',\n')}
-  )${r.rows === 'one_per_match' ? '' : `\n  QUALIFY ROW_NUMBER() OVER (PARTITION BY ${r.partCols.join(', ')} ORDER BY t1) = 1`}`;
-}
-
-/** BigQuery PIPE lowering: the funnel as `|> MATCH_RECOGNIZE` pipe operators (BigQuery
- *  pipe syntax supports MATCH_RECOGNIZE as a pipe operator), so the whole pipeline stays
- *  pipe-form. Same MEASURES/PATTERN/DEFINE semantics as the table form; the derived
- *  reached/completed/secs columns become `|> EXTEND`, the one_per_partition first-match
- *  pick becomes a ROW_NUMBER window + `|> WHERE`, and a final `|> SELECT` projects the
- *  output columns (dropping the internal t1..tn). */
+/** BigQuery lowering: the funnel as `|> MATCH_RECOGNIZE` pipe operators (BigQuery pipe syntax
+ *  supports MATCH_RECOGNIZE as a pipe operator), so the whole pipeline stays pipe-form. The derived
+ *  reached/completed/secs columns become `|> EXTEND` and a final `|> SELECT` projects the output
+ *  columns (dropping the internal t1..tn). `rows`, numerically consistent with the CTE lowering:
+ *  - one_per_match: `AFTER MATCH SKIP TO NEXT ROW`, so a new match can begin on the very next row —
+ *    every occurrence of the start step yields a match (overlapping matches), as in the CTE lowering
+ *    (BigQuery's default, AFTER MATCH SKIP PAST LAST ROW, gives non-overlapping ones);
+ *  - one_per_partition: BigQuery's default skip, and the first match per partition by a ROW_NUMBER
+ *    window + `|> WHERE` — the earliest start's match, whatever the skip mode. */
 export function matchStepBigQueryPipe(r, spec, catalog) {
   const preds = r.stepPreds('bigquery');
   const sym = r.steps.map((s) => `S${s.idx}`);
@@ -436,12 +396,12 @@ function matchOutputColumns(r) {
   return cols;
 }
 
-/** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
 /** Every relationship name the events sources declare — what `partition_by: { entity }` may name. */
 function relationshipNames(catalog) {
   return [...new Set(catalog.facts.flatMap((f) => Object.keys(catalog.getModel(f).entities || {})))].sort();
 }
 
+/** JSON-Schema for the match_recognize stage (steps + metrics + optional prefilter). */
 function matchRecognizeSchema(catalog) {
   const CMP = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'not_in'];
   const stepWhere = { type: 'object', additionalProperties: false, required: ['property', 'op'], description: 'A step condition on a scalar event_data property OR an upstream pipeline column.', properties: { property: { type: 'string', pattern: NAME, description: 'A catalog event property name — reference the flattened `*_of_event_data` property DIRECTLY (no derive needed; the engine resolves it to its column or a JSON extract). Array/struct properties must be unpacked in a prior prepare (derive/unnest) stage; a column added upstream is also referenceable by its name.' }, op: { enum: CMP }, value: {} } };
@@ -488,19 +448,18 @@ function matchRecognizeSchema(catalog) {
 registerStage('match_recognize', {
   schema: (catalog) => matchRecognizeSchema(catalog),
   build: ({ d, catalog, cols, source }, p) => {
-    const spec = p._resolved ? p.spec : p; // accept a stage object OR a preresolved wrapper
-    const r = p._resolved || resolve(catalog, spec, d.name, cols, source);
+    const spec = p;
+    const r = resolve(catalog, spec, d.name, cols, source);
     return {
       op: {
         op: 'match_recognize',
         // BigQuery has a native `|> MATCH_RECOGNIZE` pipe operator, so the funnel is a pipe step
-        // (bqPipe below). Other engines have no MATCH_RECOGNIZE → emulated as a self-contained
-        // SELECT (render), which the dialect places as one CTE of its chain.
+        // (bqPipe). DuckDB has no MATCH_RECOGNIZE → emulated as a self-contained SELECT (render),
+        // which its dialect places as one CTE of its chain.
         bqPipe: d.name === 'bigquery' ? matchStepBigQueryPipe(r, spec, catalog) : null,
         render: (prev, dn) => {
           const pre = buildPrefilter(catalog, spec, dn, r.fact, { partitionCol: r.partitionCol });
-          const fromRel = pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev;
-          return dn === 'bigquery' ? matchStepBigQuery(r, fromRel, catalog) : matchStepCte(r, fromRel, catalog, dn);
+          return matchStepCte(r, pre ? `(SELECT * FROM ${prev} WHERE ${pre})` : prev, catalog, dn);
         },
       },
       cols: matchOutputColumns(r),

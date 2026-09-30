@@ -330,9 +330,8 @@ test('python stage: the profile decides the runtime and what it may import', () 
   assert.equal(profileOf({ runtime: 'duckdb' }).key, 'duckdb');
   // the platform's own package is importable only where it exists
   assert.ok(importAllowlist({}, profileOf({ runtime: 'bigquery', method: 'bigframes' })).has('bigframes'));
-  assert.ok(importAllowlist({}, profileOf({ runtime: 'databricks' })).has('pyspark'));
-  assert.ok(!importAllowlist({}, profileOf({ runtime: 'databricks' })).has('bigframes'));
-  assert.ok(importAllowlist({}, profileOf({ runtime: 'snowflake' })).has('snowflake'));
+  assert.ok(importAllowlist({}, profileOf({ runtime: 'bigquery', method: 'serverless' })).has('pyspark'));
+  assert.ok(!importAllowlist({}, profileOf({ runtime: 'bigquery', method: 'serverless' })).has('bigframes'));
   assert.ok(!importAllowlist({}).has('bigframes'), 'no platform package without a runtime');
   // and the compiled model records the runtime it was compiled for
   const compiled = compilePythonStage(
@@ -375,11 +374,9 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
   // quietly return an arbitrary slice
   assert.match(bq.guide, /ordering_mode="partial"/);
   assert.match(bq.guide, /OrderRequiredError/);
-  const spark = frameProfile({ runtime: 'databricks' });
+  const spark = frameProfile({ runtime: 'bigquery', method: 'serverless' });
   assert.match(spark.ml, /pyspark\.ml/);
   assert.ok(!spark.guide.includes('bigframes'), 'no BigFrames rules on Spark');
-  const snow = frameProfile({ runtime: 'snowflake' });
-  assert.match(snow.ml, /snowflake\.ml\.modeling/);
   // and they land in the live schema for a BigQuery bigframes profile
   const dir = mkdtempSync(join(tmpdir(), 'bqprof-'));
   writeFileSync(join(dir, 'profiles.yml'), 'p:\n  target: dev\n  outputs:\n    dev:\n      type: bigquery\n      project: x\n      submission_method: bigframes\n      gcs_bucket: b\n      compute_region: us-central1\n');
@@ -398,7 +395,7 @@ test('python stage: descriptions name this platform\'s in-engine ML library and 
 });
 
 // dbt's adapter and this server's SQL writer read the SAME profile and can disagree: dbt connects
-// with snowflake (and runs Python models there) while no SQL dialect is written for it, so pipelines
+// with snowflake while no SQL dialect is written for it, so pipelines
 // are rendered in another dialect's syntax against it. That is a fact about the deployment — it is
 // reported, not assumed away.
 test('an adapter with no SQL dialect of its own is reported, not silently rendered as another', async () => {

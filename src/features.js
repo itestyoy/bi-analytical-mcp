@@ -29,13 +29,11 @@ import { retentioneeringDefinition } from './retentioneering/index.js';
 /** Every feature this server knows. Each is off unless its flag turns it on. */
 export const FEATURE_DEFINITIONS = [retentioneeringDefinition];
 
-const OFF = /^(0|false|no|off)$/i;
 const ON = /^(1|true|yes|on)$/i;
 
 /** Whether an env flag is on: only an explicit yes turns a feature on — a feature is opt-in. */
 export function flagOn(value) {
-  const v = String(value ?? '').trim();
-  return ON.test(v) && !OFF.test(v);
+  return ON.test(String(value ?? '').trim());
 }
 
 /**

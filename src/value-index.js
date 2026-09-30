@@ -292,7 +292,7 @@ export class BackgroundIndexer {
   }
 
   /** Value SQL expression for a property — the catalog's one rule (flat column or JSON extract). */
-  _valueExpr(name, _spec, fact) {
+  _valueExpr(name, fact) {
     return this.catalog.propertyExpr(fact, name, this.catalog.dialect);
   }
 
@@ -362,7 +362,7 @@ export class BackgroundIndexer {
       if (!spec) continue;
       const tProp = Date.now();
       const presence = this._complexPresence(name, spec, fact);
-      const expr = this._valueExpr(name, spec, fact);
+      const expr = this._valueExpr(name, fact);
       try {
         const prior = this.index.stats?.(fact, name);
         const since = (this.merge && prior?.dataWatermark != null) ? this._sinceClause(prior.dataWatermark, timeCol) : null;
@@ -449,11 +449,11 @@ export class BackgroundIndexer {
       const bundleCol = c.bundleColumn(fact);
       for (const name of c.scalarEventProps(fact)) {
         const spec = c.eventPropertySpec(name, fact);
-        if (spec) targets.push({ source: fact, property: name, ref, expr: this._valueExpr(name, spec, fact), eventCol: evCol, timeCol, bundleCol });
+        if (spec) targets.push({ source: fact, property: name, ref, expr: this._valueExpr(name, fact), eventCol: evCol, timeCol, bundleCol });
       }
       // Fact categorical DIMENSIONS — the envelope/app columns (media_source, platform,
-      // bundle_id, …) physically on every event. Index their REAL values under namespaced
-      // '<fact>.<col>' keys so a filter literal can be verified against THIS source's own
+      // bundle_id, …) physically on every event. Index their REAL values under the (source, column)
+      // key, so a filter literal can be verified against THIS source's own
       // values (casing can differ from the per-user dim_users copy). Skip the event_name
       // column (already enum-validated) and time dimensions (not an enumerable value set).
       for (const [col, spec] of Object.entries(m.dimensions || {})) {

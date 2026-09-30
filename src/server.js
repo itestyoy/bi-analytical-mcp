@@ -188,16 +188,6 @@ const csv = (v) => String(v || '').split(',').map((x) => x.trim()).filter(Boolea
 const LOOPBACK = ['localhost', '127.0.0.1', '[::1]'];
 
 /**
- * The Express app: `createMcpExpressApp` (the SDK's app factory — JSON body parsing, Host/Origin
- * validation) with `createMcpHandler` mounted on /mcp.
- *
- * Origin is ALWAYS validated ("Servers MUST validate the Origin header"): a request without one —
- * every native client, every hosted connector calling from its backend — passes; a browser page
- * passes from a loopback origin or one listed in MCP_ALLOWED_ORIGINS; anything else is 403. (The
- * SDK arms that check by itself only for a loopback bind, and a container binds 0.0.0.0 — so the
- * list is passed explicitly.) MCP_ALLOWED_HOSTS adds the Host check.
- */
-/**
  * One line for every request the endpoint REFUSED or failed (status >= 400) — including the ones the
  * SDK's Host/Origin fences reject before any handler runs, which otherwise leave no trace: a client
  * that "cannot reach" the server is then one log line away from its reason (a browser-based host
@@ -247,6 +237,16 @@ function logRequest(req, res) {
   res.on('finish', () => logLine('http', `${bits.join(' ')} → ${res.statusCode}`));
 }
 
+/**
+ * The Express app: `createMcpExpressApp` (the SDK's app factory — JSON body parsing, Host/Origin
+ * validation) with `createMcpHandler` mounted on /mcp.
+ *
+ * Origin is ALWAYS validated ("Servers MUST validate the Origin header"): a request without one —
+ * every native client, every hosted connector calling from its backend — passes; a browser page
+ * passes from a loopback origin or one listed in MCP_ALLOWED_ORIGINS; anything else is 403. (The
+ * SDK arms that check by itself only for a loopback bind, and a container binds 0.0.0.0 — so the
+ * list is passed explicitly.) MCP_ALLOWED_HOSTS adds the Host check.
+ */
 export function createApp(engine, opts = {}) {
   const services = opts.services || servicesFor(engine);
   const allowedOrigins = [...LOOPBACK, ...(opts.allowedOrigins ?? csv(process.env.MCP_ALLOWED_ORIGINS))];
@@ -319,18 +319,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   // Optional cost lever: bound indexing scans to the last N days on the anchor time column
   // (0/unset → scan all history, the default). Set on a large partitioned fact to cut cost.
   const windowDays = Number(process.env.MCP_INDEX_WINDOW_DAYS) || 0;
-  // Approximate (HLL) distinct counts during indexing — cheaper on a large fact, and the
-  // project's preferred distinct-count method. DEFAULT ON; dialect-gated (bigquery/snowflake/
-  // duckdb/redshift use APPROX_COUNT_DISTINCT, unknown fall back to EXACT). Disable
-  // with MCP_INDEX_APPROX_DISTINCT=false/0/no/off to force exact everywhere.
+  // Approximate (HLL) distinct counts during indexing — cheaper on a large fact. DEFAULT ON; the
+  // dialect's own expression (BigQuery: APPROX_COUNT_DISTINCT; DuckDB counts exactly, where the
+  // numbers are checked). Disable with MCP_INDEX_APPROX_DISTINCT=false/0/no/off to count exactly.
   const approxDistinct = !/^(0|false|no|off)$/i.test(String(process.env.MCP_INDEX_APPROX_DISTINCT ?? 'true').trim());
   // Properties indexed per combined scan (cardinality + coverage in one query each); a failed
   // batch degrades to per-property. Tune down on very wide facts / strict column limits.
   const batchSize = Number(process.env.MCP_INDEX_BATCH) || 40;
-  // Dedicated timeout (seconds) for the heavy index scans — a combined top-k over the full
-  // fact can exceed the runner's default 180s and get SIGTERM-killed. Generous default (600s)
-  // so indexing finishes; ordinary user queries keep the smaller runner timeout. Tune via
-  // MCP_INDEX_TIMEOUT_SECONDS (or pair with MCP_INDEX_WINDOW_DAYS to bound the scan instead).
   // Dedicated timeout for the heavy value-index scans — default 2 HOURS (7200s): a combined
   // scan over a large full events fact genuinely needs it, and it is separate from the general
   // dbt runner timeout (which stays short so ordinary user queries never hang). Pair with the

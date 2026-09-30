@@ -150,11 +150,6 @@ export function renderBaseModel(catalog, key) {
   return sm;
 }
 
-/**
- * Render the full context YAML.
- * @param state { additions: {modelKey:{measures,dimensions}}, metrics: [], usedModels: [] }
- * @returns { yaml, semanticModels: string[], metricNames: string[] }
- */
 /** A compiled declaration as the MANIFEST takes it: our own `_`-prefixed annotations are for the
  *  tools that describe and resolve it, and dbt rejects a key it does not know. */
 function manifestOnly(decl) {
@@ -166,6 +161,10 @@ function manifestOnly(decl) {
  * (dbt 1.x) or 'latest' (dbt v2) — the same semantic layer, rendered once and then converted
  * (src/semantic-latest.js). A 'latest' render also returns `latest` ({ models, metrics }), which the
  * context writer merges into the project's own model entries.
+ *
+ * Render the full context YAML.
+ * @param state { additions: {modelKey:{measures,dimensions}}, metrics: [], usedModels: [] }
+ * @returns { yaml, semanticModels: string[], metricNames: string[] }
  */
 export function renderContext(catalog, state, { spec = 'legacy' } = {}) {
   const modelsToRender = new Set(state.usedModels || []);

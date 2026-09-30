@@ -1,4 +1,5 @@
-// One embedded database shared by all subsystems (the job registry + the value index),
+// One embedded database shared by all subsystems (the job registry, the value index and its runs,
+// the analyst memory, the error log, the server's own facts),
 // behind a REPOSITORY abstraction. The managers call domain methods (store.jobs.*,
 // store.values.*, store.runs.*) and contain NO SQL — every query lives inside a backend.
 // Swapping databases = implement these repositories for a new backend and register it;
@@ -23,15 +24,24 @@
 //   values.bundlePropertyCoverage(source?, bundle) -> [{source, property, row_count, non_null, null_count}] (per source)
 //   values.search(query, limit)           -> [{source, property, value, freq}] (substring, freq desc)
 //   values.candidates(cap)                -> [{source, property, value, freq}] (top-freq pool for JS fuzzy rank)
+//   values.allCells(source, property)  -> [{bundle, event_name, row_count, non_null, null_count}]
 //   values.counts()                   -> { properties, values }
-//   values.valueCount(prop)           -> int (values STORED for prop; vs distinct_count → capped?)
+//   values.valueCount(source, property) -> int (values STORED; vs distinct_count → capped?)
+//   values.properties()               -> [{source, property}] (every indexed pair)
+//   values.removeProperty(source, property)
 //   runs.reconcile()                  (mark running→interrupted)
 //   runs.start()                      -> id
 //   runs.finish(id, { status, propertiesIndexed, valuesWritten, errors, error })
 //   runs.all()                        -> rows[] (desc by id)
+//   runs.get(id)                      -> row | null
+//   runs.recordProperty(runId, { source, property, ms, valuesWritten, distinctCount, totalCount, status, error })
+//   runs.properties(runId, { limit }) -> rows[] (slowest first)
+//   runs.propertyHistory(source, property, { limit }) -> rows[] (newest run first)
+//   runs.addNote(runId, note);  runs.notes(runId) -> [{ note, at }]
 //   memory.add({ id, note, targets, aliases, links, created_at }) -> id
 //   memory.get(id)                    -> { id, note, targets:[], aliases:[], links:[], created_at } | null
 //   memory.remove(id)                 -> bool (a row existed)
+//   memory.setTargets(id, targets)    -> bool (a row existed)
 //   memory.all({ limit })             -> rows[] (most recent first)
 //   memory.counts()                   -> { notes }
 //   memory.vectorPut(id, vec, model)  (store/mirror a note's embedding for semantic search)
@@ -42,6 +52,7 @@
 //   errors.get(id)                    -> row | null   (args and detail in full)
 //   errors.summary(filter)            -> [{ source, tool, stage, count, last_at }] (the same filter, grouped)
 //   errors.prune({ before, keep })    -> removed count (older than `before`, beyond the newest `keep`)
+//   reset()                           (wipe every table but memory and the error log — MCP_DB_RESET)
 //   close()
 
 import { createRequire } from 'node:module';

@@ -544,7 +544,7 @@ const STAGES = {
       anyOf: [{ required: ['via'] }, { required: ['on'] }],
       properties: {
         stage: { enum: ['join'] },
-        with: { type: 'string', enum: catalog.joinableModelKeys(), description: 'Catalog model to join (any model but the pipeline\'s own source).' },
+        with: { type: 'string', enum: catalog.modelKeys(), description: 'Catalog model to join (any model but the pipeline\'s own source).' },
         via: { type: 'string', ...(catalog.joinEntityNames().length ? { enum: catalog.joinEntityNames() } : {}), description: 'A RELATIONSHIP declared in the schema and carried by both sides. Its key columns come from the catalog, so you never restate them, and the two sides may name their columns differently — a key may span SEVERAL columns (e.g. an ad-funnel id together with the player). When one side carries the relationship on several ALTERNATIVE columns (one tracking id per ad format), each is offered as its own `<relationship>_<variant>` and you pick the one the question is about. A relationship no model OWNS has no governed path and is joinable only here — that is normal, not a limitation. semantic_index({ model }) lists each model\'s relationships, their key columns and what they point at.' },
         on: {
           description: 'Ad-hoc fallback when no relationship is declared: key column(s) that exist under the SAME NAME on both sides. A single name, or several for a composite key.',
@@ -801,7 +801,7 @@ export function registerStage(name, def) { STAGES[name] = def; }
 
 /**
  * Root-level `$defs` the stage schemas reference (`#/$defs/<name>`). A tool schema that embeds
- * pipelineStageSchema() / stageSchemas() must carry these at ITS root — `$ref` resolves against
+ * pipelineStageSchema() must carry these at ITS root — `$ref` resolves against
  * the document it is embedded in, so the definitions cannot travel inside the stage fragment.
  */
 export function stageDefs(catalog) {
@@ -817,11 +817,6 @@ export function stageDefs(catalog) {
 /** A stage may declare `available(catalog)`: false hides it from the schemas and refuses it in a build. */
 function availableStages(catalog) {
   return Object.values(STAGES).filter((s) => typeof s.available !== 'function' || s.available(catalog));
-}
-
-/** JSON-Schema oneOf for a named subset of stages (e.g. the funnel `prepare` field). */
-export function stageSchemas(catalog, names) {
-  return { discriminator: { propertyName: 'stage' }, oneOf: names.map((n) => { if (!STAGES[n]) throw new Error(`no such stage: ${n}`); return STAGES[n].schema(catalog); }) };
 }
 
 /** Initial columns available from a catalog source model. Every REAL physical column
@@ -849,18 +844,6 @@ function sourceColumns(catalog, key, physicalCols = null) {
   // reference what truly exists, so a phantom catalog column fails as a normal "unknown
   // column" here instead of as a raw warehouse error at commit. No set → declared as-is.
   if (physicalCols) for (const name of [...cols.keys()]) if (!physicalCols.has(name.toLowerCase())) cols.delete(name);
-  return cols;
-}
-
-/** The scalar columns a `prepare` stage list adds (name -> { type }) — threads prep columns. */
-export function prepareColumns(catalog, dialectName, stages = [], source) {
-  const d = getDialect(dialectName);
-  let cols = new Map();
-  for (const st of stages) {
-    const def = STAGES[st.stage];
-    if (!def) throw new Error(`unknown prepare stage: ${st.stage}`);
-    cols = def.build({ d, catalog, cols, source }, st).cols;
-  }
   return cols;
 }
 

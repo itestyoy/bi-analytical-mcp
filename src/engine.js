@@ -152,13 +152,7 @@ export class Engine {
     this.pythonBin = pythonBin || runner?.pythonBin || runner?.environment?.pythonBin || null;
   }
 
-  // Internal helpers (no longer standalone tools — reached via semantic_index({ recipe })
-  // / overview / { guide }). Kept for the recipe view + the recipe-driven tests.
-  list_recipes() {
-    if (!this.recipes) return { recipes: [], note: 'Recipes are not configured on this server.' };
-    return { recipes: this.recipes.summary() };
-  }
-
+  // Not a tool of its own — reached through semantic_index({ recipe }) and the skills.
   get_recipe(input) {
     if (!this.recipes) throw new ToolError('recipes are not configured on this server', { stage: 'validate', field: 'recipe' });
     const r = this.recipes.get(input.id);
@@ -363,12 +357,6 @@ export class Engine {
   }
 
   /**
-   * The context by id, checked against the catalog AS IT IS NOW. A context is a set of declarations
-   * over models, and a later grounding pass may have found that the warehouse no longer backs one
-   * of them — reported here with the grounding reason, not as a bare 'Unknown model' thrown from
-   * inside the renderer.
-   */
-  /**
    * A context a call is about to CHANGE. The project's own semantic layer (a pinned context) is read
    * from the project as it is: nothing is built on it, changed in it or deleted from it.
    */
@@ -378,6 +366,12 @@ export class Engine {
     return ctx;
   }
 
+  /**
+   * The context by id, checked against the catalog AS IT IS NOW. A context is a set of declarations
+   * over models, and a later grounding pass may have found that the warehouse no longer backs one
+   * of them — reported here with the grounding reason, not as a bare 'Unknown model' thrown from
+   * inside the renderer.
+   */
   _ctx(id) {
     let ctx;
     // the parsed copy the project's own contexts share is internal: its semantic models are the contexts
@@ -421,11 +415,6 @@ export class Engine {
     }
     const loaded = new Set(ctx.state.usedModels || []);
     return { now: all.filter((r) => loaded.has(r.model)), afterLoading: all.filter((r) => !loaded.has(r.model)) };
-  }
-
-  /** The refs a query in THIS context may name today — what the tools publish as `groupable`. */
-  _groupableRefs(ctx) {
-    return this._groupableSplit(ctx).now;
   }
 
   /** One wording for "here is what you CAN name, and how to reach the rest", shared by every
@@ -1995,12 +1984,6 @@ export class Engine {
   }
 
   /**
-   * An events↔dimension join is INCOMPLETE when it joins a slowly-changing (SCD-2) dimension on the
-   * key alone: without a point-in-time `between` window it fans out to EVERY historical version of
-   * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
-   * add the window (and fix it) instead of trusting a silently wrong join.
-   */
-  /**
    * The stage-level warnings for a WHOLE pipeline — the same judgements the incremental builder
    * makes per step, applied to a pipeline submitted all at once. Both entry points must warn about
    * the same stages: a recipe or a hand-written payload that goes straight through
@@ -2070,6 +2053,12 @@ export class Engine {
       + ` If it is per group (per player, per day, per session), name those columns in partition_by. A global window over an already-aggregated handful of rows is fine as it is.`];
   }
 
+  /**
+   * An events↔dimension join is INCOMPLETE when it joins a slowly-changing (SCD-2) dimension on the
+   * key alone: without a point-in-time `between` window it fans out to EVERY historical version of
+   * each key, multiplying rows and inflating counts. Surface this in the response so the caller can
+   * add the window (and fix it) instead of trusting a silently wrong join.
+   */
   _joinCompletenessWarnings(stage, draft = null) {
     if (!stage || stage.stage !== 'join' || stage.between) return [];
     let m; try { m = this.catalog.getModel(stage.with); } catch { return []; }
@@ -2355,7 +2344,6 @@ export class Engine {
     return ['If the failing column is one you declared in a python stage\'s `output.columns`, that declaration is what the SQL stages after it were rendered against — nothing projects the frame for you. The frame decides: make the last step return exactly those columns, or declare exactly what it returns. An estimator\'s output often has its OWN shape (a forecast, score(), PCA components), which is the case semantic_index({ recipe: "bf_ml_output_replaces_frame" }) works through; the response of a successful build reports the columns the table really has.'];
   }
 
-  /** Compile a python stage into its dbt model (structure only — the gate is separate). */
   /**
    * The same for a SQL build: the warehouse's message, plus the hint when the failure is one whose
    * fix is a different pipeline shape (see sqlRunHints in src/pipeline.js).
@@ -2368,6 +2356,7 @@ export class Engine {
     } catch { return message; }
   }
 
+  /** Compile a python stage into its dbt model (structure only — the gate is separate). */
   _compilePythonStage(stage, { modelName, inputModel, pipeline }) {
     try {
       const profile = frameProfile(this.catalog.pythonRuntime, this.pythonModelConfig);
@@ -3023,7 +3012,7 @@ export class Engine {
       const parse = await this._parse(ctx.id);
       return {
         context_id: ctx.id, semantic_model: modelKey, files: [file], ...(input.include_yaml ? { yaml: render.yaml } : {}),
-        metrics: render.metricNames, groupable: this._groupableRefs(ctx), parse, warnings: render.warnings || [],
+        metrics: render.metricNames, groupable: this._groupableSplit(ctx).now, parse, warnings: render.warnings || [],
         next: `Query the updated task: query_semantic_model({ context_id: '${ctx.id}', metrics: [...] }) — \`metrics\` above is the current full list.`,
       };
     }, { input });
@@ -3392,7 +3381,7 @@ export class Engine {
       semantic_models: Object.keys(additions),
       measures: Object.values(additions).flatMap((a) => a.measures.map((m) => m.name)),
       metrics: (ctx.state.metrics || []).map((m) => m.name),
-      groupable: this._groupableRefs(ctx),
+      groupable: this._groupableSplit(ctx).now,
       files: this.ctxs.generatedFiles(ctx.id),
     };
   }
@@ -3533,7 +3522,7 @@ export class Engine {
       }
     }
     if (!parsed) shown.unshift({ severity: 'error', message: running ? 'the context has not been parsed yet — its build is running' : 'the context has no parsed semantic manifest — its build did not parse' });
-    const groupable = project ? null : this._groupableRefs(ctx);
+    const groupable = project ? null : this._groupableSplit(ctx).now;
     const own = ctx.state.semantic_model;
     // what each metric can be grouped by is MetricFlow's list (src/group-by-items.js), never worked out here
     const { groupBys } = listed;
@@ -3663,15 +3652,6 @@ export class Engine {
     return result;
   }
 
-  /**
-   * MetricFlow's names, in the caller's spelling. A query is addressed by WHAT and WHERE — { model,
-   * attribute }, { semantic_model, dimension }, { entity }, metric_time — and the server resolves that to MetricFlow's
-   * `entity__dimension__grain` tokens. `names` maps each token the query used to the name the caller
-   * sees (its result column), longest first — and ONLY those: a text is never rewritten by a pattern,
-   * since a project's own columns may carry `__` in their names (measure__…), and SQL that renamed them
-   * would not run. Applied to an explained query's SQL and plan and to every failure message; it
-   * renames each occurrence alike, so SQL keeps its meaning.
-   */
   /** The tokens any metric query causes besides what it names: metric_time at every grain, and
    *  MetricFlow's alias for each metric's own column (`__<metric>`). */
   _queryTokens(metricNames) {
@@ -3709,6 +3689,15 @@ export class Engine {
     return out;
   }
 
+  /**
+   * MetricFlow's names, in the caller's spelling. A query is addressed by WHAT and WHERE — { model,
+   * attribute }, { semantic_model, dimension }, { entity }, metric_time — and the server resolves that to MetricFlow's
+   * `entity__dimension__grain` tokens. `names` maps each token the query used to the name the caller
+   * sees (its result column), longest first — and ONLY those: a text is never rewritten by a pattern,
+   * since a project's own columns may carry `__` in their names (measure__…), and SQL that renamed them
+   * would not run. Applied to an explained query's SQL and plan and to every failure message; it
+   * renames each occurrence alike, so SQL keeps its meaning.
+   */
   _callerSpelling(names = new Map()) {
     const pairs = [...names].filter(([tok, name]) => tok.includes('__') && tok !== name).sort((a, b) => b[0].length - a[0].length);
     const esc = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -4666,12 +4655,6 @@ function clone(x) {
 }
 
 /**
- * A memory target, resolved: `kind` (property | event | model | term), the public `target` the
- * tool speaks — { source, name } for a property/attribute/event, { source } for a model, { term }
- * for a free phrase — plus the stored canonical key "<kind>:<source>.<name>" and the flat `key`
- * the fuzzy matcher scores.
- */
-/**
  * The attribute a compiled dimension was DECLARED as. `_attribute` records it at compile time; a
  * context persisted before that falls back to the longest task name the identifier starts with —
  * longest, because one task name may be a prefix of another ('ret' and 'ret_v2') and the shorter
@@ -4693,12 +4676,6 @@ function memoryTarget(kind, source, name = null) {
   return { kind, target: { kind, ...addressable }, addressable, label: targetWords({ kind, ...addressable }) };
 }
 
-
-/**
- * Presentation shape for a stored memory note: decode the canonical "<kind>:<key>" targets
- * back into their public { kind, source, name } form, expose the note/aliases/links, and stamp
- * the time.
- */
 // Compact form of a saved finding for ATTACHING to a semantic_index view: id + a truncated note +
 // the date. The full text + question + about[] + aliases[] + links[] are fetched on demand via
 // memory({ action: 'list', target }) — so the view stays light without losing the finding.
@@ -4721,6 +4698,11 @@ function memoryCompact(e, maxLen = 220) {
   };
 }
 
+/**
+ * Presentation shape for a stored memory note: decode the canonical "<kind>:<key>" targets
+ * back into their public { kind, source, name } form, expose the note/aliases/links, and stamp
+ * the time.
+ */
 function memoryView(e) {
   const targets = [...(e.targets || [])];
   return {

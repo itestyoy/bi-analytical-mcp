@@ -255,7 +255,6 @@ export class ContextManager {
     }));
   }
 
-  /** Create a fresh context: allocate id + a FULL independent copy of the base project. */
   /** A fresh context id, chosen before the context exists (see create). */
   newId() {
     return newContextId();

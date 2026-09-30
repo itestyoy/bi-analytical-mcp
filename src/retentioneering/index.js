@@ -47,7 +47,6 @@ export const retentioneeringDefinition = {
   id: 'retentioneering',
   flag: 'MCP_RETENTIONEERING',
   resolve({ env, catalog, profilesDir, baseProjectDir }) {
-    if (!['duckdb', 'bigquery'].includes(catalog.dialect)) return { reason: `path analysis runs on DuckDB or BigQuery, not ${catalog.dialect}` };
     if (!pathSources(catalog).length) return { reason: 'no events source declares a relationship to the users model, so no path has an owner' };
     if (!baseProjectDir) return { reason: 'no dbt project (DBT_BASE_PROJECT) to build the eventstreams in' };
     let runner;
@@ -125,8 +124,8 @@ export function createRetentioneeringFeature({ runner, operatorConfig = {}, kept
       asset: 'retentioneeringView',
       viewModel: (result, args) => retentioneeringViewModel(result, args),
     },
-    guide: { name: GUIDE_NAME, build: (catalog) => retentioneeringGuide(catalog), triggers: ROUTING_TRIGGERS },
-    skill: (engine) => retentioneeringSkill(engine.catalog),
+    guide: { name: GUIDE_NAME, build: () => retentioneeringGuide(), triggers: ROUTING_TRIGGERS },
+    skill: () => retentioneeringSkill(),
     instructions: INSTRUCTIONS_LINE,
     close: () => feature.checker.close(),
     overview: () => ({

@@ -75,7 +75,6 @@ const missingExtension = (id) => new ProtocolError(-32021, 'Missing required cli
 export function createMcpServer(services, { era, offer = offeredExtensions(services, { era }) } = {}) {
   const { engine, tasks } = services;
   const renders = offer.apps;
-  const variant = renders ? 'apps' : 'plain';
   const server = new Server(services.serverInfo || SERVER_INFO, {
     capabilities: serverCapabilities(services),
     instructions: services.instructionsFor(offer),
@@ -83,8 +82,8 @@ export function createMcpServer(services, { era, offer = offeredExtensions(servi
   });
 
   server.setRequestHandler('tools/list', async () => {
-    logLine('rpc', `tools/list → ${services.toolDefs[variant].length} tools (${era || '?'}, apps=${renders})`);
-    return { tools: services.toolDefs[variant] };
+    logLine('rpc', `tools/list → ${services.toolDefs.length} tools (${era || '?'}, apps=${renders})`);
+    return { tools: services.toolDefs };
   });
 
   server.setRequestHandler('tools/call', async (request, ctx) => {

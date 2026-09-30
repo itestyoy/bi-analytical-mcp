@@ -441,7 +441,7 @@ export function gatePythonRuntime(catalog, runner) {
  * Can dbt run PYTHON models on this profile? Decided the way dbt itself would decide — from the
  * adapter and its settings in the active profile output — so the `python` pipeline stage is
  * offered only where it can actually run:
- *   - duckdb / snowflake / databricks: the adapter runs Python models as such;
+ *   - duckdb: the adapter runs Python models as such;
  *   - bigquery: only with a submission set up — `submission_method`, or a Dataproc/BigFrames region
  *     (`dataproc_region` / `compute_region`) or cluster (`dataproc_cluster_name`);
  *   - everything else: no Python models at all.
@@ -466,8 +466,8 @@ export function resolvePythonRuntime({ profilesDir, projectDir, env = process.en
   const out = profileOutput(profilesDir, projectDir);
   const type = String(out?.type || '').toLowerCase();
   if (/^(on|1|true|yes)$/.test(force)) return decided({ available: true, runtime: type || 'unknown', forced: true });
-  if (!out) return decided({ available: false, reason: 'no dbt profile found — dbt Python models need an adapter that runs them (BigQuery with a submission set up, Snowflake, Databricks, DuckDB)' });
-  if (['duckdb', 'snowflake', 'databricks'].includes(type)) return decided({ available: true, runtime: type });
+  if (!out) return decided({ available: false, reason: 'no dbt profile found — dbt Python models need an adapter that runs them (BigQuery with a submission set up, or DuckDB)' });
+  if (type === 'duckdb') return decided({ available: true, runtime: type });
   if (type === 'bigquery') {
     // Where the submission comes from, most authoritative first:
     //   project  — dbt_project.yml `+submission_method`: a MODEL config, which is the only thing
@@ -1024,15 +1024,6 @@ export class Catalog {
   }
 
   /**
-   * Reconcile the DECLARED catalog against PHYSICAL truth. Given each model's real
-   * column names, PRUNE every declared column / event-payload property / dimension the
-   * table does not actually have — so nothing that isn't physically present is EVER
-   * surfaced anywhere (the tool schemas, semantic_index, and the value indexer all
-   * derive from these maps). Models absent from `physByModel` (introspection
-   * unavailable / relation not built) are left untouched. Returns { pruned } for logs.
-   * Call BEFORE building schemas (so the enums reflect physical reality).
-   */
-  /**
    * What the warehouse says a column IS, where the declaration could not: a column with no
    * `data_type` in the YAML is typed 'string' for a pipeline, and a BOOL among them then takes a
    * constant as a string — which the warehouse refuses (BOOL = STRING). The physical type of each
@@ -1050,6 +1041,15 @@ export class Catalog {
     return retyped;
   }
 
+  /**
+   * Reconcile the DECLARED catalog against PHYSICAL truth. Given each model's real
+   * column names, PRUNE every declared column / event-payload property / dimension the
+   * table does not actually have — so nothing that isn't physically present is EVER
+   * surfaced anywhere (the tool schemas, semantic_index, and the value indexer all
+   * derive from these maps). Models absent from `physByModel` (introspection
+   * unavailable / relation not built) are left untouched. Returns { pruned } for logs.
+   * Call BEFORE building schemas (so the enums reflect physical reality).
+   */
   groundToPhysical(physByModel) {
     const get = (k) => (physByModel instanceof Map ? physByModel.get(k) : physByModel?.[k]);
     const pruned = {};
@@ -1540,11 +1540,6 @@ export class Catalog {
     return refs;
   }
 
-  /** Models that may be JOINED to the source a task is built from — every source is equal here,
-   *  so the list is every model; joining a source to ITSELF is what gets rejected, at build. */
-  joinableModelKeys() {
-    return this.modelKeys();
-  }
 
   /** Relationships carried by VARIANTS (one relationship, several alternative key columns on a
    *  side): { <relationship>: [<expanded entity name>, …] }. Empty when no model declares any. */

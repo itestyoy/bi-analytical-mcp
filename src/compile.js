@@ -2,7 +2,7 @@
 // objects (measures/dimensions/metrics) for a single context. All physical SQL
 // and namespacing happens here; the renderer just serializes.
 
-import { jsonExtract, sqlLiteral, isNumericType, castExpr } from './dialect.js';
+import { sqlLiteral, isNumericType, castExpr } from './dialect.js';
 import { NUMERIC_AGGS } from './catalog.js';
 
 // dbt 1.11 forbids dunders (__) in object names; use a single underscore.
@@ -32,13 +32,8 @@ export function namesToScope(catalog, modelKey, names) {
   return `${col} in (${vals.map(sqlLiteral).join(', ')})`;
 }
 
-/** Build the SQL scope predicate from a semantic_models event_scope or null. */
-export function scopeExpr(catalog, modelKey, eventScope) {
-  return namesToScope(catalog, modelKey, eventScope?.event_name);
-}
-
 /** SQL expression for an event property — the catalog's one rule (flat column or JSON extract). */
-function propExpr(catalog, modelKey, name, _spec) {
+function propExpr(catalog, modelKey, name) {
   return catalog.propertyExpr(modelKey, name, catalog.dialect);
 }
 
@@ -46,7 +41,7 @@ function propExpr(catalog, modelKey, name, _spec) {
 function propCond(catalog, modelKey, cond) {
   const found = factProp(catalog, modelKey, cond.property, 'where.property');
   if (!found) fail(`unknown event property in where: '${cond.property}' on model '${modelKey}'. Discover properties via semantic_index({ source: '${modelKey}', event })`, 'where.property');
-  const lhs = propExpr(catalog, modelKey, found.name, found.spec);
+  const lhs = propExpr(catalog, modelKey, found.name);
   switch (cond.op) {
     case 'eq': return `${lhs} = ${sqlLiteral(cond.value)}`;
     case 'neq': return `${lhs} != ${sqlLiteral(cond.value)}`;
@@ -71,7 +66,7 @@ function measureScope(catalog, modelKey, decl, smScope) {
 }
 
 /** Wrap a base value expression with the scope (M3: scope baked into every measure). */
-function applyScope(valueExpr, scope, { numeric }) {
+function applyScope(valueExpr, scope) {
   if (!scope) return valueExpr;
   if (valueExpr === '1') return `CASE WHEN ${scope} THEN 1 ELSE 0 END`;
   return `CASE WHEN ${scope} THEN ${valueExpr} END`;
@@ -107,7 +102,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
     if (NUMERIC_AGGS.has(decl.agg) && !isNumericType(spec.type) && !decl.cast) {
       fail(`measure '${decl.name}': property '${field}' is type '${spec.type}'; add "cast":"numeric" to aggregate it as a number`, 'measures.cast');
     }
-    valueExpr = propExpr(catalog, modelKey, propName, spec);
+    valueExpr = propExpr(catalog, modelKey, propName);
   } else if (catalog.aggregatableField(modelKey, field)) {
     // An AMOUNT the schema marks aggregatable on this source. The schema says only WHAT may be
     // aggregated (a column, or an expression over columns); the function is this caller's choice.
@@ -129,7 +124,7 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
   }
   if (decl.cast) valueExpr = castExpr(catalog.dialect, valueExpr, decl.cast);
 
-  const m = { name, agg, expr: applyScope(valueExpr, scope, { numeric: true }) };
+  const m = { name, agg, expr: applyScope(valueExpr, scope) };
   if (decl.agg === 'percentile') {
     if (typeof decl.percentile !== 'number') fail(`measure '${decl.name}': percentile required`, 'measures.percentile');
     m.agg = 'percentile';
@@ -138,7 +133,6 @@ function compileMeasure(catalog, task, modelKey, decl, smScope) {
   return m;
 }
 
-/** Resolve a dimension declaration to a dbt dimension object. */
 /**
  * One declared dimension → its manifest form. `_task` / `_attribute` record what the caller
  * DECLARED (the task it belongs to, the attribute name it was given) next to the namespaced name
@@ -152,7 +146,7 @@ function compileDimension(catalog, task, modelKey, decl) {
     const found = factProp(catalog, modelKey, decl.property, 'dimensions.property');
     if (!found) fail(`unknown event property: '${decl.property}' on model '${modelKey}'. Discover properties via semantic_index({ source: '${modelKey}', event })`, 'dimensions.property');
     if (decl.as_type === 'time') fail('time dimensions from JSON properties are not allowed', 'dimensions.as_type');
-    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name, found.spec), _task: task, _attribute: found.name };
+    return { name: NS(task, found.name), type: 'categorical', expr: propExpr(catalog, modelKey, found.name), _task: task, _attribute: found.name };
   }
   if (decl.source === 'model_column') {
     const dim = { name: NS(task, decl.column), type: decl.as_type || 'categorical', expr: decl.column, _task: task, _attribute: decl.column };
@@ -162,11 +156,6 @@ function compileDimension(catalog, task, modelKey, decl) {
   fail(`unknown dimension source: ${decl.source}`, 'dimensions.source');
 }
 
-/**
- * Compile a full declaration. Returns resolved additions per model, metric
- * specs (incl. auto-created simple metrics for ratio), used models, and the
- * declared measure/metric names (namespaced).
- */
 /** The measures a compiled metric reads itself: a simple or cumulative metric's measure, a conversion's
  *  base and conversion measures (and the legacy measures / input_measures lists). */
 function ownMeasures(metric) {
@@ -202,6 +191,11 @@ export function measureRefs(metric, metrics = []) {
   return found;
 }
 
+/**
+ * Compile a full declaration. Returns resolved additions per model, metric
+ * specs (incl. auto-created simple metrics for ratio), used models, and the
+ * declared measure/metric names (namespaced).
+ */
 export function compileDeclaration(catalog, decl) {
   const task = decl.name;
   if (!task) fail('name (task) is required', 'name');
@@ -223,7 +217,7 @@ export function compileDeclaration(catalog, decl) {
     if (!catalog.models[modelKey]) fail(`semantic_models.from: unknown model '${modelKey}'. Known models: ${Object.keys(catalog.models).join(', ')}${catalog.unavailableHint?.(modelKey) || ''}`, 'semantic_models.from');
     usedModels.add(modelKey);
     // Each fact scopes its OWN measures: the scope is baked into every measure expr below.
-    const scope = scopeExpr(catalog, modelKey, sm.event_scope);
+    const scope = namesToScope(catalog, modelKey, sm.event_scope?.event_name);
     for (const d of sm.dimensions || []) ensure(modelKey).dimensions.push(compileDimension(catalog, task, modelKey, d));
     for (const m of sm.measures || []) {
       const cm = compileMeasure(catalog, task, modelKey, m, scope);

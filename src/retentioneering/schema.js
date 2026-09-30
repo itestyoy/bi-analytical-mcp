@@ -113,7 +113,7 @@ export function buildSchema(catalog) {
   // names that table holds instead — the same fields, with that one constraint lifted (see the end)
   const event = eventName(catalog, sources);
   const events = (description) => ({ type: 'array', minItems: 1, uniqueItems: true, items: event, description });
-  const segmentBranches = catalog.joinableModelKeys().map((model) => {
+  const segmentBranches = catalog.modelKeys().map((model) => {
     const via = relationshipsTo(catalog, sources, model);
     return {
       type: 'object', additionalProperties: false, required: ['model', 'attribute'], title: model,
@@ -132,14 +132,14 @@ export function buildSchema(catalog) {
   // catalog does not declare (an environment flag) is reachable exactly as a pipeline reaches it
   const column = (what) => ({ type: 'string', pattern: '^[A-Za-z_][A-Za-z0-9_]*$', description: `${what}${ownColumns.length ? ` (declared: ${ownColumns.slice(0, 12).join(', ')}${ownColumns.length > 12 ? ', …' : ''})` : ''}; any other column of the table is checked against the warehouse.` });
   const ownProps = [...new Set(sources.flatMap((src) => catalog.scalarEventProps(src)))].sort();
-  const own = (key, list, what) => ({ type: 'string', enum: list, description: `${what} of the source (each is checked against the source you name).` });
+  const own = (list, what) => ({ type: 'string', enum: list, description: `${what} of the source (each is checked against the source you name).` });
   segmentBranches.push({
     type: 'object', additionalProperties: false, required: ['column'], title: 'source column',
     properties: { column: column('A column of the source itself'), as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the column).' } },
   });
   if (ownProps.length) segmentBranches.push({
     type: 'object', additionalProperties: false, required: ['property'], title: 'event property',
-    properties: { property: own('property', ownProps, 'A scalar event_data property'), as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the property).' } },
+    properties: { property: own(ownProps, 'A scalar event_data property'), as: { type: 'string', pattern: NAME, description: 'Name of the segment column (default: the property).' } },
   });
   const OPS = { enum: ['eq', 'neq', 'in', 'not_in', 'gt', 'gte', 'lt', 'lte', 'between', 'is_null', 'is_not_null'] };
   const VALUE = { description: 'The constant (an array for in/not_in; [low, high] for between, both included; none for is_null/is_not_null).' };
@@ -147,13 +147,13 @@ export function buildSchema(catalog) {
   const condition = {
     oneOf: [
       { type: 'object', additionalProperties: false, required: ['column', 'op'], title: 'column', properties: { column: column('A column of the source'), op: OPS, value: VALUE } },
-      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property', 'op'], title: 'event property', properties: { property: own('property', ownProps, 'A scalar event_data property'), op: OPS, value: VALUE } }] : []),
+      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property', 'op'], title: 'event property', properties: { property: own(ownProps, 'A scalar event_data property'), op: OPS, value: VALUE } }] : []),
     ],
   };
   const parameter = {
     oneOf: [
       { type: 'object', additionalProperties: false, required: ['column'], title: 'column', properties: { column: column('A column of the source') } },
-      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property'], title: 'event property', properties: { property: own('property', ownProps, 'A scalar event_data property') } }] : []),
+      ...(ownProps.length ? [{ type: 'object', additionalProperties: false, required: ['property'], title: 'event property', properties: { property: own(ownProps, 'A scalar event_data property') } }] : []),
     ],
   };
   const split = {

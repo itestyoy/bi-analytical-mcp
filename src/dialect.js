@@ -39,18 +39,6 @@ export function jsonColumnArrayLength(dialect, column) {
   return getDialect(dialect).jsonColumnArrayLength(column);
 }
 
-export function jsonArrayContains(dialect, column, key, value) {
-  return getDialect(dialect).jsonArrayContains(column, key, value);
-}
-
-export function jsonStructField(dialect, column, key, field, type = 'string') {
-  return getDialect(dialect).jsonStructField(column, key, field, type);
-}
-
-export function jsonArrayUnnest(dialect, prevAlias, column, key, alias, field, type = 'string') {
-  return getDialect(dialect).arrayUnnest(prevAlias, column, key, alias, field, type);
-}
-
 /** CAST(expr AS <type>) in the dialect's spelling (numeric/int/float). */
 export function castExpr(dialect, expr, type) {
   return getDialect(dialect).castExpr(expr, type);

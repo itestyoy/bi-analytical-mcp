@@ -46,7 +46,7 @@ export function frameProfile(rt, config = {}) {
   // Per platform: what the frame is, how pandas is spelled, the ML library that runs INSIDE the
   // engine (`ml`), and the do/don't list that keeps the work there (`guide`) — from the platforms'
   // own docs (BigQuery DataFrames: bigframes.ml = the scikit-learn API executed as BigQuery ML;
-  // Spark: pyspark.ml; Snowflake: snowflake.ml.modeling).
+  // Spark, which BigQuery's serverless / Dataproc submission runs: pyspark.ml).
   if (runtime === 'bigquery' && (method === 'bigframes' || !method)) {
     return {
       key: 'bigframes',
@@ -86,7 +86,7 @@ export function frameProfile(rt, config = {}) {
       packages: ['bigframes'],
     };
   }
-  if (runtime === 'bigquery' || runtime === 'databricks') {
+  if (runtime === 'bigquery') {
     return {
       key: 'pyspark',
       native: 'a PySpark DataFrame — pyspark.sql (.filter / .withColumn / .groupBy / .select, functions via pyspark.sql.functions)',
@@ -95,17 +95,6 @@ export function frameProfile(rt, config = {}) {
       guide: 'RULES FOR PYSPARK: modelling = pyspark.ml (distributed), not sklearn (needs toPandas(), single-node on the driver); stay in pyspark.sql column expressions (F.col / F.when / groupBy.agg / Window); avoid Python UDFs and row iteration (they serialize every row through Python), and collect() / toPandas() on a large frame; df.pandas_api() keeps pandas syntax distributed.',
       packagesNote: 'On PySpark prefer pyspark (pyspark.ml) over sklearn / scipy / statsmodels: those need toPandas(), single-node.',
       packages: ['pyspark'],
-    };
-  }
-  if (runtime === 'snowflake') {
-    return {
-      key: 'snowpark',
-      native: 'a Snowpark DataFrame — .filter / .with_column / .group_by / .select, functions via snowflake.snowpark.functions',
-      pandas: 'df.to_pandas()',
-      ml: 'snowflake.ml.modeling — the scikit-learn API run inside Snowflake: modeling.cluster.KMeans, modeling.linear_model.*, modeling.preprocessing.StandardScaler / OneHotEncoder, modeling.pipeline.Pipeline',
-      guide: 'RULES FOR SNOWPARK: modelling = snowflake.ml.modeling (runs in the warehouse), not sklearn (needs to_pandas(), single-node); stay in Snowpark column expressions (F.col / F.when / group_by.agg / Window); avoid Python UDFs on rows and to_pandas() on a large frame.',
-      packagesNote: 'On Snowpark prefer snowflake (snowflake.ml.modeling) over sklearn / scipy / statsmodels: those need to_pandas(), single-node.',
-      packages: ['snowflake'],
     };
   }
   if (runtime === 'duckdb') {

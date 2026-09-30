@@ -115,8 +115,6 @@ WHERE THE DETAIL IS
 // Short one-paragraph summary for serverInfo.description (UI/catalog contexts).
 const SERVER_SUMMARY = 'Declarative semantic layer for product analytics: declare virtual semantic models — measures, dimensions, metrics, and multi-step funnels — over fixed, catalog-enumerated data sources (one or more events facts + a user-attributes dimension + experiment assignments) and query them by name; you never write SQL. Start with semantic_index, then build_semantic_model / build_pipeline_model, then query_semantic_model / query_pipeline_model.';
 
-const ASYNC_TOOLS = new Set(['preview_semantic_model', 'build_semantic_model', 'register_native_model', 'build_pipeline_model', 'delete_native_model', 'query_semantic_model', 'query_pipeline_model', 'display_model_result', 'drill_result', 'update_semantic_model', 'delete_semantic_model', 'semantic_index', 'context', 'describe_context', 'memory', 'time']);
-
 // Tools that still EXIST (schema + engine method + dispatch) but are no longer
 // advertised to the AI — superseded by / folded into a newer tool. Code is kept so the
 // new tool can delegate to them and existing callers/recipes/tests keep working.
@@ -305,7 +303,8 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
     }, progressEveryMs);
   }
   try {
-    let raw = await withSignal(signal, () => (ASYNC_TOOLS.has(name) || ft ? engine[name](args || {}) : Promise.resolve().then(() => engine[name](args || {}))));
+    // a tool that answers synchronously still answers through the promise, so a throw is its rejection
+    let raw = await withSignal(signal, () => Promise.resolve().then(() => engine[name](args || {})));
     // the hint to show a result as a card means nothing to a client that draws none
     if (!renders && isPlainObject(raw) && 'show_to_user' in raw) { const { show_to_user: _hint, ...rest } = raw; raw = rest; }
     logLine(name, `✓ ok in ${Date.now() - started}ms${summarizeResult(raw)}`);
@@ -443,8 +442,8 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     apps,
     skills,
     tasks,
-    // one list for every client (see buildToolDefs); kept under both variants the server asks for
-    toolDefs: { apps: defs, plain: defs },
+    // one list for every client (see buildToolDefs)
+    toolDefs: defs,
     // the surface's fingerprint rides in serverInfo.version, so a changed surface is a changed version
     surface,
     serverInfo: { ...SERVER_INFO, version: `${SERVER_INFO.version}+${fingerprint}` },

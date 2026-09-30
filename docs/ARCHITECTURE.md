@@ -80,12 +80,16 @@ Stage = {
 | `order_by` | `\|> ORDER BY` | sort | unchanged |
 | `limit` | `\|> LIMIT` | cap rows | unchanged |
 
-**Implemented** (`src/pipeline.js` + `src/dialects/{base,duckdb,bigquery}.js`):
-`where`, `derive`, `unnest`, `join`, `aggregate`, `pivot`, `unpivot`, `order_by`,
-`limit`, `project` — lowered to a DuckDB CTE chain (data-tested via `dbt show`:
-aggregate / pivot / unpivot) and to BigQuery pipe syntax. Remaining:
-`match_recognize` as a registry stage (today a dedicated renderer consuming the
-prepared relation).
+**Implemented**: the registry is `src/pipeline/stages.js` (the compute stage's ops are one
+table in `src/pipeline/compute.js`, the pieces every stage is written with in
+`src/pipeline/sql.js`), rendering is `src/pipeline.js`, and each warehouse lowers the op list
+in `src/dialects/{base,duckdb,bigquery}.js`: `where`, `derive`, `compute`, `unnest`, `join`,
+`aggregate`, `pivot`, `unpivot`, `order_by`, `limit`, `sample`, `project`, plus
+`match_recognize` (`src/match-recognize.js`) and `python` (`src/python-model.js`), which
+register themselves — lowered to a DuckDB CTE chain and to BigQuery pipe syntax. A stage
+declares what the machinery needs to know about it (`available` on this warehouse,
+`keepsSourceRows`, the next-step hints it `recommend`s), so nothing outside the registry
+names a stage.
 
 New stages the request adds — `aggregate` (group_by), `join`, and
 `match_recognize` (promoted from a bespoke renderer to a registry stage) — slot

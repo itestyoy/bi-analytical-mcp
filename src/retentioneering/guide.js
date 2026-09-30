@@ -16,7 +16,7 @@ export const ROUTING_TRIGGERS = [
   },
 ];
 
-export const INSTRUCTIONS_LINE = `For paths and sequences, and transitions between states a pipeline computed (from_task), use build_retentioneering_model → query_retentioneering_model; its cards are the picture of them. semantic_index({ guide: "${GUIDE_NAME}" }) explains the analyses.`;
+export const INSTRUCTIONS_LINE = `For paths and sequences, and transitions between states a pipeline computed (from_task), use build_retentioneering_model → query_retentioneering_model, which answers with the numbers and tables the library computes. semantic_index({ guide: "${GUIDE_NAME}" }) explains the analyses.`;
 
 export function retentioneeringGuide() {
   const f = retentioneeringFacts();

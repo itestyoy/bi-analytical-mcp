@@ -125,7 +125,7 @@ export function summarize(result) {
       events: result.nodes.map((n) => ({ event: n.event, count: n.count })),
       transitions: edges.length,
       top_transitions: edges.slice(0, TOP_EDGES).map((e) => ({ from: e.source, to: e.target, count: e.count, unique_paths: e.unique_paths, proba_out: round(e.proba_out), proba_in: round(e.proba_in), time_median_s: round(e.time_median, 1) })),
-      ...(edges.length > TOP_EDGES ? { note: `${edges.length - TOP_EDGES} smaller transitions are in the card.` } : {}),
+      ...(edges.length > TOP_EDGES ? { note: `${edges.length - TOP_EDGES} smaller transitions are left out here; read with detail: "full" for every one.` } : {}),
     };
   }
   if ((kind === 'step_matrix' || kind === 'step_sankey') && result.blocks) {

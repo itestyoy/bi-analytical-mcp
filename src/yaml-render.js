@@ -100,13 +100,13 @@ export function renderBaseModel(catalog, key) {
   if (!pe) {
     throw new Error(`model '${key}' has no primary entity: declare meta.mcp.primary_entity, or mark its key column meta.mcp.entity: { type: primary }. A model without one can only be reached through a pipeline join stage, not use_base_models.`);
   }
-  const peName = typeof pe === 'string' ? pe : pe.name;
+  const peName = pe.name;
 
   // For SCD the join key is a `natural` entity (not unique per row). dbt still requires the model
   // to declare a PRIMARY entity when it has dimensions, so also set the model-level primary_entity
   // (verified via `dbt parse` + `mf query`: this yields the point-in-time join, no fan-out).
   if (scd) sm.primary_entity = peName;
-  const peExpr = typeof pe === 'string' ? undefined : entityExpr(catalog, pe);
+  const peExpr = pe.key ? entityExpr(catalog, pe) : undefined;
   sm.entities = [{ name: peName, type: scd ? 'natural' : 'primary', ...(peExpr ? { expr: peExpr } : {}) }];
   for (const [name, e] of Object.entries(m.entities || {})) {
     sm.entities.push({ name, type: e.type, expr: entityExpr(catalog, e) });

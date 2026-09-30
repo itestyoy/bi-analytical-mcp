@@ -58,7 +58,7 @@ export function dbtSchemaToCatalog(doc) {
     if (model.description) m.description = model.description;
     if (mcp.role) m.role = mcp.role;
     // an explicit null is no primary entity (the model owns none), as leaving it out is
-    if (mcp.primary_entity != null) m.primary_entity = mcp.primary_entity;
+    if (mcp.primary_entity != null) m.primary_entity = asPrimaryEntity(mcp.primary_entity);
     if (mcp.known_events) m.known_events = mcp.known_events;
     // Model-level declarations. An entry WITHOUT `agg` is an aggregatable EXPRESSION — the
     // caller picks the function; an entry WITH `agg` is additionally a governed measure whose
@@ -350,9 +350,7 @@ export function dbtSchemaToCatalog(doc) {
   // with the `unique` ones (after variant expansion, so an expanded name is checked too).
   const ownerOf = new Map();
   for (const [key, m] of Object.entries(out.models)) {
-    // A primary entity is written EITHER as a bare name (meta.mcp.primary_entity: event, the
-    // events-source form) or as an object with a key — both make the model the owner, so it is
-    // read through one accessor.
+    // A primary entity with a key or without one makes the model the owner alike.
     const pe = primaryEntityName(m);
     if (!pe) continue;
     if (ownerOf.has(pe)) {
@@ -415,7 +413,7 @@ export function dbtSchemaToCatalog(doc) {
   for (const [key, m] of Object.entries(out.models)) {
     const all = [];
     const pe = m.primary_entity;
-    if (pe && typeof pe === 'object' && pe.key) all.push([pe.name, pe.key]);
+    if (pe?.key) all.push([pe.name, pe.key]);
     // variants are already expanded into their own '<relationship>_<variant>' entities above, each
     // with its own key — so every side of every relationship is in this list exactly once.
     for (const [name, e] of Object.entries(m.entities || {})) if (e.key) all.push([name, e.key]);
@@ -488,8 +486,17 @@ export function dbtSchemaToCatalog(doc) {
   return out;
 }
 
+/**
+ * A primary entity in its one shape, { name, key? }: a schema may write it as a bare name
+ * (meta.mcp.primary_entity: event — the events-source form, whose key is the model's own identity)
+ * or name the key column (meta.mcp.entity: { type: primary }), which adds `key`.
+ */
+export function asPrimaryEntity(pe) {
+  if (pe == null) return null;
+  return typeof pe === 'string' ? { name: pe } : pe;
+}
+
 /** Logical name of a model's primary entity. */
 export function primaryEntityName(model) {
-  const pe = model.primary_entity;
-  return typeof pe === 'string' ? pe : pe?.name;
+  return asPrimaryEntity(model.primary_entity)?.name ?? null;
 }

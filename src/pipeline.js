@@ -95,7 +95,7 @@ function sourceColumns(catalog, key, physicalCols = null) {
   } else {
     // the primary entity's key can span several columns, and each of them is a real column of the
     // relation — the same shape the fact branch above reads (the old single `.column` form is gone)
-    for (const p of (typeof m.primary_entity === 'object' && m.primary_entity?.key) || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
+    for (const p of m.primary_entity?.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
     for (const e of Object.values(m.entities || {})) for (const p of e.key || []) if (!cols.has(p.column)) cols.set(p.column, { type: 'string' });
     for (const [name, dd] of Object.entries(m.dimensions || {})) if (!cols.has(name)) cols.set(name, { type: dd.type });
   }

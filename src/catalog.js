@@ -16,7 +16,7 @@ import { ENTITY_TYPES, GRAINS, KEY_PART_GRAINS } from './catalog/entities.js';
 import { isBooleanType } from './catalog/column-types.js';
 import { groundCatalogToPhysical } from './catalog/grounding.js';
 import { readModelPaths, validateDbtProject, collectSchemaModels, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime } from './catalog/project.js';
-import { mcpMetaOf, dbtSchemaToCatalog, primaryEntityName } from './catalog/from-dbt-schema.js';
+import { mcpMetaOf, dbtSchemaToCatalog, primaryEntityName, asPrimaryEntity } from './catalog/from-dbt-schema.js';
 export { MEASURE_AGGS, NUMERIC_AGGS, ENTITY_TYPES, GRAINS, KEY_PART_GRAINS, groundCatalogToPhysical, validateDbtProject, resolveDialect, profileOutput, submissionFromProject, gatePythonRuntime, resolvePythonRuntime, mcpMetaOf, dbtSchemaToCatalog, primaryEntityName };
 
 export { SUPPORTED_DIALECTS };
@@ -82,6 +82,8 @@ export class Catalog {
     // another dialect's syntax against it: { profile_type, rendering_as, explicit }.
     this.dialectFallback = raw.dialect_fallback || null;
     this.models = raw.models || {};
+    // one shape for a primary entity, whoever wrote the registry (a schema file, a test's object)
+    for (const m of Object.values(this.models)) if (m && m.primary_entity != null) m.primary_entity = asPrimaryEntity(m.primary_entity);
     // `facts` = every events source; they are equal, each is addressed by name, and none is a
     // default. Declared by the schema converter, or derived here for a plain registry object:
     // a model with an event_name column is an events source.

@@ -13,7 +13,7 @@ export { SUPPORTED_DIALECTS };
 
 // Aggregations a catalog measure may declare — dbt/MetricFlow's set. Any column or model
 // measure may use ANY of these; nothing here is specific to a role or a column name.
-export const MEASURE_AGGS = new Set(['sum', 'average', 'min', 'max', 'count', 'count_distinct', 'sum_boolean', 'median', 'percentile']);
+export const MEASURE_AGGS = new Set(['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean']);
 // The aggregations that compute a NUMBER out of the values — the ones a non-numeric field has to be
 // cast for. (count / count_distinct count rows, sum_boolean counts trues: any type will do.)
 export const NUMERIC_AGGS = new Set(['sum', 'average', 'median', 'min', 'max', 'percentile']);
@@ -64,8 +64,10 @@ function normalizeAggregatable(name, decl, { model, column, type } = {}) {
 // that entity; `foreign` points at whichever model owns it; `natural` is the SCD-2 form.
 export const ENTITY_TYPES = new Set(['primary', 'unique', 'foreign', 'natural']);
 
-// The grains a key part may be joined on — the ones both dialects can truncate to.
-export const KEY_PART_GRAINS = new Set(['day', 'week', 'month', 'quarter', 'year']);
+// The time grains — the ones both dialects can truncate to, finest first: what a time dimension, a
+// cumulative metric's grain_to_date and a date_trunc take, and what a key part may be joined on.
+export const GRAINS = ['day', 'week', 'month', 'quarter', 'year'];
+export const KEY_PART_GRAINS = new Set(GRAINS);
 
 /**
  * Normalise the PARTS of one key: a column name, or a list of them for a composite key. A part may
@@ -1557,6 +1559,6 @@ export class Catalog {
   }
 
   timeGranularities() {
-    return ['day', 'week', 'month', 'quarter', 'year'];
+    return [...GRAINS];
   }
 }

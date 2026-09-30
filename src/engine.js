@@ -7,7 +7,7 @@ import { makeValidators, validateInput, ToolError, RESULT_GONE } from './validat
 import { twoProportionZTest, welchTTest, cupedTest, ratioDeltaTest, srmTest, adjustPValues, alwaysValidP, sampleSizeProportion, mdeProportion, sampleSizeMean, mdeMean } from './stats.js';
 import { compileDeclaration, measureRefs } from './compile.js';
 import { renderContext, PARTITION_DIM } from './yaml-render.js';
-import { gatePythonRuntime } from './catalog.js';
+import { gatePythonRuntime, MEASURE_AGGS } from './catalog.js';
 import { ContextManager, mergeCompiled, RESULT_MODEL_PREFIX } from './context-manager.js';
 import { renderWhereClauses, renderPredicate } from './predicate.js';
 import { PROJECT_STORE } from './project-semantics.js';
@@ -537,7 +537,6 @@ export class Engine {
     // not page, a name a source does not carry — none of it can be written down, so none of it is
     // re-checked here.
     const c = this.catalog;
-    const AGG = ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'];
 
     // ── operational views (sync state / one run) ──
     if (input.run != null) return this._indexRun(input);
@@ -1103,7 +1102,7 @@ export class Engine {
       // drill one with semantic_index({ bundle }) to see what carries data for that app.
       // Apps PER SOURCE — the same bundle id is a different row set in each source that carries it.
       ...(bundleList.length ? { bundles: bundleList.map((b) => ({ source: b.source, bundle: b.bundle, event_rows: b.row_count })) } : {}),
-      enums: { agg: AGG, metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
+      enums: { agg: [...MEASURE_AGGS], metric_type: ['simple', 'ratio', 'cumulative', 'derived', 'conversion'], time_granularity: c.timeGranularities() },
       // Ready-made task templates, fetched in full via semantic_index({ recipe: id }).
       ...(this.recipes ? { recipes: this.recipes.summary().map((r) => ({ id: r.id, task_type: r.task_type, title: r.title })) } : {}),
       // The analyst PROCEDURE + IF/DO routing live behind { guide } — read it to know HOW

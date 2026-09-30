@@ -85,9 +85,8 @@ export class CatalogSearch {
     const query = String(search);
     const { events, properties, dimensions, recipes } = this._build();
     const opts = { threshold: fuzzy ? 0.6 : 1.01, fuzzy };
-    // DATA-DERIVED applicability from the value index (which events actually carry each property),
-    // not the declared meta.mcp.events. Absent/unknown ⇒ treated as "all events" downstream.
-    // DATA-DERIVED applicability per source (which events actually carry each property).
+    // DATA-DERIVED applicability per source, from the value index (which events actually carry each
+    // property), not the declared meta.mcp.events. Absent/unknown ⇒ treated as "all events" downstream.
     const appliesOf = (source) => this.valueIndex.appliesMap(source, c.eventProps(source));
 
     const event_names = events.search(query, opts).map(({ item: e, score, match }) => {

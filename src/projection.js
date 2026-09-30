@@ -8,7 +8,8 @@ import { sqlLiteral } from './dialect.js';
 
 const IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 const OPS = { eq: '=', neq: '!=', gt: '>', gte: '>=', lt: '<', lte: '<=' };
-const AGGS = new Set(['sum', 'avg', 'min', 'max', 'count', 'count_distinct']);
+/** The aggregations a projection (a read's transform, a drill-down) takes — the one list its schema offers. */
+export const AGGS = new Set(['sum', 'avg', 'min', 'max', 'count', 'count_distinct']);
 
 function ident(x) {
   if (!IDENT.test(String(x || ''))) throw new Error(`unsafe identifier: ${x}`);

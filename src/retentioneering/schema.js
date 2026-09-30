@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { ToolError } from '../validate.js';
+import { TASK_ID_PATTERN } from '../jobs.js';
 import { CARD_KINDS } from './view-model.js';
 
 let factsCache;
@@ -57,7 +58,7 @@ const CTX = '^[A-Za-z0-9_-]{1,64}$';
 const PATH_PARAM = 'path_col';
 export const CONDITION_DEF = 'retentioneering_condition';
 
-const TASK_ID = { type: 'string', minLength: 1, description: 'A task this tool started (its task_id).' };
+const TASK_ID = { type: 'string', pattern: TASK_ID_PATTERN, description: 'A task this tool started (its task_id).' };
 
 const timeRange = {
   type: 'object', additionalProperties: false,

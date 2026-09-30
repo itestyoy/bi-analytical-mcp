@@ -53,6 +53,7 @@
 //                            Solves: ordered multi-step funnels, conversion, time-between-steps.
 
 import { getDialect } from './dialects/index.js';
+import { GRAINS } from './catalog.js';
 import { partitionConditions } from './time-range.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
@@ -379,7 +380,7 @@ const STAGES = {
         sql: { type: 'string', description: 'Raw dialect SQL expression over existing columns — escape hatch for op=raw when no built-in op fits (e.g. array indexing, dialect functions). Not portable across dialects. It reads only the columns available at this step: a name it uses that is not one of them is refused when the step is added.' },
         len: { type: 'integer', minimum: 0, description: 'Length (chars) for op=substring (optional).' },
         unit: { enum: ['day', 'hour', 'minute', 'second'], description: 'date_diff unit.' },
-        granularity: { enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'date_trunc granularity.' },
+        granularity: { enum: GRAINS, description: 'date_trunc granularity.' },
         part: { enum: ['dow', 'hour', 'day', 'week', 'month', 'quarter', 'year', 'doy'], description: 'date_part to extract.' },
         places: { type: 'integer', minimum: 0, maximum: 12, description: 'Decimal places for round (default 0).' },
         default: { description: 'Fallback literal for coalesce, or default for window lag/lead.' },

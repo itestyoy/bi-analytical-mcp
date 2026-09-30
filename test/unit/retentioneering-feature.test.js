@@ -212,9 +212,10 @@ test('input the schema refuses is refused before anything starts', async () => {
     await refused('build_retentioneering_model', { context_id: 'abc', ...input }, pastSchema);
   }
   await refused('query_retentioneering_model', { context_id: 'abc', analyses: [{ kind: 'cluster_analysis', features: [{ metric: 'length' }], method: 'hdbscan', method_args: { min_cluster_size: 3 } }] }, pastSchema);
-  await refused('display_retentioneering_result', { task_id: 'nope', analysis: 'funnel' }, /unknown task_id/);
+  await refused('display_retentioneering_result', { task_id: 'nope', analysis: 'funnel' }, /invalid input/); // not a task id at all
+  await refused('display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', analysis: 'funnel' }, /unknown task_id/);
   // a card for a client that renders none is refused like display_model_result
-  const r = await runTool(e, 'display_retentioneering_result', { task_id: 'x', analysis: 'funnel' }, { renders: false });
+  const r = await runTool(e, 'display_retentioneering_result', { task_id: 'a0a0a0a0a0a0', analysis: 'funnel' }, { renders: false });
   assert.equal(r.result.isError, true);
   assert.match(r.result.content[0].text, /MCP Apps/);
 });

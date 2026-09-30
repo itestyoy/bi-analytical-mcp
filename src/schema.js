@@ -6,16 +6,19 @@
 // parameter is self-explanatory to the MCP client (the AI) without external docs.
 
 import { ERROR_SOURCES } from './error-log.js';
+import { MEASURE_AGGS, GRAINS } from './catalog.js';
+import { TASK_ID_PATTERN } from './jobs.js';
+import { AGGS as PROJECTION_AGGS } from './projection.js';
 import { RESEARCH_DOMAINS } from './research-guides.js';
 import { pipelineStageSchema, stageDefs } from './pipeline.js';
 import { strEnum, oneOfOr, withoutEmpty } from './schema-kit.js';
-import { DRILL_ROWS } from './apps/result-view-model.js';
-import { CONTEXT_ID } from './context-manager.js'; // the most rows one view of a drill-down card reads
+import { DRILL_ROWS } from './apps/result-view-model.js'; // the most rows one view of a drill-down card reads
+import { CONTEXT_ID } from './context-manager.js';
 
 const NAME = '^[a-z][a-z0-9_]{0,40}$';
 const TASK = '^[a-z][a-z0-9_]{2,40}$';
 const CTX = CONTEXT_ID;
-const TASK_ID = '^[a-f0-9]{12}$'; // what src/jobs.js hands out
+const TASK_ID = TASK_ID_PATTERN;
 const WINDOW = '^[0-9]+ (second|minute|hour|day|week|month|quarter|year)s?$';
 
 // Reusable property-description strings (kept consistent across tools).
@@ -123,7 +126,7 @@ function genericMeasureItem(catalog) {
     description: 'A measure to add to the target semantic model.',
     properties: {
       name: { type: 'string', pattern: NAME, description: D.measure_name },
-      agg: { enum: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'], description: D.agg },
+      agg: { enum: [...MEASURE_AGGS], description: D.agg },
       field: genericMeasureField(catalog),
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
       cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
@@ -155,7 +158,7 @@ function measureItemSchema(catalog, modelKey) {
     description: 'A measure: an aggregation over the model, optionally scoped to specific events / property values (the building block of funnel steps and metrics).',
     properties: {
       name: { type: 'string', pattern: NAME, description: D.measure_name },
-      agg: { enum: ['count', 'count_distinct', 'sum', 'average', 'median', 'min', 'max', 'percentile', 'sum_boolean'], description: D.agg },
+      agg: { enum: [...MEASURE_AGGS], description: D.agg },
       field: measureFieldSchema(catalog, modelKey),
       percentile: { type: 'number', exclusiveMinimum: 0, exclusiveMaximum: 1, description: D.percentile },
       cast: { enum: ['numeric', 'int', 'float'], description: 'Cast the field to a numeric type before aggregating — needed to sum/average a STRING property that holds numbers (e.g. complete_time).' },
@@ -219,7 +222,7 @@ function metricSchema() {
       numerator: { ...measureRef, description: 'ratio: the measure on top of the division.' },
       denominator: { ...measureRef, description: 'ratio: the measure on the bottom of the division.' },
       window: { type: 'string', pattern: WINDOW, description: 'conversion: time window in which the conversion must occur after the base event, e.g. "1 day", "7 day", "1 week".' },
-      grain_to_date: { enum: ['day', 'week', 'month', 'quarter', 'year'], description: 'cumulative: reset accumulation at the start of each period (e.g. month-to-date).' },
+      grain_to_date: { enum: GRAINS, description: 'cumulative: reset accumulation at the start of each period (e.g. month-to-date).' },
       period_agg: { enum: ['first', 'last', 'average'], description: 'cumulative: how to collapse multiple values within a period.' },
       expr: { type: 'string', description: 'derived: arithmetic expression over the input metrics, e.g. "coins_in - coins_out". Restricted to a safe arithmetic grammar (the referenced metric aliases + basic math functions).' },
       metrics: { type: 'array', description: 'derived: the input metrics referenced by `expr`.', items: { type: 'object', additionalProperties: false, required: ['name'], properties: { name: { type: 'string', description: 'Name of an input metric.' }, alias: { type: 'string', description: 'Optional alias to use for this metric inside `expr`.' } } } },
@@ -569,8 +572,8 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
     properties: {
       where: rowFilter,
       group_by: { type: 'array', items: { type: 'string' }, description: 'Result columns to group by before aggregating.' },
-      aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function.' }, column: { type: 'string', description: 'Column to aggregate (omit, or \'*\', for a row count).' }, where: onlyWhere, as: { type: 'string', pattern: '^[a-zA-Z_][a-zA-Z0-9_]*$', description: 'Output column alias (default: <fn>_<column>, or the function alone for a row count).' } }, if: { properties: { fn: { not: { const: 'count' } } } }, then: { required: ['column'] } } },
-      having: { type: 'array', description: 'Post-aggregation filters on aggregate values.', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: ['sum', 'avg', 'min', 'max', 'count', 'count_distinct'], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, where: onlyWhere, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' }, value: { description: 'Threshold value.' } } } },
+      aggregations: { type: 'array', description: 'Aggregations to compute over the (grouped) result.', items: { type: 'object', additionalProperties: false, required: ['fn'], properties: { fn: { enum: [...PROJECTION_AGGS], description: 'Aggregate function.' }, column: { type: 'string', description: 'Column to aggregate (omit, or \'*\', for a row count).' }, where: onlyWhere, as: { type: 'string', pattern: '^[a-zA-Z_][a-zA-Z0-9_]*$', description: 'Output column alias (default: <fn>_<column>, or the function alone for a row count).' } }, if: { properties: { fn: { not: { const: 'count' } } } }, then: { required: ['column'] } } },
+      having: { type: 'array', description: 'Post-aggregation filters on aggregate values.', items: { type: 'object', additionalProperties: false, required: ['fn', 'op', 'value'], properties: { fn: { enum: [...PROJECTION_AGGS], description: 'Aggregate function to test.' }, column: { type: 'string', description: 'Column the aggregate applies to.' }, where: onlyWhere, op: { enum: ['eq', 'neq', 'gt', 'gte', 'lt', 'lte'], description: 'Comparison operator.' }, value: { description: 'Threshold value.' } } } },
       order_by: { type: 'array', description: 'Sort the projected output.', items: { type: 'object', additionalProperties: false, required: ['key'], properties: { key: { type: 'string', description: 'Column/alias to sort by.' }, direction: { enum: ['asc', 'desc'], description: 'Sort direction.' }, nulls: { enum: ['first', 'last'], description: 'Where NULLs go. Omitted: the warehouse\'s default (which differs between warehouses).' } } } },
       ...(withThen ? { then: projectionLevel(false) } : {}),
     },

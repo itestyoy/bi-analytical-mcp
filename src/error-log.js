@@ -14,7 +14,7 @@
 
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { envInt } from './config.js';
+import { setting } from './settings.js';
 import { ToolError } from './validate.js';
 
 const MESSAGE_MAX = 20000;
@@ -34,7 +34,7 @@ function jsonOf(value) {
 export const ERROR_SOURCES = ['tool', 'task', 'startup'];
 
 export class ErrorLog {
-  constructor({ store, retentionDays = envInt('MCP_ERROR_RETENTION_DAYS', 30), maxRows = envInt('MCP_ERROR_MAX_ROWS', 10000) } = {}) {
+  constructor({ store, retentionDays = setting('MCP_ERROR_RETENTION_DAYS'), maxRows = setting('MCP_ERROR_MAX_ROWS') } = {}) {
     this.repo = store?.errors || null;
     // set by the engine: the runtime every record carries, and how a context's reproduction is read
     this.runtime = {};

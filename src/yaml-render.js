@@ -8,7 +8,7 @@ import { getDialect } from './dialects/index.js';
 import { inertProse } from './jinja-inert.js';
 import { toLatestSpec } from './semantic-latest.js';
 import { measureRefs } from './compile.js';
-import { envFlag } from './config.js';
+import { setting } from './settings.js';
 
 const EVENT_TIME_DIM = 'event_time';
 /** The partition column as a dimension of its semantic model — what a metric query bounds, next to
@@ -36,7 +36,7 @@ function entityExpr(catalog, ent) {
 /** A model is treated as SCD-2 (validity_params emitted) when the catalog marked validity columns
  *  AND the escape hatch MCP_SCD_VALIDITY_PARAMS is not disabling it. SCD models are join-only. */
 function isScdModel(m) {
-  return !!m.scd && envFlag('MCP_SCD_VALIDITY_PARAMS', true);
+  return !!m.scd && setting('MCP_SCD_VALIDITY_PARAMS');
 }
 
 /** The model's own governed measures, in dbt shape. Declared once in the schema with a FIXED

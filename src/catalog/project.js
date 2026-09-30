@@ -8,6 +8,7 @@ import { assetPath, missingAssetMessage } from '../runtime-assets.js';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { SUPPORTED_DIALECTS } from '../dialect.js';
+import { setting } from '../settings.js';
 
 /** A configured path list from dbt_project.yml (e.g. model-paths), with a default. */
 export function readPaths(projectDir, key, dflt) {
@@ -110,7 +111,7 @@ export function collectSchemaModels(dir, acc) {
  */
 export function resolveDialect({ dialect, profilesDir, projectDir, fallback, report } = {}) {
   const fromProfile = dialectFromProfile(profilesDir, projectDir);
-  const d = dialect || process.env.WAREHOUSE_DIALECT || fromProfile || fallback || 'duckdb';
+  const d = dialect || setting('WAREHOUSE_DIALECT') || fromProfile || fallback || 'duckdb';
   if (!SUPPORTED_DIALECTS.has(d)) {
     throw new Error(`unsupported warehouse dialect '${d}' (supported: ${[...SUPPORTED_DIALECTS].join(', ')}). Set WAREHOUSE_DIALECT or fix the dbt profile output type.`);
   }
@@ -118,7 +119,7 @@ export function resolveDialect({ dialect, profilesDir, projectDir, fallback, rep
   // said otherwise: the SQL is then written in `d`'s dialect against that engine. It may well work
   // — but it is a fact about this deployment, not a detail, so it is reported rather than assumed.
   const profileType = String(profileOutput(profilesDir, projectDir)?.type || '').toLowerCase();
-  if (report && profileType && !fromProfile) report({ profile_type: profileType, rendering_as: d, explicit: !!(dialect || process.env.WAREHOUSE_DIALECT) });
+  if (report && profileType && !fromProfile) report({ profile_type: profileType, rendering_as: d, explicit: !!(dialect || setting('WAREHOUSE_DIALECT')) });
   return d;
 }
 
@@ -130,13 +131,13 @@ export function profileOutput(profilesDir, projectDir) {
       const pj = join(projectDir, 'dbt_project.yml');
       if (existsSync(pj)) profileName = yaml.load(readFileSync(pj, 'utf8'))?.profile;
     }
-    const dir = profilesDir || process.env.DBT_PROFILES_DIR || join(homedir(), '.dbt');
+    const dir = profilesDir || setting('DBT_PROFILES_DIR') || join(homedir(), '.dbt');
     const pp = join(dir, 'profiles.yml');
     if (!existsSync(pp)) return undefined;
     const profiles = yaml.load(readFileSync(pp, 'utf8')) || {};
     const prof = (profileName && profiles[profileName]) || profiles[Object.keys(profiles).filter((k) => k !== 'config')[0]];
     if (!prof) return undefined;
-    const target = process.env.DBT_TARGET || prof.target || Object.keys(prof.outputs || {})[0];
+    const target = setting('DBT_TARGET') || prof.target || Object.keys(prof.outputs || {})[0];
     return prof.outputs?.[target] || undefined;
   } catch {
     return undefined; // best-effort

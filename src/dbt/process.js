@@ -14,6 +14,7 @@ import { execFile, spawn } from 'node:child_process';
 import { appendFileSync } from 'node:fs';
 import { basename } from 'node:path';
 import { currentSignal } from '../request-context.js';
+import { setting } from '../settings.js';
 
 /**
  * One process at a time per key, in the order asked; a waiter whose call is cancelled leaves the
@@ -104,7 +105,7 @@ export function runWithInput(bin, args, input, { cwd, env, timeout = 600000, tur
  * warehouse's turn and how long it RAN — to see where the time of a run (a test suite) goes.
  */
 export function timing(bin, args, asked, began, r) {
-  const file = process.env.DBT_TIMING_LOG;
+  const file = setting('DBT_TIMING_LOG');
   if (!file) return;
   const end = Date.now();
   const cmd = args[0] === 'run-operation' ? `run-operation ${args[1]}` : args[0];

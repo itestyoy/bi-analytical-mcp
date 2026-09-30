@@ -12,7 +12,8 @@
     "test:integration": "node --test test/integration/*.test.js",
     "test:all": "node --test test/unit/*.test.js test/integration/*.test.js",
     "build:app": "vite build --config src/apps/result-view/vite.config.js && vite build --config src/apps/retentioneering-view/vite.config.js",
-    "dbt:env": "node scripts/dbt-env.mjs"
+    "dbt:env": "node scripts/dbt-env.mjs",
+    "settings:example": "node scripts/env-example.mjs"
   },
   "license": "MIT",
   "dependencies": {

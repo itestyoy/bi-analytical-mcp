@@ -57,6 +57,7 @@
 
 import { createRequire } from 'node:module';
 import { cosineSimilarity } from './embeddings.js';
+import { setting } from './settings.js';
 
 const require = createRequire(import.meta.url);
 
@@ -642,7 +643,7 @@ registerStoreBackend('sqlite', ({ dbPath }) => {
  * available, so callers never branch on null.
  */
 export function openStore({ dbPath, backend, reset = false } = {}) {
-  const name = backend || process.env.MCP_DB_BACKEND || 'sqlite';
+  const name = backend || setting('MCP_DB_BACKEND');
   const factory = BACKENDS.get(name);
   if (!factory) throw new Error(`unknown store backend '${name}'. Registered: ${storeBackends().join(', ')}`);
   const store = factory({ dbPath }) || new MemoryBackend();

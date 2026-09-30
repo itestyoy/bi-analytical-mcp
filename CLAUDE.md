@@ -318,6 +318,11 @@
   its message names (as written and as dbt ran it — where a warehouse line:column points), and the
   runtime (server version + surface fingerprint, dbt, dialect). A read of a failed task is not kept again. Bounded by MCP_ERROR_RETENTION_DAYS / MCP_ERROR_MAX_ROWS, not cleared by
   MCP_DB_RESET; recording never fails the call it records.
+- EVERY SETTING HAS ONE HOME (src/settings.js): each environment variable the server reads is a row —
+  its name, kind (how src/config.js reads it), default and meaning — and is read through `setting(name)`
+  / `loadSettings()` or, by a function that takes `env` as its argument, by name from it. `.env.example`
+  is rendered from the table (`npm run settings:example`), and test/unit/settings.test.js holds the table
+  to that file and to every variable src/ reads. Do NOT read `process.env.X` for a new setting without its row.
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:
   (1) the cacheable results (lists, resources/read, server/discover) carry a SHORT `ttlMs`

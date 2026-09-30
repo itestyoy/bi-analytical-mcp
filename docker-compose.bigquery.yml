@@ -12,6 +12,11 @@ services:
     build: .    # the same image as the DuckDB setup: every environment carries both adapters
     ports:
       - "${PORT:-3000}:3000"
+    # every setting in .env reaches the server (.env.example lists them all, with defaults); the
+    # values set under environment: below win over it
+    env_file:
+      - path: .env
+        required: false
     environment:
       HOST: "0.0.0.0"
       PORT: "3000"
@@ -22,6 +27,8 @@ services:
       # no separate catalog file. (Set CATALOG_PATH=/config/catalog.yml to override.)
       DBT_BASE_PROJECT: "/dbt_project"
       DBT_PROFILES_DIR: "/dbt_project"
+      # (the host path of the same name in .env is the mount source, not a path inside the container)
+      DBT_PROJECT_DIR: "/dbt_project"
       RECIPES_PATH: "/config/recipes.json"
       MCP_WORKSPACE: "/workspace"
       # How long a best-effort warehouse read (column set, freshness) may hold a call (max 30).

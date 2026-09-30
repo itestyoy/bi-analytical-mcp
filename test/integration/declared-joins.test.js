@@ -43,24 +43,18 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import yaml from 'js-yaml';
 import { loadCatalog, groundCatalogToPhysical } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { makeMcpServer } from '../../src/server.js';
-import { Client } from '@modelcontextprotocol/client';
-import { InMemoryTransport } from '@modelcontextprotocol/server';
-import { startWarehouse, fixtureProject } from './warehouse-harness.js';
+import { buildWarehouse, connectMcp, fixtureProject } from './warehouse-harness.js';
 import { mcp } from '../helpers/catalog-doc.js';
 import { settle } from '../helpers/settle.js';
-import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
-const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 
@@ -85,10 +79,7 @@ const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_ti
 
 before(async () => {
   if (!HAS_DBT) return;
-  wh = await startWarehouse();
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
-  await execFileP(DBT_BIN, ['seed', '--full-refresh'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  wh = await buildWarehouse(BASE);
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpit-join-')), timeSpineDialect: 'duckdb' });
@@ -814,10 +805,8 @@ test('33. the semantic layer generates the point-in-time join correctly', opts, 
 
 test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4.00 / 1.75', opts, async (t) => {
   if (skip(t)) return;
-  const server = makeMcpServer(engine);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: 'declared-joins-test', version: '0.0.0' });
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  const mcpConn = await connectMcp(engine, 'declared-joins-test');
+  const { client } = mcpConn;
   try {
     const tools = (await client.listTools()).tools.map((x) => x.name);
     assert.ok(tools.includes('build_pipeline_model'), 'the pipeline tool is advertised');
@@ -855,8 +844,7 @@ test('34. the join runs end-to-end over MCP and returns the same 6.75 / 5.00 / 4
     assert.equal(bad.isError, true);
     assert.match(JSON.parse(bad.content[0].text).error.message, /declares no such relationship/);
   } finally {
-    await client.close();
-    await server.close();
+    await mcpConn.close();
   }
 });
 

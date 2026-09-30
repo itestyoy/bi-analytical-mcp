@@ -3,7 +3,9 @@
 These evals measure whether a model given only this server's tools answers analysts' questions right. A model reaches the tools the way a host connects it:
 - the server's instructions are its system prompt;
 - its tools are the server's listed tools;
-- every call goes over MCP to the fixture warehouse (DuckDB, seeded and built by dbt from `test/integration/fixtures/dbt_project`).
+- every call goes over MCP to the engine production builds (`makeEngine`: catalog grounding, the python gate, the recipes the runtime runs, the project's own semantic layer).
+
+That engine runs over the fixture warehouse: DuckDB, seeded and built by dbt from `test/integration/fixtures/dbt_project`, with the value index synced once, as at a production start.
 
 | Command | What it does | Needs |
 |---|---|---|
@@ -11,16 +13,15 @@ These evals measure whether a model given only this server's tools answers analy
 | `npm run eval` | Puts every case to the model and grades the runs. | the above + Anthropic credentials (`ANTHROPIC_API_KEY`, or an `ant auth login` profile) |
 
 `eval:check` checks, for each case:
-- its truth, computed by its own SQL on the warehouse;
-- that its reference path through the tools reaches the same answer;
+- its truth, computed by its own SQL;
+- that its decoy differs from the truth;
+- that its reference path through the tools reaches the truth;
 - that the tools it names are listed;
-- that the grader accepts the truth and refuses a wrong answer.
+- that the grader accepts the truth and refuses the decoy.
 
 `npm run eval` options:
 - `-- --case <id>` (repeatable) or `-- --kind direct|indirect|negative` picks the cases.
-- `EVAL_MODEL` sets the model (default `claude-opus-5-5`).
-- `EVAL_EFFORT` sets the effort (default `high`).
-- `EVAL_MAX_TURNS` sets the turn cap (default 25).
+- `-- --model <id> --effort <level> --max-turns <n>` sets the model, effort and turn cap (defaults: `claude-opus-5-5`, `high`, `25`).
 
 ## The cases (`cases.js`)
 
@@ -30,21 +31,32 @@ These evals measure whether a model given only this server's tools answers analy
 | indirect | it states the need and leaves the model to find the metric |
 | negative | nothing to build or query (off-topic, or data the catalog does not have) |
 
+A truth is never typed in: it is the case's SQL run on the data. That SQL is held to a path through the tools, and an empty or NULL result is a broken case, not a zero.
+
+A **decoy** is the answer the obvious wrong reading gives: purchases instead of payers, players assigned instead of players who paid. It must differ from the truth, or the case could not tell the right metric from the wrong one, so every indirect case has one.
+
+## Grading
+
+Every question asks the model to end with one line, `Answer: …`: a number, a name, or `group=value, …` for several groups. Only that line is graded, so a reply that mentions the truth along the way but states something else fails.
+
 A run passes when both hold:
-- the final answer states the warehouse's truth: the number, the top label, or every key with its value;
+- the stated answer is the truth: its first number, the label (and not the decoy's), or exactly the truth's pairs;
 - the tools meet the case: one of `expect.any` is called, nothing in `expect.forbid` is, and the call count stays within `expect.max_calls`.
 
-A truth is never typed in: it is the case's SQL run on the data. That SQL is held to a path through the tools, so a case can't pass on a number the tools cannot produce.
+A negative case passes when no number is stated.
 
-## What a run records
+## Isolation and results
+
+**Each case runs in a world of its own.** It gets a fresh engine, store and workspace, whose store starts as a copy of the indexed template. Nothing one case leaves is there for the next: no context, memory note or logged error. Results therefore don't depend on the order or the selection of cases.
 
 Per case, a run records:
 - pass/fail, split into answer and tools;
+- the truth and the decoy;
 - the calls made and how many failed;
 - turns, tokens (input, output, cache read) and wall time;
 - the final text and the full trace of calls.
 
-Results go to `evals/results/<time>.json` (not committed), with a summary per kind. Compare two runs by their summaries: the pass rate, the mean calls and the failed calls.
+`evals/results/<time>.json` (not committed) is rewritten after every case, so a run that stops part-way keeps what it already paid for.
 
 ## How the tools reach the model
 

@@ -7,9 +7,13 @@ import { execFile } from 'node:child_process';
 import { cpSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { promisify } from 'node:util';
+import { Client } from '@modelcontextprotocol/client';
+import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { warehouseTurns } from '../../src/dbt/process.js';
+import { makeMcpServer } from '../../src/server.js';
 // the Python of the environment that carries the DuckDB module (MetricFlow's, see src/dbt/environments.js)
-import { PY_BIN } from '../helpers/dbt-env.js';
+import { DBT_BIN, PY_BIN } from '../helpers/dbt-env.js';
 
 // Runs the statements in one connection and prints the last one's rows as JSON (dates and decimals
 // as strings, like the rows dbt hands back).
@@ -62,4 +66,28 @@ export async function startWarehouse() {
     async exec(sql) { await run(path, sql.split(/;\s*(?:\n|$)/).map((s) => s.trim()).filter(Boolean)); },
     async stop() { rmSync(dir, { recursive: true, force: true }); },
   };
+}
+
+const execFileP = promisify(execFile);
+
+/**
+ * The fixture warehouse BUILT: a fresh database with the project's seeds loaded and every model run
+ * by dbt — the data the tests over a whole project (and the evals, evals/) read.
+ */
+export async function buildWarehouse(base) {
+  const wh = await startWarehouse();
+  const env = { ...process.env, DBT_PROFILES_DIR: base, DBT_PROJECT_DIR: base, DUCKDB_PATH: wh.path };
+  for (const cmd of [['seed', '--full-refresh'], ['run']]) {
+    await execFileP(DBT_BIN, cmd, { cwd: base, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  }
+  return wh;
+}
+
+/** An MCP client on the other end of an in-memory transport from a server over `engine` — the way a host reaches it. */
+export async function connectMcp(engine, name = 'test') {
+  const server = makeMcpServer(engine);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name, version: '0.0.0' });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  return { client, async close() { await client.close(); await server.close(); } };
 }

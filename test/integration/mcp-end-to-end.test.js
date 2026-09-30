@@ -16,26 +16,20 @@
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
-import { Client } from '@modelcontextprotocol/client';
-import { InMemoryTransport } from '@modelcontextprotocol/server';
 import { loadCatalog } from '../../src/catalog.js';
 import { ContextManager } from '../../src/context-manager.js';
 import { Engine } from '../../src/engine.js';
-import { makeMcpServer } from '../../src/server.js';
-import { startWarehouse, fixtureProject } from './warehouse-harness.js';
-import { isStartedTask } from '../helpers/settle.js';
-import { DBT_BIN, HAS_DBT, testDbt } from '../helpers/dbt-env.js';
+import { buildWarehouse, connectMcp, fixtureProject } from './warehouse-harness.js';
+import { settleMcp } from '../helpers/settle.js';
+import { HAS_DBT, testDbt } from '../helpers/dbt-env.js';
 
-const execFileP = promisify(execFile);
 const BASE = fixtureProject('dbt_project'); // a private copy: the test files run side by side
 const opts = { timeout: 300000 };
 
-let wh; let backend; let server; let client; let seq = 0;
+let wh; let backend; let mcpConn; let client; let seq = 0;
 
 const num = (v) => Number(v === '' || v == null ? NaN : v);
 const near = (a, b, eps = 1e-6) => Math.abs(a - b) < eps;
@@ -47,10 +41,7 @@ const AT = (value) => ({ value, from: 'install_time_valid_from', to: 'install_ti
 
 before(async () => {
   if (!HAS_DBT) return;
-  wh = await startWarehouse();
-  const env = { ...process.env, DBT_PROFILES_DIR: BASE, DBT_PROJECT_DIR: BASE, DUCKDB_PATH: wh.path };
-  await execFileP(DBT_BIN, ['seed', '--full-refresh'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
-  await execFileP(DBT_BIN, ['run'], { cwd: BASE, env, timeout: 240000, maxBuffer: 64 * 1024 * 1024 });
+  wh = await buildWarehouse(BASE);
 
   const catalog = loadCatalog(join(process.cwd(), 'test', 'integration', 'fixtures', 'catalog.yml'), { profilesDir: BASE, projectDir: BASE });
   const ctxs = new ContextManager({ baseProjectDir: BASE, workspaceRoot: mkdtempSync(join(tmpdir(), 'mcpe2e-')), timeSpineDialect: 'duckdb' });
@@ -58,15 +49,12 @@ before(async () => {
   const engine = new Engine({ catalog, contextManager: ctxs, runner: backend });
 
   // The real protocol surface: an MCP server over a transport, and a client on the other end.
-  server = makeMcpServer(engine);
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  client = new Client({ name: 'mcp-e2e-test', version: '0.0.0' });
-  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  mcpConn = await connectMcp(engine, 'mcp-e2e-test');
+  ({ client } = mcpConn);
 }, opts);
 
 after(async () => {
-  if (client) await client.close();
-  if (server) await server.close();
+  if (mcpConn) await mcpConn.close();
   backend?.close?.();
   if (wh) await wh.stop();
 });
@@ -78,16 +66,8 @@ const skip = (t) => { if (!HAS_DBT) { t.skip('dbt/mf not installed'); return tru
  * task_id, and the result is read back with the query tool of its side ({ task_id }, called again
  * while it says running).
  */
-async function settled(name, args) {
-  let res = await client.callTool({ name, arguments: args });
-  let out = JSON.parse(res.content[0].text);
-  if (!res.isError && isStartedTask(out)) {
-    do {
-      res = await client.callTool({ name: out.read_with, arguments: { task_id: out.task_id } }); // the started task names its reader
-      out = JSON.parse(res.content[0].text);
-    } while (!res.isError && out.status === 'running');
-  }
-  return { res, out };
+function settled(name, args) {
+  return settleMcp(client, name, args);
 }
 
 /** One MCP tool call that must succeed; returns the parsed result payload. */

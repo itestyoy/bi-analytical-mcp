@@ -70,3 +70,24 @@ export function readTable(engine, contextId, table, { transform, limit = 1000 } 
   const raw = engine.raw || engine;
   return raw._readTable(raw.ctxs.dir(contextId), table, limit, transform);
 }
+
+/**
+ * One MCP tool call, the way an assistant makes it: a call that STARTS work answers with its task_id,
+ * and the result is read back with the query tool its answer names (`read_with`), called again while it
+ * says running — up to `deadlineMs`, past which the task is reported as not finishing rather than
+ * waited on forever. Returns { res, out }: the last MCP result and its parsed payload.
+ */
+export async function settleMcp(client, name, args, { deadlineMs = 10 * 60 * 1000 } = {}) {
+  let res = await client.callTool({ name, arguments: args });
+  let out = JSON.parse(res.content[0].text);
+  if (!res.isError && isStartedTask(out)) {
+    const { read_with: reader, task_id: taskId } = out;
+    const until = Date.now() + deadlineMs;
+    do {
+      if (Date.now() > until) throw new Error(`task ${taskId} (${name}) still running after ${Math.round(deadlineMs / 1000)}s`);
+      res = await client.callTool({ name: reader, arguments: { task_id: taskId } });
+      out = JSON.parse(res.content[0].text);
+    } while (!res.isError && out.status === 'running');
+  }
+  return { res, out };
+}

@@ -429,13 +429,18 @@
 - The integration tests query through the dbt client production runs (`testDbt`, test/helpers/
   dbt-env.js → `createDbt`): the numbers they prove come from `mf query` and `dbt show` as the server
   calls them. Do NOT add a query backend only the tests use.
-- THE EVALS ARE THE SAME WORLD WITH A MODEL IN IT (evals/): golden questions — direct, indirect,
-  negative — put to a model through the listed tools over MCP on the fixture warehouse (`npm run eval`,
-  Anthropic credentials needed), graded on the DATA (the answer states the truth a case's own SQL reads
-  from the warehouse) and on the tools (required, forbidden, a call budget), with calls, failed calls,
-  turns and tokens recorded. A truth is never typed in: `npm run eval:check` runs every case's SQL and
-  holds it to a reference path through the tools, with no model. A new question is a case in
-  evals/cases.js, never a number in a test.
+- THE EVALS ARE THE PRODUCTION SURFACE WITH A MODEL IN IT (evals/): golden questions — direct,
+  indirect, negative — put to a model through the listed tools over MCP, on the engine production
+  builds (`makeEngine`) over the fixture warehouse, EACH CASE IN A WORLD OF ITS OWN (a fresh engine and
+  store copied from one indexed template), `npm run eval` with Anthropic credentials. Graded on the
+  DATA — the model's stated `Answer:` line against the truth a case's own SQL reads from the warehouse
+  — and on the tools (required, forbidden, a call budget), with calls, failed calls, turns and tokens
+  recorded. A truth is never typed in, and never a NULL read as zero: `npm run eval:check` runs every
+  case's SQL, holds it to a reference path through the tools, and requires its DECOY (the answer of
+  the obvious wrong reading) to differ, with no model. A new question is a case in evals/cases.js,
+  never a number in a test. The fixture world (`buildWarehouse`, `connectMcp`,
+  test/integration/warehouse-harness.js) and the task-following call (`settleMcp`, test/helpers/
+  settle.js) have one definition, shared by the integration tests and the evals.
 - Tests run on the `dbt-v2` environment; the python stage's file runs on `dbt-v1` (dbt 1.x),
   since v2 runs no Python models on DuckDB — there the stage is not offered (`gatePythonRuntime`).
 

@@ -19,6 +19,7 @@ import { retentioneeringFacts, analysisKinds, offeredOps, NOT_OFFERED } from '..
 import { RETENTIONEERING_VIEW_URI, retentioneeringViewModel, hasCard, CARD_KINDS, DIFF_CARD_KINDS, CHARTED_DIFF_KINDS } from '../../src/retentioneering/view-model.js';
 import { buildToolDefs, createServices, runTool, coreInstructions } from '../../src/mcp-surface.js';
 import { RUNTIME_ASSETS } from '../../src/runtime-assets.js';
+import { CONFIG_ERRORS } from '../../src/retentioneering/checker.js';
 import { settle } from '../helpers/settle.js';
 import { dbtEnv } from '../helpers/dbt-env.js';
 
@@ -307,4 +308,11 @@ test('the synthetic events a card marks are the library\'s — the ones the serv
   assert.deepEqual(marked({}), [...sheet].sort());
   assert.deepEqual(marked({ synthetic_events: sheet }), [...sheet].sort());
   assert.deepEqual(marked({ synthetic_events: ['level_start'] }), ['level_start'], 'the list handed over decides');
+});
+
+test('the errors the library check counts as the call\'s are the library\'s own error classes', () => {
+  const errors = retentioneeringFacts().errors;
+  const unknown = CONFIG_ERRORS.filter((name) => !Object.hasOwn(errors, name));
+  assert.deepEqual(unknown, [], 'every counted error is one the library defines (regenerate the sheet if it renamed one)');
+  assert.ok(CONFIG_ERRORS.every((name) => name !== 'RetentioneeringError'), 'the base class would count every error the library raises, the rows\' own too');
 });

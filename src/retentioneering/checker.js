@@ -10,6 +10,20 @@ import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { assetPath } from '../runtime-assets.js';
 
+/**
+ * The library's errors that are the CALL's — raised by what a step or an analysis was given, not by
+ * the rows (the data's own — EmptyEventstreamError, PatternNoMatchError, PathIdNotFoundError — and a
+ * widget's export are left out). A level the library does not find (SegmentLevelNotFoundError) counts
+ * only where the shape knows every level of that segment: elsewhere the stand-in carries the call's own
+ * constants as levels, so it is never raised. Each is one of the library's own error classes (the
+ * facts sheet's `errors`, which a test holds this list to); every request carries the list.
+ */
+export const CONFIG_ERRORS = [
+  'AmbiguousGridPointError', 'DiffConfigError', 'GridPointNotFoundError', 'InvalidMetricConfigError', 'InvalidParameterError',
+  'InvalidSegmentSelectionError', 'MetricDistributionError', 'PatternSyntaxError', 'PreprocessingColumnNotFoundError',
+  'PreprocessingConfigError', 'SchemaConfigError', 'SegmentLevelNotFoundError',
+];
+
 /** How long one answer may take (the first includes loading the library). */
 const ANSWER_TIMEOUT_MS = 90000;
 
@@ -89,7 +103,7 @@ export class LibraryChecker {
       }, ANSWER_TIMEOUT_MS);
       this.pending.set(id, (reply) => { clearTimeout(timer); resolve(reply); });
       this._hold();
-      proc.stdin.write(`${JSON.stringify({ ...request, id })}\n`);
+      proc.stdin.write(`${JSON.stringify({ ...request, config_errors: CONFIG_ERRORS, id })}\n`);
     });
   }
 

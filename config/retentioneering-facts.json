@@ -6580,5 +6580,24 @@
       "Everything else regex offers is deliberately absent. The rule that draws the line: **negation and alternation are allowed exactly where their scope is bounded.** One position is bounded by definition; a gap is bounded by the anchors on either side of it, which is why `A->[^X]*->B` is expressible while `[^A->B]` is not — complementing an unanchored sequence matches almost every path and needs an automaton, while the engine is relational. For the same reason a restricted gap at either end of a pattern is refused: with nothing pinning its outer side it is satisfied by the empty run, making it a no-op. Pattern-level branching (`A->B|C->D`) is refused too, since it breaks the correspondence between tokens and the ordinals that `at=` / `occurrence=` / step-matrix centring address.",
       "A boundary sentinel participates in a class **only if it is named**. So `.` and `[^A]` never match `path_start` / `path_end`, mirroring regex, where `.` does not match a string boundary because a boundary is not a character. Without this, `A->[^B]` would be true for a path whose `A` is last — the synthetic `path_end` row satisfying \"not B\" — which is the opposite of what anyone writing that pattern means."
     ]
+  },
+  "errors": {
+    "AmbiguousGridPointError": "RetentioneeringError",
+    "DiffConfigError": "RetentioneeringError",
+    "EmptyEventstreamError": "RetentioneeringError",
+    "GridPointNotFoundError": "RetentioneeringError",
+    "InvalidMetricConfigError": "RetentioneeringError",
+    "InvalidParameterError": "RetentioneeringError",
+    "InvalidSegmentSelectionError": "MetricDistributionError",
+    "MetricDistributionError": "RetentioneeringError",
+    "PathIdNotFoundError": "RetentioneeringError",
+    "PatternNoMatchError": "RetentioneeringError",
+    "PatternSyntaxError": "RetentioneeringError",
+    "PreprocessingColumnNotFoundError": "RetentioneeringError",
+    "PreprocessingConfigError": "RetentioneeringError",
+    "RetentioneeringError": "Exception",
+    "SchemaConfigError": "RetentioneeringError",
+    "SegmentLevelNotFoundError": "MetricDistributionError",
+    "WidgetExportError": "RetentioneeringError"
   }
 }

@@ -114,7 +114,9 @@ def _plain(value):
     return value
 
 
-class _Out:
+class Output:
+    """The records a run returns: one row per (analysis, part, record), numbered in order within each."""
+
     def __init__(self):
         self.rows = []
         self.seq = {}
@@ -423,7 +425,7 @@ CHARTED = {
 }
 
 
-def _stream(frame, spec):
+def eventstream_of(frame, spec):
     """The library's Eventstream over `frame`, ordered and typed the way every analysis reads it.
 
     `spec["columns"]`: the path owner (`user`, the first path column), the event, its time, the other
@@ -481,7 +483,7 @@ def apply_steps(frame, spec):
     are paths, segments, custom) — so the table says what it is, whatever the steps made."""
     from retentioneering.ops import apply_ops
 
-    stream = apply_ops(_stream(frame, spec), spec["steps"])
+    stream = apply_ops(eventstream_of(frame, spec), spec["steps"])
     df = stream.to_dataframe()
     held = stream_columns(stream)
     schema = stream.schema
@@ -533,15 +535,15 @@ def _analyze(stream, spec, a, frame_out, out):
 def run(frame, spec):
     """The analyses `spec` names, over the eventstream `frame` → the long result table. Each analysis
     stands alone: one the library raises on is kept as its error, and the others keep their results."""
-    stream = _stream(frame, spec)
+    stream = eventstream_of(frame, spec)
     frame_out = stream.to_dataframe()
-    out = _Out()
+    out = Output()
     for a in spec["analyses"]:
-        own = _Out()
+        own = Output()
         try:
             _analyze(stream, spec, a, frame_out, own)
         except Exception as e:  # noqa: BLE001 — the library's own error, said for this analysis alone
-            own = _Out()
+            own = Output()
             own.add(a["id"], a["kind"], "error", {"type": type(e).__name__, "message": str(e)})
         out.rows.extend(own.rows)
     return pd.DataFrame(out.rows, columns=RESULT_COLUMNS)

@@ -33,22 +33,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import pandas as pd  # noqa: E402
 
-from retentioneering_model import _Out, _stream, charted_of, stream_columns  # noqa: E402
+from retentioneering_model import Output, charted_of, eventstream_of, stream_columns  # noqa: E402
 
-# The library's configuration errors — raised by what a step or an analysis was given, not by the
-# rows (the data's own are EmptyEventstreamError, PatternNoMatchError and PathIdNotFoundError, left
-# out). InvalidParameterError is also sklearn's, for a clustering parameter out of its range. A level
-# the library does not find (SegmentLevelNotFoundError) counts only where the shape knows every level
-# of that segment — elsewhere the stand-in carries the call's own constants as levels, so it is never
-# raised. And DuckDB's own, raised by the SQL the library builds from a step's constants (a date
-# compared with a number, an operator it does not know): the stand-ins' rows are clean, so one both
-# raise alike is the call's.
-CONFIG_ERRORS = {
-    "PreprocessingConfigError", "PreprocessingColumnNotFoundError", "InvalidParameterError",
-    "InvalidMetricConfigError", "PatternSyntaxError", "DiffConfigError", "SchemaConfigError",
-    "InvalidSegmentSelectionError", "GridPointNotFoundError", "AmbiguousGridPointError", "MetricDistributionError",
-    "SegmentLevelNotFoundError",
-}
+# Which of the library's errors are the call's (its configuration) and not the rows' is the server's
+# decision: every request carries it as `config_errors` (src/retentioneering/checker.js, held to the
+# library's own errors in the facts sheet). DuckDB's own count too, raised by the SQL the library builds
+# from a step's constants (a date compared with a number, an operator it does not know): the stand-ins'
+# rows are clean, so one both raise alike is the call's.
 # The library's own checks that raise a plain Python error (a segment column that is not there is a
 # ValueError): counted when the library itself raised it — its frame, not sklearn's, pandas' or ours.
 PLAIN_ERRORS = {"ValueError", "KeyError", "TypeError"}
@@ -75,9 +66,9 @@ def _raised_by_library(e):
     return last is not None and os.path.abspath(last.tb_frame.f_code.co_filename).startswith(_LIBRARY_DIR[0])
 
 
-def _counts(e):
+def _counts(e, config_errors):
     name = type(e).__name__
-    if name in CONFIG_ERRORS or type(e).__module__.split(".")[0].lstrip("_") == "duckdb":
+    if name in config_errors or type(e).__module__.split(".")[0].lstrip("_") == "duckdb":
         return True
     return name in PLAIN_ERRORS and _raised_by_library(e)
 
@@ -97,7 +88,7 @@ def _constants(value, out):
 
 
 def spec_of(shape):
-    """The column spec _stream reads a stand-in (or a table of this shape) with."""
+    """The column spec eventstream_of reads a stand-in (or a table of this shape) with."""
     return {"columns": {**COLUMNS, "paths": shape["paths"], "segments": list(shape["segments"]), "custom": shape.get("columns") or []}}
 
 
@@ -134,16 +125,16 @@ def stand_in(shape, constants, variant):
             for c in shape.get("columns") or []:
                 row[c] = i
             rows.append(row)
-    return _stream(pd.DataFrame(rows), spec_of(shape))
+    return eventstream_of(pd.DataFrame(rows), spec_of(shape))
 
 
-def _attempt(fn):
+def _attempt(fn, config_errors):
     """(result, None) — or (None, the error) when a configuration error was raised, or (None, False)
     when anything else was (the rows' business)."""
     try:
         return fn(), None
     except Exception as e:  # noqa: BLE001 — which errors count is decided by their class
-        return None, (f"{type(e).__name__}: {e}" if _counts(e) else False)
+        return None, (f"{type(e).__name__}: {e}" if _counts(e, config_errors) else False)
 
 
 def shape_after(before, streams, constants):
@@ -165,7 +156,7 @@ def shape_after(before, streams, constants):
     return {"events": events, "paths": held["paths"], "segments": segments, "columns": held["custom"]}
 
 
-def check_steps(shape, steps, constants, reserved=frozenset()):
+def check_steps(shape, steps, constants, config_errors, reserved=frozenset()):
     """Each step on the stand-ins of the shape before it → its outcome, until the first refused one."""
     from retentioneering.ops import apply_ops
 
@@ -181,7 +172,7 @@ def check_steps(shape, steps, constants, reserved=frozenset()):
         if step.get("path_col") is not None and step["path_col"] not in held:
             out.append({"ok": False, "problem": f"path '{step['path_col']}' is not a path column of the eventstream at this step (its path columns: {', '.join(held)}) — a split_sessions step before it makes one"})
             break
-        tried = [_attempt(lambda s=s: apply_ops(s, [step])) for s in streams]
+        tried = [_attempt(lambda s=s: apply_ops(s, [step]), config_errors) for s in streams]
         errors = [e for _, e in tried]
         if all(isinstance(e, str) for e in errors) and len(set(errors)) == 1:
             out.append({"ok": False, "problem": errors[0]})
@@ -192,7 +183,7 @@ def check_steps(shape, steps, constants, reserved=frozenset()):
             out.append({"ok": None, "note": "not checked in full: the stand-ins could not carry it" + (f" ({reasons[0]})" if reasons else "")})
             streams = []
             continue
-        after, err = _attempt(lambda: shape_after(shape, alive, constants))
+        after, err = _attempt(lambda: shape_after(shape, alive, constants), config_errors)
         if after is None:
             out.append({"ok": None, "note": "not checked in full: what the step left could not be read" + (f" ({err})" if err else "")})
             streams = []
@@ -214,7 +205,7 @@ def check_steps(shape, steps, constants, reserved=frozenset()):
     return out
 
 
-def check_analyses(shape, analyses, constants, edge_weights):
+def check_analyses(shape, analyses, constants, edge_weights, config_errors):
     """Each analysis on the stand-ins of the shape → the configuration errors both raise alike."""
     if not analyses or not shape["events"]:
         return []
@@ -226,9 +217,9 @@ def check_analyses(shape, analyses, constants, edge_weights):
         for a in analyses:
             charted = charted_of(a)
             if charted:
-                _, err = _attempt(lambda: charted(stream, spec, a, _Out()))
+                _, err = _attempt(lambda: charted(stream, spec, a, Output()), config_errors)
             else:
-                _, err = _attempt(lambda: getattr(stream, a["method"])(**a["params"]))
+                _, err = _attempt(lambda: getattr(stream, a["method"])(**a["params"]), config_errors)
             if isinstance(err, str):
                 found[f"analyses.{a['id']}"] = err
         seen.append(found)
@@ -240,8 +231,9 @@ def answer(request):
     analyses = request.get("analyses") or []
     # with the constants of the steps as the call wrote them (a value the server wrote into SQL is there)
     constants = _constants([steps, analyses, request.get("constants") or []], set())
-    return {"steps": check_steps(request["shape"], steps, constants, frozenset(request.get("reserved") or [])) if steps else [],
-            "analyses": check_analyses(request["shape"], analyses, constants, request.get("edge_weights") or [])}
+    config_errors = frozenset(request.get("config_errors") or [])
+    return {"steps": check_steps(request["shape"], steps, constants, config_errors, frozenset(request.get("reserved") or [])) if steps else [],
+            "analyses": check_analyses(request["shape"], analyses, constants, request.get("edge_weights") or [], config_errors)}
 
 
 def serve():

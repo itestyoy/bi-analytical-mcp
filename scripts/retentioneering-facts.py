@@ -700,7 +700,27 @@ def build():
         "anchor_occurrences": list(anchors.OCCURRENCES),
         "anchor_offset_sides": list(anchors.OFFSET_SIDES),
         "path_patterns": path_patterns(),
+        "errors": library_errors(),
     }
+
+
+def library_errors():
+    """The library's own error classes, each with the one it derives from — what a refusal can name."""
+    import importlib
+    import pkgutil
+
+    import retentioneering
+
+    found = {}
+    for info in pkgutil.walk_packages(retentioneering.__path__, "retentioneering."):
+        try:
+            module = importlib.import_module(info.name)
+        except Exception:  # noqa: BLE001 — a module that does not import (an optional widget) names no error
+            continue
+        for name, cls in inspect.getmembers(module, inspect.isclass):
+            if issubclass(cls, BaseException) and cls.__module__.startswith("retentioneering."):
+                found[name] = cls.__mro__[1].__name__
+    return dict(sorted(found.items()))
 
 
 DOCS = "https://retentioneering.com"

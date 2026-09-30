@@ -6,7 +6,9 @@
 // server announces like any other (src/surface-change.js).
 //
 // The core never names a feature: it walks `engine.features` at the few points a tool is defined,
-// dispatched, read back, drawn, guided and described. A feature module exports a DEFINITION:
+// dispatched, read back, drawn, guided and described. A feature is written against the engine's
+// public surface — engine.tasks (src/task-runner.js), engine.host, engine.ctxs, engine.catalog,
+// engine.jobs — never its private `_` members. A feature module exports a DEFINITION:
 //
 //   { id, flag, resolve({ env, catalog, profilesDir, baseProjectDir }) → { feature } | { reason } }
 //

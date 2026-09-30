@@ -133,10 +133,10 @@
   pipeline materialize, the hidden register_native_model/update_semantic_model) or a query
   (`query_semantic_model({ context_id, metrics… })`, `query_pipeline_model({ context_id,
   transform })`) — validates its input in the call and returns ONLY `{ task_id, context_id? }`; it
-  never waits (`Engine._startTask`; tasks on one context run in order). A query tool also takes a
+  never waits (the task runtime, src/task-runner.js — `engine.tasks`; tasks on one context run in order). A query tool also takes a
   BATCH — `{ context_id, queries: [...] }`, up to MAX_BATCH (5) — which checks EVERY query before
   any starts (one mistake refuses the batch), starts one task per query and returns ONLY
-  `{ task_ids, context_id }` (`Engine._startBatch`); the members run side by side (each dbt process
+  `{ task_ids, context_id }` (`engine.tasks.startBatch`); the members run side by side (each dbt process
   with a target directory of its own), after what was queued before them and before what is
   queued after. The query tool of the SAME
   side reads a task back (the started answer names it in `read_with`): `{ task_id }` waits
@@ -182,7 +182,10 @@
   it has the same three roles — its builder, its query tool that starts AND reads back its own tasks
   (its side registered with the engine, a task of another side refused), and its OWN drawing tool,
   which draws only that side's finished tasks, each analysis at most once; display_model_result stays
-  the only tool that draws a semantic or pipeline result.
+  the only tool that draws a semantic or pipeline result. A feature is written against the engine's
+  public surface — `engine.tasks` (the task runtime), `engine.host` (validation, a context, the time
+  window, a source's columns, a model's config), `engine.ctxs`, the catalog and the job registry —
+  never against the engine's private `_` members.
 - A FEATURE IS SWITCHED ON AS A WHOLE, OR IS NOT THERE (src/features.js). A part of the server that a
   deployment may not want — today only retentioneering — is a feature: off unless its flag says on
   (`MCP_RETENTIONEERING=on`), and left out WITH ITS REASON (in the overview) when asked for where it
@@ -298,9 +301,9 @@
   (test/unit/tool-surface.test.js holds the budgets).
 - EVERY FAILURE IS KEPT (src/error-log.js → the store's `errors` table), read with `explore_errors`
   (read-only): a call refused or failed, with its arguments (runTool — one point, for every tool); a
-  task that ended in an error, with its input (`_startTask`); what a start could not serve (the
+  task that ended in an error, with its input (the task runtime's `start`); what a start could not serve (the
   project's layer, a join `servable` leaves out, a feature that cannot run). Each carries what
-  REPRODUCES it: the arguments / the task's input (every `_startTask` passes its input — a pipeline
+  REPRODUCES it: the arguments / the task's input (every task start passes its input — a pipeline
   build its stages), the state of the context it worked on (`Engine._errorContext`: the declaration,
   a draft with every step, an eventstream with its steps), for a task the code of each generated model
   its message names (as written and as dbt ran it — where a warehouse line:column points), and the

@@ -100,9 +100,11 @@ function stubEngine({ after = 3, rows = [], fail = null, throws = null } = {}) {
     state,
     schemas: { query_pipeline_model: {}, display_model_result: {}, query_semantic_model: {} },
     jobs: { get: (id) => (id === 't1' ? { id, status: done() ? (fail ? 'error' : 'ready') : 'running' } : undefined), isLive: () => true },
-    async _awaitTasks() {
-      if (throws) throw throws;
-      state.waits += 1;
+    tasks: {
+      async await() {
+        if (throws) throw throws;
+        state.waits += 1;
+      },
     },
     async query_pipeline_model({ task_id }) {
       if (!task_id) return { task_id: 't1', context_id: 'c1', next: 'query_pipeline_model' };

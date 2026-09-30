@@ -342,8 +342,8 @@ export async function runToCompletion(engine, calledAs, args, { signal, renders 
   let waits = (WAITS_ON_TASK.has(name) || !!featureTool(engine, name)?.tool.waits) && !args?.cancel && ids.length > 0 && ids.every((id) => engine.jobs?.get?.(id));
   // what the call would refuse — bad arguments, a task of the other side, a card already drawn — is
   // refused NOW, not after sitting through the whole task
-  if (waits && typeof engine._precheckWait === 'function') {
-    try { engine._precheckWait(name, args); } catch { waits = false; }
+  if (waits && engine.host) {
+    try { engine.host.precheckWait(name, args); } catch { waits = false; }
   }
   if (waits) {
     // Following the task has the same contract as the call itself: a failure while waiting is a
@@ -352,7 +352,7 @@ export async function runToCompletion(engine, calledAs, args, { signal, renders 
       const running = () => ids.filter((id) => engine.jobs.get(id)?.status === 'running' && engine.jobs.isLive?.(id));
       for (let left = running(); left.length; left = running()) {
         if (signal?.aborted) throw signal.reason || new Error('cancelled');
-        await withSignal(signal, () => engine._awaitTasks(left, MAX_WAIT_SECONDS));
+        await withSignal(signal, () => engine.tasks.await(left, MAX_WAIT_SECONDS));
       }
     } catch (err) {
       const cancelled = !!signal?.aborted;

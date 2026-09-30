@@ -13,8 +13,9 @@ export const byText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 export const CHARTED_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel', 'cluster_analysis', 'segment_overview'];
 /** WHICH ANALYSES HAVE A CARD — the one list: the charted ones and a distribution (its histogram). */
 export const CARD_KINDS = [...CHARTED_KINDS, 'metric_distribution'];
-/** A diff has a card where its parts are matrices (drawn as heatmaps); a funnel's diff has none. */
-export const DIFF_CARD_KINDS = ['transition_graph', 'step_matrix', 'step_sankey'];
+/** A diff has a card where its parts are matrices (drawn as heatmaps) and for a funnel (both groups
+ *  on the same steps, and their difference). */
+export const DIFF_CARD_KINDS = ['transition_graph', 'step_matrix', 'step_sankey', 'funnel'];
 
 /** Whether an analysis of this kind (a diff of it, or not) has a card — decided by kind alone. */
 export function hasCard(kind, diff = false) {
@@ -55,7 +56,7 @@ export function retentioneeringViewModel(drawn, args = {}) {
   // a card per KIND (hasCard): any other analysis has none and is answered in words; a kind with a
   // card whose result holds nothing to draw is `empty`
   if (!hasCard(r.kind, !!r.diff)) return none('no_card');
-  if (r.diff) return diffMatrices(head, r);
+  if (r.diff) return r.kind === 'funnel' ? funnelDiff(head, r) : diffMatrices(head, r);
   switch (r.kind) {
     case 'transition_graph': return graph(head, r, args.edge_weight || drawn.edge_weight);
     case 'step_matrix': return stepMatrix(head, r);
@@ -183,6 +184,27 @@ function funnel(head, r) {
   let biggest = null;
   steps.forEach((s, i) => { if (i > 0 && (biggest === null || s.of_previous < steps[biggest].of_previous)) biggest = i; });
   return { ...head, steps, biggest_drop: biggest };
+}
+
+/** A funnel's diff: each step with both groups (paths, share of all, share of the previous step) and
+ *  their difference as the library computed it (first minus second); the step where the share that
+ *  continues differs most is marked. */
+function funnelDiff(head, r) {
+  const side = (s, p) => ({ value: s[`${p}_unique_paths`], of_first: s[`${p}_conversion_rate`], of_previous: s[`${p}_step_conversion_rate`] });
+  const steps = (r.steps || []).filter((s) => s.funnel1_unique_paths != null && s.funnel2_unique_paths != null).map((s) => ({
+    label: s.step, first: side(s, 'funnel1'), second: side(s, 'funnel2'),
+    delta: { value: s.delta_unique_paths, of_first: s.delta_conversion_rate, of_previous: s.delta_step_conversion_rate },
+  }));
+  if (!steps.length) return none('empty');
+  let widest = null;
+  steps.forEach((s, i) => { if (i > 0 && Number.isFinite(s.delta.of_previous) && (widest === null || Math.abs(s.delta.of_previous) > Math.abs(steps[widest].delta.of_previous))) widest = i; });
+  const g = r.diff_groups || {};
+  const named = (v) => (v === '<REST>' ? 'the other levels' : v === '<MISSING>' ? 'no level' : v);
+  return {
+    ...head, kind: 'funnel_diff', title: `${head.title} — two groups`,
+    groups: { segment: g.segment ?? null, first: named(g.first ?? 'Group 1'), second: named(g.second ?? 'Group 2') },
+    steps, widest_gap: widest,
+  };
 }
 
 function overview(head, r) {

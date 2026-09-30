@@ -73,7 +73,8 @@ function generic(parts) {
 
 function shape({ kind, parts }) {
   // a diff says so: the analysis step marks it, whatever shape the library gave the comparison
-  return { kind, ...(parts.diff?.length ? { diff: true } : {}), ...charted(kind, parts), ...generic(parts) };
+  const groups = parts.diff?.[0]?.groups ? JSON.parse(parts.diff[0].groups) : null;
+  return { kind, ...(parts.diff?.length ? { diff: true, ...(groups ? { diff_groups: groups } : {}) } : {}), ...charted(kind, parts), ...generic(parts) };
 }
 
 /** The charted analyses' own shape — present when the analysis step wrote it (not for a diff). */

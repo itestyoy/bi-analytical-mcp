@@ -239,7 +239,8 @@ test('a card is decided by kind: an analysis of a card kind with nothing in it i
   for (const kind of CARD_KINDS) assert.equal(hasCard(kind), true, kind);
   for (const kind of ['describe', 'conversion_rate', 'path_metrics']) assert.equal(hasCard(kind), false, kind);
   assert.deepEqual(DIFF_CARD_KINDS.map((k) => hasCard(k, true)), DIFF_CARD_KINDS.map(() => true));
-  assert.equal(hasCard('funnel', true), false, 'a funnel diff has no card');
+  assert.equal(hasCard('funnel', true), true, 'a funnel diff has its card: both groups on the same steps');
+  assert.equal(hasCard('cluster_analysis', true), false, 'the library draws no diff of clusters');
   assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'transition_graph', nodes: [], edges: [] } }), { kind: 'none', reason: 'empty' });
   assert.deepEqual(retentioneeringViewModel({ ok: true, result: { kind: 'describe', values: {} } }), { kind: 'none', reason: 'no_card' });
 });

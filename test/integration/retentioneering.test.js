@@ -339,6 +339,49 @@ test('steps are the library\'s own op model: collapsed loops leave no self-trans
   assert.equal(whole.describe.values['shape'].n_paths, built.users, 'the fork left its parent as it was');
 });
 
+test('filter_events takes a condition tree — what keep / drop cannot say — written as quoted SQL: its rows are the warehouse\'s own', opts, async (t) => {
+  if (skip(t)) return;
+  // a day boundary in the middle of the data, and the most frequent event left out by a negation
+  const days = [...new Set(rows.map((r) => new Date(r.t).toISOString().slice(0, 10)))].sort();
+  const from = days[Math.floor(days.length / 2)];
+  const counts = new Map();
+  for (const r of rows) counts.set(r.e, (counts.get(r.e) || 0) + 1);
+  const top = [...counts.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1))[0][0];
+  const where = { op: 'and', conditions: [{ column: 'event_time', op: '>=', value: from }, { not: { column: 'event', op: 'in', value: [top] } }] };
+  const { ctx } = await shaped('late_events', [{ type: 'filter_events', where }]);
+  const a = await analyze(ctx, 'late_events', [{ kind: 'transition_graph' }], 'full');
+  const want = new Map();
+  for (const r of rows) if (new Date(r.t).toISOString().slice(0, 10) >= from && r.e !== top) want.set(r.e, (want.get(r.e) || 0) + 1);
+  const got = new Map(a.transition_graph.nodes.filter((n) => n.event !== 'path_start' && n.event !== 'path_end').map((n) => [n.event, n.count]));
+  assert.deepEqual(got, want);
+  // a name that is not a column of the eventstream is the library's refusal, as the step is added
+  await engine.build_retentioneering_model({ action: 'fork', context_id: ctx, eventstream: 'base', name: 'bad_where', after: 0 });
+  await assert.rejects(engine.build_retentioneering_model({ action: 'add_step', context_id: ctx, eventstream: 'bad_where', step: { type: 'filter_events', where: { op: 'and', conditions: [{ column: 'no_such_col', op: '=', value: 'x' }] } } }), (e) => e.field === 'step' && /no_such_col/.test(e.message));
+});
+
+test('a funnel\'s diff has a card: both groups on the same steps, each the funnel of that group alone, and their difference', opts, async (t) => {
+  if (skip(t)) return;
+  const ctx = await stepsContext();
+  const platforms = (await wh.query('select distinct platform from dim_users order by 1')).rows.map((r) => String(r.platform));
+  const [p1, p2] = platforms;
+  const q = await engine.query_retentioneering_model({ context_id: ctx, eventstream: 'base', analyses: [{ kind: 'funnel', steps: FUNNEL, diff: ['platform', p1, p2] }] });
+  const r = await engine.query_retentioneering_model({ task_id: q.task_id });
+  assert.equal(r.status, 'done', JSON.stringify(r.error));
+  assert.equal(r.show_to_user?.arguments.analysis, 'funnel', 'the diff is offered as a card');
+  const d = await engine.display_retentioneering_result({ task_id: q.task_id, analysis: 'funnel' });
+  const vm = retentioneeringViewModel(d, { task_id: q.task_id, analysis: 'funnel' });
+  assert.equal(vm.kind, 'funnel_diff');
+  assert.deepEqual([vm.groups.segment, vm.groups.first, vm.groups.second], ['platform', p1, p2]);
+  // each group's steps are the funnel of that group alone
+  const alone = async (p) => {
+    const { ctx: c } = await shaped(`only_${p.replace(/[^a-z0-9]/gi, '_').toLowerCase()}`, [{ type: 'filter_events', where: { op: 'and', conditions: [{ column: 'platform', op: '=', value: p }] } }]);
+    return (await analyze(c, `only_${p.replace(/[^a-z0-9]/gi, '_').toLowerCase()}`, [{ kind: 'funnel', steps: FUNNEL }])).funnel.steps.map((s) => s.unique_paths);
+  };
+  assert.deepEqual(vm.steps.map((s) => s.first.value), await alone(p1));
+  assert.deepEqual(vm.steps.map((s) => s.second.value), await alone(p2));
+  for (const s of vm.steps) assert.equal(s.delta.value, s.first.value - s.second.value);
+});
+
 test('each step is checked by the library as it is added, and says what it changed — a refused one changes nothing', opts, async (t) => {
   if (skip(t)) return;
   const ctx = await stepsContext();

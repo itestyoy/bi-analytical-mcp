@@ -39,7 +39,7 @@ export const NOT_OFFERED = {
   },
   params: {
     func: 'a Python callable, which a call cannot carry',
-    sql: 'a DuckDB statement run on the analysis runtime — code, which this server never takes from a call; declare the data in build_retentioneering_model instead (events, groups, segments, where)',
+    sql: 'a DuckDB statement run on the analysis runtime — code, which this server never takes from a call; declare the data in build_retentioneering_model instead (events, groups, segments, where), and keep rows by a condition after the steps with filter_events\' where (this tool writes the SQL)',
   },
 };
 
@@ -49,6 +49,8 @@ export const ANALYSIS_KINDS = Object.keys(retentioneeringFacts().analyses);
 export const OFFERED_OPS = Object.keys(retentioneeringFacts().ops).filter((op) => !NOT_OFFERED.ops[op]);
 
 export const NAME = '^[a-z][a-z0-9_]*$';
+/** A column of an eventstream: an identifier the warehouse stores (a segment, a path column, a custom one). */
+const NAME_OR_COLUMN = '^[A-Za-z_][A-Za-z0-9_]*$';
 const CTX = '^[A-Za-z0-9_-]{1,64}$';
 /** The library's per-path column, which this wrapper names `path` (see pathField). */
 const PATH_PARAM = 'path_col';
@@ -322,7 +324,9 @@ const pathField = {
 
 /** A library parameter as a schema property: its type, its default, its first docstring paragraph. */
 function param(p) {
-  return { ...p.schema, ...(p.default !== undefined ? { default: p.default } : {}), ...(p.doc ? { description: p.doc } : {}) };
+  // a parameter written in the path-pattern language points at its grammar, which the guide carries
+  const doc = p.doc && /\/docs\/path-patterns/.test(p.doc) ? `${p.doc} The grammar in full: semantic_index({ guide: "retentioneering" }) → path_patterns.` : p.doc;
+  return { ...p.schema, ...(p.default !== undefined ? { default: p.default } : {}), ...(doc ? { description: doc } : {}) };
 }
 
 /** add_segment's metric_bins as ONE list of bins, each with its own level name. The library takes
@@ -406,6 +410,59 @@ function rulesToLibrary({ cases, else: otherwise }, field) {
   ];
 }
 
+/** A row condition on the eventstream's columns — a leaf compares one column with constants; a group
+ *  ANDs or ORs its conditions; `not` negates one. The operators are the library's condition grammar's
+ *  (its comparisons, its membership, its negation), with not_in and the null checks SQL adds. */
+function rowConditionSchema() {
+  const g = retentioneeringFacts().condition;
+  const scalar = { anyOf: [{ type: 'string' }, { type: 'number' }, { type: 'boolean' }] };
+  const column = { type: 'string', pattern: NAME_OR_COLUMN, description: 'A column of the eventstream at this step: the event, its time, a path column (a session a split_sessions step made, its index), a segment, a custom column.' };
+  const leaf = {
+    oneOf: [
+      { type: 'object', additionalProperties: false, required: ['column', 'op', 'value'], properties: { column, op: { enum: g.compare }, value: scalar } },
+      { type: 'object', additionalProperties: false, required: ['column', 'op', 'value'], properties: { column, op: { enum: [g.membership, `not_${g.membership}`] }, value: { type: 'array', minItems: 1, items: scalar } } },
+      { type: 'object', additionalProperties: false, required: ['column', 'op'], properties: { column, op: { enum: ['is_null', 'is_not_null'] } } },
+    ],
+  };
+  const group = (items) => ({ type: 'object', additionalProperties: false, required: ['op', 'conditions'], properties: { op: { enum: g.logical }, conditions: { type: 'array', minItems: 1, items } } });
+  const negated = (of) => ({ type: 'object', additionalProperties: false, required: [g.negation], properties: { [g.negation]: of } });
+  const inner = group(leaf);
+  return {
+    ...group({ oneOf: [leaf, inner, negated({ oneOf: [leaf, inner] })] }),
+    description: `Keep only the rows whose columns satisfy a condition — a threshold, a range, a list, a missing value — on any column the eventstream has at this step (what keep / drop cannot say: they match listed values only). Conditions combine with ${g.logical.join(' / ')} (one level of nesting) and ${g.negation}; this tool writes the SQL the library runs, its names and constants quoted. Instead of keep / drop, not with them.`,
+  };
+}
+
+/** A column name as a DuckDB identifier, quoted. */
+const ident = (name, field) => {
+  if (!new RegExp(NAME_OR_COLUMN).test(name)) throw new ToolError(`'${name}' is not a column name`, { stage: 'validate', field });
+  return `"${name.replace(/"/g, '""')}"`;
+};
+
+/** A row condition as the library's `sql` for filter_events: SELECT * FROM eventstream WHERE …, every
+ *  column quoted as an identifier and every constant as a literal — the caller's input stays data. */
+function whereToSql(where, field) {
+  const g = retentioneeringFacts().condition;
+  const node = (n) => {
+    if (n[g.negation] !== undefined) return `NOT (${node(n[g.negation])})`;
+    if (n.conditions) return n.conditions.map((c) => `(${node(c)})`).join(` ${n.op.toUpperCase()} `);
+    const col = ident(n.column, field);
+    if (n.op === 'is_null') return `${col} IS NULL`;
+    if (n.op === 'is_not_null') return `${col} IS NOT NULL`;
+    const lit = (v) => { if (typeof v === 'number' && !Number.isFinite(v)) throw new ToolError(`condition on '${n.column}': ${v} is not a number a comparison can take`, { stage: 'validate', field }); return literal(v); };
+    if (n.op === g.membership || n.op === `not_${g.membership}`) return `${col} ${n.op === g.membership ? 'IN' : 'NOT IN'} (${n.value.map(lit).join(', ')})`;
+    return `${col} ${n.op === '==' ? '=' : n.op} ${lit(n.value)}`;
+  };
+  return `SELECT * FROM eventstream WHERE ${node(where)}`;
+}
+
+/** Parameters this tool ADDS to a library op, each translated into one the library takes — a
+ *  structured form of what the library would take as code (NOT_OFFERED): the schema reads `schema`,
+ *  a step's value goes to the library under `library` through `toLibrary`. */
+export const ADDED = {
+  filter_events: { where: { schema: rowConditionSchema, library: 'sql', toLibrary: whereToSql } },
+};
+
 /** Library parameters the tool asks for in another shape, each with its translation back — the one
  *  table; the schema reads `schema`, the call's ops go through `toLibrary`. */
 export const RESHAPED = {
@@ -446,6 +503,7 @@ function opSchemas() {
   const f = retentioneeringFacts();
   return OFFERED_OPS.map((op) => {
     const { properties, required, allOf } = params(f.ops[op].params);
+    for (const [name, a] of Object.entries(ADDED[op] || {})) properties[name] = a.schema();
     return {
       ...(allOf.length ? { allOf } : {}),
       type: 'object', additionalProperties: false, title: op, description: f.ops[op].summary,

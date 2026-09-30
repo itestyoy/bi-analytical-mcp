@@ -497,6 +497,18 @@ def apply_steps(frame, spec):
     return out
 
 
+# The analyses whose diff keeps their own charted shape (the others' diffs are tables of matrices)
+DIFF_CHARTED = {"funnel"}
+
+
+def _diff_groups(diff):
+    """What the two groups of a diff are: two levels of a segment (the library's <REST> the others,
+    <MISSING> the paths with no level), or two lists of path ids."""
+    if isinstance(diff, (list, tuple)) and len(diff) == 3 and isinstance(diff[0], str):
+        return {"segment": diff[0], "first": str(diff[1]), "second": str(diff[2])}
+    return {"first": f"{len(diff[0])} paths", "second": f"{len(diff[1])} paths"}
+
+
 def run(frame, spec):
     """The analyses `spec` names, over the eventstream `frame` → the long result table."""
     stream = _stream(frame, spec)
@@ -507,9 +519,11 @@ def run(frame, spec):
         if a["path_col"] in frame_out.columns:
             out.add(a["id"], a["kind"], "scope", {"paths": int(frame_out[a["path_col"]].nunique())})
         charted = CHARTED.get(a["kind"])
-        if a["params"].get("diff") is not None:
-            out.add(a["id"], a["kind"], "diff", {"diff": True})
-        if charted and a["params"].get("diff") is None:
+        diff = a["params"].get("diff")
+        if diff is not None:
+            out.add(a["id"], a["kind"], "diff", {"diff": True, "groups": json.dumps(_diff_groups(diff), default=str)})
+        # a funnel's diff keeps the funnel's shape (each step, both groups and their difference)
+        if charted and (diff is None or a["kind"] in DIFF_CHARTED):
             charted(stream, spec, a, out)
         else:
             _emit(out, a, "result", getattr(stream, a["method"])(**a["params"]))

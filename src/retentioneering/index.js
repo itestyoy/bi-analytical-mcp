@@ -21,7 +21,7 @@ import { createDbt, formatDbtError } from '../dbt/index.js';
 import { ToolError, RESULT_GONE } from '../validate.js';
 import { MAX_WAIT_SECONDS } from '../schema.js';
 import { rankFuzzy } from '../fuzzy.js';
-import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, sourceColumns, ANALYSIS_KINDS, OFFERED_OPS, NAME, COMPLEX_EVENT_LOGIC, RESHAPED } from './schema.js';
+import { buildSchema, querySchema, displaySchema, retentioneeringFacts, userKeyColumn, pathSources, sourceColumns, ANALYSIS_KINDS, OFFERED_OPS, NAME, COMPLEX_EVENT_LOGIC, RESHAPED, ADDED } from './schema.js';
 import { renderEventstream, pathColumns, ES_COLUMNS, OTHER_EVENT } from './eventstream.js';
 import { getDialect } from '../dialects/index.js';
 import { compileAnalysisModel, compileStepsModel, analysisModelConfig } from './python.js';
@@ -514,6 +514,12 @@ function toLibrary(step, field) {
   const { path, ...rest } = step;
   if (path !== undefined && opParams(step.type).has('path_col')) rest.path_col = path === 'users' ? ES_COLUMNS.user : path === 'sessions' ? ES_COLUMNS.session : path;
   for (const [name, r] of Object.entries(RESHAPED)) if (rest[name] != null) rest[name] = r.toLibrary(rest[name], `${field}.${name}`);
+  // a parameter this tool adds goes to the library as the one it stands for
+  for (const [name, a] of Object.entries(ADDED[step.type] || {})) {
+    if (rest[name] == null) continue;
+    rest[a.library] = a.toLibrary(rest[name], `${field}.${name}`);
+    delete rest[name];
+  }
   return seeded(opParams(step.type), rest);
 }
 

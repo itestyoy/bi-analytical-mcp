@@ -39,7 +39,7 @@ import retentioneering.data_processors as processors  # noqa: E402
 from retentioneering import Eventstream  # noqa: E402
 from retentioneering.metrics import condition_ast, metric_builder  # noqa: E402
 from retentioneering.ops import registered_ops  # noqa: E402
-from retentioneering.paths import anchors  # noqa: E402
+from retentioneering.paths import anchors, tokens as pattern_tokens  # noqa: E402
 from retentioneering.tools import segment_overview, cluster_analysis  # noqa: E402
 from retentioneering.utils import clustering_methods  # noqa: E402
 
@@ -699,6 +699,59 @@ def build():
         "anchor_keys": sorted(anchors.SPEC_KEYS),
         "anchor_occurrences": list(anchors.OCCURRENCES),
         "anchor_offset_sides": list(anchors.OFFSET_SIDES),
+        "path_patterns": path_patterns(),
+    }
+
+
+DOCS = "https://retentioneering.com"
+
+
+def absolute_links(value):
+    """The library's docstrings link its own site relatively (`](/docs/…)`), which says nothing to a
+    reader outside it: every such link is made absolute."""
+    if isinstance(value, str):
+        return value.replace("](/docs/", f"]({DOCS}/docs/")
+    if isinstance(value, list):
+        return [absolute_links(v) for v in value]
+    if isinstance(value, dict):
+        return {k: absolute_links(v) for k, v in value.items()}
+    return value
+
+
+def _paragraphs(text):
+    """A docstring's paragraphs, each on one line, RST markup reduced to plain text."""
+    text = re.sub(r":(?:func|mod|class|meth):`~?([^`]+)`", r"\1", text)
+    text = re.sub(r"``([^`]+)``", r"`\1`", text)
+    text = re.sub(r"\s*\(ADR-\d+\)", "", text)
+    return [re.sub(r"\s+", " ", p).strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+
+
+def _bullets(paragraph):
+    return [b.strip() for b in re.split(r"(?:^|\s)\*\s+", paragraph) if b.strip()]
+
+
+def path_patterns():
+    """The path-pattern language — what `path_pattern`, an anchor's `pattern`, `matches_pattern` and a
+    collapse/truncate anchor read — from the library's own parser modules: the token table and rules
+    of paths.tokens, and the matching semantics and occurrences of paths.anchors."""
+    tdoc = inspect.getdoc(pattern_tokens) or ""
+    adoc = inspect.getdoc(anchors) or ""
+    rows = re.findall(r"^``(.+?)``\s{2,}(.+)$", tdoc, re.M)
+    if not rows:
+        raise SystemExit("paths.tokens: the token table was not found in its docstring")
+    token_paras = _paragraphs(tdoc)
+    matching = next((p for p in _paragraphs(adoc) if p.startswith("* a pattern is")), None)
+    occurrence = next((p for p in _paragraphs(adoc) if p.startswith('* `"first"`')), None)
+    if not matching or not occurrence:
+        raise SystemExit("paths.anchors: the matching semantics were not found in its docstring")
+    keep = ("Two deviations", "* members are", "Everything else", "A boundary sentinel")
+    return {
+        "source": "retentioneering.paths.tokens and retentioneering.paths.anchors (their docstrings)",
+        # the table's own words, less its history of the language ("as before": what a token meant earlier)
+        "tokens": [{"token": t, "meaning": re.sub(r"(?:,| —) as before$", "", _paragraphs(m)[0])} for t, m in rows],
+        "matching": _bullets(matching),
+        "occurrence": _bullets(occurrence),
+        "rules": [p for p in token_paras if p.startswith(keep)],
     }
 
 
@@ -707,7 +760,7 @@ def normalized(facts):
 
 
 def main(argv):
-    facts = build()
+    facts = absolute_links(build())
     if "--check" in argv:
         try:
             with open(OUT, encoding="utf-8") as f:

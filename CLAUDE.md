@@ -222,6 +222,12 @@
   constant is typed by what the metric's value is (probed: kind and unit). A parameter the library
   pastes into SQL is reshaped the same way, into constants this tool quotes (`add_segment.rules` as
   `{ cases, else }`, the operator from the library's condition grammar) — the caller's input stays data.
+  What the library would take only as code gets a structured parameter of this tool's (`ADDED`,
+  src/retentioneering/schema.js — today `filter_events.where`, a condition tree on the eventstream's
+  columns, written into the library's `sql` with every name and constant quoted). The path-pattern
+  language (path_pattern, an anchor's pattern, matches_pattern) is the library's parser's own, extracted
+  into the sheet (`path_patterns`) and rendered in the guide; the library's relative doc links are made
+  absolute in the sheet.
   WHAT THE LIBRARY REFUSES, THE LIBRARY SAYS BEFORE THE RUN: every step as it is added, and every
   analysis of a query, is run by the library itself on the feature's environment — one warm process
   (python/retentioneering_check.py --serve, src/retentioneering/checker.js) — over two stand-in
@@ -240,7 +246,7 @@
   warehouse read like a pipeline reads it) and its scalar event properties — to filter, to carry as a
   segment, and to make events out of an event's parameters (`events.split`: by a value, or by
   conditions) — all in SQL through the pipeline's stages. The analyses with a card are CARD_KINDS (the charted ones and a
-  distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps); any other
+  distribution's histogram; a diff of a graph or a step matrix/sankey as heatmaps, a funnel's diff as both groups on the same steps); any other
   (describe, a conversion rate, per-path metrics) comes back as the tables and values the library
   returned, has no card, and is answered in words.
 - AN EXTENSION IS OFFERED ONLY TO A CLIENT THAT DECLARES IT, IN THE REQUEST BEING SERVED — its

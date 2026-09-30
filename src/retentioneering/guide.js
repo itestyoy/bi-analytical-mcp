@@ -18,6 +18,9 @@ export const ROUTING_TRIGGERS = [
 
 export const INSTRUCTIONS_LINE = `For paths and sequences, and transitions between states a pipeline computed (from_task), use build_retentioneering_model → query_retentioneering_model, which answers with the numbers and tables the library computes. semantic_index({ guide: "${GUIDE_NAME}" }) explains the analyses.`;
 
+/** The analyses the library lets take a diff: those with a `diff` parameter. */
+const DIFF_KINDS = () => ANALYSIS_KINDS.filter((k) => retentioneeringFacts().analyses[k].params.some((p) => p.name === 'diff'));
+
 export function retentioneeringGuide() {
   const f = retentioneeringFacts();
   return {
@@ -41,7 +44,16 @@ export function retentioneeringGuide() {
       segment_overview: 'Per-path metrics compared across the levels of a segment (segment_col): a user attribute listed in segments at start, or one an add_segment / add_clusters step made (materialized).',
       ...Object.fromEntries(ANALYSIS_KINDS.filter((k) => !CHARTED_KINDS.includes(k)).map((k) => [k, f.analyses[k].summary])),
     },
-    diff: 'transition_graph, step_matrix, step_sankey and funnel take diff: [segment_col, level_1, level_2] — the same analysis for two levels and their difference, returned as tables; ' + `the diff of ${DIFF_CARD_KINDS.join(', ')} is drawn as heatmaps, and any other diff is answered in words.`,
+    // which analyses take a diff, and what it takes, are the library's (its parameter and its docstring)
+    diff: `${DIFF_KINDS().join(', ')} take diff — the same analysis for two groups of paths and their difference. ${f.analyses[DIFF_KINDS()[0]].params.find((p) => p.name === 'diff').doc} The diff of ${DIFF_CARD_KINDS.join(', ')} has a card; any other is answered in words.`,
+    // the language of path_pattern, an anchor's pattern and matches_pattern — the library's parser's own
+    path_patterns: {
+      used_by: 'path_pattern (transition_graph, step_matrix, step_sankey), an anchor\'s pattern (step_matrix / step_sankey anchor, truncate_paths, conversion_rate, add_events anchor), and the matches_pattern metric',
+      tokens: f.path_patterns.tokens.map((t) => `\`${t.token}\` — ${t.meaning}`),
+      matching: f.path_patterns.matching,
+      occurrence: f.path_patterns.occurrence,
+      rules: f.path_patterns.rules,
+    },
     steps: Object.fromEntries(OFFERED_OPS.map((op) => [op, f.ops[op].summary])),
     not_offered: { ...NOT_OFFERED.ops, ...Object.fromEntries(Object.entries(NOT_OFFERED.params).map(([p, why]) => [`the ${p} parameter`, why])) },
     path_metrics: f.path_metrics,
@@ -68,6 +80,7 @@ export function retentioneeringSkill() {
     '## Sequence', '', md(g.sequence),
     '', '## Which analysis answers what', '', md(g.analyses),
     '', '## Diff', '', g.diff,
+    '', '## Path patterns', '', `Used by ${g.path_patterns.used_by}.`, '', md(g.path_patterns.tokens), '', md(g.path_patterns.matching), '', 'occurrence (of an anchor):', '', md(g.path_patterns.occurrence), '', ...g.path_patterns.rules.flatMap((r) => [r, '']),
     '', '## Steps', '', md(g.steps),
     '', '## Not offered', '', md(g.not_offered),
     '', '## Path metrics (features, overview and segment metrics)', '', md(g.path_metrics), '', `Roll-ups: ${g.metric_aggregations.join(', ')}.`,

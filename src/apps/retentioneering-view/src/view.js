@@ -11,6 +11,7 @@
  *   step sankey        the same shares as columns, the flows between consecutive steps, and the paths
  *                      that ended as one block at the bottom of each step
  *   funnel             the steps, their share of all paths and of the previous step, the biggest drop
+ *   funnel_diff        a funnel for two groups on the same steps, and their difference at each
  *   clusters / segment overview   each group's size, then the metrics that set the groups apart most
  *   distribution       the bins as bars (two groups on the same bins in one chart), their mean,
  *                      median and the distance between them as key figures under it
@@ -106,7 +107,7 @@ function render(result) {
   mainEl.hidden = false;
   titleEl.textContent = model.title;
   subtitleEl.replaceChildren(...scopeBadges(model));
-  const draw = { transition_graph: renderGraph, step_matrix: renderStepMatrix, step_sankey: renderSankey, funnel: renderFunnel, cluster_analysis: renderOverview, segment_overview: renderOverview, distribution: renderDistribution, diff: renderDiff }[model.kind];
+  const draw = { transition_graph: renderGraph, step_matrix: renderStepMatrix, step_sankey: renderSankey, funnel: renderFunnel, funnel_diff: renderFunnelDiff, cluster_analysis: renderOverview, segment_overview: renderOverview, distribution: renderDistribution, diff: renderDiff }[model.kind];
   contentEl.replaceChildren(draw(model));
 }
 
@@ -479,6 +480,55 @@ function renderFunnel(model) {
     title: formatShare(last.of_first), titleClass: 'card-title card-title-stat',
     description: `${model.steps[0].label} → ${last.label}, in this order`,
     subline: total ? `${formatNumber(last.value)} of ${formatNumber(total)} paths reach the last step; the shares are of all paths` : `${formatNumber(last.value)} paths reach the last step`,
+  }, content);
+}
+
+/** A difference of two shares, in percentage points, with its sign. */
+const formatPoints = (d) => (Number.isFinite(d) ? `${d > 0 ? '+' : d < 0 ? '−' : '±'}${(Math.abs(d) * 100).toFixed(1)} pp` : '—');
+
+/** Two groups on the same funnel steps: per step a bar for each (paths, share of all paths), the share
+ *  that continued from the previous step for each, and the difference (first − second) the library
+ *  computed; the step where the groups part most is marked. */
+function renderFunnelDiff(model) {
+  const { first, second, segment } = model.groups;
+  const legend = el('div', 'funnel-legend');
+  legend.append(
+    el('span', 'funnel-legend-item funnel-legend-first', first),
+    el('span', 'funnel-legend-item funnel-legend-second', second),
+  );
+  const list = el('ol', 'funnel');
+  model.steps.forEach((step, i) => {
+    const widest = i === model.widest_gap;
+    const item = el('li', `funnel-step${widest ? ' funnel-step-worst' : ''}`);
+    if (i > 0) {
+      const link = el('div', 'funnel-link');
+      link.append(icon('arrow-down'), el('span', null, `continued: ${formatShare(step.first.of_previous)} · ${formatShare(step.second.of_previous)}`));
+      link.append(badge(`${formatPoints(step.delta.of_previous)}${widest ? ' · widest gap' : ''}`, widest ? 'destructive' : 'secondary'));
+      item.append(link);
+    }
+    const head = el('div', 'funnel-head');
+    head.append(el('span', 'funnel-index', String(i + 1)), el('span', 'funnel-label', step.label), el('span', 'funnel-value', formatPoints(step.delta.of_first)), el('span', 'funnel-share', 'of all paths'));
+    item.append(head);
+    for (const [who, side, cls] of [[first, step.first, 'first'], [second, step.second, 'second']]) {
+      const row = el('div', 'funnel-pair');
+      const track = el('div', 'funnel-track');
+      track.setAttribute('role', 'img');
+      track.setAttribute('aria-label', `${who}, ${step.label}: ${formatNumber(side.value)} paths, ${formatShare(side.of_first)} of all paths`);
+      const fill = el('div', `funnel-fill funnel-fill-${cls}`);
+      fill.style.width = `${Math.max(0.5, (side.of_first || 0) * 100).toFixed(2)}%`;
+      track.append(fill);
+      row.append(track, el('span', 'funnel-pair-value', `${formatNumber(side.value)} · ${formatShare(side.of_first)}`));
+      item.append(row);
+    }
+    list.append(item);
+  });
+  const content = el('div', 'card-content');
+  content.append(legend, list);
+  const last = model.steps[model.steps.length - 1];
+  return card({
+    title: formatPoints(last.delta.of_first), titleClass: 'card-title card-title-stat',
+    description: `${model.steps[0].label} → ${last.label}: ${first} ${formatShare(last.first.of_first)} vs ${second} ${formatShare(last.second.of_first)}${segment ? ` (by ${segment})` : ''}`,
+    subline: 'Shares are of each group\'s paths; the difference is the first group minus the second, in percentage points',
   }, content);
 }
 

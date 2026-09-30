@@ -28,7 +28,7 @@ import { JobManager } from './jobs.js';
 import { ValueIndex } from './value-index.js';
 import { MemoryStore, targetKey, targetWords } from './memory.js';
 import { openStore } from './store.js';
-import { ErrorLog } from './error-log.js';
+import { ErrorLog, readGenerated } from './error-log.js';
 import { buildProjection, projectionProblems } from './projection.js';
 import { SUPPORTED_DIALECTS, getDialect } from './dialects/index.js';
 import { sqlConfigHeader } from './sql-header.js';
@@ -91,6 +91,8 @@ export class Engine {
     // THE ERROR LOG (src/error-log.js): every failure, kept in the store for explore_errors — and what
     // this start could not serve is the first of them
     this.errors = new ErrorLog({ store: this.store });
+    this.errors.runtime = { node: process.version, dialect: catalog.dialect, ...(runner ? { dbt: { major: runner.major ?? null, environment: runner.environment?.name ?? null } } : {}), started_at: new Date().toISOString() };
+    this.errors.contextOf = (id, message, opts) => this._errorContext(id, message, opts);
     if (this.projectError) this.errors.record({ source: 'startup', stage: 'project_semantic_layer', message: `the dbt project's own semantic models could not be read: ${this.projectError}` });
     for (const x of project?.skipped || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `the semantic model '${x.semantic_model}' is not served: ${x.reason}` });
     for (const b of this.project?.layer.blocked || []) this.errors.record({ source: 'startup', severity: 'warning', stage: 'project_semantic_layer', message: `${b.message}: not served. To serve it, ${b.fix}.`, detail: b });
@@ -2476,6 +2478,23 @@ export class Engine {
     return id;
   }
 
+  /**
+   * What reproduces an error on context `id`: its state as it is (the semantic declaration, a pipeline
+   * draft with every step and checkpoint, an eventstream with its steps — JSON the context was built
+   * from, internal keys left out) and, with `files`, the code of each generated model the message
+   * names: as written, and as dbt compiled it (a warehouse error's line:column points into that one).
+   */
+  _errorContext(id, message = '', { files = false } = {}) {
+    if (!id || !this.ctxs?.has?.(id)) return {};
+    const ctx = this.ctxs.get(id);
+    const state = JSON.parse(JSON.stringify(ctx.state || {}, (k, v) => (k.startsWith('_') ? undefined : v)));
+    const out = { context: { id: ctx.id, ...(ctx.state?.shares ? { shares: ctx.state.shares } : {}), state } };
+    if (!files) return out;
+    const names = [...new Set([...String(message).matchAll(/\b([A-Za-z0-9_]+\.(?:sql|py))\b/g)].map((m) => m[1]))].slice(0, 4);
+    if (!names.length) return out;
+    return { ...out, files: readGenerated(this.ctxs.dir(id), this.ctxs.generatedDir(id), names) };
+  }
+
   /** A task that ended in an error, into the error log: what failed, on which context, with its input. */
   _recordTaskError(id, tool, ctx, input, error = {}) {
     const { message, stage, field, code, detail, ...rest } = isPlainObject(error) ? error : { message: String(error) };
@@ -3294,7 +3313,7 @@ export class Engine {
       id: Number(r.id), at: iso(r.at), source: r.source, severity: r.severity,
       ...Object.fromEntries(['tool', 'stage', 'field', 'code', 'context_id', 'task_id'].filter((k) => r[k] != null).map((k) => [k, r[k]])),
       message: full || !r.message || r.message.length <= 600 ? r.message : `${r.message.slice(0, 600)}… (explore_errors({ id: ${Number(r.id)} }) for all of it)`,
-      ...(full ? { ...(r.args != null ? { args: parsed(r.args) } : {}), ...(r.detail != null ? { detail: parsed(r.detail) } : {}) } : {}),
+      ...(full ? Object.fromEntries(['args', 'detail', 'context', 'files', 'runtime'].filter((k) => r[k] != null).map((k) => [k, parsed(r[k])])) : {}),
     });
     if (input.id != null) {
       const row = this.errors.get(input.id);
@@ -3323,7 +3342,7 @@ export class Engine {
       ...(offset + rows.length < total ? { next_offset: offset + rows.length } : {}),
       errors: rows.map((r) => shown(r, input.detail === true)),
       by_source: this.errors.summary(filter).map((g) => ({ ...g, last_at: iso(g.last_at) })),
-      note: `Newest first. explore_errors({ id }) gives one in full — the call's arguments and everything the warehouse said. Kept ${this.errors.retentionMs / 86400000} days, the newest ${this.errors.maxRows}.`,
+      note: `Newest first. explore_errors({ id }) gives one in full — what reproduces it: the call's arguments (a task's input), the state of the context it worked on, the code of each generated model the error names (as written and as dbt compiled it), the runtime, and everything the warehouse said. Kept ${this.errors.retentionMs / 86400000} days, the newest ${this.errors.maxRows}.`,
     };
   }
 

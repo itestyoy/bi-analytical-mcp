@@ -87,3 +87,31 @@ test('a task that ends in an error is kept once, with its input — its reads ar
   await runTool(engine, 'query_pipeline_model', { task_id: id });
   assert.equal(engine.explore_errors({}).total, 2);
 });
+
+test('an error carries what reproduces it: the draft a refused step was added to, the code of the model a task failed on, the runtime', async () => {
+  const engine = makeEngine({ recipes: false });
+  const source = engine.catalog.facts[0];
+  const s = await engine.build_pipeline_model({ action: 'start', name: 'repro', source });
+  const col = engine.catalog.modelColumns(source)[0].name;
+  await engine.build_pipeline_model({ action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: col, op: 'is_not_null' }] } });
+  // a step naming a column that is not there is refused — and the draft it was added to is kept with it
+  const refused = await runTool(engine, 'build_pipeline_model', { action: 'add_step', draft_id: s.draft_id, stage: { stage: 'where', conditions: [{ column: 'no_such_col', op: 'is_null' }] } });
+  assert.equal(refused.result.isError, true);
+  const [row] = engine.explore_errors({ tool: 'build_pipeline_model' }).errors;
+  const full = engine.explore_errors({ id: row.id }).error;
+  assert.equal(full.context_id, s.draft_id);
+  assert.deepEqual(full.context.state.draft.stages.map((st) => st.stage), ['where']);
+  assert.equal(full.context.state.draft.source, source);
+  assert.equal(full.args.stage.conditions[0].column, 'no_such_col');
+  assert.equal(full.runtime.node, process.version);
+  assert.equal(full.runtime.dialect, engine.catalog.dialect);
+  // a task that failed on a generated model keeps that model's code, as the message names it
+  const ctx = engine.ctxs.get(s.draft_id);
+  engine.ctxs.writeModel(ctx.id, 'pipe_repro_x', 'select 1 as a\n');
+  const id = engine._startTask(ctx, 'build_pipeline_model', async () => ({ ok: false, error: { stage: 'run', message: 'Database Error in model pipe_repro_x (models/generated/pipe_repro_x.sql)' } }), { input: { action: 'materialize', draft_id: ctx.id } });
+  await engine._awaitTasks([id], 5);
+  const task = engine.explore_errors({ id: engine.explore_errors({ task_id: id }).errors[0].id }).error;
+  assert.equal(task.files['generated/pipe_repro_x.sql'], 'select 1 as a\n');
+  assert.deepEqual(task.context.state.draft.stages.length, 1);
+  assert.equal(task.args.action, 'materialize');
+});

@@ -37,7 +37,7 @@
 //   memory.vectorPut(id, vec, model)  (store/mirror a note's embedding for semantic search)
 //   memory.vectorIds(model)           -> Set<id> (notes already embedded for this model)
 //   memory.vectorSearch(qvec, { limit, model }) -> [{ id, score }] (cosine; KNN via sqlite-vec)
-//   errors.add({ at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail }) -> id
+//   errors.add({ at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail, context, files, runtime }) -> id
 //   errors.list({ since, until, source, severity, tool, stage, context_id, task_id, text, limit, offset }) -> { total, rows[] } (newest first)
 //   errors.get(id)                    -> row | null   (args and detail in full)
 //   errors.summary(filter)            -> [{ source, tool, stage, count, last_at }] (the same filter, grouped)
@@ -337,6 +337,8 @@ export class SqliteBackend {
     db.exec('CREATE TABLE IF NOT EXISTS server_meta (key TEXT PRIMARY KEY, value TEXT)');
     db.exec('CREATE TABLE IF NOT EXISTS errors (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER, source TEXT, severity TEXT, tool TEXT, stage TEXT, field TEXT, code TEXT, context_id TEXT, task_id TEXT, message TEXT, args TEXT, detail TEXT)');
     db.exec('CREATE INDEX IF NOT EXISTS errors_at ON errors (at)');
+    // what reproduces an error came later: the context's state, the code of the model that failed, the runtime
+    for (const col of ['context', 'files', 'runtime']) { try { db.exec(`ALTER TABLE errors ADD COLUMN ${col} TEXT`); } catch { /* already present */ } }
     const s = this;
 
     this.meta = {
@@ -357,8 +359,8 @@ export class SqliteBackend {
     };
     this.errors = {
       add(e) {
-        return Number(s._run('INSERT INTO errors (at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-          e.at, e.source ?? null, e.severity ?? null, e.tool ?? null, e.stage ?? null, e.field ?? null, e.code ?? null, e.context_id ?? null, e.task_id ?? null, e.message ?? null, e.args ?? null, e.detail ?? null).lastInsertRowid);
+        return Number(s._run('INSERT INTO errors (at, source, severity, tool, stage, field, code, context_id, task_id, message, args, detail, context, files, runtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          e.at, e.source ?? null, e.severity ?? null, e.tool ?? null, e.stage ?? null, e.field ?? null, e.code ?? null, e.context_id ?? null, e.task_id ?? null, e.message ?? null, e.args ?? null, e.detail ?? null, e.context ?? null, e.files ?? null, e.runtime ?? null).lastInsertRowid);
       },
       list({ limit = 20, offset = 0, ...f } = {}) {
         const { sql, params } = errorWhere(f);

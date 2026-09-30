@@ -273,7 +273,7 @@ export async function runTool(engine, calledAs, args, { signal, onProgress, prog
   const started = Date.now();
   logLine(calledAs, `▶ call ${summarizeArgs(args)}`);
   // every failure of a call is kept in the error log (src/error-log.js), with the call's arguments
-  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof args?.context_id === 'string' ? args.context_id : null, task_id: typeof args?.task_id === 'string' ? args.task_id : null });
+  const failed = (tool, message, { stage, field, code, detail } = {}) => engine?.errors?.record?.({ source: 'tool', tool, stage: stage || 'error', field, code, message, args, detail, context_id: typeof args?.context_id === 'string' ? args.context_id : typeof args?.draft_id === 'string' ? args.draft_id : null, task_id: typeof args?.task_id === 'string' ? args.task_id : null });
   if (!isCallableTool(engine, calledAs)) {
     logLine(calledAs, '✗ unknown tool');
     failed(calledAs, unknownToolMessage(calledAs), { stage: 'validate' });
@@ -435,6 +435,8 @@ export function createServices(engine, { taskTtlMs, taskPollMs, progressEveryMs 
     instructions: instructionsFor({ apps: true, skills: true }),
   });
   const surface = surfaceChange(engine.store, fingerprint);
+  // every error kept from now on says which server surface it happened on
+  if (engine.errors?.runtime) engine.errors.runtime.server = `${SERVER_INFO.version}+${fingerprint}`;
   logLine('surface', `${fingerprint}${surface.changed ? ` — changed since the last start (${surface.previous || 'none recorded'}): open subscriptions are told for the next ${Math.round(CHANGE_WINDOW_MS / 60000)} min` : ' — unchanged'}`);
   return {
     engine,

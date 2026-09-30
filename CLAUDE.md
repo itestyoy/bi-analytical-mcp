@@ -290,8 +290,12 @@
 - EVERY FAILURE IS KEPT (src/error-log.js → the store's `errors` table), read with `explore_errors`
   (read-only): a call refused or failed, with its arguments (runTool — one point, for every tool); a
   task that ended in an error, with its input (`_startTask`); what a start could not serve (the
-  project's layer, a join `servable` leaves out, a feature that cannot run). A read of a failed task
-  is not kept again. Bounded by MCP_ERROR_RETENTION_DAYS / MCP_ERROR_MAX_ROWS, not cleared by
+  project's layer, a join `servable` leaves out, a feature that cannot run). Each carries what
+  REPRODUCES it: the arguments / the task's input (every `_startTask` passes its input — a pipeline
+  build its stages), the state of the context it worked on (`Engine._errorContext`: the declaration,
+  a draft with every step, an eventstream with its steps), for a task the code of each generated model
+  its message names (as written and as dbt ran it — where a warehouse line:column points), and the
+  runtime (server version + surface fingerprint, dbt, dialect). A read of a failed task is not kept again. Bounded by MCP_ERROR_RETENTION_DAYS / MCP_ERROR_MAX_ROWS, not cleared by
   MCP_DB_RESET; recording never fails the call it records.
 - A CHANGED SURFACE IS ANNOUNCED, NEVER LEFT TO A CACHE (src/surface-change.js). A host re-draws the
   cards in a conversation from its cached tool list, so a deploy that changes a tool must reach it:

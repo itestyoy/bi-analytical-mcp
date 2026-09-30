@@ -751,7 +751,7 @@ export function buildSchemas(catalog, { project = null, projectContexts = [] } =
       type: 'object', additionalProperties: false,
       description: 'Read the failures the server kept. { id } → one in full; otherwise a page of them, newest first, narrowed by the fields given.',
       properties: {
-        id: { type: 'integer', minimum: 1, description: 'One error in full: the call\'s arguments (a task\'s input) and everything that was said about it.' },
+        id: { type: 'integer', minimum: 1, description: 'One error in full — what reproduces it: the call\'s arguments (a task\'s input), the state of the context it worked on (a semantic declaration, a pipeline draft with its steps, an eventstream with its steps), the code of each generated model the error names (as written and as dbt compiled it), the runtime (server version, dbt, dialect), and everything that was said about it.' },
         since: { type: 'string', description: 'Only errors at or after this moment (ISO 8601 date or date-time, e.g. "2026-09-29" or "2026-09-29T10:00:00Z").' },
         until: { type: 'string', description: 'Only errors at or before this moment (ISO 8601; a date alone means the whole of that day).' },
         source: { enum: ERROR_SOURCES, description: 'Where it happened: tool — a call refused or failed; task — warehouse work that ended in an error; startup — what a start could not serve.' },

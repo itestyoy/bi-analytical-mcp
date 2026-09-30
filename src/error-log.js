@@ -1,14 +1,24 @@
 // THE ERROR LOG — every failure the server meets, kept in the store so it can be looked at later
 // (explore_errors): a tool call refused or failed (its arguments with it), a task that ended in an
 // error (what dbt / the warehouse said), and what start could not serve (the project's semantic layer,
-// a join it leaves out). A debugging aid: recording never fails the call it records, and what is kept
+// a join it leaves out). Each carries what REPRODUCES it: the call's arguments or the task's input, the
+// state of the context it worked on (a semantic declaration, a pipeline draft with its steps, an
+// eventstream with its steps — as it was when it failed), the code of each generated model the error
+// names (as written and as dbt compiled it: the line:column a warehouse error points at is in that
+// one), and the runtime (server version and surface, dbt, dialect). A debugging aid: recording never
+// fails the call it records, and what is kept
 // is bounded — by age (MCP_ERROR_RETENTION_DAYS, default 30) and by count (MCP_ERROR_MAX_ROWS,
 // default 10000) — so a loop of refusals cannot grow the store without end.
 //
 // The log is NOT wiped by MCP_DB_RESET: a server that fails on every start is exactly what it is for.
 
+import { readdirSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 const MESSAGE_MAX = 20000;
 const ARGS_MAX = 20000;
+const CONTEXT_MAX = 40000;
+const FILE_MAX = 40000;
 
 /** A text cut to `max` characters, saying how long it was. */
 const cut = (text, max) => (text == null ? null : text.length > max ? `${text.slice(0, max)}… (${text.length} chars)` : text);
@@ -29,6 +39,9 @@ export const ERROR_SOURCES = ['tool', 'task', 'startup'];
 export class ErrorLog {
   constructor({ store, retentionDays = envInt('MCP_ERROR_RETENTION_DAYS', 30), maxRows = envInt('MCP_ERROR_MAX_ROWS', 10000) } = {}) {
     this.repo = store?.errors || null;
+    // set by the engine: the runtime every record carries, and how a context's reproduction is read
+    this.runtime = {};
+    this.contextOf = null;
     this.retentionMs = retentionDays * 86400000;
     this.maxRows = maxRows;
     this._added = 0;
@@ -42,6 +55,10 @@ export class ErrorLog {
   record(e) {
     if (!this.repo) return null;
     try {
+      // the context as it is now — for a refused call it is what the call was made against, for a
+      // failed task what it ran on — and the generated code the message names
+      let repro = {};
+      if (e.context_id && this.contextOf) { try { repro = this.contextOf(e.context_id, `${e.message ?? ''}\n${typeof e.detail === 'string' ? e.detail : ''}`, { files: e.source === 'task' }) || {}; } catch { /* no reproduction, still the error */ } }
       const id = this.repo.add({
         at: Date.now(),
         source: e.source,
@@ -55,6 +72,9 @@ export class ErrorLog {
         message: cut(String(e.message ?? ''), MESSAGE_MAX),
         args: cut(jsonOf(e.args), ARGS_MAX),
         detail: cut(typeof e.detail === 'string' ? e.detail : jsonOf(e.detail), MESSAGE_MAX),
+        context: cut(jsonOf(repro.context), CONTEXT_MAX),
+        files: repro.files && Object.keys(repro.files).length ? jsonOf(Object.fromEntries(Object.entries(repro.files).map(([k, v]) => [k, cut(v, FILE_MAX)]))) : null,
+        runtime: jsonOf(this.runtime),
       });
       // trimmed now and then, not on every write
       if (++this._added % 200 === 0) this.prune();
@@ -75,4 +95,34 @@ export class ErrorLog {
   list(filter) { return this.repo ? this.repo.list(filter) : { total: 0, rows: [] }; }
   get(id) { return this.repo ? this.repo.get(id) : null; }
   summary(filter) { return this.repo ? this.repo.summary(filter) : []; }
+}
+
+/** The first file called `name` under `dir`, at most `depth` levels down, or null. */
+function findFile(dir, name, depth) {
+  let entries;
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+  for (const e of entries) if (e.isFile() && e.name === name) return join(dir, e.name);
+  if (depth <= 0) return null;
+  for (const e of entries) if (e.isDirectory()) { const hit = findFile(join(dir, e.name), name, depth - 1); if (hit) return hit; }
+  return null;
+}
+
+/**
+ * The code of each generated model `names` (file names a dbt message cites) in a context's project:
+ * as written (generated/) and as dbt last ran it (target/run, else target/compiled) — where a
+ * warehouse error's line:column points. → { "<where>/<name>": text }
+ */
+export function readGenerated(projectDir, generatedDir, names) {
+  const read = (file) => { try { return readFileSync(file, 'utf8'); } catch { return null; } };
+  const found = {};
+  for (const name of names) {
+    const src = read(join(generatedDir, name));
+    if (src != null) found[`generated/${name}`] = src;
+    for (const kind of ['run', 'compiled']) {
+      const hit = findFile(join(projectDir, 'target', kind), name, 6);
+      const text = hit ? read(hit) : null;
+      if (text != null) { found[`target/${kind}/${name}`] = text; break; }
+    }
+  }
+  return found;
 }

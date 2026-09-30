@@ -126,6 +126,12 @@ with the `explore_errors` tool:
 - what a start could not serve: the dbt project's semantic layer, a join it leaves out, a feature
   that cannot run here.
 
+Each error keeps what reproduces it: the call's arguments (a task's input — for a pipeline build its
+steps), the state of the context it worked on (a semantic declaration, a pipeline draft with every
+step, an eventstream with its steps), for a failed task the code of each generated model its message
+names — as written and as dbt ran it, which is where a warehouse error's `[line:column]` points — and
+the runtime: server version and surface, dbt, dialect.
+
 `explore_errors()` gives the newest 20 and a summary by source, tool and stage. `since` / `until`,
 `source`, `severity`, `tool`, `stage`, `context_id`, `task_id` and `text` narrow them, and `{ id }`
 gives one in full. The log keeps `MCP_ERROR_RETENTION_DAYS` days (default **30**) and at most the
